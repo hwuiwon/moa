@@ -5,6 +5,9 @@ use reqwest::RequestBuilder;
 use restate_sdk::prelude::Request;
 
 /// Attaches trusted identity headers to a generated Restate client request.
+///
+/// Also injects the active span's W3C trace context so the downstream Restate
+/// handler continues the same end-to-end trace instead of starting a new root.
 pub(crate) fn with_identity_headers<'a, Req, Res>(
     request: Request<'a, Req, Res>,
     identity: &Identity,
@@ -24,14 +27,22 @@ pub(crate) fn with_identity_headers<'a, Req, Res>(
     } else {
         request
     };
-    if let Some(user_id) = identity.acting_on_behalf_of {
+    let request = if let Some(user_id) = identity.acting_on_behalf_of {
         request.header("x-moa-acting-on-behalf-of".to_string(), user_id.to_string())
     } else {
         request
-    }
+    };
+    moa_observability::current_trace_headers()
+        .into_iter()
+        .fold(request, |request, (name, value)| {
+            request.header(name, value)
+        })
 }
 
 /// Attaches trusted identity headers to an HTTP Restate ingress request.
+///
+/// Also injects the active span's W3C trace context so the receiving Restate
+/// handler continues the same end-to-end trace.
 pub(crate) fn with_reqwest_identity_headers(
     request: RequestBuilder,
     identity: &Identity,
@@ -48,11 +59,16 @@ pub(crate) fn with_reqwest_identity_headers(
     } else {
         request
     };
-    if let Some(user_id) = identity.acting_on_behalf_of {
+    let request = if let Some(user_id) = identity.acting_on_behalf_of {
         request.header("x-moa-acting-on-behalf-of", user_id.to_string())
     } else {
         request
-    }
+    };
+    moa_observability::current_trace_headers()
+        .into_iter()
+        .fold(request, |request, (name, value)| {
+            request.header(name, value)
+        })
 }
 
 fn identity_type_header(identity_type: IdentityType) -> &'static str {

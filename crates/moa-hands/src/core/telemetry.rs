@@ -7,7 +7,7 @@ use moa_core::{
     types::completion::ToolInvocation, types::hands::SandboxTier,
     types::observability::TraceContext, types::session::SessionMeta, types::tools::ToolOutput,
 };
-use moa_observability::{apply_trace_context_to_span, record_tool_call};
+use moa_observability::{apply_trace_context_to_span, current_turn_root_span, record_tool_call};
 use opentelemetry::trace::Status;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -21,7 +21,15 @@ pub(super) fn tool_execution_span(
     invocation: &ToolInvocation,
 ) -> tracing::Span {
     let span_name = format!("execute_tool {}", invocation.name);
-    let span = tracing::info_span!("tool_execution", otel.name = %span_name);
+    // `moa.session.id` is not declared here as a span field: it is already set
+    // below via `apply_trace_context_to_span`, which is the shared path every
+    // session-scoped span in this crate uses to attach session/tenant identity.
+    let span = match current_turn_root_span() {
+        Some(parent) => {
+            tracing::info_span!(parent: &parent, "tool_execution", otel.name = %span_name)
+        }
+        None => tracing::info_span!("tool_execution", otel.name = %span_name),
+    };
     let trace_context = TraceContext::from_session_meta(session, None);
     apply_trace_context_to_span(&trace_context, &span);
     span.set_attribute("gen_ai.tool.name", invocation.name.clone());

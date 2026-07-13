@@ -1,4 +1,4 @@
-//! Restate service for cloud-owned graph-memory search, show, ingest, and debug retrieval.
+//! Restate service for cloud-owned graph-memory search, show, ingest, and debug inspection.
 
 mod ingest;
 mod responses;
@@ -13,12 +13,12 @@ pub use scope::{
 pub use tools::OrchestratorMemoryRetrievalExecutor;
 
 use moa_authz_schema::Relation;
+use moa_core::config::MoaConfig;
 use moa_core::wire::memory::{
     MemoryIngestRequest, MemoryIngestResponse, MemoryRetrieveDebugRequest,
     MemoryRetrieveDebugResponse, MemorySearchRequest, MemorySearchResponse, MemoryShowRequest,
     MemoryShowResponse,
 };
-use moa_core::{config::MoaConfig, traits::LineageHandle};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use std::sync::Arc;
@@ -47,7 +47,7 @@ pub trait Memory {
         request: Json<MemoryIngestRequest>,
     ) -> Result<Json<MemoryIngestResponse>, HandlerError>;
 
-    /// Runs graph-memory retrieval with debug lineage after a tenant operator check.
+    /// Runs graph-memory retrieval and returns diagnostics after a tenant operator check.
     async fn retrieve_debug(
         request: Json<MemoryRetrieveDebugRequest>,
     ) -> Result<Json<MemoryRetrieveDebugResponse>, HandlerError>;
@@ -58,22 +58,13 @@ pub trait Memory {
 pub struct MemoryImpl {
     pool: sqlx::PgPool,
     config: Arc<MoaConfig>,
-    lineage: Arc<dyn LineageHandle>,
 }
 
 impl MemoryImpl {
-    /// Creates the memory adapter with its graph, retrieval, and lineage dependencies.
+    /// Creates the memory adapter with its graph and retrieval dependencies.
     #[must_use]
-    pub fn new(
-        pool: sqlx::PgPool,
-        config: Arc<MoaConfig>,
-        lineage: Arc<dyn LineageHandle>,
-    ) -> Self {
-        Self {
-            pool,
-            config,
-            lineage,
-        }
+    pub fn new(pool: sqlx::PgPool, config: Arc<MoaConfig>) -> Self {
+        Self { pool, config }
     }
 }
 
@@ -150,19 +141,11 @@ impl Memory for MemoryImpl {
 
         let pool = self.pool.clone();
         let config = self.config.clone();
-        let lineage = self.lineage.clone();
         let response = ctx
             .run(|| async move {
-                retrieve_debug_inner(
-                    request,
-                    scope,
-                    &identity,
-                    &pool,
-                    config.as_ref(),
-                    lineage.as_ref(),
-                )
-                .await
-                .map(Json::from)
+                retrieve_debug_inner(request, scope, &pool, config.as_ref())
+                    .await
+                    .map(Json::from)
             })
             .name("memory_retrieve_debug")
             .await?

@@ -1,7 +1,7 @@
 //! Shared streamed-turn helpers used by the buffered harness and the Restate orchestrator.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use moa_core::{
     error::Result, traits::LLMProvider, types::completion::CompletionContent,
@@ -21,6 +21,9 @@ pub struct StreamedCompletion {
     pub streamed_text: String,
     /// Whether the stream was cancelled before the provider finished.
     pub cancelled: bool,
+    /// Time-to-first-token in milliseconds, measured from request dispatch to
+    /// the first streamed block. `None` when the stream produced no blocks.
+    pub ttft_ms: Option<u64>,
 }
 
 /// Control outcome returned by the streamed-signal callback.
@@ -51,6 +54,7 @@ where
     let mut streamed_text = String::new();
     let mut started_assistant = false;
     let mut recorded_first_token = false;
+    let mut first_chunk_ttft: Option<Duration> = None;
 
     loop {
         if let Some(receiver) = signal_rx.as_deref_mut() {
@@ -65,6 +69,7 @@ where
                         if let Some(span) = llm_call_span {
                             span.record("gen_ai.response.time_to_first_chunk", ttft.as_secs_f64());
                         }
+                        first_chunk_ttft = Some(ttft);
                         recorded_first_token = true;
                     }
                     match block? {
@@ -94,6 +99,7 @@ where
                         response: None,
                         streamed_text,
                         cancelled: true,
+                        ttft_ms: first_chunk_ttft.map(|d| d.as_millis() as u64),
                     });
                 }
                 signal = receiver.recv() => {
@@ -102,6 +108,7 @@ where
                             response: None,
                             streamed_text,
                             cancelled: true,
+                            ttft_ms: first_chunk_ttft.map(|d| d.as_millis() as u64),
                         });
                     };
                     if matches!(on_signal(signal), StreamSignalDisposition::CancelImmediately) {
@@ -109,6 +116,7 @@ where
                             response: None,
                             streamed_text,
                             cancelled: true,
+                            ttft_ms: first_chunk_ttft.map(|d| d.as_millis() as u64),
                         });
                     }
                 }
@@ -129,6 +137,7 @@ where
                                     ttft.as_secs_f64(),
                                 );
                             }
+                            first_chunk_ttft = Some(ttft);
                             recorded_first_token = true;
                         }
                         match block? {
@@ -154,6 +163,7 @@ where
                             response: None,
                             streamed_text,
                             cancelled: true,
+                            ttft_ms: first_chunk_ttft.map(|d| d.as_millis() as u64),
                         });
                     }
                 }
@@ -167,6 +177,7 @@ where
                     if let Some(span) = llm_call_span {
                         span.record("gen_ai.response.time_to_first_chunk", ttft.as_secs_f64());
                     }
+                    first_chunk_ttft = Some(ttft);
                     recorded_first_token = true;
                 }
                 match block? {
@@ -193,6 +204,7 @@ where
         response: Some(stream.into_response().await?),
         streamed_text,
         cancelled: false,
+        ttft_ms: first_chunk_ttft.map(|d| d.as_millis() as u64),
     })
 }
 

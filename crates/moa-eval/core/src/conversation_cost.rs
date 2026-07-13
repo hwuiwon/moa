@@ -260,6 +260,7 @@ mod tests {
             output_tokens: output,
             cost_cents: cost,
             duration_ms: 10,
+            llm_ttft_ms: None,
             thought_signature: None,
         }
     }
@@ -275,6 +276,7 @@ mod tests {
             output_tokens: 5,
             cost_cents: 1,
             duration_ms: 10,
+            llm_ttft_ms: None,
             thought_signature: None,
         }
     }

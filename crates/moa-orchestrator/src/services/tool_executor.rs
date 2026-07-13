@@ -1,7 +1,7 @@
 //! Durable Restate facade over the configured tool router.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::traits::SessionRepository;
@@ -601,7 +601,6 @@ async fn prior_non_idempotent_result_exists(
     })?;
     let storage_partition_id = storage_partition_id_for_session(session);
     let tool_call_id = request.tool_call_id;
-    let scan_started = Instant::now();
     let exists = ctx
         .run(|| async move {
             session_store
@@ -618,7 +617,7 @@ async fn prior_non_idempotent_result_exists(
         .name("tool_executor_tool_result_exists")
         .await?
         .into_inner();
-    record_tool_idempotency_scan("ToolResult", 0, scan_started.elapsed());
+    record_tool_idempotency_scan("ToolResult", 0);
     Ok(exists)
 }
 
@@ -636,7 +635,6 @@ async fn prior_tool_call_event_exists(
 
     let storage_partition_id = storage_partition_id_for_session(session);
     let tool_call_id = request.tool_call_id;
-    let scan_started = Instant::now();
     let exists = ctx
         .run(|| async move {
             session_store
@@ -653,7 +651,7 @@ async fn prior_tool_call_event_exists(
         .name("tool_executor_tool_call_exists")
         .await?
         .into_inner();
-    record_tool_idempotency_scan("ToolCall", 0, scan_started.elapsed());
+    record_tool_idempotency_scan("ToolCall", 0);
     Ok(exists)
 }
 

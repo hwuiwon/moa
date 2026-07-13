@@ -433,7 +433,6 @@ async fn delete_tenant_rows(
         .map_err(|error| format!("clear active channel binding: {error}"))?;
     for statement in [
         "DELETE FROM context_snapshots WHERE tenant_id = $1",
-        "DELETE FROM pending_signals WHERE tenant_id = $1",
         "DELETE FROM events WHERE tenant_id = $1",
         "DELETE FROM sessions WHERE tenant_id = $1",
     ] {

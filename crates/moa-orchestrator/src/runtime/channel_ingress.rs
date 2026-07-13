@@ -21,6 +21,7 @@ use reqwest::Client;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::restate_identity::with_reqwest_identity_headers;
 
@@ -108,51 +109,66 @@ async fn handle_channel_event(
         return Ok(());
     };
     let (kind, inbound) = CommandKind::from_command(&command);
-    let Some(adapter) = adapters.get(&inbound.channel) else {
-        return Err(MoaError::ProviderError(format!(
-            "no channel adapter configured for {}",
-            inbound.channel.as_str()
-        )));
-    };
-    let Some(resolution) = session_store
-        .get_active_session_binding_for_channel(&inbound.channel_ref)
-        .await?
-    else {
+    // Slack Socket Mode carries no request headers, so the inbound message ferries
+    // the receive span's W3C trace context (see the Slack adapter's `handle_push_event`).
+    // Re-adopt it here so the status/cancel calls this command issues join that trace
+    // instead of starting a disconnected root.
+    let command_span = tracing::info_span!(
+        "channel_session_command",
+        moa.channel = %inbound.channel.as_str(),
+    );
+    moa_observability::adopt_remote_parent(&command_span, |name| {
+        inbound.trace_headers.get(name).cloned()
+    });
+    async {
+        let Some(adapter) = adapters.get(&inbound.channel) else {
+            return Err(MoaError::ProviderError(format!(
+                "no channel adapter configured for {}",
+                inbound.channel.as_str()
+            )));
+        };
+        let Some(resolution) = session_store
+            .get_active_session_binding_for_channel(&inbound.channel_ref)
+            .await?
+        else {
+            send_reply(
+                adapter.as_ref(),
+                inbound,
+                &inbound.channel_ref,
+                "No active MOA session is bound to this conversation.".to_string(),
+            )
+            .await?;
+            return Ok(());
+        };
+
+        let identity = identity_for_resolution(&resolution);
+        let reply = match kind {
+            CommandKind::Status => {
+                let progress = transport.progress(&identity, resolution.session_id).await?;
+                status_reply(&progress)
+            }
+            CommandKind::Stop => {
+                let response = transport
+                    .request_cancel(
+                        &identity,
+                        resolution.session_id,
+                        "channel session stop requested",
+                    )
+                    .await?;
+                cancel_reply(&response)
+            }
+        };
         send_reply(
             adapter.as_ref(),
             inbound,
-            &inbound.channel_ref,
-            "No active MOA session is bound to this conversation.".to_string(),
+            &resolution.binding.channel_ref,
+            reply,
         )
         .await?;
-        return Ok(());
-    };
-
-    let identity = identity_for_resolution(&resolution);
-    let reply = match kind {
-        CommandKind::Status => {
-            let progress = transport.progress(&identity, resolution.session_id).await?;
-            status_reply(&progress)
-        }
-        CommandKind::Stop => {
-            let response = transport
-                .request_cancel(
-                    &identity,
-                    resolution.session_id,
-                    "channel session stop requested",
-                )
-                .await?;
-            cancel_reply(&response)
-        }
-    };
-    send_reply(
-        adapter.as_ref(),
-        inbound,
-        &resolution.binding.channel_ref,
-        reply,
-    )
-    .await?;
-    Ok(())
+        Ok(())
+    }
+    .instrument(command_span)
+    .await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -582,6 +598,7 @@ mod tests {
             reply_to: Some("1700000000.000100".to_string()),
             timestamp: chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0)
                 .expect("timestamp parses"),
+            trace_headers: std::collections::BTreeMap::new(),
         }
     }
 

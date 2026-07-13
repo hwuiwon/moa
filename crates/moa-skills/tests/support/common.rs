@@ -208,6 +208,7 @@ pub fn load_session_fixture(json_text: &str) -> LoadedSession {
             output_tokens: 32,
             cost_cents: 0,
             duration_ms: 1,
+            llm_ttft_ms: None,
         },
     );
     LoadedSession { session, events }

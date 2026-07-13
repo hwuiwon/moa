@@ -132,11 +132,11 @@ For a slow or failing behavior-lab run:
    to inspect score rows without guessing which analytics run belongs to the
    experiment.
 4. Check lifecycle metrics first:
-   `moa_experiment_runs_total{status,target_kind}`,
-   `moa_experiment_trials_total{status,stop_reason,target_kind}`, and
-   `moa_experiment_trial_duration_seconds{status,target_kind}`. Action-review
-   pressure should be investigated through session `ActionReviewRequested`
-   events and tenant action-review rows.
+   `moa_experiment_runs_total{status,target_kind}` and
+   `moa_experiment_trials_total{status,stop_reason,target_kind}`. Terminal trial
+   duration lives in the analytics tables, not Prometheus. Action-review pressure
+   should be investigated through session `ActionReviewRequested` events and
+   tenant action-review rows.
 5. For simulator pressure, compare
    `moa_simulation_turns_total{target_kind}`,
    `moa_simulation_tokens_total{role="simulator"}`,

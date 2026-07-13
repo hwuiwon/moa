@@ -72,7 +72,7 @@ SELECT
     stm.model,
     stm.pipeline_ms,
     stm.llm_ms,
-    NULL::DOUBLE PRECISION AS llm_ttft_ms,
+    stm.llm_ttft_ms,
     stm.tool_ms,
     stm.tool_call_count,
     stm.input_tokens_uncached,
@@ -176,6 +176,7 @@ SELECT
     ts.outcome_confidence::DOUBLE PRECISION AS outcome_confidence,
     ts.tools_used,
     ts.skills_activated,
+    ts.skills_used,
     ts.turn_count,
     ts.token_cost,
     CASE

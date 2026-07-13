@@ -240,18 +240,11 @@ impl LearningReviewStore for SessionLearningReviewStore {
     }
 }
 
-/// Records one skill-learning review decision and, when the candidate creation
-/// time is known, its time from creation to this decision.
+/// Records one skill-learning review decision.
 ///
-/// Best-effort telemetry: recording never changes the review result. `created_at`
-/// is optional because the reject path derives it from a separate lookup that may
-/// be unavailable, in which case only the decision counter is recorded.
-fn record_review_decision(action: &str, outcome: &str, created_at: Option<chrono::DateTime<Utc>>) {
+/// Best-effort telemetry: recording never changes the review result.
+fn record_review_decision(action: &str, outcome: &str) {
     moa_observability::runtime_metrics::record_skill_learning_review_decision(action, outcome);
-    if let Some(created_at) = created_at {
-        let waited = (Utc::now() - created_at).to_std().unwrap_or_default();
-        moa_observability::runtime_metrics::record_skill_learning_time_in_review(waited);
-    }
 }
 
 /// Loads one candidate after the caller has authorized tenant operator access.
@@ -279,9 +272,6 @@ pub async fn accept_skill_candidate_after_authz(
     let prepared = prepare_skill_acceptance(&review_store, pool.clone(), &review_request)
         .await
         .map_err(skill_review_error_to_handler_error)?;
-    // Captured before `prepared` is moved into promotion so every decision branch
-    // can observe the candidate's time in review.
-    let candidate_created_at = prepared.candidate.created_at;
     let regression_gate = match skill_acceptance_regression_report(
         config.as_ref().clone(),
         providers,
@@ -309,7 +299,7 @@ pub async fn accept_skill_candidate_after_authz(
                     "failed to release claimed skill candidate after gate error"
                 );
             }
-            record_review_decision("accept_skill", "error", Some(candidate_created_at));
+            record_review_decision("accept_skill", "error");
             return Err(moa_error_to_status_handler_error(error));
         }
     };
@@ -324,7 +314,7 @@ pub async fn accept_skill_candidate_after_authz(
         .await
         .map_err(skill_review_error_to_handler_error)?;
 
-        record_review_decision("accept_skill", "gate_rejected", Some(candidate_created_at));
+        record_review_decision("accept_skill", "gate_rejected");
         return Ok(review_response_from_outcome(outcome));
     }
 
@@ -340,7 +330,7 @@ pub async fn accept_skill_candidate_after_authz(
     .await
     .map_err(skill_review_error_to_handler_error)?;
 
-    record_review_decision("accept_skill", "promoted", Some(candidate_created_at));
+    record_review_decision("accept_skill", "promoted");
     Ok(review_response_from_outcome(outcome))
 }
 
@@ -482,13 +472,13 @@ pub async fn accept_rollback_candidate_after_authz(
 
     match executed {
         Ok(RollbackOutcome::Applied(response)) => {
-            record_review_decision("accept_rollback", "promoted", Some(candidate.created_at));
+            record_review_decision("accept_rollback", "promoted");
             Ok(response)
         }
         Ok(RollbackOutcome::Superseded {
             serving_revision_uid,
         }) => {
-            record_review_decision("accept_rollback", "superseded", Some(candidate.created_at));
+            record_review_decision("accept_rollback", "superseded");
             // The proposal targets a revision a newer promotion has since
             // superseded, so it can never serve again — reject it terminally
             // rather than release it for a retry that would fail identically.
@@ -522,7 +512,7 @@ pub async fn accept_rollback_candidate_after_authz(
             .into())
         }
         Err(error) => {
-            record_review_decision("accept_rollback", "error", Some(candidate.created_at));
+            record_review_decision("accept_rollback", "error");
             // Release the claim so the operator can retry once the fault is fixed.
             let release = LearningCandidateStatusUpdate {
                 candidate_id: candidate.id,
@@ -789,19 +779,11 @@ pub async fn reject_learning_candidate_after_authz(
     ensure_requested_action(request.action, LearningCandidateReviewAction::Reject)?;
     let review_store = SessionLearningReviewStore::new(store);
     let review_request = skill_review_request(&request, SkillReviewAction::Reject);
-    // Read the candidate's creation time before rejecting so the decision can carry
-    // its time in review; a lookup miss only drops the histogram sample.
-    let candidate_created_at = review_store
-        .get_learning_candidate(&request.tenant_id, request.candidate_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|candidate| candidate.created_at);
     let outcome = reject_learning_candidate(&review_store, &review_request)
         .await
         .map_err(skill_review_error_to_handler_error)?;
 
-    record_review_decision("reject", "rejected", candidate_created_at);
+    record_review_decision("reject", "rejected");
     Ok(review_response_from_outcome(outcome))
 }
 

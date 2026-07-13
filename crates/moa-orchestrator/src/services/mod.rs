@@ -2,6 +2,7 @@
 
 pub mod action_policy;
 pub mod action_reviews;
+pub mod action_reviews_reaper;
 pub mod admin_maintenance;
 pub mod agent_definitions;
 pub mod agents;

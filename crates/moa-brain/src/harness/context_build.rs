@@ -9,7 +9,7 @@ use moa_core::{
     traits::LLMProvider, traits::SessionStore, types::completion::CompletionRequest,
     types::completion::CompletionResponse, types::contact::SessionActorRef,
     types::context::WorkingContext, types::events_stream::EventRecord,
-    types::identifiers::SessionId, types::model::TokenPricing, types::observability::CacheReport,
+    types::identifiers::SessionId, types::observability::CacheReport,
     types::observability::TraceContext, types::observability::stable_prefix_fingerprint,
     types::session::SessionMeta, types::snapshot::ContextSnapshot,
 };
@@ -250,26 +250,6 @@ pub(super) fn record_turn_span_metrics(
     span.record("moa.turn.result", result);
 }
 
-pub(super) fn calculate_response_cost_cents(
-    response: &moa_core::types::completion::CompletionResponse,
-    pricing: &TokenPricing,
-) -> u32 {
-    let usage = response.token_usage();
-    let total_input_tokens = usage.total_input_tokens();
-    let cached_input_tokens = usage.input_tokens_cache_read.min(total_input_tokens);
-    let uncached_input_tokens = total_input_tokens.saturating_sub(cached_input_tokens);
-    let cached_input_rate = pricing
-        .cached_input_per_mtok
-        .unwrap_or(pricing.input_per_mtok);
-
-    let cost_dollars = ((uncached_input_tokens as f64 * pricing.input_per_mtok)
-        + (cached_input_tokens as f64 * cached_input_rate)
-        + (usage.output_tokens as f64 * pricing.output_per_mtok))
-        / 1_000_000.0;
-
-    (cost_dollars * 100.0).round() as u32
-}
-
 pub(super) fn build_cache_report(
     events: &[EventRecord],
     provider: &str,
@@ -350,10 +330,12 @@ mod tests {
         types::model::TokenPricing,
     };
 
-    use super::calculate_response_cost_cents;
-
+    // Pins: the streaming harness prices responses through the single canonical
+    // `TokenPricing::cost_cents` formula (no divergent brain copy). Breaking the
+    // formula — e.g. charging cache-write tokens at the standard input rate —
+    // changes this expected cent value.
     #[test]
-    fn response_cost_cents_uses_provider_pricing() {
+    fn response_cost_cents_uses_canonical_pricing() {
         let response = CompletionResponse {
             text: "done".to_string(),
             content: Vec::new(),
@@ -376,6 +358,10 @@ mod tests {
             cache_write_1h_per_mtok: None,
         };
 
-        assert_eq!(calculate_response_cost_cents(&response, &pricing), 29);
+        // 50_000 uncached @ 2.50 + 50_000 cache-read @ 0.25 + 10_000 output @ 15.0
+        // = 0.125 + 0.0125 + 0.15 = 0.2875 USD -> 29 cents.
+        assert_eq!(pricing.cost_cents(&response.token_usage()), 29);
+        // Cents and micros derive from the same dollar figure and must agree.
+        assert_eq!(pricing.cost_micros(&response.token_usage()), 287_500);
     }
 }

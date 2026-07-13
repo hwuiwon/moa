@@ -1,5 +1,7 @@
 //! Consolidated Postgres-backed (`_db`) integration-test harness for `moa-orchestrator`.
 
+#[path = "orchestrator_db/action_reviews_reaper_db.rs"]
+mod action_reviews_reaper_db;
 #[path = "orchestrator_db/analytics_chaos_db.rs"]
 mod analytics_chaos_db;
 #[path = "orchestrator_db/analytics_export_db.rs"]
@@ -14,6 +16,8 @@ mod authz_challenges_db;
 mod contacts_db;
 #[path = "orchestrator_db/eval_run_status_db.rs"]
 mod eval_run_status_db;
+#[path = "orchestrator_db/guardrail_hourly_db.rs"]
+mod guardrail_hourly_db;
 #[path = "orchestrator_db/lineage_postgres_db.rs"]
 mod lineage_postgres_db;
 #[path = "orchestrator_db/session_store_db.rs"]

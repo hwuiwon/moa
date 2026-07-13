@@ -437,6 +437,47 @@ fn dataset_specs() -> Vec<DatasetSpec> {
                 ),
             ],
         ),
+        // Honest engaged-skill signal: `skills_used` records the skills the
+        // model actually engaged during a task segment, in contrast to the
+        // `skills` dataset above which reports `skills_activated` (skills merely
+        // offered in the turn manifest). Compare the two to measure how often an
+        // injected skill was really used.
+        //
+        // Postgres-only: the ClickHouse exporter carries `skills_activated` on
+        // `dim_task_segments` but not `skills_used`, so this dataset has no
+        // ClickHouse source (see `clickhouse_from_sql`).
+        dataset(
+            "skill_usage",
+            "Skill Usage",
+            "Skills the model actually engaged, extracted from task segments.",
+            "(SELECT tenant_id, session_id, agent_id, channel, started_at, outcome, token_cost, duration_ms, unnest(skills_used) AS skill_name FROM analytics.task_segment_fact WHERE array_length(skills_used, 1) IS NOT NULL)",
+            Some("started_at"),
+            vec![
+                tenant_filter(),
+                dimension(
+                    "skill_name",
+                    "skill_name",
+                    "Skill",
+                    AnalyticsFieldKind::String,
+                ),
+                dimension("agent_id", "agent_id", "Agent", AnalyticsFieldKind::Uuid),
+                dimension("channel", "channel", "Channel", AnalyticsFieldKind::String),
+                dimension("outcome", "outcome", "Outcome", AnalyticsFieldKind::String),
+                timestamp("started_at", "started_at", "Started At"),
+                measure(
+                    "token_cost",
+                    "token_cost",
+                    "Token Cost",
+                    AnalyticsFieldKind::Integer,
+                ),
+                measure(
+                    "duration_ms",
+                    "duration_ms",
+                    "Duration Ms",
+                    AnalyticsFieldKind::Float,
+                ),
+            ],
+        ),
         dataset(
             "procedure_runs",
             "Procedure Runs",
@@ -924,6 +965,7 @@ mod tests {
             "tool_calls",
             "task_segments",
             "skills",
+            "skill_usage",
             "procedure_runs",
             "procedure_node_runs",
             "learning_candidates",

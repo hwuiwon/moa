@@ -4041,8 +4041,11 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "moa-core",
+ "moa-observability",
  "moa-runtime-store",
  "moka",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "rand 0.8.5",
  "reqwest 0.13.4",
  "rustls",
@@ -4052,6 +4055,8 @@ dependencies = [
  "slack-morphism",
  "tokio",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
  "unicode-segmentation",
  "uuid",
  "wiremock",
@@ -4083,7 +4088,6 @@ dependencies = [
  "opentelemetry_sdk",
  "reqwest 0.13.4",
  "tokio",
- "tokio-metrics",
  "tracing",
  "tracing-appender",
  "tracing-opentelemetry",
@@ -4208,12 +4212,14 @@ dependencies = [
  "moa-observability",
  "moa-runtime-store",
  "opentelemetry",
+ "opentelemetry_sdk",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
+ "tracing-subscriber",
  "webpki-root-certs",
  "wiremock",
  "workspace-hack",
@@ -7197,18 +7203,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "tokio-metrics"
-version = "0.4.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e0410015c6db7b67b9c9ab2a3af4d74a942d637ff248d0d055073750deac6f9"
-dependencies = [
- "futures-util",
- "pin-project-lite",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]

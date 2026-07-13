@@ -257,7 +257,8 @@ impl EnrichmentWorker {
                     Err(_elapsed) => break,
                 }
             }
-            metrics::histogram!("moa_retrieval_enrichment_batch_size").record(batch.len() as f64);
+            metrics::counter!("moa_retrieval_enrichment_batch_size_total")
+                .increment(batch.len() as u64);
             self.flush(batch).await;
             if senders_closed {
                 break;
@@ -266,7 +267,6 @@ impl EnrichmentWorker {
     }
 
     async fn flush(&self, batch: Vec<EnrichmentJob>) {
-        let started = std::time::Instant::now();
         // Coalesce access bumps per (scope, role): the deduped union of uids is
         // written as a single `UPDATE ... WHERE uid = ANY($1)` for each scope.
         let mut bumps: HashMap<(MemoryScope, bool), HashSet<Uuid>> = HashMap::new();
@@ -305,8 +305,6 @@ impl EnrichmentWorker {
                     .await;
             }
         }
-        metrics::histogram!("moa_retrieval_enrichment_flush_seconds")
-            .record(started.elapsed().as_secs_f64());
     }
 }
 

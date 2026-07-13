@@ -279,6 +279,7 @@ pub async fn retrieve_for_query(
     ctx.hybrid
         .retrieve(&planned, request)
         .await
+        .map(|output| output.hits)
         .map_err(PlanError::from)
 }
 

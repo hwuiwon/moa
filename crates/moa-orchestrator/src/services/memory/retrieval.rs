@@ -1,26 +1,18 @@
-//! Graph-memory retrieval, show, and debug-lineage orchestration.
+//! Graph-memory retrieval, show, and debug-inspection orchestration.
 
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::Utc;
 use moa_brain::retrieval::{
     HybridRetriever, MemoryAdmissionPolicy, RetrievalHit, RetrievalRequest, SourceTier,
     dedupe_and_rank_hits,
 };
-use moa_core::traits::{EmbeddingProvider, Identity, LineageHandle};
+use moa_core::config::MoaConfig;
+use moa_core::traits::EmbeddingProvider;
 use moa_core::wire::memory::{
     MemoryRetrieveDebugRequest, MemoryRetrieveDebugResponse, MemorySearchRequest,
     MemorySearchResponse, MemoryShowRequest, MemoryShowResponse,
-};
-use moa_core::{
-    config::MoaConfig, types::identifiers::SessionId, types::identifiers::StoragePartitionId,
-    types::identifiers::UserId,
-};
-use moa_lineage_core::{
-    BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage,
-    RetrievalSelectedHit, RetrievalStage, StageTimings, TurnId, VecHit,
 };
 use moa_memory_graph::{
     EdgeLabel, GraphStore, NodeIndexRow, NodeLabel, PiiClass, PostgresGraphStore,
@@ -30,11 +22,11 @@ use moa_memory_vector::VectorStoreFactory;
 use moa_observability::record_memory_operation;
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 use restate_sdk::prelude::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 use uuid::Uuid;
 
+use super::memory_handler_error;
 use super::responses::memory_hit_from_retrieval;
-use super::{effective_user_id, memory_handler_error};
 
 /// Runs graph-memory search and maps ranked hits into the public response.
 pub(super) async fn search_inner(
@@ -123,57 +115,62 @@ pub(super) async fn show_inner(
     Ok(response)
 }
 
-/// Runs debug retrieval and emits optional lineage for the ranked hits.
+/// Runs debug retrieval and returns the ranked hits with retrieval diagnostics.
+///
+/// This is a read-only inspection tool: it never writes lineage rows. The
+/// production stage-7 path owns durable retrieval lineage with a real turn and
+/// session context; a debug call has neither, so writing a row here would only
+/// produce orphans that join to nothing. The retrieval diagnostics are returned
+/// inline in the response instead.
 pub(super) async fn retrieve_debug_inner(
     request: MemoryRetrieveDebugRequest,
     scope: MemoryScope,
-    identity: &Identity,
     pool: &sqlx::PgPool,
     config: &MoaConfig,
-    lineage: &dyn LineageHandle,
 ) -> Result<MemoryRetrieveDebugResponse, HandlerError> {
     let started = Instant::now();
     let (graph, retriever) = memory_stack(pool, config, &scope).await?;
     let seeds = lookup_seed_uids(graph.as_ref(), &request.query, request.limit).await?;
-    let hits = retrieve_hits(
-        retriever.as_ref(),
-        RetrievalInputs {
+    let query_embedding = debug_query_embedding_with_config(config, &request.query).await?;
+    let output = retriever
+        .retrieve_with_diagnostics(RetrievalRequest {
             seeds: seeds.clone(),
-            query: request.query.clone(),
-            limit: request.limit,
-            scope: scope.clone(),
+            query_text: request.query.clone(),
+            query_embedding,
+            scope,
             label_filter: None,
             max_pii_class: PiiClass::Restricted,
+            k_final: usize::try_from(request.limit).unwrap_or(usize::MAX),
             use_reranker: true,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: None,
+            lineage: None,
+            disable_leg_timeouts: false,
             disable_graph_expansion: false,
-        },
-        config,
-    )
-    .await?;
+            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+        })
+        .await
+        .map_err(memory_handler_error)?;
 
-    let lineage_enabled = config.observability.lineage.enabled;
-    let lineage_turn = if lineage_enabled {
-        Some(record_debug_retrieval_lineage(
-            &request.query,
-            &scope,
-            identity,
-            &hits,
-            lineage,
-        )?)
-    } else {
-        None
-    };
-    let result_count = hits.len() as u64;
+    let diagnostics = serde_json::to_value(&output.diagnostics).unwrap_or(Value::Null);
+    let result_count = output.hits.len() as u64;
     record_memory_operation("retrieve_debug", "success", result_count, started.elapsed());
 
     Ok(MemoryRetrieveDebugResponse {
         query: request.query,
-        lineage_enabled,
+        // Debug retrieval never captures lineage; the field stays false and the
+        // turn id stays absent so no consumer expects a joinable row.
+        lineage_enabled: false,
         no_flush_wait: request.no_flush_wait,
-        lineage_turn: lineage_turn.map(|turn_id| turn_id.0),
+        lineage_turn: None,
         seed_uids: seeds,
-        hits: hits.into_iter().map(memory_hit_from_retrieval).collect(),
-        diagnostics: Value::Null,
+        hits: output
+            .hits
+            .into_iter()
+            .map(memory_hit_from_retrieval)
+            .collect(),
+        diagnostics,
     })
 }
 
@@ -396,145 +393,4 @@ fn parse_pii_class(value: Option<String>) -> Result<PiiClass, HandlerError> {
     PiiClass::from_str(&value).map_err(|_| {
         TerminalError::new_with_code(400, format!("unknown PII class `{value}`")).into()
     })
-}
-
-fn record_debug_retrieval_lineage(
-    query: &str,
-    scope: &MemoryScope,
-    identity: &Identity,
-    hits: &[RetrievalHit],
-    lineage: &dyn LineageHandle,
-) -> Result<TurnId, HandlerError> {
-    let turn_id = TurnId::new_v7();
-    let storage_partition_id = StoragePartitionId::for_tenant(scope.tenant_id());
-    let user_id = scope
-        .contact_id()
-        .map(|contact_id| UserId::new(contact_id.to_string()))
-        .or_else(|| effective_user_id(identity))
-        .unwrap_or_else(|| UserId::new(identity.id.to_string()));
-    let record = RetrievalLineage {
-        turn_id,
-        session_id: SessionId::new(),
-        storage_partition_id,
-        user_id,
-        scope: scope.clone(),
-        ts: Utc::now(),
-        query_original: query.to_string(),
-        query_expansions: Vec::new(),
-        vector_hits: hits
-            .iter()
-            .map(|hit| VecHit {
-                chunk_id: hit.uid,
-                score: hit.score as f32,
-                source: "hybrid".to_string(),
-                embedder: "debug".to_string(),
-                embed_dim: moa_memory_vector::VECTOR_DIMENSION as u16,
-            })
-            .collect(),
-        graph_paths: Vec::new(),
-        fusion_scores: hits
-            .iter()
-            .map(|hit| FusedHit {
-                chunk_id: hit.uid,
-                fused_score: hit.score as f32,
-                vector_contribution: if hit.legs.vector { 1.0 } else { 0.0 },
-                graph_contribution: if hit.legs.graph { 1.0 } else { 0.0 },
-                lexical_contribution: if hit.legs.lexical { 1.0 } else { 0.0 },
-                fusion_method: "rrf".to_string(),
-            })
-            .collect(),
-        rerank_scores: hits
-            .iter()
-            .enumerate()
-            .map(|(idx, hit)| RerankHit {
-                chunk_id: hit.uid,
-                original_index: idx.min(u16::MAX as usize) as u16,
-                relevance_score: hit.score as f32,
-                rerank_model: "debug".to_string(),
-            })
-            .collect(),
-        top_k: hits.iter().map(|hit| hit.uid).collect(),
-        searched_scopes: vec![debug_scope_label(scope)],
-        selected_hits: hits
-            .iter()
-            .map(|hit| debug_selected_hit(hit, true))
-            .collect(),
-        filters: json!({
-            "scope": debug_scope_label(scope),
-            "max_pii_class": "restricted",
-        }),
-        timings: StageTimings::default(),
-        introspection: BackendIntrospection::default(),
-        stage: RetrievalStage::Single,
-    };
-    let json = serde_json::to_value(LineageEvent::Retrieval(record))
-        .map_err(|error| TerminalError::new(format!("serialize debug lineage: {error}")))?;
-    lineage.record(json);
-    Ok(turn_id)
-}
-
-fn debug_scope_label(scope: &MemoryScope) -> String {
-    match scope {
-        MemoryScope::Tenant { tenant_id } => format!("tenant:{tenant_id}:tenant_knowledge"),
-        MemoryScope::Contact {
-            tenant_id,
-            contact_id,
-        } => format!("contact:{tenant_id}:{contact_id}:user_memory"),
-    }
-}
-
-fn debug_selected_hit(hit: &RetrievalHit, prompt_included: bool) -> RetrievalSelectedHit {
-    let chunk = hit.knowledge_chunk.as_ref();
-    RetrievalSelectedHit {
-        graph_node_uid: hit.uid,
-        chunk_uid: chunk.map(|chunk| chunk.chunk_uid),
-        fact_uid: (hit.node.label == NodeLabel::Fact).then_some(hit.uid),
-        source_tier: hit.source_tier.as_str().to_string(),
-        label: hit.node.label.as_str().to_string(),
-        title: chunk
-            .and_then(|chunk| chunk.source_title.clone())
-            .unwrap_or_else(|| hit.node.name.clone()),
-        snippet: chunk
-            .map(|chunk| chunk.text.clone())
-            .or_else(|| {
-                hit.node
-                    .properties_summary
-                    .as_ref()
-                    .and_then(|properties| properties.get("summary"))
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-            })
-            .unwrap_or_else(|| hit.node.name.clone()),
-        score: hit.score,
-        legs: debug_retrieval_legs(hit),
-        prompt_included,
-        source_uri: chunk.and_then(|chunk| chunk.source_uri.clone()),
-        source_title: chunk.and_then(|chunk| chunk.source_title.clone()),
-        citation: chunk
-            .map(|chunk| {
-                json!({
-                    "document_version_uid": chunk.document_version_uid,
-                    "object_uid": chunk.object_uid,
-                    "chunk_hash": chunk.chunk_hash,
-                    "ordinal": chunk.ordinal,
-                    "heading_path": chunk.heading_path,
-                    "object_type": chunk.object_type,
-                })
-            })
-            .unwrap_or_else(|| json!({})),
-    }
-}
-
-fn debug_retrieval_legs(hit: &RetrievalHit) -> Vec<String> {
-    let mut legs = Vec::new();
-    if hit.legs.graph {
-        legs.push("graph".to_string());
-    }
-    if hit.legs.vector {
-        legs.push("vector".to_string());
-    }
-    if hit.legs.lexical {
-        legs.push("lexical".to_string());
-    }
-    legs
 }

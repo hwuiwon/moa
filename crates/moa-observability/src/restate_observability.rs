@@ -28,6 +28,25 @@ pub fn current_trace_id() -> Option<String> {
     trace_id_for_span(&tracing::Span::current())
 }
 
+/// Returns the `(trace_id, span_id)` of a tracing span when it has a sampled context.
+///
+/// Both are `None` when the span has no active OpenTelemetry context (for example
+/// when tracing is disabled), so callers persist real ids or nothing — never a
+/// zero placeholder.
+#[must_use]
+pub fn trace_ids_for_span(span: &tracing::Span) -> (Option<String>, Option<String>) {
+    let context = span.context();
+    let span_context = context.span();
+    let span_context = span_context.span_context();
+    if !span_context.is_valid() {
+        return (None, None);
+    }
+    (
+        Some(span_context.trace_id().to_string()),
+        Some(span_context.span_id().to_string()),
+    )
+}
+
 /// Returns the OpenTelemetry trace ID for a tracing span when it has a sampled context.
 #[must_use]
 pub(crate) fn trace_id_for_span(span: &tracing::Span) -> Option<String> {

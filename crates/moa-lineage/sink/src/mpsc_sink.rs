@@ -13,6 +13,12 @@ use crate::store::LineageStore;
 use crate::writer::{DurableJournal, WriterCommand, WriterHandle, spawn_writer_for_sink};
 use crate::{Result, WriterStats};
 
+/// Upper bound on one durable journal append before it is treated as failed.
+///
+/// Guards the hot turn path against a pathological local-disk stall; the journal
+/// append is a fast embedded-LSM write, so this bound is never hit in practice.
+const DURABLE_APPEND_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Configuration for the production mpsc lineage sink.
 #[derive(Clone, Debug)]
 pub struct MpscSinkConfig {
@@ -90,15 +96,16 @@ impl MpscSink {
     ///
     /// Best-effort by contract: the writer batches enqueued events and group-commits them to the
     /// journal, so the hot path neither blocks nor spawns per-event work. When the writer channel
-    /// is saturated the event is dropped and counted. Callers that require guaranteed durability
-    /// use [`MpscSink::record_durable_event`], which awaits journal acceptance instead.
+    /// is saturated the event is dropped and counted under `mode="best_effort"`. Callers that
+    /// require guaranteed durability use [`MpscSink::record_durable_event`], which awaits journal
+    /// acceptance and is counted under `mode="durable"`.
     fn enqueue(&self, evt: LineageEvent) {
         let event_class = lineage_event_class(&evt);
         match self.tx.try_send(WriterCommand::Event(Box::new(evt))) {
             Ok(()) => {
                 metrics::counter!(
                     "moa_lineage_enqueued_total",
-                    "mode" => "durable",
+                    "mode" => "best_effort",
                     "event_class" => event_class
                 )
                 .increment(1);
@@ -107,7 +114,7 @@ impl MpscSink {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 metrics::counter!(
                     "moa_lineage_dropped_total",
-                    "mode" => "durable",
+                    "mode" => "best_effort",
                     "event_class" => event_class
                 )
                 .increment(1);
@@ -119,7 +126,7 @@ impl MpscSink {
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 metrics::counter!(
                     "moa_lineage_failed_total",
-                    "mode" => "durable",
+                    "mode" => "best_effort",
                     "event_class" => event_class,
                     "reason" => "channel_closed"
                 )
@@ -137,15 +144,61 @@ impl MpscSink {
         Ok(seq)
     }
 
-    async fn record_durable_json(
+    /// Records a batch of events under one journal fsync and returns their sequences.
+    ///
+    /// The whole batch group-commits through a single durability sync, then wakes
+    /// the writer with one notification, so an emission point that produces N
+    /// lineage events pays one fsync rather than N.
+    pub async fn record_durable_events(&self, events: Vec<LineageEvent>) -> Result<Vec<u64>> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        let classes: Vec<&'static str> = events.iter().map(lineage_event_class).collect();
+        let seqs = self.journal.append_accepted_events(events).await?;
+        if let Some(max_seq) = seqs.iter().copied().max() {
+            record_batch_journal_notification(&self.tx, max_seq, &classes);
+        }
+        Ok(seqs)
+    }
+
+    async fn record_durable_batch_json(
         &self,
-        evt_json: serde_json::Value,
+        events_json: Vec<serde_json::Value>,
     ) -> moa_core::error::Result<()> {
-        let evt = serde_json::from_value::<LineageEvent>(evt_json)?;
-        self.record_durable_event(evt)
-            .await
-            .map(|_| ())
-            .map_err(|error| MoaError::StorageError(error.to_string()))
+        if events_json.is_empty() {
+            return Ok(());
+        }
+        let events = events_json
+            .into_iter()
+            .map(serde_json::from_value::<LineageEvent>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // Bound the durable append so a stalled local journal write can never hang the
+        // hot turn path. The journal is an embedded LSM store (local disk, not the
+        // remote row backend), so this only guards against pathological disk stalls; a
+        // downstream Postgres/ClickHouse outage is already decoupled by the background
+        // writer draining the journal. Timeout and append errors are surfaced to the
+        // caller (which logs and continues) and counted, never silently swallowed.
+        let started = std::time::Instant::now();
+        let result =
+            tokio::time::timeout(DURABLE_APPEND_TIMEOUT, self.record_durable_events(events)).await;
+        metrics::histogram!("moa_lineage_durable_append_seconds")
+            .record(started.elapsed().as_secs_f64());
+        match result {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => Err(MoaError::StorageError(error.to_string())),
+            Err(_) => {
+                metrics::counter!(
+                    "moa_lineage_failed_total",
+                    "mode" => "durable",
+                    "reason" => "journal_timeout"
+                )
+                .increment(1);
+                Err(MoaError::StorageError(format!(
+                    "lineage durable append timed out after {:?}",
+                    DURABLE_APPEND_TIMEOUT
+                )))
+            }
+        }
     }
 }
 
@@ -198,6 +251,56 @@ fn record_journal_notification(
     }
 }
 
+/// Wakes the writer once for a group-committed batch and counts each event's enqueue.
+///
+/// Only one `Journaled` notification is sent per batch: the writer drains every
+/// pending journal row on receipt regardless of the carried sequence, so the
+/// highest sequence in the batch is enough to trigger the flush. The enqueue
+/// counter is still incremented per event so throughput accounting is unchanged.
+fn record_batch_journal_notification(
+    tx: &mpsc::Sender<WriterCommand>,
+    max_seq: u64,
+    event_classes: &[&'static str],
+) {
+    match tx.try_send(WriterCommand::Journaled(max_seq)) {
+        Ok(()) => {
+            for event_class in event_classes {
+                metrics::counter!(
+                    "moa_lineage_enqueued_total",
+                    "mode" => "durable",
+                    "event_class" => *event_class
+                )
+                .increment(1);
+            }
+        }
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            for event_class in event_classes {
+                metrics::counter!(
+                    "moa_lineage_backpressure_total",
+                    "mode" => "durable",
+                    "event_class" => *event_class
+                )
+                .increment(1);
+            }
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            for event_class in event_classes {
+                metrics::counter!(
+                    "moa_lineage_failed_total",
+                    "mode" => "durable",
+                    "event_class" => *event_class,
+                    "reason" => "channel_closed"
+                )
+                .increment(1);
+            }
+            tracing::error!(
+                max_seq,
+                "lineage batch journaled but writer channel is closed"
+            );
+        }
+    }
+}
+
 fn lineage_event_class(evt: &LineageEvent) -> &'static str {
     match evt {
         LineageEvent::Decision(_) => "audit",
@@ -217,12 +320,12 @@ impl LineageHandle for MpscSink {
         }
     }
 
-    fn record_durable<'a>(
+    fn record_durable_batch<'a>(
         &'a self,
-        evt_json: serde_json::Value,
+        events_json: Vec<serde_json::Value>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = moa_core::error::Result<()>> + Send + 'a>>
     {
-        Box::pin(async move { self.record_durable_json(evt_json).await })
+        Box::pin(async move { self.record_durable_batch_json(events_json).await })
     }
 
     fn record_span_attributes(&self, span: &tracing::Span, evt_json: &serde_json::Value) {
@@ -394,6 +497,52 @@ mod tests {
                 .approximate_len()
                 .expect("journal depth should be readable"),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn record_durable_events_group_commits_batch_under_one_persist() {
+        // Pins: a batch of N durable events costs exactly one journal fsync (group commit),
+        // assigns contiguous ascending sequences in input order, and wakes the writer with a
+        // single notification carrying the batch's highest sequence.
+        let (tx, mut rx) = mpsc::channel(8);
+        let journal = test_journal();
+        let sink = MpscSink {
+            tx,
+            journal: journal.clone(),
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+
+        let seqs = sink
+            .record_durable_events(vec![sample_event(), sample_event(), sample_event()])
+            .await
+            .expect("batch append should succeed");
+
+        assert_eq!(
+            seqs,
+            vec![1, 2, 3],
+            "sequences are contiguous in input order"
+        );
+        assert_eq!(
+            journal
+                .persist_count()
+                .expect("persist count should be readable"),
+            1,
+            "the whole batch group-commits under a single fsync"
+        );
+        assert_eq!(
+            journal
+                .approximate_len()
+                .expect("journal depth should be readable"),
+            3
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(WriterCommand::Journaled(3))),
+            "exactly one notification carrying the batch's highest sequence"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no second notification is sent for the batch"
         );
     }
 

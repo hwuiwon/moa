@@ -13,4 +13,6 @@ pub(crate) mod rate_guard;
 pub(crate) mod retry;
 pub mod router;
 pub(crate) mod schema;
+#[cfg(test)]
+pub(crate) mod span_capture_test_support;
 pub(crate) mod streaming;

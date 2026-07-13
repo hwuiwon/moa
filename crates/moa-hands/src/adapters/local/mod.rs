@@ -15,6 +15,7 @@ use moa_core::{
     types::hands::HandStatus, types::hands::SandboxFile, types::hands::SandboxTier,
     types::hands::validate_sandbox_file_path, types::tools::ToolOutput,
 };
+use moa_observability::current_turn_root_span;
 use opentelemetry::trace::Status;
 use tokio::fs;
 use tokio::process::Command;
@@ -488,13 +489,24 @@ impl LocalHandProvider {
             HandHandle::Daytona { .. } => "container",
             HandHandle::E2B { .. } => "microvm",
         };
-        let span_name = format!("hand.execute local/{tool}");
-        let hand_span = tracing::info_span!("hand_execute", otel.name = %span_name);
-        hand_span.set_attribute("moa.hand.provider", "local");
+        // The backing execution target varies by handle: a Docker-backed handle
+        // must report "docker" here, not the router-level "local" provider name,
+        // or provisioning/execution spans for containerized runs become
+        // indistinguishable from host-local runs in traces.
+        let provider = hand_execute_provider_label(handle);
+        let span_name = format!("hand.execute {provider}/{tool}");
+        let hand_span = match current_turn_root_span() {
+            Some(parent) => {
+                tracing::info_span!(parent: &parent, "hand_execute", otel.name = %span_name)
+            }
+            None => tracing::info_span!("hand_execute", otel.name = %span_name),
+        };
+        hand_span.set_attribute("moa.hand.provider", provider);
         hand_span.set_attribute("moa.hand.tier", tier);
 
         let instrument_hand_span = hand_span.clone();
         async move {
+            let started_at = Instant::now();
             let result = match handle {
                 HandHandle::Local { sandbox_dir } => {
                     self.execute_local_tool(sandbox_dir, tool, input, hard_cancel_token)
@@ -508,12 +520,24 @@ impl LocalHandProvider {
                     "non-local hand handle passed to LocalHandProvider".to_string(),
                 )),
             };
+            hand_span.set_attribute(
+                "moa.tool.duration_ms",
+                started_at.elapsed().as_millis() as i64,
+            );
 
             match &result {
                 Ok(output) if output.is_error => {
                     hand_span.set_status(Status::error(TOOL_ERROR_OUTPUT_STATUS));
+                    if let Some(exit_code) = output.process_exit_code() {
+                        hand_span.set_attribute("moa.tool.exit_code", exit_code as i64);
+                    }
                 }
-                Ok(_) | Err(MoaError::Cancelled) => {}
+                Ok(output) => {
+                    if let Some(exit_code) = output.process_exit_code() {
+                        hand_span.set_attribute("moa.tool.exit_code", exit_code as i64);
+                    }
+                }
+                Err(MoaError::Cancelled) => {}
                 Err(_) => {
                     hand_span.set_status(Status::error(TOOL_EXECUTION_FAILED_STATUS));
                 }
@@ -523,6 +547,21 @@ impl LocalHandProvider {
         }
         .instrument(instrument_hand_span)
         .await
+    }
+}
+
+/// Returns the bounded-cardinality provider label for a hand handle's backing target.
+///
+/// The [`LocalHandProvider`] only ever executes [`HandHandle::Local`] and
+/// [`HandHandle::Docker`] handles (other variants hit the `Unsupported` arm
+/// above), but the label is computed defensively for every variant so span
+/// attributes never fall back to a misleading default.
+fn hand_execute_provider_label(handle: &HandHandle) -> &'static str {
+    match handle {
+        HandHandle::Local { .. } => "local",
+        HandHandle::Docker { .. } => "docker",
+        HandHandle::Daytona { .. } => "daytona",
+        HandHandle::E2B { .. } => "e2b",
     }
 }
 

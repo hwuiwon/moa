@@ -562,6 +562,7 @@ mod tests {
                     output_tokens: 1,
                     cost_cents: 0,
                     duration_ms: 1,
+                    llm_ttft_ms: None,
                 },
             ),
             event_record(
@@ -586,6 +587,7 @@ mod tests {
                     output_tokens: 1,
                     cost_cents: 0,
                     duration_ms: 1,
+                    llm_ttft_ms: None,
                 },
             ),
             event_record(

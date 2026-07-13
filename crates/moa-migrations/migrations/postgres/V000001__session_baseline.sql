@@ -240,23 +240,6 @@ CREATE INDEX IF NOT EXISTS idx_events_session_type ON events(session_id, event_t
 CREATE INDEX IF NOT EXISTS idx_events_scope ON events(storage_partition_id, scope, user_id);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 
-CREATE TABLE IF NOT EXISTS pending_signals (
-    id UUID PRIMARY KEY,
-    session_id UUID NOT NULL REFERENCES sessions(id),
-    storage_partition_id TEXT NOT NULL,
-    user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
-    signal_type TEXT NOT NULL,
-    payload JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    resolved_at TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS idx_pending_signals_session
-    ON pending_signals(session_id, resolved_at, created_at);
-CREATE INDEX IF NOT EXISTS idx_pending_signals_scope
-    ON pending_signals(storage_partition_id, scope, user_id);
-
 -- Source: V000003__session_add_session_cache_columns.sql
 
 ALTER TABLE sessions
@@ -345,32 +328,32 @@ WITH event_aggregates AS (
         COUNT(*) FILTER (WHERE e.event_type = 'BrainResponse')::BIGINT AS turn_count,
         COALESCE(SUM(
             CASE
-                WHEN e.event_type = 'BrainResponse' THEN COALESCE((e.payload -> 'data' ->> 'input_tokens_uncached')::BIGINT, 0)
+                WHEN e.event_type IN ('BrainResponse', 'GuardrailCheck') THEN COALESCE((e.payload -> 'data' ->> 'input_tokens_uncached')::BIGINT, 0)
                 WHEN e.event_type = 'Checkpoint' THEN COALESCE((e.payload -> 'data' ->> 'input_tokens')::BIGINT, 0)
                 ELSE 0
             END
         ), 0)::BIGINT AS total_input_tokens_uncached,
         COALESCE(SUM(
             CASE
-                WHEN e.event_type = 'BrainResponse' THEN COALESCE((e.payload -> 'data' ->> 'input_tokens_cache_write')::BIGINT, 0)
+                WHEN e.event_type IN ('BrainResponse', 'GuardrailCheck') THEN COALESCE((e.payload -> 'data' ->> 'input_tokens_cache_write')::BIGINT, 0)
                 ELSE 0
             END
         ), 0)::BIGINT AS total_input_tokens_cache_write,
         COALESCE(SUM(
             CASE
-                WHEN e.event_type = 'BrainResponse' THEN COALESCE((e.payload -> 'data' ->> 'input_tokens_cache_read')::BIGINT, 0)
+                WHEN e.event_type IN ('BrainResponse', 'GuardrailCheck') THEN COALESCE((e.payload -> 'data' ->> 'input_tokens_cache_read')::BIGINT, 0)
                 ELSE 0
             END
         ), 0)::BIGINT AS total_input_tokens_cache_read,
         COALESCE(SUM(
             CASE
-                WHEN e.event_type IN ('BrainResponse', 'Checkpoint') THEN COALESCE((e.payload -> 'data' ->> 'output_tokens')::BIGINT, 0)
+                WHEN e.event_type IN ('BrainResponse', 'Checkpoint', 'GuardrailCheck') THEN COALESCE((e.payload -> 'data' ->> 'output_tokens')::BIGINT, 0)
                 ELSE 0
             END
         ), 0)::BIGINT AS total_output_tokens,
         COALESCE(SUM(
             CASE
-                WHEN e.event_type IN ('BrainResponse', 'Checkpoint') THEN COALESCE((e.payload -> 'data' ->> 'cost_cents')::BIGINT, 0)
+                WHEN e.event_type IN ('BrainResponse', 'Checkpoint', 'GuardrailCheck') THEN COALESCE((e.payload -> 'data' ->> 'cost_cents')::BIGINT, 0)
                 ELSE 0
             END
         ), 0)::BIGINT AS total_cost_cents,
@@ -581,6 +564,7 @@ SELECT
     bt.response_data ->> 'model' AS model,
     NULL::DOUBLE PRECISION AS pipeline_ms,
     COALESCE((bt.response_data ->> 'duration_ms')::DOUBLE PRECISION, 0.0) AS llm_ms,
+    (bt.response_data ->> 'llm_ttft_ms')::DOUBLE PRECISION AS llm_ttft_ms,
     COALESCE(tm.tool_ms, 0.0) AS tool_ms,
     COALESCE(tm.tool_call_count, 0)::BIGINT AS tool_call_count,
     COALESCE((bt.response_data ->> 'input_tokens_uncached')::BIGINT, 0)::BIGINT AS input_tokens_uncached,
@@ -725,7 +709,7 @@ LEFT JOIN (
                 WHEN COALESCE(
                     e.payload -> 'data' ->> 'model_tier',
                     CASE
-                        WHEN e.event_type = 'Checkpoint' THEN 'auxiliary'
+                        WHEN e.event_type IN ('Checkpoint', 'GuardrailCheck') THEN 'auxiliary'
                         ELSE 'main'
                     END
                 ) = 'main' THEN COALESCE((e.payload -> 'data' ->> 'cost_cents')::BIGINT, 0)
@@ -737,7 +721,7 @@ LEFT JOIN (
                 WHEN COALESCE(
                     e.payload -> 'data' ->> 'model_tier',
                     CASE
-                        WHEN e.event_type = 'Checkpoint' THEN 'auxiliary'
+                        WHEN e.event_type IN ('Checkpoint', 'GuardrailCheck') THEN 'auxiliary'
                         ELSE 'main'
                     END
                 ) = 'auxiliary' THEN COALESCE((e.payload -> 'data' ->> 'cost_cents')::BIGINT, 0)
@@ -745,7 +729,7 @@ LEFT JOIN (
             END
         )::BIGINT AS auxiliary_cost_cents
     FROM events e
-    WHERE e.event_type IN ('BrainResponse', 'Checkpoint')
+    WHERE e.event_type IN ('BrainResponse', 'Checkpoint', 'GuardrailCheck')
     GROUP BY e.session_id
 ) tier_costs
     ON tier_costs.session_id = s.id;
@@ -860,7 +844,6 @@ CREATE INDEX IF NOT EXISTS idx_learning_log_scope
 
 SELECT moa.apply_three_tier_rls('sessions'::REGCLASS);
 SELECT moa.apply_three_tier_rls('events'::REGCLASS);
-SELECT moa.apply_three_tier_rls('pending_signals'::REGCLASS);
 SELECT moa.apply_three_tier_rls('context_snapshots'::REGCLASS);
 SELECT moa.apply_three_tier_rls('task_segments'::REGCLASS);
 SELECT moa.apply_three_tier_rls('learning_log'::REGCLASS);

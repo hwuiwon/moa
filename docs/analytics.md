@@ -65,9 +65,18 @@ tenant-keyed read models, not a replacement for authorization.
 
 `PostgresSessionStore::refresh_analytics_materialized_views` refreshes the
 session turn and daily storage-partition views plus the `analytics.*_fact`
-materialized views. `moa-edge` may trigger that refresh in the background before
-analytics query reads, throttled to at most once per process per minute. The
-query itself proceeds against the current materialized-view state.
+materialized views. Refresh is cron-owned: the default
+`analytics_materialized_views_refresh` cron job (schedule `0 */15 * * * *`)
+invokes `SessionStore.refresh_analytics_materialized_views` every 15 minutes.
+The refresh is single-flighted under a deployment-global Postgres advisory lock,
+so overlapping cron ticks across replicas never herd concurrent refreshes, and
+it records its last successful and failed run into
+`analytics.materialized_view_refresh_state`.
+
+`moa-edge` never triggers a refresh; it only reads
+`materialized_view_refresh_state.last_success_at` to report read-model staleness
+(`read_model_updated_at`) alongside query responses. Analytics queries always
+proceed against the current materialized-view state.
 
 Segment-specific views (`skill_resolution_rates` and `segment_baselines`) are
 refreshed separately by session-store segment refresh helpers and by the

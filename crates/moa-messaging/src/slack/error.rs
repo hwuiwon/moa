@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use moa_core::error::MoaError;
+use moa_observability::current_turn_root_span;
 use slack_morphism::errors::SlackClientError;
 use tracing::field;
 
@@ -157,21 +158,42 @@ fn slack_failure_message(failure: &SlackApiFailure, body: Option<&str>) -> Strin
     }
 }
 
+/// Builds a Slack Web API call span parented to the active turn root when present.
+///
+/// `name` and `method` are both fixed per call site (never derived from
+/// tenant-controlled data), so the span carries only bounded-cardinality values.
 pub(super) fn slack_api_span(name: &'static str, method: &'static str) -> tracing::Span {
-    tracing::info_span!(
-        "slack_api",
-        otel.name = name,
-        messaging.system = "slack",
-        messaging.operation = method,
-        messaging.channel = "slack",
-        slack.method = method,
-        slack.error_code = field::Empty,
-        slack.failure_class = field::Empty,
-        slack.retryable = field::Empty,
-        slack.retry_after_ms = field::Empty,
-        http.status_code = field::Empty,
-        error = field::Empty,
-    )
+    match current_turn_root_span() {
+        Some(parent) => tracing::info_span!(
+            parent: &parent,
+            "slack_api",
+            otel.name = name,
+            messaging.system = "slack",
+            messaging.operation = method,
+            messaging.channel = "slack",
+            slack.method = method,
+            slack.error_code = field::Empty,
+            slack.failure_class = field::Empty,
+            slack.retryable = field::Empty,
+            slack.retry_after_ms = field::Empty,
+            http.status_code = field::Empty,
+            error = field::Empty,
+        ),
+        None => tracing::info_span!(
+            "slack_api",
+            otel.name = name,
+            messaging.system = "slack",
+            messaging.operation = method,
+            messaging.channel = "slack",
+            slack.method = method,
+            slack.error_code = field::Empty,
+            slack.failure_class = field::Empty,
+            slack.retryable = field::Empty,
+            slack.retry_after_ms = field::Empty,
+            http.status_code = field::Empty,
+            error = field::Empty,
+        ),
+    }
 }
 
 fn record_slack_failure(operation: &'static str, failure: &SlackApiFailure) {

@@ -44,6 +44,8 @@ pub(crate) struct DecidedReview {
     pub(crate) action_class: ActionClass,
     /// User that decided the review.
     pub(crate) decided_by: String,
+    /// Timestamp the review was created, used for approval-wait metrics.
+    pub(crate) created_at: DateTime<Utc>,
     /// Decision timestamp.
     pub(crate) decided_at: DateTime<Utc>,
     /// Whether the service should append the decision event.
@@ -74,8 +76,9 @@ pub(crate) fn requested_event(request: &RequestActionReview) -> Event {
 pub(crate) async fn request_review(
     pool: sqlx::PgPool,
     request: RequestActionReview,
+    review_timeout_secs: i64,
 ) -> Result<RequestedReview, HandlerError> {
-    let stored = store::insert_review(pool, request).await?;
+    let stored = store::insert_review(pool, request, review_timeout_secs).await?;
     Ok(RequestedReview {
         record_requested_event: stored.requested_event_recorded_at.is_none(),
         newly_inserted: stored.newly_inserted,
@@ -141,6 +144,7 @@ pub(crate) async fn decide_review(
         status: desired_status,
         action_class: row.action_class,
         decided_by,
+        created_at: row.created_at,
         decided_at,
         record_decision_event: row.decision_event_recorded_at.is_none(),
         newly_decided,
@@ -293,6 +297,20 @@ mod tests {
     }
 
     #[test]
+    fn validate_review_transition_rejects_clear_after_timeout() {
+        // Pins: a review the reaper failed closed (timeout) cannot later be
+        // cleared, so a timed-out action never executes its gated tool.
+        let error =
+            validate_review_transition(ActionReviewStatus::Timeout, ActionReviewStatus::Cleared)
+                .expect_err("timed-out review must reject a later clear decision");
+
+        assert!(
+            error.to_string().contains("action review already timeout"),
+            "error should name the terminal timeout status: {error}"
+        );
+    }
+
+    #[test]
     fn execution_tool_request_for_clear_uses_fresh_tool_id() {
         // Pins: clearing a tenant action review executes a new provider-detached tool request.
         let original_tool_id = ToolCallId::new();
@@ -300,6 +318,7 @@ mod tests {
         let row = ReviewDecisionRow {
             session_id: None,
             action_class: ActionClass::CommandExecution,
+            created_at: Utc::now(),
             status: ActionReviewStatus::Pending,
             tool_request: ToolCallRequest {
                 tool_call_id: original_tool_id,
@@ -343,6 +362,7 @@ mod tests {
         let row = ReviewDecisionRow {
             session_id: None,
             action_class: ActionClass::CommandExecution,
+            created_at: Utc::now(),
             status: ActionReviewStatus::Cleared,
             tool_request: ToolCallRequest {
                 tool_call_id: ToolCallId::new(),

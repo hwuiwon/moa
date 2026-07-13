@@ -165,6 +165,7 @@ impl LLMGateway for LLMGatewayImpl {
                 output_tokens: usage.output_tokens,
                 cost_cents,
                 duration_ms: response.duration_ms,
+                llm_ttft_ms: None,
             };
 
             let turn_seq = ctx
@@ -219,19 +220,25 @@ pub fn should_defer_brain_response(request: &CompletionRequest) -> bool {
 }
 
 /// Computes the normalized completion cost in cents for one model response.
+///
+/// Resolves the model's pricing catalog entry and defers to the single
+/// canonical formula in [`moa_core::types::model::TokenPricing::cost_cents`].
 #[must_use]
 pub fn compute_cost_cents(model: &str, usage: TokenUsage) -> u32 {
     let pricing = moa_providers::pricing_for_model(model).unwrap_or_else(zero_token_pricing);
-    let input_cost = usage.input_tokens_uncached as f64 / 1_000_000.0 * pricing.input_per_mtok;
-    let cache_write_cost =
-        usage.input_tokens_cache_write as f64 / 1_000_000.0 * pricing.cache_write_per_mtok();
-    let cache_read_cost = usage.input_tokens_cache_read as f64 / 1_000_000.0
-        * pricing
-            .cached_input_per_mtok
-            .unwrap_or(pricing.input_per_mtok);
-    let output_cost = usage.output_tokens as f64 / 1_000_000.0 * pricing.output_per_mtok;
+    pricing.cost_cents(&usage)
+}
 
-    ((input_cost + cache_write_cost + cache_read_cost + output_cost) * 100.0).round() as u32
+/// Computes the completion cost in micros of USD for one model response.
+///
+/// Resolves the model's pricing catalog entry and defers to the single
+/// canonical formula in [`moa_core::types::model::TokenPricing::cost_micros`],
+/// which keeps sub-cent precision so lineage records the true cost of small
+/// turns instead of rounding them to zero.
+#[must_use]
+pub fn compute_cost_micros(model: &str, usage: TokenUsage) -> u64 {
+    let pricing = moa_providers::pricing_for_model(model).unwrap_or_else(zero_token_pricing);
+    pricing.cost_micros(&usage)
 }
 
 fn zero_token_pricing() -> TokenPricing {

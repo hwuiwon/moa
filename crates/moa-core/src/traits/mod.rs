@@ -676,16 +676,21 @@ pub trait LineageHandle: Send + Sync {
     /// Records one lineage event encoded as JSON.
     fn record(&self, evt_json: Value);
 
-    /// Records one lineage event and resolves after durable acceptance.
+    /// Records a batch of lineage events under one durability sync and resolves
+    /// after the whole batch has reached durable acceptance.
     ///
-    /// Handles that do not support durable acceptance may fall back to the
-    /// nonblocking hot-path record operation.
-    fn record_durable<'a>(
+    /// Emitters group every durable event they produce at one emission point into
+    /// a single call so the batch shares one journal fsync instead of paying one
+    /// per event. Handles that do not support durable acceptance fall back to the
+    /// nonblocking hot-path record operation for each event.
+    fn record_durable_batch<'a>(
         &'a self,
-        evt_json: Value,
+        events: Vec<Value>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            self.record(evt_json);
+            for evt_json in events {
+                self.record(evt_json);
+            }
             Ok(())
         })
     }

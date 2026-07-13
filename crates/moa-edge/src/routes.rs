@@ -257,6 +257,7 @@ async fn handle_proxy(
     body: Bytes,
 ) -> axum::response::Response {
     let span = tracing::Span::current();
+    adopt_client_trace_parent(&span, &headers);
     let identity = match authenticate_edge_request(&state, &headers, &span).await {
         Ok(identity) => identity,
         Err(response) => return response,
@@ -359,6 +360,18 @@ pub(super) async fn authenticate_direct_request(
     let span = tracing::Span::current();
     span.record("http.route", route);
     authenticate_edge_request(state, headers, &span).await
+}
+
+/// Adopts a client-supplied W3C trace context as the parent of the edge request
+/// span, so an externally initiated trace continues through MOA rather than
+/// fragmenting at the edge. A missing or malformed `traceparent` is a no-op.
+pub(crate) fn adopt_client_trace_parent(span: &tracing::Span, headers: &HeaderMap) {
+    moa_observability::adopt_remote_parent(span, |name| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    });
 }
 
 pub(super) fn parse_json_body_with_tenant<T>(
@@ -691,6 +704,7 @@ async fn handle_session_message_stream(
     request: Request,
 ) -> axum::response::Response {
     let span = tracing::Span::current();
+    adopt_client_trace_parent(&span, &headers);
     let mut input = match session_message_input(session_id, &headers, request, &state).await {
         Ok(input) => input,
         Err(error) => {
@@ -782,6 +796,7 @@ async fn handle_session_attachment(
     headers: HeaderMap,
 ) -> axum::response::Response {
     let span = tracing::Span::current();
+    adopt_client_trace_parent(&span, &headers);
     let Some(tenant_id) = query
         .get("tenant_id")
         .and_then(|value| Uuid::parse_str(value).ok().map(TenantId::from))

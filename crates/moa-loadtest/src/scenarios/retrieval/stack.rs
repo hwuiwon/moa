@@ -166,12 +166,12 @@ impl TenantRetriever {
             disable_graph_expansion: false,
             window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
         };
-        let hits = self
+        let output = self
             .cache
             .retrieve(&planned, request)
             .await
             .map_err(|error| anyhow!("retrieval failed: {error}"))?;
-        Ok(hits.len())
+        Ok(output.hits.len())
     }
 }
 

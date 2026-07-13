@@ -66,6 +66,15 @@ data:
       forward_to = [prometheus.remote_write.mimir.receiver]
     }
 
+    prometheus.scrape "moa_edge" {
+      scrape_interval = "15s"
+      targets = [{
+        "__address__" = "moa-edge.moa-system.svc.cluster.local:9090",
+        "job"         = "moa-edge",
+      }]
+      forward_to = [prometheus.remote_write.mimir.receiver]
+    }
+
     prometheus.scrape "restate" {
       scrape_interval = "15s"
       metrics_path    = "/metrics"

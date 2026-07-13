@@ -133,6 +133,7 @@ async fn authenticate_mcp(
     next: Next,
 ) -> Response {
     let span = tracing::Span::current();
+    crate::routes::adopt_client_trace_parent(&span, request.headers());
     let identity = match authenticate_edge_request(&state, request.headers(), &span).await {
         Ok(identity) => identity,
         Err(response) => return response,

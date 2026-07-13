@@ -1,6 +1,6 @@
 //! Restate handler implementation and dependency construction for root turns.
 
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc};
 
 use moa_core::{
     config::MoaConfig,
@@ -69,6 +69,7 @@ impl TurnExecution for TurnExecutionImpl {
         request: Json<RunTurnRequest>,
     ) -> Result<Json<TurnOutcome>, HandlerError> {
         annotate_restate_handler_span("TurnExecution", "run");
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         let request = request.into_inner();
 
         driver_progress::set_phase(&ctx, TurnPhase::Compiling);
@@ -80,7 +81,6 @@ impl TurnExecution for TurnExecutionImpl {
 
         let session_id = parse_session_id(&request.session_id)?;
         let turn_id = parse_turn_id(&request.turn_id)?;
-        let workflow_started = Instant::now();
         let (outcome, post_outcome_assessment) =
             match execute_turn_inside_workflow(self, &ctx, &request, session_id, turn_id).await {
                 Ok(body) => {
@@ -132,7 +132,6 @@ impl TurnExecution for TurnExecutionImpl {
             "root",
             super::turn_outcome_kind_label(&outcome.kind),
             moa_core::types::provider::ModelTier::Main,
-            workflow_started.elapsed(),
         );
         notify_session_of_outcome(&ctx, &request.session_id, &request.identity, &outcome);
         if let Some(assessment) = post_outcome_assessment {

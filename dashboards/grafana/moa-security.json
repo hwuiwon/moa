@@ -1,0 +1,156 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "id": null,
+  "panels": [
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', occurred_at) AS time, 'failed_logon' AS metric, count(*) AS value FROM security_events WHERE $__timeFilter(occurred_at) AND class_uid = 3002 AND activity_id = 5 AND ('$tenant_id' = 'all' OR tenant_id::text = '$tenant_id') GROUP BY 1 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Failed logon rate (OCSF 3002 credential-validation failure)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', occurred_at) AS time, 'logon' AS metric, count(*) AS value FROM security_events WHERE $__timeFilter(occurred_at) AND class_uid = 3002 AND activity_id = 1 AND ('$tenant_id' = 'all' OR tenant_id::text = '$tenant_id') GROUP BY 1 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Successful logons (OCSF 3002 logon)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "id": 3,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', occurred_at) AS time, 'authz_denied' AS metric, count(*) AS value FROM security_events WHERE $__timeFilter(occurred_at) AND class_uid = 3003 AND severity_id = 2 AND ('$tenant_id' = 'all' OR tenant_id::text = '$tenant_id') GROUP BY 1 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Authorization denials over time (OCSF 3003 denied)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 4,
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COALESCE(actor_user_uid, 'unknown') AS actor, count(*) AS denials FROM security_events WHERE $__timeFilter(occurred_at) AND class_uid = 3003 AND severity_id = 2 AND ('$tenant_id' = 'all' OR tenant_id::text = '$tenant_id') GROUP BY 1 ORDER BY 2 DESC LIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "title": "Top denied actors",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 5,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', occurred_at) AS time, CASE WHEN class_uid = 3001 THEN 'account_change' ELSE 'api_key_change' END AS metric, count(*) AS value FROM security_events WHERE $__timeFilter(occurred_at) AND class_uid IN (3001, 3004) AND ('$tenant_id' = 'all' OR tenant_id::text = '$tenant_id') GROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Account and API-key changes (OCSF 3001/3004)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT bucket AS time, 'prompt_injection' AS metric, sum(checks) AS value FROM analytics.guardrail_hourly WHERE $__timeFilter(bucket) AND direction = 'input' AND passed = FALSE AND ('$tenant_id' = 'all' OR tenant_id::text = '$tenant_id') GROUP BY 1 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Prompt-injection signal (input guardrail failures)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 7,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT bucket AS time, direction || CASE WHEN passed THEN '_passed' ELSE '_failed' END AS metric, sum(checks) AS value FROM analytics.guardrail_hourly WHERE $__timeFilter(bucket) AND ('$tenant_id' = 'all' OR tenant_id::text = '$tenant_id') GROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Guardrail checks by direction and outcome",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["moa", "security", "ocsf"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Postgres datasource",
+        "multi": false,
+        "name": "DS_POSTGRES",
+        "options": [],
+        "query": "postgres",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "current": { "selected": true, "text": "all", "value": "all" },
+        "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+        "definition": "SELECT 'all' AS tenant_id UNION SELECT DISTINCT tenant_id::text AS tenant_id FROM security_events ORDER BY 1",
+        "includeAll": false,
+        "label": "tenant_id",
+        "multi": false,
+        "name": "tenant_id",
+        "query": "SELECT 'all' AS tenant_id UNION SELECT DISTINCT tenant_id::text AS tenant_id FROM security_events ORDER BY 1",
+        "refresh": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-24h", "to": "now" },
+  "timezone": "browser",
+  "title": "MOA Security Posture",
+  "uid": "moa-security",
+  "version": 1
+}

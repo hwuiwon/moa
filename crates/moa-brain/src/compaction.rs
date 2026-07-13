@@ -150,7 +150,15 @@ pub(crate) async fn maybe_compact_events(
     token_budget: usize,
     events: &[EventRecord],
 ) -> Result<Option<EventRecord>> {
-    let span = tracing::info_span!("compaction", moa.session.id = %session_id);
+    let span = tracing::info_span!(
+        "compaction",
+        moa.session.id = %session_id,
+        moa.compaction.model_tier = model_tier.as_str(),
+        moa.compaction.model = tracing::field::Empty,
+        moa.compaction.input_tokens = tracing::field::Empty,
+        moa.compaction.output_tokens = tracing::field::Empty,
+        moa.compaction.events_summarized = tracing::field::Empty,
+    );
     async move {
         let unsummarized = unsummarized_events(events);
         if !should_compact(config, &unsummarized, token_budget) {
@@ -182,6 +190,15 @@ pub(crate) async fn maybe_compact_events(
             .map(|state| state.events_summarized)
             .unwrap_or(0)
             + candidate.len();
+
+        let span = tracing::Span::current();
+        span.record("moa.compaction.model", response.model.as_str());
+        span.record(
+            "moa.compaction.input_tokens",
+            usage.total_input_tokens() as i64,
+        );
+        span.record("moa.compaction.output_tokens", usage.output_tokens as i64);
+        span.record("moa.compaction.events_summarized", summarized_events as i64);
 
         let record = store
             .emit_event_record(

@@ -27,6 +27,12 @@ async fn stale_missing_awakeable_is_suppressed_after_first_sweep_db() {
         .sweep(&resolver)
         .await
         .expect("missing awakeable sweep should complete");
+    // Sampling the builtin-approval gauges must decode against the real
+    // schema (pins the EXTRACT(EPOCH ...) NUMERIC -> f64 cast).
+    reaper
+        .sample_gauges()
+        .await
+        .expect("gauge sampling should decode against the real schema");
 
     assert_eq!(
         resolved, 0,

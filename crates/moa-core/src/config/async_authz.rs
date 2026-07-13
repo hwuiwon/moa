@@ -11,6 +11,13 @@ pub struct AsyncAuthzConfig {
     /// Default approval timeout in seconds.
     #[serde(default = "default_timeout_secs")]
     pub default_timeout_secs: u64,
+    /// Default tenant-admin action-review timeout in seconds.
+    ///
+    /// A pending `tenant_action_reviews` row that is not decided within this
+    /// window is transitioned to `timeout` by the action-review reaper and
+    /// fails closed: the gated tool never executes.
+    #[serde(default = "default_action_review_timeout_secs")]
+    pub action_review_timeout_secs: u64,
 }
 
 impl Default for AsyncAuthzConfig {
@@ -18,6 +25,7 @@ impl Default for AsyncAuthzConfig {
         Self {
             provider: AsyncAuthzKind::Builtin,
             default_timeout_secs: default_timeout_secs(),
+            action_review_timeout_secs: default_action_review_timeout_secs(),
         }
     }
 }
@@ -46,4 +54,11 @@ impl AsyncAuthzKind {
 
 fn default_timeout_secs() -> u64 {
     900
+}
+
+fn default_action_review_timeout_secs() -> u64 {
+    // Tenant-admin reviews are human-scale and asynchronous, so the default
+    // window is far longer than the interactive builtin approval timeout: a day
+    // to decide before the gated action fails closed.
+    86_400
 }

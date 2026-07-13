@@ -77,6 +77,19 @@
   "templating": {
     "list": [
       {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Postgres datasource",
+        "multi": false,
+        "name": "DS_POSTGRES",
+        "options": [],
+        "query": "postgres",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
         "current": { "selected": true, "text": "all", "value": "all" },
         "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
         "definition": "SELECT 'all' AS tenant_id UNION SELECT DISTINCT storage_partition_id::text AS tenant_id FROM analytics.turn_lineage ORDER BY 1",

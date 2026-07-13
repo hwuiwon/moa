@@ -1,10 +1,10 @@
 //! Shared tracing helpers for provider-level LLM completion spans.
 
 use moa_core::{
-    types::completion::CompletionContent, types::completion::CompletionRequest,
-    types::completion::CompletionResponse, types::completion::TokenUsage,
-    types::model::TokenPricing, types::observability::genai_operation_name,
-    types::observability::genai_provider_name,
+    error::MoaError, types::completion::CompletionContent, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::completion::StopReason,
+    types::completion::TokenUsage, types::model::TokenPricing,
+    types::observability::genai_operation_name, types::observability::genai_provider_name,
 };
 use moa_observability::{
     record_cache_hit_rate, record_genai_client_operation_duration,
@@ -49,6 +49,9 @@ pub(crate) struct LLMSpanAttributes {
     pub cache_creation_tokens: Option<usize>,
     /// Actual provider-reported prompt cache hit rate.
     pub provider_cache_hit_rate: Option<f64>,
+    /// Bounded GenAI finish-reason label for the completion (`stop`, `length`,
+    /// `tool_calls`, `content_filter`, `cancelled`, or `error`/`other`).
+    pub finish_reasons: Option<&'static str>,
 }
 
 /// Per-request span recorder used by provider streaming tasks.
@@ -166,6 +169,7 @@ impl LLMSpanRecorder {
                 cache_read_tokens: Some(usage.input_tokens_cache_read),
                 cache_creation_tokens: Some(usage.input_tokens_cache_write),
                 provider_cache_hit_rate: Some(provider_cache_hit_rate),
+                finish_reasons: Some(finish_reason_label(&response.stop_reason)),
                 ..LLMSpanAttributes::default()
             },
         );
@@ -295,6 +299,115 @@ pub(crate) fn record_llm_span_attributes(span: &Span, attrs: &LLMSpanAttributes)
     if let Some(provider_cache_hit_rate) = attrs.provider_cache_hit_rate {
         span.set_attribute("moa.cache.hit_rate", provider_cache_hit_rate);
     }
+    if let Some(finish_reason) = attrs.finish_reasons {
+        span.set_attribute("gen_ai.response.finish_reasons", finish_reason);
+    }
+}
+
+/// Maps a provider [`StopReason`] to the bounded `gen_ai.response.finish_reasons`
+/// label. Provider-specific `Other(_)` values are bucketed into a small,
+/// bounded-cardinality set rather than passed through verbatim, since a raw
+/// provider string is not guaranteed to be low-cardinality.
+fn finish_reason_label(reason: &StopReason) -> &'static str {
+    match reason {
+        StopReason::EndTurn => "stop",
+        StopReason::MaxTokens => "length",
+        StopReason::ToolUse => "tool_calls",
+        StopReason::Cancelled => "cancelled",
+        StopReason::Other(raw) => classify_other_stop_reason(raw),
+    }
+}
+
+/// Buckets a provider-specific stop-reason string into a bounded label.
+fn classify_other_stop_reason(raw: &str) -> &'static str {
+    let lower = raw.to_ascii_lowercase();
+    if [
+        "safety",
+        "recitation",
+        "prohibited",
+        "blocklist",
+        "spii",
+        "content_filter",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        "content_filter"
+    } else if lower.contains("fail") {
+        "error"
+    } else {
+        "other"
+    }
+}
+
+/// Builds a `GenAI` embeddings span for one embedding provider round trip.
+///
+/// The span carries only bounded-cardinality attribute values (provider name,
+/// model id, and integer counts) — no raw input text.
+pub(crate) fn embedding_span(provider: &'static str, model: &str, input_count: usize) -> Span {
+    let span_name = format!("embeddings {model}");
+    let span = tracing::info_span!("embeddings", otel.name = %span_name, otel.kind = "client");
+    span.set_attribute("gen_ai.operation.name", "embeddings");
+    span.set_attribute("gen_ai.provider.name", provider);
+    span.set_attribute("gen_ai.request.model", model.to_string());
+    span.set_attribute("moa.embedding.input_count", input_count as i64);
+    span
+}
+
+/// Records success usage/cost attributes on an embeddings span. Only called
+/// when the provider response actually parsed a token count — cost is never
+/// fabricated from an input/document count alone.
+pub(crate) fn finish_embedding_span(span: &Span, model: &str, input_tokens: usize) {
+    span.set_attribute("gen_ai.usage.input_tokens", input_tokens as i64);
+    if let Some(price) = super::models::embedding_price_per_mtok(model).filter(|price| *price > 0.0)
+    {
+        let cost = (input_tokens as f64 * price) / 1_000_000.0;
+        span.set_attribute("moa.embedding.cost_usd", cost);
+    }
+}
+
+/// Builds a `GenAI` rerank span for one rerank provider round trip.
+pub(crate) fn rerank_span(provider: &'static str, model: &str, document_count: usize) -> Span {
+    let span_name = format!("rerank {model}");
+    let span = tracing::info_span!("rerank", otel.name = %span_name, otel.kind = "client");
+    span.set_attribute("gen_ai.operation.name", "rerank");
+    span.set_attribute("gen_ai.provider.name", provider);
+    span.set_attribute("gen_ai.request.model", model.to_string());
+    span.set_attribute("moa.rerank.document_count", document_count as i64);
+    span
+}
+
+/// Records the per-call cost on a rerank span, when the model's price is known
+/// and non-zero. Rerank calls are billed per search unit, not per token, so
+/// cost is a flat per-call charge rather than a token-scaled one.
+pub(crate) fn finish_rerank_span(span: &Span, model: &str) {
+    if let Some(price) =
+        super::models::rerank_price_per_thousand_searches(model).filter(|price| *price > 0.0)
+    {
+        span.set_attribute("moa.rerank.cost_usd", price / 1_000.0);
+    }
+}
+
+/// Marks a provider span as failed with a bounded error class, mirroring
+/// [`LLMSpanRecorder::fail_at_stage`] for the non-streaming embedding/rerank
+/// call sites that don't have a multi-phase recorder.
+pub(crate) fn fail_provider_span(span: &Span, class: &'static str, error: &impl std::fmt::Display) {
+    span.set_status(Status::error(error.to_string()));
+    span.set_attribute("error.type", class);
+}
+
+/// Classifies a provider error into a small, bounded `error.type` label
+/// suitable for a span attribute (never the raw error message, which may be
+/// unbounded or carry provider-specific detail).
+pub(crate) fn provider_error_class(error: &MoaError) -> &'static str {
+    match error {
+        MoaError::RateLimited { .. } => "rate_limited",
+        MoaError::HttpStatus { status, .. } if *status >= 500 => "http_5xx",
+        MoaError::HttpStatus { .. } => "http_4xx",
+        MoaError::SerializationError(_) => "serialization_error",
+        MoaError::ProviderQuirk(_) => "provider_quirk",
+        _ => "provider_error",
+    }
 }
 
 /// Builds the exported span name for an LLM completion call.
@@ -355,9 +468,19 @@ fn metadata_string(request: &CompletionRequest, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use moa_core::error::MoaError;
+    use moa_core::types::completion::StopReason;
     use moa_core::types::model::TokenPricing;
 
-    use super::{calculate_cost, calculate_cost_with_cached, llm_span_name};
+    use crate::core::span_capture_test_support::{
+        attr_f64, attr_i64, attr_string, capture_spans, find_span,
+    };
+
+    use super::{
+        calculate_cost, calculate_cost_with_cached, embedding_span, fail_provider_span,
+        finish_embedding_span, finish_reason_label, finish_rerank_span, llm_span_name,
+        provider_error_class, rerank_span,
+    };
 
     #[test]
     fn llm_span_name_format() {
@@ -395,5 +518,181 @@ mod tests {
         let cost = calculate_cost_with_cached(1_000, 200, 300, 100, &pricing);
 
         assert!((cost - 0.004185).abs() < 1e-10);
+    }
+
+    #[test]
+    fn finish_reason_label_maps_known_stop_reasons() {
+        // Pins: the well-known StopReason variants map to the exact GenAI
+        // semantic-convention finish-reason labels.
+        assert_eq!(finish_reason_label(&StopReason::EndTurn), "stop");
+        assert_eq!(finish_reason_label(&StopReason::MaxTokens), "length");
+        assert_eq!(finish_reason_label(&StopReason::ToolUse), "tool_calls");
+        assert_eq!(finish_reason_label(&StopReason::Cancelled), "cancelled");
+    }
+
+    #[test]
+    fn finish_reason_label_buckets_raw_provider_strings_into_bounded_classes() {
+        // Pins: an arbitrary provider-specific stop reason (e.g. Gemini's raw
+        // SAFETY/RECITATION finish reasons) is bucketed into a small, bounded
+        // set instead of passed through verbatim as an unbounded span value.
+        assert_eq!(
+            finish_reason_label(&StopReason::Other("SAFETY".to_string())),
+            "content_filter"
+        );
+        assert_eq!(
+            finish_reason_label(&StopReason::Other("RECITATION".to_string())),
+            "content_filter"
+        );
+        assert_eq!(
+            finish_reason_label(&StopReason::Other("failed".to_string())),
+            "error"
+        );
+        assert_eq!(
+            finish_reason_label(&StopReason::Other("LANGUAGE".to_string())),
+            "other"
+        );
+    }
+
+    #[test]
+    fn provider_error_class_is_bounded() {
+        // Pins: every MoaError variant a provider call can return maps to one
+        // of a small, fixed set of `error.type` span labels.
+        assert_eq!(
+            provider_error_class(&MoaError::RateLimited {
+                retries: 3,
+                message: "slow down".to_string()
+            }),
+            "rate_limited"
+        );
+        assert_eq!(
+            provider_error_class(&MoaError::HttpStatus {
+                status: 503,
+                retry_after: None,
+                message: "unavailable".to_string()
+            }),
+            "http_5xx"
+        );
+        assert_eq!(
+            provider_error_class(&MoaError::HttpStatus {
+                status: 401,
+                retry_after: None,
+                message: "bad key".to_string()
+            }),
+            "http_4xx"
+        );
+        assert_eq!(
+            provider_error_class(&MoaError::SerializationError("bad json".to_string())),
+            "serialization_error"
+        );
+        assert_eq!(
+            provider_error_class(&MoaError::ProviderError("boom".to_string())),
+            "provider_error"
+        );
+    }
+
+    #[test]
+    fn embedding_span_records_bounded_attributes_and_token_scaled_cost() {
+        // Pins: the embeddings span carries the GenAI provider/model/operation
+        // fields, the input count, and — only once a token count is known —
+        // usage tokens and a cost computed from the dedicated embedding
+        // pricing catalog (text-embedding-3-small is $0.02/Mtok).
+        let spans = capture_spans(|| {
+            let span = embedding_span("openai", "text-embedding-3-small", 3);
+            finish_embedding_span(&span, "text-embedding-3-small", 1_000);
+        });
+
+        let span = find_span(&spans, "embeddings text-embedding-3-small");
+        assert_eq!(
+            attr_string(span, "gen_ai.operation.name").as_deref(),
+            Some("embeddings")
+        );
+        assert_eq!(
+            attr_string(span, "gen_ai.provider.name").as_deref(),
+            Some("openai")
+        );
+        assert_eq!(
+            attr_string(span, "gen_ai.request.model").as_deref(),
+            Some("text-embedding-3-small")
+        );
+        assert_eq!(attr_i64(span, "moa.embedding.input_count"), Some(3));
+        assert_eq!(attr_i64(span, "gen_ai.usage.input_tokens"), Some(1_000));
+        let cost = attr_f64(span, "moa.embedding.cost_usd")
+            .expect("cost should be set once a token count and a non-zero price are known");
+        assert!((cost - 0.00002).abs() < 1e-12);
+    }
+
+    #[test]
+    fn embedding_span_omits_cost_when_price_is_zero() {
+        // Pins: a catalogued-but-unverified embedding price (0.0) never
+        // fabricates a cost attribute, even once a token count is known.
+        let spans = capture_spans(|| {
+            let span = embedding_span("zeroentropy", "not-a-priced-model", 1);
+            finish_embedding_span(&span, "not-a-priced-model", 500);
+        });
+
+        let span = find_span(&spans, "embeddings not-a-priced-model");
+        assert_eq!(attr_i64(span, "gen_ai.usage.input_tokens"), Some(500));
+        assert_eq!(attr_f64(span, "moa.embedding.cost_usd"), None);
+    }
+
+    #[test]
+    fn rerank_span_records_bounded_attributes_and_flat_per_call_cost() {
+        // Pins: the rerank span carries document_count (not the raw documents)
+        // and a flat per-call cost from the dedicated rerank pricing catalog
+        // (rerank-v4.0-fast is $2.00/1K searches -> $0.002/call).
+        let spans = capture_spans(|| {
+            let span = rerank_span("cohere", "rerank-v4.0-fast", 12);
+            finish_rerank_span(&span, "rerank-v4.0-fast");
+        });
+
+        let span = find_span(&spans, "rerank rerank-v4.0-fast");
+        assert_eq!(
+            attr_string(span, "gen_ai.operation.name").as_deref(),
+            Some("rerank")
+        );
+        assert_eq!(
+            attr_string(span, "gen_ai.provider.name").as_deref(),
+            Some("cohere")
+        );
+        assert_eq!(attr_i64(span, "moa.rerank.document_count"), Some(12));
+        let cost = attr_f64(span, "moa.rerank.cost_usd").expect("cost should be set");
+        assert!((cost - 0.002).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rerank_span_omits_cost_for_unverified_zeroentropy_pricing() {
+        // Pins: zerank-2 is catalogued at price 0.0 (ZeroEntropy bills per
+        // token, not per search — see the RERANK_CATALOG TODO), so no cost is
+        // fabricated for it.
+        let spans = capture_spans(|| {
+            let span = rerank_span("zeroentropy", "zerank-2", 5);
+            finish_rerank_span(&span, "zerank-2");
+        });
+
+        let span = find_span(&spans, "rerank zerank-2");
+        assert_eq!(attr_f64(span, "moa.rerank.cost_usd"), None);
+    }
+
+    #[test]
+    fn fail_provider_span_sets_status_and_bounded_error_type() {
+        // Pins: a failed provider span records both an OTel error status and a
+        // bounded `error.type`, matching what a collector needs to alert on
+        // provider failure classes without parsing raw error text.
+        let spans = capture_spans(|| {
+            let span = embedding_span("cohere", "embed-v4.0", 2);
+            let error = MoaError::HttpStatus {
+                status: 429,
+                retry_after: None,
+                message: "rate limited".to_string(),
+            };
+            fail_provider_span(&span, provider_error_class(&error), &error);
+        });
+
+        let span = find_span(&spans, "embeddings embed-v4.0");
+        assert_eq!(attr_string(span, "error.type").as_deref(), Some("http_4xx"));
+        assert_eq!(
+            span.status,
+            opentelemetry::trace::Status::error("http status 429: rate limited")
+        );
     }
 }

@@ -403,18 +403,23 @@ impl SlackChunkTransport for SlackAdapter {
             ts: SlackTs(message_ref.ts.clone()),
             as_user: None,
         };
-        match session.chat_delete(&request).await {
-            Ok(_) => Ok(()),
-            Err(SlackClientError::ApiError(api)) if api.code == "message_not_found" => {
-                tracing::debug!(
-                    slack.channel_id = %message_ref.channel_id,
-                    slack.ts = %message_ref.ts,
-                    "Slack delete skipped a chunk that was already absent"
-                );
-                Ok(())
+
+        async {
+            match session.chat_delete(&request).await {
+                Ok(_) => Ok(()),
+                Err(SlackClientError::ApiError(api)) if api.code == "message_not_found" => {
+                    tracing::debug!(
+                        slack.channel_id = %message_ref.channel_id,
+                        slack.ts = %message_ref.ts,
+                        "Slack delete skipped a chunk that was already absent"
+                    );
+                    Ok(())
+                }
+                Err(error) => Err(slack_client_error("chat.delete", error)),
             }
-            Err(error) => Err(slack_client_error("chat.delete", error)),
         }
+        .instrument(slack_api_span("slack_message_delete", "chat.delete"))
+        .await
     }
 }
 

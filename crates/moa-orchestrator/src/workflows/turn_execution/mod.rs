@@ -444,6 +444,7 @@ async fn append_brain_response_from_completion(
             output_tokens: usage.output_tokens,
             cost_cents,
             duration_ms: response.duration_ms,
+            llm_ttft_ms: None,
         },
     )
     .await
@@ -640,7 +641,7 @@ async fn run_once_inside_workflow(
     let (visible_response, verification_annotated) =
         annotate_unresolved_verification(&visible_response, turn_evidence);
     let response_usage = visible_response.token_usage();
-    let response_cost_cents = crate::services::llm_gateway::compute_cost_cents(
+    let response_cost_micros = crate::services::llm_gateway::compute_cost_micros(
         visible_response.model.as_str(),
         response_usage,
     );
@@ -657,7 +658,7 @@ async fn run_once_inside_workflow(
         &request_model,
         &visible_response,
         &citation_sources,
-        response_cost_cents,
+        response_cost_micros,
         llm_call_duration,
         &span,
         Some(&response_event),

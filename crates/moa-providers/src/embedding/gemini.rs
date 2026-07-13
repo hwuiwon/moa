@@ -10,14 +10,20 @@ use moa_core::traits::EmbeddingProvider;
 use moa_core::{error::MoaError, error::Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 
 use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_MAX_IN_FLIGHT};
 use crate::core::http::{
     build_json_http_client, decode_json_response, validate_embedding_count,
     validate_embedding_dimension,
 };
+use crate::core::instrumentation::{
+    embedding_span, fail_provider_span, finish_embedding_span, provider_error_class,
+};
 use crate::core::pacer::{PacerConfig, RatePacer};
 use crate::core::rate_guard;
+
+const GEMINI_EMBEDDING_PROVIDER: &str = "google";
 
 const GEMINI_ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub(super) const GEMINI_V2_MODEL: &str = "gemini-embedding-2";
@@ -124,7 +130,25 @@ impl GeminiEmbeddingEmbedder {
             })
             .collect();
         let body = BatchEmbedRequest { requests };
-        let response = self.post_batch_embed(GEMINI_V2_MODEL, &body).await?;
+        let span = embedding_span(GEMINI_EMBEDDING_PROVIDER, GEMINI_V2_MODEL, texts.len());
+        let result = self
+            .post_batch_embed(GEMINI_V2_MODEL, &body)
+            .instrument(span.clone())
+            .await;
+        let response = match result {
+            Ok(response) => response,
+            Err(error) => {
+                fail_provider_span(&span, provider_error_class(&error), &error);
+                return Err(error);
+            }
+        };
+        if let Some(input_tokens) = response
+            .usage_metadata
+            .as_ref()
+            .and_then(|usage| usage.prompt_token_count)
+        {
+            finish_embedding_span(&span, GEMINI_V2_MODEL, input_tokens);
+        }
         validate_embedding_count(texts.len(), response.embeddings.len())?;
         let mut out = Vec::with_capacity(texts.len());
         for embedding in response.embeddings {
@@ -203,6 +227,14 @@ struct BatchEmbedItem {
 #[derive(Deserialize)]
 struct BatchEmbedResponse {
     embeddings: Vec<GeminiEmbedding>,
+    #[serde(default, rename = "usageMetadata")]
+    usage_metadata: Option<GeminiEmbeddingUsageMetadata>,
+}
+
+#[derive(Deserialize)]
+struct GeminiEmbeddingUsageMetadata {
+    #[serde(default, rename = "promptTokenCount")]
+    prompt_token_count: Option<usize>,
 }
 
 #[derive(Serialize)]

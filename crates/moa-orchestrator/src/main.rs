@@ -26,7 +26,7 @@ use moa_orchestrator::{
             DeploymentListResponse, RegisteredDeployment, build_endpoint, services_registered,
         },
         jobs::{
-            restate_ingress_base_url, spawn_default_cron_bootstrap,
+            restate_ingress_base_url, spawn_default_cron_bootstrap, start_action_review_reaper,
             start_authz_challenge_reaper_if_configured,
         },
     },
@@ -161,6 +161,7 @@ async fn async_main() -> anyhow::Result<()> {
         moa_config.as_ref(),
         runtime_deps.awakeable_resolver.clone(),
     )?;
+    let action_review_reaper_handle = start_action_review_reaper(&runtime_deps.background_pool);
 
     let restate_listener = bind_listener(args.port).await?;
     let health_listener = bind_listener(args.health_port).await?;
@@ -255,6 +256,7 @@ async fn async_main() -> anyhow::Result<()> {
             if let Some(reaper_handle) = authz_challenge_reaper_handle {
                 reaper_handle.shutdown().await;
             }
+            action_review_reaper_handle.shutdown().await;
 
             if let Some(writer) = runtime_deps.lineage.writer.clone() {
                 tracing::info!("draining lineage writer");

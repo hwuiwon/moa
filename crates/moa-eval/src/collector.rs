@@ -253,6 +253,7 @@ mod tests {
             output_tokens: 50,
             cost_cents: 0,
             duration_ms: 12,
+            llm_ttft_ms: None,
         });
 
         let collected = collector.finish();

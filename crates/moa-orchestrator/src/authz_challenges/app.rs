@@ -2,6 +2,7 @@
 
 use chrono::Utc;
 use moa_core::traits::ApprovalDecision as AsyncApprovalDecision;
+use moa_observability::{record_builtin_approval_decision, record_builtin_approval_wait};
 use moa_ocsf::ActorInput;
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use serde::{Deserialize, Serialize};
@@ -61,6 +62,17 @@ pub(crate) async fn decide_builtin_challenge(
         )
         .await
         .map_err(|error| TerminalError::new(format!("audit authz challenge decision: {error}")))?;
+
+        let decision_status = if updated.status == "approved" {
+            "approved"
+        } else {
+            "denied"
+        };
+        record_builtin_approval_decision(decision_status);
+        let wait = (Utc::now() - updated.created_at)
+            .to_std()
+            .unwrap_or_default();
+        record_builtin_approval_wait(wait);
 
         ResolvedAuthzChallenge {
             id: updated.id,
@@ -229,6 +241,7 @@ mod tests {
             awakeable_id: "awakeable".to_string(),
             status: status.to_string(),
             deny_reason: Some("stored reason".to_string()),
+            created_at: Utc::now() - Duration::minutes(1),
             expires_at: Utc::now() + Duration::minutes(5),
             resolved_at,
         }

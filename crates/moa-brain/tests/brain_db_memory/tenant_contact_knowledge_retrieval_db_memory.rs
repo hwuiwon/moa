@@ -342,7 +342,8 @@ async fn retrieval_cache_invalidates_when_knowledge_object_deactivates() {
     let first = cached
         .retrieve(&planned, request.clone())
         .await
-        .expect("warm cache retrieval should succeed");
+        .expect("warm cache retrieval should succeed")
+        .hits;
     assert_eq!(
         knowledge_text(&first, chunk_graph_uid),
         Some("Hydrated cache object deactivation text."),
@@ -366,7 +367,8 @@ async fn retrieval_cache_invalidates_when_knowledge_object_deactivates() {
     let second = cached
         .retrieve(&planned, request)
         .await
-        .expect("post-deactivation retrieval should succeed");
+        .expect("post-deactivation retrieval should succeed")
+        .hits;
     assert_eq!(
         knowledge_text(&second, chunk_graph_uid),
         None,
@@ -422,7 +424,8 @@ async fn retrieval_cache_invalidates_when_knowledge_chunk_tombstones() {
     let first = cached
         .retrieve(&planned, request.clone())
         .await
-        .expect("warm cache retrieval should succeed");
+        .expect("warm cache retrieval should succeed")
+        .hits;
     assert_eq!(
         knowledge_text(&first, chunk_graph_uid),
         Some("Hydrated cache chunk tombstone text."),
@@ -451,7 +454,8 @@ async fn retrieval_cache_invalidates_when_knowledge_chunk_tombstones() {
     let second = cached
         .retrieve(&planned, request)
         .await
-        .expect("post-tombstone retrieval should succeed");
+        .expect("post-tombstone retrieval should succeed")
+        .hits;
     assert_eq!(
         knowledge_text(&second, chunk_graph_uid),
         None,
@@ -508,7 +512,8 @@ async fn retrieval_cache_invalidates_when_graph_node_invalidates() {
     let first = cached
         .retrieve(&planned, request.clone())
         .await
-        .expect("warm cache retrieval should succeed");
+        .expect("warm cache retrieval should succeed")
+        .hits;
     assert_eq!(
         knowledge_text(&first, chunk_graph_uid),
         Some("Hydrated cache graph invalidation text."),
@@ -529,7 +534,8 @@ async fn retrieval_cache_invalidates_when_graph_node_invalidates() {
     let second = cached
         .retrieve(&planned, request)
         .await
-        .expect("post-graph-invalidation retrieval should succeed");
+        .expect("post-graph-invalidation retrieval should succeed")
+        .hits;
     assert!(
         second.iter().all(|hit| hit.uid != chunk_graph_uid),
         "stale cache hit would keep returning invalidated node: {second:?}"
@@ -585,7 +591,8 @@ async fn vector_promotion_bumps_retrieval_cache_version() {
     let first = cached
         .retrieve(&planned, request.clone())
         .await
-        .expect("warm cache retrieval should succeed");
+        .expect("warm cache retrieval should succeed")
+        .hits;
     assert_eq!(
         knowledge_text(&first, chunk_graph_uid),
         Some("Hydrated cache vector promotion text."),
@@ -616,7 +623,8 @@ async fn vector_promotion_bumps_retrieval_cache_version() {
     let second = cached
         .retrieve(&planned, request)
         .await
-        .expect("post-promotion retrieval should succeed");
+        .expect("post-promotion retrieval should succeed")
+        .hits;
     assert_eq!(
         knowledge_text(&second, chunk_graph_uid),
         Some("Hydrated cache vector promotion text."),

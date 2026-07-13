@@ -6,13 +6,19 @@ use moa_core::traits::EmbeddingProvider;
 use moa_core::{error::MoaError, error::Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 
 use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_MAX_IN_FLIGHT};
 use crate::core::http::{
     build_json_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
 };
+use crate::core::instrumentation::{
+    embedding_span, fail_provider_span, finish_embedding_span, provider_error_class,
+};
 use crate::core::pacer::{PacerConfig, RatePacer};
 use crate::core::rate_guard;
+
+const COHERE_EMBEDDING_PROVIDER: &str = "cohere";
 
 const COHERE_EMBEDDINGS_URL: &str = "https://api.cohere.com/v2/embed";
 pub(super) const COHERE_DEFAULT_MODEL: &str = "embed-v4.0";
@@ -109,7 +115,8 @@ impl CohereEmbedding {
         };
         // Cohere Embed is limited by inputs/min; pace on this chunk's input count.
         self.pacer.acquire(1, inputs.len() as u32).await;
-        let payload: CohereEmbeddingResponse = post_json(
+        let span = embedding_span(COHERE_EMBEDDING_PROVIDER, &self.model, inputs.len());
+        let result: Result<CohereEmbeddingResponse> = post_json(
             &self.client,
             &self.embeddings_url,
             &self.api_key,
@@ -121,7 +128,23 @@ impl CohereEmbedding {
                 output_dimension: self.dimensions,
             },
         )
-        .await?;
+        .instrument(span.clone())
+        .await;
+        let payload = match result {
+            Ok(payload) => payload,
+            Err(error) => {
+                fail_provider_span(&span, provider_error_class(&error), &error);
+                return Err(error);
+            }
+        };
+        if let Some(input_tokens) = payload
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.billed_units.as_ref())
+            .and_then(|billed_units| billed_units.input_tokens)
+        {
+            finish_embedding_span(&span, &self.model, input_tokens.round() as usize);
+        }
         let embeddings = payload.embeddings.float;
         validate_embedding_count(inputs.len(), embeddings.len())?;
         for embedding in &embeddings {
@@ -231,11 +254,29 @@ struct CohereEmbeddingRequest {
 #[derive(Debug, Clone, Deserialize)]
 struct CohereEmbeddingResponse {
     embeddings: CohereEmbeddings,
+    #[serde(default)]
+    meta: Option<CohereEmbeddingMeta>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct CohereEmbeddings {
     float: Vec<Vec<f32>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CohereEmbeddingMeta {
+    #[serde(default)]
+    billed_units: Option<CohereBilledUnits>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CohereBilledUnits {
+    // Cohere's `meta.billed_units.input_tokens` is a JSON number; decode as
+    // f64 so an unexpected fractional value (Cohere's docs show integers, but
+    // the field isn't documented as integer-typed) can't fail the whole
+    // response decode over a cost-accounting field.
+    #[serde(default)]
+    input_tokens: Option<f64>,
 }
 
 /// Returns the Cohere input type for a graph-memory embedder role.

@@ -65,6 +65,7 @@ where
                 output_tokens: 5,
                 cost_cents: 1,
                 duration_ms: 100,
+                llm_ttft_ms: None,
             },
         )
         .await
@@ -275,6 +276,7 @@ where
                 output_tokens: 5,
                 cost_cents: 7,
                 duration_ms: 50,
+                llm_ttft_ms: None,
             },
         )
         .await
@@ -293,6 +295,7 @@ where
                 output_tokens: 4,
                 cost_cents: 11,
                 duration_ms: 50,
+                llm_ttft_ms: None,
             },
         )
         .await
@@ -311,6 +314,7 @@ where
                 output_tokens: 4,
                 cost_cents: 99,
                 duration_ms: 50,
+                llm_ttft_ms: None,
             },
         )
         .await

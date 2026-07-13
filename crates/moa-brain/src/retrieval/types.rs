@@ -308,6 +308,85 @@ pub struct RetrievalOutput {
     pub hits: Vec<RetrievalHit>,
     /// Diagnostics for graph policy, seeds, paths, candidates, and latency.
     pub diagnostics: GraphRetrievalDiagnostics,
+    /// Observation-only provenance threaded into retrieval lineage.
+    pub provenance: RetrievalProvenance,
+}
+
+/// Per-stage retrieval latency in milliseconds.
+///
+/// Captured for retrieval spans and lineage. Legs that did not run stay zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RetrievalStageTimings {
+    /// Vector-leg wall-clock latency.
+    pub vector_ms: u32,
+    /// Lexical-leg wall-clock latency.
+    pub lexical_ms: u32,
+    /// Graph-expansion-leg wall-clock latency.
+    pub graph_ms: u32,
+    /// Reciprocal-rank fusion latency.
+    pub fusion_ms: u32,
+    /// Rerank latency when a reranker ran.
+    pub rerank_ms: u32,
+}
+
+impl RetrievalStageTimings {
+    /// Sums another stage-timing set into this one, saturating on overflow.
+    pub fn add(&mut self, other: Self) {
+        self.vector_ms = self.vector_ms.saturating_add(other.vector_ms);
+        self.lexical_ms = self.lexical_ms.saturating_add(other.lexical_ms);
+        self.graph_ms = self.graph_ms.saturating_add(other.graph_ms);
+        self.fusion_ms = self.fusion_ms.saturating_add(other.fusion_ms);
+        self.rerank_ms = self.rerank_ms.saturating_add(other.rerank_ms);
+    }
+}
+
+/// One reranked candidate's resolved position and score.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RerankScore {
+    /// Reranked candidate graph node uid.
+    pub uid: Uuid,
+    /// Pre-rerank index of the candidate in the fused window.
+    pub original_index: u16,
+    /// Backend relevance score assigned by the reranker.
+    pub relevance_score: f32,
+}
+
+/// Observation-only provenance captured during one hybrid retrieval.
+///
+/// Threaded to retrieval lineage so the persisted record carries real per-stage
+/// timings, reranker scores and model, and graph paths instead of constants.
+/// Nothing here influences ranking; the values are captured after ranking has
+/// already decided the result.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RetrievalProvenance {
+    /// Per-stage latency for the exercised legs.
+    pub timings: RetrievalStageTimings,
+    /// Resolved reranker model when a reranker ran and produced scores.
+    pub rerank_model: Option<String>,
+    /// Per-candidate reranker scores when a reranker ran.
+    pub rerank_scores: Vec<RerankScore>,
+    /// Raw graph traversal paths that contributed candidates.
+    pub graph_paths: Vec<GraphPathTrace>,
+    /// Candidates rejected by the memory admission policy for this turn.
+    pub admission_rejected: usize,
+}
+
+impl RetrievalProvenance {
+    /// Folds another provenance set into this one for multi-scope/sub-query fan-in.
+    ///
+    /// Timings sum, reranker scores and graph paths concatenate, the first
+    /// resolved reranker model wins, and admission rejections accumulate.
+    pub fn merge(&mut self, other: RetrievalProvenance) {
+        self.timings.add(other.timings);
+        if self.rerank_model.is_none() {
+            self.rerank_model = other.rerank_model;
+        }
+        self.rerank_scores.extend(other.rerank_scores);
+        self.graph_paths.extend(other.graph_paths);
+        self.admission_rejected = self
+            .admission_rejected
+            .saturating_add(other.admission_rejected);
+    }
 }
 
 /// Per-turn context needed to record retrieved facts for quality scoring.

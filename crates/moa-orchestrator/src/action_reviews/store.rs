@@ -28,6 +28,8 @@ pub(crate) struct ReviewDecisionRow {
     pub(crate) session_id: Option<moa_core::types::identifiers::SessionId>,
     /// Action class used for decision metrics.
     pub(crate) action_class: ActionClass,
+    /// Timestamp the review was created, used for approval-wait metrics.
+    pub(crate) created_at: DateTime<Utc>,
     /// Current review status.
     pub(crate) status: ActionReviewStatus,
     /// Stored tool request to execute after a clear decision.
@@ -65,9 +67,13 @@ pub(crate) struct ReviewDecisionUpdate {
 }
 
 /// Insert a pending tenant action review, or load the existing idempotent row.
+///
+/// `review_timeout_secs` sets the row's `expires_at` relative to insertion so
+/// the action-review reaper can fail an undecided review closed.
 pub(crate) async fn insert_review(
     pool: sqlx::PgPool,
     request: RequestActionReview,
+    review_timeout_secs: i64,
 ) -> Result<StoredReview, HandlerError> {
     let tool_request = serde_json::to_value(&request.tool_request)
         .map_err(|error| TerminalError::new(format!("serialize tool request: {error}")))?;
@@ -83,9 +89,10 @@ pub(crate) async fn insert_review(
         INSERT INTO tenant_action_reviews (
             id, tenant_id, storage_partition_id, user_id, session_id, worker_id, tool_call_id, tool_name,
             action_class, risk_level, input_summary, normalized_input, envelope,
-            preview, tool_request, requested_by
+            preview, tool_request, requested_by, expires_at
         )
-        VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                NOW() + ($16 || ' seconds')::INTERVAL)
         ON CONFLICT (id) DO NOTHING
         "#,
     )
@@ -104,6 +111,7 @@ pub(crate) async fn insert_review(
     .bind(preview)
     .bind(tool_request)
     .bind(&requested_by)
+    .bind(review_timeout_secs.to_string())
     .execute(&pool)
     .await
     .map_err(db_error)?;
@@ -155,7 +163,7 @@ pub(crate) async fn load_review_for_update(
     let row = sqlx::query(
         r#"
         SELECT id, tenant_id, storage_partition_id, session_id, action_class, status, tool_request,
-               decided_by, deny_reason, decided_at, decision_event_recorded_at,
+               decided_by, deny_reason, created_at, decided_at, decision_event_recorded_at,
                execution_tool_call_id, execution_requested_at
         FROM tenant_action_reviews
         WHERE storage_partition_id = $1 AND id = $2
@@ -178,6 +186,7 @@ pub(crate) async fn load_review_for_update(
             "action_class",
             row.try_get::<String, _>("action_class").map_err(db_error)?,
         )?,
+        created_at: row.try_get("created_at").map_err(db_error)?,
         status: parse_db_enum(
             "status",
             row.try_get::<String, _>("status").map_err(db_error)?,
@@ -288,6 +297,102 @@ pub(crate) async fn mark_execution_requested(
     .await
     .map_err(db_error)?;
     Ok(())
+}
+
+/// One review the reaper transitioned from `pending` to `timeout`.
+pub(crate) struct TimedOutReview {
+    /// Action class used for the timeout decision metric.
+    pub(crate) action_class: ActionClass,
+    /// Creation timestamp, used for the approval-wait metric.
+    pub(crate) created_at: DateTime<Utc>,
+    /// Timeout timestamp, recorded as the decision time.
+    pub(crate) decided_at: DateTime<Utc>,
+}
+
+/// Fail every expired pending review closed in one statement.
+///
+/// A `timeout` row is terminal: [`super::app::decide_review`] rejects any later
+/// clear because the status is no longer `pending`, so the gated tool never
+/// executes. Runs unscoped across storage partitions because the reaper is a
+/// deployment-global background job, not a tenant request.
+pub(crate) async fn timeout_expired_reviews(
+    pool: &sqlx::PgPool,
+) -> Result<Vec<TimedOutReview>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"
+        UPDATE tenant_action_reviews
+        SET status = 'timeout',
+            decided_at = NOW(),
+            deny_reason = COALESCE(deny_reason, 'review expired without a decision')
+        WHERE status = 'pending'
+          AND expires_at <= NOW()
+        RETURNING action_class, created_at, decided_at
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.iter()
+        .map(|row| {
+            let action_class = row
+                .try_get::<String, _>("action_class")?
+                .parse::<ActionClass>()
+                .map_err(|_| sqlx::Error::Decode("unknown action_class".into()))?;
+            Ok(TimedOutReview {
+                action_class,
+                created_at: row.try_get("created_at")?,
+                decided_at: row.try_get("decided_at")?,
+            })
+        })
+        .collect()
+}
+
+/// Pending-review queue snapshot used to publish operator gauges.
+pub(crate) struct PendingReviewStats {
+    /// Pending review count per bounded risk level (`low`/`medium`/`high`).
+    pub(crate) depth_by_risk: Vec<(String, i64)>,
+    /// Age in seconds of the oldest pending review, or `0.0` when the queue is empty.
+    pub(crate) oldest_pending_age_seconds: f64,
+}
+
+/// Sample the pending-review queue for gauge emission.
+pub(crate) async fn pending_review_stats(
+    pool: &sqlx::PgPool,
+) -> Result<PendingReviewStats, sqlx::Error> {
+    let depth_rows = sqlx::query(
+        r#"
+        SELECT risk_level, COUNT(*) AS depth
+        FROM tenant_action_reviews
+        WHERE status = 'pending'
+        GROUP BY risk_level
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let depth_by_risk = depth_rows
+        .iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<String, _>("risk_level")?,
+                row.try_get::<i64, _>("depth")?,
+            ))
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+
+    let oldest_age: Option<f64> = sqlx::query_scalar(
+        r#"
+        SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::DOUBLE PRECISION
+        FROM tenant_action_reviews
+        WHERE status = 'pending'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(PendingReviewStats {
+        depth_by_risk,
+        oldest_pending_age_seconds: oldest_age.unwrap_or(0.0).max(0.0),
+    })
 }
 
 async fn load_review_state(

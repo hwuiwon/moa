@@ -43,12 +43,16 @@ CREATE TABLE IF NOT EXISTS tenant_action_reviews (
     preview JSONB NOT NULL,
     tool_request JSONB NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'cleared', 'denied')),
+        CHECK (status IN ('pending', 'cleared', 'denied', 'timeout')),
     requested_by TEXT NOT NULL,
     requested_event_recorded_at TIMESTAMPTZ,
     decided_by TEXT,
     deny_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- When a pending review fails closed if still undecided. Set by the service
+    -- at insert time from `async_authz.action_review_timeout_secs`; the
+    -- action-review reaper transitions expired pending rows to `timeout`.
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '1 day',
     decided_at TIMESTAMPTZ,
     decision_event_recorded_at TIMESTAMPTZ,
     execution_tool_call_id UUID,
@@ -64,6 +68,12 @@ CREATE INDEX IF NOT EXISTS idx_tenant_action_reviews_session
     WHERE session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tenant_action_reviews_scope
     ON tenant_action_reviews(storage_partition_id, scope, user_id);
+
+-- Drives the action-review reaper timeout sweep: the oldest expired pending
+-- rows are read expires_at-first.
+CREATE INDEX IF NOT EXISTS idx_tenant_action_reviews_expiry
+    ON tenant_action_reviews(expires_at)
+    WHERE status = 'pending';
 
 SELECT moa.apply_three_tier_rls('tenant_action_reviews'::REGCLASS);
 

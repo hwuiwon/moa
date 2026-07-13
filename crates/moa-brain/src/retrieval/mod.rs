@@ -26,7 +26,8 @@ pub use router::{RetrievalStrategy, decompose_query, route_query};
 pub use types::{
     EvidenceWindowPolicy, GraphCandidateCounts, GraphPathTrace, GraphRetrievalDiagnostics,
     GraphSeedDiagnostics, GraphSeedSource, KnowledgeChunkHydration, KnowledgeChunkWindowPart,
-    LegSources, LexicalBackend, LineageContext, Result, RetrievalError, RetrievalHit,
-    RetrievalLineageHit, RetrievalOutput, RetrievalRequest, SourceObjectFeatureContribution,
-    SourceObjectFeatureContributions, SourceObjectRankingDiagnostics, SourceTier,
+    LegSources, LexicalBackend, LineageContext, RerankScore, Result, RetrievalError, RetrievalHit,
+    RetrievalLineageHit, RetrievalOutput, RetrievalProvenance, RetrievalRequest,
+    RetrievalStageTimings, SourceObjectFeatureContribution, SourceObjectFeatureContributions,
+    SourceObjectRankingDiagnostics, SourceTier,
 };

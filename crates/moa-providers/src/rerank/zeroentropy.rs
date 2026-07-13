@@ -4,15 +4,20 @@ use async_trait::async_trait;
 use moa_core::{error::MoaError, error::Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 
 use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_MAX_IN_FLIGHT};
 use crate::core::http::{build_json_http_client, post_json};
+use crate::core::instrumentation::{
+    fail_provider_span, finish_rerank_span, provider_error_class, rerank_span,
+};
 use crate::core::pacer::{PacerConfig, RatePacer};
 use crate::core::rate_guard;
 
 use super::{RerankHit, Reranker};
 
 const ZEROENTROPY_RERANK_URL: &str = "https://api.zeroentropy.dev/v1/models/rerank";
+const ZEROENTROPY_RERANK_PROVIDER: &str = "zeroentropy";
 /// Default ZeroEntropy rerank model.
 pub const ZEROENTROPY_DEFAULT_RERANK_MODEL: &str = "zerank-2";
 
@@ -122,7 +127,8 @@ impl Reranker for ZeroEntropyReranker {
             }
         };
         self.pacer.acquire(1, 0).await;
-        let body: ZeroEntropyRerankResponse = post_json(
+        let span = rerank_span(ZEROENTROPY_RERANK_PROVIDER, model, documents.len());
+        let result: Result<ZeroEntropyRerankResponse> = post_json(
             &self.client,
             &self.endpoint,
             &self.api_key,
@@ -134,7 +140,16 @@ impl Reranker for ZeroEntropyReranker {
                 latency: self.latency.map(ZeroEntropyRerankLatency::as_str),
             },
         )
-        .await?;
+        .instrument(span.clone())
+        .await;
+        let body = match result {
+            Ok(body) => body,
+            Err(error) => {
+                fail_provider_span(&span, provider_error_class(&error), &error);
+                return Err(error);
+            }
+        };
+        finish_rerank_span(&span, model);
         Ok(body
             .results
             .into_iter()

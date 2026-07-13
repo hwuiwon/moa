@@ -161,6 +161,11 @@ pub enum Event {
         cost_cents: u32,
         /// Duration in milliseconds.
         duration_ms: u64,
+        /// Time-to-first-token in milliseconds, when the response was streamed
+        /// and the first output chunk was observed. `None` for buffered
+        /// completions where no first-chunk timing is available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        llm_ttft_ms: Option<u64>,
     },
     /// Durable user-visible progress update for a running turn.
     ProgressUpdate {
@@ -1157,6 +1162,7 @@ mod tests {
                 output_tokens: 1,
                 cost_cents: 0,
                 duration_ms: 1,
+                llm_ttft_ms: None,
             },
             Event::Error {
                 message: "boom".to_string(),

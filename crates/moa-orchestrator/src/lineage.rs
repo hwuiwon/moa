@@ -74,6 +74,12 @@ pub async fn build_lineage_sink_from_env_value(
             store.ensure_schema().await.map_err(|error| {
                 MoaError::StorageError(format!("lineage schema setup failed: {error}"))
             })?;
+            // Refuse to start on the ClickHouse backend when any compliance tenant is
+            // enabled: that backend cannot hash-chain compliance rows, and a silent
+            // downgrade of `moa lineage verify` is worse than a loud startup failure.
+            store.guard_compliance_backend().await.map_err(|error| {
+                MoaError::ConfigError(format!("lineage backend refused to start: {error}"))
+            })?;
             let sink_config = moa_lineage_sink::MpscSinkConfig::from(&config.observability.lineage);
             let (sink, writer) = moa_lineage_sink::MpscSink::spawn(sink_config, store)
                 .await

@@ -5,13 +5,19 @@ use moa_core::traits::EmbeddingProvider;
 use moa_core::{error::MoaError, error::Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 
 use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_MAX_IN_FLIGHT};
 use crate::core::http::{
     build_json_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
 };
+use crate::core::instrumentation::{
+    embedding_span, fail_provider_span, finish_embedding_span, provider_error_class,
+};
 use crate::core::pacer::{PacerConfig, RatePacer};
 use crate::core::rate_guard;
+
+const ZEROENTROPY_EMBEDDING_PROVIDER: &str = "zeroentropy";
 
 const ZEROENTROPY_EMBEDDINGS_URL: &str = "https://api.zeroentropy.dev/v1/models/embed";
 /// Default ZeroEntropy embedding model id, used as a fixture by selector tests.
@@ -96,7 +102,8 @@ impl ZeroEntropyEmbedding {
             }
         };
         self.pacer.acquire(1, inputs.len() as u32).await;
-        let payload: ZeroEntropyEmbeddingResponse = post_json(
+        let span = embedding_span(ZEROENTROPY_EMBEDDING_PROVIDER, &self.model, inputs.len());
+        let result: Result<ZeroEntropyEmbeddingResponse> = post_json(
             &self.client,
             &self.embeddings_url,
             &self.api_key,
@@ -108,7 +115,18 @@ impl ZeroEntropyEmbedding {
                 encoding_format: ZEROENTROPY_FLOAT_ENCODING.to_string(),
             },
         )
-        .await?;
+        .instrument(span.clone())
+        .await;
+        let payload = match result {
+            Ok(payload) => payload,
+            Err(error) => {
+                fail_provider_span(&span, provider_error_class(&error), &error);
+                return Err(error);
+            }
+        };
+        if let Some(input_tokens) = payload.usage.as_ref().and_then(|usage| usage.total_tokens) {
+            finish_embedding_span(&span, &self.model, input_tokens);
+        }
         validate_embedding_count(inputs.len(), payload.results.len())?;
 
         let embeddings: Vec<Vec<f32>> = payload
@@ -160,6 +178,14 @@ struct ZeroEntropyEmbeddingRequest {
 #[derive(Debug, Clone, Deserialize)]
 struct ZeroEntropyEmbeddingResponse {
     results: Vec<ZeroEntropyEmbeddingResult>,
+    #[serde(default)]
+    usage: Option<ZeroEntropyEmbeddingUsage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ZeroEntropyEmbeddingUsage {
+    #[serde(default)]
+    total_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

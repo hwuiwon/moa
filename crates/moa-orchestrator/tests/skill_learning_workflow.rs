@@ -588,6 +588,7 @@ async fn seed_recurrence_member(
                     output_tokens: 32,
                     cost_cents: 0,
                     duration_ms: 1,
+                    llm_ttft_ms: None,
                 },
                 None,
             )

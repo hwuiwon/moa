@@ -60,6 +60,10 @@ impl OrchestratorProxy {
         if let Some(user_id) = identity.acting_on_behalf_of {
             request = request.header(headers::H_ACTING_ON_BEHALF_OF, user_id.to_string());
         }
+        // Inject the edge request span so the orchestrator continues one trace.
+        for (name, value) in moa_observability::current_trace_headers() {
+            request = request.header(name, value);
+        }
         if !body.is_empty() {
             request = request.body(body);
         }
@@ -86,6 +90,10 @@ impl OrchestratorProxy {
             }
             request = request.header(name.clone(), value.clone());
         }
+        // Inject the edge request span so the orchestrator continues one trace.
+        for (name, value) in moa_observability::current_trace_headers() {
+            request = request.header(name, value);
+        }
         if !body.is_empty() {
             request = request.body(body);
         }
@@ -99,7 +107,15 @@ fn should_forward_header(name: &str, has_body: bool) -> bool {
         && !name.eq_ignore_ascii_case("authorization")
         && !name.eq_ignore_ascii_case("content-length")
         && (has_body || !name.eq_ignore_ascii_case("content-type"))
+        && !is_trace_context_header(name)
         && !is_hop_by_hop_header(name)
+}
+
+/// W3C trace-context headers are re-injected from the edge span, so the raw
+/// inbound values are dropped to avoid forwarding a conflicting second copy.
+fn is_trace_context_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case(moa_observability::TRACEPARENT_HEADER)
+        || name.eq_ignore_ascii_case(moa_observability::TRACESTATE_HEADER)
 }
 
 fn validate_upstream_path(path: &str) -> Result<(), anyhow::Error> {

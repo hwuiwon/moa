@@ -61,7 +61,7 @@ async fn postgres_lineage_sink_writes_rows() -> Result<()> {
 
     runtime
         .handle
-        .record_durable(serde_json::to_value(event)?)
+        .record_durable_batch(vec![serde_json::to_value(event)?])
         .await?;
     let writer = runtime
         .writer

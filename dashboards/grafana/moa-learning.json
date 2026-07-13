@@ -1,0 +1,128 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "id": null,
+  "panels": [
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT status, COUNT(*)::BIGINT AS candidates FROM analytics.learning_candidate_fact GROUP BY status ORDER BY CASE status WHEN 'proposed' THEN 1 WHEN 'evaluating' THEN 2 WHEN 'promoted' THEN 3 WHEN 'rejected' THEN 4 WHEN 'rolled_back' THEN 5 ELSE 6 END",
+          "refId": "A"
+        }
+      ],
+      "title": "Learning-candidate funnel (by status)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('day', updated_at) AS time, status AS metric, COUNT(*)::BIGINT AS value FROM analytics.learning_candidate_fact WHERE $__timeFilter(updated_at) GROUP BY 1, 2 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Candidate status transitions over time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('day', updated_at) AS time, COUNT(*)::BIGINT AS \"rollbacks\" FROM analytics.learning_candidate_fact WHERE status = 'rolled_back' AND $__timeFilter(updated_at) GROUP BY 1 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Rollbacks over time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "uses", "desc": true }] },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT skill_name, uses, resolution_rate, avg_token_cost, avg_turn_count FROM skill_resolution_rates ORDER BY uses DESC LIMIT 25",
+          "refId": "A"
+        }
+      ],
+      "title": "Skill resolution rates (engaged skills)",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "id": 5,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('day', started_at) AS time, COALESCE(SUM(COALESCE(array_length(skills_activated, 1), 0)), 0)::BIGINT AS \"activated (offered)\", COALESCE(SUM(COALESCE(array_length(skills_used, 1), 0)), 0)::BIGINT AS \"used (engaged)\" FROM analytics.task_segment_fact WHERE $__timeFilter(started_at) GROUP BY 1 ORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Skills activated (offered) vs used (engaged)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "id": 6,
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "engagement_rate", "desc": false }] },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "WITH activated AS (SELECT unnest(skills_activated) AS skill_name, COUNT(*)::BIGINT AS offered FROM analytics.task_segment_fact WHERE $__timeFilter(started_at) AND array_length(skills_activated, 1) IS NOT NULL GROUP BY 1), used AS (SELECT unnest(skills_used) AS skill_name, COUNT(*)::BIGINT AS engaged FROM analytics.task_segment_fact WHERE $__timeFilter(started_at) AND array_length(skills_used, 1) IS NOT NULL GROUP BY 1) SELECT a.skill_name, a.offered, COALESCE(u.engaged, 0) AS engaged, ROUND(COALESCE(u.engaged, 0)::NUMERIC / NULLIF(a.offered, 0), 3) AS engagement_rate FROM activated a LEFT JOIN used u ON u.skill_name = a.skill_name ORDER BY engagement_rate ASC NULLS FIRST, a.offered DESC LIMIT 25",
+          "refId": "A"
+        }
+      ],
+      "title": "Least-engaged offered skills (offered vs engaged)",
+      "type": "table"
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 39,
+  "tags": ["moa", "learning", "skills"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Postgres datasource",
+        "multi": false,
+        "name": "DS_POSTGRES",
+        "options": [],
+        "query": "postgres",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-30d", "to": "now" },
+  "timezone": "browser",
+  "title": "MOA Learning & Skills Health",
+  "uid": "moa-learning",
+  "version": 1
+}

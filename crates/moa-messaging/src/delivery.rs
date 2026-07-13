@@ -10,6 +10,7 @@ use moa_core::{
     traits::StoredCredentialMetadata, types::channel::Channel, types::contact::ContactId,
     types::model::Credential,
 };
+use moa_observability::current_turn_root_span;
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -477,21 +478,38 @@ fn optional_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Builds the outbound delivery span, parented to the active turn root when present.
+///
+/// Contact delivery (OTPs, password resets, invitations) is not always triggered
+/// from within a brain turn, so this falls back to an ambient root span exactly
+/// like the Slack outbound spans do when no turn is in scope.
 fn delivery_span(message: &DeliveryMessage) -> tracing::Span {
     let contact_id = message
         .contact_id
         .as_ref()
         .map(ToString::to_string)
         .unwrap_or_default();
-    tracing::info_span!(
-        "contact_delivery",
-        otel.name = "contact_delivery_send",
-        messaging.operation = "deliver",
-        messaging.channel = message.channel.as_str(),
-        moa.tenant.id = %message.tenant_id,
-        moa.contact.id = %contact_id,
-        moa.delivery.purpose = message.purpose.as_str(),
-    )
+    match current_turn_root_span() {
+        Some(parent) => tracing::info_span!(
+            parent: &parent,
+            "contact_delivery",
+            otel.name = "contact_delivery_send",
+            messaging.operation = "deliver",
+            messaging.channel = message.channel.as_str(),
+            moa.tenant.id = %message.tenant_id,
+            moa.contact.id = %contact_id,
+            moa.delivery.purpose = message.purpose.as_str(),
+        ),
+        None => tracing::info_span!(
+            "contact_delivery",
+            otel.name = "contact_delivery_send",
+            messaging.operation = "deliver",
+            messaging.channel = message.channel.as_str(),
+            moa.tenant.id = %message.tenant_id,
+            moa.contact.id = %contact_id,
+            moa.delivery.purpose = message.purpose.as_str(),
+        ),
+    }
 }
 
 #[cfg(test)]

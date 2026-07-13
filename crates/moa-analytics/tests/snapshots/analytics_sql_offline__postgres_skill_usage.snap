@@ -1,0 +1,5 @@
+---
+source: crates/moa-analytics/tests/analytics_sql_offline.rs
+expression: compiled.sql
+---
+SELECT d.skill_name AS c0, d.channel AS c1, COUNT(*)::BIGINT AS c2, COALESCE(SUM(d.token_cost), 0)::BIGINT AS c3, PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY d.duration_ms)::DOUBLE PRECISION AS c4 FROM (SELECT tenant_id, session_id, agent_id, channel, started_at, outcome, token_cost, duration_ms, unnest(skills_used) AS skill_name FROM analytics.task_segment_fact WHERE array_length(skills_used, 1) IS NOT NULL) AS d WHERE d.tenant_id = $1::UUID AND d.started_at BETWEEN $2::TIMESTAMPTZ AND $3::TIMESTAMPTZ GROUP BY 1, 2 ORDER BY c2 DESC LIMIT 50

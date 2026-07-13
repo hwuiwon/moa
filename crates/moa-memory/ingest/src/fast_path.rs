@@ -586,12 +586,9 @@ async fn fast_remember_inner(
                 warn!(%error, "fast contradiction check failed; committing indeterminate fact");
                 Conflict::Indeterminate
             }
-            Err(_) => {
-                metrics::counter!("moa_fast_remember_indeterminate_total").increment(1);
-                parse_supersedes_marker(&redacted_text)
-                    .map(Conflict::Supersede)
-                    .unwrap_or(Conflict::Indeterminate)
-            }
+            Err(_) => parse_supersedes_marker(&redacted_text)
+                .map(Conflict::Supersede)
+                .unwrap_or(Conflict::Indeterminate),
         }
     };
 

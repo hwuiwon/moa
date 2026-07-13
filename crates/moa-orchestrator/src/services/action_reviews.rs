@@ -10,7 +10,9 @@ use moa_core::{
     types::identifiers::TenantId, types::identifiers::ToolCallId, types::tools::ToolCallRequest,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
-use moa_observability::{record_action_review_decision, record_action_review_requested};
+use moa_observability::{
+    record_action_review_decision, record_action_review_requested, record_approval_wait,
+};
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -126,15 +128,24 @@ pub trait ActionReviews {
 pub struct ActionReviewsImpl {
     pool: sqlx::PgPool,
     session_store: Arc<dyn SessionRepository>,
+    review_timeout_secs: i64,
 }
 
 impl ActionReviewsImpl {
     /// Creates the action-review adapter with its persistence dependencies.
+    ///
+    /// `review_timeout_secs` sets how long a queued review may stay pending
+    /// before the reaper fails it closed.
     #[must_use]
-    pub fn new(pool: sqlx::PgPool, session_store: Arc<dyn SessionRepository>) -> Self {
+    pub fn new(
+        pool: sqlx::PgPool,
+        session_store: Arc<dyn SessionRepository>,
+        review_timeout_secs: i64,
+    ) -> Self {
         Self {
             pool,
             session_store,
+            review_timeout_secs,
         }
     }
 }
@@ -154,10 +165,11 @@ impl ActionReviews for ActionReviewsImpl {
         let pool = self.pool.clone();
         let session_id = request.envelope.session_id;
         let action_class = request.envelope.action_class;
+        let review_timeout_secs = self.review_timeout_secs;
 
         let stored = ctx
             .run(|| async move {
-                action_review_app::request_review(pool, request)
+                action_review_app::request_review(pool, request, review_timeout_secs)
                     .await
                     .map(Json::from)
             })
@@ -304,6 +316,10 @@ impl ActionReviews for ActionReviewsImpl {
         }
         if decided.newly_decided {
             record_action_review_decision(decided.status, decided.action_class);
+            let wait = (decided.decided_at - decided.created_at)
+                .to_std()
+                .unwrap_or_default();
+            record_approval_wait(decided.action_class, wait);
         }
 
         if let Some(tool_request) = decided.tool_request.as_ref() {

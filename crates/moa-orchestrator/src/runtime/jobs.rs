@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 
 use crate::{
     runtime::endpoint::{RegisteredDeployment, services_registered},
+    services::action_reviews_reaper::{ActionReviewReaper, ActionReviewReaperHandle},
     services::authz_challenges_reaper::{AuthzChallengeReaper, AuthzChallengeReaperHandle},
 };
 
@@ -43,6 +44,13 @@ pub fn start_authz_challenge_reaper_if_configured(
     let handle = AuthzChallengeReaper::new(pool.clone()).spawn(resolver);
     tracing::info!("authz challenge reaper started");
     Ok(Some(handle))
+}
+
+/// Starts the tenant action-review timeout reaper and queue-gauge sampler.
+pub fn start_action_review_reaper(pool: &PgPool) -> ActionReviewReaperHandle {
+    let handle = ActionReviewReaper::new(pool.clone()).spawn();
+    tracing::info!("action review reaper started");
+    handle
 }
 
 /// Spawns default cron-job bootstrap after Restate service registration appears.

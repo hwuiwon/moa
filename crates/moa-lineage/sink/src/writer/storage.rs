@@ -24,64 +24,14 @@ pub(super) async fn write_pending_rows(store: &LineageStore, rows: &[PendingRow]
 
     match store {
         LineageStore::Postgres(pool) => write_rows(pool, &lineage_rows).await?,
-        LineageStore::ClickHouse {
-            clickhouse,
-            postgres,
-        } => {
-            warn_on_unchained_compliance_partitions(postgres, &lineage_rows).await?;
+        // Compliance tenants are refused at startup on the ClickHouse backend
+        // (see `LineageStore::guard_compliance_backend`), so ClickHouse writes
+        // never silently drop hash chaining here.
+        LineageStore::ClickHouse { clickhouse, .. } => {
             clickhouse.insert_lineage_rows(&lineage_rows).await?;
         }
     }
     write_score_rows(store.postgres(), &score_rows).await?;
-    Ok(())
-}
-
-/// Warns when a compliance-enabled partition's rows land in ClickHouse.
-///
-/// The audit hash chain needs a transactional fold over the row store, which
-/// the ClickHouse backend does not provide. Rows keep their per-row canonical
-/// `integrity_hash`, but `prev_hash` linking (and therefore Merkle roots and
-/// `moa lineage verify`) requires the Postgres backend.
-async fn warn_on_unchained_compliance_partitions(
-    pool: &sqlx::PgPool,
-    rows: &[LineageRow],
-) -> Result<()> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-
-    let partitions: Vec<String> = rows
-        .iter()
-        .map(|row| row.storage_partition_id.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let enabled: Vec<String> = sqlx::query_scalar(
-        r#"
-        SELECT storage_partition_id
-        FROM analytics.compliance_tenants
-        WHERE storage_partition_id = ANY($1) AND enabled
-        "#,
-    )
-    .bind(&partitions)
-    .fetch_all(pool)
-    .await?;
-    if enabled.is_empty() {
-        return Ok(());
-    }
-
-    let unchained_rows = rows
-        .iter()
-        .filter(|row| enabled.contains(&row.storage_partition_id))
-        .count();
-    metrics::counter!("moa_lineage_compliance_chain_skipped_total")
-        .increment(unchained_rows as u64);
-    tracing::warn!(
-        partitions = ?enabled,
-        rows = unchained_rows,
-        "compliance hash chaining is unavailable on the clickhouse lineage backend; \
-         rows written without prev_hash links"
-    );
     Ok(())
 }
 

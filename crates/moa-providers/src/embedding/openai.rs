@@ -5,13 +5,19 @@ use moa_core::error::Result;
 use moa_core::traits::EmbeddingProvider;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 
 use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_MAX_IN_FLIGHT};
 use crate::core::http::{
     build_json_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
 };
+use crate::core::instrumentation::{
+    embedding_span, fail_provider_span, finish_embedding_span, provider_error_class,
+};
 use crate::core::pacer::{PacerConfig, RatePacer};
 use crate::core::rate_guard;
+
+const OPENAI_EMBEDDING_PROVIDER: &str = "openai";
 
 const OPENAI_EMBEDDINGS_URL: &str = "https://api.openai.com/v1/embeddings";
 const OPENAI_DIMENSIONS: usize = 1_536;
@@ -85,7 +91,8 @@ impl OpenAIEmbedding {
             }
         };
         self.pacer.acquire(1, inputs.len() as u32).await;
-        let payload: OpenAIEmbeddingResponse = post_json(
+        let span = embedding_span(OPENAI_EMBEDDING_PROVIDER, &self.model, inputs.len());
+        let result: Result<OpenAIEmbeddingResponse> = post_json(
             &self.client,
             &self.embeddings_url,
             &self.api_key,
@@ -95,7 +102,18 @@ impl OpenAIEmbedding {
                 encoding_format: "float".to_string(),
             },
         )
-        .await?;
+        .instrument(span.clone())
+        .await;
+        let payload = match result {
+            Ok(payload) => payload,
+            Err(error) => {
+                fail_provider_span(&span, provider_error_class(&error), &error);
+                return Err(error);
+            }
+        };
+        if let Some(input_tokens) = payload.usage.as_ref().map(|usage| usage.prompt_tokens) {
+            finish_embedding_span(&span, &self.model, input_tokens);
+        }
         validate_embedding_count(inputs.len(), payload.data.len())?;
 
         let mut data = payload.data;
@@ -144,6 +162,13 @@ struct OpenAIEmbeddingRequest {
 #[derive(Debug, Clone, Deserialize)]
 struct OpenAIEmbeddingResponse {
     data: Vec<OpenAIEmbeddingData>,
+    #[serde(default)]
+    usage: Option<OpenAIEmbeddingUsage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OpenAIEmbeddingUsage {
+    prompt_tokens: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -213,5 +238,118 @@ mod tests {
 
         holder.abort();
         server.abort();
+    }
+
+    fn fixture_vector() -> Vec<f32> {
+        vec![0.0_f32; super::OPENAI_DIMENSIONS]
+    }
+
+    #[tokio::test]
+    async fn embed_records_span_cost_when_response_reports_usage() {
+        // Pins: when OpenAI's `/v1/embeddings` response includes `usage.prompt_tokens`
+        // (the documented shape), the embeddings span records the token count and a
+        // cost computed from the dedicated embedding pricing catalog
+        // (text-embedding-3-small is $0.02/Mtok), never fabricated from input_count alone.
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        use crate::core::span_capture_test_support::{
+            attr_f64, attr_i64, capture_spans_async, find_span,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "index": 0, "embedding": fixture_vector() }],
+                "usage": { "prompt_tokens": 7, "total_tokens": 7 }
+            })))
+            .mount(&server)
+            .await;
+        let client = OpenAIEmbedding::new("test-key", "text-embedding-3-small")
+            .unwrap()
+            .with_embeddings_url(format!("{}/v1/embeddings", server.uri()));
+
+        let spans = capture_spans_async(async {
+            client
+                .embed(&["hello".to_string()])
+                .await
+                .expect("wiremock embedding request should succeed");
+        })
+        .await;
+
+        let span = find_span(&spans, "embeddings text-embedding-3-small");
+        assert_eq!(attr_i64(span, "moa.embedding.input_count"), Some(1));
+        assert_eq!(attr_i64(span, "gen_ai.usage.input_tokens"), Some(7));
+        let cost = attr_f64(span, "moa.embedding.cost_usd").expect("cost should be recorded");
+        assert!((cost - (7.0 * 0.02 / 1_000_000.0)).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn embed_skips_cost_when_response_omits_usage() {
+        // Pins: an embeddings response with no `usage` field never fabricates a
+        // token count or cost — the span still records input_count.
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        use crate::core::span_capture_test_support::{
+            attr_f64, attr_i64, capture_spans_async, find_span,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "index": 0, "embedding": fixture_vector() }]
+            })))
+            .mount(&server)
+            .await;
+        let client = OpenAIEmbedding::new("test-key", "text-embedding-3-small")
+            .unwrap()
+            .with_embeddings_url(format!("{}/v1/embeddings", server.uri()));
+
+        let spans = capture_spans_async(async {
+            client
+                .embed(&["hello".to_string()])
+                .await
+                .expect("wiremock embedding request should succeed");
+        })
+        .await;
+
+        let span = find_span(&spans, "embeddings text-embedding-3-small");
+        assert_eq!(attr_i64(span, "moa.embedding.input_count"), Some(1));
+        assert_eq!(attr_i64(span, "gen_ai.usage.input_tokens"), None);
+        assert_eq!(attr_f64(span, "moa.embedding.cost_usd"), None);
+    }
+
+    #[tokio::test]
+    async fn embed_marks_span_failed_with_bounded_error_type_on_http_error() {
+        // Pins: an upstream HTTP failure marks the embeddings span with an OTel
+        // error status and a bounded `error.type`, not a raw error message.
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        use crate::core::span_capture_test_support::{attr_string, capture_spans_async, find_span};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("slow down"))
+            .mount(&server)
+            .await;
+        let client = OpenAIEmbedding::new("test-key", "text-embedding-3-small")
+            .unwrap()
+            .with_embeddings_url(format!("{}/v1/embeddings", server.uri()));
+
+        let spans = capture_spans_async(async {
+            let result = client.embed(&["hello".to_string()]).await;
+            assert!(result.is_err(), "a 429 response should surface as an error");
+        })
+        .await;
+
+        let span = find_span(&spans, "embeddings text-embedding-3-small");
+        assert_eq!(attr_string(span, "error.type").as_deref(), Some("http_4xx"));
+        assert!(
+            matches!(span.status, opentelemetry::trace::Status::Error { .. }),
+            "expected an OTel error status, got {:?}",
+            span.status
+        );
     }
 }

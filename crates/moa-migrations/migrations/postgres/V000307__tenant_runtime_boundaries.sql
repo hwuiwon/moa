@@ -287,7 +287,7 @@ DECLARE
     session_contact UUID;
 BEGIN
     IF NEW.tenant_id IS NULL THEN
-        IF TG_TABLE_NAME IN ('events', 'pending_signals', 'context_snapshots') THEN
+        IF TG_TABLE_NAME IN ('events', 'context_snapshots') THEN
             EXECUTE format('SELECT tenant_id, contact_id FROM %I.sessions WHERE id = $1', TG_TABLE_SCHEMA)
                 INTO session_tenant, session_contact
                 USING NEW.session_id;
@@ -582,6 +582,7 @@ SELECT
     bt.response_data ->> 'model' AS model,
     NULL::DOUBLE PRECISION AS pipeline_ms,
     COALESCE((bt.response_data ->> 'duration_ms')::DOUBLE PRECISION, 0.0) AS llm_ms,
+    (bt.response_data ->> 'llm_ttft_ms')::DOUBLE PRECISION AS llm_ttft_ms,
     COALESCE(tm.tool_ms, 0.0) AS tool_ms,
     COALESCE(tm.tool_call_count, 0)::BIGINT AS tool_call_count,
     COALESCE((bt.response_data ->> 'input_tokens_uncached')::BIGINT, 0)::BIGINT AS input_tokens_uncached,
@@ -603,20 +604,6 @@ LEFT JOIN tool_metrics tm
 
 CREATE UNIQUE INDEX idx_session_turn_metrics_session_turn
     ON session_turn_metrics(session_id, turn_number);
-
-ALTER TABLE pending_signals ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE pending_signals p
-SET tenant_id = s.tenant_id
-FROM sessions s
-WHERE p.session_id = s.id
-  AND p.tenant_id IS NULL;
-ALTER TABLE pending_signals ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_pending_signals_tenant ON pending_signals(tenant_id, resolved_at, created_at);
-DROP TRIGGER IF EXISTS pending_signals_set_tenant_columns ON pending_signals;
-CREATE TRIGGER pending_signals_set_tenant_columns
-    BEFORE INSERT OR UPDATE ON pending_signals
-    FOR EACH ROW
-    EXECUTE FUNCTION moa.set_runtime_tenant_columns();
 
 ALTER TABLE context_snapshots ADD COLUMN IF NOT EXISTS tenant_id UUID;
 UPDATE context_snapshots c
@@ -934,7 +921,6 @@ END $$;
 
 SELECT moa.apply_tenant_rls('sessions'::REGCLASS);
 SELECT moa.apply_tenant_rls('events'::REGCLASS);
-SELECT moa.apply_tenant_rls('pending_signals'::REGCLASS);
 SELECT moa.apply_tenant_rls('context_snapshots'::REGCLASS);
 SELECT moa.apply_tenant_rls('session_agent_context'::REGCLASS);
 SELECT moa.apply_tenant_rls('task_segments'::REGCLASS);

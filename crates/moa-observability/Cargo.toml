@@ -13,7 +13,6 @@ opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
-tokio-metrics.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-opentelemetry.workspace = true
@@ -24,6 +23,3 @@ workspace-hack = { workspace = true }
 # Enables `InMemorySpanExporter` so span-emitter tests can assert the exact
 # OpenTelemetry span names and attributes the crate exports.
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }

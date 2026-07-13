@@ -32,5 +32,7 @@ workspace-hack = { workspace = true }
 [dev-dependencies]
 insta.workspace = true
 moa-runtime-store = { workspace = true, features = ["redis"] }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber.workspace = true
 wiremock.workspace = true

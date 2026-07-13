@@ -730,6 +730,7 @@ mod tests {
                     output_tokens: 5,
                     cost_cents: 1,
                     duration_ms: 25,
+                    llm_ttft_ms: None,
                 },
             ),
         ];

@@ -54,6 +54,10 @@ pub fn init_observability(
     config: &MoaConfig,
     telemetry: &TelemetryConfig,
 ) -> Result<TelemetryGuard> {
+    // Install the W3C propagator regardless of whether OTLP export is enabled so
+    // inbound `traceparent` extraction and outbound injection behave uniformly.
+    crate::propagation::init_trace_propagation();
+
     let console_layer = if telemetry.json_stdout {
         Some(
             tracing_subscriber::fmt::layer()

@@ -22,9 +22,9 @@
       "id": 2,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
       "targets": [
-        { "expr": "rate(moa_lineage_recorded_total[5m])", "legendFormat": "{{instance}}", "refId": "A" }
+        { "expr": "rate(moa_lineage_enqueued_total[5m])", "legendFormat": "{{instance}}", "refId": "A" }
       ],
-      "title": "Recorded events",
+      "title": "Enqueued events",
       "type": "timeseries"
     },
     {
@@ -43,7 +43,23 @@
   "refresh": "30s",
   "schemaVersion": 39,
   "tags": ["moa", "lineage", "self-health"],
-  "templating": { "list": [] },
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus datasource",
+        "multi": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      }
+    ]
+  },
   "time": { "from": "now-24h", "to": "now" },
   "timezone": "browser",
   "title": "MOA Lineage Self Health",

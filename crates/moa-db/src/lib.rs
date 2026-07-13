@@ -1,7 +1,5 @@
 //! Database helpers shared by MOA storage crates.
 
-use std::time::Instant;
-
 use moa_core::{
     error::MoaError, error::Result, types::contact::ContactId, types::identifiers::TenantId,
     types::memory::RlsContext,
@@ -83,20 +81,10 @@ impl<'p> ScopedConn<'p> {
         Ok(())
     }
 
-    /// Begins a transaction and applies the provided GUC scope, recording timing.
+    /// Begins a transaction and applies the provided GUC scope.
     async fn begin_with_gucs(pool: &'p PgPool, gucs: &DbScopeGucs) -> Result<Self> {
-        let begin_started = Instant::now();
-        let tx = pool.begin().await;
-        metrics::histogram!("moa_scoped_transaction_begin_seconds")
-            .record(begin_started.elapsed().as_secs_f64());
-        let mut tx = tx.map_err(map_sqlx_error)?;
-
-        let guc_started = Instant::now();
-        let guc_result = Self::apply_guc_values(&mut tx, gucs).await;
-        metrics::histogram!("moa_scoped_guc_application_seconds")
-            .record(guc_started.elapsed().as_secs_f64());
-        guc_result?;
-
+        let mut tx = pool.begin().await.map_err(map_sqlx_error)?;
+        Self::apply_guc_values(&mut tx, gucs).await?;
         Ok(Self { tx })
     }
 

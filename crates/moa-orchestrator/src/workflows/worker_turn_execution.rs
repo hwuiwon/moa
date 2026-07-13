@@ -135,10 +135,10 @@ impl WorkerTurnExecution for WorkerTurnExecutionImpl {
         request: Json<RunWorkerTurnRequest>,
     ) -> Result<Json<TurnOutcome>, HandlerError> {
         annotate_restate_handler_span("WorkerTurnExecution", "run");
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         let request = request.into_inner();
         driver_progress::set_phase(&ctx, TurnPhase::Compiling);
 
-        let workflow_started = Instant::now();
         // `parent_session` is learned during the loop (best-effort for the FAILED-signal
         // emit below). It stays `None` if the workflow errors before the first turn is
         // prepared; the terminal idle-wake still covers waking an idle parent.
@@ -156,7 +156,6 @@ impl WorkerTurnExecution for WorkerTurnExecutionImpl {
             "worker",
             turn_outcome_kind_label(&outcome.kind),
             ModelTier::Auxiliary,
-            workflow_started.elapsed(),
         );
         let phase = match outcome.kind {
             TurnOutcomeKind::Completed => TurnPhase::Completed,

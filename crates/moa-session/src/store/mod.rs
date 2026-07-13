@@ -35,8 +35,8 @@ use moa_core::{
 };
 use moa_observability::{
     SessionEventAppendPhase, record_session_created, record_session_event_append,
-    record_session_event_append_phase_duration, record_session_event_decoded_bytes,
-    record_session_event_load, record_sessions_active, record_turn_completed,
+    record_session_event_append_phase_duration, record_session_event_load, record_sessions_active,
+    record_turn_completed,
 };
 use moa_security::ActionPolicyRuleStore;
 use sqlx::{Acquire, PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
@@ -390,6 +390,7 @@ impl PostgresSessionStore {
             "analytics.procedure_node_run_fact",
             "analytics.learning_candidate_fact",
             "analytics.experiment_run_fact",
+            "analytics.guardrail_hourly",
         ] {
             sqlx::query(&format!(
                 "REFRESH MATERIALIZED VIEW CONCURRENTLY {qualified}"

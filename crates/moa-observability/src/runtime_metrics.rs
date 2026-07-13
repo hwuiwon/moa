@@ -6,10 +6,6 @@ use std::time::Duration;
 
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
-#[cfg(tokio_unstable)]
-use tokio_metrics::RuntimeMonitor;
-#[cfg(tokio_unstable)]
-use tracing::debug;
 
 use moa_core::{
     config::MetricsConfig, error::MoaError, error::Result, types::action_policy::ActionClass,
@@ -26,14 +22,6 @@ const LATENCY_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
 ];
 const CACHE_HIT_RATE_BUCKETS: &[f64] = &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
-// Skill-learning review latency spans minutes (fast operator triage) to days (a
-// candidate waiting out a review backlog); the default second-scale latency
-// buckets top out at 30s and would pile the whole distribution into the last
-// bucket, so the spread is explicitly minutes-to-days.
-const SKILL_LEARNING_REVIEW_LATENCY_BUCKETS: &[f64] = &[
-    60.0, 300.0, 900.0, 1800.0, 3600.0, 14400.0, 43200.0, 86400.0, 172800.0, 604800.0,
-];
-const SKILL_LEARNING_TIME_IN_REVIEW_METRIC: &str = "moa_skill_learning_time_in_review_seconds";
 const GENAI_CLIENT_DURATION_BUCKETS: &[f64] = &[
     0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92,
 ];
@@ -44,8 +32,6 @@ const GENAI_CLIENT_TOKEN_BUCKETS: &[f64] = &[
 const GENAI_CLIENT_TOKEN_USAGE_METRIC: &str = "gen_ai.client.token.usage";
 const GENAI_CLIENT_OPERATION_DURATION_METRIC: &str = "gen_ai.client.operation.duration";
 const GENAI_CLIENT_TIME_TO_FIRST_CHUNK_METRIC: &str = "gen_ai.client.operation.time_to_first_chunk";
-#[cfg(tokio_unstable)]
-const TOKIO_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Prometheus metric name for aggregate turn-step duration samples.
 pub const TURN_STEP_DURATION_METRIC: &str = "moa_turn_step_duration_seconds";
@@ -202,8 +188,6 @@ impl SessionEventAppendPhase {
 }
 
 static PROMETHEUS_ENDPOINT: OnceLock<SocketAddr> = OnceLock::new();
-#[cfg(tokio_unstable)]
-static TOKIO_RUNTIME_MONITOR_STARTED: OnceLock<()> = OnceLock::new();
 
 /// Initializes the global Prometheus exporter when metrics are enabled.
 pub fn init_metrics(config: &MetricsConfig) -> Result<()> {
@@ -236,11 +220,6 @@ pub fn init_metrics(config: &MetricsConfig) -> Result<()> {
                 Matcher::Full(GENAI_CLIENT_TOKEN_USAGE_METRIC.to_string()),
                 GENAI_CLIENT_TOKEN_BUCKETS,
             )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full(SKILL_LEARNING_TIME_IN_REVIEW_METRIC.to_string()),
-                SKILL_LEARNING_REVIEW_LATENCY_BUCKETS,
-            )
             .map_err(|error| MoaError::ConfigError(error.to_string()))?;
 
         builder
@@ -249,8 +228,6 @@ pub fn init_metrics(config: &MetricsConfig) -> Result<()> {
         register_metric_descriptions();
         let _ = PROMETHEUS_ENDPOINT.set(addr);
     }
-
-    spawn_tokio_runtime_metrics_publisher();
 
     Ok(())
 }
@@ -491,13 +468,11 @@ pub fn record_turn_step_duration(step: TurnLatencyStep, duration: Duration) {
     histograms[step.index()].record(duration.as_secs_f64());
 }
 
-/// Records one terminal turn-workflow outcome and its total workflow latency.
-pub fn record_turn_workflow_outcome(
-    scope: &str,
-    result: &str,
-    model_tier: ModelTier,
-    duration: Duration,
-) {
+/// Records one terminal turn-workflow outcome.
+///
+/// End-to-end workflow latency is already covered by `moa_turn_latency_seconds`;
+/// this counter only tracks terminal outcome counts by scope, result, and tier.
+pub fn record_turn_workflow_outcome(scope: &str, result: &str, model_tier: ModelTier) {
     counter!(
         "moa_turn_outcomes_total",
         "scope" => scope.to_string(),
@@ -505,22 +480,10 @@ pub fn record_turn_workflow_outcome(
         "model_tier" => model_tier.as_str()
     )
     .increment(1);
-    histogram!(
-        "moa_turn_workflow_latency_seconds",
-        "scope" => scope.to_string(),
-        "result" => result.to_string(),
-        "model_tier" => model_tier.as_str()
-    )
-    .record(duration.as_secs_f64());
 }
 
 /// Records one query-rewrite gate outcome.
-pub fn record_query_rewrite_decision(
-    decision: &str,
-    reason: &str,
-    llm_called: bool,
-    duration: Duration,
-) {
+pub fn record_query_rewrite_decision(decision: &str, reason: &str, llm_called: bool) {
     let llm_called = if llm_called { "true" } else { "false" };
     counter!(
         "moa_query_rewrite_decisions_total",
@@ -529,12 +492,6 @@ pub fn record_query_rewrite_decision(
         "llm_called" => llm_called.to_string()
     )
     .increment(1);
-    histogram!(
-        "moa_query_rewrite_duration_seconds",
-        "decision" => decision.to_string(),
-        "llm_called" => llm_called.to_string()
-    )
-    .record(duration.as_secs_f64());
 }
 
 /// Records one sandbox provisioning duration sample.
@@ -569,47 +526,18 @@ pub fn record_session_event_append_phase_duration(
     histograms[phase.index()].record(duration.as_secs_f64());
 }
 
-/// Records one session event load operation and the number of events returned.
+/// Records the number of events returned by one session event load operation.
 pub fn record_session_event_load(event_count: u64) {
-    counter!("moa_session_event_loads_total").increment(1);
-    histogram!("moa_session_event_load_events").record(event_count as f64);
-}
-
-/// Records decoded session event payload bytes.
-pub fn record_session_event_decoded_bytes(bytes: u64) {
-    if bytes == 0 {
-        return;
-    }
-
-    counter!("moa_session_event_decoded_bytes_total").increment(bytes);
-}
-
-/// Records the time spent constructing a context pipeline.
-pub fn record_context_pipeline_construction(duration: Duration) {
-    histogram!("moa_context_pipeline_construction_seconds").record(duration.as_secs_f64());
-}
-
-/// Records the time spent constructing a retrieval embedder.
-pub fn record_retrieval_embedder_construction(result: &str, duration: Duration) {
-    histogram!(
-        "moa_retrieval_embedder_construction_seconds",
-        "result" => result.to_string()
-    )
-    .record(duration.as_secs_f64());
+    counter!("moa_session_event_load_events_total").increment(event_count);
 }
 
 /// Records one tool idempotency scan and the number of prior events scanned.
-pub fn record_tool_idempotency_scan(event_type: &str, scanned_events: u64, duration: Duration) {
-    histogram!(
-        "moa_tool_idempotency_scan_seconds",
+pub fn record_tool_idempotency_scan(event_type: &str, scanned_events: u64) {
+    counter!(
+        "moa_tool_idempotency_scan_events_total",
         "event_type" => event_type.to_string()
     )
-    .record(duration.as_secs_f64());
-    histogram!(
-        "moa_tool_idempotency_scan_events",
-        "event_type" => event_type.to_string()
-    )
-    .record(scanned_events as f64);
+    .increment(scanned_events);
 }
 
 /// Records one memory service operation.
@@ -631,12 +559,12 @@ pub fn record_memory_operation(
         "status" => status.to_string()
     )
     .record(duration.as_secs_f64());
-    histogram!(
-        "moa_memory_operation_results",
+    counter!(
+        "moa_memory_operation_results_total",
         "operation" => operation.to_string(),
         "status" => status.to_string()
     )
-    .record(result_count as f64);
+    .increment(result_count);
 }
 
 /// Records one tenant knowledge sync-run lifecycle observation.
@@ -701,16 +629,6 @@ pub fn record_experiment_trial(status: &str, stop_reason: Option<&str>, target_k
         "target_kind" => target_kind.to_string()
     )
     .increment(1);
-}
-
-/// Records one terminal experiment trial duration.
-pub fn record_experiment_trial_duration(target_kind: &str, status: &str, duration: Duration) {
-    histogram!(
-        "moa_experiment_trial_duration_seconds",
-        "target_kind" => target_kind.to_string(),
-        "status" => status.to_string()
-    )
-    .record(duration.as_secs_f64());
 }
 
 /// Records one simulator turn submitted to a target.
@@ -811,14 +729,6 @@ pub fn record_skill_learning_review_decision(action: &str, outcome: &str) {
     .increment(1);
 }
 
-/// Records how long a skill-learning candidate waited before its review decision.
-///
-/// Observed at decision time as the span from candidate creation to now; the
-/// bucket spread runs minutes to days to match operator review latency.
-pub fn record_skill_learning_time_in_review(duration: Duration) {
-    histogram!(SKILL_LEARNING_TIME_IN_REVIEW_METRIC).record(duration.as_secs_f64());
-}
-
 /// Records that action policy queued a tenant-admin review.
 pub fn record_action_review_requested(effect: ActionPolicyEffect, action_class: ActionClass) {
     counter!(
@@ -839,38 +749,64 @@ pub fn record_action_review_decision(status: ActionReviewStatus, action_class: A
     .increment(1);
 }
 
-#[cfg(tokio_unstable)]
-fn spawn_tokio_runtime_metrics_publisher() {
-    if TOKIO_RUNTIME_MONITOR_STARTED.get().is_some() {
-        return;
-    }
-
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        debug!("tokio runtime metrics not started because no runtime handle is active");
-        return;
-    };
-
-    let monitor = RuntimeMonitor::new(&handle);
-    tokio::spawn(async move {
-        let mut intervals = monitor.intervals();
-        loop {
-            if let Some(interval) = intervals.next() {
-                gauge!("tokio_workers_count").set(interval.workers_count as f64);
-                counter!("tokio_total_park_count").increment(interval.total_park_count);
-                gauge!("tokio_global_queue_depth").set(interval.global_queue_depth as f64);
-                gauge!("tokio_worker_mean_poll_time_us")
-                    .set(interval.mean_poll_duration.as_micros() as f64);
-                counter!("tokio_budget_forced_yield_count")
-                    .increment(interval.budget_forced_yield_count);
-            }
-            tokio::time::sleep(TOKIO_MONITOR_INTERVAL).await;
-        }
-    });
-    let _ = TOKIO_RUNTIME_MONITOR_STARTED.set(());
+/// Records how long a tenant action review waited before an admin decided it.
+///
+/// Observed at decision time as `decided_at - created_at`; labeled by action
+/// class only so cardinality stays bounded. The tenant is intentionally not a
+/// label.
+pub fn record_approval_wait(action_class: ActionClass, wait: Duration) {
+    histogram!(
+        "moa_approval_wait_seconds",
+        "action_class" => action_class.as_str()
+    )
+    .record(wait.as_secs_f64());
 }
 
-#[cfg(not(tokio_unstable))]
-fn spawn_tokio_runtime_metrics_publisher() {}
+/// Canonical risk-level labels for the pending action-review depth gauge.
+///
+/// Every known label is reset each sample so a drained risk class reports zero
+/// instead of holding its last non-zero value.
+const ACTION_REVIEW_RISK_LEVELS: [&str; 3] = ["low", "medium", "high"];
+
+/// Publishes the pending tenant action-review queue depth by bounded risk level.
+///
+/// `depth_by_risk` carries only the currently non-empty risk classes; the other
+/// canonical labels are set to zero so the gauge never reports a stale backlog.
+pub fn record_action_review_pending_depth(depth_by_risk: &[(String, i64)]) {
+    for risk in ACTION_REVIEW_RISK_LEVELS {
+        gauge!("moa_action_review_pending", "risk_level" => risk).set(0.0);
+    }
+    for (risk, depth) in depth_by_risk {
+        gauge!("moa_action_review_pending", "risk_level" => risk.clone()).set(*depth as f64);
+    }
+}
+
+/// Publishes the age in seconds of the oldest pending tenant action review.
+pub fn record_action_review_oldest_pending_age(age_seconds: f64) {
+    gauge!("moa_action_review_oldest_pending_age_seconds").set(age_seconds);
+}
+
+/// Publishes the pending builtin async-authorization approval queue depth.
+pub fn record_builtin_approval_pending_depth(depth: u64) {
+    gauge!("moa_builtin_approval_pending").set(depth as f64);
+}
+
+/// Publishes the age in seconds of the oldest pending builtin approval.
+pub fn record_builtin_approval_oldest_pending_age(age_seconds: f64) {
+    gauge!("moa_builtin_approval_oldest_pending_age_seconds").set(age_seconds);
+}
+
+/// Records a terminal builtin approval decision by bounded status.
+///
+/// `status` is one of `approved`, `denied`, or `timeout`.
+pub fn record_builtin_approval_decision(status: &'static str) {
+    counter!("moa_builtin_approval_decisions_total", "status" => status).increment(1);
+}
+
+/// Records how long a builtin approval waited from creation to decision.
+pub fn record_builtin_approval_wait(wait: Duration) {
+    histogram!("moa_builtin_approval_wait_seconds").record(wait.as_secs_f64());
+}
 
 fn parse_metrics_listen_addr(config: &MetricsConfig) -> Result<SocketAddr> {
     config.listen.parse::<SocketAddr>().map_err(|error| {
@@ -965,26 +901,6 @@ fn knowledge_metric_names() -> &'static [&'static str] {
 
 fn register_metric_descriptions() {
     describe_gauge!("moa_sessions_active", "Currently active MOA sessions.");
-    describe_gauge!(
-        "tokio_workers_count",
-        "Number of worker threads in the active Tokio runtime."
-    );
-    describe_counter!(
-        "tokio_total_park_count",
-        "Total number of worker parks observed across runtime sampling intervals."
-    );
-    describe_gauge!(
-        "tokio_global_queue_depth",
-        "Current depth of the Tokio runtime global scheduler queue."
-    );
-    describe_gauge!(
-        "tokio_worker_mean_poll_time_us",
-        "Mean Tokio worker poll time in microseconds."
-    );
-    describe_counter!(
-        "tokio_budget_forced_yield_count",
-        "Number of task budget forced yields observed across runtime sampling intervals."
-    );
     describe_counter!(
         "moa_sessions_total",
         "Total sessions created, labeled by initial status."
@@ -1034,10 +950,6 @@ fn register_metric_descriptions() {
         "Number of successful tool calls whose outputs were truncated."
     );
     describe_counter!(
-        "moa_broadcast_lag_events_dropped_total",
-        "Live broadcast events dropped because a subscriber lagged behind, labeled by channel and handling policy."
-    );
-    describe_counter!(
         "moa_compaction_tier_applied_total",
         "Number of times each compaction tier was applied."
     );
@@ -1046,8 +958,8 @@ fn register_metric_descriptions() {
         "Lineage events dropped because the hot-path channel was saturated."
     );
     describe_counter!(
-        "moa_lineage_recorded_total",
-        "Lineage events accepted by the hot-path channel."
+        "moa_lineage_enqueued_total",
+        "Lineage events accepted onto the hot-path channel toward the durable journal."
     );
     describe_counter!(
         "moa_lineage_flushed_total",
@@ -1056,22 +968,6 @@ fn register_metric_descriptions() {
     describe_gauge!(
         "moa_lineage_journal_depth",
         "Approximate lineage events pending in the durable journal."
-    );
-    describe_gauge!(
-        "moa_grounding_verified_rate",
-        "Latest citation verifier outcome per tenant, encoded as 0 or 1."
-    );
-    describe_counter!(
-        "moa_zero_recall_count",
-        "Retrieval operations that returned an empty top-K."
-    );
-    describe_counter!(
-        "moa_turn_count",
-        "Retrieval-scoped turn count used for lineage zero-recall alerting."
-    );
-    describe_gauge!(
-        "moa_cost_micros_per_turn",
-        "Latest generation cost per turn in micros of USD."
     );
     describe_histogram!(
         "moa_turn_latency_seconds",
@@ -1086,24 +982,12 @@ fn register_metric_descriptions() {
         "Terminal turn workflow outcomes, labeled by scope, result, and model tier."
     );
     describe_histogram!(
-        "moa_turn_workflow_latency_seconds",
-        "End-to-end turn workflow latency in seconds, labeled by scope, result, and model tier."
-    );
-    describe_histogram!(
         "moa_tool_call_duration_seconds",
         "Tool execution duration in seconds."
-    );
-    describe_histogram!(
-        "moa_pipeline_compile_seconds",
-        "Context pipeline compilation duration in seconds."
     );
     describe_counter!(
         "moa_query_rewrite_decisions_total",
         "Query rewrite gate decisions, labeled by decision, reason, and LLM-call status."
-    );
-    describe_histogram!(
-        "moa_query_rewrite_duration_seconds",
-        "Query rewrite stage duration in seconds, labeled by decision and LLM-call status."
     );
     describe_histogram!(
         "moa_sandbox_provision_seconds",
@@ -1112,14 +996,6 @@ fn register_metric_descriptions() {
     describe_histogram!(
         "moa_cache_hit_rate",
         "Ratio of cached input tokens to total input tokens for one request."
-    );
-    describe_histogram!(
-        "moa_scoped_transaction_begin_seconds",
-        "Scoped Postgres transaction begin duration in seconds."
-    );
-    describe_histogram!(
-        "moa_scoped_guc_application_seconds",
-        "Scoped Postgres GUC application duration in seconds."
     );
     describe_counter!(
         "moa_session_events_appended_total",
@@ -1130,32 +1006,12 @@ fn register_metric_descriptions() {
         "Session event append duration in seconds, labeled by bounded transaction phase."
     );
     describe_counter!(
-        "moa_session_event_loads_total",
-        "Session event load operations executed against the durable event log."
-    );
-    describe_histogram!(
-        "moa_session_event_load_events",
-        "Number of session events returned by one durable event log load."
+        "moa_session_event_load_events_total",
+        "Session events returned by durable event log load operations."
     );
     describe_counter!(
-        "moa_session_event_decoded_bytes_total",
-        "Decoded session event payload bytes loaded from the durable event log."
-    );
-    describe_histogram!(
-        "moa_context_pipeline_construction_seconds",
-        "Context pipeline construction duration in seconds."
-    );
-    describe_histogram!(
-        "moa_retrieval_embedder_construction_seconds",
-        "Retrieval embedder construction duration in seconds, labeled by result."
-    );
-    describe_histogram!(
-        "moa_tool_idempotency_scan_seconds",
-        "Tool idempotency prior-event scan duration in seconds, labeled by event type."
-    );
-    describe_histogram!(
-        "moa_tool_idempotency_scan_events",
-        "Number of prior session events inspected by one tool idempotency scan."
+        "moa_tool_idempotency_scan_events_total",
+        "Prior session events inspected by tool idempotency scans, labeled by event type."
     );
     describe_histogram!(
         "moa_api_key_validation_seconds",
@@ -1169,9 +1025,9 @@ fn register_metric_descriptions() {
         "moa_memory_operation_duration_seconds",
         "Memory service operation duration in seconds, labeled by operation and status."
     );
-    describe_histogram!(
-        "moa_memory_operation_results",
-        "Memory service result counts, labeled by operation and status."
+    describe_counter!(
+        "moa_memory_operation_results_total",
+        "Memory service result rows returned, labeled by operation and status."
     );
     describe_counter!(
         "moa_knowledge_sync_runs_total",
@@ -1217,10 +1073,6 @@ fn register_metric_descriptions() {
         "moa_experiment_trials_total",
         "Experiment trial lifecycle observations, labeled by status, bounded stop reason, and bounded target kind."
     );
-    describe_histogram!(
-        "moa_experiment_trial_duration_seconds",
-        "Terminal experiment trial duration in seconds, labeled by bounded status and target kind."
-    );
     describe_counter!(
         "moa_simulation_turns_total",
         "Simulator turns submitted to experiment targets, labeled by bounded target kind."
@@ -1249,10 +1101,6 @@ fn register_metric_descriptions() {
         "moa_skill_learning_review_decisions_total",
         "Skill-learning review decisions, labeled by review action and terminal outcome."
     );
-    describe_histogram!(
-        SKILL_LEARNING_TIME_IN_REVIEW_METRIC,
-        "Skill-learning candidate wait from creation to review decision, in seconds."
-    );
     describe_counter!(
         "moa_action_review_requests_total",
         "Action reviews requested by policy evaluation, labeled by effect and action class."
@@ -1260,6 +1108,34 @@ fn register_metric_descriptions() {
     describe_counter!(
         "moa_action_review_decisions_total",
         "Action review decisions, labeled by status and action class."
+    );
+    describe_histogram!(
+        "moa_approval_wait_seconds",
+        "Tenant action-review wait from creation to admin decision in seconds, labeled by action class."
+    );
+    describe_gauge!(
+        "moa_action_review_pending",
+        "Pending tenant action reviews awaiting an admin decision, labeled by risk level."
+    );
+    describe_gauge!(
+        "moa_action_review_oldest_pending_age_seconds",
+        "Age in seconds of the oldest pending tenant action review."
+    );
+    describe_gauge!(
+        "moa_builtin_approval_pending",
+        "Pending builtin async-authorization approvals awaiting a decision."
+    );
+    describe_gauge!(
+        "moa_builtin_approval_oldest_pending_age_seconds",
+        "Age in seconds of the oldest pending builtin async-authorization approval."
+    );
+    describe_counter!(
+        "moa_builtin_approval_decisions_total",
+        "Terminal builtin approval decisions, labeled by status (approved/denied/timeout)."
+    );
+    describe_histogram!(
+        "moa_builtin_approval_wait_seconds",
+        "Builtin approval wait from creation to decision in seconds."
     );
 }
 
@@ -1391,14 +1267,11 @@ mod tests {
             Duration::from_millis(3),
         );
         record_session_event_load(2);
-        record_session_event_decoded_bytes(128);
-        record_context_pipeline_construction(Duration::from_millis(3));
-        record_retrieval_embedder_construction("success", Duration::from_millis(4));
-        record_tool_idempotency_scan("ToolResult", 5, Duration::from_millis(5));
+        record_tool_idempotency_scan("ToolResult", 5);
         record_api_key_validation_duration("failure", Duration::from_millis(6));
+        record_memory_operation("search", "ok", 4, Duration::from_millis(2));
         record_experiment_run("accepted", "agent_loop");
         record_experiment_trial("completed", Some("max_turns"), "agent_loop");
-        record_experiment_trial_duration("agent_loop", "completed", Duration::from_millis(7));
         record_simulation_turn("agent_loop");
         record_simulation_tokens("simulator", 16);
         record_simulation_cost_cents("simulator", 1);
@@ -1406,9 +1279,16 @@ mod tests {
         record_experiment_learning_candidates("proposed", 1);
         record_skill_learning_candidates_filed("distilled", "created", 1);
         record_skill_learning_review_decision("accept_skill", "promoted");
-        record_skill_learning_time_in_review(Duration::from_secs(120));
         record_action_review_requested(ActionPolicyEffect::AdminReview, ActionClass::LocalWrite);
         record_action_review_decision(ActionReviewStatus::Cleared, ActionClass::LocalWrite);
+        record_action_review_decision(ActionReviewStatus::Timeout, ActionClass::CommandExecution);
+        record_approval_wait(ActionClass::LocalWrite, Duration::from_secs(30));
+        record_action_review_pending_depth(&[("high".to_string(), 2), ("low".to_string(), 1)]);
+        record_action_review_oldest_pending_age(42.0);
+        record_builtin_approval_pending_depth(3);
+        record_builtin_approval_oldest_pending_age(7.0);
+        record_builtin_approval_decision("timeout");
+        record_builtin_approval_wait(Duration::from_secs(12));
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -1439,17 +1319,12 @@ mod tests {
         assert!(scrape.contains("moa_session_event_append_phase_seconds"));
         assert!(scrape.contains("phase=\"acquire_connection\""));
         assert!(scrape.contains("phase=\"begin_transaction\""));
-        assert!(scrape.contains("moa_session_event_loads_total"));
-        assert!(scrape.contains("moa_session_event_load_events"));
-        assert!(scrape.contains("moa_session_event_decoded_bytes_total"));
-        assert!(scrape.contains("moa_context_pipeline_construction_seconds"));
-        assert!(scrape.contains("moa_retrieval_embedder_construction_seconds"));
-        assert!(scrape.contains("moa_tool_idempotency_scan_seconds"));
-        assert!(scrape.contains("moa_tool_idempotency_scan_events"));
+        assert!(scrape.contains("moa_session_event_load_events_total"));
+        assert!(scrape.contains("moa_tool_idempotency_scan_events_total"));
+        assert!(scrape.contains("moa_memory_operation_results_total"));
         assert!(scrape.contains("moa_api_key_validation_seconds"));
         assert!(scrape.contains("moa_experiment_runs_total"));
         assert!(scrape.contains("moa_experiment_trials_total"));
-        assert!(scrape.contains("moa_experiment_trial_duration_seconds"));
         assert!(scrape.contains("moa_simulation_turns_total"));
         assert!(scrape.contains("moa_simulation_tokens_total"));
         assert!(scrape.contains("moa_simulation_cost_cents_total"));
@@ -1457,32 +1332,29 @@ mod tests {
         assert!(scrape.contains("moa_experiment_learning_candidates_total"));
         assert!(scrape.contains("moa_skill_learning_candidates_filed_total"));
         assert!(scrape.contains("moa_skill_learning_review_decisions_total"));
-        assert!(scrape.contains("moa_skill_learning_time_in_review_seconds"));
         assert!(scrape.contains("moa_action_review_requests_total"));
         assert!(scrape.contains("moa_action_review_decisions_total"));
+        assert!(scrape.contains("status=\"timeout\""));
+        assert!(scrape.contains("moa_approval_wait_seconds"));
+        assert!(scrape.contains("moa_action_review_pending"));
+        assert!(scrape.contains("risk_level=\"high\""));
+        // A drained risk class is still emitted (reset to zero) rather than
+        // dropped, so it never holds a stale backlog value.
+        assert!(scrape.contains("risk_level=\"medium\""));
+        assert!(scrape.contains("moa_action_review_oldest_pending_age_seconds"));
+        assert!(scrape.contains("moa_builtin_approval_pending"));
+        assert!(scrape.contains("moa_builtin_approval_oldest_pending_age_seconds"));
+        assert!(scrape.contains("moa_builtin_approval_decisions_total"));
+        assert!(scrape.contains("moa_builtin_approval_wait_seconds"));
 
-        #[cfg(tokio_unstable)]
-        {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let tokio_scrape = loop {
-                let response = client.get(&url).send().await.expect("tokio metrics scrape");
-                let body = response.text().await.expect("tokio scrape body");
-                if body.contains("tokio_workers_count")
-                    && body.contains("tokio_global_queue_depth")
-                    && body.contains("tokio_worker_mean_poll_time_us")
-                {
-                    break body;
-                }
-                if Instant::now() >= deadline {
-                    panic!("tokio runtime metrics never appeared in scrape output");
-                }
-                sleep(Duration::from_millis(50)).await;
-            };
-
-            assert!(tokio_scrape.contains("tokio_workers_count"));
-            assert!(tokio_scrape.contains("tokio_global_queue_depth"));
-            assert!(tokio_scrape.contains("tokio_worker_mean_poll_time_us"));
-        }
+        // Duplicate/dead metric families removed by the observability pruning must
+        // not reappear in the exporter output.
+        assert!(!scrape.contains("moa_session_event_loads_total"));
+        assert!(!scrape.contains("moa_context_pipeline_construction_seconds"));
+        assert!(!scrape.contains("moa_retrieval_embedder_construction_seconds"));
+        assert!(!scrape.contains("moa_tool_idempotency_scan_seconds"));
+        assert!(!scrape.contains("moa_experiment_trial_duration_seconds"));
+        assert!(!scrape.contains("moa_skill_learning_time_in_review_seconds"));
     }
 
     #[test]
@@ -1496,7 +1368,6 @@ mod tests {
             register_metric_descriptions();
             record_experiment_run("accepted", "agent_loop");
             record_experiment_trial("completed", Some("max_turns"), "agent_loop");
-            record_experiment_trial_duration("agent_loop", "completed", Duration::from_millis(7));
             record_simulation_turn("agent_loop");
             record_simulation_tokens("simulator", 16);
             record_simulation_cost_cents("simulator", 1);
@@ -1508,7 +1379,6 @@ mod tests {
         let experiment_metrics = [
             "moa_experiment_runs_total",
             "moa_experiment_trials_total",
-            "moa_experiment_trial_duration_seconds",
             "moa_simulation_turns_total",
             "moa_simulation_tokens_total",
             "moa_simulation_cost_cents_total",
@@ -1591,14 +1461,12 @@ mod tests {
             record_skill_learning_candidates_filed("distilled", "improved", 0);
             record_skill_learning_review_decision("accept_skill", "gate_rejected");
             record_skill_learning_review_decision("reject", "rejected");
-            record_skill_learning_time_in_review(Duration::from_secs(3600));
         });
         let rendered = handle.render();
 
         let skill_learning_metrics = [
             "moa_skill_learning_candidates_filed_total",
             "moa_skill_learning_review_decisions_total",
-            "moa_skill_learning_time_in_review_seconds",
         ];
         for metric in skill_learning_metrics {
             assert!(

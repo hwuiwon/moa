@@ -152,7 +152,14 @@ pub fn build_endpoint(
         .bind(AgentsImpl::new(pool.clone(), fga_client.clone()).serve())
         .bind(AdminMaintenanceImpl::new(pool.clone(), config.clone()).serve())
         .bind(ArtifactsImpl::new(ArtifactRegistry::new(pool.clone())).serve())
-        .bind(ActionReviewsImpl::new(pool.clone(), session_store.clone()).serve())
+        .bind(
+            ActionReviewsImpl::new(
+                pool.clone(),
+                session_store.clone(),
+                action_review_timeout_secs(&config),
+            )
+            .serve(),
+        )
         .bind(ApiKeysImpl::new(pool.clone(), fga_client.clone()).serve())
         .bind(AuthzImpl::new(pool.clone()).serve())
         .bind(AuthzChallengesImpl::new(pool.clone()).serve())
@@ -190,7 +197,7 @@ pub fn build_endpoint(
             )
             .serve(),
         )
-        .bind(MemoryImpl::new(pool.clone(), config.clone(), lineage.clone()).serve())
+        .bind(MemoryImpl::new(pool.clone(), config.clone()).serve())
         .bind(NeonMaintImpl::new(config.clone()).serve())
         .bind(PrivacyImpl::new(pool.clone(), config.compliance.clone()).serve())
         .bind(SkillsImpl::new(pool.clone()).serve())
@@ -258,6 +265,11 @@ pub fn build_endpoint(
             .serve(),
         )
         .build()
+}
+
+/// Configured tenant action-review timeout in seconds, clamped to `i64`.
+fn action_review_timeout_secs(config: &MoaConfig) -> i64 {
+    i64::try_from(config.async_authz.action_review_timeout_secs).unwrap_or(i64::MAX)
 }
 
 /// Returns the service names expected for readiness in this build.

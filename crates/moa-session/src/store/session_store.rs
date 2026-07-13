@@ -174,7 +174,6 @@ impl SessionStore for PostgresSessionStore {
             events.reverse();
         }
         record_session_event_load(events.len() as u64);
-        record_session_event_decoded_bytes(decoded_bytes);
         record_session_event_replay(events.len(), decoded_bytes, started_at.elapsed());
         Ok(events)
     }
@@ -476,6 +475,11 @@ impl SessionStore for PostgresSessionStore {
     }
 
     /// Returns aggregate tenant spend in cents since the provided UTC timestamp.
+    ///
+    /// Sums the same billed event set folded into `sessions.total_cost_cents`
+    /// and the `session_summary` view — visible responses, auxiliary
+    /// checkpoints, and guardrail-judge checks — so tenant spend reconciles
+    /// with the per-session rollups.
     async fn tenant_cost_since(&self, tenant_id: &TenantId, since: DateTime<Utc>) -> Result<u32> {
         let events = self.table_name("events");
         let total = sqlx::query_scalar::<_, i64>(&format!(
@@ -485,11 +489,11 @@ impl SessionStore for PostgresSessionStore {
              )::BIGINT \
              FROM {events} e \
              WHERE e.tenant_id = $1 \
-               AND e.event_type = $2 \
+               AND e.event_type = ANY($2) \
                AND e.timestamp >= $3"
         ))
         .bind(tenant_id.0)
-        .bind("BrainResponse")
+        .bind(&["BrainResponse", "Checkpoint", "GuardrailCheck"][..])
         .bind(since)
         .fetch_one(&self.pool)
         .await
@@ -505,7 +509,6 @@ impl SessionStore for PostgresSessionStore {
         session_id: moa_core::types::identifiers::SessionId,
     ) -> Result<()> {
         let events = self.table_name("events");
-        let pending_signals = self.table_name("pending_signals");
         let context_snapshots = self.table_name("context_snapshots");
         let task_segments = self.table_name("task_segments");
         let session_attachments = self.table_name("session_attachments");
@@ -538,7 +541,6 @@ impl SessionStore for PostgresSessionStore {
         }
 
         for sql in [
-            format!("DELETE FROM {pending_signals} WHERE session_id = $1"),
             format!("DELETE FROM {context_snapshots} WHERE session_id = $1"),
             format!("DELETE FROM {task_segments} WHERE session_id = $1"),
         ] {

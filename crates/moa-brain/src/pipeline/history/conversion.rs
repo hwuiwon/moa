@@ -644,6 +644,7 @@ mod tests {
                     output_tokens: 4,
                     cost_cents: 1,
                     duration_ms: 100,
+                    llm_ttft_ms: None,
                     thought_signature: None,
                 },
             ),

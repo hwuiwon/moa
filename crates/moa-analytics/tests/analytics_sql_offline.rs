@@ -28,7 +28,7 @@ const DATASETS: &[&str] = &[
 ];
 
 /// Datasets served by the Postgres backend only (no ClickHouse source).
-const PG_ONLY_DATASETS: &[&str] = &["citation_precision"];
+const PG_ONLY_DATASETS: &[&str] = &["citation_precision", "skill_usage"];
 
 fn dim(field: &str) -> AnalyticsDimension {
     AnalyticsDimension {
@@ -142,6 +142,15 @@ fn request_for(dataset: &str) -> AnalyticsQueryRequest {
             ],
         ),
         "skills" => (
+            vec![dim("skill_name"), dim("channel")],
+            vec![
+                count(),
+                measure("token_cost", AnalyticsAggregation::Sum),
+                measure("duration_ms", AnalyticsAggregation::P95),
+            ],
+            vec![between_window("started_at")],
+        ),
+        "skill_usage" => (
             vec![dim("skill_name"), dim("channel")],
             vec![
                 count(),

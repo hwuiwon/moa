@@ -1,14 +1,10 @@
 //! Context pipeline assembly helpers.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use moa_core::{
     config::MoaConfig, traits::ContextProcessor, traits::EmbeddingProvider, traits::LLMProvider,
     traits::LineageHandle, traits::SegmentStore, traits::SessionStore,
-};
-use moa_observability::{
-    record_context_pipeline_construction, record_retrieval_embedder_construction,
 };
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 
@@ -56,17 +52,12 @@ pub fn build_default_graph_memory_retriever(
     graph_pool: sqlx::PgPool,
     lineage: Arc<dyn LineageHandle>,
 ) -> Arc<GraphMemoryRetriever> {
-    let embedder_started = Instant::now();
     let retrieval_embedder = match build_embedder_from_config(
         config,
         EmbedderConstructionRole::Retrieval,
     ) {
-        Ok(embedder) => {
-            record_retrieval_embedder_construction("success", embedder_started.elapsed());
-            Some(embedder)
-        }
+        Ok(embedder) => Some(embedder),
         Err(error) => {
-            record_retrieval_embedder_construction("failure", embedder_started.elapsed());
             tracing::warn!(
                 %error,
                 "graph memory vector retrieval disabled because the retrieval embedder could not be constructed"
@@ -99,7 +90,6 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
     session_store: Arc<dyn SessionStore>,
     options: GraphMemoryPipelineOptions,
 ) -> ContextPipeline {
-    let pipeline_started = Instant::now();
     let GraphMemoryPipelineOptions {
         graph_pool,
         shared_graph_memory_retriever,
@@ -206,11 +196,9 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
     ]);
 
-    let pipeline = ContextPipeline::with_runtime_limits(
+    ContextPipeline::with_runtime_limits(
         stages,
         config.budgets.daily_tenant_cents,
         config.context_snapshot.clone(),
-    );
-    record_context_pipeline_construction(pipeline_started.elapsed());
-    pipeline
+    )
 }

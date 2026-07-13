@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use moa_core::config::MoaConfig;
@@ -14,6 +15,7 @@ use moa_memory_graph::{GraphError, GraphStore, NodeIndexRow, NodeLabel};
 use moa_memory_vector::{Error as VectorError, PgvectorStore, TurbopufferStore};
 use moa_providers::{ConfiguredReranker, Reranker, build_reranker_from_config};
 use sqlx::PgPool;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::planning::Strategy;
@@ -36,9 +38,12 @@ use crate::retrieval::source_rank::{
 };
 use crate::retrieval::types::{
     GraphCandidateCounts, GraphRetrievalDiagnostics, LegSources, LexicalBackend, LineageContext,
-    Result, RetrievalError, RetrievalHit, RetrievalLineageHit, RetrievalOutput, RetrievalRequest,
-    SourceTier,
+    RerankScore, Result, RetrievalError, RetrievalHit, RetrievalLineageHit, RetrievalOutput,
+    RetrievalProvenance, RetrievalRequest, SourceTier,
 };
+
+/// Fusion method label recorded on retrieval spans and lineage.
+const FUSION_METHOD: &str = "rrf";
 
 const MIN_FUSED_CANDIDATE_LIMIT: usize = 26;
 const MAX_FUSED_CANDIDATE_LIMIT: usize = 100;
@@ -218,10 +223,12 @@ impl HybridRetriever {
     ) -> Result<RetrievalOutput> {
         let graph_policy = effective_graph_policy(self.graph_policy, req.disable_graph_expansion);
         let mut diagnostics = GraphRetrievalDiagnostics::new(graph_policy);
+        let mut provenance = RetrievalProvenance::default();
         if req.k_final == 0 {
             return Ok(RetrievalOutput {
                 hits: Vec::new(),
                 diagnostics,
+                provenance,
             });
         }
 
@@ -231,25 +238,52 @@ impl HybridRetriever {
         } else {
             VectorBackendState::default()
         };
-        let vector_future = run_leg(
-            req.disable_leg_timeouts,
-            "vector",
-            VECTOR_BUDGET,
-            self.vector_leg(&req, &backend_state),
+        // Per-leg spans parent under the enclosing pipeline stage span (ambient,
+        // task-local) and carry only bounded counts/timings — never query text.
+        let vector_span = tracing::debug_span!(
+            "retrieval.vector_leg",
+            candidates = tracing::field::Empty,
+            timed_out = tracing::field::Empty,
+            elapsed_ms = tracing::field::Empty,
         );
-        let lexical_future = run_leg(
-            req.disable_leg_timeouts,
-            "lexical",
-            LEXICAL_BUDGET,
-            self.lexical_leg(&req, &backend_state),
+        let lexical_span = tracing::debug_span!(
+            "retrieval.lexical_leg",
+            candidates = tracing::field::Empty,
+            elapsed_ms = tracing::field::Empty,
         );
-        let (vector_outcome, lexical_outcome) = tokio::join!(vector_future, lexical_future);
+        let vector_future = timed_future(
+            run_leg(
+                req.disable_leg_timeouts,
+                "vector",
+                VECTOR_BUDGET,
+                self.vector_leg(&req, &backend_state),
+            )
+            .instrument(vector_span.clone()),
+        );
+        let lexical_future = timed_future(
+            run_leg(
+                req.disable_leg_timeouts,
+                "lexical",
+                LEXICAL_BUDGET,
+                self.lexical_leg(&req, &backend_state),
+            )
+            .instrument(lexical_span.clone()),
+        );
+        let ((vector_outcome, vector_ms), (lexical_outcome, lexical_ms)) =
+            tokio::join!(vector_future, lexical_future);
+        provenance.timings.vector_ms = vector_ms;
+        provenance.timings.lexical_ms = lexical_ms;
         // Reduce each leg to its usable hits: a fatal error aborts, a transient
         // error or timeout degrades to empty while the peer leg's hits are kept.
         let vector_leg = reduce_leg("vector", vector_outcome)?;
         let vector_timed_out = vector_leg.timed_out;
         let mut vector_hits = vector_leg.value;
         let mut lexical_hits = reduce_leg("lexical", lexical_outcome)?.value;
+        vector_span.record("candidates", vector_hits.len());
+        vector_span.record("timed_out", vector_timed_out);
+        vector_span.record("elapsed_ms", vector_ms);
+        lexical_span.record("candidates", lexical_hits.candidates.len());
+        lexical_span.record("elapsed_ms", lexical_ms);
         apply_lexical_boost_only_policy(&req, &vector_hits, &mut lexical_hits);
         let interim = rrf_fuse(
             &[],
@@ -289,7 +323,14 @@ impl HybridRetriever {
         let graph_output = if graph_seed_plan.strengths.is_empty() {
             Default::default()
         } else {
-            let graph_started = std::time::Instant::now();
+            let graph_span = tracing::debug_span!(
+                "retrieval.graph_expansion",
+                seeds = graph_seed_plan.strengths.len(),
+                raw_paths = tracing::field::Empty,
+                candidates = tracing::field::Empty,
+                elapsed_ms = tracing::field::Empty,
+            );
+            let graph_started = Instant::now();
             let graph_outcome = run_leg(
                 req.disable_leg_timeouts,
                 "graph",
@@ -305,25 +346,40 @@ impl HybridRetriever {
                     self.ranking_config.graph_rescue_evidence_floor,
                 ),
             )
+            .instrument(graph_span.clone())
             .await;
+            let graph_ms = duration_ms_u64(graph_started.elapsed());
             let mut output = reduce_leg("graph", graph_outcome)?.value;
-            output.diagnostics.graph_latency_ms = duration_ms_u64(graph_started.elapsed());
+            output.diagnostics.graph_latency_ms = graph_ms;
+            graph_span.record("raw_paths", output.diagnostics.raw_path_count);
+            graph_span.record("candidates", output.candidates.len());
+            graph_span.record("elapsed_ms", graph_ms);
             output
         };
         diagnostics.graph_latency_ms = graph_output.diagnostics.graph_latency_ms;
+        provenance.timings.graph_ms = (graph_output
+            .diagnostics
+            .graph_latency_ms
+            .min(u64::from(u32::MAX))) as u32;
         diagnostics.record_paths(graph_output.diagnostics);
         let graph_hits = if graph_policy.uses_graph_candidate_fusion() {
             graph_output.candidates
         } else {
             Vec::new()
         };
-        let fusion_started = std::time::Instant::now();
+        let fusion_span = tracing::debug_span!(
+            "retrieval.fusion",
+            method = FUSION_METHOD,
+            pool_size = tracing::field::Empty,
+        );
+        let fusion_started = Instant::now();
         let mut fused = rrf_fuse(
             &graph_hits,
             &vector_hits,
             &lexical_hits.candidates,
             weights_for(strategy),
         );
+        let mut fusion_ms = duration_ms_u32(fusion_started.elapsed());
         if fused.is_empty()
             && should_retry_vector_after_empty_fusion(
                 &req,
@@ -342,19 +398,24 @@ impl HybridRetriever {
             )
             .await;
             vector_hits = reduce_leg("vector", retry_outcome)?.value;
+            let refuse_started = Instant::now();
             fused = rrf_fuse(
                 &graph_hits,
                 &vector_hits,
                 &lexical_hits.candidates,
                 weights_for(strategy),
             );
+            fusion_ms = fusion_ms.saturating_add(duration_ms_u32(refuse_started.elapsed()));
         }
         fused.truncate(fused_candidate_limit(req.k_final));
+        fusion_span.record("pool_size", fused.len());
+        provenance.timings.fusion_ms = fusion_ms;
         diagnostics.candidate_counts = graph_candidate_counts(&fused);
         if fused.is_empty() {
             return Ok(RetrievalOutput {
                 hits: Vec::new(),
                 diagnostics,
+                provenance,
             });
         }
 
@@ -387,7 +448,25 @@ impl HybridRetriever {
             );
         }
         let mut final_hits = if req.use_reranker && hits.len() > req.k_final {
-            let reranked = self.rerank_hits(&req, &hits).await?;
+            let rerank_span = tracing::debug_span!(
+                "retrieval.rerank",
+                model = %self.rerank_model,
+                input = hits.len(),
+                output = tracing::field::Empty,
+            );
+            let rerank_started = Instant::now();
+            let outcome = self
+                .rerank_hits(&req, &hits)
+                .instrument(rerank_span.clone())
+                .await?;
+            provenance.timings.rerank_ms = duration_ms_u32(rerank_started.elapsed());
+            rerank_span.record("output", outcome.hits.len());
+            // Only attribute a reranker model when the reranker actually produced
+            // scores; a provider failure falls back to fused order with none.
+            if !outcome.scores.is_empty() {
+                provenance.rerank_model = Some(self.rerank_model.clone());
+                provenance.rerank_scores = outcome.scores;
+            }
             // A trustworthy reranker concentrates gold at the top, so the
             // reranked window can be tighter than the caller's k: the tail
             // slots are the noise the precision metrics measure. Without a
@@ -396,7 +475,7 @@ impl HybridRetriever {
                 0 => req.k_final,
                 window => req.k_final.min(window),
             };
-            select_final_hits_for_policy(reranked, &hits, rerank_k, graph_policy)
+            select_final_hits_for_policy(outcome.hits, &hits, rerank_k, graph_policy)
         } else {
             select_final_hits_for_policy(hits, &[], req.k_final, graph_policy)
         };
@@ -438,6 +517,7 @@ impl HybridRetriever {
         Ok(RetrievalOutput {
             hits: final_hits,
             diagnostics,
+            provenance,
         })
     }
 
@@ -526,11 +606,6 @@ impl HybridRetriever {
         let tp_future = run_vector_leg(&scoped_turbopuffer, req);
         let (pg_result, tp_result) = tokio::join!(pg_future, tp_future);
 
-        if let (Ok(pg_hits), Ok(tp_hits)) = (&pg_result, &tp_result) {
-            metrics::histogram!("moa_vector_dualread_overlap")
-                .record(leg_overlap(pg_hits, tp_hits, 10));
-        }
-
         match (tp_result, pg_result) {
             (Ok(tp_hits), _) => Ok(tp_hits),
             (Err(error), Ok(pg_hits)) => {
@@ -575,7 +650,7 @@ impl HybridRetriever {
         &self,
         req: &RetrievalRequest,
         hits: &[RetrievalHit],
-    ) -> Result<Vec<RetrievalHit>> {
+    ) -> Result<RerankOutcome> {
         let documents = hits.iter().map(rerank_document).collect::<Vec<_>>();
         let reranked = match self
             .reranker
@@ -586,25 +661,52 @@ impl HybridRetriever {
             // Reranking is a best-effort refinement over already-fused hits: a
             // provider failure must not abort otherwise-usable results. Fall back
             // to the fused pre-rerank order, mirroring the empty-output fallback.
+            // No scores are attributed because the reranker did not produce any.
             Err(error) => {
                 record_leg_degraded("rerank", "error");
                 tracing::warn!(
                     error = %error,
                     "reranker failed; falling back to fused pre-rerank order"
                 );
-                return Ok(hits.iter().take(req.k_final).cloned().collect());
+                return Ok(RerankOutcome::fallback(hits, req.k_final));
             }
         };
         let mut out = Vec::with_capacity(req.k_final.min(reranked.len()));
+        // Capture the per-candidate reranker score alongside the reordered hit so
+        // retrieval lineage records the real relevance scores and their model.
+        let mut scores = Vec::with_capacity(reranked.len());
         for hit in reranked {
             if let Some(candidate) = hits.get(hit.index) {
+                scores.push(RerankScore {
+                    uid: candidate.uid,
+                    original_index: hit.index.min(u16::MAX as usize) as u16,
+                    relevance_score: hit.relevance_score,
+                });
                 out.push(candidate.clone());
             }
         }
         if out.is_empty() {
-            Ok(hits.iter().take(req.k_final).cloned().collect())
+            Ok(RerankOutcome::fallback(hits, req.k_final))
         } else {
-            Ok(out)
+            Ok(RerankOutcome { hits: out, scores })
+        }
+    }
+}
+
+/// Reordered rerank hits plus the per-candidate scores that produced them.
+struct RerankOutcome {
+    /// Hits in reranked order (or fused fallback order on reranker failure).
+    hits: Vec<RetrievalHit>,
+    /// Per-candidate reranker scores; empty when the reranker did not run.
+    scores: Vec<RerankScore>,
+}
+
+impl RerankOutcome {
+    /// Falls back to the fused pre-rerank order with no attributed scores.
+    fn fallback(hits: &[RetrievalHit], k_final: usize) -> Self {
+        Self {
+            hits: hits.iter().take(k_final).cloned().collect(),
+            scores: Vec::new(),
         }
     }
 }
@@ -785,21 +887,6 @@ fn apply_lexical_boost_only_policy(
     for candidate in &mut lexical_hits.candidates {
         candidate.score *= TURBOPUFFER_BM25_BOOST_MULTIPLIER;
     }
-}
-
-fn leg_overlap(left: &[LegCandidate], right: &[LegCandidate], k: usize) -> f64 {
-    let left_set = left
-        .iter()
-        .take(k)
-        .map(|hit| hit.uid)
-        .collect::<HashSet<_>>();
-    let right_set = right
-        .iter()
-        .take(k)
-        .map(|hit| hit.uid)
-        .collect::<HashSet<_>>();
-    let denom = left_set.len().max(right_set.len()).max(1).min(k);
-    left_set.intersection(&right_set).count() as f64 / denom as f64
 }
 
 fn weights_for(strategy: Strategy) -> (f64, f64, f64) {
@@ -1206,6 +1293,21 @@ fn preserve_vector_rank_one_for_policy(
 
 fn duration_ms_u64(elapsed: std::time::Duration) -> u64 {
     elapsed.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn duration_ms_u32(elapsed: std::time::Duration) -> u32 {
+    elapsed.as_millis().min(u128::from(u32::MAX)) as u32
+}
+
+/// Awaits a future and returns its output with the elapsed wall-clock time in ms.
+///
+/// Used to time each retrieval leg independently even when legs run concurrently
+/// inside `tokio::join!`, where a single outer measurement would only capture the
+/// slower leg.
+async fn timed_future<T>(future: impl std::future::Future<Output = T>) -> (T, u32) {
+    let started = Instant::now();
+    let value = future.await;
+    (value, duration_ms_u32(started.elapsed()))
 }
 
 #[cfg(test)]

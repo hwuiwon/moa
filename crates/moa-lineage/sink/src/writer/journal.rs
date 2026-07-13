@@ -48,6 +48,23 @@ impl DurableJournal {
         .await?
     }
 
+    /// Appends a batch of events under one durability sync and returns their
+    /// durable sequence numbers in input order (group commit).
+    ///
+    /// Backs the awaitable durable-batch path so one emission point pays a single
+    /// fsync for all its lineage events instead of one per event.
+    pub(crate) async fn append_accepted_events(
+        &self,
+        events: Vec<LineageEvent>,
+    ) -> Result<Vec<u64>> {
+        Ok(self
+            .append_event_rows(events)
+            .await?
+            .into_iter()
+            .map(|(seq, _)| seq)
+            .collect())
+    }
+
     /// Appends one event under the journal lock so that fjall insert order matches sequence
     /// order. This invariant lets the writer's low-water-mark replay cursor advance safely: a
     /// lower sequence can never become visible after a higher one has already been scanned.
@@ -167,6 +184,14 @@ impl DurableJournal {
         self.inner
             .lock()
             .map_err(|_| Error::Invalid("lineage journal lock poisoned".to_string()))
+    }
+
+    /// Returns the number of durability syncs issued by the underlying journal.
+    ///
+    /// Exposed for group-commit tests to assert that a batch append performs one fsync.
+    #[cfg(test)]
+    pub(crate) fn persist_count(&self) -> Result<u64> {
+        Ok(self.lock()?.persist_count())
     }
 }
 

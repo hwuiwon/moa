@@ -288,6 +288,8 @@ pub enum ActionReviewStatus {
     Cleared,
     /// Review was denied.
     Denied,
+    /// Review expired without a tenant-admin decision and failed closed.
+    Timeout,
 }
 
 impl ActionReviewStatus {

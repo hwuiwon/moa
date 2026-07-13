@@ -9,6 +9,7 @@ use moa_core::{
     types::hands::HandStatus, types::hands::SandboxTier, types::session::SessionMeta,
     types::tools::ToolDefinition, types::tools::ToolOutput,
 };
+use moa_observability::current_turn_root_span;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -283,31 +284,42 @@ impl ToolRouter {
         tool_definition: &ToolDefinition,
         server_name: &str,
     ) -> Result<(Option<String>, ToolOutput)> {
-        let server = self
-            .mcp_servers
-            .get(server_name)
-            .ok_or_else(|| MoaError::ProviderError(format!("unknown MCP server: {server_name}")))?;
-        let client = self.mcp_client(server_name).await?;
-        let extra_headers = if let (Some(proxy), Some(credentials)) =
-            (&self.mcp_proxy, server.credentials.as_ref())
-        {
-            // Trusted host-side credential resolution: read this server's vault
-            // credential directly and shape it into request headers. No proxy
-            // token is minted because nothing crosses an isolation boundary here.
-            proxy
-                .enrich_headers(&session.id, server_name, server_name, Some(credentials))
-                .await?
-        } else {
-            HashMap::new()
-        };
-        let output = client
-            .call_tool(&invocation.name, invocation.input.clone(), extra_headers)
-            .await?;
-        Ok((
-            None,
-            self.apply_output_budget(session, tool_definition, output)
-                .await,
-        ))
+        const MCP_DISPATCH_METHOD: &str = "tools/call";
+        let span = mcp_dispatch_span(server_name, MCP_DISPATCH_METHOD);
+        let record_span = span.clone();
+        async move {
+            let started_at = Instant::now();
+            let server = self.mcp_servers.get(server_name).ok_or_else(|| {
+                MoaError::ProviderError(format!("unknown MCP server: {server_name}"))
+            })?;
+            let client = self.mcp_client(server_name).await?;
+            let extra_headers = if let (Some(proxy), Some(credentials)) =
+                (&self.mcp_proxy, server.credentials.as_ref())
+            {
+                // Trusted host-side credential resolution: read this server's vault
+                // credential directly and shape it into request headers. No proxy
+                // token is minted because nothing crosses an isolation boundary here.
+                proxy
+                    .enrich_headers(&session.id, server_name, server_name, Some(credentials))
+                    .await?
+            } else {
+                HashMap::new()
+            };
+            let output = client
+                .call_tool(&invocation.name, invocation.input.clone(), extra_headers)
+                .await?;
+            record_span.record(
+                "moa.mcp.latency_ms",
+                started_at.elapsed().as_millis() as i64,
+            );
+            Ok((
+                None,
+                self.apply_output_budget(session, tool_definition, output)
+                    .await,
+            ))
+        }
+        .instrument(span)
+        .await
     }
 
     pub(super) async fn mcp_client(&self, server_name: &str) -> Result<Arc<MCPClient>> {
@@ -334,6 +346,29 @@ impl ToolRouter {
             .await
             .insert(server_name.to_string(), client);
         Ok(())
+    }
+}
+
+/// Builds an MCP dispatch span parented to the active turn root when present.
+///
+/// `server` and `method` are both configuration-bounded values (the configured
+/// MCP server name and the fixed JSON-RPC method used for tool calls), so
+/// neither can grow unbounded cardinality.
+fn mcp_dispatch_span(server: &str, method: &'static str) -> tracing::Span {
+    match current_turn_root_span() {
+        Some(parent) => tracing::info_span!(
+            parent: &parent,
+            "mcp_dispatch",
+            moa.mcp.server = %server,
+            moa.mcp.method = method,
+            moa.mcp.latency_ms = tracing::field::Empty,
+        ),
+        None => tracing::info_span!(
+            "mcp_dispatch",
+            moa.mcp.server = %server,
+            moa.mcp.method = method,
+            moa.mcp.latency_ms = tracing::field::Empty,
+        ),
     }
 }
 

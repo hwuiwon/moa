@@ -757,7 +757,7 @@ impl RestateSessionStore for SessionStoreImpl {
         Ok(ctx
             .run(|| async move {
                 let embedder_ref = embedder.as_ref();
-                let experiences = moa_skills::embeddings::backfill_experience_embeddings(
+                moa_skills::embeddings::backfill_experience_embeddings(
                     &store,
                     embedder_ref,
                     &config.learning.embeddings,
@@ -765,25 +765,13 @@ impl RestateSessionStore for SessionStoreImpl {
                 )
                 .await
                 .map_err(HandlerError::from)?;
-                let skills = moa_skills::embeddings::backfill_skill_embeddings(
+                moa_skills::embeddings::backfill_skill_embeddings(
                     &registry,
                     embedder_ref,
                     &config.learning.embeddings,
                 )
                 .await
                 .map_err(HandlerError::from)?;
-                // Counted inside the durable step so a replay reuses the journaled
-                // result instead of double-incrementing the counter.
-                metrics::counter!(
-                    "moa_learning_embeddings_backfilled_total",
-                    "kind" => "experience"
-                )
-                .increment(experiences as u64);
-                metrics::counter!(
-                    "moa_learning_embeddings_backfilled_total",
-                    "kind" => "skill"
-                )
-                .increment(skills as u64);
                 Ok::<(), HandlerError>(())
             })
             .name("backfill_learning_embeddings")

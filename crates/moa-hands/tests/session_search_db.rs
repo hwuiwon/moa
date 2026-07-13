@@ -41,6 +41,7 @@ async fn session_search_finds_prior_events() {
                 output_tokens: 5,
                 cost_cents: 1,
                 duration_ms: 20,
+                llm_ttft_ms: None,
             },
         )
         .await
@@ -104,6 +105,7 @@ async fn session_search_filters_error_events() {
                 output_tokens: 5,
                 cost_cents: 1,
                 duration_ms: 20,
+                llm_ttft_ms: None,
             },
         )
         .await

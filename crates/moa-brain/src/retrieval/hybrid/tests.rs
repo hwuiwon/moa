@@ -94,7 +94,14 @@ async fn reranker_reorders_candidates_when_enabled() {
         .await
         .expect("rerank should succeed");
 
-    assert_eq!(reranked, vec![second]);
+    assert_eq!(reranked.hits, vec![second.clone()]);
+    // Pins: a successful rerank captures the per-candidate score keyed by the
+    // reranked hit's uid and its pre-rerank index, so retrieval lineage records
+    // the real reranker output instead of fabricating it from fused order.
+    assert_eq!(reranked.scores.len(), 1);
+    assert_eq!(reranked.scores[0].uid, second.uid);
+    assert_eq!(reranked.scores[0].original_index, 1);
+    assert!((reranked.scores[0].relevance_score - 1.0).abs() < f32::EPSILON);
 }
 
 #[tokio::test]
@@ -1437,7 +1444,11 @@ async fn rerank_failure_falls_back_to_fused_pre_rerank_order() {
         .await
         .expect("reranker failure must degrade, not abort");
 
-    assert_eq!(out, vec![first, second]);
+    assert_eq!(out.hits, vec![first, second]);
+    assert!(
+        out.scores.is_empty(),
+        "a degraded reranker attributes no scores"
+    );
 }
 
 #[tokio::test]
@@ -1540,54 +1551,6 @@ async fn turbopuffer_dual_read_requires_configured_client() {
         error,
         RetrievalError::Vector(VectorError::TurbopufferUnavailable { .. })
     ));
-}
-
-#[test]
-fn leg_overlap_measures_top_k_set_intersection() {
-    // Pins: dual-read overlap is the top-k uid intersection size over the
-    // larger top-k set, and it honors the k cutoff.
-    let a = Uuid::from_u128(1);
-    let b = Uuid::from_u128(2);
-    let c = Uuid::from_u128(3);
-    let d = Uuid::from_u128(4);
-
-    // Disjoint top-k -> zero overlap.
-    assert_eq!(
-        leg_overlap(
-            &[leg_candidate(a), leg_candidate(b)],
-            &[leg_candidate(c), leg_candidate(d)],
-            10,
-        ),
-        0.0
-    );
-    // Identical top-k -> full overlap.
-    assert_eq!(
-        leg_overlap(
-            &[leg_candidate(a), leg_candidate(b)],
-            &[leg_candidate(a), leg_candidate(b)],
-            10,
-        ),
-        1.0
-    );
-    // Partial overlap: {a,b} vs {a,c} over k=2 -> 1/2.
-    assert_eq!(
-        leg_overlap(
-            &[leg_candidate(a), leg_candidate(b)],
-            &[leg_candidate(a), leg_candidate(c)],
-            2,
-        ),
-        0.5
-    );
-    // k cutoff: the lists diverge only past position 2, so the top-2 overlap
-    // is full even though the full lists differ.
-    assert_eq!(
-        leg_overlap(
-            &[leg_candidate(a), leg_candidate(b), leg_candidate(c)],
-            &[leg_candidate(b), leg_candidate(a), leg_candidate(d)],
-            2,
-        ),
-        1.0
-    );
 }
 
 #[test]

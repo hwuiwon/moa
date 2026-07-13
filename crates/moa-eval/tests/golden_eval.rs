@@ -477,6 +477,7 @@ impl RetrievalHarness {
         self.hybrid
             .retrieve(&planned, request)
             .await
+            .map(|output| output.hits)
             .map_err(box_error)
     }
 }

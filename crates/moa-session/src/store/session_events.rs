@@ -28,9 +28,11 @@ enum AppendPlan {
 
 /// Deltas folded into the session aggregate columns by a single UPDATE.
 ///
-/// Mirrors the retired `update_session_aggregates()` trigger exactly: only
-/// `BrainResponse` and `Checkpoint` contribute token/cost totals, and only
-/// `BrainResponse` increments `turn_count`.
+/// `BrainResponse`, `Checkpoint`, and `GuardrailCheck` all contribute
+/// token/cost totals so `sessions.total_cost_cents` captures every billed
+/// model call (the guardrail judge is auxiliary spend). Only `BrainResponse`
+/// increments `turn_count`, since a turn is one visible response. This mirrors
+/// the event set summed by the `session_summary` view and `tenant_cost_since`.
 #[derive(Default)]
 struct SessionAggregateDelta {
     event_count: i64,
@@ -72,6 +74,20 @@ impl SessionAggregateDelta {
                 self.output_tokens += *output_tokens as i64;
                 self.cost_cents += i64::from(*cost_cents);
                 self.last_checkpoint_seq = Some(sequence_num as i64);
+            }
+            Event::GuardrailCheck {
+                input_tokens_uncached,
+                input_tokens_cache_write,
+                input_tokens_cache_read,
+                output_tokens,
+                cost_cents,
+                ..
+            } => {
+                self.input_tokens_uncached += *input_tokens_uncached as i64;
+                self.input_tokens_cache_write += *input_tokens_cache_write as i64;
+                self.input_tokens_cache_read += *input_tokens_cache_read as i64;
+                self.output_tokens += *output_tokens as i64;
+                self.cost_cents += i64::from(*cost_cents);
             }
             _ => {}
         }
@@ -664,5 +680,77 @@ impl SessionEventLookupStore for PostgresSessionStore {
             review_id,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod aggregate_tests {
+    use super::SessionAggregateDelta;
+    use moa_core::events::Event;
+    use moa_core::types::guardrails::{GuardrailDirection, GuardrailMode};
+    use moa_core::types::identifiers::ModelId;
+    use moa_core::types::provider::ModelTier;
+
+    fn brain_response(cost_cents: u32) -> Event {
+        Event::BrainResponse {
+            text: "hi".to_string(),
+            thought_signature: None,
+            model: ModelId::new("gpt-5.4"),
+            model_tier: ModelTier::Main,
+            input_tokens_uncached: 100,
+            input_tokens_cache_write: 10,
+            input_tokens_cache_read: 5,
+            output_tokens: 20,
+            cost_cents,
+            duration_ms: 1,
+            llm_ttft_ms: None,
+        }
+    }
+
+    fn guardrail_check(cost_cents: u32) -> Event {
+        Event::GuardrailCheck {
+            direction: GuardrailDirection::Input,
+            mode: GuardrailMode::Enforce,
+            passed: true,
+            enforced: true,
+            reason: None,
+            model: Some(ModelId::new("guardrail-judge")),
+            policy_hash: "hash".to_string(),
+            input_tokens_uncached: 40,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
+            output_tokens: 3,
+            cost_cents,
+            duration_ms: 1,
+        }
+    }
+
+    #[test]
+    fn guardrail_check_adds_cost_and_tokens_but_not_a_turn() {
+        // Pins: GuardrailCheck is auxiliary spend — its cost and tokens fold
+        // into the session aggregate (so total_cost_cents captures every billed
+        // model call) but it does not count as a visible turn.
+        let mut delta = SessionAggregateDelta::default();
+        delta.add_event(&brain_response(7), 0);
+        delta.add_event(&guardrail_check(2), 1);
+
+        assert_eq!(delta.turn_count, 1, "only BrainResponse is a turn");
+        assert_eq!(delta.cost_cents, 9, "7c response + 2c guardrail");
+        assert_eq!(
+            delta.input_tokens_uncached, 140,
+            "100 response + 40 guardrail uncached input tokens"
+        );
+        assert_eq!(delta.output_tokens, 23, "20 response + 3 guardrail output");
+    }
+
+    #[test]
+    fn guardrail_check_alone_records_cost_without_a_turn() {
+        // Pins: a turn that is fully blocked at the input guardrail still bills
+        // its judge cost even though no BrainResponse is emitted.
+        let mut delta = SessionAggregateDelta::default();
+        delta.add_event(&guardrail_check(5), 0);
+
+        assert_eq!(delta.turn_count, 0);
+        assert_eq!(delta.cost_cents, 5);
     }
 }

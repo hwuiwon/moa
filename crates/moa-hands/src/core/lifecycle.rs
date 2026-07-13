@@ -11,10 +11,44 @@ use moa_core::{
     types::hands::HandSpec, types::hands::HandStatus, types::hands::SandboxFile,
     types::hands::SandboxTier, types::identifiers::TenantId, types::session::SessionMeta,
 };
-use moa_observability::record_sandbox_provision_duration;
+use moa_observability::{current_turn_root_span, record_sandbox_provision_duration};
+use tracing::Instrument;
 
 use super::leases::{HandLease, HandLeaseStatus, LeaseHandle};
 use super::{DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, ToolRouter};
+
+/// Builds a sandbox-provisioning span parented to the active turn root when present.
+///
+/// `operation` names the lifecycle stage (cache-aware dispatch, cold provision, or
+/// reprovision) so provisioning spans stay distinguishable in traces without
+/// putting any tenant-controlled data in the span name. `moa.sandbox.id` and
+/// `moa.sandbox.cold_start_ms` are declared empty and recorded once the caller
+/// knows the provisioned handle and, when a cold provision happened, its timing.
+fn sandbox_provision_span(
+    operation: &'static str,
+    provider: &str,
+    tier: &'static str,
+) -> tracing::Span {
+    match current_turn_root_span() {
+        Some(parent) => tracing::info_span!(
+            parent: &parent,
+            "sandbox_provision",
+            otel.name = %format!("sandbox_provision {operation}"),
+            moa.sandbox.id = tracing::field::Empty,
+            moa.sandbox.provider = %provider,
+            moa.sandbox.tier = %tier,
+            moa.sandbox.cold_start_ms = tracing::field::Empty,
+        ),
+        None => tracing::info_span!(
+            "sandbox_provision",
+            otel.name = %format!("sandbox_provision {operation}"),
+            moa.sandbox.id = tracing::field::Empty,
+            moa.sandbox.provider = %provider,
+            moa.sandbox.tier = %tier,
+            moa.sandbox.cold_start_ms = tracing::field::Empty,
+        ),
+    }
+}
 
 const HAND_LEASE_TTL_SECS: i64 = 60 * 60;
 /// Remaining-TTL threshold below which a reused active lease is renewed.
@@ -341,27 +375,34 @@ impl ToolRouter {
         session: &SessionMeta,
         worker_id: Option<&str>,
     ) -> Result<HandHandle> {
-        let key = session_provider_key(session, worker_id, provider);
-        if self.hand_leases.is_some() {
-            let cached_handle = self.active_hands.read().await.get(&key).cloned();
-            if let Some(handle) = cached_handle
-                && let Some(validated) = self
-                    .validate_cached_durable_hand(provider, session, worker_id, &key, &handle)
+        let tier_label = sandbox_tier_label(&tier);
+        let span = sandbox_provision_span("get_or_provision_hand", provider, tier_label);
+        let record_span = span.clone();
+        async move {
+            let key = session_provider_key(session, worker_id, provider);
+            let handle = if self.hand_leases.is_some() {
+                let cached_handle = self.active_hands.read().await.get(&key).cloned();
+                if let Some(handle) = cached_handle
+                    && let Some(validated) = self
+                        .validate_cached_durable_hand(provider, session, worker_id, &key, &handle)
+                        .await?
+                {
+                    validated
+                } else {
+                    self.get_or_provision_durable_hand(provider, tier, session, worker_id, key)
+                        .await?
+                }
+            } else if let Some(handle) = self.active_hands.read().await.get(&key) {
+                handle.clone()
+            } else {
+                self.provision_uncached_hand(provider, tier, session, key)
                     .await?
-            {
-                return Ok(validated);
-            }
-            return self
-                .get_or_provision_durable_hand(provider, tier, session, worker_id, key)
-                .await;
+            };
+            record_span.record("moa.sandbox.id", hand_id(&handle));
+            Ok(handle)
         }
-
-        if let Some(handle) = self.active_hands.read().await.get(&key) {
-            return Ok(handle.clone());
-        }
-
-        self.provision_uncached_hand(provider, tier, session, key)
-            .await
+        .instrument(span)
+        .await
     }
 
     async fn validate_cached_durable_hand(
@@ -635,37 +676,45 @@ impl ToolRouter {
         session: &SessionMeta,
         key: String,
     ) -> Result<HandHandle> {
-        let provider_impl = self
-            .providers
-            .get(provider)
-            .ok_or_else(|| MoaError::ProviderError(format!("unknown hand provider: {provider}")))?;
-        let workspace_mount =
-            if provider == DEFAULT_PROVIDER_NAME && matches!(tier, SandboxTier::Local) {
-                self.workspace_roots
-                    .read()
-                    .await
-                    .get(&tenant_key(session))
-                    .cloned()
-            } else {
-                None
-            };
         let tier_label = sandbox_tier_label(&tier);
-        let started_at = Instant::now();
-        let handle = provider_impl
-            .provision(HandSpec {
-                sandbox_tier: tier,
-                image: None,
-                resources: HandResources::default(),
-                env: HashMap::new(),
-                workspace_mount,
-                idle_timeout: DEFAULT_TOOL_TIMEOUT,
-                max_lifetime: DEFAULT_TOOL_TIMEOUT,
-            })
-            .await?;
-        record_sandbox_provision_duration(provider, tier_label, started_at.elapsed());
+        let span = sandbox_provision_span("provision_uncached_hand", provider, tier_label);
+        let record_span = span.clone();
+        async move {
+            let provider_impl = self.providers.get(provider).ok_or_else(|| {
+                MoaError::ProviderError(format!("unknown hand provider: {provider}"))
+            })?;
+            let workspace_mount =
+                if provider == DEFAULT_PROVIDER_NAME && matches!(tier, SandboxTier::Local) {
+                    self.workspace_roots
+                        .read()
+                        .await
+                        .get(&tenant_key(session))
+                        .cloned()
+                } else {
+                    None
+                };
+            let started_at = Instant::now();
+            let handle = provider_impl
+                .provision(HandSpec {
+                    sandbox_tier: tier,
+                    image: None,
+                    resources: HandResources::default(),
+                    env: HashMap::new(),
+                    workspace_mount,
+                    idle_timeout: DEFAULT_TOOL_TIMEOUT,
+                    max_lifetime: DEFAULT_TOOL_TIMEOUT,
+                })
+                .await?;
+            let cold_start = started_at.elapsed();
+            record_sandbox_provision_duration(provider, tier_label, cold_start);
+            record_span.record("moa.sandbox.id", hand_id(&handle));
+            record_span.record("moa.sandbox.cold_start_ms", cold_start.as_millis() as i64);
 
-        self.active_hands.write().await.insert(key, handle.clone());
-        Ok(handle)
+            self.active_hands.write().await.insert(key, handle.clone());
+            Ok(handle)
+        }
+        .instrument(span)
+        .await
     }
 
     async fn destroy_provisioned_hand(&self, provider: &str, key: &str, handle: &HandHandle) {
@@ -757,56 +806,66 @@ impl ToolRouter {
         provider: &str,
         tier: &SandboxTier,
     ) -> Result<HandHandle> {
-        let scope = worker_id.unwrap_or_default();
-        let key = session_provider_key(session, worker_id, provider);
-        let old_handle = self.active_hands.write().await.remove(&key);
-        let provider_impl = self
-            .providers
-            .get(provider)
-            .ok_or_else(|| MoaError::ProviderError(format!("unknown hand provider: {provider}")))?;
+        let tier_label = sandbox_tier_label(tier);
+        let span = sandbox_provision_span("reprovision_hand", provider, tier_label);
+        let record_span = span.clone();
+        async move {
+            let scope = worker_id.unwrap_or_default();
+            let key = session_provider_key(session, worker_id, provider);
+            let old_handle = self.active_hands.write().await.remove(&key);
+            let provider_impl = self.providers.get(provider).ok_or_else(|| {
+                MoaError::ProviderError(format!("unknown hand provider: {provider}"))
+            })?;
 
-        if let Some(handle) = old_handle.as_ref()
-            && let Err(error) = provider_impl.destroy(handle).await
-        {
-            tracing::warn!(
-                session_id = %session.id,
-                worker_id = %scope,
-                provider,
-                hand_id = %hand_id(handle),
-                error = %error,
-                "failed to destroy unhealthy hand before re-provisioning"
-            );
-        }
-
-        if let Some(lease_store) = &self.hand_leases
-            && let Ok(Some(lease)) = lease_store.get(session.id, scope, provider).await
-            && let Err(error) = lease_store
-                .mark_status(
-                    session.id,
-                    scope,
+            if let Some(handle) = old_handle.as_ref()
+                && let Err(error) = provider_impl.destroy(handle).await
+            {
+                tracing::warn!(
+                    session_id = %session.id,
+                    worker_id = %scope,
                     provider,
-                    lease.generation,
-                    HandLeaseStatus::Stale,
-                )
-                .await
-        {
-            tracing::warn!(
-                session_id = %session.id,
-                worker_id = %scope,
-                provider,
-                generation = lease.generation,
-                error = %error,
-                "failed to mark durable hand lease stale before re-provisioning"
-            );
-        }
+                    hand_id = %hand_id(handle),
+                    error = %error,
+                    "failed to destroy unhealthy hand before re-provisioning"
+                );
+            }
 
-        let handle = self
-            .get_or_provision_hand(provider, tier.clone(), session, worker_id)
-            .await?;
-        if let Some(files) = self.installed_files.read().await.get(&key).cloned() {
-            provider_impl.install_files(&handle, &files).await?;
+            if let Some(lease_store) = &self.hand_leases
+                && let Ok(Some(lease)) = lease_store.get(session.id, scope, provider).await
+                && let Err(error) = lease_store
+                    .mark_status(
+                        session.id,
+                        scope,
+                        provider,
+                        lease.generation,
+                        HandLeaseStatus::Stale,
+                    )
+                    .await
+            {
+                tracing::warn!(
+                    session_id = %session.id,
+                    worker_id = %scope,
+                    provider,
+                    generation = lease.generation,
+                    error = %error,
+                    "failed to mark durable hand lease stale before re-provisioning"
+                );
+            }
+
+            let started_at = Instant::now();
+            let handle = self
+                .get_or_provision_hand(provider, tier.clone(), session, worker_id)
+                .await?;
+            let cold_start = started_at.elapsed();
+            record_span.record("moa.sandbox.id", hand_id(&handle));
+            record_span.record("moa.sandbox.cold_start_ms", cold_start.as_millis() as i64);
+            if let Some(files) = self.installed_files.read().await.get(&key).cloned() {
+                provider_impl.install_files(&handle, &files).await?;
+            }
+            Ok(handle)
         }
-        Ok(handle)
+        .instrument(span)
+        .await
     }
 }
 

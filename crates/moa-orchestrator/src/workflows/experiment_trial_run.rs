@@ -25,8 +25,8 @@ use moa_experiments::plan::{PlanSimulationSelection, select_simulation};
 use moa_experiments::store::ExperimentStore;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_observability::{
-    current_trace_id, record_experiment_trial, record_experiment_trial_duration,
-    record_simulation_cost_cents, record_simulation_tokens, record_simulation_turn,
+    current_trace_id, record_experiment_trial, record_simulation_cost_cents,
+    record_simulation_tokens, record_simulation_turn,
 };
 use moa_providers::ProviderRegistry;
 use moa_session::PostgresSessionStore;

@@ -286,6 +286,7 @@ impl EventFactory {
             output_tokens: 1,
             cost_cents: 0,
             duration_ms: 1,
+            llm_ttft_ms: None,
         });
     }
 

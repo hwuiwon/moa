@@ -158,6 +158,7 @@ fn build_stage_span(
         moa.pipeline.stage.items_excluded = tracing::field::Empty,
         moa.pipeline.stage.tokens_before = tracing::field::Empty,
         moa.pipeline.stage.tokens_after = tracing::field::Empty,
+        moa.pipeline.stage.duration_ms = tracing::field::Empty,
         moa.query_rewrite.decision = tracing::field::Empty,
         moa.query_rewrite.reason = tracing::field::Empty,
         moa.query_rewrite.llm_called = tracing::field::Empty,
@@ -288,6 +289,10 @@ fn finalize_stage_report(
         output.items_excluded.len() as i64,
     );
     stage_span.record("moa.pipeline.stage.tokens_after", tokens_after as i64);
+    stage_span.record(
+        "moa.pipeline.stage.duration_ms",
+        output.duration.as_millis() as i64,
+    );
     if stage.name() == "query_rewrite" {
         record_query_rewrite_stage_metadata(stage_span, &output);
     }
@@ -330,7 +335,7 @@ fn record_query_rewrite_stage_metadata(span: &tracing::Span, output: &ProcessorO
     );
     span.record("moa.query_rewrite.reason", tracing::field::display(reason));
     span.record("moa.query_rewrite.llm_called", llm_called);
-    record_query_rewrite_decision(decision, reason, llm_called, output.duration);
+    record_query_rewrite_decision(decision, reason, llm_called);
 }
 
 fn metadata_str<'a>(output: &'a ProcessorOutput, key: &str) -> Option<&'a str> {

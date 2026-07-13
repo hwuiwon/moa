@@ -1,5 +1,6 @@
 //! Runtime metrics, tracing bootstrap, and Restate observability helpers.
 
+pub mod propagation;
 pub mod restate_observability;
 pub mod runtime_metrics;
 pub mod telemetry;
@@ -9,22 +10,26 @@ pub mod turn_latency;
 #[cfg(test)]
 mod test_capture;
 
-pub use restate_observability::current_trace_id;
+pub use propagation::{
+    TRACEPARENT_HEADER, TRACESTATE_HEADER, adopt_remote_parent, current_trace_headers,
+    init_trace_propagation, trace_headers_for_span,
+};
+pub use restate_observability::{current_trace_id, trace_ids_for_span};
 pub use runtime_metrics::{
     SESSION_EVENT_APPEND_PHASE_METRIC, SessionEventAppendPhase, TURN_LATENCY_REPORT_STEPS,
     TURN_STEP_DURATION_METRIC, TurnLatencyStep, init_metrics, metrics_endpoint_url,
-    record_action_review_decision, record_action_review_requested,
-    record_api_key_validation_duration, record_cache_hit_rate,
-    record_context_pipeline_construction, record_experiment_learning_candidates,
+    record_action_review_decision, record_action_review_oldest_pending_age,
+    record_action_review_pending_depth, record_action_review_requested,
+    record_api_key_validation_duration, record_approval_wait, record_builtin_approval_decision,
+    record_builtin_approval_oldest_pending_age, record_builtin_approval_pending_depth,
+    record_builtin_approval_wait, record_cache_hit_rate, record_experiment_learning_candidates,
     record_experiment_run, record_experiment_score_rows, record_experiment_trial,
-    record_experiment_trial_duration, record_genai_client_operation_duration,
-    record_genai_client_time_to_first_chunk, record_genai_client_token_usage,
-    record_knowledge_retrieval_duration, record_knowledge_retrieval_hits,
-    record_knowledge_sync_run, record_llm_cost_cents, record_memory_operation,
-    record_query_rewrite_decision, record_retrieval_embedder_construction,
-    record_sandbox_provision_duration, record_session_created, record_session_error,
-    record_session_event_append, record_session_event_append_phase_duration,
-    record_session_event_decoded_bytes, record_session_event_load, record_sessions_active,
+    record_genai_client_operation_duration, record_genai_client_time_to_first_chunk,
+    record_genai_client_token_usage, record_knowledge_retrieval_duration,
+    record_knowledge_retrieval_hits, record_knowledge_sync_run, record_llm_cost_cents,
+    record_memory_operation, record_query_rewrite_decision, record_sandbox_provision_duration,
+    record_session_created, record_session_error, record_session_event_append,
+    record_session_event_append_phase_duration, record_session_event_load, record_sessions_active,
     record_simulation_cost_cents, record_simulation_tokens, record_simulation_turn,
     record_tool_call, record_tool_failure, record_tool_idempotency_scan,
     record_tool_output_truncated_metric, record_tool_reprovision, record_tool_retry,

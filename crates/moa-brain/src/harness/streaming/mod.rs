@@ -33,8 +33,8 @@ use super::StreamedTurnResult;
 use super::budget::enforce_tenant_budget;
 use super::context_build::{
     BuildTurnContextOptions, append_event, build_cache_report, build_turn_context,
-    calculate_response_cost_cents, complete_cache_report, last_user_message_text,
-    record_turn_span_metrics, turn_number_for_events,
+    complete_cache_report, last_user_message_text, record_turn_span_metrics,
+    turn_number_for_events,
 };
 use super::tool_dispatch::{DurableToolFailure, ToolCallOutcome, handle_tool_call};
 
@@ -118,7 +118,8 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             register_selected_skill_files(tool_router.as_deref(), &session, &mut ctx).await;
             augment_agentic_memory_tools(&mut ctx, tool_router.as_deref());
             let citation_sources =
-                emit_context_lineage(lineage.as_ref(), turn_id, &session, &ctx, &pipeline_compile_span);
+                emit_context_lineage(lineage.as_ref(), turn_id, &session, &ctx, &pipeline_compile_span)
+                    .await;
 
             let mut emit_runtime = |event| {
                 let _ = runtime_tx.send(event);
@@ -207,8 +208,9 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 )
             })?;
             let response_usage = response.token_usage();
-            let response_cost_cents =
-                calculate_response_cost_cents(&response, &llm_provider.capabilities().pricing);
+            let pricing = &llm_provider.capabilities().pricing;
+            let response_cost_cents = pricing.cost_cents(&response_usage);
+            let response_cost_micros = pricing.cost_micros(&response_usage);
             emit_generation_lineage(
                 lineage.as_ref(),
                 turn_id,
@@ -217,7 +219,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 &request_model,
                 &response,
                 &citation_sources,
-                response_cost_cents,
+                response_cost_micros,
                 llm_call_duration,
                 &llm_call_span,
                 None,
@@ -265,6 +267,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                         output_tokens: response_usage.output_tokens,
                         cost_cents: response_cost_cents,
                         duration_ms: response.duration_ms,
+                        llm_ttft_ms: streamed.ttft_ms,
                     },
                 )
                 .await?;
@@ -441,24 +444,31 @@ fn spawn_incident_capture(
         return;
     };
     let session = session.clone();
-    tokio::spawn(async move {
-        match moa_memory_ingest::record_incident(
-            &session,
-            turn_seq,
-            &failure.tool_name,
-            failure.error_class,
-        )
-        .await
-        {
-            Ok(Some(uid)) => {
-                tracing::debug!(session_id = %session.id, %uid, "recorded turn incident");
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::debug!(session_id = %session.id, %error, "incident capture skipped");
+    // Parent the detached write to the turn root so it stays in the turn's trace
+    // instead of surfacing as an orphan root span in Tempo.
+    let capture_span =
+        moa_observability::current_turn_root_span().unwrap_or_else(tracing::Span::current);
+    tokio::spawn(
+        async move {
+            match moa_memory_ingest::record_incident(
+                &session,
+                turn_seq,
+                &failure.tool_name,
+                failure.error_class,
+            )
+            .await
+            {
+                Ok(Some(uid)) => {
+                    tracing::debug!(session_id = %session.id, %uid, "recorded turn incident");
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(session_id = %session.id, %error, "incident capture skipped");
+                }
             }
         }
-    });
+        .instrument(capture_span),
+    );
 }
 
 async fn register_selected_skill_files(

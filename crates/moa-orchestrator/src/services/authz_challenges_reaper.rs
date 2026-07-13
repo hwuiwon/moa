@@ -5,6 +5,10 @@ use std::time::Duration;
 
 use moa_authz::{AwakeableResolveError, AwakeableResolver};
 use moa_core::traits::ApprovalDecision;
+use moa_observability::{
+    record_builtin_approval_decision, record_builtin_approval_oldest_pending_age,
+    record_builtin_approval_pending_depth, record_builtin_approval_wait,
+};
 use sqlx::PgPool;
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -76,6 +80,8 @@ impl AuthzChallengeReaper {
                 if let Err(error) = self.sweep(resolver.as_ref()).await {
                     tracing::error!(error = %error, "authz challenge reaper sweep failed");
                 }
+                // Best-effort in the tick loop; the error is logged inside.
+                let _ = self.sample_gauges().await;
             }
         });
         AuthzChallengeReaperHandle {
@@ -84,10 +90,38 @@ impl AuthzChallengeReaper {
         }
     }
 
+    /// Samples the pending builtin-approval queue depth and oldest-pending age.
+    ///
+    /// Returns the sampling error so tests can assert the query decodes
+    /// against the real schema; the tick loop treats it as best-effort and a
+    /// sampling error never fails a tick, matching the authz outbox backlog
+    /// gauge.
+    pub async fn sample_gauges(&self) -> Result<(), sqlx::Error> {
+        match authz_challenge_store::builtin_approval_pending_stats(&self.pool).await {
+            Ok(stats) => {
+                record_builtin_approval_pending_depth(stats.pending_depth.max(0) as u64);
+                record_builtin_approval_oldest_pending_age(stats.oldest_pending_age_seconds);
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to sample builtin approval queue gauges");
+                Err(error)
+            }
+        }
+    }
+
     /// Run one timeout sweep.
     pub async fn sweep(&self, resolver: &dyn AwakeableResolver) -> Result<usize, ReaperError> {
-        let unresolved =
+        let sweep =
             authz_challenge_store::unresolved_terminal_builtin_challenges(&self.pool).await?;
+        for timing in &sweep.timed_out {
+            record_builtin_approval_decision("timeout");
+            let wait = (timing.decided_at - timing.created_at)
+                .to_std()
+                .unwrap_or_default();
+            record_builtin_approval_wait(wait);
+        }
+        let unresolved = sweep.unresolved;
 
         let mut resolved_count = 0usize;
         for challenge in &unresolved {

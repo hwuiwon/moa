@@ -20,8 +20,9 @@ use sqlx::PgPool;
 
 use crate::planning::{PlannedQuery, Strategy};
 use crate::retrieval::{
-    MemoryAdmissionPolicy, PlannedRetriever, RetrievalHit, RetrievalRequest, RetrievalScopePlan,
-    RetrievalStrategy, decompose_query, dedupe_and_rank_hits, route_query,
+    MemoryAdmissionPolicy, PlannedRetriever, RetrievalHit, RetrievalOutput, RetrievalProvenance,
+    RetrievalRequest, RetrievalScopePlan, RetrievalStrategy, decompose_query, dedupe_and_rank_hits,
+    route_query,
 };
 
 /// Maximum number of scope-keyed retrieval runtimes retained process-wide.
@@ -428,7 +429,7 @@ impl GraphMemoryRetriever {
         }
 
         let retrieval_started = Instant::now();
-        let hits = match strategy {
+        let (hits, provenance) = match strategy {
             RetrievalStrategy::Deep => {
                 self.retrieve_hits_deep(ctx, query, policy, result_limit)
                     .await?
@@ -437,7 +438,7 @@ impl GraphMemoryRetriever {
                 self.retrieve_hits(ctx, query.to_string(), policy, result_limit)
                     .await?
             }
-            RetrievalStrategy::Skip => Vec::new(),
+            RetrievalStrategy::Skip => (Vec::new(), RetrievalProvenance::default()),
         };
         lineage::emit_retrieval_lineage(
             self.lineage.as_ref(),
@@ -445,8 +446,29 @@ impl GraphMemoryRetriever {
             query,
             &hits,
             retrieval_started.elapsed(),
-        );
+            &self.embedder_provenance(),
+            &provenance,
+        )
+        .await;
         Ok((strategy, hits))
+    }
+
+    /// Resolves the real embedder model and dimensionality for retrieval lineage.
+    ///
+    /// Prefers the installed embedding provider's resolved identity; falls back to
+    /// the configured selector and the default vector dimension when no provider
+    /// is installed.
+    fn embedder_provenance(&self) -> lineage::EmbedderProvenance {
+        match self.embedder.as_deref() {
+            Some(embedder) => lineage::EmbedderProvenance {
+                model: embedder.model_id().to_string(),
+                dim: embedder.dimensions().min(u16::MAX as usize) as u16,
+            },
+            None => lineage::EmbedderProvenance {
+                model: self.config.memory.embedding_model.clone(),
+                dim: moa_memory_vector::VECTOR_DIMENSION as u16,
+            },
+        }
     }
 
     async fn retrieve_hits(
@@ -455,10 +477,10 @@ impl GraphMemoryRetriever {
         query: String,
         policy: &MemoryAdmissionPolicy,
         requested_result_limit: usize,
-    ) -> Result<Vec<RetrievalHit>> {
+    ) -> Result<(Vec<RetrievalHit>, RetrievalProvenance)> {
         let retrieval_plan = policy.plans();
         if retrieval_plan.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), RetrievalProvenance::default()));
         }
         let result_limit = requested_result_limit;
         let max_pii_class = policy.max_pii_class()?;
@@ -502,36 +524,46 @@ impl GraphMemoryRetriever {
         };
 
         // Resolve the missed scopes against the backend in parallel; cached
-        // scopes reuse their probe result.
+        // scopes reuse their probe result and carry no fresh provenance.
         let query_embedding = query_embedding.as_slice();
-        let scope_hits = try_join_all(probes.iter().map(|probe| async move {
+        let scope_results = try_join_all(probes.iter().map(|probe| async move {
             match &probe.cached_hits {
-                Some(hits) => Ok::<_, MoaError>(hits.clone()),
+                Some(hits) => Ok::<_, MoaError>((hits.clone(), RetrievalProvenance::default())),
                 None => {
-                    self.retrieve_scope_backend(
-                        ctx,
-                        query_str,
-                        probe,
-                        query_embedding,
-                        max_pii_class,
-                        result_limit,
-                    )
-                    .await
+                    let output = self
+                        .retrieve_scope_backend(
+                            ctx,
+                            query_str,
+                            probe,
+                            query_embedding,
+                            max_pii_class,
+                            result_limit,
+                        )
+                        .await?;
+                    Ok(provenance_from_output(output))
                 }
             }
         }))
         .await?;
 
         // Merge in scope order, admitting each scope's hits under its own plan.
+        // Every candidate the admission policy rejects is counted so the turn can
+        // emit one aggregated scope-enforcement decision.
         let mut hits = Vec::new();
-        for (probe, results) in probes.iter().zip(scope_hits) {
-            hits.extend(
-                results
-                    .into_iter()
-                    .filter_map(|hit| policy.admit_hit(hit, probe.scope_plan)),
-            );
+        let mut provenance = RetrievalProvenance::default();
+        for (probe, (results, scope_provenance)) in probes.iter().zip(scope_results) {
+            provenance.merge(scope_provenance);
+            let before = results.len();
+            let admitted = results
+                .into_iter()
+                .filter_map(|hit| policy.admit_hit(hit, probe.scope_plan))
+                .collect::<Vec<_>>();
+            provenance.admission_rejected = provenance
+                .admission_rejected
+                .saturating_add(before.saturating_sub(admitted.len()));
+            hits.extend(admitted);
         }
-        Ok(dedupe_and_rank_hits(hits, result_limit))
+        Ok((dedupe_and_rank_hits(hits, result_limit), provenance))
     }
 
     /// Runs the deep, decomposed retrieval path for multi-hop queries.
@@ -548,7 +580,7 @@ impl GraphMemoryRetriever {
         query: &str,
         policy: &MemoryAdmissionPolicy,
         requested_result_limit: usize,
-    ) -> Result<Vec<RetrievalHit>> {
+    ) -> Result<(Vec<RetrievalHit>, RetrievalProvenance)> {
         let mut sub_queries = decompose_query(query);
         if sub_queries.is_empty() {
             sub_queries.push(query.to_string());
@@ -564,11 +596,15 @@ impl GraphMemoryRetriever {
                 self.retrieve_hits(ctx, sub_query, policy, requested_result_limit)
             }))
             .await?;
+        // Fold each sub-query's provenance into one turn-level record so lineage
+        // reflects the full decomposed retrieval.
         let mut fused = Vec::new();
-        for hits in sub_results {
+        let mut provenance = RetrievalProvenance::default();
+        for (hits, sub_provenance) in sub_results {
+            provenance.merge(sub_provenance);
             fused.extend(hits);
         }
-        Ok(dedupe_and_rank_hits(fused, result_limit))
+        Ok((dedupe_and_rank_hits(fused, result_limit), provenance))
     }
 
     /// Plans one scope and probes its read-time cache without an embedding.
@@ -622,7 +658,7 @@ impl GraphMemoryRetriever {
         query_embedding: &[f32],
         max_pii_class: PiiClass,
         result_limit: usize,
-    ) -> Result<Vec<RetrievalHit>> {
+    ) -> Result<RetrievalOutput> {
         let request = self.build_scope_request(
             ctx,
             query,
@@ -709,6 +745,17 @@ impl GraphMemoryRetriever {
             .build_runtime(scope, &self.config, &self.pool, self.assume_app_role)
             .await
     }
+}
+
+/// Splits a backend retrieval output into its hits and lineage provenance.
+///
+/// The raw graph paths captured in the retrieval diagnostics are moved into the
+/// provenance so the emitter records real traversal paths without re-walking the
+/// graph; ranking has already run, so this is observation-only.
+fn provenance_from_output(mut output: RetrievalOutput) -> (Vec<RetrievalHit>, RetrievalProvenance) {
+    let mut provenance = output.provenance;
+    provenance.graph_paths = std::mem::take(&mut output.diagnostics.path_traces);
+    (output.hits, provenance)
 }
 
 fn memory_evidence_source_metadata(hit: &RetrievalHit) -> Result<MemoryEvidenceSourceMetadata> {
@@ -860,8 +907,6 @@ impl ContextProcessor for GraphMemoryRetriever {
                     evidence_budget,
                     "graph-memory injection omitted ranked hits to fit the memory budget"
                 );
-                metrics::counter!("moa_memory_injection_omitted_hits_total")
-                    .increment(omitted as u64);
             }
             if budgeted.hit_count == 0 {
                 // The budget could not fit even one hit; inject nothing rather than
@@ -1052,6 +1097,15 @@ mod tests {
         extract_search_query, should_disable_graph_expansion,
     };
 
+    /// Wraps scripted hits in a retrieval output with empty diagnostics/provenance.
+    fn test_output(hits: Vec<crate::retrieval::RetrievalHit>) -> crate::retrieval::RetrievalOutput {
+        crate::retrieval::RetrievalOutput {
+            hits,
+            diagnostics: Default::default(),
+            provenance: Default::default(),
+        }
+    }
+
     fn retrieval_scopes_from_context(ctx: &WorkingContext) -> Vec<RetrievalScopePlan> {
         MemoryAdmissionPolicy::from_working_context(ctx)
             .expect("memory admission policy should parse")
@@ -1135,8 +1189,8 @@ mod tests {
             &self,
             _planned: &crate::planning::PlannedQuery,
             _req: crate::retrieval::RetrievalRequest,
-        ) -> crate::retrieval::Result<Vec<crate::retrieval::RetrievalHit>> {
-            Ok(Vec::new())
+        ) -> crate::retrieval::Result<crate::retrieval::RetrievalOutput> {
+            Ok(test_output(Vec::new()))
         }
     }
 
@@ -1181,7 +1235,7 @@ mod tests {
             &self,
             _planned: &crate::planning::PlannedQuery,
             req: crate::retrieval::RetrievalRequest,
-        ) -> crate::retrieval::Result<Vec<crate::retrieval::RetrievalHit>> {
+        ) -> crate::retrieval::Result<crate::retrieval::RetrievalOutput> {
             self.calls
                 .lock()
                 .expect("scripted retriever calls lock")
@@ -1190,11 +1244,12 @@ mod tests {
                     label_filter: req.label_filter.clone(),
                     strategy: req.strategy,
                 });
-            Ok(self
-                .hits_by_scope
-                .get(&req.scope)
-                .cloned()
-                .unwrap_or_default())
+            Ok(test_output(
+                self.hits_by_scope
+                    .get(&req.scope)
+                    .cloned()
+                    .unwrap_or_default(),
+            ))
         }
     }
 
@@ -1235,7 +1290,7 @@ mod tests {
             &self,
             _planned: &crate::planning::PlannedQuery,
             req: crate::retrieval::RetrievalRequest,
-        ) -> crate::retrieval::Result<Vec<crate::retrieval::RetrievalHit>> {
+        ) -> crate::retrieval::Result<crate::retrieval::RetrievalOutput> {
             let query = req.query_text.to_ascii_lowercase();
             self.queries
                 .lock()
@@ -1247,7 +1302,7 @@ mod tests {
                 .find(|(marker, _)| query.contains(marker.as_str()))
                 .map(|(_, hits)| hits.clone())
                 .unwrap_or_default();
-            Ok(hits)
+            Ok(test_output(hits))
         }
     }
 
@@ -1285,9 +1340,9 @@ mod tests {
             &self,
             _planned: &crate::planning::PlannedQuery,
             _req: crate::retrieval::RetrievalRequest,
-        ) -> crate::retrieval::Result<Vec<crate::retrieval::RetrievalHit>> {
+        ) -> crate::retrieval::Result<crate::retrieval::RetrievalOutput> {
             self.retrieve_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Vec::new())
+            Ok(test_output(Vec::new()))
         }
 
         async fn retrieve_cached(

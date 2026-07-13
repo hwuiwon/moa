@@ -1379,6 +1379,9 @@ async fn start_turn_inner(
     request: StartTurnRequest,
     session_limits: &SessionLimitsConfig,
 ) -> Result<StartTurnResponse, HandlerError> {
+    // Continue the caller's trace (edge or Slack ingress) so the turn this
+    // schedules dispatches TurnExecution under the same end-to-end trace.
+    crate::ctx::adopt_incoming_trace_parent(ctx);
     let session_id = parse_session_key(ctx.key())?;
     let identity = require_session_participant(ctx, session_id).await?;
     let mut state = SessionVoState::load_from(ctx).await?;

@@ -14,7 +14,7 @@ use sqlx::PgPool;
 use crate::planning::PlannedQuery;
 use crate::retrieval::hybrid::HybridRetriever;
 use crate::retrieval::types::Result;
-use crate::retrieval::{RetrievalHit, RetrievalRequest};
+use crate::retrieval::{RetrievalHit, RetrievalOutput, RetrievalRequest};
 
 const DEFAULT_MAX_TENANTS: u64 = 1_000;
 const DEFAULT_TENANT_CAPACITY: u64 = 200;
@@ -28,19 +28,19 @@ pub trait RetrievalBackend: Send + Sync {
     /// Returns a stable fingerprint for the backend's ranking pipeline.
     fn ranking_fingerprint(&self) -> [u8; 32];
 
-    /// Runs one uncached retrieval request.
-    async fn retrieve(&self, req: RetrievalRequest) -> Result<Vec<RetrievalHit>>;
+    /// Runs one uncached retrieval request, returning hits and provenance.
+    async fn retrieve(&self, req: RetrievalRequest) -> Result<RetrievalOutput>;
 }
 
 /// Planned retrieval abstraction used by graph-memory pipeline tests and production caches.
 #[async_trait]
 pub trait PlannedRetriever: Send + Sync {
-    /// Retrieves graph-memory hits for an already planned query.
+    /// Retrieves graph-memory hits and provenance for an already planned query.
     async fn retrieve(
         &self,
         planned: &PlannedQuery,
         req: RetrievalRequest,
-    ) -> Result<Vec<RetrievalHit>>;
+    ) -> Result<RetrievalOutput>;
 
     /// Returns cached hits when a fresh cache entry already exists, without
     /// running the backend or requiring a query embedding.
@@ -67,8 +67,8 @@ impl RetrievalBackend for HybridRetriever {
         HybridRetriever::ranking_fingerprint(self)
     }
 
-    async fn retrieve(&self, req: RetrievalRequest) -> Result<Vec<RetrievalHit>> {
-        HybridRetriever::retrieve(self, req).await
+    async fn retrieve(&self, req: RetrievalRequest) -> Result<RetrievalOutput> {
+        HybridRetriever::retrieve_with_diagnostics(self, req).await
     }
 }
 
@@ -197,11 +197,15 @@ impl CachedHybridRetriever {
     }
 
     /// Retrieves graph-memory hits, using the versioned cache when eligible.
+    ///
+    /// A cache hit returns the stored hits with empty diagnostics and provenance:
+    /// the backend did not run this turn, so there are no fresh stage timings,
+    /// reranker scores, or graph paths to attribute.
     pub async fn retrieve(
         &self,
         planned: &PlannedQuery,
         req: RetrievalRequest,
-    ) -> Result<Vec<RetrievalHit>> {
+    ) -> Result<RetrievalOutput> {
         let started = std::time::Instant::now();
         if !self.cacheable_scope(&req.scope) {
             metrics::counter!("moa_retrieval_cache_total", "outcome" => "bypass").increment(1);
@@ -223,7 +227,11 @@ impl CachedHybridRetriever {
                 metrics::counter!("moa_retrieval_cache_total", "outcome" => "hit").increment(1);
                 metrics::gauge!("moa_retrieval_cache_entries")
                     .set(tenant_cache.entry_count() as f64);
-                return Ok(entry.hits);
+                return Ok(RetrievalOutput {
+                    hits: entry.hits,
+                    diagnostics: Default::default(),
+                    provenance: Default::default(),
+                });
             }
             metrics::counter!("moa_retrieval_cache_total", "outcome" => "stale").increment(1);
             tenant_cache.invalidate(&key).await;
@@ -231,19 +239,19 @@ impl CachedHybridRetriever {
             metrics::counter!("moa_retrieval_cache_total", "outcome" => "miss").increment(1);
         }
 
-        let hits = self.inner.retrieve(req).await?;
+        let output = self.inner.retrieve(req).await?;
         tenant_cache
             .insert(
                 key,
                 CachedEntry {
-                    hits: hits.clone(),
+                    hits: output.hits.clone(),
                     changelog_version: current_version,
                     cached_at: Utc::now(),
                 },
             )
             .await;
         metrics::gauge!("moa_retrieval_cache_entries").set(tenant_cache.entry_count() as f64);
-        Ok(hits)
+        Ok(output)
     }
 
     /// Returns a fresh cache entry without touching the backend or embedding.
@@ -304,7 +312,7 @@ impl PlannedRetriever for CachedHybridRetriever {
         &self,
         planned: &PlannedQuery,
         req: RetrievalRequest,
-    ) -> Result<Vec<RetrievalHit>> {
+    ) -> Result<RetrievalOutput> {
         CachedHybridRetriever::retrieve(self, planned, req).await
     }
 
@@ -726,36 +734,40 @@ mod tests {
             ranking_fingerprint(&RankingConfig::default())
         }
 
-        async fn retrieve(&self, _req: RetrievalRequest) -> Result<Vec<RetrievalHit>> {
+        async fn retrieve(&self, _req: RetrievalRequest) -> Result<RetrievalOutput> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             let uid = Uuid::now_v7();
-            Ok(vec![RetrievalHit {
-                uid,
-                score: call as f64,
-                legs: LegSources {
-                    graph: true,
-                    vector: false,
-                    lexical: false,
-                },
-                similarity: None,
-                lexical_backend: None,
-                source_tier: crate::retrieval::SourceTier::UserMemory,
-                knowledge_chunk: None,
-                node: NodeIndexRow {
+            Ok(RetrievalOutput {
+                hits: vec![RetrievalHit {
                     uid,
-                    label: NodeLabel::Fact,
-                    storage_partition_id: Some("tenant-a".to_string()),
-                    contact_id: None,
-                    scope: "tenant".to_string(),
-                    name: format!("hit {call}"),
-                    pii_class: PiiClass::None,
-                    valid_to: None,
-                    valid_from: Utc::now(),
-                    properties_summary: None,
-                    last_accessed_at: Utc::now(),
-                    quality_score: 0.5,
-                },
-            }])
+                    score: call as f64,
+                    legs: LegSources {
+                        graph: true,
+                        vector: false,
+                        lexical: false,
+                    },
+                    similarity: None,
+                    lexical_backend: None,
+                    source_tier: crate::retrieval::SourceTier::UserMemory,
+                    knowledge_chunk: None,
+                    node: NodeIndexRow {
+                        uid,
+                        label: NodeLabel::Fact,
+                        storage_partition_id: Some("tenant-a".to_string()),
+                        contact_id: None,
+                        scope: "tenant".to_string(),
+                        name: format!("hit {call}"),
+                        pii_class: PiiClass::None,
+                        valid_to: None,
+                        valid_from: Utc::now(),
+                        properties_summary: None,
+                        last_accessed_at: Utc::now(),
+                        quality_score: 0.5,
+                    },
+                }],
+                diagnostics: Default::default(),
+                provenance: Default::default(),
+            })
         }
     }
 

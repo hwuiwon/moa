@@ -4,13 +4,44 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use moa_core::{error::MoaError, error::Result};
+use opentelemetry::KeyValue;
 use reqwest::{
     RequestBuilder, Response, StatusCode,
     header::{HeaderMap, RETRY_AFTER},
 };
 use serde_json::Value;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::core::rate_guard::RateGuard;
+
+/// Records a bounded `provider_retry` span event on the ambient span (the
+/// caller's `llm_completion`/embedding/rerank span, entered via
+/// `tracing::Instrument`) so retry attempts are visible without re-deriving
+/// them from log lines. `reason` must be a small, bounded label — never a raw
+/// provider error message.
+fn record_retry_attempt(attempt: usize, reason: &'static str) {
+    tracing::Span::current().add_event(
+        "provider_retry",
+        vec![
+            KeyValue::new("retry.attempt", (attempt + 1) as i64),
+            KeyValue::new("error.type", reason),
+        ],
+    );
+}
+
+/// Maps a retryable HTTP status to a bounded `error.type` label for the retry
+/// span event. Only [`RetryPolicy::is_retryable_status`] statuses reach this
+/// function.
+fn retry_status_class(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::TOO_MANY_REQUESTS => "http_429",
+        StatusCode::INTERNAL_SERVER_ERROR => "http_500",
+        StatusCode::BAD_GATEWAY => "http_502",
+        StatusCode::SERVICE_UNAVAILABLE => "http_503",
+        StatusCode::GATEWAY_TIMEOUT => "http_504",
+        _ => "http_error",
+    }
+}
 
 /// Shared retry policy for provider HTTP requests.
 #[derive(Debug, Clone)]
@@ -72,6 +103,7 @@ impl RetryPolicy {
                             error = %error,
                             "provider request failed with a retryable transport error; retrying"
                         );
+                        record_retry_attempt(attempt, "transport_error");
                         tokio::time::sleep(delay).await;
                         attempt += 1;
                         continue;
@@ -116,6 +148,7 @@ impl RetryPolicy {
                     message,
                     "provider request returned a retryable HTTP status; retrying"
                 );
+                record_retry_attempt(attempt, retry_status_class(status));
                 tokio::time::sleep(delay).await;
                 attempt += 1;
                 continue;
@@ -358,6 +391,86 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(request_count.load(Ordering::SeqCst), 2);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn retry_emits_bounded_span_event_on_rate_limit() {
+        // Pins: each in-call retry records a bounded `provider_retry` span
+        // event (retry.attempt + a bounded error.type) on the ambient span,
+        // not just a log line, so retries are visible in traces without
+        // re-deriving them from logs.
+        use tracing::Instrument;
+
+        use crate::core::span_capture_test_support::{capture_spans_async, find_span};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let request_count_task = Arc::clone(&request_count);
+
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let current = request_count_task.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = vec![0_u8; 2048];
+                let _ = socket.read(&mut buffer).await;
+
+                let response = if current == 0 {
+                    "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 11\r\n\r\nrate limit"
+                } else {
+                    "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"
+                };
+
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/retry");
+
+        let spans = capture_spans_async(async {
+            let span = tracing::info_span!("test_retry_span");
+            RetryPolicy::default()
+                .with_max_retries(3)
+                .send_gated(|| client.get(&url), &RateGuard::new())
+                .instrument(span)
+                .await
+                .unwrap();
+        })
+        .await;
+
+        // The ambient span also picks up unrelated TRACE-level events emitted
+        // by hyper/tokio internals during the real HTTP round trip, so filter
+        // to the `provider_retry` events this change actually adds.
+        let span = find_span(&spans, "test_retry_span");
+        let retry_events = span
+            .events
+            .iter()
+            .filter(|event| event.name == "provider_retry")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            retry_events.len(),
+            1,
+            "expected exactly one provider_retry event, got {:?}",
+            retry_events
+        );
+        let event = retry_events[0];
+        let attempt = event
+            .attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == "retry.attempt")
+            .expect("retry.attempt attribute present");
+        assert_eq!(attempt.value, opentelemetry::Value::I64(1));
+        let error_type = event
+            .attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == "error.type")
+            .expect("error.type attribute present");
+        assert_eq!(error_type.value.as_str(), "http_429");
 
         server.abort();
     }

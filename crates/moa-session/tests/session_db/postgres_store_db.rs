@@ -496,6 +496,7 @@ async fn dashboard_session_detail_requires_tenant_scope_and_reports_aggregates()
                 output_tokens: 5,
                 cost_cents: 7,
                 duration_ms: 10,
+                llm_ttft_ms: None,
             },
         )
         .await
@@ -1848,6 +1849,7 @@ async fn postgres_trigger_populates_generated_session_rollups() {
                     output_tokens: output,
                     cost_cents: cost,
                     duration_ms: 100,
+                    llm_ttft_ms: None,
                 },
             )
             .await
@@ -1935,6 +1937,7 @@ async fn postgres_session_summary_tracks_model_tier_costs() {
                 output_tokens: 6,
                 cost_cents: 20,
                 duration_ms: 30,
+                llm_ttft_ms: None,
             },
         )
         .await
@@ -2047,6 +2050,7 @@ async fn events_hot_path_triggers_are_removed_and_aggregates_maintained_by_app_d
                 output_tokens: 3,
                 cost_cents: 5,
                 duration_ms: 1,
+                llm_ttft_ms: None,
             },
         )
         .await
@@ -2240,6 +2244,7 @@ async fn postgres_materialized_analytics_views_refresh() {
                     output_tokens: output,
                     cost_cents: cost,
                     duration_ms: llm_ms,
+                    llm_ttft_ms: None,
                 },
             )
             .await
@@ -2415,6 +2420,7 @@ async fn postgres_analytics_query_read_models_refresh() {
                 output_tokens: 4,
                 cost_cents: 12,
                 duration_ms: 250,
+                llm_ttft_ms: None,
             },
         )
         .await
@@ -2586,6 +2592,7 @@ async fn append_events_batches_inserts_aggregates_and_dedupe_db() {
                 output_tokens: 5,
                 cost_cents: 7,
                 duration_ms: 10,
+                llm_ttft_ms: None,
             },
             dedupe_key: None,
         },

@@ -10,10 +10,6 @@ tokio::task_local! {
     static TURN_LATENCY_COUNTERS: Arc<TurnLatencyCounters>;
 }
 
-fn record_pipeline_compile_duration_metric(duration: Duration) {
-    metrics::histogram!("moa_pipeline_compile_seconds").record(duration.as_secs_f64());
-}
-
 fn record_compaction_tier_applied(tier: u8) {
     metrics::counter!(
         "moa_compaction_tier_applied_total",
@@ -264,8 +260,11 @@ pub fn current_turn_root_span() -> Option<tracing::Span> {
 }
 
 /// Records pipeline compile duration for the current turn.
+///
+/// The aggregate Prometheus family for this step is
+/// `moa_turn_step_duration_seconds{step="pipeline_compile"}`; this only feeds the
+/// per-turn latency breakdown counters.
 pub fn record_turn_pipeline_compile_duration(duration: Duration) {
-    record_pipeline_compile_duration_metric(duration);
     let _ = TURN_LATENCY_COUNTERS.try_with(|counters| {
         counters.record_pipeline_compile_duration(duration);
     });

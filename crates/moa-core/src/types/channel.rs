@@ -242,6 +242,16 @@ pub struct InboundMessage {
     pub reply_to: Option<String>,
     /// Event timestamp.
     pub timestamp: DateTime<Utc>,
+    /// W3C trace-context headers (`traceparent`/`tracestate`) captured when this
+    /// message was received.
+    ///
+    /// Transports without request headers — Slack Socket Mode delivers events over
+    /// a websocket with no per-event HTTP headers — serialize the inbound-receive
+    /// span's context here so the turn started from this message re-adopts it and
+    /// joins the same trace instead of starting a disconnected root. Empty for
+    /// messages that arrived without an active trace.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub trace_headers: std::collections::BTreeMap<String, String>,
 }
 
 /// Inbound event emitted by a channel adapter.

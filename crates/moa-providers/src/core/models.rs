@@ -586,6 +586,131 @@ pub fn cheapest_chat_model() -> Option<&'static ProviderModel> {
         .min_by(|left, right| chat_price_rank(left).total_cmp(&chat_price_rank(right)))
 }
 
+/// One embedding-model pricing entry.
+///
+/// Embedding and rerank calls are billed per input token or per search unit,
+/// not per chat completion (context window, output-token limit, tool
+/// support), so their pricing lives in this dedicated table rather than as
+/// [`CATALOG`] entries.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EmbeddingModelPrice {
+    /// Provider that serves the model (`"openai"` / `"cohere"` / `"google"` /
+    /// `"zeroentropy"`).
+    pub provider: &'static str,
+    /// Canonical embedding model id passed to the provider API.
+    pub id: &'static str,
+    /// Price in USD per 1,000,000 input tokens.
+    pub price_per_mtok: f64,
+}
+
+/// One rerank-model pricing entry, billed per "search" (one query over up to
+/// 100 documents, per Cohere's billing definition) rather than per token.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RerankModelPrice {
+    /// Provider that serves the model (`"cohere"` / `"zeroentropy"`).
+    pub provider: &'static str,
+    /// Canonical rerank model id passed to the provider API.
+    pub id: &'static str,
+    /// Price in USD per 1,000 search units.
+    pub price_per_thousand_searches: f64,
+}
+
+/// Embedding-model pricing, verified against provider pricing pages on
+/// 2026-07-12: OpenAI (platform.openai.com/docs/api-reference/embeddings),
+/// Cohere (cohere.com/pricing, embeddingcost.com/cohere), Google
+/// (ai.google.dev/gemini-api/docs/pricing), ZeroEntropy
+/// (zeroentropy.dev/pricing).
+pub const EMBEDDING_CATALOG: &[EmbeddingModelPrice] = &[
+    EmbeddingModelPrice {
+        provider: PROVIDER_OPENAI,
+        id: "text-embedding-3-small",
+        price_per_mtok: 0.02,
+    },
+    EmbeddingModelPrice {
+        provider: PROVIDER_OPENAI,
+        id: "text-embedding-3-large",
+        price_per_mtok: 0.13,
+    },
+    EmbeddingModelPrice {
+        provider: PROVIDER_OPENAI,
+        id: "text-embedding-ada-002",
+        price_per_mtok: 0.10,
+    },
+    EmbeddingModelPrice {
+        provider: "cohere",
+        id: "embed-v4.0",
+        price_per_mtok: 0.12,
+    },
+    EmbeddingModelPrice {
+        provider: "cohere",
+        id: "embed-english-v3.0",
+        price_per_mtok: 0.10,
+    },
+    EmbeddingModelPrice {
+        provider: PROVIDER_GOOGLE,
+        id: "gemini-embedding-2",
+        price_per_mtok: 0.20,
+    },
+    EmbeddingModelPrice {
+        provider: "zeroentropy",
+        id: "zembed-1",
+        price_per_mtok: 0.05,
+    },
+];
+
+/// Rerank-model pricing, verified against provider pricing pages on
+/// 2026-07-12.
+pub const RERANK_CATALOG: &[RerankModelPrice] = &[
+    RerankModelPrice {
+        provider: "cohere",
+        id: "rerank-v3.5",
+        price_per_thousand_searches: 2.00,
+    },
+    RerankModelPrice {
+        provider: "cohere",
+        id: "rerank-v4.0",
+        price_per_thousand_searches: 2.00,
+    },
+    RerankModelPrice {
+        provider: "cohere",
+        id: "rerank-v4.0-fast",
+        price_per_thousand_searches: 2.00,
+    },
+    RerankModelPrice {
+        provider: "zeroentropy",
+        // TODO(pricing): unverified in this unit. ZeroEntropy bills zerank-2 at
+        // $0.025 per 1,000,000 tokens (confirmed at zeroentropy.dev/pricing),
+        // not per search, and publishes no official token-to-search
+        // conversion, so it cannot be priced in this per-1K-searches table
+        // without fabricating a ratio. Cost wiring skips this model (price is
+        // 0.0) until ZeroEntropy either bills per search or MOA adds a
+        // token-billed rerank pricing path.
+        id: "zerank-2",
+        price_per_thousand_searches: 0.0,
+    },
+];
+
+/// Returns the USD price per 1,000,000 input tokens for an embedding model
+/// id, or `None` if the id isn't catalogued.
+pub fn embedding_price_per_mtok(model_id: &str) -> Option<f64> {
+    EMBEDDING_CATALOG
+        .iter()
+        .find(|entry| entry.id == model_id)
+        .map(|entry| entry.price_per_mtok)
+}
+
+/// Returns the USD price per 1,000 rerank search units for a rerank model id,
+/// or `None` if the id isn't catalogued. A catalogued-but-unverified model
+/// (see the `TODO(pricing)` entries in [`RERANK_CATALOG`]) returns
+/// `Some(0.0)`; callers that skip zero-cost billing already treat that
+/// correctly as "do not charge."
+pub fn rerank_price_per_thousand_searches(model_id: &str) -> Option<f64> {
+    RERANK_CATALOG
+        .iter()
+        .find(|entry| entry.id == model_id)
+        .map(|entry| entry.price_per_thousand_searches)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,12 +837,14 @@ mod tests {
     }
 
     #[test]
-    fn embedding_and_rerank_model_ids_are_uncosted_via_catalog() {
-        // Pins (intentional gap): the chat CATALOG/TokenPricing models token-billed
-        // completion models only. Embedding and rerank ids are deliberately absent,
-        // so `find_model`/`pricing_for_model` return `None` for them and their cost
-        // is accounted elsewhere. This guards against a half-wired entry that would
-        // expose chat token pricing for a non-chat model.
+    fn embedding_and_rerank_model_ids_are_priced_via_dedicated_catalogs() {
+        // Pins: the chat CATALOG/TokenPricing models token-billed completion
+        // models only, so embedding and rerank ids stay absent from it and
+        // `find_model`/`pricing_for_model` return `None` for them — this guards
+        // against a half-wired entry that would expose chat token pricing for a
+        // non-chat model. Embedding/rerank cost is instead wired through the
+        // dedicated EMBEDDING_CATALOG/RERANK_CATALOG tables, which this test
+        // asserts price the real ids.
         for id in [
             "embed-v4.0",
             "zembed-1",
@@ -735,6 +862,32 @@ mod tests {
                 "{id} should be uncosted via the chat catalog"
             );
         }
+
+        assert_eq!(
+            embedding_price_per_mtok("text-embedding-3-small"),
+            Some(0.02)
+        );
+        assert_eq!(
+            embedding_price_per_mtok("text-embedding-3-large"),
+            Some(0.13)
+        );
+        assert_eq!(embedding_price_per_mtok("embed-v4.0"), Some(0.12));
+        assert_eq!(embedding_price_per_mtok("gemini-embedding-2"), Some(0.20));
+        assert_eq!(embedding_price_per_mtok("zembed-1"), Some(0.05));
+        assert_eq!(embedding_price_per_mtok("not-a-real-embedding-model"), None);
+
+        assert_eq!(
+            rerank_price_per_thousand_searches("rerank-v4.0-fast"),
+            Some(2.00)
+        );
+        assert_eq!(
+            rerank_price_per_thousand_searches("rerank-v3.5"),
+            Some(2.00)
+        );
+        assert_eq!(
+            rerank_price_per_thousand_searches("not-a-real-rerank-model"),
+            None
+        );
     }
 
     #[test]

@@ -10,12 +10,17 @@ use moa_core::{
 };
 use moa_lineage_citation::{CascadeConfig, CascadeVerifier, ChunkRef, NliVerifier};
 use moa_lineage_core::{
-    CitationLineage, ContextChunk, ContextLineage, GenerationLineage, GenerationTokenUsage,
-    LineageEvent, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, ToolCallSummary, TurnId,
+    CitationLineage, ContextChunk, ContextLineage, DecisionKind, DecisionRecord, GenerationLineage,
+    GenerationTokenUsage, LineageEvent, PiiRedactionDecision, ScoreRecord, ScoreSource,
+    ScoreTarget, ScoreValue, ToolCallSummary, TurnId,
 };
 
 /// Emits compiled-context lineage and returns citable source chunks for citation checks.
-pub fn emit_context_lineage(
+///
+/// The persisted `chunks_in_window` carry PII-redacted excerpts; the returned
+/// `ChunkRef`s keep their original text because they feed citation verification,
+/// which must match against the unredacted answer.
+pub async fn emit_context_lineage(
     lineage: &dyn LineageHandle,
     turn_id: TurnId,
     session: &SessionMeta,
@@ -31,9 +36,14 @@ pub fn emit_context_lineage(
             message,
         })
         .collect::<Vec<_>>();
+    let mut redacted_fields: Vec<String> = Vec::new();
     let chunks = source_chunks
         .iter()
-        .map(|source| source.chunk.clone())
+        .map(|source| {
+            let (chunk, fields) = redact_context_chunk(source.chunk.clone());
+            redacted_fields.extend(fields);
+            chunk
+        })
         .collect::<Vec<_>>();
     let citation_sources = source_chunks
         .into_iter()
@@ -52,18 +62,20 @@ pub fn emit_context_lineage(
         total_input_tokens_estimated: ctx.token_count.min(u32::MAX as usize) as u32,
     };
 
-    match serde_json::to_value(LineageEvent::Context(record.clone())) {
-        Ok(json) => {
-            lineage.record_span_attributes(span, &json);
-            lineage.record(json);
-        }
-        Err(error) => tracing::warn!(%error, "failed to serialize context lineage"),
-    }
     let recall_proxy = if record.chunks_in_window.is_empty() {
         0.0
     } else {
         1.0
     };
+
+    let mut events: Vec<serde_json::Value> = Vec::new();
+    match serde_json::to_value(LineageEvent::Context(record)) {
+        Ok(json) => {
+            lineage.record_span_attributes(span, &json);
+            events.push(json);
+        }
+        Err(error) => tracing::warn!(%error, "failed to serialize context lineage"),
+    }
     let score = ScoreRecord {
         score_id: uuid::Uuid::now_v7(),
         ts: chrono::Utc::now(),
@@ -78,12 +90,38 @@ pub fn emit_context_lineage(
         dataset_id: None,
         comment: None,
     };
-    match serde_json::to_value(LineageEvent::Eval(score)) {
-        Ok(json) => lineage.record(json),
-        Err(error) => tracing::warn!(%error, "failed to serialize context score"),
-    }
+    push_event(&mut events, LineageEvent::Eval(score), "context score");
+
+    redacted_fields.sort();
+    redacted_fields.dedup();
+    events.extend(pii_redaction_decision_event(
+        turn_id,
+        session.id,
+        lineage_storage_partition_id(session),
+        lineage_user_id(session),
+        redacted_fields,
+    ));
+
+    record_durable_batch(lineage, events, "context").await;
 
     citation_sources
+}
+
+/// Redacts PII from the persisted excerpts of one context chunk's source refs.
+///
+/// Returns the redacted chunk and the field names redacted across its refs.
+fn redact_context_chunk(mut chunk: ContextChunk) -> (ContextChunk, Vec<String>) {
+    let mut fields = Vec::new();
+    for source_ref in &mut chunk.source_refs {
+        if let Some(excerpt) = source_ref.excerpt.as_deref() {
+            let (redacted, redacted_fields) = redact_lineage_text(excerpt);
+            if !redacted_fields.is_empty() {
+                source_ref.excerpt = Some(redacted);
+                fields.extend(redacted_fields);
+            }
+        }
+    }
+    (chunk, fields)
 }
 
 fn context_chunk(session: &SessionMeta, idx: usize, message: &ContextMessage) -> ContextChunk {
@@ -189,12 +227,13 @@ pub async fn emit_generation_lineage(
     request_model: &str,
     response: &CompletionResponse,
     citation_sources: &[ChunkRef],
-    cost_cents: u32,
+    cost_micros: u64,
     duration: std::time::Duration,
     span: &tracing::Span,
     response_event: Option<&EventRecord>,
 ) {
     let usage = response.token_usage();
+    let (trace_id, span_id) = moa_observability::trace_ids_for_span(span);
     let record = GenerationLineage {
         turn_id,
         session_id: session.id,
@@ -214,20 +253,22 @@ pub async fn emit_generation_lineage(
         },
         finish_reasons: vec![format!("{:?}", response.stop_reason)],
         tool_calls: tool_call_summaries(response),
-        cost_micros: u64::from(cost_cents).saturating_mul(10_000),
+        cost_micros,
         duration,
-        trace_id: None,
-        span_id: None,
+        trace_id,
+        span_id,
         response_event_id: response_event.map(|record| record.id),
         response_event_sequence_num: response_event.map(|record| record.sequence_num),
     };
 
+    // Group every durable event this emission point produces — generation,
+    // cost score, citation, per-citation scores, and any PII decision — into one
+    // batch so they share a single journal fsync instead of ~5 sequential ones.
+    let mut events: Vec<serde_json::Value> = Vec::new();
     match serde_json::to_value(LineageEvent::Generation(record.clone())) {
         Ok(json) => {
             lineage.record_span_attributes(span, &json);
-            if let Err(error) = lineage.record_durable(json).await {
-                tracing::warn!(%error, "failed to durably record generation lineage");
-            }
+            events.push(json);
         }
         Err(error) => tracing::warn!(%error, "failed to serialize generation lineage"),
     }
@@ -245,41 +286,40 @@ pub async fn emit_generation_lineage(
         dataset_id: None,
         comment: None,
     };
-    match serde_json::to_value(LineageEvent::Eval(score)) {
-        Ok(json) => {
-            if let Err(error) = lineage.record_durable(json).await {
-                tracing::warn!(%error, "failed to durably record generation score");
-            }
-        }
-        Err(error) => tracing::warn!(%error, "failed to serialize generation score"),
-    }
-    metrics::gauge!(
-        "moa_cost_micros_per_turn",
-        "tenant_id" => session.tenant_id.to_string(),
-        "provider" => provider.to_string()
-    )
-    .set(record.cost_micros as f64);
+    push_event(&mut events, LineageEvent::Eval(score), "generation score");
 
-    let citation =
+    let (citation, citation_redacted_fields) =
         build_citation_lineage(turn_id, session, response, citation_sources, response_event).await;
-    match serde_json::to_value(LineageEvent::Citation(citation.clone())) {
-        Ok(json) => {
-            if let Err(error) = lineage.record_durable(json).await {
-                tracing::warn!(%error, "failed to durably record citation lineage");
-            }
-        }
-        Err(error) => tracing::warn!(%error, "failed to serialize citation lineage"),
-    }
-    emit_citation_scores(lineage, &citation).await;
+    let citation_scores = citation_score_events(&citation);
+    push_event(
+        &mut events,
+        LineageEvent::Citation(citation),
+        "citation lineage",
+    );
+    events.extend(citation_scores);
+    events.extend(pii_redaction_decision_event(
+        turn_id,
+        session.id,
+        lineage_storage_partition_id(session),
+        lineage_user_id(session),
+        citation_redacted_fields,
+    ));
+
+    record_durable_batch(lineage, events, "generation").await;
 }
 
+/// Builds citation lineage and reports the PII fields redacted from persisted text.
+///
+/// Verification runs against the original answer and sources; only the persisted
+/// `answer_text` and per-citation `cited_text` are redacted, so grounding checks
+/// are unaffected while stored free text stays PII-free.
 async fn build_citation_lineage(
     turn_id: TurnId,
     session: &SessionMeta,
     response: &CompletionResponse,
     citation_sources: &[ChunkRef],
     response_event: Option<&EventRecord>,
-) -> CitationLineage {
+) -> (CitationLineage, Vec<String>) {
     metrics::histogram!(
         "moa_citation_source_count",
         "tenant_id" => session.tenant_id.to_string()
@@ -310,13 +350,35 @@ async fn build_citation_lineage(
     )
     .record(verifier_started.elapsed().as_secs_f64());
 
-    CitationLineage {
+    // Redact only now — after verification has matched original answer against
+    // original sources — so grounding quality is preserved while stored text is
+    // PII-free.
+    let mut redacted_fields: Vec<String> = Vec::new();
+    let (answer_text, answer_fields) = redact_lineage_text(&response.text);
+    redacted_fields.extend(answer_fields);
+    let citations = citations
+        .into_iter()
+        .map(|mut citation| {
+            if let Some(cited_text) = citation.cited_text.as_deref() {
+                let (redacted, fields) = redact_lineage_text(cited_text);
+                if !fields.is_empty() {
+                    citation.cited_text = Some(redacted);
+                    redacted_fields.extend(fields);
+                }
+            }
+            citation
+        })
+        .collect();
+    redacted_fields.sort();
+    redacted_fields.dedup();
+
+    let record = CitationLineage {
         turn_id,
         session_id: session.id,
         storage_partition_id: lineage_storage_partition_id(session),
         user_id: lineage_user_id(session),
         ts: chrono::Utc::now(),
-        answer_text: response.text.clone(),
+        answer_text,
         answer_event_id: response_event.map(|record| record.id),
         answer_event_sequence_num: response_event.map(|record| record.sequence_num),
         answer_sentence_offsets,
@@ -327,7 +389,8 @@ async fn build_citation_lineage(
         } else {
             Some("cascade-bm25+lexical-overlap".to_string())
         },
-    }
+    };
+    (record, redacted_fields)
 }
 
 fn context_citation_verifier() -> CascadeVerifier {
@@ -340,7 +403,37 @@ fn context_citation_verifier() -> CascadeVerifier {
     )
 }
 
-async fn emit_citation_scores(lineage: &dyn LineageHandle, citation: &CitationLineage) {
+/// Serializes one lineage event into the durable batch, logging and skipping on error.
+pub(crate) fn push_event(
+    events: &mut Vec<serde_json::Value>,
+    event: LineageEvent,
+    context: &'static str,
+) {
+    match serde_json::to_value(event) {
+        Ok(json) => events.push(json),
+        Err(error) => tracing::warn!(%error, context, "failed to serialize lineage event"),
+    }
+}
+
+/// Records one emission point's durable events under a single journal fsync.
+///
+/// Failure is logged and non-fatal to the turn; an empty batch is a no-op.
+pub(crate) async fn record_durable_batch(
+    lineage: &dyn LineageHandle,
+    events: Vec<serde_json::Value>,
+    context: &'static str,
+) {
+    if events.is_empty() {
+        return;
+    }
+    if let Err(error) = lineage.record_durable_batch(events).await {
+        tracing::warn!(%error, context, "failed to durably record lineage batch");
+    }
+}
+
+/// Builds the per-citation verification score events for one citation record.
+fn citation_score_events(citation: &CitationLineage) -> Vec<serde_json::Value> {
+    let mut events = Vec::new();
     for source in &citation.citations {
         let score = ScoreRecord {
             score_id: uuid::Uuid::now_v7(),
@@ -358,19 +451,7 @@ async fn emit_citation_scores(lineage: &dyn LineageHandle, citation: &CitationLi
             dataset_id: None,
             comment: None,
         };
-        match serde_json::to_value(LineageEvent::Eval(score)) {
-            Ok(json) => {
-                if let Err(error) = lineage.record_durable(json).await {
-                    tracing::warn!(%error, "failed to durably record citation score");
-                }
-            }
-            Err(error) => tracing::warn!(%error, "failed to serialize citation score"),
-        }
-        metrics::gauge!(
-            "moa_grounding_verified_rate",
-            "tenant_id" => citation.storage_partition_id.to_string()
-        )
-        .set(if source.verifier.verified { 1.0 } else { 0.0 });
+        push_event(&mut events, LineageEvent::Eval(score), "citation score");
 
         if let Some(entailment) = source.verifier.nli_entailment {
             let score = ScoreRecord {
@@ -389,16 +470,10 @@ async fn emit_citation_scores(lineage: &dyn LineageHandle, citation: &CitationLi
                 dataset_id: None,
                 comment: None,
             };
-            match serde_json::to_value(LineageEvent::Eval(score)) {
-                Ok(json) => {
-                    if let Err(error) = lineage.record_durable(json).await {
-                        tracing::warn!(%error, "failed to durably record citation NLI score");
-                    }
-                }
-                Err(error) => tracing::warn!(%error, "failed to serialize nli score"),
-            }
+            push_event(&mut events, LineageEvent::Eval(score), "citation nli score");
         }
     }
+    events
 }
 
 fn sentence_offsets(text: &str) -> Vec<(u32, u32)> {
@@ -445,12 +520,79 @@ fn tool_call_summaries(response: &CompletionResponse) -> Vec<ToolCallSummary> {
                     .clone()
                     .unwrap_or_else(|| call.invocation.name.clone()),
                 argument_size_bytes,
-                result_size_bytes: 0,
-                duration: std::time::Duration::ZERO,
+                // The requested tools have not run when generation lineage is
+                // captured, so result/duration/error stay unknown here rather
+                // than being fabricated as zero.
+                result_size_bytes: None,
+                duration: None,
                 error: None,
             })
         })
         .collect()
+}
+
+/// Detector label recorded on `PiiRedaction` decisions emitted by lineage capture.
+///
+/// Capture uses the deterministic local heuristic classifier so it stays
+/// synchronous and free of network IO on the hot path.
+pub(crate) const LINEAGE_PII_DETECTOR: &str = "moa-heuristic:v1";
+
+/// Redacts PII spans from free text before it is persisted into lineage rows.
+///
+/// Returns the redacted text and the sorted, de-duplicated stable field names
+/// that were redacted (empty when the text was already clean).
+pub(crate) fn redact_lineage_text(text: &str) -> (String, Vec<String>) {
+    let result = moa_memory_pii::classify_heuristic(text);
+    if result.spans.is_empty() {
+        return (text.to_string(), Vec::new());
+    }
+    let redacted = moa_memory_pii::redact_text(text, &result.spans);
+    let mut fields: Vec<String> = result
+        .spans
+        .iter()
+        .map(|span| span.category.field_name().to_string())
+        .collect();
+    fields.sort();
+    fields.dedup();
+    (redacted, fields)
+}
+
+/// Builds a `PiiRedaction` compliance decision event for one capture point.
+///
+/// Returns `None` when no field was redacted, so clean turns add nothing to the
+/// durable batch.
+pub(crate) fn pii_redaction_decision_event(
+    turn_id: TurnId,
+    session_id: moa_core::types::identifiers::SessionId,
+    storage_partition_id: StoragePartitionId,
+    user_id: UserId,
+    fields: Vec<String>,
+) -> Option<serde_json::Value> {
+    if fields.is_empty() {
+        return None;
+    }
+    let subject_pseudonym = Some(user_id.to_string());
+    let decision = DecisionRecord::new(
+        turn_id,
+        session_id,
+        storage_partition_id,
+        user_id,
+        chrono::Utc::now(),
+        DecisionKind::PiiRedaction(PiiRedactionDecision {
+            subject_pseudonym,
+            fields,
+            detector: LINEAGE_PII_DETECTOR.to_string(),
+            redacted: true,
+        }),
+        LINEAGE_PII_DETECTOR,
+    );
+    match serde_json::to_value(LineageEvent::Decision(decision)) {
+        Ok(json) => Some(json),
+        Err(error) => {
+            tracing::warn!(%error, "failed to serialize pii redaction decision");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -468,8 +610,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn context_lineage_fans_out_one_citation_source_per_evidence_ref() {
+    #[tokio::test]
+    async fn context_lineage_fans_out_one_citation_source_per_evidence_ref() {
         // Pins: each evidence-bearing source ref becomes its own citation source
         // keyed by the knowledge chunk uid (falling back to the graph uid), tool
         // output stays citable whole, and generic prompt text yields nothing.
@@ -505,7 +647,8 @@ mod tests {
             &session,
             &ctx,
             &tracing::Span::none(),
-        );
+        )
+        .await;
 
         assert_eq!(sources.len(), 3);
         assert_eq!(sources[0].chunk_id, fact_uid);
@@ -573,6 +716,7 @@ mod tests {
                 output_tokens: 0,
                 cost_cents: 0,
                 duration_ms: 1,
+                llm_ttft_ms: None,
             },
             timestamp: chrono::Utc::now(),
             brain_id: None,
@@ -580,7 +724,7 @@ mod tests {
             token_count: None,
         };
 
-        let record = build_citation_lineage(
+        let (record, _redacted_fields) = build_citation_lineage(
             turn_id,
             &session,
             &response,
@@ -606,5 +750,86 @@ mod tests {
             record.citations[0].cited_text.as_deref(),
             Some("OAuth uses access tokens for delegated API access.")
         );
+    }
+
+    #[test]
+    fn redact_lineage_text_redacts_email_and_reports_field() {
+        // Pins: free text with an email is redacted and the field name is reported so the
+        // capture point can emit a PiiRedaction decision; clean text passes through untouched.
+        let (redacted, fields) = redact_lineage_text("ping me at bob@example.com now");
+        assert!(
+            !redacted.contains("bob@example.com"),
+            "email must be removed"
+        );
+        assert_eq!(fields, vec!["email".to_string()]);
+
+        let (clean, clean_fields) = redact_lineage_text("no personal data here");
+        assert_eq!(clean, "no personal data here");
+        assert!(clean_fields.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_citation_lineage_redacts_answer_after_verifying() {
+        // Pins: verification still grounds the citation against the original source, but the
+        // persisted answer text has PII redacted and the redaction is reported for a decision.
+        let session = SessionMeta::default();
+        let sources = vec![ChunkRef {
+            chunk_id: Uuid::now_v7(),
+            source_node_uid: Some(Uuid::now_v7()),
+            text: "Contact the admin for access.".to_string(),
+            provider_doc_id: "memory-admin".to_string(),
+        }];
+        let response = CompletionResponse {
+            text: "Contact the admin at admin@example.com.".to_string(),
+            content: Vec::new(),
+            stop_reason: StopReason::EndTurn,
+            model: ModelId::new("test-model"),
+            usage: TokenUsage::default(),
+            duration_ms: 1,
+            thought_signature: None,
+        };
+
+        let (record, redacted_fields) =
+            build_citation_lineage(TurnId::new_v7(), &session, &response, &sources, None).await;
+
+        assert!(
+            !record.answer_text.contains("admin@example.com"),
+            "raw email must not persist: {}",
+            record.answer_text
+        );
+        assert!(redacted_fields.contains(&"email".to_string()));
+    }
+
+    #[test]
+    fn tool_call_summaries_leave_unexecuted_results_unknown() {
+        // Pins: tool summaries built at generation time (before tools run) mark result size,
+        // duration, and error as unknown rather than fabricating a zero-length success.
+        use moa_core::types::completion::{ToolCallContent, ToolInvocation};
+
+        let response = CompletionResponse {
+            text: String::new(),
+            content: vec![CompletionContent::ToolCall(ToolCallContent {
+                invocation: ToolInvocation {
+                    id: Some("call-1".to_string()),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                },
+                provider_metadata: None,
+            })],
+            stop_reason: StopReason::ToolUse,
+            model: ModelId::new("test-model"),
+            usage: TokenUsage::default(),
+            duration_ms: 1,
+            thought_signature: None,
+        };
+
+        let summaries = tool_call_summaries(&response);
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].tool_name, "bash");
+        assert!(summaries[0].argument_size_bytes > 0);
+        assert_eq!(summaries[0].result_size_bytes, None);
+        assert_eq!(summaries[0].duration, None);
+        assert_eq!(summaries[0].error, None);
     }
 }

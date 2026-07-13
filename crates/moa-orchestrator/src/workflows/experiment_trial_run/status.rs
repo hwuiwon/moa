@@ -257,13 +257,4 @@ fn record_trial_metrics(trial: &ExperimentTrialRecord) {
         trial.stop_reason.map(ExperimentTrialStopReason::as_str),
         trial.target_kind.as_str(),
     );
-    if let (Some(started_at), Some(completed_at)) = (trial.started_at, trial.completed_at)
-        && let Ok(duration) = completed_at.signed_duration_since(started_at).to_std()
-    {
-        record_experiment_trial_duration(
-            trial.target_kind.as_str(),
-            trial.status.as_str(),
-            duration,
-        );
-    }
 }

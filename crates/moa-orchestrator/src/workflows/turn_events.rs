@@ -202,6 +202,7 @@ pub(super) async fn append_zero_cost_assistant_response_with_sequence(
             output_tokens: 0,
             cost_cents: 0,
             duration_ms: 0,
+            llm_ttft_ms: None,
         },
     )
     .await?;

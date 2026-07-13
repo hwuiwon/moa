@@ -395,6 +395,12 @@ pub struct GenerationTokenUsage {
 }
 
 /// Summary of one model-requested tool call.
+///
+/// Generation lineage is captured when the provider response is received, which
+/// is before the requested tools run, so `result_size_bytes`, `duration`, and
+/// `error` are `None` until a caller supplies the post-execution outcome. A
+/// `None` result field therefore means "not executed / unknown at capture
+/// time", never "executed with an empty result".
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCallSummary {
     /// Tool name.
@@ -403,11 +409,14 @@ pub struct ToolCallSummary {
     pub call_id: String,
     /// Serialized argument size.
     pub argument_size_bytes: u32,
-    /// Serialized result size when known.
-    pub result_size_bytes: u32,
-    /// Tool call duration when known.
-    pub duration: Duration,
-    /// Optional error string.
+    /// Serialized result size when the tool has executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_size_bytes: Option<u32>,
+    /// Tool call duration when the tool has executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<Duration>,
+    /// Optional error string captured after execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -591,6 +600,53 @@ pub enum DecisionKind {
     PrivacyErase(PrivacyEraseDecision),
 }
 
+impl DecisionRecord {
+    /// Builds a decision record, binding its canonical payload to an integrity hash.
+    ///
+    /// The hash is the BLAKE3 of the canonical JSON of `kind` and `policy_version`
+    /// together, so tampering with either the decision payload or the policy
+    /// version it was made under is detectable independently of the outer
+    /// hash chain applied by the sink.
+    #[must_use]
+    pub fn new(
+        turn_id: TurnId,
+        session_id: SessionId,
+        storage_partition_id: StoragePartitionId,
+        user_id: UserId,
+        ts: DateTime<Utc>,
+        kind: DecisionKind,
+        policy_version: impl Into<String>,
+    ) -> Self {
+        let policy_version = policy_version.into();
+        let integrity_hash = decision_integrity_hash(&kind, &policy_version);
+        Self {
+            turn_id,
+            session_id,
+            storage_partition_id,
+            user_id,
+            ts,
+            kind,
+            policy_version,
+            integrity_hash,
+        }
+    }
+}
+
+/// Computes the canonical integrity hash for a decision payload and its policy version.
+fn decision_integrity_hash(kind: &DecisionKind, policy_version: &str) -> Vec<u8> {
+    let canonical = serde_json::json!({
+        "kind": kind,
+        "policy_version": policy_version,
+    });
+    match crate::chain::canonical_payload_hash(&canonical) {
+        Ok(hash) => hash.as_bytes().to_vec(),
+        // Canonicalization of a serde-derived value cannot fail in practice; if it
+        // ever did, an empty hash keeps the decision emittable while still flagging
+        // the record as unverifiable to the audit chain.
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Redacted PII redaction decision details.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PiiRedactionDecision {
@@ -724,6 +780,66 @@ mod tests {
 
         assert_eq!(value["kind"], "retrieval");
         assert_eq!(value["record"]["query_original"], "query");
+    }
+
+    #[test]
+    fn decision_record_binds_integrity_hash_to_kind_and_policy_version() {
+        // Pins: DecisionRecord::new derives a non-empty BLAKE3 integrity hash over the
+        // canonical (kind, policy_version) pair, the hash is stable for identical inputs,
+        // and it changes when the policy version changes — so a compliance decision cannot
+        // be silently re-attributed to a different policy version.
+        let turn_id = TurnId::new_v7();
+        let session_id = SessionId::new();
+        let storage_partition_id = StoragePartitionId::new("tenant");
+        let user_id = UserId::new("user");
+        let ts = Utc::now();
+        let kind = DecisionKind::PiiRedaction(PiiRedactionDecision {
+            subject_pseudonym: Some("user".to_string()),
+            fields: vec!["email".to_string()],
+            detector: "moa-heuristic:v1".to_string(),
+            redacted: true,
+        });
+
+        let record = DecisionRecord::new(
+            turn_id,
+            session_id,
+            storage_partition_id.clone(),
+            user_id.clone(),
+            ts,
+            kind.clone(),
+            "moa-heuristic:v1",
+        );
+        assert!(!record.integrity_hash.is_empty());
+
+        let same = DecisionRecord::new(
+            turn_id,
+            session_id,
+            storage_partition_id.clone(),
+            user_id.clone(),
+            ts,
+            kind.clone(),
+            "moa-heuristic:v1",
+        );
+        assert_eq!(record.integrity_hash, same.integrity_hash);
+
+        let other_policy = DecisionRecord::new(
+            turn_id,
+            session_id,
+            storage_partition_id,
+            user_id,
+            ts,
+            kind,
+            "moa-heuristic:v2",
+        );
+        assert_ne!(record.integrity_hash, other_policy.integrity_hash);
+
+        // Round-trips through the lineage event envelope as record_kind 6.
+        let event = LineageEvent::Decision(record);
+        assert_eq!(event.record_kind(), RecordKind::Decision);
+        let value = serde_json::to_value(&event).expect("serialize decision");
+        assert_eq!(value["kind"], "decision");
+        let decoded: LineageEvent = serde_json::from_value(value).expect("decode decision");
+        assert_eq!(decoded.record_kind(), RecordKind::Decision);
     }
 
     #[test]

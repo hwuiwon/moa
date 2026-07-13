@@ -472,6 +472,20 @@ pub fn extract_identity(
     }))
 }
 
+/// Adopts an inbound W3C trace context (when present) as the parent of the
+/// current span.
+///
+/// Restate forwards custom request headers verbatim across invocations, so an
+/// upstream hop that injected `traceparent` through the identity-header helpers
+/// is continued here instead of starting a disconnected trace. A missing or
+/// malformed `traceparent` is a no-op, leaving the span as its own root.
+pub(crate) fn adopt_incoming_trace_parent(ctx: &impl RequestHeaders) {
+    let headers = ctx.request_headers();
+    moa_observability::adopt_remote_parent(&tracing::Span::current(), |name| {
+        headers.get(name).cloned()
+    });
+}
+
 /// Extract identity from a Restate handler context.
 pub fn current_identity(
     ctx: &impl RequestHeaders,

@@ -14,6 +14,25 @@ use crate::core::schema::normalize_openai_strict_output;
 use crate::core::streaming::StreamDeadline;
 use eventsource_stream::Eventsource;
 use moa_core::config::ProviderStreamTimeoutConfig;
+use opentelemetry::KeyValue;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+/// Records a bounded `provider_retry` span event on the completion span for
+/// one in-loop retry attempt in the OpenAI Responses streaming/retry loops.
+/// `reason` must stay a small, bounded label (never a raw error message).
+fn record_responses_retry_attempt(
+    span_recorder: &LLMSpanRecorder,
+    attempt: usize,
+    reason: &'static str,
+) {
+    span_recorder.span().add_event(
+        "provider_retry",
+        vec![
+            KeyValue::new("retry.attempt", (attempt + 1) as i64),
+            KeyValue::new("error.type", reason),
+        ],
+    );
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_responses_with_retry(
@@ -82,6 +101,7 @@ pub(crate) async fn stream_responses_with_retry(
                             delay_ms = delay.as_millis(),
                             "provider stream hit a rate limit before any content was emitted; retrying"
                         );
+                        record_responses_retry_attempt(&span_recorder, attempt, "rate_limited");
                         tokio::time::sleep(delay).await;
                         attempt += 1;
                     }
@@ -119,6 +139,7 @@ pub(crate) async fn stream_responses_with_retry(
                     delay_ms = delay.as_millis(),
                     "provider request hit a retryable transport error; retrying"
                 );
+                record_responses_retry_attempt(&span_recorder, attempt, "transport_error");
                 tokio::time::sleep(delay).await;
                 attempt += 1;
             }
@@ -184,6 +205,7 @@ async fn create_response_with_retry(
                         delay_ms = delay.as_millis(),
                         "provider structured response was empty; retrying"
                     );
+                    record_responses_retry_attempt(&span_recorder, attempt, "empty_response");
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                     continue;
@@ -210,6 +232,7 @@ async fn create_response_with_retry(
                     delay_ms = delay.as_millis(),
                     "provider structured response hit a retryable transport error; retrying"
                 );
+                record_responses_retry_attempt(&span_recorder, attempt, "transport_error");
                 tokio::time::sleep(delay).await;
                 attempt += 1;
             }

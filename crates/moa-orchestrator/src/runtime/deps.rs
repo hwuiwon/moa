@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{Context as AnyhowContext, Result, bail};
 use moa_authz::{AwakeableResolver, FgaClient};
@@ -16,7 +15,6 @@ use moa_core::{
     types::channel::Channel,
 };
 use moa_hands::{ToolRouter, core::leases::PostgresHandLeaseStore};
-use moa_observability::record_retrieval_embedder_construction;
 use moa_providers::{
     EmbedderConstructionRole, ProviderRegistry, build_embedder_from_config,
     build_embedding_provider_from_config,
@@ -298,14 +296,9 @@ fn build_channel_adapters(
 }
 
 fn build_retrieval_embedder(config: &MoaConfig) -> Option<Arc<dyn EmbeddingProvider>> {
-    let embedder_started = Instant::now();
     match build_embedder_from_config(config, EmbedderConstructionRole::Retrieval) {
-        Ok(embedder) => {
-            record_retrieval_embedder_construction("success", embedder_started.elapsed());
-            Some(embedder)
-        }
+        Ok(embedder) => Some(embedder),
         Err(error) => {
-            record_retrieval_embedder_construction("failure", embedder_started.elapsed());
             tracing::warn!(
                 %error,
                 "graph memory vector retrieval disabled because the retrieval embedder could not be constructed"

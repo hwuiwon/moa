@@ -195,7 +195,9 @@ pub fn clickhouse_field_expr(dataset_id: &str, field_id: &str) -> Option<&'stati
         ("turns", "finished_at") => "d.finished_at",
         ("turns", "pipeline_ms") => "d.pipeline_ms",
         ("turns", "llm_ms") => "d.llm_ms",
-        // Postgres nulls this column too; not carried by turn_fact.
+        // Postgres now populates llm_ttft_ms from the streamed BrainResponse
+        // payload, but the ClickHouse exporter does not carry per-turn TTFT, so
+        // this column is null on the ClickHouse backend only.
         ("turns", "llm_ttft_ms") => "CAST(NULL AS Nullable(Float64))",
         ("turns", "tool_ms") => "d.tool_ms",
         ("turns", "tool_call_count") => "d.tool_call_count",

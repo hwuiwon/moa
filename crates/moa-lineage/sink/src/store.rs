@@ -77,4 +77,38 @@ impl LineageStore {
         }
         Ok(())
     }
+
+    /// Refuses to start when the ClickHouse backend would silently drop hash
+    /// chaining for a compliance-enabled tenant.
+    ///
+    /// The audit hash chain needs a transactional fold over the row store, which
+    /// the ClickHouse backend cannot provide. Rather than write compliance rows
+    /// without `prev_hash` links (and so without verifiable Merkle roots), the
+    /// process must not come up at all: a misconfigured backend that silently
+    /// breaks `moa lineage verify` is worse than a hard startup failure the
+    /// operator can act on. On the Postgres backend this is a no-op.
+    pub async fn guard_compliance_backend(&self) -> Result<()> {
+        if self.clickhouse().is_none() {
+            return Ok(());
+        }
+        let enabled: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT storage_partition_id
+            FROM analytics.compliance_tenants
+            WHERE enabled
+            "#,
+        )
+        .fetch_all(self.postgres())
+        .await?;
+        if enabled.is_empty() {
+            return Ok(());
+        }
+        Err(crate::Error::Invalid(format!(
+            "the clickhouse lineage backend cannot hash-chain compliance tenants, but {} \
+             compliance tenant(s) are enabled ({:?}); use the postgres lineage backend or \
+             disable compliance for these tenants before starting",
+            enabled.len(),
+            enabled
+        )))
+    }
 }

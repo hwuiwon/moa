@@ -22,6 +22,7 @@ moa-lineage-citation = { workspace = true }
 moa-lineage-core = { workspace = true }
 moa-memory-graph = { workspace = true }
 moa-memory-ingest = { workspace = true, optional = true }
+moa-memory-pii = { workspace = true }
 moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
 moa-observability = { workspace = true }
@@ -45,7 +46,6 @@ workspace-hack = { workspace = true }
 insta.workspace = true
 moa-memory-ingest = { workspace = true, features = ["test-util"] }
 moa-memory-lifecycle = { workspace = true }
-moa-memory-pii = { workspace = true }
 moa-providers = { workspace = true, features = ["test-util"] }
 moa-session = { workspace = true }
 moa-test-support = { workspace = true }

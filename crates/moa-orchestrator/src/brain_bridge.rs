@@ -174,7 +174,8 @@ pub(crate) async fn prepare_turn_request(
         &session,
         &context,
         &pipeline_span,
-    );
+    )
+    .await;
     let active_canary = if context.tools().is_empty() {
         None
     } else {
@@ -584,6 +585,7 @@ mod tests {
                         output_tokens: 1,
                         cost_cents: 0,
                         duration_ms: 1,
+                        llm_ttft_ms: None,
                     },
                 )
             })

@@ -54,8 +54,8 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(moa_tool_calls_total[5m])) by (category, sandbox_tier, status)",
-          "legendFormat": "{{category}} {{sandbox_tier}} {{status}}",
+          "expr": "sum(rate(moa_tool_calls_total[5m])) by (tool_name, status)",
+          "legendFormat": "{{tool_name}} {{status}}",
           "refId": "A"
         }
       ],

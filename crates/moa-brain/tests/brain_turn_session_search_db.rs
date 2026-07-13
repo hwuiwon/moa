@@ -170,6 +170,7 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
                 output_tokens: 8,
                 cost_cents: 1,
                 duration_ms: 10,
+                llm_ttft_ms: None,
             },
         )
         .await
@@ -200,6 +201,7 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
                     output_tokens: 10,
                     cost_cents: 1,
                     duration_ms: 10,
+                    llm_ttft_ms: None,
                 },
             )
             .await
