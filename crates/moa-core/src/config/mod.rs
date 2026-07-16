@@ -10,6 +10,7 @@ mod compliance;
 mod context;
 mod database;
 mod env_overlay;
+mod execution;
 mod knowledge;
 mod learning;
 mod lineage;
@@ -43,6 +44,7 @@ pub use context::{
 };
 pub use database::{DatabaseConfig, DatabaseNeonConfig};
 pub use env_overlay::MoaEnvOverlay;
+pub use execution::ExecutionConfig;
 pub use knowledge::{
     KnowledgeChunkingConfig, KnowledgeConfig, KnowledgeObservabilityConfig,
     KnowledgeParserDefaultsConfig, KnowledgeParsersConfig, KnowledgeProvidersConfig,
@@ -151,6 +153,8 @@ pub struct MoaConfig {
     pub resolution: ResolutionConfig,
     /// Automated learning-loop controls.
     pub learning: LearningConfig,
+    /// Execution planning, failure-loop, and resource defaults.
+    pub execution: ExecutionConfig,
     /// Incremental context snapshot settings.
     pub context_snapshot: ContextSnapshotConfig,
     /// External MCP server connections.
@@ -313,6 +317,22 @@ mod tests {
         "MOA_MEMORY_EXTRACTION_TIMEOUT_MS",
         "MOA_LEARNING_SKILLS_MIN_TOOL_CALLS",
         "MOA_LEARNING_SEGMENTS_IDLE_GAP_MINUTES",
+        "MOA_EXECUTION_PLANNER_REPAIR_ATTEMPTS",
+        "MOA_EXECUTION_REPEATED_FAILURE_LIMIT",
+        "MOA_EXECUTION_MAX_TASKS",
+        "MOA_EXECUTION_MAX_TOKENS",
+        "MOA_EXECUTION_MAX_TOOL_CALLS",
+        "MOA_EXECUTION_MAX_RETRIEVED_BYTES",
+        "MOA_EXECUTION_MAX_COST_MICROUSD",
+        "MOA_EXECUTION_UNATTENDED_MAX_COST_MICROUSD",
+        "MOA_EXECUTION_AGENT_TURN_COST_MICROUSD",
+        "MOA_EXECUTION_AGENT_TURN_TOKENS",
+        "MOA_EXECUTION_AGENT_TURN_TOOL_CALLS",
+        "MOA_EXECUTION_AGENT_TURN_RETRIEVED_BYTES",
+        "MOA_EXECUTION_VERIFIER_TURN_COST_MICROUSD",
+        "MOA_EXECUTION_VERIFIER_TURN_TOKENS",
+        "MOA_EXECUTION_VERIFIER_TURN_TOOL_CALLS",
+        "MOA_EXECUTION_VERIFIER_TURN_RETRIEVED_BYTES",
         "MOA_ORCHESTRATOR_ENDPOINT",
     ];
 

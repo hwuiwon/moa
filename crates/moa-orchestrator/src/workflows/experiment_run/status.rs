@@ -26,12 +26,9 @@ pub(super) async fn status_response(
         return status_response_from_record(tenant_id, run);
     }
 
-    if run.target_kind == ExperimentTargetKind::Procedure {
-        return linked_workflow_status_response(pool, scope, tenant_id, run).await;
-    }
-
-    if let Some(status) =
-        derived_session_status(run.status, run.session_id, session_store.as_ref()).await?
+    if run.target_kind == ExperimentTargetKind::AgentLoop
+        && let Some(status) =
+            derived_session_status(run.status, run.session_id, session_store.as_ref()).await?
         && status != run.status
     {
         run.status = status;
@@ -40,43 +37,7 @@ pub(super) async fn status_response(
     status_response_from_record(tenant_id, run)
 }
 
-async fn linked_workflow_status_response(
-    pool: sqlx::PgPool,
-    scope: ActionRuleScope,
-    tenant_id: TenantId,
-    mut run: ExperimentRunRecord,
-) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let Some(procedure_run_uid) = run.procedure_run_uid else {
-        return status_response_from_record(tenant_id, run);
-    };
-
-    let workflow_run = workflow_runtime(pool.clone())
-        .status(&scope, procedure_run_uid)
-        .await
-        .map_err(procedure_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
-
-    if let Some(status) = experiment_status_from_artifact_status(&workflow_run.status)
-        && status != run.status
-    {
-        run.status = status;
-        run.error = workflow_run.error.clone();
-        run.completed_at = workflow_run.completed_at;
-    }
-
-    let mut response = status_response_from_record_with_status(
-        tenant_id,
-        run,
-        workflow_run.status.as_str().to_string(),
-    )?;
-    response.session_id = workflow_run.session_id.or(response.session_id);
-    if workflow_run.error.is_some() {
-        response.error = workflow_run.error;
-    }
-    Ok(response)
-}
-
-pub(super) async fn procedure_status_response(
+pub(super) async fn run_status_response(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunStatusRequest,
     pool: &sqlx::PgPool,
@@ -125,20 +86,6 @@ async fn derived_session_status(
     }))
 }
 
-fn experiment_status_from_artifact_status(
-    status: &ArtifactRunStatus,
-) -> Option<ExperimentRunStatus> {
-    match status {
-        ArtifactRunStatus::Queued => None,
-        ArtifactRunStatus::Running | ArtifactRunStatus::PendingReview => {
-            Some(ExperimentRunStatus::Running)
-        }
-        ArtifactRunStatus::Completed => Some(ExperimentRunStatus::Completed),
-        ArtifactRunStatus::Failed => Some(ExperimentRunStatus::Failed),
-        ArtifactRunStatus::Cancelled => Some(ExperimentRunStatus::Cancelled),
-    }
-}
-
 fn status_response_from_record(
     tenant_id: TenantId,
     run: ExperimentRunRecord,
@@ -161,7 +108,7 @@ fn status_response_from_record_with_status(
         target_kind: Some(run.target_kind.as_str().to_string()),
         score_run_id: Some(run.score_run_id),
         session_id: run.session_id,
-        procedure_run_uid: run.procedure_run_uid,
+        execution_run_uid: run.execution_run_uid,
         error: run.error,
         run: run_value,
     })

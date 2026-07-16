@@ -143,6 +143,7 @@ async fn try_deliver_status(
 fn terminal_status_and_summary(phase: TurnPhase) -> (SessionStatus, &'static str) {
     match phase {
         TurnPhase::Completed => (SessionStatus::Completed, "Completed."),
+        TurnPhase::Accepted => (SessionStatus::Running, "Execution accepted."),
         TurnPhase::Cancelled => (SessionStatus::Cancelled, "Cancelled."),
         TurnPhase::Failed => (SessionStatus::Failed, "Failed."),
         _ => (SessionStatus::Running, "Working on it."),
@@ -495,6 +496,16 @@ mod tests {
                 status: SessionStatus::Completed,
                 summary: "Completed.".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn accepted_turn_status_update_keeps_session_running() {
+        // Pins: a detached execution handoff terminates the root turn without claiming the
+        // still-active session or execution run has completed.
+        assert_eq!(
+            terminal_status_and_summary(TurnPhase::Accepted),
+            (SessionStatus::Running, "Execution accepted.")
         );
     }
 

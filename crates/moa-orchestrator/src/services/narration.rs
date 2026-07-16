@@ -227,6 +227,7 @@ async fn run_merge_completion(
         max_output_tokens: Some(max_tokens as usize),
         temperature: Some(0.2),
         response_format: None,
+        native_web_search: Default::default(),
         metadata: HashMap::new(),
     };
 
@@ -283,15 +284,16 @@ async fn append_narration(
         tokens_used,
     };
     let dedupe_key = narration_dedupe_key(request.session_id, request.narration_seq);
-    let append = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id: request.session_id,
-            event,
-            dedupe_key: Some(dedupe_key),
-        }))
-        .call()
-        .await;
+    let append = crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id: request.session_id,
+                event,
+                dedupe_key: Some(dedupe_key),
+            })),
+    )
+    .call()
+    .await;
 
     match append {
         Ok(_) => {
@@ -480,7 +482,7 @@ fn escape_xml(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::wire::turn::{SessionSnapshot, TurnComplexityClass};
+    use moa_core::wire::turn::SessionSnapshot;
 
     use super::*;
 
@@ -502,7 +504,7 @@ mod tests {
         TurnProgress {
             turn_id: "turn-1".to_string(),
             phase,
-            complexity_class: TurnComplexityClass::Standard,
+            execution_route: None,
             iteration: 1,
             max_turns: None,
             tool_calls: 0,
@@ -524,8 +526,10 @@ mod tests {
                 active_turn_id: None,
                 pending_message_count: 0,
                 last_outcome: None,
+                active_execution_run_uids: Vec::new(),
             },
             active_turn_progress: active_turn,
+            active_execution_progress: Vec::new(),
             events: Vec::new(),
             child_progress: children,
         }

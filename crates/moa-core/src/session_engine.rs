@@ -39,14 +39,19 @@ mod tests {
     use std::time::Duration;
 
     use crate::{
-        events::Event, events::EventType, types::events_stream::EventRecord,
-        types::guardrails::GuardrailDirection, types::guardrails::GuardrailMode,
-        types::identifiers::AgentSignalId, types::identifiers::ModelId,
-        types::identifiers::SessionId, types::identifiers::ToolCallId, types::provider::ModelTier,
-        types::session::SessionMeta, types::tools::ToolOutput,
-        types::worker::state::ChildSignalKind, types::worker::state::InputAudience,
-        types::worker::state::NarrationSource, types::worker::state::SignalSeverity,
-        types::worker::state::WorkerState,
+        events::Event,
+        events::EventType,
+        types::events_stream::EventRecord,
+        types::execution_planning::{ExecutionRunAdmissionStatus, ExecutionRunStarted},
+        types::guardrails::GuardrailDirection,
+        types::guardrails::GuardrailMode,
+        types::identifiers::ModelId,
+        types::identifiers::SessionId,
+        types::identifiers::ToolCallId,
+        types::provider::ModelTier,
+        types::session::SessionMeta,
+        types::tools::ToolOutput,
+        types::worker::state::NarrationSource,
     };
 
     use super::session_requires_processing;
@@ -137,6 +142,101 @@ mod tests {
 
         assert!(session_requires_processing(&session, &events));
         assert_eq!(events[1].event_type, EventType::WorkerHeartbeatStale);
+    }
+
+    #[test]
+    fn execution_run_started_does_not_mask_pending_user_work() {
+        // Pins: the admission breadcrumb is neutral scheduling evidence and may
+        // not consume or terminate the user message that precedes it.
+        let session = SessionMeta::default();
+        let events = vec![
+            record(
+                1,
+                Event::UserMessage {
+                    text: "start an execution run".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            record(
+                2,
+                Event::ExecutionRunStarted(ExecutionRunStarted {
+                    run_uid: Uuid::now_v7(),
+                    originating_user_sequence_num: 1,
+                    plan_revision: 1,
+                    status: ExecutionRunAdmissionStatus::Queued,
+                    confirmation: None,
+                }),
+            ),
+        ];
+
+        assert!(session_requires_processing(&session, &events));
+    }
+
+    #[test]
+    fn execution_delivery_effects_drive_only_input_and_synthesis_processing_boundaries() {
+        // Pins: terminal run status is a transparent projection, input parks the current turn,
+        // and only the guarded synthesis request starts new model work.
+        use crate::events::{
+            ExecutionInputRequired, ExecutionRunEvidenceRef, ExecutionSynthesisRequested,
+            ExecutionTaskResultsRef, ExecutionTerminalSummary,
+        };
+
+        let session = SessionMeta::default();
+        let run_uid = Uuid::from_u128(61);
+        let terminal = ExecutionTerminalSummary {
+            run_uid,
+            originating_user_sequence_num: 1,
+            output: None,
+            output_hash: [5; 32],
+            citation_ids: Vec::new(),
+            failures: Vec::new(),
+            gaps: Vec::new(),
+            task_results: ExecutionTaskResultsRef::ExecutionTaskTable { run_uid },
+        };
+        let user = record(
+            1,
+            Event::UserMessage {
+                text: "run it".to_string(),
+                attachments: Vec::new(),
+            },
+        );
+
+        assert!(session_requires_processing(
+            &session,
+            &[
+                user.clone(),
+                record(2, Event::ExecutionCompleted(terminal.clone()))
+            ]
+        ));
+        assert!(!session_requires_processing(
+            &session,
+            &[
+                user,
+                record(
+                    2,
+                    Event::ExecutionInputRequired(ExecutionInputRequired {
+                        run_uid,
+                        originating_user_sequence_num: 1,
+                        task_id: Uuid::from_u128(62),
+                        generation: 2,
+                        question: "Which account?".to_string(),
+                    }),
+                ),
+            ]
+        ));
+        assert!(session_requires_processing(
+            &session,
+            &[record(
+                3,
+                Event::ExecutionSynthesisRequested(ExecutionSynthesisRequested {
+                    run_uid,
+                    originating_user_sequence_num: 1,
+                    turn_id: "execution-synthesis-61-1".to_string(),
+                    terminal,
+                    run_evidence: ExecutionRunEvidenceRef::ExecutionRun { run_uid },
+                }),
+            )]
+        ));
     }
 
     #[test]
@@ -275,70 +375,5 @@ mod tests {
         )];
 
         assert!(!session_requires_processing(&session, &events));
-    }
-
-    #[test]
-    fn worker_result_synthesis_request_drives_processing() {
-        // Pins: deterministic auto-delegation completion dispatches a system-triggered
-        // synthesis turn, so the request event must compile a model call.
-        let session = SessionMeta::default();
-        let events = vec![record(
-            1,
-            Event::WorkerResultSynthesisRequested {
-                user_sequence_num: 1,
-                turn_id: "turn-1".to_string(),
-                reason: "worker bundle ready".to_string(),
-            },
-        )];
-
-        assert!(session_requires_processing(&session, &events));
-    }
-
-    #[test]
-    fn worker_result_synthesis_request_survives_late_worker_lifecycle_events() {
-        // Pins: a late terminal notification from one worker must not mask the already
-        // dispatched coordinator synthesis turn for the completed auto-delegation bundle.
-        let session = SessionMeta::default();
-        let events = vec![
-            record(
-                1,
-                Event::WorkerResultSynthesisRequested {
-                    user_sequence_num: 1,
-                    turn_id: "turn-1".to_string(),
-                    reason: "worker bundle ready".to_string(),
-                },
-            ),
-            record(
-                2,
-                Event::WorkerStatusChanged {
-                    worker_id: "worker-1".to_string(),
-                    from: Some(WorkerState::Running),
-                    to: WorkerState::Completed,
-                    summary: Some("done".to_string()),
-                },
-            ),
-            record(
-                3,
-                Event::WorkerNotificationDelivered {
-                    worker_id: "worker-1".to_string(),
-                    state: WorkerState::Completed,
-                    summary: "done".to_string(),
-                },
-            ),
-            record(
-                4,
-                Event::WorkerSignalReceived {
-                    signal_id: AgentSignalId::new(),
-                    worker_id: "worker-1".to_string(),
-                    kind: ChildSignalKind::Finding,
-                    severity: SignalSeverity::Info,
-                    summary: "done".to_string(),
-                    input_request_id: None,
-                    input_audience: Some(InputAudience::Coordinator),
-                },
-            ),
-        ];
-
-        assert!(session_requires_processing(&session, &events));
     }
 }

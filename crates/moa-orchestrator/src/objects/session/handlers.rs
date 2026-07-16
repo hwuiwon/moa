@@ -1,5 +1,9 @@
 //! Restate handlers for the Session VO.
 
+use super::execution_runs::{
+    accept_execution_input_required, accept_execution_progress, accept_execution_run_started,
+    accept_execution_terminal, admit_execution_template, dispatch_execution_run,
+};
 use super::state::signal_kind_is_resume_eligible;
 use super::*;
 use crate::ctx::RequestHeaders;
@@ -16,6 +20,7 @@ impl Session for SessionImpl {
         ctx: ObjectContext<'_>,
         meta: Json<SessionMeta>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "set_meta");
         let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         state.set_meta(meta.into_inner());
@@ -29,6 +34,7 @@ impl Session for SessionImpl {
         mut ctx: ObjectContext<'_>,
         msg: Json<UserMessage>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "post_message");
         let msg = msg.into_inner();
         start_turn_inner(
@@ -39,6 +45,7 @@ impl Session for SessionImpl {
                 model: None,
                 contact: None,
                 max_turns: None,
+                execution_template: None,
             },
             &self.session_limits,
         )
@@ -52,26 +59,63 @@ impl Session for SessionImpl {
         ctx: ObjectContext<'_>,
         scope: Json<CancelScope>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "cancel");
         let session_id = parse_session_key(ctx.key())?;
-        require_session_participant(&ctx, session_id).await?;
+        let identity = require_session_participant(&ctx, session_id).await?;
         let scope = scope.into_inner();
         let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        let meta = state
+            .ensure_initialized()
+            .map_err(moa_error_to_handler_error)?
+            .clone();
         state.set_cancel_flag(scope);
         let children = state.children.clone();
+        let active_execution_run_uids = state
+            .active_execution_runs
+            .iter()
+            .map(|run| run.run_uid)
+            .collect::<Vec<_>>();
         state.persist(&ctx);
         // Both scopes cancel the active coordinator turn.
         if let Some(turn_id) = load_pending_state(&ctx).await?.active_turn_id {
-            ctx.workflow_client::<TurnExecutionClient>(turn_id)
-                .request_cancel(Json::from("session cancel requested".to_string()))
-                .send();
+            crate::restate_identity::replay_safe_request(
+                ctx.workflow_client::<TurnExecutionClient>(turn_id)
+                    .request_cancel(Json::from("session cancel requested".to_string())),
+            )
+            .send();
         }
         // Only `TaskTree` cascades to the registered children; `CoordinatorOnly` leaves them running.
         if scope.cancels_task_tree() {
             for child in children {
-                ctx.object_client::<WorkerClient>(child.id)
-                    .cancel("parent session cancelled".to_string())
-                    .send();
+                crate::restate_identity::replay_safe_request(
+                    ctx.object_client::<WorkerClient>(child.id)
+                        .cancel("parent session cancelled".to_string()),
+                )
+                .send();
+            }
+            for run_uid in active_execution_run_uids {
+                let call = ctx.service_client::<ExecutionClient>().cancel(Json::from(
+                    moa_execution::wire::ExecutionCancelRequest {
+                        run: moa_execution::wire::ExecutionRunRequest {
+                            tenant_id: meta.tenant_id,
+                            contact_id: meta.contact.as_ref().map(|contact| contact.contact_id),
+                            session_id,
+                            run_uid,
+                        },
+                        reason: "parent session cancelled".to_string(),
+                    },
+                ));
+                match with_identity_headers(call, &identity)
+                    .call()
+                    .await?
+                    .into_inner()
+                {
+                    moa_execution::wire::ExecutionMutationResponse::Applied { .. }
+                    | moa_execution::wire::ExecutionMutationResponse::Replayed { .. }
+                    | moa_execution::wire::ExecutionMutationResponse::Conflict { .. }
+                    | moa_execution::wire::ExecutionMutationResponse::NotFound => {}
+                }
             }
         }
         tracing::info!(scope = ?scope, key = %ctx.key(), "session cancel requested");
@@ -83,6 +127,7 @@ impl Session for SessionImpl {
         &self,
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<SessionStatus>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "status");
         let session_id = parse_session_key(ctx.key())?;
         require_session_participant(&ctx, session_id).await?;
@@ -95,6 +140,7 @@ impl Session for SessionImpl {
         mut ctx: ObjectContext<'_>,
         request: Json<StartTurnRequest>,
     ) -> Result<Json<StartTurnResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "start_turn");
         Ok(Json::from(
             start_turn_inner(&mut ctx, request.into_inner(), &self.session_limits).await?,
@@ -107,6 +153,7 @@ impl Session for SessionImpl {
         mut ctx: ObjectContext<'_>,
         outcome: Json<ExecutionTurnOutcome>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "record_turn_outcome");
         let outcome = outcome.into_inner();
         let mut pending_state = load_pending_state(&ctx).await?;
@@ -114,6 +161,18 @@ impl Session for SessionImpl {
             pending_state.active_turn_id.as_deref() == Some(outcome.turn_id.as_str());
         let session_id = parse_session_key(ctx.key())?;
         let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        if let ExecutionTurnOutcomeKind::Accepted { execution_run_uid } = outcome.kind
+            && !state
+                .active_execution_runs
+                .iter()
+                .any(|marker| marker.run_uid == execution_run_uid)
+        {
+            return Err(TerminalError::new_with_code(
+                409,
+                "accepted turn outcome requires a matching active execution run marker",
+            )
+            .into());
+        }
 
         if matches_active {
             pending_state.active_turn_id = None;
@@ -133,16 +192,11 @@ impl Session for SessionImpl {
                 "cleared pending parent resume and drained dispatch-time signal snapshot"
             );
         }
-        if matches_active && state.clear_auto_delegation_on_synthesis_outcome(&outcome.turn_id) {
-            tracing::debug!(
-                key = %ctx.key(),
-                turn_id = %outcome.turn_id,
-                "cleared completed auto-delegation synthesis run"
-            );
-        }
-
         if matches_active
-            && matches!(outcome.kind, ExecutionTurnOutcomeKind::Completed)
+            && matches!(
+                outcome.kind,
+                ExecutionTurnOutcomeKind::Completed | ExecutionTurnOutcomeKind::Accepted { .. }
+            )
             && let Some(next) = pending_state.pending_messages.pop_front()
         {
             let next_turn_id = generate_turn_id(&mut ctx);
@@ -175,6 +229,7 @@ impl Session for SessionImpl {
                     max_turns: next.max_turns,
                     trigger: TurnTrigger::UserMessage,
                     child_signal_id: None,
+                    execution_template: next.execution_template,
                 },
             );
             return Ok(());
@@ -183,23 +238,15 @@ impl Session for SessionImpl {
         if matches_active {
             let now = durable_utc_now(&ctx).await?;
             let resumed = if matches!(outcome.kind, ExecutionTurnOutcomeKind::Completed) {
-                dispatch_auto_delegation_synthesis_if_idle(
+                dispatch_queued_parent_resume_if_idle(
                     &mut ctx,
                     &mut pending_state,
                     &mut state,
                     session_id,
                     now,
+                    &self.session_limits,
                 )
                 .await?
-                    || dispatch_queued_parent_resume_if_idle(
-                        &mut ctx,
-                        &mut pending_state,
-                        &mut state,
-                        session_id,
-                        now,
-                        &self.session_limits,
-                    )
-                    .await?
             } else {
                 false
             };
@@ -209,7 +256,7 @@ impl Session for SessionImpl {
                         // Compute the branch before the `&mut self` call so the
                         // immutable read does not overlap the mutable borrow
                         // (the `Tracked` deref forgoes two-phase borrows).
-                        let completed_status = if state.auto_delegation_waiting_for_workers() {
+                        let completed_status = if !state.active_execution_runs.is_empty() {
                             SessionStatus::Running
                         } else {
                             SessionStatus::Paused
@@ -222,6 +269,9 @@ impl Session for SessionImpl {
                     ExecutionTurnOutcomeKind::Failed => {
                         state.set_status(SessionStatus::Failed, now)
                     }
+                    ExecutionTurnOutcomeKind::Accepted { .. } => {
+                        state.apply_accepted_execution_turn(now)
+                    }
                 }
             }
             state.persist(&ctx);
@@ -232,6 +282,209 @@ impl Session for SessionImpl {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self, ctx, delivery))]
+    // SAFETY: internal TurnExecution delivery after Execution/start has committed the run.
+    async fn execution_run_started(
+        &self,
+        ctx: ObjectContext<'_>,
+        delivery: Json<ExecutionRunStartedDelivery>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Session", "execution_run_started");
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        let delivery = delivery.into_inner();
+        let run_uid = delivery.started.run_uid;
+        let originating_user_sequence_num = delivery.started.originating_user_sequence_num;
+        tracing_opentelemetry::OpenTelemetrySpanExt::set_attribute(
+            &tracing::Span::current(),
+            "moa.execution.run_uid",
+            run_uid.to_string(),
+        );
+        accept_execution_run_started(&ctx, &mut state, delivery.started, delivery.approved_budget)
+            .await?;
+        let terminal_replay = state
+            .execution_synthesis_marker(run_uid, originating_user_sequence_num)
+            .is_some();
+        if !terminal_replay {
+            state.apply_accepted_execution_turn(durable_utc_now(&ctx).await?);
+        }
+        state.persist(&ctx);
+        if !terminal_replay {
+            let session_id = parse_session_key(ctx.key())?;
+            sync_status(&ctx, session_id, &state).await?;
+            dispatch_execution_run(&ctx, &state, run_uid)?;
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn admit_execution_template(
+        &self,
+        mut ctx: ObjectContext<'_>,
+        request: Json<moa_execution::wire::ExecutionTemplateAdmissionRequest>,
+    ) -> Result<Json<moa_execution::wire::ExecutionTemplateAdmissionResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Session", "admit_execution_template");
+        let request = request.into_inner();
+        let session_id = parse_session_key(ctx.key())?;
+        if request.session_id != session_id {
+            return Err(TerminalError::new_with_code(
+                409,
+                "execution-template admission request targets a different Session",
+            )
+            .into());
+        }
+        let identity = require_session_participant(&ctx, session_id).await?;
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        let response = admit_execution_template(
+            &mut ctx,
+            &mut state,
+            self.session_store_backend.clone(),
+            &identity,
+            request,
+        )
+        .await?;
+        Ok(Json::from(response))
+    }
+
+    #[tracing::instrument(skip(self, ctx, progress))]
+    // SAFETY: internal ExecutionRun delivery after execution persistence committed the aggregate.
+    async fn execution_progress(
+        &self,
+        ctx: ObjectContext<'_>,
+        progress: Json<ExecutionProgress>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Session", "execution_progress");
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        accept_execution_progress(
+            &ctx,
+            &mut state,
+            progress.into_inner(),
+            self.session_limits.progress_interval_ms,
+        )
+        .await?;
+        state.persist(&ctx);
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, input))]
+    // SAFETY: internal ExecutionRun delivery after a task persisted exact user-audience input.
+    async fn execution_input_required(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<ExecutionInputRequired>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Session", "execution_input_required");
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        accept_execution_input_required(&ctx, &mut state, input.into_inner()).await?;
+        state.persist(&ctx);
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, delivery))]
+    // SAFETY: internal ExecutionRun delivery after the terminal run and task projection are durable.
+    async fn execution_terminal(
+        &self,
+        ctx: ObjectContext<'_>,
+        delivery: Json<moa_execution::wire::ExecutionTerminalDelivery>,
+    ) -> Result<Json<ExecutionSynthesisDispatch>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Session", "execution_terminal");
+        let delivery = delivery.into_inner();
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        let run_uid = delivery.summary.run_uid;
+        let origin = delivery.summary.originating_user_sequence_num;
+        if let Some(existing) = state.execution_synthesis_marker(run_uid, origin) {
+            return Ok(Json::from(ExecutionSynthesisDispatch {
+                run_uid,
+                originating_user_sequence_num: origin,
+                turn_id: existing.turn_id.clone(),
+            }));
+        }
+
+        let requested = accept_execution_terminal(&ctx, &state, delivery).await?;
+        let meta = state
+            .ensure_initialized()
+            .map_err(moa_error_to_handler_error)?
+            .clone();
+        let identity = state.owning_identity.clone().ok_or_else(|| {
+            TerminalError::new_with_code(
+                409,
+                "execution synthesis requires the session owning identity",
+            )
+        })?;
+        let session_id = parse_session_key(ctx.key())?;
+        let evidence_call = ctx
+            .service_client::<ExecutionClient>()
+            .synthesis_evidence(Json::from(
+                moa_execution::wire::ExecutionSynthesisEvidenceRequest {
+                    run: moa_execution::wire::ExecutionRunRequest {
+                        tenant_id: meta.tenant_id,
+                        contact_id: meta.contact.as_ref().map(|contact| contact.contact_id),
+                        session_id,
+                        run_uid,
+                    },
+                    originating_user_sequence_num: origin,
+                },
+            ));
+        let evidence = with_identity_headers(evidence_call, &identity)
+            .call()
+            .await?
+            .into_inner();
+        let evidence_json = serde_json::to_string(&evidence).map_err(|error| {
+            TerminalError::new(format!(
+                "failed to encode execution synthesis evidence: {error}"
+            ))
+        })?;
+        let instruction = format!(
+            "Synthesize the final user response for execution run {run_uid} from the durable \
+             <execution_synthesis> event and this internally authorized evidence: \
+             <execution_run_evidence>{evidence_json}</execution_run_evidence>. Do not start a new \
+             execution run and do not reproduce raw task-table outputs."
+        );
+
+        let mut pending_state = load_pending_state(&ctx).await?;
+        pending_state.active_turn_id = Some(requested.turn_id.clone());
+        let now = durable_utc_now(&ctx).await?;
+        state.set_status(SessionStatus::Running, now);
+        state.persist(&ctx);
+        persist_pending_state(&ctx, &pending_state);
+        sync_status(&ctx, session_id, &state).await?;
+
+        dispatch_turn_execution(
+            &ctx,
+            RunTurnRequest {
+                session_id: ctx.key().to_string(),
+                turn_id: requested.turn_id.clone(),
+                identity,
+                contact: meta.contact,
+                user_message: instruction,
+                attachments: Vec::new(),
+                model: None,
+                max_turns: None,
+                trigger: TurnTrigger::ExecutionSynthesis,
+                child_signal_id: None,
+                execution_template: None,
+            },
+        );
+        let marker = ExecutionSynthesisDedupe {
+            run_uid,
+            originating_user_sequence_num: origin,
+            turn_id: requested.turn_id.clone(),
+        };
+        state
+            .record_execution_synthesis_dispatch(marker)
+            .map_err(moa_error_to_handler_error)?;
+        state.persist(&ctx);
+        Ok(Json::from(ExecutionSynthesisDispatch {
+            run_uid,
+            originating_user_sequence_num: origin,
+            turn_id: requested.turn_id,
+        }))
+    }
+
     #[tracing::instrument(skip(self, ctx, input))]
     // SAFETY: called only by authorized workflows after the turn has been admitted by Session.
     async fn attach_turn_waiter(
@@ -239,6 +492,7 @@ impl Session for SessionImpl {
         ctx: ObjectContext<'_>,
         input: Json<AttachSessionTurnWaiterInput>,
     ) -> Result<Json<AttachSessionTurnWaiterOutput>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "attach_turn_waiter");
         let input = input.into_inner();
         let mut pending_state = load_pending_state(&ctx).await?;
@@ -271,6 +525,7 @@ impl Session for SessionImpl {
         ctx: ObjectContext<'_>,
         input: Json<RemoveSessionTurnWaiterInput>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "remove_turn_waiter");
         let input = input.into_inner();
         let mut pending_state = load_pending_state(&ctx).await?;
@@ -290,6 +545,7 @@ impl Session for SessionImpl {
         ctx: ObjectContext<'_>,
         reason: Json<String>,
     ) -> Result<Json<CancelResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "request_cancel");
         let session_id = parse_session_key(ctx.key())?;
         require_session_participant(&ctx, session_id).await?;
@@ -301,9 +557,11 @@ impl Session for SessionImpl {
             }));
         };
 
-        ctx.workflow_client::<TurnExecutionClient>(turn_id.clone())
-            .request_cancel(reason)
-            .send();
+        crate::restate_identity::replay_safe_request(
+            ctx.workflow_client::<TurnExecutionClient>(turn_id.clone())
+                .request_cancel(reason),
+        )
+        .send();
 
         Ok(Json::from(CancelResponse {
             cancelled: true,
@@ -317,6 +575,7 @@ impl Session for SessionImpl {
         mut ctx: ObjectContext<'_>,
         request: Json<QueueMessageRequest>,
     ) -> Result<Json<QueueMessageResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "queue_message");
         let request = request.into_inner();
         let response = start_turn_inner(
@@ -327,6 +586,7 @@ impl Session for SessionImpl {
                 model: request.model,
                 contact: request.contact,
                 max_turns: request.max_turns,
+                execution_template: request.execution_template,
             },
             &self.session_limits,
         )
@@ -342,15 +602,21 @@ impl Session for SessionImpl {
         &self,
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<SessionSnapshot>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "snapshot");
         let session_id = parse_session_key(ctx.key())?;
         require_session_participant(&ctx, session_id).await?;
         let pending_state = load_pending_state(&ctx).await?;
+        let active_execution_runs = SessionVoState::load_active_execution_runs(&ctx).await?;
         Ok(Json::from(SessionSnapshot {
             session_id: ctx.key().to_string(),
             active_turn_id: pending_state.active_turn_id,
             pending_message_count: pending_state.pending_messages.len() as u64,
             last_outcome: pending_state.last_outcome,
+            active_execution_run_uids: active_execution_runs
+                .into_iter()
+                .map(|marker| marker.run_uid)
+                .collect(),
         }))
     }
 
@@ -360,28 +626,38 @@ impl Session for SessionImpl {
         ctx: SharedObjectContext<'_>,
         request: Json<SessionProgressRequest>,
     ) -> Result<Json<SessionProgress>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "progress");
         let session_id = parse_session_key(ctx.key())?;
         require_session_participant(&ctx, session_id).await?;
         let event_range = request.into_inner().normalized_event_range();
         let pending_state = load_pending_state(&ctx).await?;
         let children = SessionVoState::load_children(&ctx).await?;
+        let active_execution_runs = SessionVoState::load_active_execution_runs(&ctx).await?;
+        let active_execution_progress =
+            SessionVoState::project_active_execution_progress(&active_execution_runs);
         let active_turn_id = pending_state.active_turn_id.clone();
         let snapshot = SessionSnapshot {
             session_id: ctx.key().to_string(),
             active_turn_id: pending_state.active_turn_id,
             pending_message_count: pending_state.pending_messages.len() as u64,
             last_outcome: pending_state.last_outcome,
+            active_execution_run_uids: active_execution_runs
+                .iter()
+                .map(|marker| marker.run_uid)
+                .collect(),
         };
         let events =
             load_progress_events(&ctx, session_id, event_range, &self.session_store).await?;
         let active_turn_progress = if let Some(turn_id) = active_turn_id {
             active_turn_progress_or_none(
                 &turn_id,
-                ctx.workflow_client::<TurnExecutionClient>(turn_id.clone())
-                    .progress()
-                    .call()
-                    .await,
+                crate::restate_identity::replay_safe_request(
+                    ctx.workflow_client::<TurnExecutionClient>(turn_id.clone())
+                        .progress(),
+                )
+                .call()
+                .await,
             )
         } else {
             None
@@ -391,6 +667,7 @@ impl Session for SessionImpl {
         Ok(Json::from(SessionProgress {
             snapshot,
             active_turn_progress,
+            active_execution_progress,
             events,
             child_progress,
         }))
@@ -403,6 +680,7 @@ impl Session for SessionImpl {
         ctx: ObjectContext<'_>,
         child: Json<WorkerChildRef>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "register_child");
         let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         let child = child.into_inner();
@@ -426,93 +704,6 @@ impl Session for SessionImpl {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self, ctx, input))]
-    // SAFETY: called only from TurnExecution after session participant authz has already checked.
-    async fn register_auto_delegation_run(
-        &self,
-        mut ctx: ObjectContext<'_>,
-        input: Json<RegisterAutoDelegationRunInput>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Session", "register_auto_delegation_run");
-        let session_id = parse_session_key(ctx.key())?;
-        let input = input.into_inner();
-        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
-        let mut pending_state = load_pending_state(&ctx).await?;
-        let changed = state.register_auto_delegation_run(input.user_sequence_num, input.worker_ids);
-        maybe_complete_auto_delegation_run(&mut ctx, &mut pending_state, &mut state, session_id)
-            .await?;
-        if changed || state.auto_delegation_run.is_some() {
-            state.persist(&ctx);
-            persist_pending_state(&ctx, &pending_state);
-        }
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self, ctx, input))]
-    // SAFETY: called only from TurnExecution after session participant authz has already checked.
-    async fn poll_auto_delegation_fan_in(
-        &self,
-        mut ctx: ObjectContext<'_>,
-        input: Json<PollAutoDelegationFanInInput>,
-    ) -> Result<Json<AutoDelegationFanInStatus>, HandlerError> {
-        annotate_restate_handler_span("Session", "poll_auto_delegation_fan_in");
-        let session_id = parse_session_key(ctx.key())?;
-        let input = input.into_inner();
-        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
-        let mut pending_state = load_pending_state(&ctx).await?;
-
-        // Only the run for the polling root turn's own user sequence is fanned in here.
-        let matches = state
-            .auto_delegation_run
-            .as_ref()
-            .is_some_and(|run| run.user_sequence_num == input.user_sequence_num);
-        if !matches {
-            return Ok(Json::from(AutoDelegationFanInStatus::NotRunning));
-        }
-
-        // Fan-in wait bound exceeded for a stuck worker: fail out any worker still not terminal
-        // so the run can complete and the coordinator synthesizes from the workers that did
-        // finish, instead of hanging the whole session until the turn/session timeout.
-        if input.force_complete {
-            let failed = state.fail_pending_auto_delegation_workers(
-                "worker did not report a terminal result before the fan-in wait bound",
-            );
-            if failed > 0 {
-                tracing::warn!(
-                    key = %ctx.key(),
-                    user_sequence_num = input.user_sequence_num,
-                    failed,
-                    "auto-delegation fan-in bound exceeded; failed out stuck worker(s) to unblock synthesis"
-                );
-            }
-        }
-
-        // Emit the durable bundle from run-owned snapshots if the run is complete; idempotent
-        // if the Session-VO terminal path already emitted it. Does not dispatch synthesis
-        // because the root turn is the active turn.
-        maybe_complete_auto_delegation_run(&mut ctx, &mut pending_state, &mut state, session_id)
-            .await?;
-
-        let status = if state
-            .auto_delegation_run
-            .as_ref()
-            .is_some_and(|run| run.bundle_emitted)
-        {
-            // The active root turn owns synthesis: claim it so `record_turn_outcome` clears the
-            // run instead of dispatching a duplicate synthesis turn. Idempotent once claimed.
-            state.record_auto_delegation_synthesis_dispatch(input.root_turn_id);
-            AutoDelegationFanInStatus::Ready
-        } else if let Some(worker_id) = state.pending_auto_delegation_worker() {
-            AutoDelegationFanInStatus::Pending { worker_id }
-        } else {
-            AutoDelegationFanInStatus::NotRunning
-        };
-
-        state.persist(&ctx);
-        persist_pending_state(&ctx, &pending_state);
-        Ok(Json::from(status))
-    }
-
     #[tracing::instrument(skip(self, ctx))]
     // SAFETY: called only from TurnExecution after session participant authz has already checked.
     async fn remove_child(
@@ -520,6 +711,7 @@ impl Session for SessionImpl {
         ctx: ObjectContext<'_>,
         worker_id: String,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "remove_child");
         let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         if state.remove_child(&worker_id) {
@@ -532,13 +724,13 @@ impl Session for SessionImpl {
     // SAFETY: called only from Worker terminal delivery after parent dispatch authz has already checked.
     async fn mark_child_terminal(
         &self,
-        mut ctx: ObjectContext<'_>,
+        ctx: ObjectContext<'_>,
         input: Json<MarkWorkerChildTerminalInput>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "mark_child_terminal");
         let session_id = parse_session_key(ctx.key())?;
         let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
-        let mut pending_state = load_pending_state(&ctx).await?;
         let input = input.into_inner();
         let worker_id = input.worker_id.clone();
         if state.mark_child_terminal(input) {
@@ -550,15 +742,7 @@ impl Session for SessionImpl {
                 &self.session_store,
             )
             .await?;
-            maybe_complete_auto_delegation_run(
-                &mut ctx,
-                &mut pending_state,
-                &mut state,
-                session_id,
-            )
-            .await?;
             state.persist(&ctx);
-            persist_pending_state(&ctx, &pending_state);
         }
         Ok(())
     }
@@ -570,6 +754,7 @@ impl Session for SessionImpl {
         ctx: ObjectContext<'_>,
         input: Json<ConsumeWorkerChildResultInput>,
     ) -> Result<Json<ConsumeWorkerChildResultOutput>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "consume_child_result");
         let session_id = parse_session_key(ctx.key())?;
         let input = input.into_inner();
@@ -600,6 +785,7 @@ impl Session for SessionImpl {
         &self,
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<Vec<WorkerChildRef>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "child_refs");
         Ok(Json::from(SessionVoState::load_children(&ctx).await?))
     }
@@ -617,6 +803,7 @@ impl Session for SessionImpl {
         mut ctx: ObjectContext<'_>,
         signal: Json<WorkerSignal>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "record_child_signal");
         let signal = signal.into_inner();
         let session_id = parse_session_key(ctx.key())?;
@@ -666,32 +853,6 @@ impl Session for SessionImpl {
         )
         .await?;
 
-        // Never-terminal recovery: a stuck worker (HeartbeatStale) that belongs to an un-emitted
-        // auto-delegation run is failed out here and the run is completed. The root turn's inline
-        // fan-in bound only force-completes while that turn is alive; once it has ended (e.g. this
-        // stale signal itself dispatches a resume, or the turn hit its cap) this is the only path
-        // that emits the bundle, so a never-terminal worker cannot leave the session waiting
-        // indefinitely. Runs BEFORE the active-turn reload so the resume gate below observes any
-        // synthesis turn this dispatches and does not start a duplicate.
-        if signal.kind == ChildSignalKind::HeartbeatStale
-            && state.fail_auto_delegation_worker(
-                &signal.worker_id,
-                "worker heartbeat went stale and it never reported a terminal result",
-            )
-        {
-            let mut pending_state = load_pending_state(&ctx).await?;
-            maybe_complete_auto_delegation_run(
-                &mut ctx,
-                &mut pending_state,
-                &mut state,
-                session_id,
-            )
-            .await?;
-            state.persist(&ctx);
-            persist_pending_state(&ctx, &pending_state);
-            sync_status(&ctx, session_id, &state).await?;
-        }
-
         // The resume gate needs the active-turn cursor, which lives in pending state.
         let active_turn_id = load_pending_state(&ctx).await?.active_turn_id;
 
@@ -704,6 +865,15 @@ impl Session for SessionImpl {
             input_request_id: signal.input_request_id.clone(),
             input_audience: signal.input_audience,
         });
+        if signal.kind == ChildSignalKind::NeedsInput
+            && signal.input_audience == Some(InputAudience::User)
+            && let Some(input_request_id) = signal.input_request_id.clone()
+        {
+            state.upsert_pending_user_reply_target(PendingUserReplyTarget::WorkerInput {
+                worker_id: signal.worker_id.clone(),
+                input_request_id,
+            });
+        }
 
         // Idempotence: a retried delivery of an already-armed signal must not start a
         // second resume turn. `maybe_arm_parent_resume` also re-blocks once the dispatched
@@ -764,6 +934,7 @@ impl Session for SessionImpl {
                         max_turns: None,
                         trigger: TurnTrigger::ChildSignal,
                         child_signal_id: Some(signal.signal_id),
+                        execution_template: None,
                     },
                 );
                 tracing::info!(
@@ -822,6 +993,7 @@ impl Session for SessionImpl {
 
     #[tracing::instrument(skip(self, ctx))]
     async fn destroy(&self, ctx: ObjectContext<'_>) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "destroy");
         let session_id = parse_session_key(ctx.key())?;
         require_session_participant(&ctx, session_id).await?;
@@ -829,9 +1001,11 @@ impl Session for SessionImpl {
         // VO state is cleared. The Session VO holds no `ToolRouter`, so this is dispatched
         // detached (fire-and-forget) to the ToolExecutor service that owns the router. It is
         // non-fatal; without this caller durable leases reclaim only via their 1-hour TTL.
-        ctx.service_client::<ToolExecutorClient>()
-            .release_session_hands(Json::from(ReleaseSessionHandsRequest { session_id }))
-            .send();
+        crate::restate_identity::replay_safe_request(
+            ctx.service_client::<ToolExecutorClient>()
+                .release_session_hands(Json::from(ReleaseSessionHandsRequest { session_id })),
+        )
+        .send();
         ctx.clear_all();
         tracing::info!(key = %ctx.key(), "session VO state cleared");
         Ok(())
@@ -847,6 +1021,7 @@ impl Session for SessionImpl {
         ctx: ObjectContext<'_>,
         req: Json<NarrationTickRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "narration_tick");
         narration::run_narration_tick(&ctx, req.into_inner().generation, &self.session_limits).await
     }
@@ -862,6 +1037,7 @@ impl Session for SessionImpl {
         ctx: ObjectContext<'_>,
         req: Json<CheckChildLivenessRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "check_child_liveness");
         liveness::run_child_liveness_check(&ctx, req.into_inner(), &self.session_limits).await
     }
@@ -937,9 +1113,11 @@ async fn collect_child_progress(
             ChildProgressFetch::Fetch(child_id) => {
                 fetch_plan_slots.push((plan_slot, child_id.clone()));
                 inflight.push(
-                    ctx.object_client::<WorkerClient>(child_id)
-                        .progress_summary()
-                        .call(),
+                    crate::restate_identity::replay_safe_request(
+                        ctx.object_client::<WorkerClient>(child_id)
+                            .progress_summary(),
+                    )
+                    .call(),
                 );
             }
         }
@@ -976,56 +1154,131 @@ async fn forward_user_input_reply(
     ctx: &ObjectContext<'_>,
     state: &mut SessionVoState,
     session_id: SessionId,
+    tenant_id: moa_core::types::identifiers::TenantId,
+    contact_id: Option<moa_core::types::contact::ContactId>,
+    identity: &moa_core::traits::Identity,
     text: &str,
-) -> Result<Option<UnreadChildSignal>, HandlerError> {
-    // Only auto-forward the message as a `ProvideInput` reply when EXACTLY ONE worker is
-    // awaiting user input. With zero pending questions there is nothing to answer, and with more
-    // than one the target is ambiguous — in both cases the message must start a normal
-    // coordinator turn rather than being silently swallowed into an unrelated worker.
-    let signal = {
-        let mut awaiting = state.unread_child_signals.iter().filter(|signal| {
-            signal.kind == ChildSignalKind::NeedsInput
-                && signal.input_audience == Some(InputAudience::User)
-                && signal.input_request_id.is_some()
-        });
-        let Some(signal) = awaiting.next() else {
-            return Ok(None);
-        };
-        if awaiting.next().is_some() {
-            return Ok(None);
+) -> Result<bool, HandlerError> {
+    let Some(target) = state.exact_pending_user_reply_target() else {
+        return Ok(false);
+    };
+    let acknowledgement = match &target {
+        PendingUserReplyTarget::ExecutionConfirmation {
+            run_uid,
+            expected_plan_hash,
+            approved_budget,
+        } => {
+            let call = ctx.service_client::<ExecutionClient>().confirm(Json::from(
+                moa_execution::wire::ExecutionConfirmRequest {
+                    run: moa_execution::wire::ExecutionRunRequest {
+                        tenant_id,
+                        contact_id,
+                        session_id,
+                        run_uid: *run_uid,
+                    },
+                    expected_plan_hash: moa_execution::capability::ExecutionHash::from_bytes(
+                        *expected_plan_hash,
+                    ),
+                    approved_budget: approved_budget.clone(),
+                },
+            ));
+            execution_mutation_ack(
+                with_identity_headers(call, identity)
+                    .call()
+                    .await?
+                    .into_inner(),
+            )
         }
-        signal.clone()
+        PendingUserReplyTarget::ExecutionInput {
+            run_uid,
+            task_id,
+            generation,
+        } => {
+            let call = ctx
+                .service_client::<ExecutionClient>()
+                .deliver_input(Json::from(moa_execution::wire::ExecutionInputRequest {
+                    tenant_id,
+                    contact_id,
+                    session_id: Some(session_id),
+                    run_uid: *run_uid,
+                    task_id: moa_execution::state::ExecutionTaskId::from_uuid(*task_id),
+                    expected_generation: *generation,
+                    audience: moa_artifacts::execution_plan::InputAudience::User,
+                    input: serde_json::Value::String(text.to_string()),
+                }));
+            execution_mutation_ack(
+                with_identity_headers(call, identity)
+                    .call()
+                    .await?
+                    .into_inner(),
+            )
+        }
+        PendingUserReplyTarget::WorkerInput {
+            worker_id,
+            input_request_id,
+        } => {
+            let call = ctx
+                .object_client::<WorkerClient>(worker_id.clone())
+                .provide_input(Json::from(worker_provide_input_request(
+                    session_id,
+                    input_request_id,
+                    text,
+                )));
+            let acknowledgement = with_identity_headers(call, identity)
+                .call()
+                .await?
+                .into_inner();
+            if matches!(
+                acknowledgement,
+                UserReplyDeliveryAck::Applied | UserReplyDeliveryAck::Replayed
+            ) {
+                append_session_event_deduped(
+                    ctx,
+                    session_id,
+                    Event::WorkerMessageSent {
+                        worker_id: worker_id.clone(),
+                        input_request_id: Some(input_request_id.clone()),
+                        text: text.to_string(),
+                    },
+                    format!("worker_input_reply:{input_request_id}"),
+                )
+                .await?;
+                state.clear_unread_worker_input(worker_id, input_request_id);
+            }
+            acknowledgement
+        }
     };
-    let Some(input_request_id) = signal.input_request_id.clone() else {
-        return Ok(None);
-    };
+    state.apply_pending_user_reply_ack(&target, acknowledgement);
+    Ok(true)
+}
 
-    ctx.object_client::<WorkerClient>(signal.worker_id.clone())
-        .post_message(Json::from(WorkerMessage::ProvideInput {
-            input_request_id: input_request_id.clone(),
-            text: text.to_string(),
-        }))
-        .call()
-        .await?;
-    append_session_event_deduped(
-        ctx,
-        session_id,
-        Event::WorkerMessageSent {
-            worker_id: signal.worker_id.clone(),
-            input_request_id: Some(input_request_id.clone()),
-            text: text.to_string(),
-        },
-        format!("worker_input_reply:{input_request_id}"),
-    )
-    .await?;
-    state.clear_unread_child_signal(signal.signal_id);
-    tracing::info!(
-        session_id = %session_id,
-        worker_id = %signal.worker_id,
-        input_request_id = %input_request_id,
-        "forwarded user reply to worker input request"
-    );
-    Ok(Some(signal))
+fn worker_provide_input_request(
+    parent_session: SessionId,
+    input_request_id: &str,
+    text: &str,
+) -> WorkerProvideInputRequest {
+    WorkerProvideInputRequest {
+        parent_session,
+        input_request_id: input_request_id.to_string(),
+        input: serde_json::Value::String(text.to_string()),
+    }
+}
+
+fn execution_mutation_ack(
+    response: moa_execution::wire::ExecutionMutationResponse,
+) -> UserReplyDeliveryAck {
+    match response {
+        moa_execution::wire::ExecutionMutationResponse::Applied { .. } => {
+            UserReplyDeliveryAck::Applied
+        }
+        moa_execution::wire::ExecutionMutationResponse::Replayed { .. } => {
+            UserReplyDeliveryAck::Replayed
+        }
+        moa_execution::wire::ExecutionMutationResponse::Conflict { .. }
+        | moa_execution::wire::ExecutionMutationResponse::NotFound => {
+            UserReplyDeliveryAck::Conflict
+        }
+    }
 }
 
 /// Offloads a just-marked terminal child's large output to a content-addressed blob.
@@ -1033,7 +1286,7 @@ async fn forward_user_input_reply(
 /// A no-op unless the child's output exceeds the claim-check threshold. The full body is
 /// stored via a journaled `ctx.run` (content-addressed, so the recorded blob id is
 /// deterministic and reused on replay) and the inline `children` copy is compacted to a
-/// preview. The separate auto-delegation run copy keeps the full output for the bundle event.
+/// preview.
 async fn claim_check_child_output(
     ctx: &ObjectContext<'_>,
     state: &mut SessionVoState,
@@ -1086,108 +1339,6 @@ async fn hydrate_child_terminal_output(
         .into_inner();
     terminal.result.output = body;
     Ok(())
-}
-
-async fn maybe_complete_auto_delegation_run(
-    ctx: &mut ObjectContext<'_>,
-    pending_state: &mut SessionPendingState,
-    state: &mut SessionVoState,
-    session_id: SessionId,
-) -> Result<(), HandlerError> {
-    let Some((user_sequence_num, results)) = state.ready_auto_delegation_bundle() else {
-        return Ok(());
-    };
-    append_session_event_deduped(
-        ctx,
-        session_id,
-        Event::WorkerResultBundle {
-            user_sequence_num,
-            results,
-        },
-        format!("auto_delegation_fan_in:{user_sequence_num}"),
-    )
-    .await?;
-    state.mark_auto_delegation_bundle_emitted(user_sequence_num);
-    if pending_state.active_turn_id.is_none() {
-        let now = durable_utc_now(ctx).await?;
-        dispatch_auto_delegation_synthesis_if_idle(ctx, pending_state, state, session_id, now)
-            .await?;
-    }
-    Ok(())
-}
-
-async fn dispatch_auto_delegation_synthesis_if_idle(
-    ctx: &mut ObjectContext<'_>,
-    pending_state: &mut SessionPendingState,
-    state: &mut SessionVoState,
-    session_id: SessionId,
-    now: DateTime<Utc>,
-) -> Result<bool, HandlerError> {
-    if pending_state.active_turn_id.is_some() {
-        return Ok(false);
-    }
-    let Some(user_sequence_num) = state.pending_auto_delegation_synthesis_sequence() else {
-        return Ok(false);
-    };
-    let Some(identity) = state.owning_identity.clone() else {
-        tracing::warn!(
-            key = %ctx.key(),
-            user_sequence_num,
-            "auto-delegation bundle is ready but no owning identity is recorded"
-        );
-        return Ok(false);
-    };
-
-    let turn_id = generate_turn_id(ctx);
-    let instruction = build_auto_delegation_synthesis_instruction(user_sequence_num);
-    append_session_event_deduped(
-        ctx,
-        session_id,
-        Event::WorkerResultSynthesisRequested {
-            user_sequence_num,
-            turn_id: turn_id.clone(),
-            reason: instruction.clone(),
-        },
-        format!("worker_result_synthesis:{user_sequence_num}"),
-    )
-    .await?;
-    pending_state.active_turn_id = Some(turn_id.clone());
-    state.set_status(SessionStatus::Running, now);
-    state.record_auto_delegation_synthesis_dispatch(turn_id.clone());
-    let contact = state.meta.as_ref().and_then(|meta| meta.contact.clone());
-    state.persist_into(ctx);
-    persist_pending_state(ctx, pending_state);
-    sync_status(ctx, session_id, state).await?;
-    dispatch_turn_execution(
-        ctx,
-        RunTurnRequest {
-            session_id: ctx.key().to_string(),
-            turn_id: turn_id.clone(),
-            identity,
-            contact,
-            user_message: instruction,
-            attachments: Vec::new(),
-            model: None,
-            max_turns: None,
-            trigger: TurnTrigger::WorkerResults,
-            child_signal_id: None,
-        },
-    );
-    tracing::info!(
-        key = %ctx.key(),
-        user_sequence_num,
-        turn_id = %turn_id,
-        "dispatched auto-delegation result synthesis turn"
-    );
-    Ok(true)
-}
-
-fn build_auto_delegation_synthesis_instruction(user_sequence_num: u64) -> String {
-    format!(
-        "Auto-delegated worker results are complete for user message sequence {user_sequence_num}. \
-         Produce the final answer from the <worker_result_bundle> in the session history. \
-         Do not call list_workers or wait_worker for these workers."
-    )
 }
 
 async fn dispatch_queued_parent_resume_if_idle(
@@ -1284,6 +1435,7 @@ async fn dispatch_queued_parent_resume_if_idle(
             max_turns: None,
             trigger: TurnTrigger::ChildSignal,
             child_signal_id: Some(signal.signal_id),
+            execution_template: None,
         },
     );
     tracing::info!(
@@ -1389,12 +1541,21 @@ async fn start_turn_inner(
         .ensure_initialized()
         .map_err(moa_error_to_handler_error)?;
     let contact = admitted_contact_for_turn(request.contact, meta)?;
+    let tenant_id = meta.tenant_id;
+    let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
     let mut pending_state = load_pending_state(ctx).await?;
 
     if request.attachments.is_empty()
-        && forward_user_input_reply(ctx, &mut state, session_id, &request.user_message)
-            .await?
-            .is_some()
+        && forward_user_input_reply(
+            ctx,
+            &mut state,
+            session_id,
+            tenant_id,
+            contact_id,
+            &identity,
+            &request.user_message,
+        )
+        .await?
     {
         state.persist_into(ctx);
         sync_status(ctx, session_id, &state).await?;
@@ -1429,6 +1590,7 @@ async fn start_turn_inner(
             attachments: request.attachments,
             model: request.model,
             max_turns: request.max_turns,
+            execution_template: request.execution_template,
         });
         persist_pending_state(ctx, &pending_state);
         return Ok(StartTurnResponse {
@@ -1466,6 +1628,7 @@ async fn start_turn_inner(
             max_turns: request.max_turns,
             trigger: TurnTrigger::UserMessage,
             child_signal_id: None,
+            execution_template: request.execution_template,
         },
     );
     if drained > 0 {
@@ -1520,11 +1683,28 @@ mod tests {
     use moa_core::{
         types::channel::Channel, types::contact::ContactId, types::contact::ContactRef,
         types::contact::ContactVerificationState, types::identifiers::ModelId,
-        types::identifiers::TenantId, types::session::SessionMeta,
+        types::identifiers::SessionId, types::identifiers::TenantId, types::session::SessionMeta,
     };
     use restate_sdk::prelude::TerminalError;
 
-    use super::{active_turn_progress_or_none, admitted_contact_for_turn};
+    use super::{
+        active_turn_progress_or_none, admitted_contact_for_turn, worker_provide_input_request,
+    };
+
+    #[test]
+    fn session_worker_reply_payload_carries_exact_parent_session_and_string() {
+        // Pins: Session plain-reply routing sends the exact owning Session scope and keeps the
+        // canonical Value::String payload expected by Worker replay hashing.
+        let parent_session = SessionId::new();
+        let request = worker_provide_input_request(parent_session, "request-9", "the exact answer");
+
+        assert_eq!(request.parent_session, parent_session);
+        assert_eq!(request.input_request_id, "request-9");
+        assert_eq!(
+            request.input,
+            serde_json::Value::String("the exact answer".to_string())
+        );
+    }
 
     #[test]
     fn session_progress_active_turn_failure_returns_none() {

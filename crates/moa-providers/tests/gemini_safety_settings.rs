@@ -118,6 +118,7 @@ fn base_request() -> CompletionRequest {
         max_output_tokens: Some(256),
         temperature: Some(0.0),
         response_format: None,
+        native_web_search: Default::default(),
         metadata: HashMap::new(),
     }
 }

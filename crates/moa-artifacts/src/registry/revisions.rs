@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::validation::validate_for_status;
+use moa_core::types::contact::ContactId;
 
 /// Outcome of attempting to roll a published skill revision back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

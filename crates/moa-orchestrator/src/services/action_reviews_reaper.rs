@@ -9,6 +9,11 @@
 use std::time::Duration;
 
 use moa_core::types::action_policy::ActionReviewStatus;
+use moa_execution::wire::ExecutionActionReviewAcknowledgement;
+use moa_observability::propagation::{
+    ValidatedTraceContext, with_reqwest_validated_trace_headers,
+    with_reqwest_validated_trace_link_headers,
+};
 use moa_observability::{
     record_action_review_decision, record_action_review_oldest_pending_age,
     record_action_review_pending_depth, record_approval_wait,
@@ -19,6 +24,8 @@ use tokio::sync::oneshot;
 use tokio::time::interval;
 
 use crate::action_reviews::store as action_review_store;
+
+const EXECUTION_REVIEW_DISPATCH_BATCH_SIZE: i64 = 32;
 
 /// Action-review reaper failures.
 #[derive(Debug, Error)]
@@ -32,6 +39,8 @@ pub enum ActionReviewReaperError {
 pub struct ActionReviewReaper {
     pool: PgPool,
     sweep_interval: Duration,
+    restate_ingress_url: Option<String>,
+    client: reqwest::Client,
 }
 
 impl ActionReviewReaper {
@@ -41,6 +50,19 @@ impl ActionReviewReaper {
         Self {
             pool,
             sweep_interval: Duration::from_secs(30),
+            restate_ingress_url: None,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Builds the production reaper with execution-review outbox delivery enabled.
+    #[must_use]
+    pub fn with_restate_ingress(pool: PgPool, restate_ingress_url: String) -> Self {
+        Self {
+            pool,
+            sweep_interval: Duration::from_secs(30),
+            restate_ingress_url: Some(restate_ingress_url.trim_end_matches('/').to_string()),
+            client: reqwest::Client::new(),
         }
     }
 
@@ -72,8 +94,14 @@ impl ActionReviewReaper {
     }
 
     /// Run one timeout sweep, returning how many reviews failed closed.
+    #[tracing::instrument(skip(self))]
     pub async fn sweep(&self) -> Result<usize, ActionReviewReaperError> {
-        let timed_out = action_review_store::timeout_expired_reviews(&self.pool).await?;
+        let resolution_trace_context = current_trace_context();
+        let timed_out = action_review_store::timeout_expired_reviews(
+            &self.pool,
+            resolution_trace_context.as_ref(),
+        )
+        .await?;
         for review in &timed_out {
             record_action_review_decision(ActionReviewStatus::Timeout, review.action_class);
             let wait = (review.decided_at - review.created_at)
@@ -87,7 +115,102 @@ impl ActionReviewReaper {
                 "tenant action reviews timed out and failed closed"
             );
         }
+        if self.restate_ingress_url.is_some() {
+            let dispatched = self.dispatch_execution_review_resolutions().await?;
+            if dispatched > 0 {
+                tracing::info!(
+                    count = dispatched,
+                    "execution action-review resolutions dispatched"
+                );
+            }
+        }
         Ok(timed_out.len())
+    }
+
+    /// Claims and attempts one bounded persisted execution-review outbox batch.
+    pub async fn dispatch_execution_review_resolutions(
+        &self,
+    ) -> Result<usize, ActionReviewReaperError> {
+        let Some(ingress_url) = self.restate_ingress_url.as_deref() else {
+            return Ok(0);
+        };
+        let claimed = action_review_store::claim_execution_review_resolutions(
+            &self.pool,
+            EXECUTION_REVIEW_DISPATCH_BATCH_SIZE,
+        )
+        .await?;
+        let claimed_count = claimed.len();
+        for delivery in claimed {
+            let endpoint = format!(
+                "{ingress_url}/restate/call/ExecutionTask/{}/resolve_action_review",
+                delivery.request.task_id
+            );
+            let request = with_reqwest_validated_trace_headers(
+                self.client
+                    .post(endpoint)
+                    .header("idempotency-key", delivery.review_uid.to_string())
+                    .json(&delivery.request),
+                delivery.resolution_trace_context.as_ref(),
+            );
+            let response = with_reqwest_validated_trace_link_headers(
+                request,
+                delivery.task_trace_context.as_ref(),
+            )
+            .send()
+            .await;
+            let acknowledgement = match response {
+                Ok(response) if response.status().is_success() => response
+                    .json::<ExecutionActionReviewAcknowledgement>()
+                    .await
+                    .map_err(|error| error.to_string()),
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|error| format!("<unreadable body: {error}>"));
+                    Err(format!("Restate returned {status}: {body}"))
+                }
+                Err(error) => Err(error.to_string()),
+            };
+            match acknowledgement {
+                Ok(
+                    ExecutionActionReviewAcknowledgement::Applied
+                    | ExecutionActionReviewAcknowledgement::Replayed
+                    | ExecutionActionReviewAcknowledgement::AuditedStale,
+                ) => {
+                    let marked = action_review_store::mark_execution_review_delivered(
+                        &self.pool,
+                        delivery.review_uid,
+                        delivery.attempt_count,
+                    )
+                    .await?;
+                    if !marked {
+                        tracing::warn!(
+                            review_uid = %delivery.review_uid,
+                            attempt = delivery.attempt_count,
+                            "execution review acknowledgement lost its outbox claim fence"
+                        );
+                    }
+                }
+                Err(error) => {
+                    action_review_store::mark_execution_review_failed(
+                        &self.pool,
+                        delivery.review_uid,
+                        delivery.attempt_count,
+                        &error,
+                    )
+                    .await?;
+                    tracing::warn!(
+                        review_uid = %delivery.review_uid,
+                        attempt = delivery.attempt_count,
+                        error,
+                        "execution review delivery failed and was rescheduled"
+                    );
+                }
+            }
+        }
+        Ok(claimed_count)
     }
 
     /// Sample the pending-review queue and publish operator gauges.
@@ -109,6 +232,11 @@ impl ActionReviewReaper {
             }
         }
     }
+}
+
+fn current_trace_context() -> Option<ValidatedTraceContext> {
+    let headers = moa_observability::current_trace_headers();
+    ValidatedTraceContext::from_headers(|name| headers.get(name).cloned())
 }
 
 /// Handle used to stop the action-review reaper.

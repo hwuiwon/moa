@@ -185,6 +185,31 @@ pub struct ActionPolicyRule {
     pub created_at: DateTime<Utc>,
 }
 
+/// Capability-level provenance independent of the execution task that invoked it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityProvenance {
+    /// Origin object kind for workflow or artifact-driven actions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Origin object identifier for workflow or artifact-driven actions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Origin step identifier for workflow or artifact-driven actions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+}
+
+/// Durable execution-task identity carried through policy, review, and dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionTaskOrigin {
+    /// Owning execution run identifier.
+    pub run_uid: Uuid,
+    /// Owning persisted task identifier.
+    pub task_uid: Uuid,
+    /// Task attempt generation fenced by the execution workflow.
+    pub generation: u64,
+}
+
 /// Durable policy-facing description of one tool invocation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionEnvelope {
@@ -216,6 +241,9 @@ pub struct ActionEnvelope {
     pub origin_id: Option<String>,
     /// Origin step identifier for workflow or artifact-driven actions.
     pub origin_step_id: Option<String>,
+    /// Execution task that invoked the capability, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_origin: Option<ExecutionTaskOrigin>,
     /// Explicit idempotency key supplied for side-effecting tools.
     pub idempotency_key: Option<String>,
     /// Creation timestamp.

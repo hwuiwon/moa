@@ -9,14 +9,16 @@ pub(super) async fn sync_status(
 ) -> Result<(), HandlerError> {
     let persist_span = event_persist_span(0);
     let persist_started = Instant::now();
-    ctx.service_client::<RestateSessionStoreClient>()
-        .update_status(Json(UpdateStatusRequest {
-            session_id,
-            status: state.current_status(),
-        }))
-        .call()
-        .instrument(persist_span)
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .update_status(Json(UpdateStatusRequest {
+                session_id,
+                status: state.current_status(),
+            })),
+    )
+    .call()
+    .instrument(persist_span)
+    .await?;
     record_turn_event_persist_duration(persist_started.elapsed(), 0);
     Ok(())
 }

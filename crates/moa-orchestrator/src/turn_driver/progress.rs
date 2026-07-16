@@ -1,6 +1,9 @@
 //! Progress and cancellation state helpers shared by turn workflows.
 
-use moa_core::wire::turn::{TurnComplexityClass, TurnPhase, TurnProgress};
+use moa_core::{
+    types::execution_planning::ExecutionRouteDecision,
+    wire::turn::{TurnPhase, TurnProgress},
+};
 use restate_sdk::prelude::*;
 
 use crate::turn::util::meaningful_cancel_reason;
@@ -15,8 +18,8 @@ impl TurnStateKey {
     pub(crate) const CANCEL_REASON_PROMISE: &'static str = "cancel_reason";
     /// Current workflow lifecycle phase.
     const PHASE: &'static str = "phase";
-    /// Selected deterministic turn complexity class.
-    const COMPLEXITY_CLASS: &'static str = "complexity_class";
+    /// Selected deterministic execution route.
+    const EXECUTION_ROUTE: &'static str = "execution_route";
     /// Current model-loop iteration counter.
     const ITERATION: &'static str = "iteration";
     /// Current model-loop cap exposed in progress snapshots.
@@ -37,27 +40,13 @@ impl RootTurnStateKey {
     pub(crate) const QUERY_REWRITE_CACHE: &'static str = "query_rewrite_cache";
     /// Sequence number of the latest assistant response appended by this root turn.
     pub(crate) const LAST_RESPONSE_SEQUENCE: &'static str = "last_response_sequence";
-    /// User-message sequence for which deterministic ready delegation nodes were spawned.
-    pub(crate) const AUTO_DELEGATION_SEQUENCE: &'static str = "auto_delegation_sequence";
-    /// Worker ids spawned by deterministic auto-delegation for the admitted user message.
-    pub(crate) const AUTO_DELEGATION_WORKER_IDS: &'static str = "auto_delegation_worker_ids";
-    /// User-message sequence for which auto-delegated worker results were bundled.
-    pub(crate) const AUTO_DELEGATION_FAN_IN_SEQUENCE: &'static str =
-        "auto_delegation_fan_in_sequence";
-    /// Worker id the root fan-in has been waiting on across consecutive stuck cycles.
-    pub(crate) const AUTO_DELEGATION_FAN_IN_STUCK_WORKER: &'static str =
-        "auto_delegation_fan_in_stuck_worker";
-    /// Consecutive fan-in wait cycles spent on the same still-pending worker, used to bound the
-    /// wait so one never-terminal worker cannot hang the whole session.
-    pub(crate) const AUTO_DELEGATION_FAN_IN_STUCK_COUNT: &'static str =
-        "auto_delegation_fan_in_stuck_count";
 }
 
 /// Returns whether the phase no longer accepts cancellation changes.
 pub(crate) fn is_terminal_phase(phase: &TurnPhase) -> bool {
     matches!(
         phase,
-        TurnPhase::Completed | TurnPhase::Cancelled | TurnPhase::Failed
+        TurnPhase::Completed | TurnPhase::Accepted | TurnPhase::Cancelled | TurnPhase::Failed
     )
 }
 
@@ -69,11 +58,11 @@ pub(crate) fn set_phase(ctx: &WorkflowContext<'_>, phase: TurnPhase) {
 /// Initializes shared model-loop progress fields.
 pub(crate) fn initialize_loop_progress(
     ctx: &WorkflowContext<'_>,
-    complexity_class: TurnComplexityClass,
+    execution_route: ExecutionRouteDecision,
     max_turns: usize,
     max_tool_calls: usize,
 ) {
-    ctx.set(TurnStateKey::COMPLEXITY_CLASS, Json::from(complexity_class));
+    ctx.set(TurnStateKey::EXECUTION_ROUTE, Json::from(execution_route));
     ctx.set(TurnStateKey::ITERATION, Json::from(0_u32));
     ctx.set(TurnStateKey::MAX_TURNS, Json::from(progress_cap(max_turns)));
     ctx.set(TurnStateKey::TOOL_CALLS, Json::from(0_u32));
@@ -143,11 +132,10 @@ pub(crate) async fn snapshot(
         ctx.peek_promise::<String>(TurnStateKey::CANCEL_REASON_PROMISE)
             .await?,
     );
-    let complexity_class = ctx
-        .get::<Json<TurnComplexityClass>>(TurnStateKey::COMPLEXITY_CLASS)
+    let execution_route = ctx
+        .get::<Json<ExecutionRouteDecision>>(TurnStateKey::EXECUTION_ROUTE)
         .await?
-        .map(Json::into_inner)
-        .unwrap_or_default();
+        .map(Json::into_inner);
     let iteration = ctx
         .get::<Json<u32>>(TurnStateKey::ITERATION)
         .await?
@@ -172,7 +160,7 @@ pub(crate) async fn snapshot(
     Ok(Json::from(TurnProgress {
         turn_id: ctx.key().to_string(),
         phase,
-        complexity_class,
+        execution_route,
         iteration,
         max_turns,
         tool_calls,

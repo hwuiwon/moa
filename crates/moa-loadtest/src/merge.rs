@@ -19,10 +19,18 @@ pub struct MergedSummary {
     pub requested_rate_qps: f64,
     /// Sum of achieved rates across workers.
     pub achieved_rate_qps: f64,
+    /// Recomputed merged execution-admission rate.
+    pub admission_rate_qps: f64,
+    /// Recomputed merged successful-operation rate.
+    pub successful_operation_rate_qps: f64,
     /// Summed scheduled arrivals.
     pub turns_scheduled: u64,
     /// Summed completed turns.
     pub turns_completed: u64,
+    /// Summed execution admissions.
+    pub execution_admissions: u64,
+    /// Summed completed answers and execution admissions.
+    pub successful_operations: u64,
     /// Summed error taxonomy.
     pub errors: ErrorTaxonomy,
     /// Summed session counters.
@@ -35,6 +43,10 @@ pub struct MergedSummary {
     pub turn_latency_corrected_ms: PercentileSummary,
     /// Merged uncorrected service time.
     pub turn_latency_ms: PercentileSummary,
+    /// Merged corrected execution-admission latency.
+    pub execution_admission_latency_corrected_ms: PercentileSummary,
+    /// Merged uncorrected execution-admission latency.
+    pub execution_admission_latency_ms: PercentileSummary,
     /// Merged dispatch delay.
     pub dispatch_delay_ms: PercentileSummary,
     /// Merged TTFT.
@@ -137,19 +149,27 @@ pub fn merge_report_files(paths: &[impl AsRef<Path>]) -> Result<MergedSummary> {
     let mut dispatch: Option<hdrhistogram::Histogram<u64>> = None;
     let mut ttft: Option<hdrhistogram::Histogram<u64>> = None;
     let mut edge_observation_wait: Option<hdrhistogram::Histogram<u64>> = None;
+    let mut admission_corrected: Option<hdrhistogram::Histogram<u64>> = None;
+    let mut admission: Option<hdrhistogram::Histogram<u64>> = None;
     let mut event_rows_by_type = BTreeMap::new();
     let mut merged = MergedSummary {
         workers: 0,
         requested_rate_qps: 0.0,
         achieved_rate_qps: 0.0,
+        admission_rate_qps: 0.0,
+        successful_operation_rate_qps: 0.0,
         turns_scheduled: 0,
         turns_completed: 0,
+        execution_admissions: 0,
+        successful_operations: 0,
         errors: ErrorTaxonomy::default(),
         sessions_started: 0,
         sessions_completed: 0,
         sessions_failed: 0,
         turn_latency_corrected_ms: histogram_summary(&empty_histogram()?),
         turn_latency_ms: histogram_summary(&empty_histogram()?),
+        execution_admission_latency_corrected_ms: histogram_summary(&empty_histogram()?),
+        execution_admission_latency_ms: histogram_summary(&empty_histogram()?),
         dispatch_delay_ms: histogram_summary(&empty_histogram()?),
         ttft_ms: histogram_summary(&empty_histogram()?),
         edge_observation_wait_ms: histogram_summary(&empty_histogram()?),
@@ -194,12 +214,19 @@ pub fn merge_report_files(paths: &[impl AsRef<Path>]) -> Result<MergedSummary> {
         if !hdr.edge_observation_wait.is_empty() {
             merge_into(&mut edge_observation_wait, &hdr.edge_observation_wait)?;
         }
+        if !hdr.execution_admission_corrected.is_empty() {
+            merge_into(&mut admission_corrected, &hdr.execution_admission_corrected)?;
+        }
+        if !hdr.execution_admission.is_empty() {
+            merge_into(&mut admission, &hdr.execution_admission)?;
+        }
 
         merged.workers += 1;
         merged.requested_rate_qps += report.requested_rate_qps;
-        merged.achieved_rate_qps += report.achieved_rate_qps;
         merged.turns_scheduled += report.turns_scheduled;
         merged.turns_completed += report.turns_completed;
+        merged.execution_admissions += report.execution_admissions;
+        merged.successful_operations += report.successful_operations;
         add_errors(&mut merged.errors, &report.errors);
         merged.sessions_started += report.sessions_started;
         merged.sessions_completed += report.sessions_completed;
@@ -224,13 +251,27 @@ pub fn merge_report_files(paths: &[impl AsRef<Path>]) -> Result<MergedSummary> {
     if let Some(histogram) = &edge_observation_wait {
         merged.edge_observation_wait_ms = histogram_summary(histogram);
     }
-    merged.resource_bill = resource_bill_from_rows(event_rows_by_type, merged.turns_completed);
+    if let Some(histogram) = &admission_corrected {
+        merged.execution_admission_latency_corrected_ms = histogram_summary(histogram);
+    }
+    if let Some(histogram) = &admission {
+        merged.execution_admission_latency_ms = histogram_summary(histogram);
+    }
+    let measure_window = fingerprint
+        .as_ref()
+        .map(|value| ((value.duration_ms - value.warmup_ms) / 1_000.0).max(f64::MIN_POSITIVE))
+        .unwrap_or(f64::MIN_POSITIVE);
+    merged.achieved_rate_qps = merged.turns_completed as f64 / measure_window;
+    merged.admission_rate_qps = merged.execution_admissions as f64 / measure_window;
+    merged.successful_operation_rate_qps = merged.successful_operations as f64 / measure_window;
+    merged.resource_bill =
+        resource_bill_from_rows(event_rows_by_type, merged.successful_operations);
     Ok(merged)
 }
 
 fn resource_bill_from_rows(
     event_rows_by_type: BTreeMap<String, u64>,
-    turns_completed: u64,
+    successful_operations: u64,
 ) -> ResourceBillReport {
     let event_rows_by_type = event_rows_by_type
         .into_iter()
@@ -242,11 +283,20 @@ fn resource_bill_from_rows(
     let progress_narrated_rows = rows_for_event_type(&event_rows_by_type, "ProgressNarrated");
     ResourceBillReport {
         durable_event_rows,
-        durable_event_rows_per_turn: merged_per_turn(durable_event_rows, turns_completed),
+        durable_event_rows_per_successful_operation: merged_per_successful_operation(
+            durable_event_rows,
+            successful_operations,
+        ),
         progress_update_rows,
-        progress_update_rows_per_turn: merged_per_turn(progress_update_rows, turns_completed),
+        progress_update_rows_per_successful_operation: merged_per_successful_operation(
+            progress_update_rows,
+            successful_operations,
+        ),
         progress_narrated_rows,
-        progress_narrated_rows_per_turn: merged_per_turn(progress_narrated_rows, turns_completed),
+        progress_narrated_rows_per_successful_operation: merged_per_successful_operation(
+            progress_narrated_rows,
+            successful_operations,
+        ),
         event_rows_by_type,
     }
 }
@@ -259,11 +309,11 @@ fn rows_for_event_type(event_rows_by_type: &[EventAppendTypeReport], event_type:
         .unwrap_or_default()
 }
 
-fn merged_per_turn(rows: u64, turns_completed: u64) -> f64 {
-    if turns_completed == 0 {
+fn merged_per_successful_operation(rows: u64, successful_operations: u64) -> f64 {
+    if successful_operations == 0 {
         return 0.0;
     }
-    rows as f64 / turns_completed as f64
+    rows as f64 / successful_operations as f64
 }
 
 fn empty_histogram() -> Result<hdrhistogram::Histogram<u64>> {
@@ -289,14 +339,20 @@ pub fn render_merged_summary(summary: &MergedSummary) -> String {
     let _ = writeln!(&mut output, "============================");
     let _ = writeln!(
         &mut output,
-        "Workers: {} | Rate: {:.1}/s requested, {:.1}/s achieved",
-        summary.workers, summary.requested_rate_qps, summary.achieved_rate_qps
+        "Workers: {} | Rate: {:.1}/s requested, {:.1}/s answers, {:.1}/s admissions, {:.1}/s successful operations",
+        summary.workers,
+        summary.requested_rate_qps,
+        summary.achieved_rate_qps,
+        summary.admission_rate_qps,
+        summary.successful_operation_rate_qps
     );
     let _ = writeln!(
         &mut output,
-        "Turns: {} scheduled, {} completed | failed: {}",
+        "Turns: {} scheduled, {} answers, {} admissions, {} successful operations | failed: {}",
         summary.turns_scheduled,
         summary.turns_completed,
+        summary.execution_admissions,
+        summary.successful_operations,
         summary.errors.failed_turns()
     );
     let _ = writeln!(
@@ -313,6 +369,14 @@ pub fn render_merged_summary(summary: &MergedSummary) -> String {
         format_millis(summary.turn_latency_ms.p50),
         format_millis(summary.turn_latency_ms.p95),
         format_millis(summary.turn_latency_ms.p99)
+    );
+    let _ = writeln!(
+        &mut output,
+        "Execution Admission Latency (corrected):\n  p50: {}  p95: {}  p99: {}  max: {}",
+        format_millis(summary.execution_admission_latency_corrected_ms.p50),
+        format_millis(summary.execution_admission_latency_corrected_ms.p95),
+        format_millis(summary.execution_admission_latency_corrected_ms.p99),
+        format_millis(summary.execution_admission_latency_corrected_ms.max)
     );
     let _ = writeln!(
         &mut output,
@@ -340,13 +404,19 @@ pub fn render_merged_summary(summary: &MergedSummary) -> String {
     if summary.resource_bill.durable_event_rows > 0 {
         let _ = writeln!(
             &mut output,
-            "Resource Bill:\n  durable event rows: {} ({:.2}/turn) | ProgressUpdate: {} ({:.2}/turn) | ProgressNarrated: {} ({:.2}/turn)",
+            "Resource Bill:\n  durable event rows: {} ({:.2}/successful operation) | ProgressUpdate: {} ({:.2}/successful operation) | ProgressNarrated: {} ({:.2}/successful operation)",
             summary.resource_bill.durable_event_rows,
-            summary.resource_bill.durable_event_rows_per_turn,
+            summary
+                .resource_bill
+                .durable_event_rows_per_successful_operation,
             summary.resource_bill.progress_update_rows,
-            summary.resource_bill.progress_update_rows_per_turn,
+            summary
+                .resource_bill
+                .progress_update_rows_per_successful_operation,
             summary.resource_bill.progress_narrated_rows,
-            summary.resource_bill.progress_narrated_rows_per_turn
+            summary
+                .resource_bill
+                .progress_narrated_rows_per_successful_operation
         );
     }
     let _ = writeln!(
@@ -417,7 +487,73 @@ mod tests {
             merged.turn_latency_corrected_ms
         );
         assert_eq!(merged.resource_bill.durable_event_rows, 100);
-        assert_eq!(merged.resource_bill.durable_event_rows_per_turn, 1.0);
+        assert_eq!(
+            merged
+                .resource_bill
+                .durable_event_rows_per_successful_operation,
+            1.0
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn execution_admission_merge_accounting() {
+        // Pins: worker admissions, admission histograms, combined successful-operation rates,
+        // and resource denominators merge independently from answer latency/counts.
+        let dir = std::env::temp_dir().join(format!("moa-admission-merge-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let mut paths = Vec::new();
+        for (index, admission_ms) in [200_u64, 500_u64].into_iter().enumerate() {
+            let mut recorder =
+                LatencyRecorder::new(Duration::from_secs(10), Duration::ZERO).expect("recorder");
+            recorder
+                .record_turn(
+                    Duration::from_secs(1),
+                    Duration::from_secs(1),
+                    Duration::from_millis(1_010),
+                    None,
+                    None,
+                )
+                .expect("answer");
+            recorder
+                .record_execution_admission(
+                    Duration::from_secs(2),
+                    Duration::from_secs(2),
+                    Duration::from_millis(2_000 + admission_ms),
+                )
+                .expect("admission");
+            let mut report = template_report(&recorder);
+            report.execution_admissions = 1;
+            report.successful_operations = 2;
+            report.admission_rate_qps = 0.1;
+            report.successful_operation_rate_qps = 0.2;
+            report.resource_bill.durable_event_rows = 4;
+            report
+                .resource_bill
+                .durable_event_rows_per_successful_operation = 2.0;
+            report.resource_bill.event_rows_by_type[0].rows = 4;
+            let path = dir.join(format!("worker-{index}.json"));
+            std::fs::write(&path, serde_json::to_string(&report).expect("serialize"))
+                .expect("write report");
+            paths.push(path);
+        }
+
+        let merged = merge_report_files(&paths).expect("merge admission reports");
+
+        assert_eq!(merged.turns_completed, 2);
+        assert_eq!(merged.execution_admissions, 2);
+        assert_eq!(merged.successful_operations, 4);
+        assert!((merged.admission_rate_qps - 0.2).abs() < f64::EPSILON);
+        assert!((merged.successful_operation_rate_qps - 0.4).abs() < f64::EPSILON);
+        assert!(merged.execution_admission_latency_corrected_ms.p50 >= 200.0);
+        assert!(merged.execution_admission_latency_corrected_ms.p99 >= 500.0);
+        assert_eq!(merged.resource_bill.durable_event_rows, 8);
+        assert_eq!(
+            merged
+                .resource_bill
+                .durable_event_rows_per_successful_operation,
+            2.0
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -517,11 +653,15 @@ mod tests {
             profile: SessionProfileKind::Short,
             requested_rate_qps: 10.0,
             achieved_rate_qps: 10.0,
+            admission_rate_qps: 0.0,
+            successful_operation_rate_qps: 10.0,
             sessions_started: 1,
             sessions_completed: 1,
             sessions_failed: 0,
             turns_scheduled: recorder.corrected_len(),
             turns_completed: recorder.corrected_len(),
+            execution_admissions: 0,
+            successful_operations: recorder.corrected_len(),
             errors: ErrorTaxonomy::default(),
             total_tool_calls: 0,
             auto_denied_approvals: 0,
@@ -529,6 +669,8 @@ mod tests {
             warmup_ms: 0.0,
             turn_latency_corrected_ms: recorder.corrected_summary(),
             turn_latency_ms: recorder.uncorrected_summary(),
+            execution_admission_latency_corrected_ms: recorder.admission_corrected_summary(),
+            execution_admission_latency_ms: recorder.admission_uncorrected_summary(),
             dispatch_delay_ms: recorder.dispatch_delay_summary(),
             ttft_ms: recorder.ttft_summary(),
             edge_observation_wait_ms: recorder.edge_observation_wait_summary(),
@@ -536,11 +678,11 @@ mod tests {
             event_append_phase_latency_ms: Vec::new(),
             resource_bill: ResourceBillReport {
                 durable_event_rows: recorder.corrected_len(),
-                durable_event_rows_per_turn: 1.0,
+                durable_event_rows_per_successful_operation: 1.0,
                 progress_update_rows: 0,
-                progress_update_rows_per_turn: 0.0,
+                progress_update_rows_per_successful_operation: 0.0,
                 progress_narrated_rows: 0,
-                progress_narrated_rows_per_turn: 0.0,
+                progress_narrated_rows_per_successful_operation: 0.0,
                 event_rows_by_type: vec![EventAppendTypeReport {
                     event_type: "BrainResponse".to_string(),
                     rows: recorder.corrected_len(),

@@ -5,7 +5,10 @@ use moa_artifacts::simulation::{
     SimulationDataBundleDefinition, SimulationPersonaDefinition, SimulationProfileDefinition,
     SimulationScenarioDefinition,
 };
-use moa_core::{types::agent::AgentSessionSelection, types::identifiers::ModelId};
+use moa_core::{
+    types::agent::AgentSessionSelection, types::execution_planning::PinnedExecutionTemplateRef,
+    types::identifiers::ModelId,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -37,9 +40,18 @@ pub enum PlanExpansionError {
     /// A simulator temperature value cannot be represented safely.
     #[error("simulator_temperature must be a finite f32-compatible number")]
     InvalidSimulatorTemperature,
-    /// Procedure variants require a procedure reference.
-    #[error("procedure target variants require procedure_ref")]
-    MissingProcedureRef,
+    /// Execution-template variants require an exact pinned template.
+    #[error("execution-template target variants require template")]
+    MissingExecutionTemplate,
+    /// Execution-template variants require an explicit non-empty objective.
+    #[error("execution-template target variants require a non-empty objective")]
+    MissingExecutionObjective,
+    /// An execution-template variant field is malformed.
+    #[error("execution-template target variant is invalid: {message}")]
+    InvalidExecutionTemplate {
+        /// Validation error message.
+        message: String,
+    },
     /// A target variant has an invalid agent selector.
     #[error("target variant agent selector is invalid: {message}")]
     InvalidAgentSelector {
@@ -123,6 +135,7 @@ pub fn project_plan_run(
                 "parallelism": definition.parallelism,
             })
         })?;
+    let artifact_revision_uids = variant.artifact_revision_uids.clone();
     Ok(PlanRunProjection {
         target,
         variant,
@@ -130,7 +143,7 @@ pub fn project_plan_run(
             score_names: Vec::new(),
             evaluator_metadata: definition.scorecard.clone(),
         },
-        artifact_revision_uids: vec![plan_revision_uid],
+        artifact_revision_uids,
         plan_revision_uid,
     })
 }
@@ -309,22 +322,62 @@ pub(crate) fn target_for_plan_variant(
                 .ok_or(PlanExpansionError::MissingTargetModel)?,
             attachments: Vec::new(),
         }),
-        ExperimentTargetKind::Procedure => Ok(ExperimentTarget::Procedure {
-            procedure_ref: variant
+        ExperimentTargetKind::ExecutionTemplate => {
+            let template = execution_template_for_variant(variant)?;
+            let objective = variant
                 .config
-                .get("procedure_ref")
+                .get("objective")
                 .and_then(Value::as_str)
-                .ok_or(PlanExpansionError::MissingProcedureRef)?
-                .to_string(),
-            input: variant
-                .config
-                .get("input")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
-            session_id: None,
-            idempotency_key: None,
-        }),
+                .filter(|value| !value.trim().is_empty())
+                .ok_or(PlanExpansionError::MissingExecutionObjective)?
+                .to_string();
+            Ok(ExperimentTarget::ExecutionTemplate {
+                template,
+                objective,
+                input: variant
+                    .config
+                    .get("input")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+                session_id: optional_config(variant, "session_id")?,
+                idempotency_key: optional_config(variant, "idempotency_key")?,
+            })
+        }
     }
+}
+
+fn execution_template_for_variant(
+    variant: &ExperimentTargetVariant,
+) -> Result<PinnedExecutionTemplateRef, PlanExpansionError> {
+    let value = variant
+        .config
+        .get("template")
+        .ok_or(PlanExpansionError::MissingExecutionTemplate)?;
+    serde_json::from_value(value.clone()).map_err(|error| {
+        PlanExpansionError::InvalidExecutionTemplate {
+            message: format!("template: {error}"),
+        }
+    })
+}
+
+fn optional_config<T>(
+    variant: &ExperimentTargetVariant,
+    key: &'static str,
+) -> Result<Option<T>, PlanExpansionError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let Some(value) = variant.config.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| PlanExpansionError::InvalidExecutionTemplate {
+            message: format!("{key}: {error}"),
+        })
 }
 
 fn agent_selection_for_variant(
@@ -372,16 +425,21 @@ fn variant_payload_for_plan(
     variant: &ExperimentTargetVariant,
     metadata: impl FnOnce(Uuid) -> Value,
 ) -> Result<ExperimentVariant, PlanExpansionError> {
+    let execution_template = if variant.kind == ExperimentTargetKind::ExecutionTemplate {
+        Some(execution_template_for_variant(variant)?)
+    } else {
+        None
+    };
+    let mut artifact_revision_uids = vec![plan_revision_uid];
+    if let Some(template) = &execution_template {
+        artifact_revision_uids.push(template.revision_uid);
+    }
     Ok(ExperimentVariant {
         name: variant.key.clone(),
         model: definition.target_model.as_ref().map(ModelId::new),
-        artifact_revision_uids: vec![plan_revision_uid],
+        artifact_revision_uids,
         skill_refs: Vec::new(),
-        procedure_ref: variant
-            .config
-            .get("procedure_ref")
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
+        execution_template,
         metadata: metadata(plan_revision_uid),
     })
 }
@@ -624,16 +682,90 @@ mod tests {
     }
 
     #[test]
-    fn expand_plan_trials_rejects_procedure_variant_without_procedure_ref_offline() {
-        // Pins: procedure target variants cannot expand without a procedure reference to invoke.
+    fn expand_plan_trials_rejects_execution_template_variant_without_exact_template_offline() {
+        // Pins: execution-template variants cannot expand without an exact immutable revision.
         let mut definition = fixture_plan();
-        definition.target_variants[0].kind = ExperimentTargetKind::Procedure;
-        definition.target_variants[0].config = json!({});
+        definition.target_variants[0].kind = ExperimentTargetKind::ExecutionTemplate;
+        definition.target_variants[0].config = json!({"objective": "Run the template."});
 
         let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
-            .expect_err("procedure variant without procedure_ref should fail expansion");
+            .expect_err("execution-template variant without template should fail expansion");
 
-        assert!(matches!(error, PlanExpansionError::MissingProcedureRef));
+        assert!(matches!(
+            error,
+            PlanExpansionError::MissingExecutionTemplate
+        ));
+    }
+
+    #[test]
+    fn expand_plan_trials_rejects_blank_execution_template_objective_offline() {
+        // Pins: execution-template plan fanout requires a meaningful explicit objective.
+        let mut definition = fixture_plan();
+        definition.target_variants[0].kind = ExperimentTargetKind::ExecutionTemplate;
+        definition.target_variants[0].config = json!({
+            "template": {
+                "skill_ref": "skill://damaged-food-order",
+                "revision_uid": fixture_uuid(77),
+            },
+            "objective": "  \n",
+        });
+
+        let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
+            .expect_err("blank execution-template objective should fail expansion");
+
+        assert!(matches!(
+            error,
+            PlanExpansionError::MissingExecutionObjective
+        ));
+    }
+
+    #[test]
+    fn execution_template_plan_projection_pins_objective_revision_and_input_offline() {
+        // Pins: plan fanout preserves one exact template/objective pair for every trial.
+        let mut definition = fixture_plan();
+        let revision_uid = fixture_uuid(77);
+        definition.target_variants = vec![ExperimentTargetVariant {
+            key: "template".to_string(),
+            kind: ExperimentTargetKind::ExecutionTemplate,
+            config: json!({
+                "template": {
+                    "skill_ref": "skill://damaged-food-order",
+                    "revision_uid": revision_uid,
+                },
+                "objective": "Resolve the damaged order.",
+                "input": {"order_id": "order-123"},
+                "session_id": null,
+                "idempotency_key": "template-plan-key",
+            }),
+            ui: json!({}),
+        }];
+
+        let projection = project_plan_run(&definition, fixture_uuid(1), "plan", "run")
+            .expect("exact execution-template plan should project");
+
+        let ExperimentTarget::ExecutionTemplate {
+            template,
+            objective,
+            input,
+            session_id,
+            idempotency_key,
+        } = projection.target
+        else {
+            panic!("projection should retain execution-template target");
+        };
+        assert_eq!(template.revision_uid, revision_uid);
+        assert_eq!(objective, "Resolve the damaged order.");
+        assert_eq!(input, json!({"order_id": "order-123"}));
+        assert!(session_id.is_none());
+        assert_eq!(idempotency_key.as_deref(), Some("template-plan-key"));
+        assert_eq!(
+            projection.variant.execution_template,
+            Some(template.clone())
+        );
+        assert_eq!(
+            projection.artifact_revision_uids,
+            vec![fixture_uuid(1), revision_uid]
+        );
     }
 
     #[test]

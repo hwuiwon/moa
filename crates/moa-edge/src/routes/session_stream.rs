@@ -267,8 +267,8 @@ fn enqueue_progress_events(state: &mut SessionMessageStreamState, records: Vec<E
         state.next_sequence_num = state
             .next_sequence_num
             .max(record.sequence_num.saturating_add(1));
-        // A follow-on coordinator turn (auto-delegation synthesis or a guarded child-signal
-        // resume) runs under a NEW turn id after the initial turn completed. Re-target the
+        // A follow-on coordinator turn (execution synthesis or a guarded child-signal resume)
+        // runs under a NEW turn id after the initial turn completed. Re-target the
         // stream's terminal turn to it so the stream neither closes early — before the
         // follow-on answer streams — nor leaks waiting on a turn id that never completes again.
         // `pending_events` (this event) is drained before the done-check, so the poll that
@@ -300,6 +300,9 @@ fn session_message_terminal_done(
     terminal_turn_id: Option<&str>,
     progress: &SessionProgress,
 ) -> bool {
+    if !progress.snapshot.active_execution_run_uids.is_empty() {
+        return false;
+    }
     if let Some(turn_id) = terminal_turn_id {
         let turn_completed = progress
             .snapshot
@@ -337,13 +340,13 @@ fn active_child_summary(
 
 /// The follow-on coordinator turn id introduced by a synthesis/resume event, if any.
 ///
-/// After the initial turn completes, auto-delegation synthesis and guarded child-signal resume
-/// each dispatch a NEW coordinator turn. The SSE stream re-targets its terminal turn to this id
-/// so it closes on the follow-on turn's completion rather than the original turn's.
+/// Execution synthesis and guarded child-signal resume each dispatch a new coordinator turn.
+/// The SSE stream re-targets its terminal turn to this id so it closes on the follow-on turn's
+/// completion rather than the original turn's.
 fn follow_on_terminal_turn(event: &Event) -> Option<&str> {
     match event {
-        Event::WorkerResultSynthesisRequested { turn_id, .. }
-        | Event::WorkerParentResumeRequested { turn_id, .. } => Some(turn_id),
+        Event::WorkerParentResumeRequested { turn_id, .. } => Some(turn_id),
+        Event::ExecutionSynthesisRequested(requested) => Some(&requested.turn_id),
         _ => None,
     }
 }
@@ -382,6 +385,7 @@ fn done_status(progress: &SessionProgress) -> &'static str {
     };
     match outcome.kind {
         moa_core::wire::turn::TurnOutcomeKind::Completed => "completed",
+        moa_core::wire::turn::TurnOutcomeKind::Accepted { .. } => "accepted",
         moa_core::wire::turn::TurnOutcomeKind::Cancelled => "cancelled",
         moa_core::wire::turn::TurnOutcomeKind::Failed => "failed",
     }
@@ -477,6 +481,11 @@ fn sse_event_name(event: &Event) -> &'static str {
         Event::WorkerParentResumeRequested { .. } => "worker_resume",
         Event::WorkerHeartbeatStale { .. } => "worker_stale",
         Event::BrainResponse { .. } => "response",
+        Event::ExecutionRunStarted(_) => "execution_started",
+        Event::ExecutionProgress(_) => "execution_progress",
+        Event::ExecutionInputRequired(_) => "execution_input_request",
+        Event::ExecutionCompleted(_) => "execution_completed",
+        Event::ExecutionFailed { .. } | Event::ExecutionCancelled(_) => "execution_failed",
         Event::ToolCall { .. } | Event::ToolResult { .. } | Event::ToolError { .. } => "tool",
         _ => "session_event",
     }
@@ -508,9 +517,8 @@ fn error_sse_event(message: String) -> SseEvent {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::wire::turn::{
-        SessionSnapshot, TurnComplexityClass, TurnOutcome, TurnOutcomeKind,
-    };
+    use moa_core::types::execution_planning::{ExecutionRunAdmissionStatus, ExecutionRunStarted};
+    use moa_core::wire::turn::{SessionSnapshot, TurnOutcome, TurnOutcomeKind};
     use moa_core::{events::EventType, types::events_stream::EventRecord};
     use uuid::Uuid;
 
@@ -707,6 +715,115 @@ mod tests {
     }
 
     #[test]
+    fn execution_started_event_uses_named_sse_frame() {
+        // Pins: admitted detached runs have a stable public frame name and minimal payload type.
+        let event = Event::ExecutionRunStarted(ExecutionRunStarted {
+            run_uid: Uuid::now_v7(),
+            originating_user_sequence_num: 7,
+            plan_revision: 1,
+            status: ExecutionRunAdmissionStatus::Queued,
+            confirmation: None,
+        });
+
+        assert_eq!(sse_event_name(&event), "execution_started");
+    }
+
+    #[test]
+    fn execution_delivery_events_use_only_the_five_stable_sse_names() {
+        // Pins: all durable run delivery frames use the public five-name contract; cancellation
+        // is a typed failed frame and synthesis retargets stream completion without a sixth name.
+        use moa_core::events::{
+            ExecutionFailureDisposition, ExecutionInputRequired, ExecutionProgress,
+            ExecutionRunEvidenceRef, ExecutionSynthesisRequested, ExecutionTaskResultsRef,
+            ExecutionTerminalSummary,
+        };
+
+        let run_uid = Uuid::from_u128(81);
+        let terminal = ExecutionTerminalSummary {
+            run_uid,
+            originating_user_sequence_num: 7,
+            output: None,
+            output_hash: [4; 32],
+            citation_ids: vec!["source-a".to_string()],
+            failures: Vec::new(),
+            gaps: Vec::new(),
+            task_results: ExecutionTaskResultsRef::ExecutionTaskTable { run_uid },
+        };
+        let synthesis = Event::ExecutionSynthesisRequested(ExecutionSynthesisRequested {
+            run_uid,
+            originating_user_sequence_num: 7,
+            turn_id: "execution-synthesis-81-7".to_string(),
+            terminal: terminal.clone(),
+            run_evidence: ExecutionRunEvidenceRef::ExecutionRun { run_uid },
+        });
+        let cases = [
+            (
+                Event::ExecutionProgress(ExecutionProgress {
+                    run_uid,
+                    originating_user_sequence_num: 7,
+                    plan_revision: 2,
+                    status: "running".to_string(),
+                    total: 9,
+                    completed: 4,
+                    failed: 1,
+                    cancelled: 0,
+                }),
+                "execution_progress",
+            ),
+            (
+                Event::ExecutionInputRequired(ExecutionInputRequired {
+                    run_uid,
+                    originating_user_sequence_num: 7,
+                    task_id: Uuid::from_u128(82),
+                    generation: 3,
+                    question: "Which source?".to_string(),
+                }),
+                "execution_input_request",
+            ),
+            (
+                Event::ExecutionCompleted(terminal.clone()),
+                "execution_completed",
+            ),
+            (
+                Event::ExecutionFailed {
+                    disposition: ExecutionFailureDisposition::Partial,
+                    summary: terminal.clone(),
+                },
+                "execution_failed",
+            ),
+            (Event::ExecutionCancelled(terminal), "execution_failed"),
+        ];
+
+        for (event, expected_name) in cases {
+            assert_eq!(sse_event_name(&event), expected_name);
+        }
+        assert_eq!(sse_event_name(&synthesis), "session_event");
+        assert_eq!(
+            follow_on_terminal_turn(&synthesis),
+            Some("execution-synthesis-81-7")
+        );
+    }
+
+    #[test]
+    fn accepted_turn_outcome_renders_accepted_status() {
+        // Pins: a planning/admission turn is terminal for the HTTP stream even though the detached
+        // run keeps the Session virtual object in Running state.
+        let progress = session_progress(
+            None,
+            0,
+            Some(TurnOutcome {
+                turn_id: "planning-turn".to_string(),
+                kind: TurnOutcomeKind::Accepted {
+                    execution_run_uid: Uuid::now_v7(),
+                },
+                message: "execution accepted".to_string(),
+            }),
+        );
+
+        assert_eq!(done_status(&progress), "accepted");
+    }
+
+    #[test]
     fn working_frame_payload_renders_active_child_summary() {
         // Pins: the silence-filler frame echoes the active child's summary and the silent window
         // inside the pre-rendered `message`, and does not duplicate them as separate wire fields.
@@ -788,17 +905,9 @@ mod tests {
     }
 
     #[test]
-    fn follow_on_terminal_turn_targets_synthesis_and_resume_turns() {
-        // Pins (B3): synthesis and guarded-resume events carry the follow-on coordinator turn id
-        // the stream must re-target to; other events do not move the terminal turn.
-        assert_eq!(
-            follow_on_terminal_turn(&Event::WorkerResultSynthesisRequested {
-                user_sequence_num: 1,
-                turn_id: "synth-turn".to_string(),
-                reason: "synthesize".to_string(),
-            }),
-            Some("synth-turn")
-        );
+    fn follow_on_terminal_turn_targets_guarded_resume_turns() {
+        // Pins (B3): guarded-resume events carry the follow-on coordinator turn id the stream must
+        // re-target to; other events do not move the terminal turn.
         assert_eq!(
             follow_on_terminal_turn(&Event::WorkerParentResumeRequested {
                 signal_id: moa_core::types::identifiers::AgentSignalId::new(),
@@ -916,8 +1025,10 @@ mod tests {
                 active_turn_id,
                 pending_message_count,
                 last_outcome,
+                active_execution_run_uids: Vec::new(),
             },
             active_turn_progress: None,
+            active_execution_progress: Vec::new(),
             events: Vec::new(),
             child_progress: Vec::new(),
         }
@@ -945,7 +1056,7 @@ mod tests {
         TurnProgress {
             turn_id: "turn-1".to_string(),
             phase,
-            complexity_class: TurnComplexityClass::Standard,
+            execution_route: None,
             iteration: 1,
             max_turns: Some(4),
             tool_calls: 1,

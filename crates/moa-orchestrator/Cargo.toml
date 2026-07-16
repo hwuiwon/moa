@@ -9,6 +9,8 @@ default = []
 integration = ["moa-test-support/orchestrator-fixture"]
 auth0 = ["moa-auth-providers/auth0"]
 provider-overrides = ["moa-providers/scripted-provider"]
+# Deterministic execution-planning fault hooks used only by service E2E fixtures.
+execution-planning-failpoints = ["moa-session/failpoints"]
 slack = ["moa-messaging/slack"]
 postmark = ["moa-messaging/postmark"]
 twilio = ["moa-messaging/twilio"]
@@ -41,10 +43,6 @@ path = "tests/experiment_service.rs"
 name = "experiment_trial_run_e2e"
 path = "tests/experiment_trial_run_e2e.rs"
 
-[[test]]
-name = "experiment_procedure_e2e"
-path = "tests/experiment_procedure_e2e.rs"
-
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -69,6 +67,7 @@ moa-artifacts.workspace = true
 moa-brain = { workspace = true, features = ["eval-harness"] }
 moa-contacts = { workspace = true }
 moa-core = { workspace = true }
+moa-execution = { workspace = true }
 moa-db = { workspace = true }
 moa-eval-core = { workspace = true }
 moa-eval = { workspace = true }

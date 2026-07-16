@@ -123,49 +123,6 @@ pub async fn run_scenario_with_provider(
     case: &TestCase,
     llm_provider: Arc<dyn LLMProvider>,
 ) -> Result<LongRunReport> {
-    let long_case = case.long_case()?;
-
-    match long_case.mode {
-        LongConversationMode::Recorded => {
-            run_recorded_scenario_with_provider(
-                base_config,
-                agent_config,
-                options,
-                case,
-                long_case,
-                llm_provider,
-            )
-            .await
-        }
-        LongConversationMode::ScriptedUser => {
-            run_scripted_user_scenario_with_provider(
-                base_config,
-                agent_config,
-                options,
-                case,
-                long_case,
-                llm_provider,
-            )
-            .await
-        }
-    }
-}
-
-async fn run_recorded_scenario_with_provider(
-    base_config: &MoaConfig,
-    agent_config: &AgentConfig,
-    options: &EngineOptions,
-    case: &TestCase,
-    long_case: &LongTestCase,
-    llm_provider: Arc<dyn LLMProvider>,
-) -> Result<LongRunReport> {
-    let transcript_path = resolve_path(&long_case.transcript)?;
-    let transcript = Transcript::read_jsonl(&transcript_path).map_err(|error| {
-        EvalError::InvalidConfig(format!(
-            "failed to read transcript {}: {error}",
-            transcript_path.display()
-        ))
-    })?;
     let environment = build_agent_environment_with_provider(
         base_config,
         agent_config,
@@ -178,8 +135,44 @@ async fn run_recorded_scenario_with_provider(
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| environment.workspace_dir.clone());
+    let outcome = run_scenario_in_environment(agent_config, options, case, &environment).await;
+    cleanup_environment_after_run(run_root.as_path(), environment, outcome).await
+}
 
-    let outcome = if let Some(secondary_session) = &long_case.secondary_session {
+pub(crate) async fn run_scenario_in_environment(
+    agent_config: &AgentConfig,
+    options: &EngineOptions,
+    case: &TestCase,
+    environment: &crate::AgentEnvironment,
+) -> Result<LongRunReport> {
+    let long_case = case.long_case()?;
+
+    match long_case.mode {
+        LongConversationMode::Recorded => {
+            run_recorded_scenario(agent_config, options, case, long_case, environment).await
+        }
+        LongConversationMode::ScriptedUser => {
+            run_scripted_user_scenario(agent_config, options, case, long_case, environment).await
+        }
+    }
+}
+
+async fn run_recorded_scenario(
+    agent_config: &AgentConfig,
+    options: &EngineOptions,
+    case: &TestCase,
+    long_case: &LongTestCase,
+    environment: &crate::AgentEnvironment,
+) -> Result<LongRunReport> {
+    let transcript_path = resolve_path(&long_case.transcript)?;
+    let transcript = Transcript::read_jsonl(&transcript_path).map_err(|error| {
+        EvalError::InvalidConfig(format!(
+            "failed to read transcript {}: {error}",
+            transcript_path.display()
+        ))
+    })?;
+
+    if let Some(secondary_session) = &long_case.secondary_session {
         let secondary_transcript_path = resolve_path(&secondary_session.transcript)?;
         let secondary_transcript =
             Transcript::read_jsonl(&secondary_transcript_path).map_err(|error| {
@@ -200,17 +193,15 @@ async fn run_recorded_scenario_with_provider(
         .await
     } else {
         drive_transcript(case, agent_config, options, transcript, environment).await
-    };
-    cleanup_workspace_after_run(run_root.as_path(), outcome).await
+    }
 }
 
-async fn run_scripted_user_scenario_with_provider(
-    base_config: &MoaConfig,
+async fn run_scripted_user_scenario(
     agent_config: &AgentConfig,
     options: &EngineOptions,
     case: &TestCase,
     long_case: &LongTestCase,
-    llm_provider: Arc<dyn LLMProvider>,
+    environment: &crate::AgentEnvironment,
 ) -> Result<LongRunReport> {
     let Some(goal_card_path) = long_case.goal_card.as_deref() else {
         return Err(EvalError::InvalidConfig(format!(
@@ -247,31 +238,29 @@ async fn run_scripted_user_scenario_with_provider(
                 script_path.display()
             ))
         })?;
-    let environment = build_agent_environment_with_provider(
-        base_config,
-        agent_config,
-        &options.temp_dir,
-        llm_provider,
-    )
-    .await?;
-    let run_root = environment
-        .workspace_dir
-        .parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| environment.workspace_dir.clone());
-    let outcome = drive_scripted_user(case, agent_config, options, script, environment).await;
-    cleanup_workspace_after_run(run_root.as_path(), outcome).await
+    drive_scripted_user(case, agent_config, options, script, environment).await
 }
 
-async fn cleanup_workspace_after_run(
+async fn cleanup_environment_after_run(
     run_root: &Path,
+    environment: crate::AgentEnvironment,
     outcome: Result<LongRunReport>,
 ) -> Result<LongRunReport> {
-    let cleanup = cleanup_workspace(run_root).await;
-    match (outcome, cleanup) {
-        (Ok(report), Ok(())) => Ok(report),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
+    let workspace_cleanup = cleanup_workspace(run_root).await;
+    let database_cleanup = environment.cleanup().await;
+    match (outcome, workspace_cleanup, database_cleanup) {
+        (Ok(report), Ok(()), Ok(())) => Ok(report),
+        (Err(error), workspace_cleanup, database_cleanup) => {
+            if let Err(cleanup_error) = workspace_cleanup {
+                tracing::warn!(error = %cleanup_error, "failed to clean up long eval workspace");
+            }
+            if let Err(cleanup_error) = database_cleanup {
+                tracing::warn!(error = %cleanup_error, "failed to clean up long eval database");
+            }
+            Err(error)
+        }
+        (Ok(_), Err(error), _) => Err(error),
+        (Ok(_), Ok(()), Err(error)) => Err(error),
     }
 }
 
@@ -280,7 +269,7 @@ async fn drive_transcript(
     agent_config: &AgentConfig,
     options: &EngineOptions,
     transcript: Transcript,
-    environment: crate::AgentEnvironment,
+    environment: &crate::AgentEnvironment,
 ) -> Result<LongRunReport> {
     let started_at = Utc::now();
     let mut primary = TranscriptSession::new(
@@ -290,17 +279,17 @@ async fn drive_transcript(
     );
 
     while primary.has_next_user_turn() {
-        primary.drive_next_turn(case, &environment).await?;
+        primary.drive_next_turn(case, environment).await?;
     }
 
     let completed_at = Utc::now();
-    let events = collect_events_for_sessions(&environment, &[primary.session_id]).await?;
-    let learning = collect_learning_summary(&environment, &[primary.session_id]).await?;
+    let events = collect_events_for_sessions(environment, &[primary.session_id]).await?;
+    let learning = collect_learning_summary(environment, &[primary.session_id]).await?;
     let mut report = finish_report(FinishReportInput {
         case,
         agent_config,
         options,
-        environment: &environment,
+        environment,
         events,
         user_turn_count: primary.user_turn_count,
         started_at,
@@ -318,13 +307,13 @@ async fn drive_multi_session_transcripts(
     primary_transcript: Transcript,
     secondary_transcript: Transcript,
     interleaving: LongSessionInterleaving,
-    environment: crate::AgentEnvironment,
+    environment: &crate::AgentEnvironment,
 ) -> Result<LongRunReport> {
     let started_at = Utc::now();
     let secondary_observer = ObservedRecordedProvider::new(secondary_transcript.clone());
     let secondary_provider: Arc<dyn LLMProvider> = Arc::new(secondary_observer.clone());
     let secondary_session_id =
-        create_secondary_session(&environment, secondary_provider.clone()).await?;
+        create_secondary_session(environment, secondary_provider.clone()).await?;
     let mut primary = TranscriptSession::new(
         environment.session_id,
         environment.llm_provider.clone(),
@@ -339,39 +328,39 @@ async fn drive_multi_session_transcripts(
     match interleaving {
         LongSessionInterleaving::Sequential | LongSessionInterleaving::Phased => {
             while primary.has_next_user_turn() {
-                primary.drive_next_turn(case, &environment).await?;
+                primary.drive_next_turn(case, environment).await?;
             }
-            materialize_primary_learning_if_requested(case, &environment, &primary).await?;
+            materialize_primary_learning_if_requested(case, environment, &primary).await?;
             while secondary.has_next_user_turn() {
-                secondary.drive_next_turn(case, &environment).await?;
+                secondary.drive_next_turn(case, environment).await?;
             }
         }
         LongSessionInterleaving::RoundRobin => {
             while primary.has_next_user_turn() || secondary.has_next_user_turn() {
                 if primary.has_next_user_turn() {
-                    primary.drive_next_turn(case, &environment).await?;
+                    primary.drive_next_turn(case, environment).await?;
                 }
                 if secondary.has_next_user_turn() {
-                    secondary.drive_next_turn(case, &environment).await?;
+                    secondary.drive_next_turn(case, environment).await?;
                 }
             }
         }
     }
 
     let completed_at = Utc::now();
-    let primary_events = collect_events_for_sessions(&environment, &[primary.session_id]).await?;
+    let primary_events = collect_events_for_sessions(environment, &[primary.session_id]).await?;
     let secondary_events =
-        collect_events_for_sessions(&environment, &[secondary.session_id]).await?;
+        collect_events_for_sessions(environment, &[secondary.session_id]).await?;
     let mut events = primary_events.clone();
     events.extend(secondary_events.clone());
     events.sort_by_key(|record| (record.timestamp, record.sequence_num));
     let learning =
-        collect_learning_summary(&environment, &[primary.session_id, secondary.session_id]).await?;
+        collect_learning_summary(environment, &[primary.session_id, secondary.session_id]).await?;
     let mut report = finish_report(FinishReportInput {
         case,
         agent_config,
         options,
-        environment: &environment,
+        environment,
         events,
         user_turn_count: primary.user_turn_count + secondary.user_turn_count,
         started_at,
@@ -394,24 +383,24 @@ async fn drive_scripted_user(
     agent_config: &AgentConfig,
     options: &EngineOptions,
     script: ScriptedUserScript,
-    environment: crate::AgentEnvironment,
+    environment: &crate::AgentEnvironment,
 ) -> Result<LongRunReport> {
     let started_at = Utc::now();
     let mut primary =
         ScriptedUserSession::new(environment.session_id, environment.llm_provider.clone());
 
     for turn in &script.turns {
-        primary.drive_turn(case, &environment, turn).await?;
+        primary.drive_turn(case, environment, turn).await?;
     }
 
     let completed_at = Utc::now();
-    let events = collect_events_for_sessions(&environment, &[primary.session_id]).await?;
-    let learning = collect_learning_summary(&environment, &[primary.session_id]).await?;
+    let events = collect_events_for_sessions(environment, &[primary.session_id]).await?;
+    let learning = collect_learning_summary(environment, &[primary.session_id]).await?;
     let mut report = finish_report(FinishReportInput {
         case,
         agent_config,
         options,
-        environment: &environment,
+        environment,
         events,
         user_turn_count: primary.user_turn_count,
         started_at,

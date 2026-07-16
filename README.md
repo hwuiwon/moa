@@ -152,11 +152,11 @@ The binary serves these Restate surfaces: virtual objects `Session`, `Worker`,
 `AuthzChallenges`, `Contacts`, `Eval`, `Experiments`, `GraphMemoryMaint`,
 `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`,
 `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, and `ActionPolicy`; and
-workflows `Consolidate`, `TurnExecution`, `WorkerTurnExecution`,
-`ProcedureExecution`, `KnowledgeSyncIngestion`, `ExperimentRun`, and
-`ExperimentTrialRun`. Builds with `skill-learning` also register the
-`SkillLearning` workflow. Deployment registration is handled outside the
-binary.
+workflows `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`,
+`Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `TenantPurge`,
+`TurnExecution`, and `WorkerTurnExecution`. Builds with `skill-learning` also
+register the `SkillLearning` workflow. Deployment registration is handled
+outside the binary.
 
 The Docker image builds `moa-orchestrator-bin` and installs it as `/usr/local/bin/moa-orchestrator`.
 
@@ -178,7 +178,8 @@ REST / Messaging / API automation
 Restate handler service (`moa-orchestrator-bin`)
         |
         +-- Session VO -> TurnExecution workflow -> context pipeline -> LLMGateway
-        +-- Worker VO -> bounded child agent execution
+        +-- TurnExecution run mode -> ExecutionRun -> ExecutionTask
+        +-- Worker VO -> explicit conversational child tools and terminal reporting
         +-- ToolExecutor -> ToolRouter -> hands / MCP / built-ins
         +-- Consolidate workflow -> memory compaction
         +-- IngestionVO -> graph memory updates
@@ -191,10 +192,18 @@ Postgres / Neon
   lineage, scores, compliance audit tables
 ```
 
+`TurnExecution` durably owns one admitted session turn and selects `respond`,
+`act`, or `run`. `act` retains the explicit bounded conversational Worker tool
+surface and ordinary per-worker terminal delivery. `run` compiles or
+instantiates an immutable plan, starts `ExecutionRun` detached, and executes
+stable logical tasks through `ExecutionTask`.
+
 The context pipeline is byte-stable where possible for prompt caching. With
-query rewriting and memory digests enabled, the current processors are:
-identity, agent instructions, instructions, tools, query rewrite, skills,
-digest, memory, history, delegation planning, runtime context, and compactor.
+query rewriting and memory digests enabled, the current execution order is:
+identity, agent instructions, instructions, tools, query rewrite, history,
+skills, digest, memory, and runtime context. History owns replay and
+compaction; the per-turn dynamic skill, digest, and memory sections follow it
+to preserve the reusable prompt prefix.
 
 ## Memory
 

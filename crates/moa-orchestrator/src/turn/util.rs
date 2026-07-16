@@ -9,8 +9,8 @@ use moa_core::{
     types::completion::CompletionResponse, types::completion::StopReason,
     types::completion::ToolCallContent, types::completion::ToolInvocation,
     types::context::ContextMessage, types::identifiers::SessionId, types::identifiers::ToolCallId,
-    types::procedure_tools::procedure_tool_schemas, types::session::TurnOutcome,
-    types::tools::ToolOutput, types::worker::tool_schema::delegation_tool_schemas,
+    types::session::TurnOutcome, types::tools::ToolOutput,
+    types::worker::tool_schema::delegation_tool_schemas,
 };
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use uuid::Uuid;
@@ -189,14 +189,26 @@ pub(crate) fn ensure_delegation_tool_schemas(request: &mut CompletionRequest) {
     }
 }
 
-/// Ensures the procedure execution tool schemas are available on the request.
-///
-/// Injected only when a selected skill carries a procedure so the tools appear
-/// on the turn exactly when deterministic execution is available.
-pub(crate) fn ensure_procedure_tool_schemas(request: &mut CompletionRequest) {
-    for schema in procedure_tool_schemas() {
-        ensure_tool_schema(request, schema);
-    }
+/// Removes operator-facing execution lifecycle controls from a provider request.
+pub(crate) fn exclude_execution_lifecycle_tool_schemas(request: &mut CompletionRequest) {
+    request.tools.retain(|schema| {
+        schema
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|name| !is_execution_lifecycle_tool_name(name))
+    });
+}
+
+fn is_execution_lifecycle_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "execution_runs_list"
+            | "execution_run_start"
+            | "execution_run_status"
+            | "execution_run_cancel"
+            | "execution_review_decide"
+            | "execution_signal"
+    )
 }
 
 fn ensure_tool_schema(request: &mut CompletionRequest, schema: serde_json::Value) {

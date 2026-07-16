@@ -29,9 +29,9 @@ crate, translate it to `crates/<name>/...`.
 
 | Area | Crates |
 |---|---|
-| Core runtime | `moa-core` traits/types/config/events, `moa-brain` context pipeline, `moa-db` shared storage helpers, `moa-session` Postgres event store, `moa-orchestrator` Restate services/workflows, `moa-runtime-store` runtime cache, `moa-edge` public HTTP edge, `moa-migrations` Postgres migrations |
+| Core runtime | `moa-core` traits/types/config/events, `moa-brain` context pipeline and execution planning, `moa-execution` execution-plan compiler/interpreter/repository, `moa-db` shared storage helpers, `moa-session` Postgres event store, `moa-orchestrator` Restate services/workflows, `moa-runtime-store` runtime cache, `moa-edge` public HTTP edge, `moa-migrations` Postgres migrations |
 | Memory and learning | `moa-memory-*` graph/ingest/lifecycle/PII/types/vector, `moa-knowledge` tenant knowledge base, `moa-skills` registry/distillation/improvement |
-| Agents, artifacts, experiments | `moa-agents` agent resolution/policy, `moa-contacts` contact identity, `moa-artifacts` artifact definitions and skill procedure graphs, `moa-experiments` experiment runs, `moa-scoring` score storage |
+| Agents, artifacts, experiments | `moa-agents` agent resolution/policy, `moa-contacts` contact identity, `moa-artifacts` artifact definitions and optional skill execution-plan templates, `moa-experiments` experiment runs, `moa-scoring` score storage |
 | Tools and providers | `moa-hands` tool routing and sandboxes, `moa-providers` LLM/embedding/rerank providers, `moa-messaging` Slack and notification adapters, `moa-security` vault/policy/MCP proxy |
 | Auth, audit, lineage, observability | `moa-auth/*` identity/authz/OpenFGA bootstrap, `moa-ocsf` security events, `moa-lineage/*` citation, sinks, OTel, audit chain, `moa-observability` metrics/tracing |
 | Eval and dev tooling | `moa-eval-core`, `moa-eval`, `moa-loadtest`, `moa-test-support`, `xtask`, `workspace-hack` |

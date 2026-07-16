@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod execution_audits;
 pub mod fixtures;
 pub mod invariants;
 pub mod postgres;
@@ -17,6 +18,8 @@ mod orchestrator_fixture;
 
 #[cfg(feature = "orchestrator-fixture")]
 pub use orchestrator_fixture::{
-    ConversationOptions, IsolatedTest, OrchestratorTestFixture, TestApiClient, TestSessionHandle,
+    ConversationOptions, FixtureCapabilityAttempt, FixtureCapabilityCall,
+    FixtureCapabilityController, FixtureCapabilityOptions, FixtureCapabilityOutcome,
+    FixtureCapabilityTool, IsolatedTest, OrchestratorTestFixture, TestApiClient, TestSessionHandle,
     drive_conversation,
 };

@@ -4,7 +4,7 @@
 //!
 //! The corpus is seeded so that *every* catalog dataset has rows (sessions with
 //! multi-turn ToolCall/ToolResult/ToolError/BrainResponse/Error sequences, task
-//! segments with and without skills, artifact runs + node runs, learning
+//! segments with and without skills, execution runs + tasks, learning
 //! candidates, and experiment runs). The Postgres path refreshes the
 //! `analytics.*_fact` matviews (via the store's canonical refresh, the same list
 //! `moa-session` uses); the ClickHouse path runs the real exporter
@@ -22,6 +22,8 @@
 //!  -p moa-orchestrator --run-ignored all -E 'test(analytics_parity)'`.
 
 use chrono::{DateTime, Duration, Utc};
+use clickhouse::sql::Identifier;
+use clickhouse::{Client, Row};
 use moa_analytics::{AnalyticsClickHouseClient, AnalyticsService};
 use moa_core::config::ClickHouseConfig;
 use moa_core::types::identifiers::TenantId;
@@ -31,6 +33,7 @@ use moa_core::wire::analytics::{
     AnalyticsOrderBy, AnalyticsQueryRequest, AnalyticsQueryResponse, AnalyticsSortDirection,
 };
 use moa_orchestrator::analytics_export::AnalyticsExporter;
+use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -39,6 +42,30 @@ type TestResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 
 /// Relative tolerance for float measure comparison across the two SQL engines.
 const FLOAT_REL_TOLERANCE: f64 = 1e-6;
+
+fn clickhouse_config(prefix: &str) -> ClickHouseConfig {
+    ClickHouseConfig {
+        url: std::env::var("MOA_CLICKHOUSE_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:10061".to_string()),
+        database: format!("{prefix}_{}", Uuid::now_v7().simple()),
+        user: Some(std::env::var("MOA_CLICKHOUSE_USER").unwrap_or_else(|_| "moa".to_string())),
+        password: Some(
+            std::env::var("MOA_CLICKHOUSE_PASSWORD").unwrap_or_else(|_| "dev".to_string()),
+        ),
+        ..ClickHouseConfig::default()
+    }
+}
+
+fn clickhouse_client(config: &ClickHouseConfig) -> Client {
+    let mut client = Client::default().with_url(config.url.trim());
+    if let Some(user) = config.user.as_deref() {
+        client = client.with_user(user);
+    }
+    if let Some(password) = config.password.as_deref() {
+        client = client.with_password(password);
+    }
+    client
+}
 
 /// Documented parity exceptions: `(dataset_id, field_id, reason)`.
 ///
@@ -61,6 +88,153 @@ const PARITY_EXCEPTIONS: &[(&str, &str, &str)] = &[
          ToolResult/ToolError event timestamp",
     ),
 ];
+
+#[derive(Debug, Row, Deserialize)]
+struct ClickHouseColumn {
+    name: String,
+    column_type: String,
+}
+
+#[derive(Debug, Row, Deserialize)]
+struct ClickHouseCount {
+    row_count: u64,
+}
+
+#[derive(Debug, Row, Deserialize)]
+struct ClickHouseMicros {
+    micros: i64,
+}
+
+async fn clickhouse_columns(
+    client: &Client,
+    database: &str,
+    table: &str,
+) -> TestResult<Vec<ClickHouseColumn>> {
+    Ok(client
+        .query(
+            "SELECT name, type AS column_type FROM system.columns \
+             WHERE database = ? AND table = ? ORDER BY position",
+        )
+        .bind(database)
+        .bind(table)
+        .fetch_all()
+        .await?)
+}
+
+async fn clickhouse_count(client: &Client, database: &str, table: &str) -> TestResult<u64> {
+    let row: ClickHouseCount = client
+        .query("SELECT count() AS row_count FROM ?.? FINAL")
+        .bind(Identifier(database))
+        .bind(Identifier(table))
+        .fetch_one()
+        .await?;
+    Ok(row.row_count)
+}
+
+async fn seed_task9_clickhouse_execution_schema(
+    client: &Client,
+    database: &str,
+    tenant: Uuid,
+    session: Uuid,
+    run_uid: Uuid,
+    task_id: Uuid,
+    future_version: DateTime<Utc>,
+) -> TestResult<()> {
+    client
+        .query("CREATE DATABASE IF NOT EXISTS ?")
+        .bind(Identifier(database))
+        .execute()
+        .await?;
+    client
+        .query(
+            "CREATE TABLE ?.dim_execution_runs ( \
+                 run_uid UUID, tenant_id UUID, storage_partition_id String, user_id String, \
+                 session_id Nullable(UUID), source_kind LowCardinality(String), \
+                 source_ref Nullable(String), plan_hash String, plan_revision UInt32, \
+                 route_reason Nullable(String), status LowCardinality(String), \
+                 terminal_reason Nullable(String), error Nullable(String), required_count UInt64, \
+                 satisfied_count UInt64, logical_task_count UInt64, \
+                 reserved_cost_microusd UInt64, actual_cost_microusd UInt64, \
+                 reserved_tokens UInt64, actual_tokens UInt64, \
+                 started_at Nullable(DateTime64(6, 'UTC')), \
+                 completed_at Nullable(DateTime64(6, 'UTC')), \
+                 created_at DateTime64(6, 'UTC'), updated_at DateTime64(6, 'UTC'), \
+                 duration_ms Nullable(Float64), export_version DateTime64(6, 'UTC') \
+             ) ENGINE = ReplacingMergeTree(export_version) ORDER BY (tenant_id, run_uid)",
+        )
+        .bind(Identifier(database))
+        .execute()
+        .await?;
+    client
+        .query(
+            "CREATE TABLE ?.dim_execution_tasks ( \
+                 task_uid UUID, run_uid UUID, tenant_id UUID, node_id String, \
+                 item_key Nullable(String), capability_ref Nullable(String), \
+                 plan_revision UInt32, status LowCardinality(String), error Nullable(String), \
+                 attempt UInt32, generation UInt64, reserved_cost_microusd UInt64, \
+                 actual_cost_microusd UInt64, reserved_tokens UInt64, actual_tokens UInt64, \
+                 citation_count UInt64, started_at Nullable(DateTime64(6, 'UTC')), \
+                 completed_at Nullable(DateTime64(6, 'UTC')), \
+                 created_at DateTime64(6, 'UTC'), updated_at DateTime64(6, 'UTC'), \
+                 duration_ms Nullable(Float64), export_version DateTime64(6, 'UTC') \
+             ) ENGINE = ReplacingMergeTree(export_version) \
+             ORDER BY (tenant_id, run_uid, task_uid)",
+        )
+        .bind(Identifier(database))
+        .execute()
+        .await?;
+    client
+        .query(
+            "INSERT INTO ?.dim_execution_runs ( \
+                 run_uid, tenant_id, storage_partition_id, user_id, session_id, source_kind, \
+                 source_ref, plan_hash, plan_revision, route_reason, status, terminal_reason, \
+                 error, required_count, satisfied_count, logical_task_count, \
+                 reserved_cost_microusd, actual_cost_microusd, reserved_tokens, actual_tokens, \
+                 started_at, completed_at, created_at, updated_at, duration_ms, export_version \
+             ) VALUES ( \
+                 ?, ?, ?, 'user-1', ?, 'skill_template', 'skill://old', ?, 1, \
+                 'selected_execution_template', 'completed', 'completed', 'old raw error', \
+                 1, 1, 1, 0, 1, 0, 1, ?, ?, ?, ?, 1000.0, ? \
+             )",
+        )
+        .bind(Identifier(database))
+        .bind(run_uid)
+        .bind(tenant)
+        .bind(tenant.to_string())
+        .bind(session)
+        .bind("f".repeat(64))
+        .bind(future_version - Duration::seconds(2))
+        .bind(future_version - Duration::seconds(1))
+        .bind(future_version - Duration::seconds(3))
+        .bind(future_version - Duration::seconds(1))
+        .bind(future_version)
+        .execute()
+        .await?;
+    client
+        .query(
+            "INSERT INTO ?.dim_execution_tasks ( \
+                 task_uid, run_uid, tenant_id, node_id, item_key, capability_ref, plan_revision, \
+                 status, error, attempt, generation, reserved_cost_microusd, \
+                 actual_cost_microusd, reserved_tokens, actual_tokens, citation_count, \
+                 started_at, completed_at, created_at, updated_at, duration_ms, export_version \
+             ) VALUES ( \
+                 ?, ?, ?, 'old-node', NULL, 'docs.search:v1', 1, 'completed', 'old task prose', \
+                 1, 1, 0, 1, 0, 1, 0, ?, ?, ?, ?, 500.0, ? \
+             )",
+        )
+        .bind(Identifier(database))
+        .bind(task_id)
+        .bind(run_uid)
+        .bind(tenant)
+        .bind(future_version - Duration::milliseconds(750))
+        .bind(future_version - Duration::milliseconds(250))
+        .bind(future_version - Duration::seconds(1))
+        .bind(future_version - Duration::milliseconds(250))
+        .bind(future_version)
+        .execute()
+        .await?;
+    Ok(())
+}
 
 #[tokio::test]
 #[ignore = "requires local ClickHouse (docker compose --profile clickhouse) and MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1"]
@@ -85,16 +259,7 @@ async fn analytics_parity_all_datasets_docker() -> TestResult<()> {
 
     // ClickHouse backend: bootstrap schema and run one full export pass into an
     // isolated CH database so concurrent runs cannot collide.
-    let config = ClickHouseConfig {
-        url: std::env::var("MOA_CLICKHOUSE_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:10061".to_string()),
-        database: format!("moa_analytics_parity_{}", Uuid::now_v7().simple()),
-        user: Some(std::env::var("MOA_CLICKHOUSE_USER").unwrap_or_else(|_| "moa".to_string())),
-        password: Some(
-            std::env::var("MOA_CLICKHOUSE_PASSWORD").unwrap_or_else(|_| "dev".to_string()),
-        ),
-        ..ClickHouseConfig::default()
-    };
+    let config = clickhouse_config("moa_analytics_parity");
     let exporter = AnalyticsExporter::from_config(pool.clone(), &config);
     exporter.ensure_clickhouse_schema().await?;
     exporter.run_one_pass().await?;
@@ -105,6 +270,19 @@ async fn analytics_parity_all_datasets_docker() -> TestResult<()> {
     let tenant_id = TenantId::from(tenant);
 
     let catalog = pg_service.catalog();
+    assert!(
+        catalog
+            .datasets
+            .iter()
+            .all(|dataset| !dataset.id.contains("procedure")
+                && dataset.fields.iter().all(|field| {
+                    !matches!(
+                        field.id.as_str(),
+                        "task_uid" | "source_ref" | "capability_ref"
+                    )
+                })),
+        "execution-only analytics catalog restored a legacy dataset or alias"
+    );
     let mut battery_total = 0usize;
     let mut coverage: Vec<String> = Vec::new();
 
@@ -167,6 +345,325 @@ async fn analytics_parity_all_datasets_docker() -> TestResult<()> {
         catalog.datasets.len(),
         PARITY_EXCEPTIONS.len()
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local ClickHouse (docker compose --profile clickhouse) and MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1"]
+async fn execution_schema_upgrade_recovery_docker() -> TestResult<()> {
+    // Pins: a future-skewed Task 9 schema upgrades field-for-field, backfills
+    // through durable high waters, and a restarted completed upgrader is a no-op.
+    if std::env::var("MOA_RUN_CLICKHOUSE_DOCKER_TESTS").as_deref() != Ok("1") {
+        return Err("MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1 is required for this test".into());
+    }
+
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let tenant = Uuid::now_v7();
+    seed_corpus(&pool, tenant).await?;
+    let (run_uid, session): (Uuid, Uuid) =
+        sqlx::query_as("SELECT run_uid, session_id FROM moa.execution_run LIMIT 1")
+            .fetch_one(&pool)
+            .await?;
+    let task_id: Uuid =
+        sqlx::query_scalar("SELECT task_id FROM moa.execution_task ORDER BY task_id LIMIT 1")
+            .fetch_one(&pool)
+            .await?;
+
+    let config = clickhouse_config("moa_execution_schema_upgrade");
+    let client = clickhouse_client(&config);
+    let future_version = Utc::now() + Duration::days(7);
+    seed_task9_clickhouse_execution_schema(
+        &client,
+        &config.database,
+        tenant,
+        session,
+        run_uid,
+        task_id,
+        future_version,
+    )
+    .await?;
+
+    let exporter = AnalyticsExporter::from_config(pool.clone(), &config);
+    exporter.ensure_clickhouse_schema().await?;
+
+    let expected_run_columns = [
+        ("run_uid", "UUID"),
+        ("tenant_id", "UUID"),
+        ("contact_id", "Nullable(UUID)"),
+        ("session_id", "UUID"),
+        ("initial_plan_hash", "String"),
+        ("active_plan_hash", "String"),
+        ("plan_revision", "UInt64"),
+        ("route_mode", "LowCardinality(String)"),
+        ("route_reason", "LowCardinality(String)"),
+        ("source_kind", "LowCardinality(String)"),
+        ("skill_template_ref", "Nullable(String)"),
+        ("skill_template_revision_uid", "Nullable(UUID)"),
+        ("status", "LowCardinality(String)"),
+        ("terminal_reason", "Nullable(String)"),
+        ("requirement_count", "UInt64"),
+        ("satisfied_requirement_count", "UInt64"),
+        ("completion_check_count", "UInt64"),
+        ("logical_task_count", "UInt64"),
+        ("queued_at", "Nullable(DateTime64(6, 'UTC'))"),
+        ("started_at", "Nullable(DateTime64(6, 'UTC'))"),
+        ("queue_to_start_ms", "Nullable(Float64)"),
+        ("completed_at", "Nullable(DateTime64(6, 'UTC'))"),
+        ("duration_ms", "Nullable(Float64)"),
+        ("reserved_cost_microusd", "UInt64"),
+        ("actual_cost_microusd", "UInt64"),
+        ("reserved_tokens", "UInt64"),
+        ("actual_tokens", "UInt64"),
+        ("reserved_tasks", "UInt64"),
+        ("actual_tasks", "UInt64"),
+        ("reserved_tool_calls", "UInt64"),
+        ("actual_tool_calls", "UInt64"),
+        ("reserved_retrieved_bytes", "UInt64"),
+        ("actual_retrieved_bytes", "UInt64"),
+        ("created_at", "DateTime64(6, 'UTC')"),
+        ("updated_at", "DateTime64(6, 'UTC')"),
+        ("export_version", "DateTime64(6, 'UTC')"),
+    ];
+    let expected_task_columns = [
+        ("task_id", "UUID"),
+        ("run_uid", "UUID"),
+        ("tenant_id", "UUID"),
+        ("node_id", "String"),
+        ("item_key", "String"),
+        ("task_kind", "LowCardinality(String)"),
+        ("capability_name", "Nullable(String)"),
+        ("capability_version", "Nullable(String)"),
+        ("plan_revision", "UInt64"),
+        ("status", "LowCardinality(String)"),
+        ("failure_class", "Nullable(String)"),
+        ("attempt", "UInt32"),
+        ("generation", "UInt64"),
+        ("citation_count", "UInt64"),
+        ("queue_latency_ms", "Nullable(Float64)"),
+        ("duration_ms", "Nullable(Float64)"),
+        ("reserved_cost_microusd", "UInt64"),
+        ("actual_cost_microusd", "UInt64"),
+        ("reserved_tokens", "UInt64"),
+        ("actual_tokens", "UInt64"),
+        ("reserved_tasks", "UInt64"),
+        ("actual_tasks", "UInt64"),
+        ("reserved_tool_calls", "UInt64"),
+        ("actual_tool_calls", "UInt64"),
+        ("reserved_retrieved_bytes", "UInt64"),
+        ("actual_retrieved_bytes", "UInt64"),
+        ("started_at", "Nullable(DateTime64(6, 'UTC'))"),
+        ("completed_at", "Nullable(DateTime64(6, 'UTC'))"),
+        ("created_at", "DateTime64(6, 'UTC')"),
+        ("updated_at", "DateTime64(6, 'UTC')"),
+        ("export_version", "DateTime64(6, 'UTC')"),
+    ];
+    for (table, expected) in [
+        ("dim_execution_runs", expected_run_columns.as_slice()),
+        ("dim_execution_tasks", expected_task_columns.as_slice()),
+    ] {
+        let actual = clickhouse_columns(&client, &config.database, table).await?;
+        let actual: Vec<(&str, &str)> = actual
+            .iter()
+            .map(|column| (column.name.as_str(), column.column_type.as_str()))
+            .collect();
+        assert_eq!(actual, expected, "{table} final schema differs");
+    }
+
+    let pg_run_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM moa.execution_run")
+        .fetch_one(&pool)
+        .await?;
+    let pg_task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM moa.execution_task")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_runs").await?,
+        u64::try_from(pg_run_count)?
+    );
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_tasks").await?,
+        u64::try_from(pg_task_count)?
+    );
+    for table in ["dim_execution_runs", "dim_execution_tasks"] {
+        let version: ClickHouseMicros = client
+            .query("SELECT toUnixTimestamp64Micro(min(export_version)) AS micros FROM ?.? FINAL")
+            .bind(Identifier(&config.database))
+            .bind(Identifier(table))
+            .fetch_one()
+            .await?;
+        assert!(
+            version.micros > future_version.timestamp_micros(),
+            "{table} backfill must supersede the future-skewed Task 9 row"
+        );
+    }
+
+    let before_restart: (String, DateTime<Utc>) = sqlx::query_as(
+        "SELECT stage, export_version_floor \
+         FROM analytics.clickhouse_schema_upgrade_state \
+         WHERE upgrade_key = 'execution_dimensions_v2'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(before_restart.0, "complete");
+    exporter.ensure_clickhouse_schema().await?;
+    let after_restart: (String, DateTime<Utc>) = sqlx::query_as(
+        "SELECT stage, export_version_floor \
+         FROM analytics.clickhouse_schema_upgrade_state \
+         WHERE upgrade_key = 'execution_dimensions_v2'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(after_restart, before_restart);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local ClickHouse (docker compose --profile clickhouse) and MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1"]
+async fn execution_incremental_high_water_recovery_docker() -> TestResult<()> {
+    // Pins: a restarted exporter resumes persisted run/task bounds. Rows moved
+    // above those bounds are not lost and appear in the next bounded pass.
+    if std::env::var("MOA_RUN_CLICKHOUSE_DOCKER_TESTS").as_deref() != Ok("1") {
+        return Err("MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1 is required for this test".into());
+    }
+
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let tenant = Uuid::now_v7();
+    let session = Uuid::now_v7();
+    seed_session(
+        &pool, tenant, session, "chat", "running", "claude", 0, 0, 0, 0, 0, 0,
+    )
+    .await?;
+
+    let config = clickhouse_config("moa_execution_high_water");
+    let first_exporter = AnalyticsExporter::from_config(pool.clone(), &config);
+    first_exporter.ensure_clickhouse_schema().await?;
+
+    let run_uid = Uuid::now_v7();
+    seed_execution_run_and_tasks(
+        &pool,
+        tenant,
+        run_uid,
+        session,
+        Utc::now() - Duration::seconds(5),
+        Utc::now(),
+    )
+    .await?;
+    let old_run: (i64, Uuid) = sqlx::query_as(
+        "SELECT analytics_change_seq, run_uid FROM moa.execution_run WHERE run_uid = $1",
+    )
+    .bind(run_uid)
+    .fetch_one(&pool)
+    .await?;
+    let old_task: (i64, Uuid) = sqlx::query_as(
+        "SELECT analytics_change_seq, task_id FROM moa.execution_task \
+         WHERE run_uid = $1 ORDER BY analytics_change_seq DESC, task_id DESC LIMIT 1",
+    )
+    .bind(run_uid)
+    .fetch_one(&pool)
+    .await?;
+    for (table, high_water) in [
+        ("dim_execution_runs", old_run),
+        ("dim_execution_tasks", old_task),
+    ] {
+        sqlx::query(
+            "UPDATE analytics.clickhouse_export_state \
+             SET pass_high_water_seq = $2, pass_high_water_id = $3, pass_started_at = NOW() \
+             WHERE table_name = $1",
+        )
+        .bind(table)
+        .bind(high_water.0)
+        .bind(high_water.1)
+        .execute(&pool)
+        .await?;
+    }
+
+    sqlx::query(
+        "UPDATE moa.execution_run SET updated_at = updated_at + INTERVAL '1 second' \
+         WHERE run_uid = $1",
+    )
+    .bind(run_uid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE moa.execution_task SET updated_at = updated_at + INTERVAL '1 second' \
+         WHERE task_id = $1",
+    )
+    .bind(old_task.1)
+    .execute(&pool)
+    .await?;
+
+    let resumed_exporter = AnalyticsExporter::from_config(pool.clone(), &config);
+    resumed_exporter.export_execution_dimensions().await?;
+    let client = clickhouse_client(&config);
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_runs").await?,
+        0,
+        "the run moved above the persisted bound"
+    );
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_tasks").await?,
+        1,
+        "the lower task remains inside the persisted bound"
+    );
+
+    let first_run_cursor: (i64, Uuid, Option<i64>) = sqlx::query_as(
+        "SELECT cursor_seq, cursor_id, pass_high_water_seq \
+         FROM analytics.clickhouse_export_state WHERE table_name = 'dim_execution_runs'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let first_task_cursor: (i64, Uuid, Option<i64>) = sqlx::query_as(
+        "SELECT cursor_seq, cursor_id, pass_high_water_seq \
+         FROM analytics.clickhouse_export_state WHERE table_name = 'dim_execution_tasks'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!((first_run_cursor.0, first_run_cursor.1), old_run);
+    assert_eq!((first_task_cursor.0, first_task_cursor.1), old_task);
+    assert_eq!(first_run_cursor.2, None);
+    assert_eq!(first_task_cursor.2, None);
+
+    resumed_exporter.export_execution_dimensions().await?;
+    let new_run: (i64, Uuid) = sqlx::query_as(
+        "SELECT analytics_change_seq, run_uid FROM moa.execution_run WHERE run_uid = $1",
+    )
+    .bind(run_uid)
+    .fetch_one(&pool)
+    .await?;
+    let new_task: (i64, Uuid) = sqlx::query_as(
+        "SELECT analytics_change_seq, task_id FROM moa.execution_task \
+         WHERE task_id = $1",
+    )
+    .bind(old_task.1)
+    .fetch_one(&pool)
+    .await?;
+    assert!(new_run.0 > old_run.0);
+    assert!(new_task.0 > old_task.0);
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_runs").await?,
+        1
+    );
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_tasks").await?,
+        2
+    );
+    for (table, expected) in [
+        ("dim_execution_runs", new_run),
+        ("dim_execution_tasks", new_task),
+    ] {
+        let cursor: (i64, Uuid, Option<i64>) = sqlx::query_as(
+            "SELECT cursor_seq, cursor_id, pass_high_water_seq \
+             FROM analytics.clickhouse_export_state WHERE table_name = $1",
+        )
+        .bind(table)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!((cursor.0, cursor.1), expected);
+        assert_eq!(cursor.2, None);
+    }
 
     Ok(())
 }
@@ -645,37 +1142,15 @@ async fn seed_corpus(pool: &PgPool, tenant: Uuid) -> TestResult<()> {
     )
     .await?;
 
-    // Artifact run + node run.
+    // Execution run + tasks.
     let run_uid = Uuid::now_v7();
-    seed_artifact_run(
+    seed_execution_run_and_tasks(
         pool,
         tenant,
         run_uid,
         session1,
-        "skill://billing-flow",
-        "completed",
         base,
-        Some(base + Duration::seconds(5)),
-    )
-    .await?;
-    seed_artifact_node_run(
-        pool,
-        tenant,
-        run_uid,
-        "collect-input",
-        "completed",
-        base,
-        Some(base + Duration::seconds(1)),
-    )
-    .await?;
-    seed_artifact_node_run(
-        pool,
-        tenant,
-        run_uid,
-        "draft-reply",
-        "failed",
-        base + Duration::seconds(1),
-        Some(base + Duration::seconds(4)),
+        base + Duration::seconds(5),
     )
     .await?;
 
@@ -850,63 +1325,128 @@ async fn seed_task_segment(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn seed_artifact_run(
+async fn seed_execution_run_and_tasks(
     pool: &PgPool,
     tenant: Uuid,
     run_uid: Uuid,
     session: Uuid,
-    procedure_ref: &str,
-    status: &str,
     started_at: DateTime<Utc>,
-    completed_at: Option<DateTime<Utc>>,
+    completed_at: DateTime<Utc>,
 ) -> TestResult<()> {
-    let default_revision = Uuid::parse_str("00000000-0000-4000-8000-000000000a02")?;
+    let planning_context_uid = Uuid::now_v7();
+    let skill_template_revision_uid = Uuid::now_v7();
+    let planning_hash = "1".repeat(64);
+    let plan_hash = "2".repeat(64);
     sqlx::query(
-        "INSERT INTO moa.artifact_run \
-             (run_uid, tenant_id, revision_uid, storage_partition_id, user_id, session_id, \
-              procedure_ref, status, input, state, started_at, completed_at) \
-         VALUES ($1, $2, $3, $4, 'user-1', $5, $6, $7, '{}'::jsonb, '{}'::jsonb, $8, $9)",
+        "INSERT INTO moa.execution_planning_context \
+             (planning_context_uid, tenant_id, session_id, originating_user_sequence_num, \
+              originating_user_event_hash, owner_user_id, planning_context_hash, snapshot) \
+         VALUES ($1, $2, $3, 1, $4, 'user-1', $4, '{}'::JSONB)",
     )
-    .bind(run_uid)
+    .bind(planning_context_uid)
     .bind(tenant)
-    .bind(default_revision)
-    .bind(tenant.to_string())
     .bind(session)
-    .bind(procedure_ref)
-    .bind(status)
-    .bind(started_at)
-    .bind(completed_at)
+    .bind(&planning_hash)
     .execute(pool)
     .await?;
-    Ok(())
-}
-
-async fn seed_artifact_node_run(
-    pool: &PgPool,
-    tenant: Uuid,
-    run_uid: Uuid,
-    node_id: &str,
-    status: &str,
-    started_at: DateTime<Utc>,
-    completed_at: Option<DateTime<Utc>>,
-) -> TestResult<()> {
     sqlx::query(
-        "INSERT INTO moa.artifact_node_run \
-             (node_run_uid, run_uid, tenant_id, storage_partition_id, user_id, node_id, status, \
-              input, started_at, completed_at) \
-         VALUES ($1, $2, $3, $4, 'user-1', $5, $6, '{}'::jsonb, $7, $8)",
+        "INSERT INTO moa.execution_run \
+             (run_uid, tenant_id, session_id, originating_user_sequence_num, planning_context_uid, \
+              planning_context_hash, owner_user_id, goal_contract, initial_plan, active_plan, \
+              initial_plan_hash, active_plan_hash, capability_catalog, authorization_envelope, \
+              source_provenance, source_kind, route_mode, route_reason, skill_template_ref, \
+              skill_template_revision_uid, input, status, progress_total_tasks, started_at) \
+         VALUES ($1, $2, $3, 1, $4, $5, 'user-1', \
+                 '{\"requirements\":[{\"id\":\"r1\"}]}'::JSONB, '{}'::JSONB, '{}'::JSONB, \
+                 $6, $6, '{}'::JSONB, '{}'::JSONB, \
+                 jsonb_build_object('kind', 'skill_template', \
+                    'route_reason', 'selected_execution_template', \
+                    'skill_template_ref', 'skill://billing-flow', \
+                    'skill_template_revision_uid', lower($7::TEXT)), \
+                 'skill_template', 'run', 'selected_execution_template', \
+                 'skill://billing-flow', $7, '{}'::JSONB, 'queued', 2, $8)",
     )
-    .bind(Uuid::now_v7())
     .bind(run_uid)
     .bind(tenant)
-    .bind(tenant.to_string())
-    .bind(node_id)
-    .bind(status)
+    .bind(session)
+    .bind(planning_context_uid)
+    .bind(&planning_hash)
+    .bind(&plan_hash)
+    .bind(skill_template_revision_uid)
     .bind(started_at)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE moa.execution_run SET status = 'running', updated_at = $2 WHERE run_uid = $1",
+    )
+    .bind(run_uid)
+    .bind(started_at)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE moa.execution_run SET status = 'completed', output = '{}'::JSONB, \
+             completion_check_results = '[{\"check_id\":\"complete\"}]'::JSONB, \
+             terminal_cause = '{\"kind\":\"completion\",\"limit_stop\":null}'::JSONB, \
+             terminal_reason = 'completed', \
+             terminal_satisfied_requirement_count = 1, terminal_requirement_count = 1, \
+             consumed_cost_microusd = 12, consumed_tokens = 34, consumed_tasks = 2, \
+             consumed_tool_calls = 3, consumed_retrieved_bytes = 4096, \
+             progress_completed_tasks = 2, completed_at = $2, updated_at = $2 \
+         WHERE run_uid = $1",
+    )
+    .bind(run_uid)
     .bind(completed_at)
     .execute(pool)
     .await?;
+
+    for (node_id, task_kind, capability, offset_ms, cost, tokens, citation) in [
+        (
+            "collect-input",
+            json!({"kind":"capability","reference":{"name":"docs.search","version":"v1"}}),
+            true,
+            1_000_i64,
+            5_i64,
+            13_i64,
+            json!([{"source":"doc-1"}]),
+        ),
+        (
+            "draft-reply",
+            json!({"kind":"output","value":{}}),
+            false,
+            4_000_i64,
+            7_i64,
+            21_i64,
+            json!([]),
+        ),
+    ] {
+        let task_id = Uuid::now_v7();
+        let item_key = if capability { "item-1" } else { "" };
+        sqlx::query(
+            "INSERT INTO moa.execution_task \
+                 (task_id, run_uid, tenant_id, node_id, item_key, plan_revision, status, input, \
+                  task_kind, retry_policy, estimate_cost_microusd, estimate_tokens, estimate_tasks, \
+                  estimate_tool_calls, estimate_retrieved_bytes, actual_cost_microusd, actual_tokens, \
+                  actual_tasks, actual_tool_calls, actual_retrieved_bytes, citations, \
+                  started_at, completed_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, 1, 'completed', '{}'::JSONB, $6, \
+                     '{\"max_attempts\":1,\"initial_backoff_ms\":0,\"max_backoff_ms\":0}'::JSONB, \
+                     $7, $8, 1, 2, 1024, $7, $8, 1, 2, 1024, $9, $10, $11, $11)",
+        )
+        .bind(task_id)
+        .bind(run_uid)
+        .bind(tenant)
+        .bind(node_id)
+        .bind(item_key)
+        .bind(task_kind)
+        .bind(cost)
+        .bind(tokens)
+        .bind(citation)
+        .bind(started_at)
+        .bind(started_at + Duration::milliseconds(offset_ms))
+        .execute(pool)
+        .await?;
+    }
     Ok(())
 }
 

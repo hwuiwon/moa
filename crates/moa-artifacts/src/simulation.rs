@@ -304,8 +304,8 @@ pub struct ExperimentTargetVariant {
 pub enum ExperimentTargetKind {
     /// Existing open-ended agent-loop session path.
     AgentLoop,
-    /// Deterministic skill-backed procedure run path.
-    Procedure,
+    /// Exact pinned skill execution-template path.
+    ExecutionTemplate,
 }
 
 impl ExperimentTargetKind {
@@ -314,7 +314,7 @@ impl ExperimentTargetKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AgentLoop => "agent_loop",
-            Self::Procedure => "procedure",
+            Self::ExecutionTemplate => "execution_template",
         }
     }
 
@@ -323,7 +323,7 @@ impl ExperimentTargetKind {
     pub fn from_db(value: &str) -> Option<Self> {
         match value {
             "agent_loop" => Some(Self::AgentLoop),
-            "procedure" => Some(Self::Procedure),
+            "execution_template" => Some(Self::ExecutionTemplate),
             _ => None,
         }
     }

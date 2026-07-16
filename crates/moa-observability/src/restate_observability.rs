@@ -397,9 +397,17 @@ fn synthetic_session_span_context(session_id: SessionId) -> SpanContext {
     let mut trace_id_bytes = [0_u8; 16];
     trace_id_bytes[..8].copy_from_slice(&left.to_be_bytes());
     trace_id_bytes[8..].copy_from_slice(&right.to_be_bytes());
+
+    let mut span = DefaultHasher::new();
+    "moa.session.synthetic_span".hash(&mut span);
+    session_id.hash(&mut span);
+    let mut span_id_bytes = span.finish().to_be_bytes();
+    if span_id_bytes.iter().all(|byte| *byte == 0) {
+        span_id_bytes[7] = 1;
+    }
     SpanContext::new(
         TraceId::from_bytes(trace_id_bytes),
-        SpanId::INVALID,
+        SpanId::from_bytes(span_id_bytes),
         TraceFlags::SAMPLED,
         false,
         TraceState::default(),
@@ -471,6 +479,12 @@ mod tests {
         assert_eq!(
             attr_string(span, "moa.environment").as_deref(),
             Some("production")
+        );
+        assert_eq!(span.links.len(), 1, "session root link should be exported");
+        assert_ne!(
+            span.links[0].span_context.span_id(),
+            SpanId::INVALID,
+            "session root link must use a valid nonzero span id"
         );
     }
 

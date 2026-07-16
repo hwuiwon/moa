@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/moa-analytics",
     "crates/moa-core",
+    "crates/moa-execution",
     "crates/moa-db",
     "crates/moa-scoring",
     "crates/moa-agents",
@@ -49,6 +50,7 @@ members = [
 default-members = [
     "crates/moa-analytics",
     "crates/moa-core",
+    "crates/moa-execution",
     "crates/moa-db",
     "crates/moa-scoring",
     "crates/moa-agents",
@@ -107,6 +109,7 @@ moa-brain = { path = "crates/moa-brain" }
 moa-contacts = { path = "crates/moa-contacts" }
 moa-core = { path = "crates/moa-core" }
 moa-db = { path = "crates/moa-db" }
+moa-execution = { path = "crates/moa-execution" }
 moa-scoring = { path = "crates/moa-scoring" }
 moa-edge = { path = "crates/moa-edge" }
 moa-eval-core = { path = "crates/moa-eval/core" }
@@ -179,11 +182,13 @@ metrics-exporter-prometheus = { version = "0.18", features = ["http-listener"] }
 moka = { version = "0.12", features = ["future"] }
 object_store = { version = "0.11", features = ["aws", "gcp"] }
 opentelemetry = "0.31"
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-rustls"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
+opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace"] }
 opentelemetry_sdk = "0.31"
 httpmock = "0.7"
 parquet = { version = "53", features = ["async", "arrow"] }
 proptest = "1"
+prost = "0.14"
 rand = "0.8"
 regex = "1"
 restate-sdk = "0.10"
@@ -228,7 +233,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http = "0.6"
 unicode-normalization = "0.1"
 url = "2.5"
-uuid = { version = "1", features = ["serde", "v7"] }
+uuid = { version = "1", features = ["serde", "v5", "v7"] }
 webpki-root-certs = "1"
 wiremock = "0.6"
 testcontainers = "0.23"

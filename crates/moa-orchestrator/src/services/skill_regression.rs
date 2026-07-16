@@ -1,12 +1,29 @@
 //! Review-boundary regression reporting for proposed skill updates.
 
 use std::sync::Arc;
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, time::Instant};
 
-use moa_artifacts::registry::ArtifactFile;
+use chrono::Utc;
+use moa_artifacts::{
+    canonical::canonical_json_bytes as artifact_canonical_json_bytes,
+    execution_plan::{
+        ExecutionBudgetLimit, ExecutionGoalContract, ExecutionPlanDefinition, ExecutionPlanTemplate,
+    },
+    registry::{ArtifactFile, StoredArtifactRevision},
+};
 use moa_core::{
-    config::MoaConfig, error::Result, types::action_policy::ActionRuleScope,
-    types::experience::LearningCandidate,
+    config::MoaConfig,
+    error::Result,
+    types::{
+        action_policy::ActionRuleScope,
+        execution_planning::{
+            ExecutionAuditViolationV1, ExecutionCompileOutcome, ExecutionCompileSource,
+            ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
+            bounded_audit_report, execution_planning_hash,
+        },
+        experience::LearningCandidate,
+        identifiers::TenantId,
+    },
 };
 use moa_core::{error::MoaError, traits::LLMProvider, types::provider::ModelTask};
 use moa_eval::EvalEngine;
@@ -15,17 +32,29 @@ use moa_eval_core::{
     ActionPolicyOverride, AgentConfig, EngineOptions, EvalResult, EvalScoreValue, EvalStatus,
     Evaluator, EvaluatorOptions, InstructionOverride, TestSuite, build_evaluators, evaluate_run,
 };
+use moa_execution::{
+    CompileExecutionOutcome, CompileExecutionRequest, ExecutionAuthorizationEnvelope,
+    ExecutionCapabilityCatalog, ExecutionValidationReport, ExecutionValidationSeverity, compile,
+    repository::{CompileAuditWriteOutcome, ExecutionRepository, ExecutionScope},
+    schema::validate_instance,
+};
+use moa_hands::ToolRouter;
 use moa_providers::ProviderRegistry;
+use moa_session::PostgresSessionStore;
 use moa_skills::artifact::skill_definition_from_package;
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_skills::registry::SkillRegistry;
 use moa_skills::regression::{SkillRegressionSummary, compare_scores};
+use serde::Serialize;
 use serde_json::{Value, json};
+
+use crate::services::execution::resolve_skill_regression_compile_authority;
 
 const DEFAULT_SKILL_TEST_BUDGET_DOLLARS: f64 = 0.50;
 const DEFAULT_SKILL_EVALUATORS: &[&str] = &["trajectory", "output", "tool_success"];
 /// Floor applied when a generated suite carries no (or a zero) case timeout.
 const DEFAULT_SKILL_SUITE_TIMEOUT_SECONDS: u64 = 90;
+const EXECUTION_INPUT_METADATA_KEY: &str = "execution_input";
 
 type LocalBoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 
@@ -71,6 +100,8 @@ pub struct SkillRegressionGate {
     /// Number of held-out suite sources (prior revisions + sibling sessions)
     /// that actually executed, for honest acceptance-check derivation.
     pub held_out_sources: usize,
+    /// Exact compile-audit operation key required by the terminal candidate CAS.
+    pub compile_operation_key: Option<String>,
 }
 
 impl SkillRegressionGate {
@@ -85,6 +116,7 @@ impl SkillRegressionGate {
             rejection_reason: None,
             execution,
             held_out_sources,
+            compile_operation_key: None,
         }
     }
 
@@ -95,8 +127,24 @@ impl SkillRegressionGate {
             rejection_reason: Some(rejection_reason),
             execution: SkillRegressionExecution::Blocked,
             held_out_sources: 0,
+            compile_operation_key: None,
         }
     }
+
+    fn with_compile_operation_key(mut self, operation_key: Option<String>) -> Self {
+        self.compile_operation_key = operation_key;
+        self
+    }
+}
+
+/// Draft execution inputs needed only when a regression suite compiles a template.
+pub struct SkillRegressionCompileContext {
+    /// Production tool router used to resolve governed capability registrations.
+    pub router: Arc<ToolRouter>,
+    /// Exact draft revision whose template is being reviewed.
+    pub draft: StoredArtifactRevision,
+    /// Files belonging to the exact draft revision.
+    pub draft_files: Vec<ArtifactFile>,
 }
 
 /// Builds the review-time regression report for accepting a skill candidate.
@@ -104,9 +152,10 @@ pub async fn skill_acceptance_regression_report(
     config: MoaConfig,
     providers: Arc<ProviderRegistry>,
     registry: SkillRegistry,
+    store: Arc<PostgresSessionStore>,
     scope: ActionRuleScope,
     candidate: LearningCandidate,
-    draft_files: Vec<ArtifactFile>,
+    compile_context: SkillRegressionCompileContext,
 ) -> Result<SkillRegressionGate> {
     let Some(generated_suite) = generated_suite_payload(&candidate.payload) else {
         return Ok(SkillRegressionGate::blocked(
@@ -167,6 +216,18 @@ pub async fn skill_acceptance_regression_report(
             "generated regression suite contains no test cases".to_string(),
         ));
     }
+    if suite.name.trim().is_empty() {
+        return Ok(SkillRegressionGate::blocked(
+            json!({
+                "regression_execution": "unavailable",
+                "runner": "moa-eval",
+                "reason": "generated regression suite has no name",
+                "generated_suite": generated_suite.summary_with_suite(&suite),
+                "previous_skill": previous_skill,
+            }),
+            "generated regression suite has no name".to_string(),
+        ));
+    }
     // A missing suite timeout parses as zero, which times every case out
     // instantly and rejects the candidate for a fixture defect rather than a
     // behavior regression. Floor it instead of trusting the TOML default.
@@ -175,7 +236,8 @@ pub async fn skill_acceptance_regression_report(
     }
 
     let candidate_package = SkillPackage::new(
-        draft_files
+        compile_context
+            .draft_files
             .into_iter()
             .map(|file| SkillPackageFile {
                 path: file.path,
@@ -188,27 +250,67 @@ pub async fn skill_acceptance_regression_report(
     .validate()?;
     let candidate_markdown = candidate_package.skill_md.clone();
 
-    // Smoke-run a candidate procedure before spending any eval budget:
-    // document validation catches structural document defects, while this
-    // catches graphs that error immediately at runtime.
     let definition = skill_definition_from_package(&candidate_package)?;
-    if let Some(smoke_error) = definition
-        .procedure
-        .as_ref()
-        .and_then(procedure_smoke_error)
-    {
-        return Ok(SkillRegressionGate::blocked(
-            json!({
-                "regression_execution": "unavailable",
-                "runner": "moa-eval",
-                "reason": "candidate procedure failed its smoke run",
-                "error": smoke_error,
-                "generated_suite": generated_suite.summary_with_suite(&suite),
-                "previous_skill": previous_skill,
-            }),
-            "candidate procedure failed its smoke run".to_string(),
-        ));
-    }
+    let compile_operation_key = if let Some(template) = definition.execution_plan.as_ref() {
+        let draft_revision_uid = draft_artifact_revision_uid(&candidate)?;
+        let suite_hash = validated_suite_hash(&suite)?;
+        let operation_key = format!("skill_regression:{draft_revision_uid}:{suite_hash}");
+        let authority = resolve_skill_regression_compile_authority(
+            store.pool().clone(),
+            compile_context.router.capability_registrations(),
+            scope,
+            compile_context.draft,
+        )
+        .await?;
+        let run_input = resolve_regression_execution_input(&suite)?;
+        let compiled = compile_skill_execution_template(SkillTemplateCompileRequest {
+            config: &config,
+            tenant_id: candidate.tenant_id,
+            skill_name: &skill_name,
+            skill_input_schema: &definition.inputs,
+            template,
+            run_input: &run_input,
+            catalog: &authority.catalog,
+            authorization: &authority.authorization,
+            operation_key: &operation_key,
+        })?;
+        let audit_outcome = ExecutionRepository::new(store.pool().clone())
+            .write_compile_audit(
+                ExecutionScope::Tenant {
+                    tenant_id: candidate.tenant_id,
+                },
+                &compiled.audit,
+            )
+            .await
+            .map_err(|error| {
+                MoaError::StorageError(format!(
+                    "skill regression compile audit persistence failed: {error}"
+                ))
+            })?;
+        moa_brain::execution_planning::request::record_applied_planning_audit(&audit_outcome);
+        if matches!(audit_outcome, CompileAuditWriteOutcome::Conflict { .. }) {
+            return Err(MoaError::ValidationError(format!(
+                "skill regression planning audit conflicts for operation `{operation_key}`"
+            )));
+        }
+        if !compiled.accepted {
+            return Ok(SkillRegressionGate::blocked(
+                json!({
+                    "regression_execution": "unavailable",
+                    "runner": "moa-eval",
+                    "reason": "candidate execution-plan template failed compilation",
+                    "generated_suite": generated_suite.summary_with_suite(&suite),
+                    "previous_skill": previous_skill,
+                    "compile_operation_key": operation_key,
+                }),
+                "candidate execution-plan template failed compilation".to_string(),
+            )
+            .with_compile_operation_key(Some(operation_key)));
+        }
+        Some(operation_key)
+    } else {
+        None
+    };
 
     // An unavailable provider is an operational failure, not a property of the
     // candidate: surface an error so the review can be retried after the
@@ -238,7 +340,8 @@ pub async fn skill_acceptance_regression_report(
                 "previous_skill": previous_skill,
             }),
             "estimated regression cost exceeds the review budget".to_string(),
-        ));
+        )
+        .with_compile_operation_key(compile_operation_key));
     }
 
     let Some(previous_package) = previous_package else {
@@ -305,6 +408,7 @@ pub async fn skill_acceptance_regression_report(
                 SkillRegressionExecution::CandidateOnly,
                 held_out.source_count,
             )
+            .with_compile_operation_key(compile_operation_key)
         } else {
             SkillRegressionGate {
                 report,
@@ -318,6 +422,7 @@ pub async fn skill_acceptance_regression_report(
                 }),
                 execution: SkillRegressionExecution::Blocked,
                 held_out_sources: held_out.source_count,
+                compile_operation_key,
             }
         });
     };
@@ -396,7 +501,8 @@ pub async fn skill_acceptance_regression_report(
             report,
             SkillRegressionExecution::ComparedWithPrevious,
             held_out.source_count,
-        ))
+        )
+        .with_compile_operation_key(compile_operation_key))
     } else {
         Ok(SkillRegressionGate {
             report,
@@ -410,6 +516,7 @@ pub async fn skill_acceptance_regression_report(
             }),
             execution: SkillRegressionExecution::Blocked,
             held_out_sources: held_out.source_count,
+            compile_operation_key,
         })
     }
 }
@@ -560,6 +667,38 @@ fn skill_name(candidate: &LearningCandidate) -> Option<String> {
         .and_then(Value::as_str)
         .map(ToString::to_string)
         .or_else(|| candidate.target_label.clone())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum RegressionExecutionInput {
+    Missing,
+    Resolved(Value),
+    Ambiguous,
+}
+
+fn resolve_regression_execution_input(suite: &TestSuite) -> Result<RegressionExecutionInput> {
+    let mut canonical_inputs = Vec::new();
+    for input in suite
+        .cases
+        .iter()
+        .filter_map(|case| case.metadata.get(EXECUTION_INPUT_METADATA_KEY))
+    {
+        let canonical = artifact_canonical_json_bytes(input)
+            .map_err(|error| MoaError::SerializationError(error.to_string()))?;
+        if canonical_inputs
+            .iter()
+            .any(|(existing, _)| existing == &canonical)
+        {
+            continue;
+        }
+        canonical_inputs.push((canonical, input.clone()));
+    }
+
+    match canonical_inputs.as_slice() {
+        [] => Ok(RegressionExecutionInput::Missing),
+        [(_, input)] => Ok(RegressionExecutionInput::Resolved(input.clone())),
+        _ => Ok(RegressionExecutionInput::Ambiguous),
+    }
 }
 
 struct ExecutedRegressionRuns {
@@ -785,29 +924,231 @@ fn estimate_tokens(text: &str) -> usize {
     }
 }
 
-/// Smoke-runs a procedure graph one step and returns the failure, if any.
-///
-/// The pure interpreter advances from the start node with empty input. Reaching
-/// completion, a blocked side-effect node, or ready requests all prove the
-/// graph starts executing. A condition that cannot match on empty input is
-/// input-dependent rather than structural, so it passes; every other
-/// interpreter error means the graph would fail on its first real run and the
-/// candidate must not promote.
-fn procedure_smoke_error(
-    procedure: &moa_artifacts::procedure::ProcedureDefinition,
-) -> Option<String> {
-    use moa_skills::procedure::error::ProcedureError;
-    use moa_skills::procedure::interpreter::{ProcedureExecutionState, ProcedureInterpreter};
+struct SkillTemplateCompileRequest<'a> {
+    config: &'a MoaConfig,
+    tenant_id: TenantId,
+    skill_name: &'a str,
+    skill_input_schema: &'a Value,
+    template: &'a ExecutionPlanTemplate,
+    run_input: &'a RegressionExecutionInput,
+    catalog: &'a ExecutionCapabilityCatalog,
+    authorization: &'a ExecutionAuthorizationEnvelope,
+    operation_key: &'a str,
+}
 
-    let smoke = ProcedureInterpreter::new(procedure).advance(ProcedureExecutionState::new(
-        uuid::Uuid::now_v7(),
-        json!({}),
+struct SkillTemplateCompile {
+    audit: ExecutionPlanningAuditEnvelopeV1,
+    accepted: bool,
+}
+
+#[derive(Serialize)]
+struct InitialCompileCandidate<'a> {
+    kind: &'static str,
+    schema_version: u8,
+    source: ExecutionCompileSource,
+    goal: &'a ExecutionGoalContract,
+    plan: &'a ExecutionPlanDefinition,
+    run_input: &'a Value,
+}
+
+fn compile_skill_execution_template(
+    request: SkillTemplateCompileRequest<'_>,
+) -> Result<SkillTemplateCompile> {
+    let run_input = match request.run_input {
+        RegressionExecutionInput::Resolved(input) => input.clone(),
+        RegressionExecutionInput::Missing | RegressionExecutionInput::Ambiguous => Value::Null,
+    };
+    let goal = request.template.instantiate_goal(format!(
+        "Validate the regression behavior of skill `{}`.",
+        request.skill_name
     ));
-    match smoke {
-        Ok(_) => None,
-        Err(ProcedureError::NoMatchingOutgoingEdge { .. }) => None,
-        Err(error) => Some(error.to_string()),
+    let source = ExecutionCompileSource::SkillRegression;
+    let candidate = InitialCompileCandidate {
+        kind: "initial",
+        schema_version: 1,
+        source,
+        goal: &goal,
+        plan: &request.template.plan,
+        run_input: &run_input,
+    };
+    let candidate_bytes = artifact_canonical_json_bytes(&candidate)
+        .map_err(|error| MoaError::SerializationError(error.to_string()))?;
+    let candidate_hash =
+        execution_planning_hash("moa.execution.compile-candidate.v1", &candidate_bytes);
+    let approved_budget = ExecutionBudgetLimit {
+        max_cost_microusd: Some(request.config.execution.max_cost_microusd),
+        max_tokens: Some(request.config.execution.max_tokens),
+        max_tasks: Some(request.config.execution.max_tasks),
+        max_tool_calls: Some(request.config.execution.max_tool_calls),
+        max_retrieved_bytes: Some(request.config.execution.max_retrieved_bytes),
+        deadline_at: None,
+    };
+    let created_at = Utc::now();
+    let started = Instant::now();
+    let mut outcome = if matches!(request.run_input, RegressionExecutionInput::Ambiguous) {
+        CompileExecutionOutcome {
+            compiled: None,
+            report: ExecutionValidationReport {
+                issues: vec![moa_execution::ExecutionValidationIssue {
+                    severity: ExecutionValidationSeverity::Error,
+                    code: "ambiguous_run_input".to_string(),
+                    path: "run_input".to_string(),
+                    message: "skill regression suite declares multiple distinct structured inputs"
+                        .to_string(),
+                }],
+            },
+        }
+    } else {
+        compile(CompileExecutionRequest {
+            goal,
+            plan: request.template.plan.clone(),
+            run_input: run_input.clone(),
+            catalog: request.catalog.clone(),
+            authorization: request.authorization.clone(),
+            approved_budget,
+            config: request.config.execution.clone(),
+            now: created_at,
+        })
+    };
+    match request.run_input {
+        RegressionExecutionInput::Missing => {
+            outcome.compiled = None;
+            outcome
+                .report
+                .issues
+                .push(moa_execution::ExecutionValidationIssue {
+                    severity: ExecutionValidationSeverity::Error,
+                    code: "missing_run_input".to_string(),
+                    path: "run_input".to_string(),
+                    message: "skill regression template requires explicit structured input"
+                        .to_string(),
+                });
+        }
+        RegressionExecutionInput::Resolved(_) => {
+            if let Err(error) =
+                validate_instance(request.skill_input_schema, &run_input, "skill_input_schema")
+            {
+                outcome.compiled = None;
+                outcome
+                    .report
+                    .issues
+                    .push(moa_execution::ExecutionValidationIssue {
+                        severity: ExecutionValidationSeverity::Error,
+                        code: "invalid_skill_input".to_string(),
+                        path: "run_input".to_string(),
+                        message: error.to_string(),
+                    });
+            }
+        }
+        RegressionExecutionInput::Ambiguous => {}
     }
+    let duration_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let compile_outcome = classify_compile_outcome(&outcome);
+    let validation_report = compiler_report_json(&outcome)?;
+    let final_plan_hash = outcome
+        .compiled
+        .as_ref()
+        .map(|compiled| compiled.plan.plan_hash.to_string());
+    let accepted = compile_outcome == ExecutionCompileOutcome::Accepted;
+    Ok(SkillTemplateCompile {
+        audit: ExecutionPlanningAuditEnvelopeV1 {
+            schema_version: 1,
+            tenant_id: request.tenant_id,
+            contact_id: None,
+            session_id: None,
+            originating_sequence: None,
+            payload: ExecutionPlanningAuditPayloadV1::Compile {
+                source,
+                operation_key: request.operation_key.to_string(),
+                run_uid: None,
+                plan_revision: None,
+                outcome: compile_outcome,
+                candidate_hash,
+                final_plan_hash,
+                validation_report,
+                duration_micros,
+                created_at,
+            },
+        },
+        accepted,
+    })
+}
+
+fn classify_compile_outcome(outcome: &CompileExecutionOutcome) -> ExecutionCompileOutcome {
+    if outcome.compiled.is_some() && !outcome.report.has_errors() {
+        return ExecutionCompileOutcome::Accepted;
+    }
+    let error_codes = outcome
+        .report
+        .issues
+        .iter()
+        .filter(|issue| issue.severity == ExecutionValidationSeverity::Error)
+        .map(|issue| issue.code.as_str())
+        .collect::<Vec<_>>();
+    if error_codes.iter().any(|code| {
+        matches!(
+            *code,
+            "missing_run_input"
+                | "ambiguous_run_input"
+                | "invalid_run_input"
+                | "invalid_skill_input"
+                | "empty_objective"
+                | "goal_structure"
+        )
+    }) {
+        ExecutionCompileOutcome::NeedsInput
+    } else if error_codes.iter().any(|code| {
+        code.contains("authorization")
+            || code.contains("capability")
+            || code.contains("budget")
+            || code.contains("deadline")
+            || code.starts_with("unsupported_")
+            || *code == "skill_not_authorized"
+    }) {
+        ExecutionCompileOutcome::Unsupported
+    } else {
+        ExecutionCompileOutcome::Rejected
+    }
+}
+
+fn compiler_report_json(outcome: &CompileExecutionOutcome) -> Result<String> {
+    let violations = outcome
+        .report
+        .issues
+        .iter()
+        .map(|issue| ExecutionAuditViolationV1 {
+            code: issue.code.clone(),
+            path: issue.path.clone(),
+            message: issue.message.clone(),
+        })
+        .collect();
+    let report = bounded_audit_report(true, violations)
+        .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    let bytes = artifact_canonical_json_bytes(&report)
+        .map_err(|error| MoaError::SerializationError(error.to_string()))?;
+    String::from_utf8(bytes).map_err(|error| MoaError::SerializationError(error.to_string()))
+}
+
+fn draft_artifact_revision_uid(candidate: &LearningCandidate) -> Result<uuid::Uuid> {
+    let raw = candidate
+        .payload
+        .get("draft_artifact_revision_uid")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            MoaError::ValidationError(
+                "candidate payload missing draft_artifact_revision_uid".to_string(),
+            )
+        })?;
+    uuid::Uuid::parse_str(raw).map_err(MoaError::from)
+}
+
+fn validated_suite_hash(suite: &TestSuite) -> Result<String> {
+    let bytes = artifact_canonical_json_bytes(&json!({
+        "schema_version": 1,
+        "suite": suite,
+    }))
+    .map_err(|error| MoaError::SerializationError(error.to_string()))?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
 /// Collects per-case failure detail so a rejected candidate's report explains
@@ -843,10 +1184,27 @@ fn map_eval_error(error: moa_eval_core::EvalError) -> MoaError {
 
 #[cfg(test)]
 mod tests {
-    use moa_artifacts::procedure::ProcedureDefinition;
+    use moa_artifacts::execution_plan::ExecutionPlanTemplate;
+    use moa_core::{
+        config::MoaConfig,
+        types::{
+            execution_planning::{
+                ExecutionAuditReportV1, ExecutionCompileOutcome, ExecutionCompileSource,
+                ExecutionPlanningAuditPayloadV1,
+            },
+            identifiers::TenantId,
+        },
+    };
+    use moa_execution::{ExecutionAuthorizationEnvelope, ExecutionCapabilityCatalog};
+    use moa_hands::ToolRegistry;
     use serde_json::json;
 
-    use super::{collect_held_out_pool, procedure_smoke_error};
+    use crate::services::execution::build_capability_response;
+
+    use super::{
+        RegressionExecutionInput, SkillTemplateCompileRequest, collect_held_out_pool,
+        compile_skill_execution_template, resolve_regression_execution_input,
+    };
 
     #[test]
     fn held_out_pool_merges_sibling_suites_with_prefixed_case_names() {
@@ -890,60 +1248,561 @@ mod tests {
         assert_eq!(pool.report_base()["decision"], "no_material");
     }
 
-    fn procedure(value: serde_json::Value) -> ProcedureDefinition {
-        serde_json::from_value(value).expect("procedure definition parses")
-    }
-
     #[test]
-    fn smoke_passes_a_start_to_end_graph() {
-        // Pins: a graph that reaches its end node smokes clean.
-        let procedure = procedure(json!({
-            "nodes": [
-                {"id": "start", "kind": "start"},
-                {"id": "done", "kind": "end"},
+    fn regression_template_input_comes_only_from_explicit_structured_case_metadata() {
+        // Pins: free-form case input is never parsed as template JSON; one explicit
+        // structured metadata value is preserved as compiler input, while no value stays missing.
+        let exact = json!({"ticket": "INC-42", "options": {"notify": true}});
+        let suite = moa_eval_core::TestSuite {
+            cases: vec![
+                moa_eval_core::TestCase {
+                    input: r#"{"ticket":"fabricated-from-prose"}"#.to_string(),
+                    ..moa_eval_core::TestCase::default()
+                },
+                moa_eval_core::TestCase {
+                    metadata: std::collections::HashMap::from([(
+                        "execution_input".to_string(),
+                        exact.clone(),
+                    )]),
+                    ..moa_eval_core::TestCase::default()
+                },
             ],
-            "edges": [{"from": "start", "to": "done"}],
-        }));
+            ..moa_eval_core::TestSuite::default()
+        };
 
-        assert_eq!(procedure_smoke_error(&procedure), None);
-    }
-
-    #[test]
-    fn smoke_rejects_an_edge_to_a_missing_node() {
-        // Pins: a structurally broken graph (dangling edge) blocks promotion with the
-        // interpreter error preserved for the reviewer.
-        let procedure = procedure(json!({
-            "nodes": [{"id": "start", "kind": "start"}],
-            "edges": [{"from": "start", "to": "ghost"}],
-        }));
-
-        let error = procedure_smoke_error(&procedure).expect("dangling edge must fail smoke");
-        assert!(
-            error.contains("ghost"),
-            "error names the missing node: {error}"
+        assert_eq!(
+            resolve_regression_execution_input(&suite)
+                .expect("one structured input should resolve"),
+            RegressionExecutionInput::Resolved(exact)
+        );
+        assert_eq!(
+            resolve_regression_execution_input(&moa_eval_core::TestSuite {
+                cases: vec![moa_eval_core::TestCase {
+                    input: r#"{"ticket":"still-prose"}"#.to_string(),
+                    ..moa_eval_core::TestCase::default()
+                }],
+                ..moa_eval_core::TestSuite::default()
+            })
+            .expect("free-form input is ignored"),
+            RegressionExecutionInput::Missing
         );
     }
 
     #[test]
-    fn smoke_treats_unmatched_input_conditions_as_input_dependent() {
-        // Pins: a condition that cannot match on empty smoke input is not a structural
-        // defect — real runs supply inputs, so the candidate still promotes.
-        let procedure = procedure(json!({
-            "nodes": [
-                {"id": "start", "kind": "start"},
-                {
-                    "id": "gate",
-                    "kind": "condition",
-                    "condition": {"type": "exists", "path": "input.ticket"},
+    fn canonical_identical_regression_execution_inputs_resolve_once() {
+        // Pins: semantically identical explicit objects deduplicate through artifact
+        // canonical JSON even when their source key insertion order differs.
+        let first: serde_json::Value =
+            serde_json::from_str(r#"{"ticket":"INC-42","options":{"notify":true,"limit":2}}"#)
+                .expect("first structured input parses");
+        let reordered: serde_json::Value =
+            serde_json::from_str(r#"{"options":{"limit":2,"notify":true},"ticket":"INC-42"}"#)
+                .expect("reordered structured input parses");
+        let suite = moa_eval_core::TestSuite {
+            cases: vec![
+                moa_eval_core::TestCase {
+                    metadata: std::collections::HashMap::from([(
+                        "execution_input".to_string(),
+                        first.clone(),
+                    )]),
+                    ..moa_eval_core::TestCase::default()
                 },
-                {"id": "done", "kind": "end"},
+                moa_eval_core::TestCase {
+                    metadata: std::collections::HashMap::from([(
+                        "execution_input".to_string(),
+                        reordered,
+                    )]),
+                    ..moa_eval_core::TestCase::default()
+                },
             ],
-            "edges": [
-                {"from": "start", "to": "gate"},
-                {"from": "gate", "to": "done"},
-            ],
-        }));
+            ..moa_eval_core::TestSuite::default()
+        };
 
-        assert_eq!(procedure_smoke_error(&procedure), None);
+        assert_eq!(
+            resolve_regression_execution_input(&suite)
+                .expect("canonical-identical inputs should resolve"),
+            RegressionExecutionInput::Resolved(first)
+        );
+    }
+
+    #[test]
+    fn distinct_regression_execution_inputs_need_input_and_cannot_be_accepted() {
+        // Pins: a suite with conflicting explicit template inputs is ambiguous and must
+        // produce a typed NeedsInput audit instead of silently compiling the first case.
+        let suite = moa_eval_core::TestSuite {
+            cases: vec![
+                moa_eval_core::TestCase {
+                    metadata: std::collections::HashMap::from([(
+                        "execution_input".to_string(),
+                        json!({"ticket": "INC-42"}),
+                    )]),
+                    ..moa_eval_core::TestCase::default()
+                },
+                moa_eval_core::TestCase {
+                    metadata: std::collections::HashMap::from([(
+                        "execution_input".to_string(),
+                        json!({"ticket": "INC-43"}),
+                    )]),
+                    ..moa_eval_core::TestCase::default()
+                },
+            ],
+            ..moa_eval_core::TestSuite::default()
+        };
+        let mut template = output_only_template();
+        template.plan.input_schema = json!({
+            "type": "object",
+            "required": ["ticket"],
+            "properties": {"ticket": {"type": "string"}},
+            "additionalProperties": false
+        });
+        let skill_input_schema = template.plan.input_schema.clone();
+        let run_input = resolve_regression_execution_input(&suite)
+            .expect("conflicting structured inputs produce a typed resolution");
+        assert_eq!(run_input, RegressionExecutionInput::Ambiguous);
+        let (catalog, authorization) = empty_authority("input-template");
+        let compiled = compile_skill_execution_template(SkillTemplateCompileRequest {
+            config: &MoaConfig::default(),
+            tenant_id: TenantId::new(),
+            skill_name: "input-template",
+            skill_input_schema: &skill_input_schema,
+            template: &template,
+            run_input: &run_input,
+            catalog: &catalog,
+            authorization: &authorization,
+            operation_key: &format!(
+                "skill_regression:{}:{}",
+                uuid::Uuid::now_v7(),
+                "f".repeat(64)
+            ),
+        })
+        .expect("input ambiguity is captured in a strict compile audit");
+
+        assert!(!compiled.accepted, "ambiguous input must never be accepted");
+        assert_eq!(
+            compile_outcome_and_candidate_hash(&compiled).0,
+            ExecutionCompileOutcome::NeedsInput
+        );
+        let ExecutionPlanningAuditPayloadV1::Compile {
+            validation_report,
+            final_plan_hash,
+            ..
+        } = &compiled.audit.payload
+        else {
+            panic!("input ambiguity must emit a compile audit");
+        };
+        assert_eq!(final_plan_hash, &None);
+        let ExecutionAuditReportV1::Compiler { violations, .. } =
+            serde_json::from_str(validation_report).expect("strict compiler report parses")
+        else {
+            panic!("input ambiguity must emit a compiler report");
+        };
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].code, "ambiguous_run_input");
+        assert_eq!(violations[0].path, "run_input");
+    }
+
+    fn output_only_template() -> ExecutionPlanTemplate {
+        serde_json::from_value(json!({
+            "goal": {
+                "requirements": [{
+                    "id": "regression_result",
+                    "description": "Return the deterministic regression result."
+                }],
+                "deliverables": [],
+                "coverage": [],
+                "constraints": [],
+                "completion_checks": [{
+                    "id": "output_schema",
+                    "description": "Validate the regression output.",
+                    "requirement_ids": ["regression_result"],
+                    "constraint_ids": [],
+                    "kind": {"kind": "output_schema"}
+                }]
+            },
+            "plan": {
+                "schema_version": 1,
+                "input_schema": {
+                    "type": "object",
+                    "additionalProperties": false
+                },
+                "output_schema": {"type": "object"},
+                "nodes": [{
+                    "id": "result",
+                    "requirement_ids": ["regression_result"],
+                    "depends_on": [],
+                    "when": null,
+                    "input": {},
+                    "output_schema": {"type": "object"},
+                    "operation": {
+                        "kind": "output",
+                        "value": {"status": "validated"}
+                    },
+                    "retry": {
+                        "max_attempts": 1,
+                        "initial_backoff_ms": 0,
+                        "max_backoff_ms": 0
+                    },
+                    "budget": null
+                }]
+            }
+        }))
+        .expect("execution-plan template parses")
+    }
+
+    fn empty_authority(
+        skill_name: &str,
+    ) -> (ExecutionCapabilityCatalog, ExecutionAuthorizationEnvelope) {
+        let catalog = ExecutionCapabilityCatalog::build(Vec::new())
+            .expect("empty governed catalog should build");
+        let authorization = ExecutionAuthorizationEnvelope {
+            capability_refs: Vec::new(),
+            skill_refs: vec![moa_artifacts::reference::ArtifactRef::artifact(
+                moa_artifacts::document::ArtifactKind::Skill,
+                skill_name,
+            )],
+        };
+        (catalog, authorization)
+    }
+
+    fn compile_outcome_and_candidate_hash(
+        compiled: &super::SkillTemplateCompile,
+    ) -> (ExecutionCompileOutcome, String) {
+        let ExecutionPlanningAuditPayloadV1::Compile {
+            outcome,
+            candidate_hash,
+            ..
+        } = &compiled.audit.payload
+        else {
+            panic!("template compilation must emit a compile audit");
+        };
+        (*outcome, candidate_hash.clone())
+    }
+
+    fn governed_capability_template(
+        reference: &moa_artifacts::execution_plan::CapabilityReference,
+        output_schema: &serde_json::Value,
+    ) -> ExecutionPlanTemplate {
+        serde_json::from_value(json!({
+            "goal": {
+                "requirements": [{
+                    "id": "regression_result",
+                    "description": "Read the governed regression fixture."
+                }],
+                "deliverables": [],
+                "coverage": [],
+                "constraints": [],
+                "completion_checks": [{
+                    "id": "output_schema",
+                    "description": "Validate the regression output.",
+                    "requirement_ids": ["regression_result"],
+                    "constraint_ids": [],
+                    "kind": {"kind": "output_schema"}
+                }]
+            },
+            "plan": {
+                "schema_version": 1,
+                "input_schema": {
+                    "type": "object",
+                    "additionalProperties": false
+                },
+                "output_schema": output_schema,
+                "nodes": [
+                    {
+                        "id": "read_fixture",
+                        "requirement_ids": ["regression_result"],
+                        "depends_on": [],
+                        "when": null,
+                        "input": {"path": "SKILL.md"},
+                        "output_schema": output_schema,
+                        "operation": {
+                            "kind": "capability",
+                            "reference": reference
+                        },
+                        "retry": {
+                            "max_attempts": 1,
+                            "initial_backoff_ms": 0,
+                            "max_backoff_ms": 0
+                        },
+                        "budget": null
+                    },
+                    {
+                        "id": "result",
+                        "requirement_ids": ["regression_result"],
+                        "depends_on": ["read_fixture"],
+                        "when": null,
+                        "input": {},
+                        "output_schema": output_schema,
+                        "operation": {
+                            "kind": "output",
+                            "value": {"$ref": "$.nodes.read_fixture.output"}
+                        },
+                        "retry": {
+                            "max_attempts": 1,
+                            "initial_backoff_ms": 0,
+                            "max_backoff_ms": 0
+                        },
+                        "budget": null
+                    }
+                ]
+            }
+        }))
+        .expect("governed capability template parses")
+    }
+
+    #[test]
+    fn execution_template_uses_the_execution_compiler_and_emits_strict_audit() {
+        // Pins: a template-bearing draft is validated by the shared execution compiler and
+        // produces the sessionless skill-regression audit consumed by the learning append.
+        let config = MoaConfig::default();
+        let tenant_id = TenantId::new();
+        let operation_key = format!(
+            "skill_regression:{}:{}",
+            uuid::Uuid::now_v7(),
+            "a".repeat(64)
+        );
+        let run_input = json!({});
+        let run_input = RegressionExecutionInput::Resolved(run_input);
+        let (catalog, authorization) = empty_authority("regression-template");
+        let compiled = compile_skill_execution_template(SkillTemplateCompileRequest {
+            config: &config,
+            tenant_id,
+            skill_name: "regression-template",
+            skill_input_schema: &json!({
+                "type": "object",
+                "additionalProperties": false
+            }),
+            template: &output_only_template(),
+            run_input: &run_input,
+            catalog: &catalog,
+            authorization: &authorization,
+            operation_key: &operation_key,
+        })
+        .expect("valid output-only template compiles");
+
+        assert!(compiled.accepted);
+        assert_eq!(compiled.audit.tenant_id, tenant_id);
+        assert_eq!(compiled.audit.contact_id, None);
+        assert_eq!(compiled.audit.session_id, None);
+        assert_eq!(compiled.audit.originating_sequence, None);
+        let ExecutionPlanningAuditPayloadV1::Compile {
+            source,
+            operation_key: persisted_key,
+            outcome,
+            candidate_hash,
+            final_plan_hash,
+            validation_report,
+            ..
+        } = compiled.audit.payload
+        else {
+            panic!("template compilation must emit a compile audit");
+        };
+        assert_eq!(source, ExecutionCompileSource::SkillRegression);
+        assert_eq!(persisted_key, operation_key);
+        assert_eq!(outcome, ExecutionCompileOutcome::Accepted);
+        assert_eq!(candidate_hash.len(), 64);
+        assert!(final_plan_hash.is_some());
+        assert!(matches!(
+            serde_json::from_str::<ExecutionAuditReportV1>(&validation_report)
+                .expect("compiler report stays strict"),
+            ExecutionAuditReportV1::Compiler { .. }
+        ));
+    }
+
+    #[test]
+    fn execution_template_compiles_with_exact_supplied_structured_input() {
+        // Pins: the regression compiler consumes the explicit structured input instead of
+        // fabricating an empty object; changing only that input changes the audited candidate.
+        let mut template = output_only_template();
+        template.plan.input_schema = json!({
+            "type": "object",
+            "required": ["ticket"],
+            "properties": {"ticket": {"type": "string"}},
+            "additionalProperties": false
+        });
+        let skill_input_schema = json!({
+            "type": "object",
+            "required": ["ticket"],
+            "properties": {"ticket": {"type": "string"}},
+            "additionalProperties": false
+        });
+        let first_input = json!({"ticket": "INC-42"});
+        let second_input = json!({"ticket": "INC-43"});
+        let (catalog, authorization) = empty_authority("input-template");
+        let compile_with_input = |run_input: &serde_json::Value| {
+            let run_input = RegressionExecutionInput::Resolved(run_input.clone());
+            compile_skill_execution_template(SkillTemplateCompileRequest {
+                config: &MoaConfig::default(),
+                tenant_id: TenantId::new(),
+                skill_name: "input-template",
+                skill_input_schema: &skill_input_schema,
+                template: &template,
+                run_input: &run_input,
+                catalog: &catalog,
+                authorization: &authorization,
+                operation_key: &format!(
+                    "skill_regression:{}:{}",
+                    uuid::Uuid::now_v7(),
+                    "b".repeat(64)
+                ),
+            })
+            .expect("valid structured regression input compiles")
+        };
+
+        let first = compile_with_input(&first_input);
+        let second = compile_with_input(&second_input);
+        let (first_outcome, first_hash) = compile_outcome_and_candidate_hash(&first);
+        let (second_outcome, second_hash) = compile_outcome_and_candidate_hash(&second);
+
+        assert!(first.accepted);
+        assert!(second.accepted);
+        assert_eq!(first_outcome, ExecutionCompileOutcome::Accepted);
+        assert_eq!(second_outcome, ExecutionCompileOutcome::Accepted);
+        assert_ne!(
+            first_hash, second_hash,
+            "candidate hash must bind exact input"
+        );
+    }
+
+    #[test]
+    fn execution_template_with_missing_or_invalid_structured_input_needs_input() {
+        // Pins: absence and schema-invalid structured input remain typed input failures.
+        let mut template = output_only_template();
+        template.plan.input_schema = json!({
+            "type": "object",
+            "required": ["ticket"],
+            "properties": {"ticket": {"type": "string"}},
+            "additionalProperties": false
+        });
+        let skill_input_schema = template.plan.input_schema.clone();
+        let invalid_input = json!({"ticket": 42});
+        let (catalog, authorization) = empty_authority("input-template");
+        for run_input in [
+            RegressionExecutionInput::Missing,
+            RegressionExecutionInput::Resolved(invalid_input.clone()),
+        ] {
+            let compiled = compile_skill_execution_template(SkillTemplateCompileRequest {
+                config: &MoaConfig::default(),
+                tenant_id: TenantId::new(),
+                skill_name: "input-template",
+                skill_input_schema: &skill_input_schema,
+                template: &template,
+                run_input: &run_input,
+                catalog: &catalog,
+                authorization: &authorization,
+                operation_key: &format!(
+                    "skill_regression:{}:{}",
+                    uuid::Uuid::now_v7(),
+                    "c".repeat(64)
+                ),
+            })
+            .expect("typed compiler rejection is still audited");
+
+            assert!(!compiled.accepted);
+            assert_eq!(
+                compile_outcome_and_candidate_hash(&compiled).0,
+                ExecutionCompileOutcome::NeedsInput
+            );
+        }
+    }
+
+    #[test]
+    fn execution_template_compiles_with_real_governed_capability_authority() {
+        // Pins: skill regression uses the same live governed catalog builder and exact
+        // capability authorization as production execution planning.
+        let registry = ToolRegistry::default_local();
+        let response = build_capability_response(&registry.capability_registrations(), &[], &[])
+            .expect("production capability catalog should build");
+        let capability = response
+            .catalog
+            .capabilities
+            .iter()
+            .find(|capability| capability.reference.name == "file_read")
+            .expect("default governed file_read capability exists");
+        let template =
+            governed_capability_template(&capability.reference, &capability.output_schema);
+        let run_input = json!({});
+        let run_input = RegressionExecutionInput::Resolved(run_input);
+        let authorization = ExecutionAuthorizationEnvelope {
+            capability_refs: response
+                .catalog
+                .capabilities
+                .iter()
+                .map(|entry| entry.reference.clone())
+                .collect(),
+            skill_refs: vec![moa_artifacts::reference::ArtifactRef::artifact(
+                moa_artifacts::document::ArtifactKind::Skill,
+                "governed-template",
+            )],
+        };
+
+        let compiled = compile_skill_execution_template(SkillTemplateCompileRequest {
+            config: &MoaConfig::default(),
+            tenant_id: TenantId::new(),
+            skill_name: "governed-template",
+            skill_input_schema: &json!({"type": "object"}),
+            template: &template,
+            run_input: &run_input,
+            catalog: &response.catalog,
+            authorization: &authorization,
+            operation_key: &format!(
+                "skill_regression:{}:{}",
+                uuid::Uuid::now_v7(),
+                "d".repeat(64)
+            ),
+        })
+        .expect("authorized governed capability compiles");
+
+        assert!(compiled.accepted);
+        assert_eq!(
+            compile_outcome_and_candidate_hash(&compiled).0,
+            ExecutionCompileOutcome::Accepted
+        );
+    }
+
+    #[test]
+    fn execution_template_rejects_unauthorized_governed_capability_as_unsupported() {
+        // Pins: catalog presence alone never authorizes a governed capability.
+        let registry = ToolRegistry::default_local();
+        let response = build_capability_response(&registry.capability_registrations(), &[], &[])
+            .expect("production capability catalog should build");
+        let capability = response
+            .catalog
+            .capabilities
+            .iter()
+            .find(|capability| capability.reference.name == "file_read")
+            .expect("default governed file_read capability exists");
+        let template =
+            governed_capability_template(&capability.reference, &capability.output_schema);
+        let run_input = json!({});
+        let run_input = RegressionExecutionInput::Resolved(run_input);
+        let authorization = ExecutionAuthorizationEnvelope {
+            capability_refs: Vec::new(),
+            skill_refs: vec![moa_artifacts::reference::ArtifactRef::artifact(
+                moa_artifacts::document::ArtifactKind::Skill,
+                "governed-template",
+            )],
+        };
+        let compiled = compile_skill_execution_template(SkillTemplateCompileRequest {
+            config: &MoaConfig::default(),
+            tenant_id: TenantId::new(),
+            skill_name: "governed-template",
+            skill_input_schema: &json!({"type": "object"}),
+            template: &template,
+            run_input: &run_input,
+            catalog: &response.catalog,
+            authorization: &authorization,
+            operation_key: &format!(
+                "skill_regression:{}:{}",
+                uuid::Uuid::now_v7(),
+                "e".repeat(64)
+            ),
+        })
+        .expect("unauthorized compiler outcome is still audited");
+
+        assert!(!compiled.accepted);
+        assert_eq!(
+            compile_outcome_and_candidate_hash(&compiled).0,
+            ExecutionCompileOutcome::Unsupported
+        );
     }
 }

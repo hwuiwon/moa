@@ -317,8 +317,8 @@ async fn cross_tenant_artifact_revision_rejects_insert_db() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
-async fn procedure_run_and_session_links_persist_db() -> Result<()> {
-    // Pins: session and procedure artifact-run links persist on experiment records.
+async fn execution_run_and_session_links_persist_db() -> Result<()> {
+    // Pins: session and execution-run links persist on experiment records.
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let experiment_store = ExperimentStore::new(test_db.store().pool().clone());
@@ -329,23 +329,30 @@ async fn procedure_run_and_session_links_persist_db() -> Result<()> {
     let session_id =
         insert_session_for_experiment_fk(test_db.store().pool(), &storage_partition_id, &user_id)
             .await?;
-    let procedure_run_uid =
-        insert_procedure_run(test_db.store().pool(), &scope, session_id).await?;
     let inserted = experiment_store
         .insert_run(&scope, new_experiment("links", None, Vec::new()))
         .await?;
+    let execution_run_uid = insert_execution_run(
+        test_db.store().pool(),
+        &scope,
+        session_id,
+        inserted.run_uid,
+        inserted.score_run_id,
+        None,
+    )
+    .await?;
 
     experiment_store
         .attach_session(&scope, inserted.run_uid, session_id)
         .await?
         .expect("session link update should return the run");
     let linked = experiment_store
-        .attach_procedure_run(&scope, inserted.run_uid, procedure_run_uid)
+        .attach_execution_run(&scope, inserted.run_uid, execution_run_uid)
         .await?
-        .expect("procedure link update should return the run");
+        .expect("execution-run link update should return the run");
 
     assert_eq!(linked.session_id, Some(session_id));
-    assert_eq!(linked.procedure_run_uid, Some(procedure_run_uid));
+    assert_eq!(linked.execution_run_uid, Some(execution_run_uid));
     assert_score_run_exists(test_db.store().pool(), &scope, linked.score_run_id).await?;
     Ok(())
 }
@@ -784,7 +791,7 @@ async fn trial_rejects_cross_tenant_artifact_revision_db() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
-    // Pins: trial session/procedure/trace links, turn counts, and terminal status persist.
+    // Pins: trial session/execution/trace links, turn counts, and terminal status persist.
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
@@ -795,8 +802,6 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
     let session_id =
         insert_session_for_experiment_fk(test_db.store().pool(), &storage_partition_id, &user_id)
             .await?;
-    let procedure_run_uid =
-        insert_procedure_run(test_db.store().pool(), &scope, session_id).await?;
     let plan_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
     let run = store
         .insert_run(
@@ -810,15 +815,24 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
             new_trial(run.run_uid, "trial-links", plan_revision_uid, Vec::new()),
         )
         .await?;
+    let execution_run_uid = insert_execution_run(
+        test_db.store().pool(),
+        &scope,
+        session_id,
+        run.run_uid,
+        trial.score_run_id,
+        Some(trial.trial_uid),
+    )
+    .await?;
 
     store
         .attach_trial_session(&scope, trial.trial_uid, session_id)
         .await?
         .expect("session link update should return the trial");
     store
-        .attach_trial_procedure_run(&scope, trial.trial_uid, procedure_run_uid)
+        .attach_trial_execution_run(&scope, trial.trial_uid, execution_run_uid)
         .await?
-        .expect("procedure link update should return the trial");
+        .expect("execution-run link update should return the trial");
     store
         .attach_trial_trace(&scope, trial.trial_uid, "trace-trial-123".to_string())
         .await?
@@ -845,7 +859,7 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
 
     assert_eq!(incremented.turn_count, 2);
     assert_eq!(completed.session_id, Some(session_id));
-    assert_eq!(completed.procedure_run_uid, Some(procedure_run_uid));
+    assert_eq!(completed.execution_run_uid, Some(execution_run_uid));
     assert_eq!(completed.trace_id.as_deref(), Some("trace-trial-123"));
     assert_eq!(completed.status, ExperimentTrialStatus::Completed);
     assert_eq!(
@@ -1273,7 +1287,7 @@ fn new_experiment(
             model: Some(ModelId::new("gpt-5.1")),
             artifact_revision_uids: artifact_revision_uids.clone(),
             skill_refs: vec!["skill://experiment-baseline".to_string()],
-            procedure_ref: None,
+            execution_template: None,
             metadata: json!({ "cohort": "db" }),
         },
         scorecard: ExperimentScorecard {
@@ -1282,7 +1296,7 @@ fn new_experiment(
         },
         score_run_id: Uuid::now_v7(),
         session_id: None,
-        procedure_run_uid: None,
+        execution_run_uid: None,
         artifact_revision_uids,
         idempotency_key: idempotency_key.map(ToOwned::to_owned),
         created_by_identity: json!({
@@ -1438,30 +1452,77 @@ fn assert_trial_status(
     assert_eq!(trial.stop_reason, stop_reason);
 }
 
-async fn insert_procedure_run(
+async fn insert_execution_run(
     pool: &sqlx::PgPool,
     scope: &ActionRuleScope,
     session_id: SessionId,
+    experiment_run_uid: Uuid,
+    score_run_id: Uuid,
+    trial_uid: Option<Uuid>,
 ) -> Result<Uuid> {
-    let storage_partition_id = scope_storage_partition_id(scope);
-    let user_id = scope_user_id(scope);
+    let tenant_id = scope_tenant_id(scope);
+    let contact_id = scope_contact_id(scope);
+    let owner_user_id = scope_user_id(scope).unwrap_or_else(|| "experiment-owner".to_string());
+    let planning_context_uid = Uuid::now_v7();
     let run_uid = Uuid::now_v7();
+    let planning_hash = "1".repeat(64);
+    let plan_hash = "2".repeat(64);
+    let source_provenance = json!({
+        "kind": "experiment_template",
+        "route_reason": "explicit_run",
+        "skill_template_ref": "skill://experiment-link",
+        "skill_template_revision_uid": Uuid::now_v7(),
+        "experiment_run_uid": experiment_run_uid,
+        "score_run_id": score_run_id,
+        "trial_uid": trial_uid,
+    });
     let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
     sqlx::query(
         r#"
-        INSERT INTO moa.artifact_run (
-            run_uid, storage_partition_id, user_id, session_id, procedure_ref, status, input, state
+        INSERT INTO moa.execution_planning_context (
+            planning_context_uid, tenant_id, contact_id, session_id,
+            originating_user_sequence_num, originating_user_event_hash,
+            owner_user_id, planning_context_hash, snapshot
         )
-        VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7)
+        VALUES ($1, $2, $3, $4, 1, $5, $6, $5, '{}'::JSONB)
+        "#,
+    )
+    .bind(planning_context_uid)
+    .bind(tenant_id.0)
+    .bind(contact_id.map(|id| id.0))
+    .bind(session_id.0)
+    .bind(&planning_hash)
+    .bind(&owner_user_id)
+    .execute(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.execution_run (
+            run_uid, tenant_id, contact_id, session_id,
+            originating_user_sequence_num, planning_context_uid, planning_context_hash,
+            owner_user_id, goal_contract, initial_plan, active_plan,
+            initial_plan_hash, active_plan_hash, capability_catalog,
+            authorization_envelope, source_provenance, input, status
+        )
+        VALUES (
+            $1, $2, $3, $4, 1, $5, $6, $7,
+            '{}'::JSONB, '{}'::JSONB, '{}'::JSONB, $8, $8,
+            '{"schema_version":1}'::JSONB,
+            '{"capability_refs":[],"skill_refs":[]}'::JSONB,
+            $9, '{}'::JSONB, 'queued'
+        )
         "#,
     )
     .bind(run_uid)
-    .bind(storage_partition_id)
-    .bind(user_id.as_deref())
+    .bind(tenant_id.0)
+    .bind(contact_id.map(|id| id.0))
     .bind(session_id.0)
-    .bind("skill://experiment-link")
-    .bind(json!({ "case": "link" }))
-    .bind(json!({}))
+    .bind(planning_context_uid)
+    .bind(&planning_hash)
+    .bind(&owner_user_id)
+    .bind(&plan_hash)
+    .bind(source_provenance)
     .execute(conn.as_mut())
     .await
     .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
@@ -1731,21 +1792,51 @@ async fn insert_session_for_experiment_fk(
     .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     let session_id = SessionId::new();
     let target_table = target_table.unwrap_or_else(|| "sessions".to_string());
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     sqlx::query(&format!(
         r#"
         INSERT INTO {target_table} (
-            id, storage_partition_id, user_id, status, platform, model
+            id, storage_partition_id, user_id, status, channel, model
         )
-        VALUES ($1, $2, $3, 'created', 'api', $4)
+        VALUES ($1, $2, $3, 'created', 'chat', $4)
         "#
     ))
     .bind(session_id.0)
     .bind(storage_partition_id.to_string())
     .bind(user_id.to_string())
     .bind("gpt-5.1")
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
+    sqlx::query(
+        r#"
+        INSERT INTO session_agent_context (
+            session_id, storage_partition_id, user_id, agent_definition_ref,
+            agent_revision_uid, policy_hash, display_name, policy_snapshot,
+            artifact_dependencies, tool_dependencies
+        )
+        VALUES (
+            $1, $2, $3, 'agent://system-default',
+            '00000000-0000-4000-8000-000000000a02',
+            'system-default-agent-v1', 'MOA Default Agent',
+            '{"instructions":[],"tool_policy":{"mode":"auto","tools":[],"denied_tools":[]}}'::JSONB,
+            '[]'::JSONB, '[]'::JSONB
+        )
+        "#,
+    )
+    .bind(session_id.0)
+    .bind(storage_partition_id.to_string())
+    .bind(user_id.to_string())
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
     Ok(session_id)
 }
 
@@ -1775,6 +1866,13 @@ fn scope_tenant_id(scope: &ActionRuleScope) -> TenantId {
         ActionRuleScope::Tenant { tenant_id } | ActionRuleScope::Contact { tenant_id, .. } => {
             *tenant_id
         }
+    }
+}
+
+fn scope_contact_id(scope: &ActionRuleScope) -> Option<ContactId> {
+    match scope {
+        ActionRuleScope::Tenant { .. } => None,
+        ActionRuleScope::Contact { contact_id, .. } => Some(*contact_id),
     }
 }
 

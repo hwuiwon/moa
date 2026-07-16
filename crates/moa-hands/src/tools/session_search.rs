@@ -82,18 +82,7 @@ impl BuiltInTool for SessionSearchTool {
         };
         let results = session_store.search_events(&params.query, filter).await?;
         let rendered = render_results(&results);
-        let structured = results
-            .iter()
-            .map(|record| {
-                json!({
-                    "sequence_num": record.sequence_num,
-                    "timestamp": record.timestamp,
-                    "event_type": record.event_type,
-                    "tool_id": event_tool_id(record),
-                    "snippet": event_snippet(record),
-                })
-            })
-            .collect::<Vec<_>>();
+        let structured = structured_results(&results);
 
         Ok(ToolOutput::json(
             rendered,
@@ -136,27 +125,42 @@ impl SessionSearchEventType {
 }
 
 fn render_results(results: &[EventRecord]) -> String {
-    if results.is_empty() {
-        return "No matching session events found.".to_string();
-    }
-
-    results
+    let rendered = results
         .iter()
-        .map(|record| {
-            format!(
+        .filter_map(|record| {
+            let snippet = event_snippet(record)?;
+            Some(format!(
                 "## #{sequence} {event_type} @ {timestamp}\n{snippet}\n",
                 sequence = record.sequence_num,
                 event_type = record.event.type_name(),
                 timestamp = record.timestamp.to_rfc3339(),
-                snippet = event_snippet(record),
-            )
+            ))
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect::<Vec<_>>();
+    if rendered.is_empty() {
+        return "No matching session events found.".to_string();
+    }
+
+    rendered.join("\n")
 }
 
-fn event_snippet(record: &EventRecord) -> String {
-    truncate(match &record.event {
+fn structured_results(results: &[EventRecord]) -> Vec<Value> {
+    results
+        .iter()
+        .filter_map(|record| {
+            Some(json!({
+                "sequence_num": record.sequence_num,
+                "timestamp": record.timestamp,
+                "event_type": record.event_type,
+                "tool_id": event_tool_id(record),
+                "snippet": event_snippet(record)?,
+            }))
+        })
+        .collect()
+}
+
+fn event_snippet(record: &EventRecord) -> Option<String> {
+    let text = match &record.event {
         Event::UserMessage { text, .. } | Event::QueuedMessage { text, .. } => text.clone(),
         Event::BrainResponse { text, .. } => text.clone(),
         Event::ToolCall {
@@ -177,7 +181,8 @@ fn event_snippet(record: &EventRecord) -> String {
         Event::Error { message, .. } | Event::Warning { message } => message.clone(),
         Event::Checkpoint { summary, .. } => summary.clone(),
         other => serde_json::to_string(other).unwrap_or_else(|_| format!("{other:?}")),
-    })
+    };
+    Some(truncate(text))
 }
 
 fn event_tool_id(record: &EventRecord) -> Option<String> {

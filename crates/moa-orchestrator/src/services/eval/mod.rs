@@ -146,6 +146,7 @@ impl Eval for EvalImpl {
         ctx: Context<'_>,
         request: Json<EvalPlanRequest>,
     ) -> Result<Json<EvalPlanResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Eval", "plan");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -167,6 +168,7 @@ impl Eval for EvalImpl {
         ctx: Context<'_>,
         request: Json<EvalSuiteListRequest>,
     ) -> Result<Json<EvalSuiteListResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Eval", "suites_list");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -187,6 +189,7 @@ impl Eval for EvalImpl {
         ctx: Context<'_>,
         request: Json<EvalRunRequest>,
     ) -> Result<Json<EvalRunResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Eval", "run");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -220,13 +223,15 @@ impl Eval for EvalImpl {
             .name("eval_run_accept")
             .await?
             .into_inner();
-        ctx.service_client::<EvalClient>()
-            .execute_run(Json(EvalRunExecutionRequest {
-                run_id: accepted.response.run_id,
-                request,
-                dispatch_token: accepted.dispatch_token,
-            }))
-            .send();
+        crate::restate_identity::replay_safe_request(
+            ctx.service_client::<EvalClient>()
+                .execute_run(Json(EvalRunExecutionRequest {
+                    run_id: accepted.response.run_id,
+                    request,
+                    dispatch_token: accepted.dispatch_token,
+                })),
+        )
+        .send();
         Ok(Json(accepted.response))
     }
 
@@ -237,6 +242,7 @@ impl Eval for EvalImpl {
         ctx: Context<'_>,
         request: Json<EvalRunExecutionRequest>,
     ) -> Result<Json<EvalRunResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Eval", "execute_run");
         let request = request.into_inner();
         let run_id = request.run_id;
@@ -311,6 +317,7 @@ impl Eval for EvalImpl {
         ctx: Context<'_>,
         request: Json<EvalRunStatusRequest>,
     ) -> Result<Json<EvalRunStatusResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Eval", "run_status");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -332,6 +339,7 @@ impl Eval for EvalImpl {
         ctx: Context<'_>,
         request: Json<EvalDatasetRegisterRequest>,
     ) -> Result<Json<EvalDatasetRegisterResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Eval", "datasets_register");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -354,6 +362,7 @@ impl Eval for EvalImpl {
         ctx: Context<'_>,
         request: Json<EvalDatasetListRequest>,
     ) -> Result<Json<EvalDatasetListResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Eval", "datasets_list");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -376,6 +385,7 @@ impl Eval for EvalImpl {
         ctx: Context<'_>,
         request: Json<EvalReplayRequest>,
     ) -> Result<Json<EvalReplayResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Eval", "replay");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -395,6 +405,7 @@ impl Eval for EvalImpl {
         ctx: Context<'_>,
         request: Json<EvalScoresRequest>,
     ) -> Result<Json<EvalScoresResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Eval", "scores");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -425,6 +436,7 @@ impl Eval for EvalImpl {
         ctx: Context<'_>,
         request: Json<EvalCompareRequest>,
     ) -> Result<Json<EvalCompareResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Eval", "compare");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;

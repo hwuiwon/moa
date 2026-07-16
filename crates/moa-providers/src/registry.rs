@@ -30,6 +30,9 @@ use crate::routing::{
 #[cfg(feature = "scripted-provider")]
 use crate::{ScriptedBlock, ScriptedFault, ScriptedProvider, ScriptedResponse};
 
+#[cfg(feature = "scripted-provider")]
+const SCRIPTED_PROVIDER_REQUEST_LOG_ENV: &str = "MOA_SCRIPTED_PROVIDER_REQUEST_LOG";
+
 #[derive(Clone)]
 enum ProviderSource {
     Static(Arc<dyn LLMProvider>),
@@ -187,8 +190,10 @@ impl ProviderRegistry {
         {
             let response = ScriptedResponse::text(format!("OK mock response seed={seed}"));
             let provider = Arc::new(
-                ScriptedProvider::new(scripted_capabilities("scripted-mock"))
-                    .with_fallback_response(response),
+                configure_scripted_request_journal(ScriptedProvider::new(scripted_capabilities(
+                    "scripted-mock",
+                )))
+                .with_fallback_response(response),
             );
             Ok(Self::all_kinds_from_static(provider))
         }
@@ -616,7 +621,9 @@ struct ScriptedToolCall {
 fn scripted_registry_from_file(
     file: ScriptedProviderFile,
 ) -> moa_core::error::Result<ProviderRegistry> {
-    let mut provider = ScriptedProvider::new(scripted_capabilities("scripted-loadtest"));
+    let mut provider = configure_scripted_request_journal(ScriptedProvider::new(
+        scripted_capabilities("scripted-loadtest"),
+    ));
     if let Some(default) = file.default {
         provider = provider.with_fallback_response(scripted_response(default)?);
     }
@@ -630,6 +637,14 @@ fn scripted_registry_from_file(
         );
     }
     Ok(ProviderRegistry::all_kinds_from_static(Arc::new(provider)))
+}
+
+#[cfg(feature = "scripted-provider")]
+fn configure_scripted_request_journal(provider: ScriptedProvider) -> ScriptedProvider {
+    match std::env::var_os(SCRIPTED_PROVIDER_REQUEST_LOG_ENV) {
+        Some(path) if !path.is_empty() => provider.with_request_journal(path.into()),
+        Some(_) | None => provider,
+    }
 }
 
 #[cfg(feature = "scripted-provider")]

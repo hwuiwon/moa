@@ -85,8 +85,8 @@ pub struct ExperimentRunResponse {
     pub score_run_id: Uuid,
     /// Linked session identifier, when the target has one.
     pub session_id: Option<SessionId>,
-    /// Linked procedure run identifier, when the target has one.
-    pub procedure_run_uid: Option<Uuid>,
+    /// Linked execution run identifier, when the target has one.
+    pub execution_run_uid: Option<Uuid>,
 }
 
 /// Request payload for reading an experiment run status.
@@ -113,8 +113,8 @@ pub struct ExperimentRunStatusResponse {
     pub score_run_id: Option<Uuid>,
     /// Linked session identifier, when the target has one.
     pub session_id: Option<SessionId>,
-    /// Linked procedure run identifier, when the target has one.
-    pub procedure_run_uid: Option<Uuid>,
+    /// Linked execution run identifier, when the target has one.
+    pub execution_run_uid: Option<Uuid>,
     /// Terminal error for failed runs.
     pub error: Option<String>,
     /// Full run record payload for service versions that can expose it.
@@ -204,8 +204,8 @@ pub struct ExperimentTrialSummary {
     pub score_run_id: Uuid,
     /// Linked session identifier, when the trial has one.
     pub session_id: Option<SessionId>,
-    /// Linked procedure run identifier, when the trial has one.
-    pub procedure_run_uid: Option<Uuid>,
+    /// Linked execution run identifier, when the trial has one.
+    pub execution_run_uid: Option<Uuid>,
     /// Trace identifier for observability drill-down.
     pub trace_id: Option<String>,
     /// Durable reason why the trial stopped.
@@ -260,8 +260,8 @@ pub struct ExperimentTrialStatusResponse {
     pub score_run_id: Uuid,
     /// Linked session identifier, when the trial has one.
     pub session_id: Option<SessionId>,
-    /// Linked procedure run identifier, when the trial has one.
-    pub procedure_run_uid: Option<Uuid>,
+    /// Linked execution run identifier, when the trial has one.
+    pub execution_run_uid: Option<Uuid>,
     /// Trace identifier for observability drill-down.
     pub trace_id: Option<String>,
     /// Durable reason why the trial stopped.

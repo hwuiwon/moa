@@ -7,6 +7,7 @@
 //! attributes written through `OpenTelemetrySpanExt::set_attribute` and
 //! `tracing::Span::record`, which a plain `tracing` layer never observes.
 
+use opentelemetry::trace::SpanContext;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::trace::{
     InMemorySpanExporter, Sampler, SdkTracerProvider, SimpleSpanProcessor, SpanData,
@@ -67,4 +68,19 @@ pub(crate) fn attr_string(span: &SpanData, key: &str) -> Option<String> {
         .iter()
         .find(|kv| kv.key.as_str() == key)
         .map(|kv| kv.value.as_str().into_owned())
+}
+
+/// Returns the single exported link span context on `span`.
+///
+/// Panics unless exactly one link was exported so causal-link tests cannot pass
+/// after silently dropping or duplicating a link.
+pub(crate) fn single_link_context(span: &SpanData) -> &SpanContext {
+    assert_eq!(
+        span.links.len(),
+        1,
+        "expected exactly one exported link on `{}`, found {}",
+        span.name,
+        span.links.len()
+    );
+    &span.links[0].span_context
 }

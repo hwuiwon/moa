@@ -14,9 +14,11 @@ Runtime boundary
         |
         v
 Brain and execution
+  TurnExecution -> respond | act | run
   Context pipeline -> provider router -> LLM
   Tool router -> built-ins / hands / MCP
-  Worker dispatch -> Restate Worker virtual objects
+  Act delegation -> Restate Worker virtual objects
+  Run planning/compiler -> Restate ExecutionRun / ExecutionTask workflows
         |
         v
 Product data in Postgres / Neon
@@ -25,6 +27,7 @@ Product data in Postgres / Neon
   learning_candidates, segment and strategy materialized views
   graph nodes, graph edges, sidecar indexes, configured vector records
   knowledge connections, sync runs, document versions, chunks
+  execution runs, execution tasks, plan history, budgets, completion checks
   learning_log
   analytics.turn_lineage, analytics.score_run, analytics.scores,
   moa.experiment_run, compliance audit tables
@@ -50,31 +53,154 @@ without turning connector sync into session memory ingestion.
 
 ## Agent Building Blocks
 
-MOA has one user-facing capability artifact kind: the skill. A skill is an
-open-ended, agent-mediated capability selected by the context pipeline and
-executed through the existing `Session` and `TurnExecution` path. Skills give an
-agent instructions, tools, memory, approvals, and workers so it can handle a
-task autonomously.
+MOA has one user-facing capability artifact kind: the skill. A skill can remain
+instructions only, can expose governed actions or code capabilities, and may
+also carry an optional `execution_plan` in `skill.moa.yaml`. Instruction-only
+skills are selected normally in `act` and may be pinned on an `Agent` node in a
+run; no skill is required to define a plan.
 
-A skill may additionally declare an optional deterministic `procedure` in its
-`skill.moa.yaml` definition. A procedure is a graph-shaped execution plan
-(`ProcedureDefinition`) used when conditions, approval gates, connector actions,
-checkpoints, memory operations, bounded agent/worker adapter nodes, and run
-history must be explicit and reviewable. It is the deterministic execution mode
-of the same skill artifact, not a separate artifact shape; skills without a
-procedure keep the open-ended agent-mediated behavior.
+`TurnExecution` chooses exactly one execution mode:
+
+- `respond`: one model response, no tools, and no plan-generation call.
+- `act`: the bounded root model/tool loop, including repeat and tool-call
+  limits. It may use visible skills and conversational `Worker` delegation.
+- `run`: instantiate or compile an immutable plan, start a detached durable
+  run, publish compact progress, and synthesize its terminal result into the
+  owning session automatically.
+
+`act` may escalate to `run` when investigation reveals resumable, high-fan-out,
+long-running, or review-bearing work. Difficulty alone does not select `run`.
+`Worker` remains available for interactive delegation in `act`; it is not the
+bulk DAG primitive.
 
 Agents, skills, connectors, actions, and behavior-lab experiment plans are
-canonical artifacts. `moa-artifacts` owns the persisted document model,
-validation, stable references, revision history, and Postgres registry;
-`moa-skills` owns skill package parsing, draft proposal generation,
-artifact-backed package helpers, and the pure deterministic procedure
-interpreter (`ProcedureInterpreter`) with its graph-renderable execution state;
-`moa-orchestrator` owns Restate execution through `ProcedureExecution` and
-adapter calls into existing services. JSON is the canonical persisted shape in
-Postgres, while YAML is a human authoring/import/export format. Visual builders
-must round-trip through the same artifact structs instead of owning a separate
-canvas-only model; optional `ui` metadata is non-semantic layout/canvas data.
+canonical artifacts. `moa-artifacts` owns their persisted document model,
+structural plan types, stable references, revision history, and registry.
+`moa-skills` owns skill package parsing, ranking, distillation, improvement,
+review, and artifact-backed package helpers. Generic graph execution does not
+live in `moa-skills`. The pure `moa-execution` core is the source of truth for
+compiled plan validation, binding resolution, scheduling, budget transitions,
+completion, and replan-stop evaluation. These entrypoints perform no database,
+network, filesystem, Restate, provider, or tool I/O. Persistence adapters and
+`moa-orchestrator` Restate handlers drive those pure domain transitions without
+redefining their state enums. JSON is the canonical persisted shape; YAML is an
+authoring and import/export format. Optional `ui` metadata is non-semantic.
+
+### Execution ownership
+
+| Boundary | Owner | Contract |
+|---|---|---|
+| `ExecutionPlanner` | `moa-brain` | Chooses a pinned skill template or asks the auxiliary model for a strict candidate plan and immutable goal contract. |
+| `ExecutionCompiler` | `moa-execution` | Validates, canonicalizes, estimates, and hashes initial plans and amendments against the capability catalog and remaining budget. |
+| `ExecutionProjection` | `moa-execution` | Supplies ordered node/task state to the pure scheduler; it contains no repository or provider handle. |
+| `ExecutionRepository` | `moa-execution` | Owns scoped run/task persistence, idempotent materialization, atomic budget accounting, generation-fenced outcomes, amendment history, and cancellation. It depends only on shared database/core types, never on Restate or runtime owners. |
+| `ExecutionRun` | `moa-orchestrator` Restate workflow | Drives one durable plan from persisted state, including amendment, cancellation, progress, and terminal completion. |
+| `ExecutionTask` | `moa-orchestrator` Restate workflow | Executes one stable logical node or map-item instance and records one typed outcome. |
+
+Every run starts with an immutable `ExecutionGoalContract` containing
+`objective`, individually identified `requirements`, `deliverables`, `coverage`,
+`constraints`, and `completion_checks`. Nodes identify the requirement IDs they
+serve. Completion checks deterministically verify output schemas, required
+node/task coverage, missing or failed work, citation/provenance requirements,
+and budget/deadline state. A bounded verifier agent may perform a semantic
+check, but its evidence and verdict are persisted. Missing required coverage or
+deliverables can produce `partial`, `blocked`, or `unsupported`, never a false
+`completed`. Final synthesis receives the contract, check results, aggregate
+outputs, citations, and explicit gaps.
+
+An `ExecutionPlanDefinition` carries `schema_version`, `input_schema`,
+`output_schema`, and `nodes`. Each node carries `id`, `depends_on`, optional
+`when`, `input`, `output_schema`, one `operation`, retry policy, optional budget,
+and the goal requirement IDs it serves. The dependency graph is acyclic, and
+its operation enum has exactly seven v1 variants:
+
+1. `Capability { reference }` invokes one registered governed capability.
+2. `Agent { instructions, skill_refs, capability_refs, max_turns }` runs one
+   bounded task-local agent.
+3. `Map { items, item_key, max_items, item_output_schema, task }` creates one
+   stable task per item up to the declared accounting bound; its task is only
+   `Capability` or `Agent`, so maps cannot recurse.
+4. `Reduce { items, max_items, reducer, batch_size }` reduces bounded structured
+   results through a deterministic capability or a bounded hierarchical agent
+   reducer.
+5. `Review { prompt }` waits for a tenant review decision.
+6. `WaitSignal { signal_name }` waits for one external or user signal.
+7. `Output { value }` resolves and validates the terminal output.
+
+Dependencies provide parallelism and joins; there are no implicit start,
+parallel, join, worker, tool, action, skill-action, or memory node kinds. Dynamic
+values use only whole-value `{ "$ref": "$.input.query" }`,
+`{ "$ref": "$.nodes.resolve.output.items" }`, `{ "$item": true }`, and
+`{ "$item_key": true }` objects. The compiler rejects unknown or
+non-dependency paths, recursion, and item variables outside a map task. There is
+no string interpolation, script, JSONata, JQ, or general expression evaluator.
+
+Published skills provide pinned reusable plan-template provenance. A selected
+high-confidence template is instantiated without a planning-model call. A
+one-off request instead stores planner model/prompt provenance, candidate JSON,
+compiler report, and final plan hash with its immutable compiled snapshot. A
+one-off plan is not a published artifact and is never promoted automatically.
+Both sources compile to the same canonical run snapshot.
+
+An agent node may reason freely within its declared skills, capabilities,
+turns, and budget, but it cannot mutate the durable graph invisibly. Every task
+returns `ExecutionTaskOutcome { schema_version, usage, result }`; cumulative
+`usage` is common to every result. The flattened result is
+`Completed { output, citations }`, `NeedsInput { question, audience }`,
+`NeedsReplan { reason, evidence }`, `Cancelled { reason }`, or
+`Failed { class, message }`. `NeedsReplan` requests a compiler-validated amendment that may add only downstream work,
+replace or remove pending work, narrow a map, switch to a registered capability,
+or add review/signal input. It cannot alter running or completed tasks, create a
+cycle or recursive map, reuse a task identity with new meaning, exceed remaining
+budget, or broaden authorization. Accepted amendments increment
+`plan_revision` and append their canonical patch, hash, reason, and requirement
+mapping to replayable `plan_history`. Replanning stops on resource/deadline
+exhaustion, repeated plan hashes or failure fingerprints, or no measurable
+progress—not an arbitrary revision count.
+
+Run resources use one integer `ExecutionBudgetLimit`: cost in microusd, tokens,
+tasks, tool calls, retrieved bytes, and deadline. Each task atomically reserves
+its worst case before dispatch and reconciles actual usage afterward; work that
+cannot reserve never starts. Default and tenant/user-approved envelopes govern
+resource consumption only. Authorization, action policy, the capability
+catalog, and node declarations govern what the run may do. Raising a resource
+budget never grants a new skill, tool, task shape, strategy, or permission.
+
+Compilation pins a sorted, duplicate-free `ExecutionCapabilityCatalog` and its
+canonical hash. Scheduling requires the caller to supply that exact immutable
+snapshot, rejects any hash drift, validates resolved capability inputs and
+outputs against its Draft 2020-12 schemas, and derives each task reservation
+from the catalog capability estimate. There is no hidden/global catalog refresh
+inside a run revision. Capability estimates declare exactly one logical task;
+retries and agent turns multiply only cost, tokens, tool calls, and retrieved
+bytes. Nonterminal cumulative outcomes charge only their nonnegative usage
+delta and retain the remaining reservation; terminal outcomes release it and
+consume one logical task.
+
+`ExecutionConfig` provides one planner repair attempt,
+`repeated_failure_limit = 3`, and tenant-independent defaults of
+`max_tasks = 10_000`, `max_tokens = 10_000_000`,
+`max_tool_calls = 100_000`, `max_retrieved_bytes = 10_000_000_000`, and
+`max_cost_microusd = 100_000_000` ($100). The unattended threshold is
+`5_000_000` microusd ($5). One agent turn reserves 100,000 microusd, 8,000
+tokens, 8 tool calls, and 10,000,000 retrieved bytes; one verifier turn reserves
+200,000 microusd, 16,000 tokens, 4 tool calls, and 1,000,000 retrieved bytes.
+Tenant policy or explicit user approval may raise or lower these envelopes. A
+compiled worst-case estimate above the unattended threshold is persisted as
+`awaiting_confirmation` and starts no task until the owning user confirms it.
+
+Ready map items are materialized as stable tasks keyed by
+`(run_uid, node_id, item_key)` and all are submitted durably. There is no
+application-level active-worker or fan-out cap for execution tasks; run budget
+and `max_tasks` bound logical expansion, while Restate concurrency rules and
+provider pacing provide physical backpressure.
+
+`ExecutionTaskId` is UUIDv5 over length-framed run UUID, node ID, and item key.
+Ordinary tasks use item key `""`, map tasks use the typed canonical extracted
+key, reducer tasks use `r{round}:b{batch}`, and completion verifiers use
+`check:{completion_check_id}`. New work starts at attempt/generation one;
+retries increment both, input resumes increment only generation, and stale
+generation results cannot persist.
 
 Behavior Lab uses a single `experiment_plan` artifact. Personas, profiles, data bundles, and scenarios are typed embedded blocks under `definition.spec.simulation`, each with stable IDs for UI round trips, trial fanout, scoring, and analytics. Their product boundary, UI expectations, and verification lanes are documented in [`docs/product/behavior-lab.md`](product/behavior-lab.md).
 
@@ -89,18 +215,20 @@ artifact JSON and pinned into this `session_agent_context` snapshot as
 artifact revisions and materializes selected artifact files for the tool
 router, but that selection now runs inside the configured agent policy for the
 session.
-Skill procedures are explicit product operations run through the Skills surface
-(`/v1/skills/runs/list`, `/v1/skills/run`, `/v1/skills/status`,
-`/v1/skills/cancel`, `/v1/skills/signal`, `/v1/skills/decide-review`); a run
-may be associated with a session for UI/history. Starting a procedure validates
-caller inputs against the skill's input schema and returns a structured
-missing-inputs error instead of creating a run when required inputs are absent.
-The procedure runtime interprets explicit graph nodes; the open-ended agent loop
-does not implicitly choose procedure graphs. An agent can invoke a selected
-skill's procedure through a policy-gated hands tool, which enforces the same
-input-schema check before a run starts.
-
-Current artifact tables are `moa.artifact`, `moa.artifact_revision`, `moa.artifact_file`, `moa.artifact_run`, and `moa.artifact_node_run`. `moa.artifact` / `moa.artifact_revision` are the source of truth for skill packages, and `moa.artifact_run` / `moa.artifact_node_run` persist procedure runs and their per-node execution state. Automatic skill learning follows `skill proposal -> draft skill artifact + learning_candidate -> LearningReview accept -> published artifact`; generation never rewrites published skill revisions directly.
+Execution APIs list, start, inspect, cancel, review, and signal runs through the
+common execution DTOs. Run admission originates from a persisted user message:
+it either selects one exact pinned `skill://...` template revision plus structured
+input or uses the strict internal planner/compiler path. Callers submit neither a
+compiled-plan identifier nor raw plan JSON.
+`moa.execution_run` stores the goal contract, immutable initial and active plan,
+revision history/hashes, provenance, status, budgets/usage, completion results,
+session scope, and timestamps. `moa.execution_task` stores stable node/item
+instances, requirement IDs, generation fence, input/output/error, reserved and
+actual usage, citations, and timestamps. These are the source-of-truth run
+tables. Skill packages remain in `moa.artifact`, `moa.artifact_revision`, and
+`moa.artifact_file`. Automatic learning still follows `skill proposal -> draft
+skill artifact + learning_candidate -> LearningReview accept -> published
+artifact`; live runs never rewrite published revisions.
 
 Tenant knowledge-base rows are `moa.knowledge_connections`,
 `moa.knowledge_sync_runs`, `moa.knowledge_ingestion_steps`,
@@ -171,7 +299,7 @@ it is realized as Restate services and virtual objects in `moa-orchestrator`
 | `Reranker` | Shared reranking interface | Noop, Cohere Rerank, and ZeroEntropy rerank through `moa-providers` |
 | `ChannelAdapter` | Channel inbound/outbound normalization | Slack |
 | `BuiltInTool` | Built-in tool execution | memory/search/web and other built-ins |
-| `ContextProcessor` | One stage in context compilation | identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, delegation planning, runtime context |
+| `ContextProcessor` | One stage in context compilation | identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, runtime context |
 | `LinkedIntegrationProvider` | Tenant knowledge linked-account flow, provider sync trigger, changed-record listing, and webhook verification | Nango and Merge adapters in `moa-knowledge` |
 | `DocumentParser` | Structure-aware parsing into normalized document elements for tenant knowledge ingestion | Native parser backed by `liteparse` for local file parsing, plus LlamaParse, Unstructured, and Reducto adapters in `moa-knowledge` |
 | `CredentialVault` | Secret storage and retrieval | environment-backed MCP vault |
@@ -195,10 +323,10 @@ Core production bindings:
 - Virtual objects: `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO`
 - Services: `ActionReviews`, `AgentDefinitions`, `Agents`,
   `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`,
-  `Contacts`, `Eval`, `Experiments`, `GraphMemoryMaint`, `Knowledge`,
+  `Contacts`, `Eval`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`,
   `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`,
   `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy`
-- Workflows: `ProcedureExecution`, `KnowledgeSyncIngestion`,
+- Workflows: `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`,
   `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `TenantPurge`,
   `TurnExecution`, `WorkerTurnExecution`
 
@@ -229,6 +357,11 @@ invariant, not a claim that every `OrchestratorCtx` use has been removed from
 the entire repository.
 
 `Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `Worker` owns conversational delegated state with depth and budget limits, while `WorkerTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
+
+`ExecutionRun` and `ExecutionTask` are the separate durable bulk-execution
+family. Their full state and aggregate counters come from execution persistence,
+not the `Session` VO. A run links to its owning session only for compact
+progress, exact input requests, and one deduplicated terminal synthesis turn.
 
 Coordinator turns can return while detached workers keep running across
 non-sticky replicas. The coordinator and its children coordinate over two planes —
@@ -267,14 +400,18 @@ User message
        6 memory_digest (when enabled)
        7 memory
        8 history
-       8 delegation_planning
        9 runtime_context
+  -> TurnExecution selects respond, act, or run
+       respond: one model response, no tools or planning call
+       act: bounded model/tool loop; optional conversational Worker delegation
+       run: instantiate/compile, persist, and detach ExecutionRun
   -> Query rewrite may mark `is_new_task`
   -> SegmentTracker opens or rolls a task segment
   -> LLM response is streamed/collected
   -> Tool calls route through ToolExecutor and ToolRouter
   -> Output guardrail evaluates buffered visible text
   -> BrainResponse and tool events are persisted
+  -> Detached runs emit compact progress and request one guarded terminal synthesis
   -> Segment counters are updated
   -> SegmentAssessor assesses completed or idle segments
   -> Assessed segments emit experience records and attributions
@@ -306,6 +443,7 @@ policy.
 | Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
 | Memory vectors | Postgres or configured vector backend | pgvector embeddings or Turbopuffer namespaces for graph retrieval; graph storage remains relational Postgres |
 | Skill packages | Postgres | `moa.artifact`, `moa.artifact_revision`, and `moa.artifact_file` store tenant-owned skill documents and package bytes; generated tenant updates first land as tenant-scoped draft skill artifacts plus proposed `learning_candidates` and only become active after review acceptance |
+| Execution runs | Postgres | `moa.execution_run` and `moa.execution_task` store immutable plan snapshots, provenance, amendments, budgets, stable logical tasks, outcomes, citations, completion checks, and terminal results |
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity |
 | Hand leases | Postgres | `moa.hand_leases` stores session/provider sandbox bindings, serialized handles, generation fencing, status, and expiry for cross-pod reuse and cleanup |
 | Claim-check blobs | Postgres by default | large event payloads use `session_blobs`; local filesystem blobs require explicit configuration and a persistent mounted path in cloud |
@@ -408,12 +546,12 @@ separate surfaces:
 - Live behavior experiments: `moa-experiments` owns the typed domain model and
   storage repository; the `Experiments` service accepts and tracks runs against
   production execution paths. Agent-loop targets create or reuse `Session`
-  state and queue messages through the normal `Session` and `TurnExecution`
-  path. Procedure targets start skill procedure runs through the procedure
-  runtime, link `moa.artifact_run.run_uid`, and execute supported deterministic
-  procedure nodes through `ProcedureExecution`. The `moa.experiment_run` row is
-  the experiment ledger and links to the session, procedure run, pinned artifact
-  revisions, and `analytics.score_run`.
+  state and queue messages through normal `Session` and `TurnExecution` routing.
+  Execution targets invoke a published skill's exact pinned `execution_plan`
+  through the same origin-bound planning/admission path, start the common
+  `ExecutionRun`, and link its `execution_run_uid`. The `moa.experiment_run` row is the experiment ledger and
+  links to the session, execution run, pinned artifact revisions, and
+  `analytics.score_run`.
   `ExperimentTrialRun` owns per-trial simulator execution. The public edge
   routes are `POST /v1/experiments/generate-plan`,
   `/v1/experiments/run-plan`, `/v1/experiments/status`,

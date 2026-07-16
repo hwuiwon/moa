@@ -5,18 +5,129 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::turn::{
-    StartTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
+    SessionProgress, SessionProgressRequest, StartTurnRequest, TurnOutcome, TurnOutcomeKind,
+    TurnPhase, TurnProgress,
 };
 use moa_core::{
     events::Event, events::EventType, types::events_stream::EventRange,
     types::events_stream::EventRecord, types::identifiers::SessionId, types::identifiers::TenantId,
-    types::provider::ModelTier,
+    types::provider::ModelTier, types::session::SessionStatus,
 };
 use moa_test_support::{OrchestratorTestFixture, TestApiClient};
 use serde_json::json;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 const CLARIFICATION_RESPONSE: &str = "What should I change? Point me at the file, message, object, or output and the specific fix you want.";
+
+#[tokio::test]
+#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
+async fn execution_routing_writes_normalized_audits_outside_session_progress_service_e2e()
+-> Result<()> {
+    // Pins: the real Session -> TurnExecution -> Execution service path distinguishes all three
+    // routes, durably audits planning in normalized storage, and returns Accepted with one run UID
+    // without placing planner internals in Session/progress events.
+    let run_objective = "Start an execution run for a durable report";
+    let fixture = OrchestratorTestFixture::with_script(json!({
+        "keyed": [
+            {
+                "match": "Inspect the repository",
+                "completion": { "content": "inspection complete" }
+            },
+            {
+                "match": run_objective,
+                "completion": { "content": execution_candidate(run_objective) }
+            }
+        ],
+        "default": { "completion": { "content": "4" } }
+    }))
+    .await?;
+    let test = fixture.isolated().await;
+
+    let respond_session = test.create_session("execution-route-respond").await?;
+    let (_, respond_outcome, respond_events) =
+        run_scripted_turn(&fixture.client, respond_session, "What is 2+2?").await?;
+    assert_eq!(
+        respond_outcome.kind,
+        TurnOutcomeKind::Completed,
+        "respond outcome: {}; events: {}",
+        respond_outcome.message,
+        event_summary(&respond_events)
+    );
+    assert_eq!(
+        route_modes(&fixture.postgres_url, respond_session).await?,
+        vec!["respond"]
+    );
+
+    let act_session = test.create_session("execution-route-act").await?;
+    let (_, act_outcome, act_events) = run_scripted_turn(
+        &fixture.client,
+        act_session,
+        "Inspect the repository and explain the result.",
+    )
+    .await?;
+    assert_eq!(
+        act_outcome.kind,
+        TurnOutcomeKind::Completed,
+        "act outcome: {}; events: {}",
+        act_outcome.message,
+        event_summary(&act_events)
+    );
+    assert_eq!(
+        route_modes(&fixture.postgres_url, act_session).await?,
+        vec!["act"]
+    );
+
+    let run_session = test.create_session("execution-route-run").await?;
+    let (_, run_outcome, run_events) =
+        run_scripted_turn(&fixture.client, run_session, run_objective).await?;
+    let TurnOutcomeKind::Accepted { execution_run_uid } = run_outcome.kind else {
+        panic!(
+            "explicit run must return Accepted, got {:?}: {}; events: {}",
+            run_outcome.kind,
+            run_outcome.message,
+            event_summary(&run_events)
+        );
+    };
+    assert_eq!(
+        route_modes(&fixture.postgres_url, run_session).await?,
+        vec!["run"]
+    );
+    assert!(run_events.iter().any(|record| {
+        matches!(
+            &record.event,
+            Event::ExecutionRunStarted(started) if started.run_uid == execution_run_uid
+        )
+    }));
+    assert_eq!(
+        planner_outcomes(&fixture.postgres_url, run_session).await?,
+        vec!["accepted"]
+    );
+    assert_eq!(
+        compile_outcomes(&fixture.postgres_url, run_session).await?,
+        vec!["accepted"]
+    );
+    assert_eq!(
+        fixture
+            .client
+            .session(run_session.to_string())
+            .status()
+            .await?,
+        SessionStatus::Running
+    );
+
+    let progress: SessionProgress = fixture
+        .client
+        .post_call(
+            &format!("/Session/{run_session}/progress"),
+            &SessionProgressRequest {
+                event_range: EventRange::all(),
+            },
+        )
+        .await?;
+    assert_eq!(progress.events, run_events);
+    Ok(())
+}
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
@@ -143,6 +254,7 @@ async fn run_scripted_turn(
                 model: None,
                 contact: None,
                 max_turns: None,
+                execution_template: None,
             },
             None,
         )
@@ -205,6 +317,96 @@ fn progress_script() -> serde_json::Value {
             }
         }
     })
+}
+
+fn execution_candidate(objective: &str) -> String {
+    json!({
+        "goal": {
+            "objective": objective,
+            "requirements": [{
+                "id": "req_report",
+                "description": "Produce the requested report."
+            }],
+            "deliverables": [],
+            "coverage": [],
+            "constraints": [],
+            "completion_checks": [{
+                "id": "check_output",
+                "description": "Validate the final output.",
+                "requirement_ids": ["req_report"],
+                "constraint_ids": [],
+                "kind": { "kind": "output_schema" }
+            }]
+        },
+        "plan": {
+            "schema_version": 1,
+            "input_schema": { "type": "object" },
+            "output_schema": { "type": "object" },
+            "nodes": [{
+                "id": "output",
+                "requirement_ids": ["req_report"],
+                "depends_on": [],
+                "when": null,
+                "input": {},
+                "output_schema": { "type": "object" },
+                "operation": {
+                    "kind": "output",
+                    "value": { "status": "complete" }
+                },
+                "retry": {
+                    "max_attempts": 1,
+                    "initial_backoff_ms": 0,
+                    "max_backoff_ms": 0
+                },
+                "budget": null
+            }]
+        },
+        "run_input": {}
+    })
+    .to_string()
+}
+
+async fn route_modes(postgres_url: &str, session_id: SessionId) -> Result<Vec<String>> {
+    audit_column(
+        postgres_url,
+        "SELECT mode FROM moa.execution_route_audit WHERE session_id = $1 ORDER BY accepted_at",
+        session_id,
+    )
+    .await
+}
+
+async fn planner_outcomes(postgres_url: &str, session_id: SessionId) -> Result<Vec<String>> {
+    audit_column(
+        postgres_url,
+        "SELECT outcome FROM moa.execution_planner_call_audit \
+         WHERE session_id = $1 ORDER BY created_at",
+        session_id,
+    )
+    .await
+}
+
+async fn compile_outcomes(postgres_url: &str, session_id: SessionId) -> Result<Vec<String>> {
+    audit_column(
+        postgres_url,
+        "SELECT outcome FROM moa.execution_compile_audit \
+         WHERE session_id = $1 ORDER BY created_at",
+        session_id,
+    )
+    .await
+}
+
+async fn audit_column(
+    postgres_url: &str,
+    query: &str,
+    session_id: SessionId,
+) -> Result<Vec<String>> {
+    let pool = PgPool::connect(postgres_url).await?;
+    let values = sqlx::query_scalar(query)
+        .bind(session_id.0)
+        .fetch_all(&pool)
+        .await?;
+    pool.close().await;
+    Ok(values)
 }
 
 fn user_messages(events: &[EventRecord]) -> Vec<String> {

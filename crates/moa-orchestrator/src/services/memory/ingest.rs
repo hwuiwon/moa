@@ -83,9 +83,11 @@ pub(super) async fn ingest_documents_inner(
         for (_, turn) in prepared {
             let key = ingestion_object_key(&turn);
             inflight.push(
-                ctx.object_client::<IngestionVOClient>(key)
-                    .ingest_turn(Json(turn))
-                    .call(),
+                crate::restate_identity::replay_safe_request(
+                    ctx.object_client::<IngestionVOClient>(key)
+                        .ingest_turn(Json(turn)),
+                )
+                .call(),
             );
         }
 

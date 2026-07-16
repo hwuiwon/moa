@@ -73,10 +73,6 @@ pub struct ConversationCost {
     pub total_cost_cents: u64,
     /// Workers spawned (count of `WorkerSpawned` events).
     pub worker_spawns: u64,
-    /// Result bundles emitted (count of `WorkerResultBundle` events).
-    pub worker_result_bundles: u64,
-    /// Total worker results across all bundles.
-    pub bundled_results: u64,
     /// Durable error events (`Error` + `ToolError`).
     pub error_events: u64,
     /// Trimmed text of the LAST `BrainResponse` event (the conversation's final model reply), or
@@ -137,8 +133,6 @@ impl ConversationCost {
             total_output_tokens: 0,
             total_cost_cents: 0,
             worker_spawns: 0,
-            worker_result_bundles: 0,
-            bundled_results: 0,
             error_events: 0,
             final_text: None,
             coordination_present: false,
@@ -198,10 +192,6 @@ impl ConversationCost {
                     pending_tool_calls = 0;
                 }
                 Event::WorkerSpawned { .. } => cost.worker_spawns += 1,
-                Event::WorkerResultBundle { results, .. } => {
-                    cost.worker_result_bundles += 1;
-                    cost.bundled_results += results.len() as u64;
-                }
                 Event::Error { .. } | Event::ToolError { .. } => cost.error_events += 1,
                 Event::TurnMetrics {
                     session_vo_calls,

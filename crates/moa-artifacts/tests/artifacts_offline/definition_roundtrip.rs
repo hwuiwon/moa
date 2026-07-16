@@ -155,6 +155,75 @@ fn artifact_refs_parse_and_format_supported_schemes() {
 }
 
 #[test]
+fn artifact_ref_schema_matches_parser_and_canonical_round_trip() {
+    // Pins: the planner schema and Rust parser accept the same canonical reference language.
+    let schema = serde_json::to_value(schemars::schema_for!(ArtifactRef)).expect("schema");
+    let validator = jsonschema::validator_for(&schema).expect("compile artifact-ref schema");
+    let boundary = format!("skill://{}", "a".repeat(512));
+    let accepted = [
+        "agent://support",
+        "skill://research-v1",
+        "connector://orders/api#v1",
+        "action://refund-order",
+        "action://orders.refund.v2",
+        "experiment_plan://cohort~v1",
+        "tool://mcp:search/web@v1#result",
+        boundary.as_str(),
+    ];
+    for value in accepted {
+        assert!(
+            validator.is_valid(&serde_json::json!(value)),
+            "schema: {value}"
+        );
+        let parsed = ArtifactRef::from_str(value).expect("parser accepts schema value");
+        assert_eq!(parsed.canonical_string().expect("canonical"), value);
+        assert_eq!(
+            serde_json::to_string(&parsed).expect("serialize"),
+            format!("\"{value}\"")
+        );
+    }
+
+    let too_long = format!("skill://{}", "a".repeat(513));
+    let rejected = [
+        "Skill://support",
+        "unknown://support",
+        "skill://",
+        "skill://-support",
+        "skill://support-",
+        "skill://white space",
+        "skill://café",
+        "skill://percent%20encoded",
+        "skill://nested://target",
+        "action://.refund",
+        "action://orders.",
+        too_long.as_str(),
+    ];
+    for value in rejected {
+        assert!(
+            !validator.is_valid(&serde_json::json!(value)),
+            "schema: {value}"
+        );
+        assert!(ArtifactRef::from_str(value).is_err(), "parser: {value}");
+    }
+}
+
+#[test]
+fn artifact_ref_invalid_public_variants_fail_closed() {
+    // Pins: unchecked constructors cannot emit a noncanonical reference through Display or serde.
+    let invalid = [
+        ArtifactRef::artifact(ArtifactKind::Skill, " leading"),
+        ArtifactRef::artifact(ArtifactKind::Action, "orders.refund"),
+        ArtifactRef::action("orders.v2", "refund"),
+        ArtifactRef::action("orders", ""),
+        ArtifactRef::tool("web search"),
+    ];
+    for reference in invalid {
+        assert!(reference.canonical_string().is_err());
+        assert!(serde_json::to_string(&reference).is_err());
+    }
+}
+
+#[test]
 fn agent_and_action_artifacts_roundtrip_and_extract_refs() {
     // Pins: tenant-configurable agents and standalone actions are first-class artifacts.
     let agent_yaml = r#"
@@ -313,7 +382,7 @@ fn assert_error(report: &moa_artifacts::validation::ValidationReport, path: &str
 
 #[test]
 fn draft_allows_unresolved_refs_but_published_rejects_them() {
-    // Pins: visual-builder drafts may link procedure capabilities that are created later.
+    // Pins: execution-plan agent skill_refs use the existing draft/publish artifact-reference path.
     let yaml = r#"
 api_version: moa.artifact/v1
 kind: skill
@@ -323,23 +392,51 @@ status: draft
 definition:
   type: skill
   spec:
-    procedure:
-      nodes:
-        - id: start
-          kind: start
-        - id: submit_issue
-          kind: action
-          ref: action://orders.submit_issue
-        - id: done
-          kind: end
-      edges:
-        - from: start
-          to: submit_issue
-        - from: submit_issue
-          to: done
+    execution_plan:
+      goal:
+        requirements:
+          - id: req_customer_advice
+            description: Advise the customer.
+        deliverables: []
+        coverage: []
+        constraints: []
+        completion_checks: []
+      plan:
+        schema_version: 1
+        input_schema: { type: object }
+        output_schema: { type: object }
+        nodes:
+          - id: advise_customer
+            requirement_ids: [req_customer_advice]
+            depends_on: []
+            input: {}
+            output_schema: { type: object }
+            operation:
+              kind: agent
+              instructions: Advise the customer about the damaged order.
+              skill_refs: [skill://customer-reassurance]
+              capability_refs: []
+              max_turns: 1
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0
+          - id: output
+            requirement_ids: [req_customer_advice]
+            depends_on: [advise_customer]
+            input: {}
+            output_schema: { type: object }
+            operation:
+              kind: output
+              value:
+                $ref: $.nodes.advise_customer.output
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0
 reference_resolutions:
-  - path: definition.spec.procedure.nodes[1].ref
-    ref: action://orders.submit_issue
+  - path: definition.spec.execution_plan.plan.nodes[0].operation.skill_refs[0]
+    ref: skill://customer-reassurance
     state: unresolved
 "#;
     let document = ArtifactDocument::from_yaml(yaml).expect("parse skill artifact");
@@ -355,108 +452,164 @@ reference_resolutions:
     assert_eq!(published_report.errors.len(), 1);
     assert_eq!(
         published_report.errors[0].path,
-        "definition.spec.procedure.nodes[1].ref"
+        "definition.spec.execution_plan.plan.nodes[0].operation.skill_refs[0]"
+    );
+    assert_eq!(
+        document.reference_paths(),
+        vec![(
+            "definition.spec.execution_plan.plan.nodes[0].operation.skill_refs[0]".to_string(),
+            ArtifactRef::from_str("skill://customer-reassurance")
+                .expect("parse execution-plan skill reference"),
+        )]
     );
 }
 
 #[test]
-fn procedure_validation_rejects_duplicate_node_ids() {
-    // Pins: skill procedure graphs must have unambiguous node identities.
+fn execution_plan_validation_rejects_duplicate_node_ids() {
+    // Pins: skill execution plans must have unambiguous stable node identities.
     let yaml = r#"
 api_version: moa.artifact/v1
 kind: skill
 metadata:
-  name: invalid-procedure
+  name: invalid-execution-plan
 definition:
   type: skill
   spec:
-    procedure:
-      nodes:
-        - id: start
-          kind: start
-        - id: start
-          kind: end
-      edges:
-        - from: start
-          to: missing
+    execution_plan:
+      goal:
+        requirements:
+          - id: req_one
+            description: Exercise duplicate node validation.
+        deliverables: []
+        coverage: []
+        constraints: []
+        completion_checks: []
+      plan:
+        schema_version: 1
+        input_schema: { type: object }
+        output_schema: { type: object }
+        nodes:
+          - id: duplicate
+            requirement_ids: [req_one]
+            depends_on: []
+            input: {}
+            output_schema: { type: object }
+            operation:
+              kind: capability
+              reference: { name: first.lookup, version: v1 }
+            retry: { max_attempts: 1, initial_backoff_ms: 0, max_backoff_ms: 0 }
+          - id: duplicate
+            requirement_ids: [req_one]
+            depends_on: []
+            input: {}
+            output_schema: { type: object }
+            operation:
+              kind: capability
+              reference: { name: second.lookup, version: v1 }
+            retry: { max_attempts: 1, initial_backoff_ms: 0, max_backoff_ms: 0 }
+          - id: output
+            requirement_ids: [req_one]
+            depends_on: [duplicate]
+            input: {}
+            output_schema: { type: object }
+            operation:
+              kind: output
+              value: { $ref: $.nodes.duplicate.output }
+            retry: { max_attempts: 1, initial_backoff_ms: 0, max_backoff_ms: 0 }
 "#;
-    let document = ArtifactDocument::from_yaml(yaml).expect("parse invalid skill procedure");
+    let document = ArtifactDocument::from_yaml(yaml).expect("parse invalid skill execution plan");
     let report = validate_for_status(&document, ArtifactStatus::Draft);
 
     assert!(
         report
             .errors
             .iter()
-            .any(|error| error.message == "duplicate procedure node id"),
+            .any(|error| error.message == "duplicate execution node id"),
         "expected duplicate-node error: {report:?}"
-    );
-    assert!(
-        report
-            .errors
-            .iter()
-            .any(|error| error.message == "edge destination node does not exist"),
-        "expected missing-edge-target error: {report:?}"
     );
 }
 
 #[test]
-fn procedure_validation_rejects_executable_nodes_without_invocation_targets() {
-    // Pins: published procedure action/tool nodes fail validation before runtime if no target can be executed.
+fn execution_plan_validation_rejects_malformed_capability_and_unbounded_agent() {
+    // Pins: execution plans reject malformed capability syntax and zero-turn agents before publish.
     let yaml = r#"
 api_version: moa.artifact/v1
 kind: skill
 metadata:
-  name: invalid-executable-procedure
+  name: invalid-execution-targets
 definition:
   type: skill
   spec:
-    procedure:
-      nodes:
-        - id: start
-          kind: start
-        - id: notify_customer
-          kind: action
-          input:
-            template: Tell the customer what happens next.
-        - id: call_tool
-          kind: tool
-        - id: done
-          kind: end
-      edges:
-        - from: start
-          to: notify_customer
-        - from: notify_customer
-          to: call_tool
-        - from: call_tool
-          to: done
+    execution_plan:
+      goal:
+        requirements:
+          - id: req_target
+            description: Exercise target validation.
+        deliverables: []
+        coverage: []
+        constraints: []
+        completion_checks: []
+      plan:
+        schema_version: 1
+        input_schema: { type: object }
+        output_schema: { type: object }
+        nodes:
+          - id: malformed_capability
+            requirement_ids: [req_target]
+            depends_on: []
+            input: {}
+            output_schema: { type: object }
+            operation:
+              kind: capability
+              reference: { name: "bad capability", version: v1 }
+            retry: { max_attempts: 1, initial_backoff_ms: 0, max_backoff_ms: 0 }
+          - id: unbounded_agent
+            requirement_ids: [req_target]
+            depends_on: []
+            input: {}
+            output_schema: { type: object }
+            operation:
+              kind: agent
+              instructions: Summarize the result.
+              skill_refs: []
+              capability_refs: []
+              max_turns: 0
+            retry: { max_attempts: 1, initial_backoff_ms: 0, max_backoff_ms: 0 }
+          - id: output
+            requirement_ids: [req_target]
+            depends_on: [malformed_capability, unbounded_agent]
+            input: {}
+            output_schema: { type: object }
+            operation:
+              kind: output
+              value: {}
+            retry: { max_attempts: 1, initial_backoff_ms: 0, max_backoff_ms: 0 }
 "#;
-    let document = ArtifactDocument::from_yaml(yaml).expect("parse invalid skill procedure");
+    let document = ArtifactDocument::from_yaml(yaml).expect("parse invalid skill execution plan");
     let report = validate_for_status(&document, ArtifactStatus::Published);
 
     assert!(
         report.errors.iter().any(|error| {
-            error.path == "definition.spec.procedure.nodes[1]"
+            error.path == "definition.spec.execution_plan.plan.nodes[0].operation.reference.name"
                 && error.message
-                    == "procedure action node must specify ref, input.tool_name, or input.tool"
+                    == "capability name must be a non-empty ASCII name of at most 256 characters"
         }),
-        "expected missing action invocation target error: {report:?}"
+        "expected malformed capability error: {report:?}"
     );
     assert!(
         report.errors.iter().any(|error| {
-            error.path == "definition.spec.procedure.nodes[2]"
-                && error.message
-                    == "procedure tool node must specify exactly one tool_ref, input.tool_name, or input.tool"
+            error.path == "definition.spec.execution_plan.plan.nodes[1].operation.max_turns"
+                && error.message == "agent max_turns must be at least one"
         }),
-        "expected missing tool invocation target error: {report:?}"
+        "expected zero-turn agent error: {report:?}"
     );
 }
 
 #[test]
-fn prompt_examples_parse_as_skill_procedures() {
+fn prompt_examples_parse_as_skill_execution_plans() {
     // Pins: docs skill examples stay executable by the canonical parser; the converted
-    // procedure examples each keep a deterministic procedure graph, and the purely
-    // agent-mediated example stays a procedure-less skill.
-    let procedure_examples: [(&str, &str); 6] = [
+    // examples each keep a v1 execution plan, and the agent-mediated example stays plan-less.
+    let execution_plan_examples: [(&str, &str); 6] = [
         (
             "damaged-food-order",
             include_str!("../../../../docs/examples/artifacts/damaged-food-order.skill.yaml"),
@@ -483,22 +636,22 @@ fn prompt_examples_parse_as_skill_procedures() {
         ),
     ];
 
-    for (name, yaml) in procedure_examples {
-        let procedure = parse_skill_example(name, yaml);
+    for (name, yaml) in execution_plan_examples {
+        let skill = parse_skill_example(name, yaml);
         assert!(
-            procedure.procedure.is_some(),
-            "example {name} should declare a procedure"
+            skill.execution_plan.is_some(),
+            "example {name} should declare an execution plan"
         );
     }
 
-    // The transaction-dispute example is a purely agent-mediated skill with no procedure.
+    // The transaction-dispute example is purely agent-mediated with no execution plan.
     let agent_mediated = parse_skill_example(
         "transaction-dispute",
         include_str!("../../../../docs/examples/artifacts/transaction-dispute.skill.yaml"),
     );
     assert!(
-        agent_mediated.procedure.is_none(),
-        "transaction-dispute example should stay procedure-less"
+        agent_mediated.execution_plan.is_none(),
+        "transaction-dispute example should stay execution-plan-less"
     );
 }
 

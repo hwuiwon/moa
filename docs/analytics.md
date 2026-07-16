@@ -52,14 +52,33 @@ Catalog datasets currently map to:
 - `analytics.tool_call_fact`
 - `analytics.task_segment_fact`
 - skill activations derived from `analytics.task_segment_fact`
-- `analytics.procedure_run_fact`
-- `analytics.procedure_node_run_fact`
+- `analytics.execution_run_fact`
+- `analytics.execution_task_fact`
 - `analytics.learning_candidate_fact`
 - `analytics.experiment_run_fact`
 - `analytics.event_fact`
 
 The compiler injects tenant predicates for every query. Materialized views are
 tenant-keyed read models, not a replacement for authorization.
+
+Execution facts are sourced from `moa.execution_run` and
+`moa.execution_task`, not session prose. The facts are normalized, bounded
+execution records:
+
+| Fact | Contract |
+|---|---|
+| `analytics.execution_run_fact` | Tenant/contact/session/run identity; immutable initial and final active plan hashes; plan revision; `route_mode=run`; typed route reason and source kind; separate nullable skill-template ref and revision UID; run status and typed terminal reason; requirement, satisfied-requirement, completion-check, and logical-task counts; `queued_at`, `started_at`, exact queue-to-start latency from `started_at - queued_at`, terminal latency; and reserved/actual cost, tokens, tasks, tool calls, and retrieved bytes |
+| `analytics.execution_task_fact` | Canonical `task_id` (never `task_uid`); tenant/run/node/non-null item identity; task kind; separate nullable capability name/version; task status and typed failure class; attempt and generation; citation count; queue and terminal duration; and all five reserved/actual dimensions |
+
+Raw input, output, terminal gaps, cancellation reason, and error prose are not
+analytics fields. There are no procedure datasets, aliases, migration cohorts,
+or compatibility dimensions.
+
+Use these facts to group success, cost, and latency by active plan hash, exact
+skill-template revision, capability name/version, tenant, or logical task
+count. Coverage is the persisted satisfied/total requirement pair, with
+`0/0 = 1.0`. All five terminal reserved values must be zero; dashboards should
+alert on any non-zero terminal reservation as a leak invariant violation.
 
 ## Refresh Behavior
 
@@ -91,18 +110,30 @@ schema contract, `docs/plans/clickhouse-analytics-read-models.md` the design):
   incrementally copies dimension rows, the `events_raw` stream (with
   exporter-stamped `turn_number`), and the Postgres-computed windowed facts
   (`turn_fact`, `tool_call_fact`) into ClickHouse on a poll interval
-  (`clickhouse.export_poll_secs`, default 15 s). Cursors live in
+  (`clickhouse.export_poll_secs`, default 15 s). Execution dimensions use a
+  sequence-backed bounded high-water cursor; other datasets retain their
+  timestamp cursor. Durable cursor state lives in
   `analytics.clickhouse_export_state`.
 - `moa-analytics` compiles each catalog dataset to ClickHouse SQL
   (`AnalyticsBackend::ClickHouse`) and executes via
   `AnalyticsClickHouseClient`; `moa-edge` selects the backend from config and
   skips the matview refresh entirely. Response metadata
-  `read_model_updated_at` reports the most-stale export cursor.
+  `read_model_updated_at` reports the most-stale caught-up cursor:
+  `MIN(CASE WHEN cursor_seq IS NULL THEN cursor_ts ELSE exported_at END)`.
+  Zero/reset execution cursors use Unix epoch, and an active or partial pass
+  does not advance freshness.
 - Tenant isolation stays compiler-injected (`tenant_id = ?` bound first) on
   both backends. Tenant offboarding purges the ClickHouse copies
   (`AnalyticsClickHouseClient::purge_tenant`) after the relational purge.
 - Runtime aggregates (`skill_resolution_rates`, `segment_baselines`,
   `task_strategy_success_rates`) and `analytics.scores` stay in Postgres.
+- Existing ClickHouse databases are upgraded in place. The durable
+  `execution_dimensions_v2` state machine renames `task_uid` to `task_id`,
+  widens `plan_revision` to `UInt64`, repairs nullability, adds normalized
+  fields, removes `source_ref`, `capability_ref`, and raw `error`, resets
+  sequence cursors, and fully exports through fixed run/task high-water tuples.
+  Restarting the exporter resumes the stored stage, page cursor, and active
+  incremental-pass bound.
 - Validation: the certify skill's "ClickHouse Analytics Backend And Exporter"
   matrix — offline snapshots alone cannot catch ClickHouse syntax/semantic
   drift; the live parity lane is the gate.

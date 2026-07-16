@@ -65,6 +65,8 @@ fn spawn_orchestrator(
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
+        .env("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true")
+        .env("MOA_RUNTIME_CACHE_REDIS_URL", "redis://127.0.0.1:10051/0")
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env(
             "MOA_PROVIDERS_OVERRIDE",
@@ -134,11 +136,16 @@ async fn agent_loop_experiment_creates_session_and_persists_scripted_response() 
             run.session_id.is_none(),
             "session should be attached by the workflow after acceptance"
         );
+        assert!(
+            run.execution_run_uid.is_none(),
+            "agent-loop experiments must not attach a detached execution run"
+        );
 
         let status =
             wait_for_experiment_status(&client, ingress, &identity, &storage_partition_id, run.run_uid)
                 .await?;
         assert_eq!(status.score_run_id, Some(run.score_run_id));
+        assert!(status.execution_run_uid.is_none());
         assert!(
             matches!(status.status.as_str(), "completed"),
             "experiment should complete without a blocking review state, got {status:?}"
@@ -155,6 +162,84 @@ async fn agent_loop_experiment_creates_session_and_persists_scripted_response() 
             "expected the imported support skill to be read through normal tool routing; observed events: {}",
             summarize_events(&events)
         );
+
+        Ok(())
+    }
+    .await;
+
+    let _ = orchestrator.kill();
+    let _ = orchestrator.wait();
+
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
+async fn experiments_run_denies_caller_without_tenant_operator() -> Result<()> {
+    // Pins: Experiments/run authorizes before target admission, so a tenant-scoped caller with no
+    // operator/admin grant receives the exact forbidden status and creates no experiment run.
+    let _guard = RESTATE_E2E_LOCK.lock().await;
+    if !cfg!(feature = "provider-overrides") {
+        return Ok(());
+    }
+
+    let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
+    let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
+    let fixture_path = memory_dir
+        .path()
+        .join("unauthorized-experiment-script.json");
+    write_scripted_fixture(&fixture_path, "unreachable")?;
+
+    let ports = reserve_orchestrator_ports()?;
+    let endpoint_url = deployment_endpoint_url(ports.restate);
+    let ingress = restate_ingress_url();
+    let ingress = ingress.as_str();
+    let client = reqwest::Client::new();
+    let tenant_id = TenantId::new();
+    let mut unauthorized = test_user_identity();
+    unauthorized.tenant_id = tenant_id;
+    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
+
+    let result = async {
+        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        let request = ExperimentRunRequest {
+            tenant_id,
+            name: "unauthorized-agent-loop-experiment".to_string(),
+            plan_revision_uid: None,
+            target: Some(json!({
+                "kind": "agent_loop",
+                "prompt": "This target must never be admitted.",
+                "session_id": null,
+                "agent": { "revision_uid": Uuid::now_v7() },
+                "model": "scripted-loadtest",
+                "attachments": []
+            })),
+            variant: Some(json!({
+                "name": "unauthorized-agent-loop",
+                "model": "scripted-loadtest",
+                "artifact_revision_uids": [],
+                "skill_refs": [],
+                "execution_template": null,
+                "metadata": {}
+            })),
+            scorecard: json!({
+                "score_names": [],
+                "evaluator_metadata": {}
+            }),
+            score_run_id: None,
+            idempotency_key: Some(format!("unauthorized-agent-loop-{}", Uuid::now_v7())),
+            agent_revision_variants: Vec::new(),
+        };
+
+        let response = with_identity(
+            client.post(service_url(ingress, "Experiments", "run")),
+            &unauthorized,
+        )
+        .json(&request)
+        .send()
+        .await
+        .context("call Experiments/run without tenant operator grant")?;
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
 
         Ok(())
     }
@@ -214,7 +299,7 @@ async fn run_agent_loop_experiment(
             "model": "scripted-loadtest",
             "artifact_revision_uids": [],
             "skill_refs": ["skill://delivery-support"],
-            "procedure_ref": null,
+            "execution_template": null,
             "metadata": { "lane": "deterministic-e2e" }
         })),
         scorecard: json!({

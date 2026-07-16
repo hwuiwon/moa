@@ -24,8 +24,12 @@ use moa_eval_core::{
 use moa_hands::ToolRouter;
 use moa_providers::ProviderRegistry;
 use moa_security::{ActionPolicies, ActionPolicyRuleStore};
-use moa_session::PostgresSessionStore;
+use moa_session::{
+    PostgresSessionStore,
+    testing::{cleanup_test_schema, provision_cloned_database_from},
+};
 use serde_json::Value;
+use sqlx::PgPool;
 use tokio::fs;
 use uuid::Uuid;
 
@@ -59,6 +63,23 @@ pub struct AgentEnvironment {
     pub user_id: UserId,
     /// In-memory lineage handle used to retain eval-run lineage events.
     pub lineage: Arc<EvalLineageHandle>,
+    database_url: String,
+    schema_name: String,
+    database_pool: PgPool,
+}
+
+impl AgentEnvironment {
+    /// Closes the eval pool and drops the cloned database owned by this environment.
+    pub async fn cleanup(self) -> Result<()> {
+        let database_url = self.database_url.clone();
+        let schema_name = self.schema_name.clone();
+        let database_pool = self.database_pool.clone();
+        drop(self);
+        database_pool.close().await;
+        cleanup_test_schema(&database_url, &schema_name)
+            .await
+            .map_err(EvalError::from)
+    }
 }
 
 /// In-memory lineage handle for isolated eval runs.
@@ -125,73 +146,124 @@ pub(crate) async fn build_agent_environment_with_provider(
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let user_id = UserId::new(DEFAULT_EVAL_USER);
     let lineage = Arc::new(EvalLineageHandle::default());
-    let schema_name = format!("eval_{}", Uuid::now_v7().simple());
-    let session_store_concrete = Arc::new(
-        PostgresSessionStore::new_in_schema(&base_config.database.url, &schema_name).await?,
-    );
-    let session_store: Arc<dyn SessionStore> = session_store_concrete.clone();
-    let segment_store: Arc<dyn SegmentStore> = session_store_concrete.clone();
-    let experience_store: Arc<dyn ExperienceStore> = session_store_concrete.clone();
-    let learning_candidate_store: Arc<dyn LearningCandidateStore> = session_store_concrete.clone();
-    let rule_store: Arc<dyn ActionPolicyRuleStore> = session_store_concrete.clone();
-    seed_memory(base_config, agent_config).await?;
-    seed_eval_action_policy_rules(
-        session_store_concrete.as_ref(),
-        tenant_id,
-        &user_id,
-        &agent_config.permissions.allow_rules,
-    )
-    .await?;
-
-    let tool_router = Arc::new(
-        build_tool_router(
-            base_config,
-            session_store.clone(),
-            rule_store,
-            &workspace_dir,
-            agent_config,
+    let (database_url, schema_name) =
+        if let Some((database_url, schema_name)) = preprovisioned_eval_database(base_config) {
+            (database_url.to_string(), schema_name.to_string())
+        } else {
+            provision_cloned_database_from(&base_config.database.url).await?
+        };
+    let session_store_concrete =
+        match PostgresSessionStore::new_in_existing_schema(&database_url, &schema_name).await {
+            Ok(store) => Arc::new(store),
+            Err(error) => {
+                if let Err(cleanup_error) = cleanup_test_schema(&database_url, &schema_name).await {
+                    tracing::warn!(
+                        %cleanup_error,
+                        "failed to clean up cloned eval database after store initialization failed"
+                    );
+                }
+                return Err(error.into());
+            }
+        };
+    let database_pool = session_store_concrete.pool().clone();
+    let environment = async {
+        let session_store: Arc<dyn SessionStore> = session_store_concrete.clone();
+        let segment_store: Arc<dyn SegmentStore> = session_store_concrete.clone();
+        let experience_store: Arc<dyn ExperienceStore> = session_store_concrete.clone();
+        let learning_candidate_store: Arc<dyn LearningCandidateStore> =
+            session_store_concrete.clone();
+        let rule_store: Arc<dyn ActionPolicyRuleStore> = session_store_concrete.clone();
+        seed_memory(base_config, agent_config).await?;
+        seed_eval_action_policy_rules(
+            session_store_concrete.as_ref(),
+            tenant_id,
+            &user_id,
+            &agent_config.permissions.allow_rules,
         )
-        .await?,
-    );
+        .await?;
 
-    let session_meta = SessionMeta {
-        tenant_id,
-        created_by: Some(SessionActorRef::Identity { id: Uuid::now_v7() }),
-        model: llm_provider.capabilities().model_id.clone(),
-        title: Some(agent_config.name.clone()),
-        ..SessionMeta::default()
-    };
-    let session_id = session_store.create_session(session_meta).await?;
+        let tool_router = Arc::new(
+            build_tool_router(
+                base_config,
+                session_store.clone(),
+                rule_store,
+                &workspace_dir,
+                agent_config,
+            )
+            .await?,
+        );
 
-    let pipeline = build_pipeline(
-        base_config,
-        agent_config,
-        EvalPipelineDeps {
-            session_store: session_store.clone(),
-            segment_store: segment_store.clone(),
-            graph_pool: session_store_concrete.pool().clone(),
-            llm_provider: llm_provider.clone(),
-            provider_registry: ProviderRegistry::from_config(base_config),
-            lineage: lineage.clone(),
-        },
-        tool_router.as_ref(),
-    )
-    .await?;
+        let session_meta = SessionMeta {
+            tenant_id,
+            created_by: Some(SessionActorRef::Identity { id: Uuid::now_v7() }),
+            model: llm_provider.capabilities().model_id.clone(),
+            title: Some(agent_config.name.clone()),
+            ..SessionMeta::default()
+        };
+        let session_id = session_store.create_session(session_meta).await?;
 
-    Ok(AgentEnvironment {
-        session_store,
-        segment_store,
-        experience_store,
-        learning_candidate_store,
-        llm_provider,
-        tool_router,
-        pipeline,
-        workspace_dir,
-        session_id,
-        storage_partition_id,
-        user_id,
-        lineage,
-    })
+        let pipeline = build_pipeline(
+            base_config,
+            agent_config,
+            EvalPipelineDeps {
+                session_store: session_store.clone(),
+                segment_store: segment_store.clone(),
+                graph_pool: database_pool.clone(),
+                llm_provider: llm_provider.clone(),
+                provider_registry: ProviderRegistry::from_config(base_config),
+                lineage: lineage.clone(),
+            },
+            tool_router.as_ref(),
+        )
+        .await?;
+
+        Ok(AgentEnvironment {
+            session_store,
+            segment_store,
+            experience_store,
+            learning_candidate_store,
+            llm_provider,
+            tool_router,
+            pipeline,
+            workspace_dir,
+            session_id,
+            storage_partition_id,
+            user_id,
+            lineage,
+            database_url: database_url.clone(),
+            schema_name: schema_name.clone(),
+            database_pool: database_pool.clone(),
+        })
+    }
+    .await;
+
+    match environment {
+        Ok(environment) => Ok(environment),
+        Err(error) => {
+            drop(session_store_concrete);
+            database_pool.close().await;
+            if let Err(cleanup_error) = cleanup_test_schema(&database_url, &schema_name).await {
+                tracing::warn!(
+                    %cleanup_error,
+                    "failed to clean up cloned eval database after environment setup failed"
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+fn preprovisioned_eval_database(base_config: &MoaConfig) -> Option<(&str, &str)> {
+    let schema_name = base_config.database.schema.as_deref()?;
+    let database_path = base_config
+        .database
+        .url
+        .split_once('?')
+        .map_or(base_config.database.url.as_str(), |(path, _)| path);
+    let database_name = database_path.rsplit('/').next()?;
+    database_name
+        .starts_with("moa_test_")
+        .then_some((base_config.database.url.as_str(), schema_name))
 }
 
 async fn seed_memory(base_config: &MoaConfig, agent_config: &AgentConfig) -> Result<()> {
@@ -609,6 +681,10 @@ mod tests {
         assert!(!environment.tool_router.has_tool("bash"));
         uuid::Uuid::parse_str(environment.storage_partition_id.as_str())
             .expect("eval tenant id should be the tenant UUID string");
+        environment
+            .cleanup()
+            .await
+            .expect("cleanup setup test database");
     }
 
     #[tokio::test]

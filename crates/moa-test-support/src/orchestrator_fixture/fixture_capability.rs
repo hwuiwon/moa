@@ -1,0 +1,1009 @@
+//! Parent-process MCP capability fixture for deterministic execution-run tests.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
+use axum::{Json, Router};
+use moa_execution::bindings::extract_map_key;
+use moa_execution::state::ExecutionTaskId;
+use serde_json::{Value, json};
+use tokio::sync::{Notify, oneshot};
+use tokio::task::JoinHandle;
+use uuid::Uuid;
+
+const FIXTURE_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
+
+/// One deterministic result returned by a fixture MCP capability.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FixtureCapabilityOutcome {
+    /// Return a successful MCP tool result with structured content.
+    Success {
+        /// Structured result exposed to the execution task.
+        output: Value,
+    },
+    /// Return the input object with fixed fields merged over it.
+    SuccessWithInput {
+        /// Object fields merged over the received input object.
+        output: Value,
+    },
+    /// Return a retryable HTTP 503 transport failure.
+    RetryableFailure {
+        /// Stable diagnostic body returned by the fixture server.
+        message: String,
+    },
+    /// Return a terminal MCP tool result with `isError = true`.
+    TerminalFailure {
+        /// Stable tool error returned to the execution task.
+        message: String,
+    },
+}
+
+/// One MCP tool exposed by the parent-process fixture capability server.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FixtureCapabilityTool {
+    /// Exact discovered MCP tool name.
+    pub name: String,
+    /// Human-readable tool description used in the generated capability catalog.
+    pub description: String,
+    /// Draft-compatible JSON schema accepted by the MCP tool.
+    pub input_schema: Value,
+    /// RFC 6901 pointer used by production map-key extraction, or `None` for ordinary tasks.
+    pub item_key_pointer: Option<String>,
+    /// Ordered unique-invocation outcomes; the final outcome repeats after the list is exhausted.
+    pub outcomes: Vec<FixtureCapabilityOutcome>,
+}
+
+/// Configuration for an opt-in execution-run fixture.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FixtureCapabilityOptions {
+    /// Exact MCP tools exposed to the orchestrator.
+    pub tools: Vec<FixtureCapabilityTool>,
+    /// Additional exact environment passed to the dedicated orchestrator child.
+    pub orchestrator_env: Vec<(String, String)>,
+}
+
+/// One unique logical fixture capability effect.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FixtureCapabilityCall {
+    /// Provider tool-use identifier used as the logical-effect idempotency key.
+    pub invocation_id: String,
+    /// Exact MCP capability name.
+    pub capability: String,
+    /// Production-canonical map item key, or the empty string for ordinary tasks.
+    pub item_key: String,
+    /// Complete MCP `arguments` value received from the orchestrator.
+    pub input: Value,
+    /// One-based arrival order among unique logical effects in this observation window.
+    pub arrival_order: u64,
+}
+
+/// One HTTP arrival at the fixture capability server, including logical replays.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FixtureCapabilityAttempt {
+    /// Provider tool-use identifier carried by this transport arrival.
+    pub invocation_id: String,
+    /// Exact MCP capability name.
+    pub capability: String,
+    /// Production-canonical map item key, or the empty string for ordinary tasks.
+    pub item_key: String,
+    /// Complete MCP `arguments` value received from the orchestrator.
+    pub input: Value,
+    /// One-based order among every transport arrival in this observation window.
+    pub arrival_order: u64,
+    /// One-based order of the corresponding unique logical effect.
+    pub logical_arrival_order: u64,
+    /// Whether an earlier arrival already created this logical effect.
+    pub is_replay: bool,
+}
+
+/// Controller for observing and releasing parent-process fixture capabilities.
+#[derive(Clone)]
+pub struct FixtureCapabilityController {
+    state: Arc<FixtureCapabilityState>,
+}
+
+impl FixtureCapabilityController {
+    /// Waits until at least `count` unique effects have arrived and returns the full ordered set.
+    pub async fn wait_for_calls(
+        &self,
+        count: usize,
+        timeout: Duration,
+    ) -> Result<Vec<FixtureCapabilityCall>> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.state.arrival_notify.notified();
+            let calls = self.calls();
+            if calls.len() >= count {
+                return Ok(calls);
+            }
+            tokio::time::timeout_at(deadline, notified)
+                .await
+                .with_context(|| {
+                    format!(
+                        "fixture capability received {} of {count} unique calls within {timeout:?}",
+                        calls.len()
+                    )
+                })?;
+        }
+    }
+
+    /// Releases exactly `count` currently pending logical effects in unique-arrival order.
+    pub fn release(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let effects = {
+            let observations = lock_unpoisoned(&self.state.observations);
+            let effects = observations
+                .calls
+                .iter()
+                .filter_map(|call| observations.effects.get(&call.invocation_id))
+                .filter(|effect| effect.is_pending())
+                .take(count)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                effects.len(),
+                count,
+                "release({count}) requires {count} pending fixture capability effects"
+            );
+            effects
+        };
+        for effect in effects {
+            effect.resolve(EffectResolution::Outcome(effect.outcome.clone()));
+        }
+    }
+
+    /// Returns unique logical effects in deterministic arrival order.
+    #[must_use]
+    pub fn calls(&self) -> Vec<FixtureCapabilityCall> {
+        lock_unpoisoned(&self.state.observations).calls.clone()
+    }
+
+    /// Returns every HTTP arrival in deterministic arrival order.
+    #[must_use]
+    pub fn transport_attempts(&self) -> Vec<FixtureCapabilityAttempt> {
+        lock_unpoisoned(&self.state.observations)
+            .transport_attempts
+            .clone()
+    }
+
+    /// Derives stable task IDs for unique map item keys using production algorithms.
+    pub fn derived_task_ids(&self, run_uid: Uuid, node_id: &str) -> Result<Vec<ExecutionTaskId>> {
+        let calls = self.calls();
+        let mut seen = BTreeSet::new();
+        let mut task_ids = Vec::new();
+        for call in calls {
+            let Some(tool) = self.state.tools.get(&call.capability) else {
+                bail!(
+                    "fixture capability `{}` disappeared while deriving task ids",
+                    call.capability
+                );
+            };
+            let Some(pointer) = tool.item_key_pointer.as_deref() else {
+                continue;
+            };
+            let item_key = extract_map_key(&call.input, pointer)
+                .with_context(|| format!("derive map item key for `{}`", call.capability))?;
+            if item_key != call.item_key {
+                bail!(
+                    "fixture call item key changed from `{}` to `{item_key}`",
+                    call.item_key
+                );
+            }
+            if seen.insert(item_key.clone()) {
+                task_ids.push(ExecutionTaskId::derive(run_uid, node_id, &item_key)?);
+            }
+        }
+        Ok(task_ids)
+    }
+
+    /// Cancels pending handlers and clears calls, attempts, script cursors, and arrival counters.
+    pub fn reset(&self) {
+        let effects = {
+            let mut observations = lock_unpoisoned(&self.state.observations);
+            let effects = observations.effects.values().cloned().collect::<Vec<_>>();
+            *observations = FixtureCapabilityObservations::default();
+            effects
+        };
+        for effect in effects {
+            effect.resolve(EffectResolution::Reset);
+        }
+    }
+}
+
+pub(super) struct FixtureCapabilityRuntime {
+    controller: FixtureCapabilityController,
+    endpoint: String,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl FixtureCapabilityRuntime {
+    pub(super) async fn start(options: FixtureCapabilityOptions) -> Result<Self> {
+        let state = Arc::new(FixtureCapabilityState::new(options.tools)?);
+        let controller = FixtureCapabilityController {
+            state: Arc::clone(&state),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("bind fixture capability MCP listener")?;
+        let address = listener
+            .local_addr()
+            .context("read fixture capability listener address")?;
+        let endpoint = format!("http://{address}");
+        let router = Router::new().route("/", post(handle_mcp)).with_state(state);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            });
+            if let Err(error) = server.await {
+                tracing::warn!(%error, "fixture capability MCP server stopped unexpectedly");
+            }
+        });
+        Ok(Self {
+            controller,
+            endpoint,
+            shutdown: Some(shutdown_tx),
+            task: Some(task),
+        })
+    }
+
+    pub(super) fn controller(&self) -> &FixtureCapabilityController {
+        &self.controller
+    }
+
+    pub(super) fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub(super) fn stop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for FixtureCapabilityRuntime {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+struct FixtureCapabilityState {
+    tools: BTreeMap<String, FixtureCapabilityTool>,
+    observations: StdMutex<FixtureCapabilityObservations>,
+    arrival_notify: Notify,
+}
+
+impl FixtureCapabilityState {
+    fn new(tools: Vec<FixtureCapabilityTool>) -> Result<Self> {
+        let mut indexed = BTreeMap::new();
+        for tool in tools {
+            if tool.name.trim().is_empty() {
+                bail!("fixture capability tool name must be non-empty");
+            }
+            if !tool.input_schema.is_object() {
+                bail!(
+                    "fixture capability `{}` input schema must be an object",
+                    tool.name
+                );
+            }
+            if tool.outcomes.is_empty() {
+                bail!(
+                    "fixture capability `{}` needs at least one outcome",
+                    tool.name
+                );
+            }
+            for outcome in &tool.outcomes {
+                if matches!(
+                    outcome,
+                    FixtureCapabilityOutcome::SuccessWithInput { output }
+                        if !output.is_object()
+                ) {
+                    bail!(
+                        "fixture capability `{}` success-with-input output must be an object",
+                        tool.name
+                    );
+                }
+            }
+            let name = tool.name.clone();
+            if indexed.insert(name.clone(), tool).is_some() {
+                bail!("duplicate fixture capability tool `{name}`");
+            }
+        }
+        Ok(Self {
+            tools: indexed,
+            observations: StdMutex::new(FixtureCapabilityObservations::default()),
+            arrival_notify: Notify::new(),
+        })
+    }
+
+    fn record_call(
+        &self,
+        invocation_id: String,
+        capability: String,
+        input: Value,
+    ) -> Result<RecordCall> {
+        let tool = self
+            .tools
+            .get(&capability)
+            .with_context(|| format!("unknown fixture capability `{capability}`"))?;
+        let item_key = match tool.item_key_pointer.as_deref() {
+            Some(pointer) => extract_map_key(&input, pointer)
+                .with_context(|| format!("extract fixture map key for `{capability}`"))?,
+            None => String::new(),
+        };
+        let mut observations = lock_unpoisoned(&self.observations);
+        observations.next_transport_order += 1;
+        let transport_order = observations.next_transport_order;
+        if let Some(effect) = observations.effects.get(&invocation_id).cloned() {
+            let logical_arrival_order = effect.call.arrival_order;
+            let conflict = effect.call.capability != capability
+                || effect.call.item_key != item_key
+                || effect.call.input != input;
+            observations
+                .transport_attempts
+                .push(FixtureCapabilityAttempt {
+                    invocation_id,
+                    capability,
+                    item_key,
+                    input,
+                    arrival_order: transport_order,
+                    logical_arrival_order,
+                    is_replay: true,
+                });
+            return Ok(if conflict {
+                RecordCall::Conflict
+            } else {
+                RecordCall::Effect(effect)
+            });
+        }
+
+        observations.next_unique_order += 1;
+        let unique_order = observations.next_unique_order;
+        let script_index = observations
+            .tool_script_cursors
+            .entry(capability.clone())
+            .or_default();
+        let outcome = tool
+            .outcomes
+            .get(*script_index)
+            .or_else(|| tool.outcomes.last())
+            .context("validated fixture outcome script became empty")?
+            .clone();
+        *script_index += 1;
+        let call = FixtureCapabilityCall {
+            invocation_id: invocation_id.clone(),
+            capability: capability.clone(),
+            item_key: item_key.clone(),
+            input: input.clone(),
+            arrival_order: unique_order,
+        };
+        let effect = Arc::new(LogicalEffect::new(call.clone(), outcome));
+        observations.calls.push(call);
+        observations
+            .transport_attempts
+            .push(FixtureCapabilityAttempt {
+                invocation_id: invocation_id.clone(),
+                capability,
+                item_key,
+                input,
+                arrival_order: transport_order,
+                logical_arrival_order: unique_order,
+                is_replay: false,
+            });
+        observations
+            .effects
+            .insert(invocation_id, Arc::clone(&effect));
+        drop(observations);
+        self.arrival_notify.notify_waiters();
+        Ok(RecordCall::Effect(effect))
+    }
+
+    fn listed_tools(&self) -> Vec<Value> {
+        self.tools
+            .values()
+            .map(|tool| {
+                json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.input_schema,
+                    "annotations": {
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": true,
+                        "openWorldHint": false
+                    }
+                })
+            })
+            .collect()
+    }
+}
+
+#[derive(Default)]
+struct FixtureCapabilityObservations {
+    calls: Vec<FixtureCapabilityCall>,
+    transport_attempts: Vec<FixtureCapabilityAttempt>,
+    effects: HashMap<String, Arc<LogicalEffect>>,
+    tool_script_cursors: HashMap<String, usize>,
+    next_unique_order: u64,
+    next_transport_order: u64,
+}
+
+struct LogicalEffect {
+    call: FixtureCapabilityCall,
+    outcome: FixtureCapabilityOutcome,
+    resolution: StdMutex<Option<EffectResolution>>,
+    resolved: Notify,
+}
+
+impl LogicalEffect {
+    fn new(call: FixtureCapabilityCall, outcome: FixtureCapabilityOutcome) -> Self {
+        Self {
+            call,
+            outcome,
+            resolution: StdMutex::new(None),
+            resolved: Notify::new(),
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        lock_unpoisoned(&self.resolution).is_none()
+    }
+
+    fn resolve(&self, resolution: EffectResolution) {
+        let mut current = lock_unpoisoned(&self.resolution);
+        if current.is_none() {
+            *current = Some(resolution);
+            drop(current);
+            self.resolved.notify_waiters();
+        }
+    }
+
+    async fn wait(&self) -> EffectResolution {
+        loop {
+            let notified = self.resolved.notified();
+            if let Some(resolution) = lock_unpoisoned(&self.resolution).clone() {
+                return resolution;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[derive(Clone)]
+enum EffectResolution {
+    Outcome(FixtureCapabilityOutcome),
+    Reset,
+}
+
+enum RecordCall {
+    Effect(Arc<LogicalEffect>),
+    Conflict,
+}
+
+async fn handle_mcp(
+    State(state): State<Arc<FixtureCapabilityState>>,
+    Json(request): Json<Value>,
+) -> Response {
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match method {
+        "initialize" => json_rpc_result(
+            id,
+            json!({
+                "protocolVersion": FIXTURE_MCP_PROTOCOL_VERSION,
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "moa-fixture-capability", "version": "1" }
+            }),
+        ),
+        "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
+        "tools/list" => json_rpc_result(id, json!({ "tools": state.listed_tools() })),
+        "tools/call" => handle_tool_call(state, id, request.get("params")).await,
+        _ => json_rpc_error(id, -32601, format!("unknown fixture MCP method `{method}`")),
+    }
+}
+
+async fn handle_tool_call(
+    state: Arc<FixtureCapabilityState>,
+    id: Value,
+    params: Option<&Value>,
+) -> Response {
+    let Some(params) = params.and_then(Value::as_object) else {
+        return json_rpc_error(id, -32602, "tools/call params must be an object");
+    };
+    let Some(capability) = params.get("name").and_then(Value::as_str) else {
+        return json_rpc_error(id, -32602, "tools/call name must be a string");
+    };
+    let input = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let Some(invocation_id) = params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("moa/toolInvocationId"))
+        .and_then(Value::as_str)
+    else {
+        return json_rpc_error(
+            id,
+            -32602,
+            "tools/call _meta.moa/toolInvocationId must be a string",
+        );
+    };
+    let record = match state.record_call(invocation_id.to_string(), capability.to_string(), input) {
+        Ok(record) => record,
+        Err(error) => return json_rpc_error(id, -32602, error.to_string()),
+    };
+    let RecordCall::Effect(effect) = record else {
+        return json_rpc_error(
+            id,
+            -32602,
+            "one tool invocation id cannot carry conflicting capability input",
+        );
+    };
+    match effect.wait().await {
+        EffectResolution::Outcome(FixtureCapabilityOutcome::Success { output }) => {
+            successful_tool_response(id, output)
+        }
+        EffectResolution::Outcome(FixtureCapabilityOutcome::SuccessWithInput { output }) => {
+            let Value::Object(mut merged) = effect.call.input.clone() else {
+                return json_rpc_error(
+                    id,
+                    -32602,
+                    "success-with-input requires object tool arguments",
+                );
+            };
+            let Value::Object(output) = output else {
+                return json_rpc_error(
+                    id,
+                    -32603,
+                    "validated success-with-input output stopped being an object",
+                );
+            };
+            merged.extend(output);
+            successful_tool_response(id, Value::Object(merged))
+        }
+        EffectResolution::Outcome(FixtureCapabilityOutcome::RetryableFailure { message }) => {
+            (StatusCode::SERVICE_UNAVAILABLE, message).into_response()
+        }
+        EffectResolution::Outcome(FixtureCapabilityOutcome::TerminalFailure { message }) => {
+            json_rpc_result(
+                id,
+                json!({
+                    "content": [{ "type": "text", "text": message }],
+                    "structuredContent": { "error": message },
+                    "isError": true
+                }),
+            )
+        }
+        EffectResolution::Reset => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "fixture capability observations reset",
+        )
+            .into_response(),
+    }
+}
+
+fn successful_tool_response(id: Value, output: Value) -> Response {
+    let text = match serde_json::to_string(&output) {
+        Ok(text) => text,
+        Err(error) => format!("fixture output serialization failed: {error}"),
+    };
+    json_rpc_result(
+        id,
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": output,
+            "isError": false
+        }),
+    )
+}
+
+fn json_rpc_result(id: Value, result: Value) -> Response {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result
+        })),
+    )
+        .into_response()
+}
+
+fn json_rpc_error(id: Value, code: i64, message: impl Into<String>) -> Response {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": code, "message": message.into() }
+        })),
+    )
+        .into_response()
+}
+
+fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use moa_execution::bindings::extract_map_key;
+    use moa_execution::state::ExecutionTaskId;
+    use serde_json::{Value, json};
+    use uuid::Uuid;
+
+    use super::{
+        FixtureCapabilityOptions, FixtureCapabilityOutcome, FixtureCapabilityRuntime,
+        FixtureCapabilityTool,
+    };
+
+    fn tool() -> FixtureCapabilityTool {
+        FixtureCapabilityTool {
+            name: "fixture_map".to_string(),
+            description: "Returns one deterministic company result.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "company": { "type": "string" } },
+                "required": ["company"],
+                "additionalProperties": false
+            }),
+            item_key_pointer: Some("/company".to_string()),
+            outcomes: vec![FixtureCapabilityOutcome::SuccessWithInput {
+                output: json!({ "mentions": 7 }),
+            }],
+        }
+    }
+
+    fn request(id: u64, method: &str, params: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        })
+    }
+
+    #[tokio::test]
+    async fn streamable_http_server_deduplicates_logical_effects_by_invocation_id() {
+        // Pins: transport replays await one controller-owned logical effect while every arrival
+        // remains observable and map task IDs use the production canonical-key algorithm.
+        let runtime = FixtureCapabilityRuntime::start(FixtureCapabilityOptions {
+            tools: vec![tool()],
+            orchestrator_env: Vec::new(),
+        })
+        .await
+        .expect("start fixture capability server");
+        let client = reqwest::Client::new();
+
+        let initialized = client
+            .post(runtime.endpoint())
+            .json(&request(
+                1,
+                "initialize",
+                json!({ "protocolVersion": "2025-03-26" }),
+            ))
+            .send()
+            .await
+            .expect("initialize fixture MCP server")
+            .json::<Value>()
+            .await
+            .expect("decode initialize response");
+        assert_eq!(
+            initialized.pointer("/result/protocolVersion"),
+            Some(&json!("2025-03-26"))
+        );
+
+        let listed = client
+            .post(runtime.endpoint())
+            .json(&request(2, "tools/list", json!({})))
+            .send()
+            .await
+            .expect("list fixture MCP tools")
+            .json::<Value>()
+            .await
+            .expect("decode tool list response");
+        assert_eq!(
+            listed.pointer("/result/tools/0/name"),
+            Some(&json!("fixture_map"))
+        );
+        assert_eq!(
+            listed.pointer("/result/tools/0/annotations/idempotentHint"),
+            Some(&json!(true))
+        );
+
+        let call = request(
+            3,
+            "tools/call",
+            json!({
+                "name": "fixture_map",
+                "arguments": { "company": "AAPL" },
+                "_meta": { "moa/toolInvocationId": "invocation-1" }
+            }),
+        );
+        let first = tokio::spawn({
+            let client = client.clone();
+            let endpoint = runtime.endpoint().to_string();
+            let call = call.clone();
+            async move { client.post(endpoint).json(&call).send().await }
+        });
+        let second = tokio::spawn({
+            let client = client.clone();
+            let endpoint = runtime.endpoint().to_string();
+            async move { client.post(endpoint).json(&call).send().await }
+        });
+
+        let calls = runtime
+            .controller()
+            .wait_for_calls(1, Duration::from_secs(2))
+            .await
+            .expect("wait for unique logical call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].item_key, "string:\"AAPL\"");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while runtime.controller().transport_attempts().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both transport attempts should arrive");
+        runtime.controller().release(1);
+
+        let first = first
+            .await
+            .expect("join first transport")
+            .expect("first transport response")
+            .json::<Value>()
+            .await
+            .expect("decode first response");
+        let second = second
+            .await
+            .expect("join replayed transport")
+            .expect("replayed transport response")
+            .json::<Value>()
+            .await
+            .expect("decode replayed response");
+        assert_eq!(
+            first.pointer("/result/structuredContent"),
+            Some(&json!({ "company": "AAPL", "mentions": 7 }))
+        );
+        assert_eq!(second, first);
+        assert_eq!(runtime.controller().calls().len(), 1);
+        let attempts = runtime.controller().transport_attempts();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(
+            attempts.iter().filter(|attempt| attempt.is_replay).count(),
+            1
+        );
+        let run_uid = Uuid::from_u128(17);
+        let item_key =
+            extract_map_key(&json!({ "company": "AAPL" }), "/company").expect("production map key");
+        assert_eq!(
+            runtime
+                .controller()
+                .derived_task_ids(run_uid, "screen")
+                .expect("derive fixture task ids"),
+            vec![
+                ExecutionTaskId::derive(run_uid, "screen", &item_key)
+                    .expect("derive expected production task id")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnected_first_handler_cannot_strand_a_replayed_logical_effect() {
+        // Pins: the controller, not an individual HTTP future, owns pending invocation state.
+        let runtime = FixtureCapabilityRuntime::start(FixtureCapabilityOptions {
+            tools: vec![tool()],
+            orchestrator_env: Vec::new(),
+        })
+        .await
+        .expect("start fixture capability server");
+        let client = reqwest::Client::new();
+        let call = request(
+            1,
+            "tools/call",
+            json!({
+                "name": "fixture_map",
+                "arguments": { "company": "NVDA" },
+                "_meta": { "moa/toolInvocationId": "disconnected" }
+            }),
+        );
+        let first = tokio::spawn({
+            let client = client.clone();
+            let endpoint = runtime.endpoint().to_string();
+            let call = call.clone();
+            async move { client.post(endpoint).json(&call).send().await }
+        });
+        runtime
+            .controller()
+            .wait_for_calls(1, Duration::from_secs(2))
+            .await
+            .expect("wait for first handler");
+        first.abort();
+        let _ = first.await;
+
+        let replay = tokio::spawn({
+            let endpoint = runtime.endpoint().to_string();
+            async move { client.post(endpoint).json(&call).send().await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while runtime.controller().transport_attempts().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("replayed transport should reach the fixture");
+        runtime.controller().release(1);
+
+        let response = replay
+            .await
+            .expect("join replayed transport")
+            .expect("replayed transport response")
+            .json::<Value>()
+            .await
+            .expect("decode replayed result");
+        assert_eq!(
+            response.pointer("/result/structuredContent"),
+            Some(&json!({ "company": "NVDA", "mentions": 7 }))
+        );
+        assert_eq!(runtime.controller().calls().len(), 1);
+        assert_eq!(runtime.controller().transport_attempts().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn scripted_outcomes_advance_only_for_new_logical_invocations() {
+        // Pins: a transport replay receives the cached retryable failure and cannot consume the
+        // next scripted success intended for a new execution-task generation.
+        let mut retry_tool = tool();
+        retry_tool.outcomes = vec![
+            FixtureCapabilityOutcome::RetryableFailure {
+                message: "try again".to_string(),
+            },
+            FixtureCapabilityOutcome::SuccessWithInput {
+                output: json!({ "mentions": 9 }),
+            },
+        ];
+        let runtime = FixtureCapabilityRuntime::start(FixtureCapabilityOptions {
+            tools: vec![retry_tool],
+            orchestrator_env: Vec::new(),
+        })
+        .await
+        .expect("start retry fixture capability server");
+        let client = reqwest::Client::new();
+        let first_call = request(
+            1,
+            "tools/call",
+            json!({
+                "name": "fixture_map",
+                "arguments": { "company": "AMD" },
+                "_meta": { "moa/toolInvocationId": "generation-1" }
+            }),
+        );
+        let first = tokio::spawn({
+            let client = client.clone();
+            let endpoint = runtime.endpoint().to_string();
+            let first_call = first_call.clone();
+            async move { client.post(endpoint).json(&first_call).send().await }
+        });
+        runtime
+            .controller()
+            .wait_for_calls(1, Duration::from_secs(2))
+            .await
+            .expect("wait for first generation");
+        runtime.controller().release(1);
+        let first = first
+            .await
+            .expect("join first generation")
+            .expect("first generation response");
+        assert_eq!(first.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+        let replay = client
+            .post(runtime.endpoint())
+            .json(&first_call)
+            .send()
+            .await
+            .expect("replay first generation");
+        assert_eq!(replay.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(runtime.controller().calls().len(), 1);
+
+        let second_call = request(
+            2,
+            "tools/call",
+            json!({
+                "name": "fixture_map",
+                "arguments": { "company": "AMD" },
+                "_meta": { "moa/toolInvocationId": "generation-2" }
+            }),
+        );
+        let second = tokio::spawn({
+            let endpoint = runtime.endpoint().to_string();
+            async move { client.post(endpoint).json(&second_call).send().await }
+        });
+        runtime
+            .controller()
+            .wait_for_calls(2, Duration::from_secs(2))
+            .await
+            .expect("wait for second generation");
+        runtime.controller().release(1);
+        let second = second
+            .await
+            .expect("join second generation")
+            .expect("second generation response")
+            .json::<Value>()
+            .await
+            .expect("decode second generation success");
+        assert_eq!(
+            second.pointer("/result/structuredContent"),
+            Some(&json!({ "company": "AMD", "mentions": 9 }))
+        );
+        assert_eq!(runtime.controller().calls().len(), 2);
+        assert_eq!(runtime.controller().transport_attempts().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn reset_cancels_pending_effects_and_starts_a_fresh_observation_window() {
+        // Pins: resetting between scenarios cannot strand an HTTP handler or retain observations.
+        let runtime = FixtureCapabilityRuntime::start(FixtureCapabilityOptions {
+            tools: vec![tool()],
+            orchestrator_env: Vec::new(),
+        })
+        .await
+        .expect("start fixture capability server");
+        let client = reqwest::Client::new();
+        let pending = tokio::spawn({
+            let endpoint = runtime.endpoint().to_string();
+            async move {
+                client
+                    .post(endpoint)
+                    .json(&request(
+                        1,
+                        "tools/call",
+                        json!({
+                            "name": "fixture_map",
+                            "arguments": { "company": "MSFT" },
+                            "_meta": { "moa/toolInvocationId": "pending" }
+                        }),
+                    ))
+                    .send()
+                    .await
+            }
+        });
+        runtime
+            .controller()
+            .wait_for_calls(1, Duration::from_secs(2))
+            .await
+            .expect("wait for pending logical call");
+
+        runtime.controller().reset();
+
+        let response = pending
+            .await
+            .expect("join reset transport")
+            .expect("reset transport response");
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(runtime.controller().calls().is_empty());
+        assert!(runtime.controller().transport_attempts().is_empty());
+    }
+}

@@ -20,8 +20,8 @@ const DATASETS: &[&str] = &[
     "tool_calls",
     "task_segments",
     "skills",
-    "procedure_runs",
-    "procedure_node_runs",
+    "execution_runs",
+    "execution_tasks",
     "learning_candidates",
     "experiment_runs",
     "events",
@@ -159,14 +159,35 @@ fn request_for(dataset: &str) -> AnalyticsQueryRequest {
             ],
             vec![between_window("started_at")],
         ),
-        "procedure_runs" => (
-            vec![dim("procedure_ref"), dim("status"), dim("error_present")],
-            vec![count(), measure("duration_ms", AnalyticsAggregation::P95)],
+        "execution_runs" => (
+            vec![
+                dim("active_plan_hash"),
+                dim("skill_template_revision_uid"),
+                dim("status"),
+                dim("logical_task_count"),
+            ],
+            vec![
+                count(),
+                measure("actual_cost_microusd", AnalyticsAggregation::Sum),
+                measure("queue_to_start_ms", AnalyticsAggregation::P95),
+                measure("duration_ms", AnalyticsAggregation::P95),
+            ],
             vec![between_window("started_at")],
         ),
-        "procedure_node_runs" => (
-            vec![dim("node_id"), dim("status")],
-            vec![count(), measure("duration_ms", AnalyticsAggregation::P95)],
+        "execution_tasks" => (
+            vec![
+                dim("capability_name"),
+                dim("capability_version"),
+                dim("status"),
+                dim("failure_class"),
+            ],
+            vec![
+                count(),
+                measure("actual_cost_microusd", AnalyticsAggregation::Sum),
+                measure("citation_count", AnalyticsAggregation::Sum),
+                measure("queue_latency_ms", AnalyticsAggregation::P95),
+                measure("duration_ms", AnalyticsAggregation::P95),
+            ],
             vec![between_window("started_at")],
         ),
         "learning_candidates" => (
@@ -375,5 +396,54 @@ fn clickhouse_events_raw_reads_are_duplicate_tolerant_offline() {
     assert!(
         !events.contains(" count()"),
         "events dataset must not use raw count(): {events}"
+    );
+}
+
+#[test]
+fn execution_catalog_is_normalized_and_has_clickhouse_field_parity_offline() {
+    // Pins: Task 11 exposes canonical normalized execution fields on both
+    // backends and never restores Task 9 compatibility aliases or raw prose.
+    let catalog = analytics_catalog();
+    for dataset_id in ["execution_runs", "execution_tasks"] {
+        let dataset = catalog
+            .datasets
+            .iter()
+            .find(|dataset| dataset.id == dataset_id)
+            .expect("execution dataset");
+        let fields: std::collections::BTreeSet<_> = dataset
+            .fields
+            .iter()
+            .map(|field| field.id.as_str())
+            .collect();
+        for forbidden in [
+            "task_uid",
+            "source_ref",
+            "plan_hash",
+            "capability_ref",
+            "error",
+            "error_present",
+        ] {
+            assert!(
+                !fields.contains(forbidden),
+                "{dataset_id} restored forbidden field {forbidden}"
+            );
+        }
+    }
+
+    let run_sql = compile("execution_runs", AnalyticsBackend::ClickHouse).sql;
+    assert!(
+        run_sql.contains("d.active_plan_hash")
+            && run_sql.contains("toString(d.skill_template_revision_uid)")
+            && run_sql.contains("d.logical_task_count")
+            && run_sql.contains("d.duration_ms"),
+        "{run_sql}"
+    );
+    let task_sql = compile("execution_tasks", AnalyticsBackend::ClickHouse).sql;
+    assert!(
+        task_sql.contains("d.capability_name")
+            && task_sql.contains("d.capability_version")
+            && task_sql.contains("d.failure_class")
+            && task_sql.contains("d.duration_ms"),
+        "{task_sql}"
     );
 }

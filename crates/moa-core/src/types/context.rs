@@ -497,6 +497,7 @@ impl WorkingContext {
             max_output_tokens: Some(max_output),
             temperature: None,
             response_format: None,
+            native_web_search: super::completion::NativeWebSearchPolicy::ProviderDefault,
             metadata: self.metadata,
         }
     }

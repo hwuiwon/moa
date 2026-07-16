@@ -4,7 +4,8 @@ use chrono::{DateTime, Utc};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::{
     types::action_policy::ActionRuleScope, types::agent::AgentSessionSelection,
-    types::channel::Attachment, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::channel::Attachment, types::execution_planning::PinnedExecutionTemplateRef,
+    types::identifiers::ModelId, types::identifiers::SessionId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -126,7 +127,7 @@ pub enum ExperimentTrialStopReason {
     BudgetCap,
     /// The simulator indicated it had no more user-visible messages.
     SimulatorDone,
-    /// The target session or procedure reached a terminal state.
+    /// The target session or execution run reached a terminal state.
     TargetTerminal,
     /// The trial stopped because execution failed.
     Error,
@@ -185,15 +186,17 @@ pub enum ExperimentTarget {
         /// Input attachments supplied with the prompt.
         attachments: Vec<Attachment>,
     },
-    /// Run a deterministic skill-backed procedure.
-    Procedure {
-        /// Skill artifact reference carrying the procedure such as `skill://name`.
-        procedure_ref: String,
-        /// Procedure input payload.
+    /// Run one exact published execution-template revision.
+    ExecutionTemplate {
+        /// Exact published skill template revision.
+        template: PinnedExecutionTemplateRef,
+        /// Explicit immutable execution objective.
+        objective: String,
+        /// Structured execution-template input payload.
         input: Value,
-        /// Optional session linked to procedure history.
+        /// Optional caller-owned session; `None` creates an internal experiment session.
         session_id: Option<SessionId>,
-        /// Optional idempotency key for live procedure admission.
+        /// Optional idempotency key for execution admission.
         idempotency_key: Option<String>,
     },
 }
@@ -204,7 +207,7 @@ impl ExperimentTarget {
     pub const fn kind(&self) -> ExperimentTargetKind {
         match self {
             Self::AgentLoop { .. } => ExperimentTargetKind::AgentLoop,
-            Self::Procedure { .. } => ExperimentTargetKind::Procedure,
+            Self::ExecutionTemplate { .. } => ExperimentTargetKind::ExecutionTemplate,
         }
     }
 }
@@ -220,8 +223,8 @@ pub struct ExperimentVariant {
     pub artifact_revision_uids: Vec<Uuid>,
     /// Skill artifact references included in this variant.
     pub skill_refs: Vec<String>,
-    /// Skill procedure reference included in this variant.
-    pub procedure_ref: Option<String>,
+    /// Exact execution-template revision included in this variant.
+    pub execution_template: Option<PinnedExecutionTemplateRef>,
     /// Variant-specific metadata.
     pub metadata: Value,
 }
@@ -286,8 +289,8 @@ pub struct NewExperimentRun {
     pub score_run_id: Uuid,
     /// Session linked to the experiment run, when one exists.
     pub session_id: Option<SessionId>,
-    /// Procedure run linked to the experiment run, when one exists.
-    pub procedure_run_uid: Option<Uuid>,
+    /// Execution run linked to the experiment run, when one exists.
+    pub execution_run_uid: Option<Uuid>,
     /// Artifact revisions associated with this experiment run.
     pub artifact_revision_uids: Vec<Uuid>,
     /// Optional idempotency key for scoped create deduplication.
@@ -352,8 +355,8 @@ pub struct ExperimentRunRecord {
     pub score_run_id: Uuid,
     /// Session linked to the experiment run, when one exists.
     pub session_id: Option<SessionId>,
-    /// Procedure run linked to the experiment run, when one exists.
-    pub procedure_run_uid: Option<Uuid>,
+    /// Execution run linked to the experiment run, when one exists.
+    pub execution_run_uid: Option<Uuid>,
     /// Artifact revisions associated with this experiment run.
     pub artifact_revision_uids: Vec<Uuid>,
     /// Optional idempotency key for scoped create deduplication.
@@ -409,8 +412,8 @@ pub struct ExperimentTrialRecord {
     pub seed: Option<String>,
     /// Session linked to the trial, when one exists.
     pub session_id: Option<SessionId>,
-    /// Procedure run linked to the trial, when one exists.
-    pub procedure_run_uid: Option<Uuid>,
+    /// Execution run linked to the trial, when one exists.
+    pub execution_run_uid: Option<Uuid>,
     /// Score run identifier used for trial-level scores.
     pub score_run_id: Uuid,
     /// Number of simulator-target turns persisted for this trial.

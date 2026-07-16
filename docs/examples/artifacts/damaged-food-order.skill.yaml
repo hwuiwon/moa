@@ -2,7 +2,7 @@ api_version: moa.artifact/v1
 kind: skill
 metadata:
   name: damaged-food-order
-  description: Skill with a deterministic procedure for damaged food delivery reports.
+  description: Skill with a reusable execution plan for damaged food delivery reports.
   tags:
     - support
     - food-delivery
@@ -19,77 +19,115 @@ definition:
           type: string
         evidence_summary:
           type: string
-    procedure:
-      input_schema:
-        type: object
-        properties:
-          order_id:
-            type: string
-          evidence_summary:
-            type: string
-      state_schema:
-        type: object
-      nodes:
-        - id: start
-          kind: start
-          ui:
-            x: 80
-            y: 160
-        - id: verify_order
-          kind: action
-          ref: action://orders.get_order_info
-          ui:
-            x: 260
-            y: 160
-        - id: evidence_sufficient
-          kind: condition
-          condition:
-            type: equals
-            left: $.evidence.sufficient
-            right: true
-          ui:
-            x: 460
-            y: 160
-        - id: reorder_confirmation
-          kind: agent
-          skill_refs:
-            - skill://customer-reassurance
-          max_turns: 2
-          ui:
-            x: 680
-            y: 110
-        - id: notify_restaurant
-          kind: action
-          ref: action://orders.submit_issue
-          ui:
-            x: 680
-            y: 230
-        - id: done
-          kind: end
-          ui:
-            x: 900
-            y: 160
-      edges:
-        - from: start
-          to: verify_order
-        - from: verify_order
-          to: evidence_sufficient
-        - from: evidence_sufficient
-          to: reorder_confirmation
-          when:
-            type: equals
-            left: $.evidence.sufficient
-            right: true
-        - from: evidence_sufficient
-          to: notify_restaurant
-          when:
-            type: equals
-            left: $.evidence.sufficient
-            right: false
-        - from: reorder_confirmation
-          to: done
-        - from: notify_restaurant
-          to: done
+    execution_plan:
+      goal:
+        requirements:
+          - id: req_damaged_order
+            description: Resolve the damaged-food order from verified evidence.
+        deliverables: []
+        coverage: []
+        constraints: []
+        completion_checks:
+          - id: check_output
+            description: Validate the final resolution output.
+            requirement_ids: [req_damaged_order]
+            constraint_ids: []
+            kind:
+              kind: output_schema
+      plan:
+        schema_version: 1
+        input_schema:
+          type: object
+          properties:
+            order_id:
+              type: string
+            evidence_summary:
+              type: string
+        output_schema:
+          type: object
+        nodes:
+          - id: verify_order
+            requirement_ids: [req_damaged_order]
+            depends_on: []
+            input:
+              order_id:
+                $ref: $.input.order_id
+              evidence_summary:
+                $ref: $.input.evidence_summary
+            output_schema:
+              type: object
+            operation:
+              kind: capability
+              reference:
+                name: action://orders.get_order_info
+                version: v1
+            retry:
+              max_attempts: 2
+              initial_backoff_ms: 100
+              max_backoff_ms: 1000
+          - id: reorder_confirmation
+            requirement_ids: [req_damaged_order]
+            depends_on: [verify_order]
+            when:
+              kind: equals
+              reference:
+                $ref: $.nodes.verify_order.output.evidence_sufficient
+              value: true
+            input:
+              order:
+                $ref: $.nodes.verify_order.output
+            output_schema:
+              type: object
+            operation:
+              kind: agent
+              instructions: Confirm the replacement order and reassure the customer.
+              skill_refs:
+                - skill://customer-reassurance
+              capability_refs: []
+              max_turns: 2
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0
+          - id: notify_restaurant
+            requirement_ids: [req_damaged_order]
+            depends_on: [verify_order]
+            when:
+              kind: equals
+              reference:
+                $ref: $.nodes.verify_order.output.evidence_sufficient
+              value: false
+            input:
+              order:
+                $ref: $.nodes.verify_order.output
+            output_schema:
+              type: object
+            operation:
+              kind: capability
+              reference:
+                name: action://orders.submit_issue
+                version: v1
+            retry:
+              max_attempts: 2
+              initial_backoff_ms: 100
+              max_backoff_ms: 1000
+          - id: output
+            requirement_ids: [req_damaged_order]
+            depends_on: [reorder_confirmation, notify_restaurant]
+            input: {}
+            output_schema:
+              type: object
+            operation:
+              kind: output
+              value:
+                reorder_confirmation:
+                  $ref: $.nodes.reorder_confirmation.output
+                restaurant_notification:
+                  $ref: $.nodes.notify_restaurant.output
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0
 ui:
   label: Damaged food order
   icon: package-x
@@ -98,12 +136,6 @@ ui:
       width: 1024
       height: 420
 reference_resolutions:
-  - path: definition.spec.procedure.nodes[1].ref
-    ref: action://orders.get_order_info
-    state: unresolved
-  - path: definition.spec.procedure.nodes[3].skill_refs[0]
+  - path: definition.spec.execution_plan.plan.nodes[1].operation.skill_refs[0]
     ref: skill://customer-reassurance
-    state: unresolved
-  - path: definition.spec.procedure.nodes[4].ref
-    ref: action://orders.submit_issue
     state: unresolved

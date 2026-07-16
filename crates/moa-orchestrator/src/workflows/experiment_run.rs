@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
-use moa_artifacts::registry::{ArtifactRegistry, ArtifactRunStatus, StoredArtifactRevision};
+use moa_artifacts::registry::{ArtifactRegistry, StoredArtifactRevision};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::experiments::{
@@ -28,8 +28,6 @@ use moa_experiments::store::ExperimentStore;
 use moa_observability::record_experiment_run;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_session::PostgresSessionStore;
-use moa_skills::procedure::runtime::{ProcedureRuntime, StartProcedureRun};
-use restate_sdk::context::Request;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,36 +35,35 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::objects::session::SessionClient;
+use crate::restate_identity::with_identity_headers;
 use crate::services::session_store::inner::{
     apply_agent_model_policy, create_session_for_identity, resolve_agent_context_for_session,
 };
 use crate::workflows::durable_utc_now;
-use crate::workflows::errors::{
-    bad_request, handler_error_message, moa_error_to_handler_error, procedure_handler_error,
+use crate::workflows::errors::{bad_request, handler_error_message, moa_error_to_handler_error};
+use crate::workflows::experiment_cancel::{
+    K_CANCEL_IDENTITY, K_EXECUTION_CONTACT_ID, K_EXECUTION_RUN_UID, forward_child_cancellation,
 };
-use crate::workflows::experiment_cancel::{K_CANCEL_IDENTITY, forward_child_cancellation};
 use crate::workflows::experiment_errors::{
     non_retryable_handler_error, plan_expansion_error_to_handler_error,
 };
 use crate::workflows::experiment_trial_run::{
     ExperimentTrialRunClient, ExperimentTrialRunWorkflowRequest, trial_workflow_key,
 };
-use crate::workflows::procedure_target_wait::{self, ProcedureWaitOutcome};
 
 mod plan_expansion;
 mod status;
-mod target_execution;
+pub(crate) mod target_execution;
 
 use plan_expansion::run_experiment_plan;
-use status::{procedure_status_response, status_response};
-use target_execution::{run_agent_loop_target, run_procedure_target};
+use status::{run_status_response, status_response};
+use target_execution::{run_agent_loop_target, run_execution_template_target};
 
 const K_RUN_UID: &str = "run_uid";
 const K_TENANT_ID: &str = "tenant_id";
 const K_SCORE_RUN_ID: &str = "score_run_id";
 const K_STATUS: &str = "status";
 const K_SESSION_ID: &str = "session_id";
-const K_PROCEDURE_RUN_UID: &str = "procedure_run_uid";
 const PLAN_CHILD_COMPLETION_WAIT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Workflow input for one live behavior experiment run.
@@ -136,6 +133,7 @@ impl ExperimentRun for ExperimentRunImpl {
         ctx: WorkflowContext<'_>,
         request: Json<ExperimentRunWorkflowRequest>,
     ) -> Result<Json<ExperimentRunStatusResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExperimentRun", "run");
         let request = request.into_inner();
         if request.run_uid.to_string() != ctx.key() {
@@ -184,6 +182,7 @@ impl ExperimentRun for ExperimentRunImpl {
         ctx: SharedWorkflowContext<'_>,
         request: Json<ExperimentRunStatusRequest>,
     ) -> Result<Json<ExperimentRunStatusResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExperimentRun", "status");
         let request = request.into_inner();
         if request.run_uid.to_string() != ctx.key() {
@@ -203,16 +202,17 @@ impl ExperimentRun for ExperimentRunImpl {
 
     #[tracing::instrument(skip(self, ctx, reason))]
     // SAFETY: control-only cancellation forward after Experiments/cancel authz;
-    // the child Session, ProcedureExecution, and ExperimentTrialRun request_cancel
+    // the child Session, Execution, and ExperimentTrialRun request_cancel
     // handlers enforce their own authorization.
     async fn request_cancel(
         &self,
         ctx: SharedWorkflowContext<'_>,
         reason: Json<String>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExperimentRun", "request_cancel");
         let reason = reason.into_inner();
-        // Single-target runs drive a child session/procedure directly.
+        // Single-target runs drive a child Session or Execution directly.
         forward_child_cancellation(&ctx, reason.clone()).await?;
         // Plan runs fan cancellation out to every active trial workflow so their
         // own child targets stop even while the main run loop is blocked waiting
@@ -247,9 +247,13 @@ async fn fan_out_cancellation_to_active_trials(
         return Ok(());
     };
     for trial_key in load_active_trial_keys(ctx, tenant_id, run_uid, pool).await? {
-        ctx.workflow_client::<ExperimentTrialRunClient>(trial_workflow_key(run_uid, &trial_key))
-            .request_cancel(Json::from(reason.clone()))
-            .send();
+        crate::restate_identity::replay_safe_request(
+            ctx.workflow_client::<ExperimentTrialRunClient>(trial_workflow_key(
+                run_uid, &trial_key,
+            ))
+            .request_cancel(Json::from(reason.clone())),
+        )
+        .send();
     }
     Ok(())
 }
@@ -313,17 +317,19 @@ async fn run_experiment_target(
             )
             .await
         }
-        ExperimentTarget::Procedure {
-            procedure_ref,
+        ExperimentTarget::ExecutionTemplate {
+            template,
+            objective,
             input,
             session_id,
             idempotency_key,
         } => {
-            annotate_run_span(&request, Some(ExperimentTargetKind::Procedure));
-            run_procedure_target(
+            annotate_run_span(&request, Some(ExperimentTargetKind::ExecutionTemplate));
+            run_execution_template_target(
                 ctx,
                 request,
-                procedure_ref,
+                template,
+                objective,
                 input,
                 session_id,
                 idempotency_key,
@@ -402,94 +408,17 @@ async fn attach_session(
         .ok_or_else(|| run_not_found(run_uid))
 }
 
-async fn attach_procedure_run(
+async fn attach_execution_run(
     pool: sqlx::PgPool,
     scope: ActionRuleScope,
     run_uid: Uuid,
-    procedure_run_uid: Uuid,
+    execution_run_uid: Uuid,
 ) -> Result<ExperimentRunRecord, HandlerError> {
     ExperimentStore::new(pool)
-        .attach_procedure_run(&scope, run_uid, procedure_run_uid)
+        .attach_execution_run(&scope, run_uid, execution_run_uid)
         .await
         .map_err(moa_error_to_handler_error)?
         .ok_or_else(|| run_not_found(run_uid))
-}
-
-fn new_session_meta(
-    tenant_id: TenantId,
-    model: ModelId,
-    identity: &Identity,
-) -> Result<SessionMeta, HandlerError> {
-    let now = Utc::now();
-    Ok(SessionMeta {
-        id: SessionId::new(),
-        tenant_id,
-        title: Some("Experiment agent-loop run".to_string()),
-        status: SessionStatus::Created,
-        channel: Channel::Chat,
-        model,
-        created_at: now,
-        updated_at: now,
-        created_by: Some(session_actor_ref(identity)?),
-        ..SessionMeta::default()
-    })
-}
-
-fn session_actor_ref(identity: &Identity) -> Result<SessionActorRef, HandlerError> {
-    match identity.identity_type {
-        IdentityType::Operator | IdentityType::Agent => Ok(SessionActorRef::Identity {
-            id: identity.acting_on_behalf_of.unwrap_or(identity.id),
-        }),
-        IdentityType::Service => Err(TerminalError::new_with_code(
-            403,
-            "service identities cannot create agent-loop experiment sessions",
-        )
-        .into()),
-        IdentityType::Contact => Err(TerminalError::new_with_code(
-            403,
-            "contact identities cannot create agent-loop experiment sessions",
-        )
-        .into()),
-    }
-}
-
-fn with_identity_headers<'a, Req, Res>(
-    request: Request<'a, Req, Res>,
-    identity: &Identity,
-) -> Request<'a, Req, Res> {
-    let request = request
-        .header(
-            "x-moa-identity-type".to_string(),
-            identity_type_header(identity.identity_type).to_string(),
-        )
-        .header("x-moa-identity-id".to_string(), identity.id.to_string())
-        .header(
-            "x-moa-tenant-id".to_string(),
-            identity.tenant_id.to_string(),
-        );
-    let request = if let Some(api_key_id) = identity.api_key_id {
-        request.header("x-moa-api-key-id".to_string(), api_key_id.to_string())
-    } else {
-        request
-    };
-    if let Some(user_id) = identity.acting_on_behalf_of {
-        request.header("x-moa-acting-on-behalf-of".to_string(), user_id.to_string())
-    } else {
-        request
-    }
-}
-
-fn identity_type_header(identity_type: IdentityType) -> &'static str {
-    match identity_type {
-        IdentityType::Operator => "operator",
-        IdentityType::Agent => "agent",
-        IdentityType::Service => "service",
-        IdentityType::Contact => "contact",
-    }
-}
-
-fn workflow_runtime(pool: sqlx::PgPool) -> ProcedureRuntime {
-    ProcedureRuntime::new(ArtifactRegistry::new(pool))
 }
 
 fn annotate_run_span(
@@ -648,7 +577,7 @@ mod tests {
             target_model: Some(ModelId::new("gpt-5.1")),
             seed: None,
             session_id: None,
-            procedure_run_uid: None,
+            execution_run_uid: None,
             score_run_id: Uuid::now_v7(),
             turn_count: 0,
             stop_reason: None,

@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::adapters::mcp::McpDiscoveredTool;
+use crate::adapters::mcp::McpDiscoveredToolRegistration;
 use crate::tools::{memory, session_search, tool_result};
 use moa_core::{
     config::ToolBudgetConfig, error::Result, traits::BuiltInTool,
@@ -17,7 +17,7 @@ use crate::tools::sandbox_descriptor::{
     SandboxToolDescriptor, default_sandbox_tool_descriptors, sandbox_tool_descriptors,
 };
 
-use super::DEFAULT_PROVIDER_NAME;
+use super::{DEFAULT_PROVIDER_NAME, ToolRouter};
 
 /// One provider route for a hand-routed tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +38,7 @@ impl HandRoute {
 }
 
 /// Tool execution routing target.
+#[derive(Clone)]
 pub enum ToolExecution {
     /// Built-in Rust implementation.
     BuiltIn(Arc<dyn BuiltInTool>),
@@ -91,7 +92,13 @@ impl RegisteredTool {
         }
     }
 
-    fn mcp(server_name: &str, tool: McpDiscoveredTool) -> Self {
+    fn mcp(server_name: &str, registration: McpDiscoveredToolRegistration) -> Self {
+        let idempotency_class = if registration.allows_idempotent_retry() {
+            IdempotencyClass::Idempotent
+        } else {
+            IdempotencyClass::NonIdempotent
+        };
+        let tool = registration.into_tool();
         let name = tool.name;
         Self {
             definition: ToolDefinition {
@@ -111,7 +118,7 @@ impl RegisteredTool {
                     input_shape: ToolInputShape::Json,
                     diff_strategy: ToolDiffStrategy::None,
                 },
-                idempotency_class: IdempotencyClass::NonIdempotent,
+                idempotency_class,
                 max_output_tokens: 8_000,
             },
             execution: ToolExecution::Mcp {
@@ -200,15 +207,20 @@ impl ToolRegistry {
     }
 
     /// Registers a discovered MCP tool and adds it to the default loadout.
-    pub fn register_mcp_tool(&mut self, server_name: &str, tool: McpDiscoveredTool) -> Result<()> {
-        let name = tool.name.clone();
+    pub fn register_mcp_tool(
+        &mut self,
+        server_name: &str,
+        tool: impl Into<McpDiscoveredToolRegistration>,
+    ) -> Result<()> {
+        let registration = tool.into();
+        let name = registration.tool().name.clone();
         if self.tools.contains_key(&name) {
             return Err(moa_core::error::MoaError::ConfigError(format!(
                 "MCP server {server_name} discovered tool {name}, which conflicts with an existing local tool name"
             )));
         }
         self.tools
-            .insert(name.clone(), RegisteredTool::mcp(server_name, tool));
+            .insert(name.clone(), RegisteredTool::mcp(server_name, registration));
         if !self
             .default_loadout
             .iter()
@@ -234,6 +246,17 @@ impl ToolRegistry {
     /// Returns a tool definition by name.
     pub fn get(&self, name: &str) -> Option<&ToolDefinition> {
         self.tools.get(name).map(|tool| &tool.definition)
+    }
+
+    /// Returns registered definitions with their executable owners in stable name order.
+    pub fn capability_registrations(&self) -> Vec<(ToolDefinition, ToolExecution)> {
+        let mut registrations = self
+            .tools
+            .values()
+            .map(|tool| (tool.definition.clone(), tool.execution.clone()))
+            .collect::<Vec<_>>();
+        registrations.sort_by(|left, right| left.0.name.cmp(&right.0.name));
+        registrations
     }
 
     /// Returns whether the named tool provisions a hand/sandbox to execute.
@@ -294,6 +317,13 @@ impl ToolRegistry {
         for (name, registered_tool) in &mut self.tools {
             registered_tool.definition.max_output_tokens = tool_budgets.for_tool(name);
         }
+    }
+}
+
+impl ToolRouter {
+    /// Returns live registered definitions with their executable owners in stable name order.
+    pub fn capability_registrations(&self) -> Vec<(ToolDefinition, ToolExecution)> {
+        self.registry.capability_registrations()
     }
 }
 

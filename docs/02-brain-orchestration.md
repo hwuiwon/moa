@@ -12,7 +12,8 @@ _Restate orchestration, hosted API runtime mode, turn execution, and workers._
 - Session VO: `crates/moa-orchestrator/src/objects/session/`
 - Worker VO: `crates/moa-orchestrator/src/objects/worker/`
 - Turn workflows: `crates/moa-orchestrator/src/workflows/turn_execution/mod.rs` and `crates/moa-orchestrator/src/workflows/worker_turn_execution.rs`
-- Procedure execution: `crates/moa-orchestrator/src/workflows/procedure_execution.rs`
+- Execution domain: `crates/moa-execution/`
+- Execution workflows: `crates/moa-orchestrator/src/workflows/execution_run.rs` and `crates/moa-orchestrator/src/workflows/execution_task.rs`
 - CronJob VO: `crates/moa-orchestrator/src/objects/cron_job.rs`
 - Pipeline assembly: `crates/moa-brain/src/pipeline/mod.rs`
 
@@ -34,8 +35,8 @@ Core production Restate bindings:
 | Restate primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
-| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Eval`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
-| Workflow | `ProcedureExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `TurnExecution`, `WorkerTurnExecution`, `ExperimentRun`, `ExperimentTrialRun` |
+| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Eval`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
+| Workflow | `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `Consolidate`, `TurnExecution`, `WorkerTurnExecution`, `ExperimentRun`, `ExperimentTrialRun` |
 
 Feature-gated Restate bindings:
 
@@ -58,16 +59,12 @@ Postgres, Restate, or an explicitly configured Redis runtime cache; process
 memory is only a local cache.
 
 `Artifacts` owns import, export, listing, validation, and publish for canonical
-skills, connectors, actions, and agents. The `Skills` service exposes the skill
-procedure run lifecycle over Restate, while `ProcedureExecution` executes the
-deterministic procedure graph using the pure interpreter in `moa-skills`.
-The open-ended agent loop still lives in `Session` and `TurnExecution`.
-
-Procedure runs can carry an optional `session_id` so the product can show a
-procedure attached to the same support conversation. This is an association
-boundary, not autonomous routing: skill selection still happens inside the
-context pipeline, and procedure node execution remains explicit procedure
-runtime behavior.
+skills, connectors, actions, and agents. `moa-execution` owns execution-plan
+compilation, pure scheduling, budgets, completion, and run/task persistence.
+The `Execution` service exposes start, status, list, cancel, review, signal, and
+bounded task-result operations. `ExecutionRun` and `ExecutionTask` own durable
+graph execution. The open-ended agent loop remains in `Session` and
+`TurnExecution`.
 
 ## Session Flow
 
@@ -90,11 +87,22 @@ long-running LLM/tool loop lives in `TurnExecution`, so concurrent `snapshot`,
 There is no previous session-local turn runner; `TurnExecution` owns the durable
 turn loop.
 
-`TurnExecution` owns the turn mechanics:
+`TurnExecution` first selects one mode, then owns its turn mechanics:
+
+- `respond` makes one model call with no tools and no planning call.
+- `act` runs the existing bounded root model/tool loop and may use
+  conversational workers.
+- `run` instantiates a pinned skill template or compiles a strict generated
+  plan, persists it, starts `ExecutionRun` detached, and returns acceptance
+  without polling it from the root model.
+
+An `act` turn may escalate to `run` after discovering durable, high-fan-out,
+resumable, or review-bearing work. Task difficulty by itself is not a routing
+signal.
 
 1. Build a `CompletionRequest` from session events and the context pipeline.
 2. Ensure a task segment exists or roll to a new segment when query rewrite marks `is_new_task`.
-3. Call `LLMGateway`.
+3. Select `respond`, `act`, or `run`; invoke `LLMGateway` only as that mode requires.
 4. Persist assistant output and tool calls.
 5. Build an `ActionEnvelope`, evaluate action policy, and route allowed tool execution through `ToolExecutor`.
 6. Record tool usage, skill activation, token usage, and turn counts on the active segment.
@@ -206,7 +214,7 @@ Tenant action reviews are decided by tenant admins through `ActionReviews`; conv
 
 `Worker` admits conversational messages and starts at most one `WorkerTurnExecution` workflow per active child turn. Workflow callbacks carry the admitted `turn_id`; stale responses, tool results, approval clears, and outcomes are ignored rather than mutating a newer turn.
 
-Delegation is owned by the root coordinator. Workers are bounded
+Delegation is owned by the root coordinator in `act`. Workers are bounded
 general-purpose child agents: they run task-local turns with scoped tools and
 budgets, report results, and do not own decomposition or final synthesis.
 Workers do not spawn or manage other workers. Coordinator delegation is bounded
@@ -215,39 +223,16 @@ by active fan-out, repeated active task detection, and inherited token budgets.
 terminal worker result; otherwise it registers a worker-owned result waiter
 awakeable and removes that waiter on timeout. Terminal worker results are cached
 on the session until consumed so finished detached workers free active fan-out
-without losing the final result.
+without losing the final result. `spawn_worker.task` carries the purpose,
+relevant context, expected output, evidence requirements, constraints, and
+relevant skill instructions; optional controls bound tools, tokens, and turns.
 
-The coordinator decomposes delegated work as a DAG of subtasks. It should spawn
-all ready nodes whose dependencies are already satisfied so independent work runs
-in parallel, wait only when downstream work needs a result, then use completed
-worker results as context for dependent nodes or the final answer. This DAG is a
-coordinator planning contract, not a worker wire schema: `spawn_worker.task`
-is the canonical instruction field and should carry purpose, relevant context,
-expected output, evidence requirements, constraints, and any relevant skill
-steps the worker should follow. The current structured controls are optional
-`tool_subset`, `budget_tokens`, and `max_turns`. `task_name` was intentionally
-removed because worker identity should be based on durable child ids; worker
-paths are identifiers, not semantic task titles. Additional durable worker
-contract fields are deferred until evals, traces, or incidents show they solve a
-real coordination failure.
-
-Before the coordinator model synthesizes a response, the context pipeline may
-append a conservative `delegation_plan` candidate for high-confidence
-multi-workstream requests. Root `TurnExecution` consumes that artifact once per
-admitted user message and auto-spawns dependency-free ready nodes through the
-normal `spawn_worker` path, recording ordinary tool-call/tool-result events for
-replay and model context. This scheduler does not authorize workers to spawn
-other workers; workers stay child-local and report results back to the
-coordinator. When the deterministic planner finds ready worker nodes,
-`TurnExecution` raises a low requested coordinator model-loop turn cap to
-`4 + 2 * ready_node_count` (bounded by active fan-out and the global session hard
-cap) so the root has room to spawn, wait, and synthesize results. After
-auto-spawn, the root workflow tracks the spawned worker ids, waits on worker
-result awakeables before the next provider call, and appends one
-`WorkerResultBundle` event when all tracked workers are terminal. History replay
-renders that bundle as one coordinator-visible synthesis directive, so the model
-does not need extra `list_workers` / `wait_worker` discovery turns for completed
-auto-delegated workers.
+Workers support interactive, steerable delegation inside `act`. They are not
+plan nodes, map items, reducers, or the bulk DAG substrate. Work that needs an
+explicit dependency graph, durable joins, scalable map materialization, review
+waits, or exact coverage uses `ExecutionRun` and stable `ExecutionTask` rows.
+Conversational worker fan-out limits therefore do not impose an execution-map
+fan-out cap.
 
 ### Two coordination planes
 
@@ -324,7 +309,7 @@ generation-guarded `check_child_liveness` watchdog per active child; on a stale
 heartbeat it appends `WorkerHeartbeatStale` and raises a `HeartbeatStale` signal,
 exempting children parked on a `needs_input` request (`awaiting_input`).
 
-## Workflows and Procedures
+## Workflows And Execution Runs
 
 Restate workflows run internal durable jobs:
 
@@ -332,45 +317,43 @@ Restate workflows run internal durable jobs:
 - `KnowledgeSyncIngestion`: one tenant knowledge sync ingestion pass.
 - `TurnExecution`: one durable session turn keyed by `turn_id`; runs the top-level session brain loop and calls back to `Session` on completion, cancellation, or failure.
 - `WorkerTurnExecution`: one admitted worker turn keyed by `turn_id`; runs child-local LLM/tool loops and calls back to `Worker` with turn-scoped mutations.
+- `ExecutionRun`: one immutable goal contract and active plan keyed by `run_uid`.
+- `ExecutionTask`: one stable logical node or map item keyed by its task identity.
 
-These are workflow-shaped because rerunning the same logical job should be explicit and observable.
+These are workflow-shaped because rerunning the same logical job should be
+explicit and observable.
 
-Skill procedures are user-authored deterministic execution plans. A skill may
-declare an optional `procedure` in its `skill.moa.yaml` definition: a
-`ProcedureDefinition` stores an explicit node/edge graph for branch conditions,
-parallel fan-out, joins, bounded loops, connector actions, approval gates,
-memory reads/writes, checkpoints, and product-visible run history.
-`moa-artifacts` stores and validates the skill document shape including its
-optional procedure; `moa-skills` owns the pure graph interpreter and
-graph-renderable execution state; the `Skills` Restate service handles
-authorization and run creation; `ProcedureExecution` owns durable execution and
-node-run persistence.
+`ExecutionRun` loads the persisted canonical plan and asks the pure interpreter
+for every ready logical task. It materializes stable rows keyed by
+`(run_uid, node_id, item_key)` and submits all ready tasks durably. There is no
+application active-worker count or execution fan-out constant. Run budgets
+bound logical task count; Restate concurrency rules and provider pacing queue
+physical work.
 
-Procedure nodes stay decomposable for future dashboard editing:
+`ExecutionTask` atomically reserves its worst-case integer cost, token, task,
+tool-call, retrieved-byte, and deadline allowance before dispatch. A failed
+reservation starts no work. It resolves only compiler-approved references,
+executes one governed capability or bounded agent task, reconciles actual usage,
+persists citations and output, and completes through a generation fence so a
+stale attempt cannot overwrite newer work.
 
-- deterministic nodes such as `start`, `condition`, `parallel`, `join`, and
-  `end` are interpreted directly by `moa-skills`; `parallel` nodes express graph
-  fan-out/join semantics, and their side effects currently execute sequentially
-  in a deterministic order rather than concurrently;
-- governed tool/action/skill-action nodes call existing action policy,
-  review, and `ToolExecutor` services;
-- `review` nodes pause the run until `Skills/decide_review` resumes or
-  fails the node;
-- `agent` nodes enqueue one bounded `Session` turn and wait for the existing
-  `TurnExecution` result; `max_turns` caps that turn loop, not the procedure
-  graph itself;
-- `worker` nodes call the existing delegation path, including depth,
-  fan-out, repeated-task, and budget validation;
-- `memory_read` and `memory_write` nodes call the existing `Memory` service so
-  tenant/contact scope, privacy, ingestion, and retrieval behavior do not fork
-  inside the procedure runtime.
+The plan is an acyclic graph with exactly `Capability`, `Agent`, `Map`,
+`Reduce`, `Review`, `WaitSignal`, and `Output`. A map task is only a capability
+or agent and cannot nest another map. Agent tasks can use declared
+instruction-only skills and capabilities with bounded turns and budgets. They
+cannot mutate the graph. Unexpected conditions return typed `NeedsInput` or
+`NeedsReplan`; every amendment is compiled, authorization-narrowing, budgeted,
+persisted in `plan_history`, and applied only to pending or downstream work.
+Repeated hashes, recurring failure fingerprints, no progress, deadline, or
+resource exhaustion terminate with exact partial/blocked coverage instead of an
+infinite loop.
 
-Adapter nodes link to inner service records such as session turns, worker
-outputs, review IDs, memory hit IDs, or ingestion reports through node output.
-The procedure graph remains the product-visible control plane; detailed inner
-events remain in their owning service logs. Procedure improvement should operate
-on skill artifact revisions and proposed patches, not by rewriting the live run
-state directly.
+Cancellation prevents new reservations and leaves completed task results
+queryable. A run cannot become `completed` until every immutable goal-contract
+requirement and completion check passes. Terminal state emits compact aggregate
+output, citations, failures, and gaps to the owning session. The session starts
+at most one deduplicated synthesis turn for the originating user sequence; it
+does not ingest every raw map output or poll the run through the root model.
 
 Reusable scheduled work is anchored by the `CronJob` virtual object. Each job
 key stores its cron expression, timezone, target service handler, and a version

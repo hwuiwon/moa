@@ -159,6 +159,7 @@ impl SkillLearning for SkillLearningImpl {
         ctx: WorkflowContext<'_>,
         request: Json<RunSkillLearningRequest>,
     ) -> Result<Json<SkillLearningReport>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SkillLearning", "run");
         let request = request.into_inner();
         let store = self.session_store.clone();
@@ -478,15 +479,16 @@ async fn record_skill_learning_failure_from_workflow(
     experience_id: Uuid,
     error: &str,
 ) {
-    let append = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event: skill_learning_failure_event(experience_id, error),
-            dedupe_key: None,
-        }))
-        .call()
-        .await;
+    let append = crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event: skill_learning_failure_event(experience_id, error),
+                dedupe_key: None,
+            })),
+    )
+    .call()
+    .await;
     if let Err(warning_error) = append {
         tracing::warn!(
             session_id = %session_id,
@@ -625,7 +627,7 @@ mod tests {
                 tags: Vec::new(),
                 allowed_tools: Vec::new(),
                 actions: Vec::new(),
-                has_procedure: false,
+                has_execution_plan: false,
                 estimated_tokens: 100,
             },
             operation: SkillProposalOperation::Created,

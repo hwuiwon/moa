@@ -4,12 +4,9 @@ _Crates, services, build targets, and deployment dependencies._
 
 ## Rust Workspace
 
-The root workspace currently contains these packages from
-`cargo metadata --no-deps`. The final structural-program inventory is 44
-packages, 41 default members, 152 integration-test targets, and 203 total
-targets:
+The root workspace package inventory comes from `cargo metadata --no-deps`:
 
-- Core/runtime: `moa-core`, `moa-brain`, `moa-db`, `moa-session`,
+- Core/runtime: `moa-core`, `moa-brain`, `moa-execution`, `moa-db`, `moa-session`,
   `moa-runtime-store`, `moa-edge`, `moa-orchestrator`, `moa-migrations`.
 - Memory/knowledge: `moa-knowledge`, `moa-memory-graph`,
   `moa-memory-ingest`, `moa-memory-lifecycle`, `moa-memory-pii`,
@@ -49,6 +46,7 @@ Build-graph boundaries keep optional tooling out of ordinary builds:
 | HTTP | `reqwest`, `axum` |
 | Database | `sqlx` with Postgres for runtime queries; `refinery` for all Postgres schema migrations |
 | Orchestration | `restate-sdk` |
+| Execution plans | `serde_json`, `serde_canonical_json`, `blake3`, UUIDv5, and `jsonschema` 0.47 with Draft 2020-12 validation and remote/file retrieval disabled in `moa-execution` |
 | Scheduling | Restate `CronJob` virtual object |
 | Runtime cache | Redis-backed coordination for the orchestrator; in-process memory exists only for isolated local/test code |
 | Security | `secrecy`, `shell-words` |
@@ -129,6 +127,7 @@ and deployment setup. Key groups:
 | `MOA_QUERY_REWRITE_*` | fail-open, retrieval-scoped query rewrite gating and timeout behavior |
 | `MOA_RESOLUTION_*` | automated segment assessment weights and thresholds |
 | `MOA_SKILL_BUDGET_*` | skill manifest budget controls |
+| `MOA_EXECUTION_*` | planner repair, task/token/tool/retrieval/cost defaults, unattended confirmation threshold, and deadlines |
 | `MOA_CLOUD_*` | remote hand provider settings |
 | `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Restate ingress/admin endpoints and optional health URL |
 | `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_TOKEN_VAULT_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, token vault, builtin async authorization challenges, and OCSF security-event audit |
@@ -144,6 +143,8 @@ and deployment setup. Key groups:
 Implemented architectural pillars:
 
 - Restate cloud orchestration with session, worker, tenant, service, and workflow handlers.
+- Dynamic `respond`/`act`/`run` routing with `ExecutionRun` and `ExecutionTask` as the only durable typed-DAG runtime.
+- `moa-execution` ownership of canonical plan compilation, bindings, pure scheduling, pure integer budget transitions, completion checks, and replan-stop evaluation; these core APIs have no I/O, provider, Restate, or persistence dependencies.
 - One `moa-orchestrator` production binary for local development and cloud execution, with domain logic kept behind in-process application and repository boundaries.
 - Constructor-based runtime composition: `RuntimeDeps::build` constructs the
   concrete graph and `build_endpoint` binds it, including the durable
@@ -251,3 +252,10 @@ and Postgres, never in process memory or Redis:
   lives in the event log and object store, and a crashed sandbox is reprovisioned
   under a new lease generation. Readiness should still require the orchestrator's
   Restate services to be registered before the replica takes traffic.
+
+Durable execution runs use a separate topology. `ExecutionRun` and
+`ExecutionTask` workflows recover from Postgres execution rows plus Restate
+journals; the `Session` VO stores only compact linkage and terminal-synthesis
+dedupe state. Ready map items have stable logical task identities and no
+application fan-out cap. Atomic run-budget reservations bound admission, while
+Restate concurrency rules and provider pacing supply physical backpressure.

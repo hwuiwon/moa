@@ -55,9 +55,24 @@ pub(crate) struct IsolatedEvalStore {
 
 impl IsolatedEvalStore {
     pub(crate) async fn create() -> Result<Self> {
-        let database_url = test_database_url()?;
-        let schema_name = format!("moa_memory_eval_{}", Uuid::now_v7().simple());
-        let store = PostgresSessionStore::new_in_schema(&database_url, &schema_name).await?;
+        let maintenance_url = test_database_url()?;
+        let (database_url, schema_name) =
+            moa_session::testing::provision_cloned_database_from(&maintenance_url).await?;
+        let store =
+            match PostgresSessionStore::new_in_existing_schema(&database_url, &schema_name).await {
+                Ok(store) => store,
+                Err(error) => {
+                    if let Err(cleanup_error) =
+                        moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+                    {
+                        tracing::warn!(
+                            %cleanup_error,
+                            "failed to clean up memory eval clone after store initialization failed"
+                        );
+                    }
+                    return Err(error.into());
+                }
+            };
         Ok(Self {
             store,
             database_url,

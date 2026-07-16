@@ -9,7 +9,6 @@ use moa_core::{
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 
 use super::agent_instructions::AgentInstructionProcessor;
-use super::delegation_planning::DelegationPlanningProcessor;
 use super::digest::DigestProcessor;
 use super::history::HistoryCompiler;
 use super::identity::{DEFAULT_IDENTITY_PROMPT, IdentityProcessor};
@@ -172,7 +171,6 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
     // churn would break provider prompt-cache reuse of the entire replayed
     // history and invalidate the incremental context snapshot every turn.
     stages.push(history);
-    stages.push(Box::new(DelegationPlanningProcessor::new()) as Box<dyn ContextProcessor>);
     let skill_injector = shared_skill_injector.unwrap_or_else(|| {
         let injector = SkillInjector::new(graph_pool.clone())
             .with_session_store(session_store.clone())

@@ -1,9 +1,10 @@
 //! Semantic validation for artifact documents.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use moa_core::types::guardrails::GuardrailMode;
 use serde::{Deserialize, Serialize};
+use serde_canonical_json::CanonicalFormatter;
 use serde_json::Value;
 
 use crate::action::ActionDefinition;
@@ -13,7 +14,11 @@ use crate::agent::{
 };
 use crate::connector::ConnectorDefinition;
 use crate::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactStatus};
-use crate::procedure::{ProcedureDefinition, ProcedureNode, ProcedureNodeKind};
+use crate::execution_plan::{
+    CapabilityReference, CompletionCheckKind, ExecutionCondition, ExecutionGoalContract,
+    ExecutionGoalTemplate, ExecutionNode, ExecutionOperation, ExecutionPlanDefinition,
+    ExecutionReducer, ExecutionTaskOutcome, MapTask, PlanAmendment, PlanAmendmentOperation,
+};
 use crate::reference::{ArtifactRef, ReferenceResolution, ReferenceState};
 use crate::simulation::{
     ExperimentBudget, ExperimentPlanDefinition, ExperimentSimulationDefinition,
@@ -93,6 +98,185 @@ pub fn validate_for_status(
         }
     }
 
+    report
+}
+
+/// Validates the standalone structural invariants of an execution goal contract.
+#[must_use]
+pub fn validate_execution_goal_contract(contract: &ExecutionGoalContract) -> ValidationReport {
+    let mut report = ValidationReport::default();
+    let mut ids = HashSet::new();
+
+    for (index, requirement) in contract.requirements.iter().enumerate() {
+        validate_contract_id(
+            &format!("goal_contract.requirements[{index}].id"),
+            &requirement.id,
+            &mut ids,
+            &mut report,
+        );
+    }
+    for (index, deliverable) in contract.deliverables.iter().enumerate() {
+        let root = format!("goal_contract.deliverables[{index}]");
+        validate_contract_id(
+            &format!("{root}.id"),
+            &deliverable.id,
+            &mut ids,
+            &mut report,
+        );
+        validate_json_pointer(
+            &format!("{root}.output_pointer"),
+            &deliverable.output_pointer,
+            &mut report,
+        );
+        validate_json_schema(&format!("{root}.schema"), &deliverable.schema, &mut report);
+    }
+    for (index, coverage) in contract.coverage.iter().enumerate() {
+        let root = format!("goal_contract.coverage[{index}]");
+        validate_contract_id(&format!("{root}.id"), &coverage.id, &mut ids, &mut report);
+        validate_stable_id(
+            &format!("{root}.map_node_id"),
+            &coverage.map_node_id,
+            "map node id",
+            &mut report,
+        );
+    }
+    for (index, constraint) in contract.constraints.iter().enumerate() {
+        validate_contract_id(
+            &format!("goal_contract.constraints[{index}].id"),
+            &constraint.id,
+            &mut ids,
+            &mut report,
+        );
+    }
+    for (index, check) in contract.completion_checks.iter().enumerate() {
+        let root = format!("goal_contract.completion_checks[{index}]");
+        validate_contract_id(&format!("{root}.id"), &check.id, &mut ids, &mut report);
+        validate_stable_id_list(
+            &format!("{root}.requirement_ids"),
+            &check.requirement_ids,
+            "completion requirement id",
+            false,
+            &mut report,
+        );
+        validate_stable_id_list(
+            &format!("{root}.constraint_ids"),
+            &check.constraint_ids,
+            "completion constraint id",
+            false,
+            &mut report,
+        );
+        match &check.kind {
+            CompletionCheckKind::OutputSchema => {}
+            CompletionCheckKind::RequiredNodes { node_ids }
+            | CompletionCheckKind::Citations { node_ids, .. } => {
+                validate_stable_id_list(
+                    &format!("{root}.kind.node_ids"),
+                    node_ids,
+                    "completion node id",
+                    true,
+                    &mut report,
+                );
+            }
+            CompletionCheckKind::MapCoverage { map_node_id } => validate_stable_id(
+                &format!("{root}.kind.map_node_id"),
+                map_node_id,
+                "map node id",
+                &mut report,
+            ),
+            CompletionCheckKind::AgentVerifier {
+                instructions,
+                max_turns,
+            } => {
+                require_non_empty(
+                    format!("{root}.kind.instructions"),
+                    instructions,
+                    "agent verifier instructions",
+                    &mut report,
+                );
+                validate_positive_u32(
+                    &format!("{root}.kind.max_turns"),
+                    *max_turns,
+                    "agent verifier max_turns",
+                    &mut report,
+                );
+            }
+        }
+    }
+
+    report
+}
+
+/// Validates the standalone structural invariants of a v1 execution plan.
+#[must_use]
+pub fn validate_execution_plan_definition(
+    definition: &ExecutionPlanDefinition,
+) -> ValidationReport {
+    let mut report = ValidationReport::default();
+    validate_execution_plan_at("execution_plan", definition, &mut report);
+    report
+}
+
+/// Validates the versioned envelope of one execution task outcome.
+#[must_use]
+pub fn validate_execution_task_outcome(outcome: &ExecutionTaskOutcome) -> ValidationReport {
+    let mut report = ValidationReport::default();
+    validate_schema_version(
+        "execution_task_outcome.schema_version",
+        outcome.schema_version,
+        &mut report,
+    );
+    if let crate::execution_plan::ExecutionTaskResult::Completed { citations, .. } = &outcome.result
+    {
+        for (index, citation) in citations.iter().enumerate() {
+            require_non_empty(
+                format!("execution_task_outcome.citations[{index}].source_id"),
+                &citation.source_id,
+                "citation source_id",
+                &mut report,
+            );
+            if citation.source_id.chars().count() > 512 {
+                report.push_error(
+                    format!("execution_task_outcome.citations[{index}].source_id"),
+                    "citation source_id must be at most 512 characters",
+                );
+            }
+        }
+    }
+    report
+}
+
+/// Validates the structural envelope and node payloads of a plan amendment.
+#[must_use]
+pub fn validate_plan_amendment(amendment: &PlanAmendment) -> ValidationReport {
+    let mut report = ValidationReport::default();
+    validate_schema_version(
+        "plan_amendment.schema_version",
+        amendment.schema_version,
+        &mut report,
+    );
+    for (index, operation) in amendment.operations.iter().enumerate() {
+        let root = format!("plan_amendment.operations[{index}]");
+        match operation {
+            PlanAmendmentOperation::AddNode { node } => {
+                validate_execution_node(&format!("{root}.node"), node, None, &mut report);
+            }
+            PlanAmendmentOperation::ReplacePendingNode { node_id, node } => {
+                validate_stable_id(
+                    &format!("{root}.node_id"),
+                    node_id,
+                    "pending node id",
+                    &mut report,
+                );
+                validate_execution_node(&format!("{root}.node"), node, None, &mut report);
+            }
+            PlanAmendmentOperation::RemovePendingNode { node_id } => validate_stable_id(
+                &format!("{root}.node_id"),
+                node_id,
+                "pending node id",
+                &mut report,
+            ),
+        }
+    }
     report
 }
 
@@ -630,9 +814,878 @@ fn validate_skill(definition: &SkillDefinition, report: &mut ValidationReport) {
         "duplicate skill action id",
         report,
     );
-    if let Some(procedure) = &definition.procedure {
-        validate_procedure(procedure, report);
+    if let Some(execution_plan) = &definition.execution_plan {
+        validate_execution_goal_template(
+            "definition.spec.execution_plan.goal",
+            &execution_plan.goal,
+            report,
+        );
+        validate_execution_plan_at(
+            "definition.spec.execution_plan.plan",
+            &execution_plan.plan,
+            report,
+        );
     }
+}
+
+fn validate_execution_goal_template(
+    root: &str,
+    goal: &ExecutionGoalTemplate,
+    report: &mut ValidationReport,
+) {
+    let requirement_ids = goal
+        .requirements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, requirement)| {
+            let path = format!("{root}.requirements[{index}].id");
+            validate_stable_id(&path, &requirement.id, "execution requirement id", report);
+            is_stable_id(&requirement.id).then_some(requirement.id.as_str())
+        })
+        .collect::<HashSet<_>>();
+    let constraint_ids = goal
+        .constraints
+        .iter()
+        .enumerate()
+        .filter_map(|(index, constraint)| {
+            let path = format!("{root}.constraints[{index}].id");
+            validate_stable_id(&path, &constraint.id, "execution constraint id", report);
+            is_stable_id(&constraint.id).then_some(constraint.id.as_str())
+        })
+        .collect::<HashSet<_>>();
+    let mut covered_constraints = HashSet::new();
+    for (index, check) in goal.completion_checks.iter().enumerate() {
+        let path = format!("{root}.completion_checks[{index}]");
+        validate_stable_id(
+            &format!("{path}.id"),
+            &check.id,
+            "execution completion check id",
+            report,
+        );
+        for requirement_id in &check.requirement_ids {
+            if !requirement_ids.contains(requirement_id.as_str()) {
+                report.push_error(
+                    format!("{path}.requirement_ids"),
+                    format!("unknown execution requirement id '{requirement_id}'"),
+                );
+            }
+        }
+        for constraint_id in &check.constraint_ids {
+            if !constraint_ids.contains(constraint_id.as_str()) {
+                report.push_error(
+                    format!("{path}.constraint_ids"),
+                    format!("unknown execution constraint id '{constraint_id}'"),
+                );
+            } else {
+                covered_constraints.insert(constraint_id.as_str());
+            }
+        }
+    }
+    for constraint in &goal.constraints {
+        if !covered_constraints.contains(constraint.id.as_str()) {
+            report.push_error(
+                root,
+                format!(
+                    "execution constraint '{}' must be covered by a completion check",
+                    constraint.id
+                ),
+            );
+        }
+    }
+}
+
+fn validate_execution_plan_at(
+    root: &str,
+    definition: &ExecutionPlanDefinition,
+    report: &mut ValidationReport,
+) {
+    validate_schema_version(
+        &format!("{root}.schema_version"),
+        definition.schema_version,
+        report,
+    );
+    validate_json_schema(
+        &format!("{root}.input_schema"),
+        &definition.input_schema,
+        report,
+    );
+    validate_json_schema(
+        &format!("{root}.output_schema"),
+        &definition.output_schema,
+        report,
+    );
+
+    let mut node_ids = HashSet::new();
+    for (index, node) in definition.nodes.iter().enumerate() {
+        let id_path = format!("{root}.nodes[{index}].id");
+        validate_stable_id(&id_path, &node.id, "execution node id", report);
+        if is_stable_id(&node.id) && !node_ids.insert(node.id.as_str()) {
+            report.push_error(id_path, "duplicate execution node id");
+        }
+    }
+
+    for (index, node) in definition.nodes.iter().enumerate() {
+        validate_execution_node(
+            &format!("{root}.nodes[{index}]"),
+            node,
+            Some(&node_ids),
+            report,
+        );
+    }
+
+    validate_execution_dag(root, &definition.nodes, &node_ids, report);
+    validate_terminal_output(root, &definition.nodes, report);
+}
+
+fn validate_execution_node(
+    root: &str,
+    node: &ExecutionNode,
+    known_node_ids: Option<&HashSet<&str>>,
+    report: &mut ValidationReport,
+) {
+    validate_stable_id(&format!("{root}.id"), &node.id, "execution node id", report);
+    validate_stable_id_list(
+        &format!("{root}.requirement_ids"),
+        &node.requirement_ids,
+        "requirement id",
+        true,
+        report,
+    );
+    validate_stable_id_list(
+        &format!("{root}.depends_on"),
+        &node.depends_on,
+        "dependency node id",
+        false,
+        report,
+    );
+    for (index, dependency) in node.depends_on.iter().enumerate() {
+        let path = format!("{root}.depends_on[{index}]");
+        if dependency == &node.id {
+            report.push_error(path.clone(), "execution node cannot depend on itself");
+        }
+        if known_node_ids.is_some_and(|ids| !ids.contains(dependency.as_str())) {
+            report.push_error(path, "execution dependency node does not exist");
+        }
+    }
+
+    if let Some(condition) = &node.when {
+        let reference = match condition {
+            ExecutionCondition::Exists { reference }
+            | ExecutionCondition::Equals { reference, .. } => reference,
+        };
+        validate_visible_reference(
+            &format!("{root}.when.reference.$ref"),
+            &reference.path,
+            node,
+            report,
+        );
+    }
+
+    let map_input_scope = matches!(node.operation, ExecutionOperation::Map { .. });
+    validate_dynamic_value(
+        &format!("{root}.input"),
+        &node.input,
+        node,
+        map_input_scope,
+        report,
+    );
+    validate_json_schema(
+        &format!("{root}.output_schema"),
+        &node.output_schema,
+        report,
+    );
+    validate_retry_policy(root, node, report);
+    validate_execution_operation(root, node, report);
+}
+
+fn validate_retry_policy(root: &str, node: &ExecutionNode, report: &mut ValidationReport) {
+    validate_positive_u32(
+        &format!("{root}.retry.max_attempts"),
+        node.retry.max_attempts,
+        "retry max_attempts",
+        report,
+    );
+    if node.retry.max_backoff_ms < node.retry.initial_backoff_ms {
+        report.push_error(
+            format!("{root}.retry.max_backoff_ms"),
+            "retry max_backoff_ms must be greater than or equal to initial_backoff_ms",
+        );
+    }
+}
+
+fn validate_execution_operation(root: &str, node: &ExecutionNode, report: &mut ValidationReport) {
+    let operation_root = format!("{root}.operation");
+    match &node.operation {
+        ExecutionOperation::Capability { reference } => {
+            validate_capability_reference(
+                &format!("{operation_root}.reference"),
+                reference,
+                report,
+            );
+        }
+        ExecutionOperation::Agent {
+            instructions,
+            skill_refs,
+            capability_refs,
+            max_turns,
+        } => validate_agent_operation(
+            &operation_root,
+            instructions,
+            skill_refs,
+            capability_refs,
+            *max_turns,
+            report,
+        ),
+        ExecutionOperation::Map {
+            items,
+            item_key,
+            max_items,
+            item_output_schema,
+            task,
+        } => {
+            validate_dynamic_value(
+                &format!("{operation_root}.items"),
+                items,
+                node,
+                false,
+                report,
+            );
+            validate_json_pointer(&format!("{operation_root}.item_key"), item_key, report);
+            if *max_items == 0 {
+                report.push_error(
+                    format!("{operation_root}.max_items"),
+                    "map max_items must be at least one",
+                );
+            }
+            if items.as_array().is_some_and(|items| {
+                u64::try_from(items.len()).map_or(true, |length| length > *max_items)
+            }) {
+                report.push_error(
+                    format!("{operation_root}.items"),
+                    "literal map items must not exceed max_items",
+                );
+            }
+            validate_json_schema(
+                &format!("{operation_root}.item_output_schema"),
+                item_output_schema,
+                report,
+            );
+            validate_static_map_keys(&operation_root, items, item_key, report);
+            match task {
+                MapTask::Capability { reference } => validate_capability_reference(
+                    &format!("{operation_root}.task.reference"),
+                    reference,
+                    report,
+                ),
+                MapTask::Agent {
+                    instructions,
+                    skill_refs,
+                    capability_refs,
+                    max_turns,
+                } => validate_agent_operation(
+                    &format!("{operation_root}.task"),
+                    instructions,
+                    skill_refs,
+                    capability_refs,
+                    *max_turns,
+                    report,
+                ),
+            }
+        }
+        ExecutionOperation::Reduce {
+            items,
+            max_items,
+            reducer,
+            batch_size,
+        } => {
+            validate_dynamic_value(
+                &format!("{operation_root}.items"),
+                items,
+                node,
+                false,
+                report,
+            );
+            if *max_items == 0 {
+                report.push_error(
+                    format!("{operation_root}.max_items"),
+                    "reduce max_items must be at least one",
+                );
+            }
+            if items.as_array().is_some_and(|items| {
+                u64::try_from(items.len()).map_or(true, |length| length > *max_items)
+            }) {
+                report.push_error(
+                    format!("{operation_root}.items"),
+                    "literal reduce items must not exceed max_items",
+                );
+            }
+            if *batch_size < 2 {
+                report.push_error(
+                    format!("{operation_root}.batch_size"),
+                    "reduce batch_size must be at least two",
+                );
+            }
+            match reducer {
+                ExecutionReducer::Capability { reference } => validate_capability_reference(
+                    &format!("{operation_root}.reducer.reference"),
+                    reference,
+                    report,
+                ),
+                ExecutionReducer::Agent {
+                    instructions,
+                    skill_refs,
+                    capability_refs,
+                    max_turns,
+                } => validate_agent_operation(
+                    &format!("{operation_root}.reducer"),
+                    instructions,
+                    skill_refs,
+                    capability_refs,
+                    *max_turns,
+                    report,
+                ),
+            }
+        }
+        ExecutionOperation::Review { prompt } => require_non_empty(
+            format!("{operation_root}.prompt"),
+            prompt,
+            "review prompt",
+            report,
+        ),
+        ExecutionOperation::WaitSignal { signal_name } => {
+            if !is_capability_component(signal_name, 64) {
+                report.push_error(
+                    format!("{operation_root}.signal_name"),
+                    "signal_name must be a non-empty ASCII name of at most 64 characters",
+                );
+            }
+        }
+        ExecutionOperation::Output { value } => validate_dynamic_value(
+            &format!("{operation_root}.value"),
+            value,
+            node,
+            false,
+            report,
+        ),
+    }
+}
+
+fn validate_agent_operation(
+    root: &str,
+    instructions: &str,
+    skill_refs: &[ArtifactRef],
+    capability_refs: &[CapabilityReference],
+    max_turns: u32,
+    report: &mut ValidationReport,
+) {
+    require_non_empty(
+        format!("{root}.instructions"),
+        instructions,
+        "agent instructions",
+        report,
+    );
+    validate_non_empty_unique_refs(
+        &format!("{root}.skill_refs"),
+        skill_refs,
+        Some(ArtifactKind::Skill),
+        report,
+    );
+    let mut seen = HashSet::new();
+    for (index, reference) in capability_refs.iter().enumerate() {
+        let path = format!("{root}.capability_refs[{index}]");
+        validate_capability_reference(&path, reference, report);
+        if !seen.insert((&reference.name, &reference.version)) {
+            report.push_error(path, "duplicate capability reference");
+        }
+    }
+    validate_positive_u32(
+        &format!("{root}.max_turns"),
+        max_turns,
+        "agent max_turns",
+        report,
+    );
+}
+
+fn validate_capability_reference(
+    root: &str,
+    reference: &CapabilityReference,
+    report: &mut ValidationReport,
+) {
+    if !is_capability_component(&reference.name, 256) {
+        report.push_error(
+            format!("{root}.name"),
+            "capability name must be a non-empty ASCII name of at most 256 characters",
+        );
+    }
+    if !is_capability_version(&reference.version) {
+        report.push_error(
+            format!("{root}.version"),
+            "capability version must be a non-empty ASCII version of at most 64 characters",
+        );
+    }
+}
+
+fn validate_execution_dag(
+    root: &str,
+    nodes: &[ExecutionNode],
+    node_ids: &HashSet<&str>,
+    report: &mut ValidationReport,
+) {
+    let mut indegree = node_ids
+        .iter()
+        .copied()
+        .map(|id| (id, 0_usize))
+        .collect::<HashMap<_, _>>();
+    let mut dependents = node_ids
+        .iter()
+        .copied()
+        .map(|id| (id, Vec::<&str>::new()))
+        .collect::<HashMap<_, _>>();
+
+    for node in nodes {
+        if !node_ids.contains(node.id.as_str()) {
+            continue;
+        }
+        for dependency in &node.depends_on {
+            if !node_ids.contains(dependency.as_str()) {
+                continue;
+            }
+            if let Some(value) = indegree.get_mut(node.id.as_str()) {
+                *value += 1;
+            }
+            if let Some(values) = dependents.get_mut(dependency.as_str()) {
+                values.push(node.id.as_str());
+            }
+        }
+    }
+
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(id, degree)| (*degree == 0).then_some(*id))
+        .collect::<Vec<_>>();
+    let mut visited = 0_usize;
+    while let Some(id) = ready.pop() {
+        visited += 1;
+        if let Some(values) = dependents.get(id) {
+            for dependent in values {
+                if let Some(degree) = indegree.get_mut(dependent) {
+                    *degree = degree.saturating_sub(1);
+                    if *degree == 0 {
+                        ready.push(dependent);
+                    }
+                }
+            }
+        }
+    }
+    if visited != node_ids.len() {
+        report.push_error(
+            format!("{root}.nodes"),
+            "execution plan dependencies must be acyclic",
+        );
+    }
+}
+
+fn validate_terminal_output(root: &str, nodes: &[ExecutionNode], report: &mut ValidationReport) {
+    let output_nodes = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| matches!(node.operation, ExecutionOperation::Output { .. }))
+        .collect::<Vec<_>>();
+    if output_nodes.len() != 1 {
+        report.push_error(
+            format!("{root}.nodes"),
+            "execution plan must contain exactly one output node",
+        );
+        return;
+    }
+
+    let (output_index, output_node) = output_nodes[0];
+    for (index, node) in nodes.iter().enumerate() {
+        if node.depends_on.iter().any(|id| id == &output_node.id) {
+            report.push_error(
+                format!("{root}.nodes[{index}].depends_on"),
+                "output node must not have dependents",
+            );
+        }
+    }
+
+    let by_id = nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    let mut ancestors = HashSet::new();
+    let mut stack = output_node
+        .depends_on
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    while let Some(id) = stack.pop() {
+        if !ancestors.insert(id) {
+            continue;
+        }
+        if let Some(node) = by_id.get(id) {
+            stack.extend(node.depends_on.iter().map(String::as_str));
+        }
+    }
+
+    for (index, node) in nodes.iter().enumerate() {
+        if index != output_index && !ancestors.contains(node.id.as_str()) {
+            report.push_error(
+                format!("{root}.nodes[{index}].id"),
+                "every non-output node must be an ancestor of the output node",
+            );
+        }
+    }
+}
+
+fn validate_dynamic_value(
+    path: &str,
+    value: &Value,
+    node: &ExecutionNode,
+    allow_map_variables: bool,
+    report: &mut ValidationReport,
+) {
+    match value {
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                validate_dynamic_value(
+                    &format!("{path}[{index}]"),
+                    value,
+                    node,
+                    allow_map_variables,
+                    report,
+                );
+            }
+        }
+        Value::Object(object) => {
+            let dynamic_keys = ["$ref", "$item", "$item_key"]
+                .into_iter()
+                .filter(|key| object.contains_key(*key))
+                .collect::<Vec<_>>();
+            if !dynamic_keys.is_empty() {
+                if dynamic_keys.len() != 1 || object.len() != 1 {
+                    report.push_error(
+                        path,
+                        "dynamic binding must be an object containing exactly one supported key",
+                    );
+                    return;
+                }
+                let key = dynamic_keys[0];
+                let Some(binding) = object.get(key) else {
+                    return;
+                };
+                match key {
+                    "$ref" => {
+                        if let Some(reference) = binding.as_str() {
+                            validate_visible_reference(path, reference, node, report);
+                        } else {
+                            report.push_error(path, "$ref binding value must be a string");
+                        }
+                    }
+                    "$item" | "$item_key" => {
+                        if binding != &Value::Bool(true) {
+                            report.push_error(path, "map-variable binding value must be true");
+                        }
+                        if !allow_map_variables {
+                            report.push_error(
+                                path,
+                                "map variables are only valid inside a map task input",
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            if object.keys().any(|key| key.starts_with('$')) {
+                report.push_error(path, "unsupported dynamic binding key");
+                return;
+            }
+            for (key, value) in object {
+                validate_dynamic_value(
+                    &format!("{path}.{key}"),
+                    value,
+                    node,
+                    allow_map_variables,
+                    report,
+                );
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn validate_visible_reference(
+    path: &str,
+    reference: &str,
+    node: &ExecutionNode,
+    report: &mut ValidationReport,
+) {
+    match execution_reference_node(reference) {
+        Ok(Some(referenced_node)) => {
+            if referenced_node == node.id {
+                report.push_error(
+                    path,
+                    "execution reference cannot recursively reference its node",
+                );
+            } else if !node.depends_on.iter().any(|id| id == referenced_node) {
+                report.push_error(
+                    path,
+                    "execution reference may only read a declared dependency output",
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(message) => report.push_error(path, message),
+    }
+}
+
+fn execution_reference_node(reference: &str) -> std::result::Result<Option<&str>, &'static str> {
+    if let Some(tail) = reference.strip_prefix("$.input") {
+        validate_reference_tail(tail)?;
+        return Ok(None);
+    }
+    let Some(rest) = reference.strip_prefix("$.nodes.") else {
+        return Err("execution reference must target $.input or $.nodes.<id>.output");
+    };
+    let Some((node_id, tail)) = rest.split_once(".output") else {
+        return Err("execution node reference must include .output");
+    };
+    if !is_stable_id(node_id) {
+        return Err("execution reference node id must be a stable identifier");
+    }
+    validate_reference_tail(tail)?;
+    Ok(Some(node_id))
+}
+
+fn validate_reference_tail(tail: &str) -> std::result::Result<(), &'static str> {
+    if tail.is_empty() {
+        return Ok(());
+    }
+    let Some(segments) = tail.strip_prefix('.') else {
+        return Err("execution reference path must use dot-separated fields");
+    };
+    if segments.is_empty()
+        || segments
+            .split('.')
+            .any(|segment| !is_reference_segment(segment))
+    {
+        return Err("execution reference contains an invalid field segment");
+    }
+    Ok(())
+}
+
+fn is_reference_segment(segment: &str) -> bool {
+    let mut characters = segment.chars();
+    characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        && characters
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+}
+
+fn validate_static_map_keys(
+    root: &str,
+    items: &Value,
+    item_key: &str,
+    report: &mut ValidationReport,
+) {
+    let Value::Array(items) = items else {
+        return;
+    };
+    if !is_json_pointer(item_key) {
+        return;
+    }
+    let mut keys = HashSet::new();
+    for (index, item) in items.iter().enumerate() {
+        let key_value = if item_key.is_empty() {
+            Some(item)
+        } else {
+            item.pointer(item_key)
+        };
+        let Some(key_value) = key_value else {
+            report.push_error(
+                format!("{root}.items[{index}]"),
+                "map item_key does not resolve for this static item",
+            );
+            continue;
+        };
+        let key = match encode_static_map_key(key_value) {
+            Ok(key) => key,
+            Err(error) => {
+                report.push_error(
+                    format!("{root}.items[{index}]"),
+                    format!("map item_key canonical encoding failed: {error}"),
+                );
+                continue;
+            }
+        };
+        if key.len() > 1_024 {
+            report.push_error(
+                format!("{root}.items[{index}]"),
+                "encoded map item_key exceeds 1,024 UTF-8 bytes",
+            );
+            continue;
+        }
+        if !keys.insert(key) {
+            report.push_error(
+                format!("{root}.items[{index}]"),
+                "map item_key values must be unique",
+            );
+        }
+    }
+}
+
+fn encode_static_map_key(value: &Value) -> std::result::Result<String, serde_json::Error> {
+    let prefix = match value {
+        Value::Null => return Ok("null:".to_string()),
+        Value::Bool(_) => "bool:",
+        Value::Number(_) => "number:",
+        Value::String(_) => "string:",
+        Value::Array(_) => "array:",
+        Value::Object(_) => "object:",
+    };
+    let mut serializer =
+        serde_json::Serializer::with_formatter(Vec::new(), CanonicalFormatter::new());
+    value.serialize(&mut serializer)?;
+    let canonical = String::from_utf8(serializer.into_inner()).map_err(|error| {
+        serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    })?;
+    Ok(format!("{prefix}{canonical}"))
+}
+
+fn validate_contract_id(
+    path: &str,
+    id: &str,
+    ids: &mut HashSet<String>,
+    report: &mut ValidationReport,
+) {
+    validate_stable_id(path, id, "goal contract id", report);
+    if is_stable_id(id) && !ids.insert(id.to_string()) {
+        report.push_error(path, "duplicate goal contract id");
+    }
+}
+
+fn validate_stable_id_list(
+    path: &str,
+    values: &[String],
+    label: &str,
+    require_items: bool,
+    report: &mut ValidationReport,
+) {
+    if require_items && values.is_empty() {
+        report.push_error(path, format!("{label} list must not be empty"));
+        return;
+    }
+    let mut seen = HashSet::new();
+    for (index, value) in values.iter().enumerate() {
+        let item_path = format!("{path}[{index}]");
+        validate_stable_id(&item_path, value, label, report);
+        if !seen.insert(value) {
+            report.push_error(item_path, format!("duplicate {label}"));
+        }
+    }
+}
+
+fn validate_stable_id(path: &str, value: &str, label: &str, report: &mut ValidationReport) {
+    if !is_stable_id(value) {
+        report.push_error(path, format!("{label} must match [a-z][a-z0-9_-]{{0,63}}"));
+    }
+}
+
+fn is_stable_id(value: &str) -> bool {
+    if value.is_empty() || value.len() > 64 || !value.is_ascii() {
+        return false;
+    }
+    let mut bytes = value.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+        && bytes.all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+}
+
+fn is_capability_component(value: &str, max_len: usize) -> bool {
+    if value.is_empty() || value.len() > max_len || !value.is_ascii() {
+        return false;
+    }
+    let valid = |byte: u8| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/' | b'#')
+    };
+    value.bytes().all(valid)
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value
+            .bytes()
+            .next_back()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn is_capability_version(value: &str) -> bool {
+    if value.is_empty() || value.len() > 64 || !value.is_ascii() {
+        return false;
+    }
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value
+            .bytes()
+            .next_back()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn validate_json_schema(path: &str, schema: &Value, report: &mut ValidationReport) {
+    if !schema.is_object() {
+        report.push_error(path, "JSON schema must be an object");
+    }
+}
+
+fn validate_schema_version(path: &str, schema_version: u32, report: &mut ValidationReport) {
+    if schema_version != 1 {
+        report.push_error(path, "schema_version must equal 1");
+    }
+}
+
+fn validate_positive_u32(path: &str, value: u32, label: &str, report: &mut ValidationReport) {
+    if value == 0 {
+        report.push_error(path, format!("{label} must be at least one"));
+    }
+}
+
+fn validate_json_pointer(path: &str, pointer: &str, report: &mut ValidationReport) {
+    if !is_json_pointer(pointer) {
+        report.push_error(path, "value must be an RFC 6901 JSON Pointer");
+    }
+}
+
+fn is_json_pointer(pointer: &str) -> bool {
+    if pointer.is_empty() {
+        return true;
+    }
+    if !pointer.starts_with('/') {
+        return false;
+    }
+    let bytes = pointer.as_bytes();
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        if bytes[index] == b'~' {
+            let Some(next) = bytes.get(index + 1) else {
+                return false;
+            };
+            if !matches!(next, b'0' | b'1') {
+                return false;
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    true
 }
 
 fn validate_connector(definition: &ConnectorDefinition, report: &mut ValidationReport) {
@@ -661,99 +1714,6 @@ fn validate_action_id_uniqueness<'a>(
             report.push_error(path, duplicate_message);
         }
     }
-}
-
-/// Validates a skill's optional deterministic procedure graph.
-fn validate_procedure(definition: &ProcedureDefinition, report: &mut ValidationReport) {
-    let mut node_ids = HashSet::new();
-    let mut saw_start = false;
-    let mut saw_end = false;
-
-    for (index, node) in definition.nodes.iter().enumerate() {
-        let id_path = format!("definition.spec.procedure.nodes[{index}].id");
-        if node.id.trim().is_empty() {
-            report.push_error(id_path.clone(), "procedure node id must not be empty");
-        } else if !node_ids.insert(node.id.as_str()) {
-            report.push_error(id_path, "duplicate procedure node id");
-        }
-        validate_procedure_node(index, node, report);
-
-        saw_start |= node.kind == ProcedureNodeKind::Start;
-        saw_end |= node.kind == ProcedureNodeKind::End;
-    }
-
-    if !saw_start {
-        report.push_error(
-            "definition.spec.procedure.nodes",
-            "procedure must include a start node",
-        );
-    }
-    if !saw_end {
-        report.push_error(
-            "definition.spec.procedure.nodes",
-            "procedure must include an end node",
-        );
-    }
-
-    for (index, edge) in definition.edges.iter().enumerate() {
-        if !node_ids.contains(edge.from.as_str()) {
-            report.push_error(
-                format!("definition.spec.procedure.edges[{index}].from"),
-                "edge source node does not exist",
-            );
-        }
-        if !node_ids.contains(edge.to.as_str()) {
-            report.push_error(
-                format!("definition.spec.procedure.edges[{index}].to"),
-                "edge destination node does not exist",
-            );
-        }
-    }
-}
-
-fn validate_procedure_node(index: usize, node: &ProcedureNode, report: &mut ValidationReport) {
-    let path = format!("definition.spec.procedure.nodes[{index}]");
-    match node.kind {
-        ProcedureNodeKind::Action | ProcedureNodeKind::SkillAction => {
-            validate_procedure_action_node(&path, node, report);
-        }
-        ProcedureNodeKind::Tool => validate_procedure_tool_node(&path, node, report),
-        _ => {}
-    }
-}
-
-fn validate_procedure_action_node(path: &str, node: &ProcedureNode, report: &mut ValidationReport) {
-    if let Some(artifact_ref) = &node.artifact_ref {
-        validate_single_action_ref(&format!("{path}.ref"), artifact_ref, report);
-        return;
-    }
-    if !procedure_input_tool_target_present(&node.input) {
-        report.push_error(
-            path,
-            "procedure action node must specify ref, input.tool_name, or input.tool",
-        );
-    }
-}
-
-fn validate_procedure_tool_node(path: &str, node: &ProcedureNode, report: &mut ValidationReport) {
-    validate_tool_refs(&format!("{path}.tool_refs"), &node.tool_refs, report);
-    if procedure_input_tool_target_present(&node.input) {
-        return;
-    }
-    if node.tool_refs.len() != 1 {
-        report.push_error(
-            path,
-            "procedure tool node must specify exactly one tool_ref, input.tool_name, or input.tool",
-        );
-    }
-}
-
-fn procedure_input_tool_target_present(input: &Value) -> bool {
-    input
-        .get("tool_name")
-        .or_else(|| input.get("tool"))
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn require_non_empty(
@@ -878,44 +1838,6 @@ fn validate_action_refs(path: &str, refs: &[ArtifactRef], report: &mut Validatio
         "action reference target must not be empty",
         "duplicate action reference",
         validate_action_ref_kind,
-        report,
-    );
-}
-
-fn validate_single_action_ref(
-    path: &str,
-    artifact_ref: &ArtifactRef,
-    report: &mut ValidationReport,
-) {
-    if artifact_ref.target_name().trim().is_empty() {
-        report.push_error(
-            path.to_string(),
-            "action reference target must not be empty",
-        );
-    }
-    if artifact_ref
-        .action_name()
-        .is_some_and(|action| action.trim().is_empty())
-    {
-        report.push_error(
-            path.to_string(),
-            "action reference action must not be empty",
-        );
-    }
-    validate_action_ref_kind(path, artifact_ref, report);
-}
-
-fn validate_tool_refs(path: &str, refs: &[ArtifactRef], report: &mut ValidationReport) {
-    validate_ref_list(
-        path,
-        refs,
-        "tool reference target must not be empty",
-        "duplicate tool reference",
-        |item_path, artifact_ref, report| {
-            if !matches!(artifact_ref, ArtifactRef::Tool { .. }) {
-                report.push_error(item_path, "tool reference must use tool://");
-            }
-        },
         report,
     );
 }

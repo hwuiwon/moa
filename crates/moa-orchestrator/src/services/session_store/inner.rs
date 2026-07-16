@@ -5,12 +5,16 @@ use moa_agents::AgentResolver;
 use moa_authz::{enqueue, enqueue_raw};
 use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
 use moa_core::{
+    events::Event,
     traits::{Identity, IdentityType, SessionChannelBindingUpdate},
     types::action_policy::ActionRuleScope,
     types::agent::AgentContext,
     types::agent::AgentSessionSelection,
     types::channel::SessionChannelBindingId,
     types::identifiers::ModelId,
+    types::{
+        channel::Channel, contact::SessionActorRef, session::SessionMeta, session::SessionStatus,
+    },
 };
 use moa_session::SessionChannelBindingReplacement;
 use sqlx::{Postgres, Transaction};
@@ -188,6 +192,126 @@ pub(crate) async fn initialize_contact_session_atomic(
         .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
 
     Ok(outcome.session_id)
+}
+
+/// Atomically creates or validates one replay-stable internal execution Session.
+///
+/// New rows commit with their pinned agent sidecar, `SessionCreated` origin,
+/// and authorization outbox tuples. Replays must match every immutable
+/// authority field used by execution planning; a deterministic key collision
+/// never adopts another tenant, contact, creator, model, or agent context.
+pub(crate) async fn initialize_internal_execution_session_atomic(
+    store: &PostgresSessionStore,
+    pool: &sqlx::PgPool,
+    meta: SessionMeta,
+    identity: Identity,
+) -> Result<SessionId, HandlerError> {
+    validate_internal_execution_session_meta(&meta, &identity)?;
+    let expected = meta.clone();
+    let tenant_id = meta.tenant_id;
+    let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
+    let session_id = meta.id;
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
+    let outcome = store
+        .create_session_in_tx(&mut transaction, meta)
+        .await
+        .map_err(HandlerError::from)?;
+    if outcome.inserted {
+        enqueue_session_authz_tuples(
+            &mut transaction,
+            &identity,
+            session_id,
+            tenant_id,
+            contact_id,
+        )
+        .await?;
+        store
+            .append_event_in_tx(
+                &mut transaction,
+                session_id,
+                Event::SessionCreated {
+                    tenant_id,
+                    contact_id,
+                    created_by: expected.created_by.clone(),
+                    model: expected.model.clone(),
+                    channel: Channel::Chat,
+                },
+                None,
+            )
+            .await
+            .map_err(session_store_handler_error)?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+
+    let persisted = store
+        .get_session(session_id)
+        .await
+        .map_err(HandlerError::from)?;
+    if persisted.tenant_id != expected.tenant_id
+        || persisted.contact != expected.contact
+        || persisted.created_by != expected.created_by
+        || persisted.model != expected.model
+        || persisted.agent_context != expected.agent_context
+    {
+        return Err(TerminalError::new_with_code(
+            409,
+            "deterministic internal execution session conflicts with persisted authority",
+        )
+        .into());
+    }
+    Ok(outcome.session_id)
+}
+
+fn validate_internal_execution_session_meta(
+    meta: &SessionMeta,
+    identity: &Identity,
+) -> Result<(), HandlerError> {
+    if !matches!(
+        identity.identity_type,
+        IdentityType::Operator | IdentityType::Agent
+    ) {
+        return Err(TerminalError::new_with_code(
+            403,
+            "only operator or agent identities may create internal execution sessions",
+        )
+        .into());
+    }
+    if identity.tenant_id != meta.tenant_id
+        || meta.status != SessionStatus::Created
+        || meta.channel != Channel::Chat
+    {
+        return Err(TerminalError::new_with_code(
+            409,
+            "internal execution session identity or fixed lifecycle fields do not match",
+        )
+        .into());
+    }
+    let expected_creator = SessionActorRef::Identity {
+        id: identity.acting_on_behalf_of.unwrap_or(identity.id),
+    };
+    if meta.created_by.as_ref() != Some(&expected_creator) {
+        return Err(TerminalError::new_with_code(
+            409,
+            "internal execution session creator does not match the acting identity",
+        )
+        .into());
+    }
+    if let Some(contact) = &meta.contact
+        && (contact.tenant_id != meta.tenant_id || contact.contact_id.0.is_nil())
+    {
+        return Err(TerminalError::new_with_code(
+            409,
+            "internal execution session contact scope is invalid",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Atomically applies a contact session channel change: a replay-stable binding
@@ -405,13 +529,18 @@ fn owner_tuple_subject(identity: &Identity) -> Result<(UserType, uuid::Uuid), Ha
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        types::agent::AgentContext, types::agent::AgentModelPolicy,
-        types::agent::AgentPolicySnapshot, types::agent::SYSTEM_DEFAULT_AGENT_POLICY_HASH,
-        types::agent::SYSTEM_DEFAULT_AGENT_REF, types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID,
-        types::identifiers::ModelId, types::session::SessionMeta,
+        traits::{Identity, IdentityType},
+        types::agent::AgentContext,
+        types::agent::AgentModelPolicy,
+        types::agent::AgentPolicySnapshot,
+        types::agent::SYSTEM_DEFAULT_AGENT_POLICY_HASH,
+        types::agent::SYSTEM_DEFAULT_AGENT_REF,
+        types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID,
+        types::identifiers::ModelId,
+        types::session::SessionMeta,
     };
 
-    use super::apply_agent_model_policy;
+    use super::{apply_agent_model_policy, validate_internal_execution_session_meta};
 
     #[test]
     fn agent_model_policy_fills_empty_model() {
@@ -464,6 +593,38 @@ mod tests {
 
         apply_agent_model_policy(&mut meta, &context)
             .expect_err("invalid model should be rejected");
+    }
+
+    #[test]
+    fn internal_execution_session_rejects_unowned_or_scope_mismatched_identity() {
+        // Pins: sessionless experiment execution cannot elevate service/contact identities or cross tenants.
+        let identity = Identity {
+            identity_type: IdentityType::Service,
+            id: uuid::Uuid::new_v4(),
+            tenant_id: moa_core::types::identifiers::TenantId::new(),
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        };
+        let meta = SessionMeta {
+            tenant_id: identity.tenant_id,
+            created_by: Some(moa_core::types::contact::SessionActorRef::Identity {
+                id: identity.id,
+            }),
+            model: ModelId::new("gpt-5.1"),
+            ..SessionMeta::default()
+        };
+
+        validate_internal_execution_session_meta(&meta, &identity)
+            .expect_err("service identity must not gain an internal execution session");
+
+        let operator = Identity {
+            identity_type: IdentityType::Operator,
+            ..identity
+        };
+        let mut wrong_tenant = meta;
+        wrong_tenant.tenant_id = moa_core::types::identifiers::TenantId::new();
+        validate_internal_execution_session_meta(&wrong_tenant, &operator)
+            .expect_err("deterministic session tenant must match the acting identity");
     }
 
     fn agent_context(model_policy: AgentModelPolicy) -> AgentContext {

@@ -3,6 +3,7 @@
 use axum::body::Bytes;
 use axum::http::{Method, Uri};
 use moa_core::types::identifiers::TenantId;
+use moa_execution::wire::ExecutionTemplateAdmissionRequest;
 
 use super::{
     RouteTranslation, tenant_id_field, translate_json_object_with_fields,
@@ -28,23 +29,26 @@ pub(super) fn translate(
         }
         "/v1/skills/list" => translate_json_object_with_tenant_id(body, "/Skills/list", tenant_id),
         "/v1/capabilities/list" => {
-            translate_json_object_with_tenant_id(body, "/Skills/list_capabilities", tenant_id)
+            translate_json_object_with_tenant_id(body, "/Execution/list_capabilities", tenant_id)
         }
-        "/v1/skills/run" => translate_json_object_with_tenant_id(body, "/Skills/run", tenant_id),
-        "/v1/skills/status" => {
-            translate_json_object_with_tenant_id(body, "/Skills/status", tenant_id)
+        "/v1/execution-runs/start" => translate_execution_template_admission(body, tenant_id),
+        "/v1/execution-runs/list" => {
+            translate_json_object_with_tenant_id(body, "/Execution/list_runs", tenant_id)
         }
-        "/v1/skills/runs/list" => {
-            translate_json_object_with_tenant_id(body, "/Skills/list_runs", tenant_id)
+        "/v1/execution-runs/status" => {
+            translate_json_object_with_tenant_id(body, "/Execution/status", tenant_id)
         }
-        "/v1/skills/cancel" => {
-            translate_json_object_with_tenant_id(body, "/Skills/cancel", tenant_id)
+        "/v1/execution-runs/tasks/list" => {
+            translate_execution_run_nested(body, "/Execution/list_tasks", tenant_id)
         }
-        "/v1/skills/signal" => {
-            translate_json_object_with_tenant_id(body, "/Skills/signal", tenant_id)
+        "/v1/execution-runs/cancel" => {
+            translate_execution_run_nested(body, "/Execution/cancel", tenant_id)
         }
-        "/v1/skills/decide-review" => {
-            translate_json_object_with_tenant_id(body, "/Skills/decide_review", tenant_id)
+        "/v1/execution-runs/decide-review" => {
+            translate_json_object_with_tenant_id(body, "/Execution/decide_review", tenant_id)
+        }
+        "/v1/execution-runs/signal" => {
+            translate_json_object_with_tenant_id(body, "/Execution/deliver_signal", tenant_id)
         }
         "/v1/artifacts/import" => {
             translate_json_object_with_tenant_scope(body, "/Artifacts/import", tenant_id)
@@ -93,6 +97,59 @@ pub(super) fn translate(
     Some(translation)
 }
 
+fn translate_execution_template_admission(body: &Bytes, tenant_id: TenantId) -> RouteTranslation {
+    let mut value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return RouteTranslation::BadRequest("bad tenant route body"),
+    };
+    let Some(object) = value.as_object_mut() else {
+        return RouteTranslation::BadRequest("tenant route body must be object");
+    };
+    object.insert("tenant_id".to_string(), serde_json::json!(tenant_id));
+    let request = match serde_json::from_value::<ExecutionTemplateAdmissionRequest>(value) {
+        Ok(request) => request,
+        Err(_) => return RouteTranslation::BadRequest("invalid execution admission request"),
+    };
+    let path = format!("/Session/{}/admit_execution_template", request.session_id);
+    match serde_json::to_vec(&request) {
+        Ok(body) => RouteTranslation::Forward {
+            method: Method::POST,
+            path,
+            body,
+        },
+        Err(_) => RouteTranslation::BadRequest("serialize tenant route body failed"),
+    }
+}
+
+fn translate_execution_run_nested(
+    body: &Bytes,
+    path: &'static str,
+    tenant_id: TenantId,
+) -> RouteTranslation {
+    let mut value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return RouteTranslation::BadRequest("bad tenant route body"),
+    };
+    let Some(object) = value.as_object_mut() else {
+        return RouteTranslation::BadRequest("tenant route body must be object");
+    };
+    let Some(run) = object
+        .get_mut("run")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return RouteTranslation::BadRequest("execution request requires run object");
+    };
+    run.insert("tenant_id".to_string(), serde_json::json!(tenant_id));
+    match serde_json::to_vec(&value) {
+        Ok(body) => RouteTranslation::Forward {
+            method: Method::POST,
+            path: path.to_string(),
+            body,
+        },
+        Err(_) => RouteTranslation::BadRequest("serialize tenant route body failed"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::Bytes;
@@ -102,7 +159,7 @@ mod tests {
     use crate::routes::test_support::{test_tenant_json, test_tenant_scope_json, translate};
 
     #[test]
-    fn skills_public_routes_translate_to_restate_handlers() {
+    fn skills_and_capabilities_public_routes_translate_to_restate_handlers() {
         // Pins: hosted skills edge routes forward to the internal Skills service paths.
         let cases = [
             (
@@ -125,7 +182,7 @@ mod tests {
             ),
             (
                 "/v1/capabilities/list",
-                "/Skills/list_capabilities",
+                "/Execution/list_capabilities",
                 serde_json::json!({ "tenant_id": test_tenant_json() }),
             ),
         ];
@@ -165,43 +222,76 @@ mod tests {
     }
 
     #[test]
-    fn skill_execution_public_routes_translate_to_restate_handlers() {
-        // Pins: hosted skill procedure edge routes forward to the internal Skills service handlers
-        // that absorbed the former standalone workflow run/status/cancel/signal/review surface.
-        let cases = [
-            ("/v1/skills/run", "/Skills/run"),
-            ("/v1/skills/status", "/Skills/status"),
-            ("/v1/skills/runs/list", "/Skills/list_runs"),
-            ("/v1/skills/cancel", "/Skills/cancel"),
-            ("/v1/skills/signal", "/Skills/signal"),
-            ("/v1/skills/decide-review", "/Skills/decide_review"),
-        ];
-
-        for (public_path, internal_path) in cases {
+    fn legacy_execution_lifecycle_routes_removed() {
+        // Pins: retired skill-lifecycle REST paths have no redirects or aliases after
+        // the execution cutover, while exact pinned-template admission is Session-owned.
+        for suffix in [
+            "run",
+            "status",
+            "runs/list",
+            "cancel",
+            "signal",
+            "decide-review",
+        ] {
+            let public_path = format!("/v1/skills/{suffix}");
             let uri = public_path.parse::<Uri>().expect("route path should parse");
-            let body = Bytes::from_static(br#"{}"#);
+            assert_eq!(
+                translate(&Method::POST, &uri, &Bytes::from_static(br#"{}"#)),
+                RouteTranslation::NotFound,
+                "{public_path} must not remain as an alias"
+            );
+        }
 
-            let translation = translate(&Method::POST, &uri, &body);
+        let session_id = "11111111-1111-1111-1111-111111111111";
+        let uri = "/v1/execution-runs/start"
+            .parse::<Uri>()
+            .expect("route path should parse");
+        let body = Bytes::from(
+            serde_json::json!({
+                "contact_id": null,
+                "session_id": session_id,
+                "template": {
+                    "skill_ref": "skill://triage",
+                    "revision_uid": "22222222-2222-2222-2222-222222222222"
+                },
+                "objective": "Triage the incident",
+                "input": {"severity": "high"},
+                "idempotency_key": "incident-42"
+            })
+            .to_string(),
+        );
+        let RouteTranslation::Forward {
+            method,
+            path,
+            body: forwarded_body,
+        } = translate(&Method::POST, &uri, &body)
+        else {
+            panic!("execution start should translate to Session admission");
+        };
+        assert_eq!(method, Method::POST);
+        assert_eq!(
+            path,
+            format!("/Session/{session_id}/admit_execution_template")
+        );
+        let forwarded: serde_json::Value =
+            serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+        assert_eq!(forwarded["tenant_id"], test_tenant_json());
+        assert_eq!(forwarded["session_id"], serde_json::json!(session_id));
 
-            match translation {
-                RouteTranslation::Forward {
-                    method,
-                    path,
-                    body: forwarded_body,
-                } => {
-                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
-                    assert_eq!(path, internal_path, "{public_path} target changed");
-                    let forwarded: serde_json::Value =
-                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
-                    assert_eq!(forwarded.get("tenant_id"), Some(&test_tenant_json()));
-                }
-                RouteTranslation::NoChange => {
-                    panic!("{public_path} should translate to {internal_path}")
-                }
-                RouteTranslation::BadRequest(message) => {
-                    panic!("{public_path} should not fail translation: {message}")
-                }
-            }
+        let forbidden_fields = [
+            ["compiled", "plan", "id"].join("_"),
+            ["raw", "plan"].join("_"),
+            "plan".to_string(),
+        ];
+        for forbidden in forbidden_fields {
+            let mut invalid = serde_json::from_slice::<serde_json::Value>(&body)
+                .expect("admission fixture is JSON");
+            invalid[&forbidden] = serde_json::json!({"nodes": []});
+            assert_eq!(
+                translate(&Method::POST, &uri, &Bytes::from(invalid.to_string())),
+                RouteTranslation::BadRequest("invalid execution admission request"),
+                "execution admission must reject caller-supplied {forbidden}"
+            );
         }
     }
 

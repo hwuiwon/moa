@@ -36,7 +36,7 @@ bounded to `1..=1000`, and session/event cursors are opaque URL-safe tokens.
   distinguish inline content from paths or URIs, and state retry semantics;
 - JSON Schema enums for closed choices, including analytics aggregations,
   filter operators and sort directions, artifact kind/status/source format,
-  and procedure review decisions;
+  and execution review decisions;
 - numeric schema bounds matching runtime behavior, including list pagination,
   analytics row limits, and positive eval parallelism; and
 - an `outputSchema` for the stable success envelope and a tool-specific
@@ -80,13 +80,19 @@ Artifact and learning tools are `artifacts_list`, `artifact_export`,
 `artifact_validate`, `artifact_import`, `artifact_publish`,
 `learning_candidate_get`, `learning_candidate_accept_skill`, and
 `learning_candidate_reject`. Import creates a draft; publish is a separate,
-destructive confirmation. Skills, procedures, agents, and experiment plans all
+destructive confirmation. Skills, execution-plan templates, agents, and experiment plans all
 use the generic artifact format, so MCP does not duplicate legacy skill import
 or export paths.
 
-Procedure tools are `capabilities_list`, `procedure_runs_list`,
-`procedure_run_status`, `procedure_run_start`, `procedure_run_cancel`,
-`procedure_review_decide`, and `procedure_signal`.
+Execution tools are `capabilities_list`, `execution_runs_list`,
+`execution_run_status`, `execution_run_start`, `execution_run_cancel`,
+`execution_review_decide`, and `execution_signal`. Start accepts either a
+published `skill://...` reference with its exact revision, an objective, and
+structured input; it enters the same origin-bound session admission path and
+accepts neither a compiled-plan identifier nor raw plan JSON. Status includes immutable goal coverage,
+reserved/actual budget, plan revision/provenance, aggregate progress, completion
+checks, and explicit terminal gaps. Full task results use a separate bounded
+listing response.
 
 Internal eval tools are `eval_suites_summarize`, `eval_plan`,
 `eval_datasets_list`, `eval_dataset_register`, `eval_run`, `eval_run_status`,
@@ -124,9 +130,9 @@ clients do not need a second hard-coded schema catalog.
 |---|---|---|---|
 | Understand aggregate performance | `analytics_catalog` → `analytics_query` | — | Narrow with `sessions_list` |
 | Diagnose one session | `sessions_list` → `session_get` → `session_events_list` | — | `lineage_explain` |
-| Edit a skill, procedure, agent, connector, action, or experiment plan | `artifacts_list` → `artifact_export` → `artifact_validate` | `artifact_import` → `artifact_publish` | Run the relevant eval or experiment |
+| Edit a skill, execution-plan template, agent, connector, action, or experiment plan | `artifacts_list` → `artifact_export` → `artifact_validate` | `artifact_import` → `artifact_publish` | Run the relevant eval or experiment |
 | Review learned improvements | `learning_candidates_list` → `learning_candidate_get` | `learning_candidate_accept_skill` or `learning_candidate_reject` | `artifacts_list` plus an eval/experiment |
-| Run a procedure | `capabilities_list` and `procedure_runs_list` | `procedure_run_start`; when waiting, `procedure_review_decide` or `procedure_signal`; if necessary, `procedure_run_cancel` | Poll `procedure_run_status` |
+| Run durable typed work | `capabilities_list` and `execution_runs_list` | `execution_run_start`; when waiting, `execution_review_decide` or `execution_signal`; if necessary, `execution_run_cancel` | Poll `execution_run_status` |
 | Run an eval | `eval_suites_summarize` → `eval_plan`; inspect/register data with `eval_datasets_list` and `eval_dataset_register` | `eval_run` | Poll `eval_run_status`, then `eval_scores` → `eval_compare` |
 | Run a Behavior Lab experiment | `experiment_plan_generate` or artifact authoring | `experiment_run`; if necessary, `experiment_cancel` | `experiment_status`, `experiment_trials_list`, `experiment_trial_status`, `experiment_scores`, `experiment_compare` |
 | Turn experiment evidence into proposals | `experiment_compare` | `experiment_propose_improvements` | Review through the learning-candidate tools |
@@ -135,8 +141,9 @@ clients do not need a second hard-coded schema catalog.
 
 Long-running calls return domain IDs, not MCP task IDs. Poll with the paired
 status tool: eval `run_id` with `eval_run_status`; experiment or simulation
-`run_uid` with `experiment_status`; procedure `run_id` with
-`procedure_run_status`. Read scores only after a terminal completed status.
+`run_uid` with `experiment_status`; execution `run_uid` with
+`execution_run_status`. Read scores only after a terminal completed status;
+partial, blocked, and unsupported runs remain terminal but are not completed.
 
 ## Operator Workflows
 
@@ -146,7 +153,7 @@ status tool: eval `run_id` with `eval_run_status`; experiment or simulation
    reject it.
 3. Export an artifact, edit locally, validate, import a draft, evaluate it, and
    publish only after review.
-4. Inspect capabilities, start a procedure, poll status, and deliver review,
+4. Inspect capabilities, start an execution run, poll status, and deliver review,
    signal, or cancellation input when required.
 5. Summarize and plan inline eval TOML, register datasets as needed, start a
    run, poll it, then read or compare scores.

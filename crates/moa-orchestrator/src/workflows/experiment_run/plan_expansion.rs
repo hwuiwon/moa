@@ -88,7 +88,7 @@ async fn dispatch_plan_trials(
                 pool,
             )
             .await?;
-            return procedure_status_response(
+            return run_status_response(
                 ctx,
                 ExperimentRunStatusRequest {
                     tenant_id: request.tenant_id,
@@ -111,7 +111,7 @@ async fn dispatch_plan_trials(
                 pool,
             )
             .await?;
-            return procedure_status_response(
+            return run_status_response(
                 ctx,
                 ExperimentRunStatusRequest {
                     tenant_id: request.tenant_id,
@@ -168,16 +168,18 @@ async fn dispatch_plan_trials(
                 trial_key: trial.trial.trial_key.clone(),
                 future: completion,
             });
-            ctx.workflow_client::<ExperimentTrialRunClient>(key)
-                .run(Json::from(ExperimentTrialRunWorkflowRequest {
-                    tenant_id: request.tenant_id,
-                    trial: trial.trial.clone(),
-                    target: trial.target.clone(),
-                    variant: trial.variant.clone(),
-                    identity: request.identity.clone(),
-                    completion_awakeable_id: Some(awakeable_id),
-                }))
-                .send();
+            crate::restate_identity::replay_safe_request(
+                ctx.workflow_client::<ExperimentTrialRunClient>(key)
+                    .run(Json::from(ExperimentTrialRunWorkflowRequest {
+                        tenant_id: request.tenant_id,
+                        trial: trial.trial.clone(),
+                        target: trial.target.clone(),
+                        variant: trial.variant.clone(),
+                        identity: request.identity.clone(),
+                        completion_awakeable_id: Some(awakeable_id),
+                    })),
+            )
+            .send();
         }
 
         if !state_changed && !claimed_any_trials && active_waits.is_empty() {
@@ -201,7 +203,7 @@ async fn dispatch_plan_trials(
                 pool,
             )
             .await?;
-            return procedure_status_response(
+            return run_status_response(
                 ctx,
                 ExperimentRunStatusRequest {
                     tenant_id: request.tenant_id,
@@ -696,7 +698,7 @@ mod tests {
         Pin<Box<dyn Future<Output = Result<String, TerminalError>> + Send + 'static>>;
 
     #[tokio::test]
-    async fn plan_trial_completion_awakeable_resolves_before_legacy_poll_interval_offline() {
+    async fn plan_trial_completion_awakeable_resolves_without_polling_offline() {
         // Pins: parent dispatch waits on the child completion signal, not a 1s status poll.
         let started = Instant::now();
 

@@ -9,7 +9,6 @@
 //! `request_cancel` handler only resolves the promise after checking the
 //! persisted phase.
 //!
-mod delegation;
 mod event_queries;
 mod experience;
 mod guardrails;
@@ -21,27 +20,48 @@ mod tools;
 use std::sync::Arc;
 use std::time::Instant;
 
-use moa_brain::lineage::emit_generation_lineage;
-use moa_brain::pipeline::skills::{
-    SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY, SELECTED_SKILL_NAMES_METADATA_KEY,
+use async_trait::async_trait;
+use moa_brain::execution_planning::request::record_applied_planning_audit;
+use moa_brain::execution_planning::routing::record_applied_route_audit;
+use moa_brain::execution_planning::{
+    ExecutionPlanningRequest, ExecutionPlanningResultKind, ExecutionRoutingInput, plan_execution,
+    route_execution,
 };
+use moa_brain::lineage::emit_generation_lineage;
+use moa_brain::pipeline::skills::SELECTED_SKILL_NAMES_METADATA_KEY;
 use moa_brain::segment_assessment::AssessmentOverride;
 use moa_core::wire::session_store::{
     AppendEventRequest, RecordSegmentSkillActivationRequest, RecordSegmentTurnUsageRequest,
 };
 use moa_core::wire::turn::{
-    RunTurnRequest, TurnComplexityClass, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
-    TurnTrigger,
+    RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress, TurnTrigger,
 };
 use moa_core::{
     coordination_counters::CoordinationCounters,
-    coordination_counters::scope_coordination_counters, events::Event,
-    session_replay::TurnReplayCounters, session_replay::scope_turn_replay_counters,
-    types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY, types::events_stream::EventRecord,
-    types::identifiers::SessionId, types::provider::ModelTier,
-    types::segment_assessment::AssessmentPhase, types::session::SessionMeta,
+    coordination_counters::scope_coordination_counters,
+    events::Event,
+    session_replay::TurnReplayCounters,
+    session_replay::scope_turn_replay_counters,
+    traits::LLMProvider,
+    types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY,
+    types::completion::{CompletionRequest, CompletionResponse, CompletionStream},
+    types::context::ContextMessage,
+    types::events_stream::EventRecord,
+    types::execution_planning::{
+        ExecutionMode, ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
+        ExecutionRouteDecision, ExecutionRouteDecisionKind, ExecutionRouteStage,
+        execution_planning_dedupe_key,
+    },
+    types::identifiers::{ModelId, SessionId},
+    types::model::ModelCapabilities,
+    types::provider::ModelTier,
+    types::segment_assessment::AssessmentPhase,
+    types::session::SessionMeta,
     types::session::TurnOutcome as CoreTurnOutcome,
+};
+use moa_execution::repository::{
+    CompileAuditWriteOutcome, ExecutionRepository, ExecutionScope, PlannerCallAuditWriteOutcome,
+    RouteAuditWriteOutcome,
 };
 use moa_lineage_core::TurnId;
 use moa_memory_ingest::{IngestionVOClient, ingestion_object_key};
@@ -56,11 +76,6 @@ use moa_observability::{
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
-use self::delegation::{
-    AutoDelegationContext, AutoDelegationFanInOutcome, AutoDelegationOutcome,
-    maybe_fan_in_auto_delegation_results, maybe_schedule_auto_delegation,
-    root_request_turn_cap_for_auto_delegation,
-};
 use self::event_queries::{load_recent_target_events, load_session_meta};
 use self::guardrails::{evaluate_input_guardrail, visible_response_after_output_guardrail};
 use self::implementation::TurnExecutionImpl;
@@ -75,10 +90,13 @@ use self::tools::{
 
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
-use crate::services::{llm_gateway::LLMGatewayClient, session_store::RestateSessionStoreClient};
+use crate::services::{
+    execution::ExecutionClient, llm_gateway::LLMGatewayClient,
+    session_store::RestateSessionStoreClient,
+};
 use crate::turn::util::{
     TurnEvidence, allowed_tool_names, annotate_unresolved_verification,
-    ensure_delegation_tool_schemas, ensure_procedure_tool_schemas, response_tool_calls,
+    ensure_delegation_tool_schemas, exclude_execution_lifecycle_tool_schemas, response_tool_calls,
     summarize_response_text, turn_outcome_for_response,
 };
 use crate::turn_driver::{
@@ -103,14 +121,51 @@ struct BodyOutcome {
 }
 
 #[derive(Clone, Copy)]
-struct RunOnceContext {
+struct RunOnceContext<'a> {
     session_id: SessionId,
     turn_id: TurnId,
+    execution_mode: ExecutionMode,
+    objective: &'a str,
+    act_escalation_allowed: bool,
+    execution_synthesis_instruction: Option<&'a str>,
+}
+
+struct RestatePlannerProvider<'a> {
+    ctx: &'a WorkflowContext<'a>,
+}
+
+#[async_trait]
+impl LLMProvider for RestatePlannerProvider<'_> {
+    fn name(&self) -> &'static str {
+        "restate-llm-gateway"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        let response = crate::restate_identity::replay_safe_request(
+            self.ctx
+                .service_client::<LLMGatewayClient>()
+                .complete(Json::from(request)),
+        )
+        .call()
+        .await
+        .map_err(|error| moa_core::error::MoaError::ProviderError(error.to_string()))?
+        .into_inner();
+        Ok(CompletionStream::from_response(response))
+    }
 }
 
 #[derive(Clone, Debug)]
 enum TurnIterationOutcome {
     Core(CoreTurnOutcome),
+    ActEscalation(moa_core::types::execution_planning::ActEscalationSignal),
+    ActEscalationUnsupported(String),
     ToolBudgetExceeded(ToolBudgetExhausted),
 }
 
@@ -173,7 +228,7 @@ async fn execute_turn_inside_workflow(
             );
             user_sequence_num
         }
-        TurnTrigger::ChildSignal | TurnTrigger::WorkerResults => {
+        TurnTrigger::ChildSignal | TurnTrigger::WorkerResults | TurnTrigger::ExecutionSynthesis => {
             // System-triggered coordinator resume: the instruction was already recorded
             // as a durable control event and the history pipeline renders that event into
             // the prompt. So we deliberately do NOT append a fake `Event::UserMessage`,
@@ -205,16 +260,64 @@ async fn execute_turn_inside_workflow(
     let recent_target_events =
         load_recent_target_events(ctx, workflow.session_store.clone(), session_id).await?;
     let has_recent_target = recent_events_have_target(&recent_target_events, user_sequence_num);
+    let execution_synthesis_turn = is_execution_synthesis_turn(request);
+    let mut route = if execution_synthesis_turn {
+        ExecutionRouteDecision::Routed {
+            mode: ExecutionMode::Respond,
+            reason: moa_core::types::execution_planning::ExecutionRouteReason::SimpleResponse,
+        }
+    } else {
+        route_execution(ExecutionRoutingInput {
+            objective: &request.user_message,
+            execution_template: request.execution_template.as_ref(),
+            escalation: None,
+        })
+    };
+    let should_force_act = (matches!(route, ExecutionRouteDecision::NeedsInput { .. })
+        && (has_recent_target || !request.attachments.is_empty()))
+        || (matches!(
+            route,
+            ExecutionRouteDecision::Routed {
+                mode: ExecutionMode::Respond,
+                ..
+            }
+        ) && !request.attachments.is_empty());
+    if should_force_act {
+        route = ExecutionRouteDecision::Routed {
+            mode: ExecutionMode::Act,
+            reason:
+                moa_core::types::execution_planning::ExecutionRouteReason::BoundedInteractiveWork,
+        };
+    }
+    if !has_user_message_origin(request, user_sequence_num)
+        && (request.execution_template.is_some()
+            || matches!(
+                route,
+                ExecutionRouteDecision::Routed {
+                    mode: ExecutionMode::Run,
+                    ..
+                }
+            ))
+    {
+        return Err(TerminalError::new_with_code(409, "run_requires_user_message_origin").into());
+    }
+    if request.trigger == TurnTrigger::UserMessage {
+        let route_audit = route_audit_envelope(
+            ctx,
+            &meta,
+            session_id,
+            user_sequence_num,
+            &route,
+            ExecutionRouteStage::Initial,
+        )
+        .await?;
+        persist_planning_audit(workflow, ctx, route_audit).await?;
+    }
     let session_limits = workflow.session_limits();
-    let request_max_turns =
-        root_request_turn_cap_for_auto_delegation(&request.user_message, request.max_turns);
     let loop_plan = driver_model_loop::root_loop_plan(
         driver_model_loop::RootLoopPlanRequest {
-            user_text: &request.user_message,
-            attachment_count: request.attachments.len(),
-            request_max_turns,
-            has_recent_target,
-            available_tool_count: workflow.tool_schemas.len(),
+            route: &route,
+            request_max_turns: request.max_turns,
         },
         session_limits,
     );
@@ -222,20 +325,33 @@ async fn execute_turn_inside_workflow(
     let mut tool_budget = loop_plan.tool_budget();
     driver_progress::initialize_loop_progress(
         ctx,
-        loop_plan.complexity_class,
+        loop_plan.route.clone(),
         loop_plan.max_turns,
         loop_plan.max_tool_calls,
     );
-    if matches!(
-        loop_plan.complexity_class,
-        TurnComplexityClass::Clarification
-    ) {
+    if matches!(route, ExecutionRouteDecision::NeedsInput { .. }) {
         let message = append_clarification_response(ctx, session_id, &meta).await?;
         return Ok(BodyOutcome {
             kind: TurnOutcomeKind::Completed,
             message,
             post_outcome_assessment: None,
         });
+    }
+    let ExecutionRouteDecision::Routed { mode, reason } = route else {
+        return Err(TerminalError::new("execution route remained unresolved").into());
+    };
+    if mode == ExecutionMode::Run {
+        return execute_run_admission(
+            workflow,
+            ctx,
+            request,
+            &meta,
+            session_id,
+            user_sequence_num,
+            reason,
+            None,
+        )
+        .await;
     }
 
     let mut last_summary = None;
@@ -279,6 +395,12 @@ async fn execute_turn_inside_workflow(
                             RunOnceContext {
                                 session_id,
                                 turn_id,
+                                execution_mode: mode,
+                                objective: &request.user_message,
+                                act_escalation_allowed: mode == ExecutionMode::Act
+                                    && has_user_message_origin(request, user_sequence_num),
+                                execution_synthesis_instruction: execution_synthesis_turn
+                                    .then_some(request.user_message.as_str()),
                             },
                             &mut last_summary,
                             &mut turn_evidence,
@@ -324,6 +446,67 @@ async fn execute_turn_inside_workflow(
 
         match turn_outcome {
             TurnIterationOutcome::Core(CoreTurnOutcome::Continue) => continue,
+            TurnIterationOutcome::ActEscalation(signal) => {
+                if !has_user_message_origin(request, user_sequence_num)
+                    || signal.objective.as_bytes() != request.user_message.as_bytes()
+                {
+                    return Err(TerminalError::new_with_code(
+                        409,
+                        "run_requires_user_message_origin",
+                    )
+                    .into());
+                }
+                let escalation_route = route_execution(ExecutionRoutingInput {
+                    objective: &request.user_message,
+                    execution_template: None,
+                    escalation: Some(&signal),
+                });
+                let route_audit = route_audit_envelope(
+                    ctx,
+                    &meta,
+                    session_id,
+                    user_sequence_num,
+                    &escalation_route,
+                    ExecutionRouteStage::ActEscalation,
+                )
+                .await?;
+                persist_planning_audit(workflow, ctx, route_audit).await?;
+                let ExecutionRouteDecision::Routed {
+                    mode: ExecutionMode::Run,
+                    reason,
+                } = escalation_route
+                else {
+                    return Err(TerminalError::new(
+                        "Act escalation did not produce a terminal Run route",
+                    )
+                    .into());
+                };
+                return execute_run_admission(
+                    workflow,
+                    ctx,
+                    request,
+                    &meta,
+                    session_id,
+                    user_sequence_num,
+                    reason,
+                    Some(signal),
+                )
+                .await;
+            }
+            TurnIterationOutcome::ActEscalationUnsupported(message) => {
+                let message = append_zero_cost_assistant_response(
+                    ctx,
+                    session_id,
+                    &meta,
+                    format!("Execution escalation is unsupported: {message}"),
+                )
+                .await?;
+                return Ok(BodyOutcome {
+                    kind: TurnOutcomeKind::Completed,
+                    message,
+                    post_outcome_assessment: None,
+                });
+            }
             TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled) => {
                 let post_outcome_assessment = capture_current_active_segment_assessment(
                     workflow,
@@ -413,6 +596,249 @@ async fn execute_turn_inside_workflow(
     })
 }
 
+async fn route_audit_envelope(
+    ctx: &WorkflowContext<'_>,
+    meta: &SessionMeta,
+    session_id: SessionId,
+    originating_sequence: u64,
+    route: &ExecutionRouteDecision,
+    stage: ExecutionRouteStage,
+) -> Result<ExecutionPlanningAuditEnvelopeV1, HandlerError> {
+    let accepted_at = durable_utc_now(ctx, "execution_route_accepted_at").await?;
+    let (decision, mode, reason) = match route {
+        ExecutionRouteDecision::NeedsInput { reason } => {
+            (ExecutionRouteDecisionKind::NeedsInput, None, *reason)
+        }
+        ExecutionRouteDecision::Routed { mode, reason } => {
+            (ExecutionRouteDecisionKind::Routed, Some(*mode), *reason)
+        }
+    };
+    Ok(ExecutionPlanningAuditEnvelopeV1 {
+        schema_version: 1,
+        tenant_id: meta.tenant_id,
+        contact_id: meta.contact.as_ref().map(|contact| contact.contact_id),
+        session_id: Some(session_id),
+        originating_sequence: Some(originating_sequence),
+        payload: ExecutionPlanningAuditPayloadV1::Route {
+            stage,
+            decision,
+            mode,
+            reason,
+            accepted_at,
+        },
+    })
+}
+
+async fn persist_planning_audit(
+    workflow: &TurnExecutionImpl,
+    ctx: &WorkflowContext<'_>,
+    envelope: ExecutionPlanningAuditEnvelopeV1,
+) -> Result<(), HandlerError> {
+    let scope = envelope.contact_id.map_or(
+        ExecutionScope::Tenant {
+            tenant_id: envelope.tenant_id,
+        },
+        |contact_id| ExecutionScope::Contact {
+            tenant_id: envelope.tenant_id,
+            contact_id,
+        },
+    );
+    let durable_step_suffix = execution_planning_dedupe_key(&envelope)
+        .map_err(|error| TerminalError::new_with_code(422, error.to_string()))?
+        .strip_prefix("execution-planning-v1:")
+        .unwrap_or("audit")
+        .to_string();
+    match &envelope.payload {
+        ExecutionPlanningAuditPayloadV1::Route { .. } => {
+            let pool = workflow.session_store.pool().clone();
+            let audit = envelope.clone();
+            let result = ctx
+                .run(|| async move {
+                    ExecutionRepository::new(pool)
+                        .write_route_audit(scope, &audit)
+                        .await
+                        .map(Json::from)
+                        .map_err(execution_audit_error)
+                })
+                .name(format!("execution_route_audit_{durable_step_suffix}"))
+                .await?
+                .into_inner();
+            record_applied_route_audit(&result);
+            if matches!(result, RouteAuditWriteOutcome::Conflict { .. }) {
+                return Err(planning_audit_conflict());
+            }
+        }
+        ExecutionPlanningAuditPayloadV1::PlannerCall { .. } => {
+            let pool = workflow.session_store.pool().clone();
+            let audit = envelope.clone();
+            let result = ctx
+                .run(|| async move {
+                    ExecutionRepository::new(pool)
+                        .write_planner_call_audit(scope, &audit)
+                        .await
+                        .map(Json::from)
+                        .map_err(execution_audit_error)
+                })
+                .name(format!("execution_planner_audit_{durable_step_suffix}"))
+                .await?
+                .into_inner();
+            record_applied_planning_audit(&result);
+            if matches!(result, PlannerCallAuditWriteOutcome::Conflict { .. }) {
+                return Err(planning_audit_conflict());
+            }
+        }
+        ExecutionPlanningAuditPayloadV1::Compile { .. } => {
+            let pool = workflow.session_store.pool().clone();
+            let audit = envelope;
+            let result = ctx
+                .run(|| async move {
+                    ExecutionRepository::new(pool)
+                        .write_compile_audit(scope, &audit)
+                        .await
+                        .map(Json::from)
+                        .map_err(execution_audit_error)
+                })
+                .name(format!("execution_compile_audit_{durable_step_suffix}"))
+                .await?
+                .into_inner();
+            record_applied_planning_audit(&result);
+            if matches!(result, CompileAuditWriteOutcome::Conflict { .. }) {
+                return Err(planning_audit_conflict());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn planning_audit_conflict() -> HandlerError {
+    TerminalError::new_with_code(
+        409,
+        "execution planning audit conflicts with first persisted evidence",
+    )
+    .into()
+}
+
+fn execution_audit_error(error: moa_execution::Error) -> HandlerError {
+    TerminalError::new(format!("execution planning audit failed: {error}")).into()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_run_admission(
+    workflow: &TurnExecutionImpl,
+    ctx: &WorkflowContext<'_>,
+    request: &RunTurnRequest,
+    meta: &SessionMeta,
+    session_id: SessionId,
+    originating_user_sequence_num: u64,
+    route_reason: moa_core::types::execution_planning::ExecutionRouteReason,
+    escalation: Option<moa_core::types::execution_planning::ActEscalationSignal>,
+) -> Result<BodyOutcome, HandlerError> {
+    if !has_user_message_origin(request, originating_user_sequence_num) {
+        return Err(TerminalError::new_with_code(409, "run_requires_user_message_origin").into());
+    }
+    let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
+    let planning_call = ctx
+        .service_client::<ExecutionClient>()
+        .planning_context(Json::from(
+            moa_execution::wire::ExecutionPlanningContextRequest {
+                tenant_id: meta.tenant_id,
+                contact_id,
+                session_id,
+                originating_user_sequence_num,
+                requested_template: request
+                    .execution_template
+                    .as_ref()
+                    .map(|invocation| invocation.template.clone()),
+            },
+        ));
+    let planning_context = with_identity_headers(planning_call, &request.identity)
+        .call()
+        .await?
+        .into_inner();
+
+    let planner_model = workflow
+        .config
+        .models
+        .auxiliary
+        .clone()
+        .unwrap_or_else(|| workflow.config.models.main.clone());
+    let planning_now = durable_utc_now(ctx, "execution_planning_now").await?;
+    let provider = RestatePlannerProvider { ctx };
+    let planned = plan_execution(
+        &provider,
+        ExecutionPlanningRequest {
+            objective: request.user_message.clone(),
+            context: planning_context.snapshot.clone(),
+            execution_template: request.execution_template.clone(),
+            escalation,
+            planner_model: ModelId::new(planner_model),
+            config: workflow.config.execution.clone(),
+            now: planning_now,
+        },
+        route_reason,
+    )
+    .await
+    .map_err(crate::workflows::errors::moa_error_to_handler_error)?;
+    for audit in planned.audits {
+        persist_planning_audit(workflow, ctx, audit).await?;
+    }
+    let admitted = match planned.kind {
+        ExecutionPlanningResultKind::Ready(admitted) => admitted,
+        ExecutionPlanningResultKind::NeedsInput { message } => {
+            let message =
+                append_zero_cost_assistant_response(ctx, session_id, meta, message).await?;
+            return Ok(BodyOutcome {
+                kind: TurnOutcomeKind::Completed,
+                message,
+                post_outcome_assessment: None,
+            });
+        }
+        ExecutionPlanningResultKind::Unsupported { message } => {
+            let message =
+                append_zero_cost_assistant_response(ctx, session_id, meta, message).await?;
+            return Ok(BodyOutcome {
+                kind: TurnOutcomeKind::Completed,
+                message,
+                post_outcome_assessment: None,
+            });
+        }
+    };
+
+    let start_call = ctx.service_client::<ExecutionClient>().start(Json::from(
+        moa_execution::wire::ExecutionStartRequest {
+            tenant_id: meta.tenant_id,
+            contact_id,
+            session_id,
+            originating_user_sequence_num,
+            planning_context_uid: planning_context.planning_context_uid,
+            planning_context_hash: planning_context.planning_context_hash,
+            idempotency_key: Some(format!("turn:{}", request.turn_id)),
+            compiled: admitted.compiled,
+            run_input: admitted.run_input,
+            source_provenance: admitted.source_provenance,
+        },
+    ));
+    let started = with_identity_headers(start_call, &request.identity)
+        .call()
+        .await?
+        .into_inner();
+    Ok(BodyOutcome {
+        kind: TurnOutcomeKind::Accepted {
+            execution_run_uid: started.run.run_uid,
+        },
+        message: "Execution accepted.".to_string(),
+        post_outcome_assessment: None,
+    })
+}
+
+fn has_user_message_origin(request: &RunTurnRequest, originating_user_sequence_num: u64) -> bool {
+    request.trigger == TurnTrigger::UserMessage && originating_user_sequence_num > 0
+}
+
+fn is_execution_synthesis_turn(request: &RunTurnRequest) -> bool {
+    request.trigger == TurnTrigger::ExecutionSynthesis
+}
+
 async fn append_clarification_response(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
@@ -480,9 +906,11 @@ async fn ingest_deferred_session_turn(
         response_sequence_num,
         finalized_at,
     ) {
-        ctx.object_client::<IngestionVOClient>(ingestion_object_key(&turn))
-            .ingest_turn(Json(turn))
-            .send();
+        crate::restate_identity::replay_safe_request(
+            ctx.object_client::<IngestionVOClient>(ingestion_object_key(&turn))
+                .ingest_turn(Json(turn)),
+        )
+        .send();
     }
     Ok(())
 }
@@ -490,7 +918,7 @@ async fn ingest_deferred_session_turn(
 async fn run_once_inside_workflow(
     workflow: &TurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
-    turn_context: RunOnceContext,
+    turn_context: RunOnceContext<'_>,
     last_summary: &mut Option<String>,
     turn_evidence: &mut TurnEvidence,
     tool_budget: &mut ToolBudgetState,
@@ -503,7 +931,6 @@ async fn run_once_inside_workflow(
         return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
     }
 
-    let progress_turn_id = turn_id.0.to_string();
     driver_progress::set_phase(ctx, TurnPhase::Compiling);
     turn_progress::maybe_emit(
         ctx,
@@ -527,6 +954,9 @@ async fn run_once_inside_workflow(
         trusted_sandbox_manifest,
         citation_sources,
     } = built_request;
+    if let Some(instruction) = turn_context.execution_synthesis_instruction {
+        request.messages.push(ContextMessage::system(instruction));
+    }
     if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
         *last_summary = Some(reason);
         return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
@@ -543,9 +973,11 @@ async fn run_once_inside_workflow(
         driver_segments::insert_active_segment_metadata(&mut request, segment);
         record_selected_segment_skills(ctx, session_id, &request.metadata).await?;
     }
-    ensure_delegation_tool_schemas(&mut request);
-    if turn_has_procedure_capable_skill(&request.metadata) {
-        ensure_procedure_tool_schemas(&mut request);
+    if turn_context.execution_mode == ExecutionMode::Respond {
+        request.tools.clear();
+    } else {
+        ensure_delegation_tool_schemas(&mut request);
+        exclude_execution_lifecycle_tool_schemas(&mut request);
     }
     request.metadata.insert(
         DEFER_BRAIN_RESPONSE_METADATA_KEY.to_string(),
@@ -558,52 +990,6 @@ async fn run_once_inside_workflow(
         .map(|model| model.as_str())
         .unwrap_or(meta.model.as_str())
         .to_string();
-
-    match maybe_schedule_auto_delegation(
-        workflow,
-        ctx,
-        AutoDelegationContext {
-            meta: &meta,
-            session_id,
-            trusted_sandbox_manifest: trusted_sandbox_manifest.as_ref(),
-            turn_evidence,
-        },
-        &request,
-        &allowed_tools,
-        tool_budget,
-        last_summary,
-    )
-    .await?
-    {
-        AutoDelegationOutcome::Skipped => {}
-        AutoDelegationOutcome::Scheduled => {
-            return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Continue));
-        }
-        AutoDelegationOutcome::Cancelled => {
-            return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
-        }
-        AutoDelegationOutcome::ToolBudgetExceeded(exhaustion) => {
-            return Ok(TurnIterationOutcome::ToolBudgetExceeded(exhaustion));
-        }
-    }
-
-    match maybe_fan_in_auto_delegation_results(
-        workflow,
-        ctx,
-        session_id,
-        &progress_turn_id,
-        last_summary,
-    )
-    .await?
-    {
-        AutoDelegationFanInOutcome::Skipped => {}
-        AutoDelegationFanInOutcome::Continue => {
-            return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Continue));
-        }
-        AutoDelegationFanInOutcome::Cancelled => {
-            return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
-        }
-    }
 
     driver_progress::set_phase(ctx, TurnPhase::Streaming);
     turn_progress::maybe_emit(
@@ -625,9 +1011,10 @@ async fn run_once_inside_workflow(
                 *last_summary = Some(reason);
                 return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
             },
-            response = ctx
-                .service_client::<LLMGatewayClient>()
-                .complete(Json::from(request.clone()))
+            response = crate::restate_identity::replay_safe_request(
+                ctx.service_client::<LLMGatewayClient>()
+                    .complete(Json::from(request.clone())),
+            )
                 .call() => {
                     response?.into_inner()
             }
@@ -672,7 +1059,6 @@ async fn run_once_inside_workflow(
     }
 
     let tool_calls = response_tool_calls(&visible_response);
-    let selected_procedure_skills = selected_procedure_skill_refs(&request.metadata);
     let selected_skills = selected_skill_names(&request.metadata);
     match dispatch_response_tool_calls(
         workflow,
@@ -682,8 +1068,9 @@ async fn run_once_inside_workflow(
             session_id,
             active_canary: active_canary.as_deref(),
             trusted_sandbox_manifest: trusted_sandbox_manifest.as_ref(),
-            selected_procedure_skills: &selected_procedure_skills,
             selected_skills: &selected_skills,
+            objective: turn_context.objective,
+            act_escalation_allowed: turn_context.act_escalation_allowed,
             turn_evidence,
             file_read_cache,
         },
@@ -695,6 +1082,12 @@ async fn run_once_inside_workflow(
     .await?
     {
         ToolDispatchOutcome::Completed => {}
+        ToolDispatchOutcome::ActEscalation(signal) => {
+            return Ok(TurnIterationOutcome::ActEscalation(signal));
+        }
+        ToolDispatchOutcome::ActEscalationUnsupported(message) => {
+            return Ok(TurnIterationOutcome::ActEscalationUnsupported(message));
+        }
         ToolDispatchOutcome::Cancelled => {
             return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
         }
@@ -738,26 +1131,28 @@ async fn maybe_append_turn_metrics(
     if !persist_turn_metrics_enabled() {
         return Ok(());
     }
-    ctx.service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event: Event::TurnMetrics {
-                turn_id: turn_id.to_string(),
-                actor: actor.to_string(),
-                session_vo_calls: coordination.session_vo_calls,
-                worker_vo_calls: coordination.worker_vo_calls,
-                vo_sends: coordination.vo_sends,
-                durable_appends: coordination.durable_appends,
-                get_events_calls: replay.get_events_calls,
-                events_bytes: replay.events_bytes,
-                llm_ms,
-                tool_ms,
-                persist_ms,
-            },
-            dedupe_key: Some(format!("turn_metrics:{turn_id}")),
-        }))
-        .call()
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event: Event::TurnMetrics {
+                    turn_id: turn_id.to_string(),
+                    actor: actor.to_string(),
+                    session_vo_calls: coordination.session_vo_calls,
+                    worker_vo_calls: coordination.worker_vo_calls,
+                    vo_sends: coordination.vo_sends,
+                    durable_appends: coordination.durable_appends,
+                    get_events_calls: replay.get_events_calls,
+                    events_bytes: replay.events_bytes,
+                    llm_ms,
+                    tool_ms,
+                    persist_ms,
+                },
+                dedupe_key: Some(format!("turn_metrics:{turn_id}")),
+            })),
+    )
+    .call()
+    .await?;
     Ok(())
 }
 
@@ -771,12 +1166,14 @@ async fn record_response(
     let usage = response.token_usage();
     let token_cost = (usage.total_input_tokens() + usage.output_tokens) as u64;
     if token_cost > 0 {
-        ctx.service_client::<RestateSessionStoreClient>()
-            .record_segment_turn_usage(Json(RecordSegmentTurnUsageRequest {
-                session_id,
-                token_cost,
-            }))
-            .send();
+        crate::restate_identity::replay_safe_request(
+            ctx.service_client::<RestateSessionStoreClient>()
+                .record_segment_turn_usage(Json(RecordSegmentTurnUsageRequest {
+                    session_id,
+                    token_cost,
+                })),
+        )
+        .send();
     }
     Ok(())
 }
@@ -787,51 +1184,16 @@ async fn record_selected_segment_skills(
     metadata: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), HandlerError> {
     for skill_name in selected_skill_names(metadata) {
-        ctx.service_client::<RestateSessionStoreClient>()
-            .record_segment_skill_activation(Json(RecordSegmentSkillActivationRequest {
-                session_id,
-                skill_name,
-            }))
-            .send();
+        crate::restate_identity::replay_safe_request(
+            ctx.service_client::<RestateSessionStoreClient>()
+                .record_segment_skill_activation(Json(RecordSegmentSkillActivationRequest {
+                    session_id,
+                    skill_name,
+                })),
+        )
+        .send();
     }
     Ok(())
-}
-
-/// Returns whether the turn selected at least one skill carrying a procedure, so
-/// the deterministic procedure execution tools should be offered on this turn.
-fn turn_has_procedure_capable_skill(
-    metadata: &std::collections::HashMap<String, serde_json::Value>,
-) -> bool {
-    metadata
-        .get(SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY)
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .any(|name| !name.trim().is_empty())
-}
-
-/// Returns the normalized `skill://<name>` references for the procedure-capable
-/// skills selected on this turn, used to gate which skills `run_procedure` may start.
-///
-/// This reads the same context metadata that decides whether the procedure tools are
-/// offered ([`turn_has_procedure_capable_skill`]) and normalizes each name the way
-/// [`moa_core::types::procedure_tools::RunProcedureToolInput::procedure_ref`] does, so a `run_procedure` call
-/// and the allowlist compare on identical forms. Both the root and worker turn loops
-/// use this so the membership gate shares one source of truth.
-pub(crate) fn selected_procedure_skill_refs(
-    metadata: &std::collections::HashMap<String, serde_json::Value>,
-) -> std::collections::BTreeSet<String> {
-    metadata
-        .get(SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY)
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(moa_core::types::procedure_tools::normalize_procedure_skill_ref)
-        .collect()
 }
 
 fn selected_skill_names(
@@ -926,6 +1288,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn run_requires_user_message_origin_for_every_run_admission_path() {
+        // Pins: only a persisted user-message turn with a nonzero event sequence may start Run.
+        let mut request = RunTurnRequest {
+            session_id: "session-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            identity: moa_core::traits::Identity {
+                identity_type: moa_core::traits::IdentityType::Service,
+                id: uuid::Uuid::new_v4(),
+                tenant_id: moa_core::types::identifiers::TenantId::new(),
+                api_key_id: None,
+                acting_on_behalf_of: None,
+            },
+            contact: None,
+            user_message: "Run the report".to_string(),
+            attachments: Vec::new(),
+            model: None,
+            max_turns: None,
+            trigger: TurnTrigger::UserMessage,
+            child_signal_id: None,
+            execution_template: None,
+        };
+        assert!(has_user_message_origin(&request, 1));
+        assert!(!has_user_message_origin(&request, 0));
+
+        for trigger in [
+            TurnTrigger::WorkerResults,
+            TurnTrigger::ChildSignal,
+            TurnTrigger::ExecutionSynthesis,
+        ] {
+            request.trigger = trigger;
+            assert!(!has_user_message_origin(&request, 1));
+        }
+    }
+
+    #[test]
     fn selected_skill_names_ignores_invalid_values_and_deduplicates() {
         // Pins: skill selection metadata from the context pipeline becomes stable segment evidence.
         let mut metadata = HashMap::new();
@@ -941,51 +1338,28 @@ mod tests {
     }
 
     #[test]
-    fn procedure_tools_offered_only_when_a_procedure_skill_is_selected() {
-        // Pins: run_procedure/procedure_status are injected only when the turn
-        // selected at least one skill that carries a procedure.
-        let mut none = HashMap::new();
-        none.insert(
-            SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY.to_string(),
-            json!([]),
-        );
-        assert!(!turn_has_procedure_capable_skill(&none));
-        // Missing key entirely also means no procedure tools.
-        assert!(!turn_has_procedure_capable_skill(&HashMap::new()));
+    fn provider_tool_list_excludes_execution_lifecycle_tools() {
+        // Pins: external execution-run controls cannot enter the root model's
+        // provider-visible tool list.
+        let mut request = moa_core::types::completion::CompletionRequest::new("work");
+        request.tools = [
+            "execution_runs_list",
+            "execution_run_start",
+            "execution_run_status",
+            "execution_run_cancel",
+            "execution_review_decide",
+            "execution_signal",
+            "file_read",
+        ]
+        .into_iter()
+        .map(|name| json!({"name": name, "input_schema": {"type": "object"}}))
+        .collect();
 
-        let mut present = HashMap::new();
-        present.insert(
-            SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY.to_string(),
-            json!(["", "damaged-food-order"]),
-        );
-        assert!(turn_has_procedure_capable_skill(&present));
-    }
-
-    #[test]
-    fn selected_procedure_skill_refs_normalizes_and_ignores_blanks() {
-        // Pins: the run_procedure membership set is built from the selected procedure
-        // skill names, normalized to skill:// references, with blank and non-string
-        // metadata entries dropped so the allowlist matches procedure_ref() exactly.
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            SELECTED_PROCEDURE_SKILL_NAMES_METADATA_KEY.to_string(),
-            json!([
-                "damaged-food-order",
-                " ",
-                "skill://transaction-dispute",
-                7,
-                null
-            ]),
-        );
+        crate::turn::util::exclude_execution_lifecycle_tool_schemas(&mut request);
 
         assert_eq!(
-            selected_procedure_skill_refs(&metadata),
-            BTreeSet::from([
-                "skill://damaged-food-order".to_string(),
-                "skill://transaction-dispute".to_string(),
-            ])
+            crate::turn::util::allowed_tool_names(&request),
+            BTreeSet::from(["file_read".to_string()])
         );
-        // No selected procedure skills yields an empty set, so run_procedure is rejected.
-        assert!(selected_procedure_skill_refs(&HashMap::new()).is_empty());
     }
 }

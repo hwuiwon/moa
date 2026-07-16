@@ -2,7 +2,7 @@ api_version: moa.artifact/v1
 kind: skill
 metadata:
   name: human-approval
-  description: Skill whose procedure pauses on an explicit human review node.
+  description: Skill whose execution plan pauses for an explicit human review.
   tags:
     - pattern
     - human-in-the-loop
@@ -12,56 +12,86 @@ definition:
   spec:
     instructions:
       path: SKILL.md
-    procedure:
-      nodes:
-        - id: start
-          kind: start
-          ui:
-            x: 80
-            y: 150
-        - id: draft_action
-          kind: skill_action
-          ref: action://refund_policy.draft_refund
-          input:
-            operation: draft_refund
-          ui:
-            x: 280
-            y: 150
-        - id: approval
-          kind: review
-          input:
-            prompt: Approve or reject the drafted customer-visible action.
-          ui:
-            x: 500
-            y: 150
-        - id: execute_action
-          kind: action
-          ref: action://orders.refund
-          input:
-            source: approved_procedure
-          ui:
-            x: 720
-            y: 150
-        - id: done
-          kind: end
-          input:
-            status: approved
-          ui:
-            x: 920
-            y: 150
-      edges:
-        - id: start-draft-action
-          from: start
-          to: draft_action
-        - id: draft-action-approval
-          from: draft_action
-          to: approval
-        - id: approval-execute-action
-          from: approval
-          to: execute_action
-        - id: execute-action-done
-          from: execute_action
-          to: done
-      ui:
-        layout: dagre
-        version: 1
+    execution_plan:
+      goal:
+        requirements:
+          - id: req_approval
+            description: Execute the action only after explicit human approval.
+        deliverables: []
+        coverage: []
+        constraints: []
+        completion_checks:
+          - id: check_output
+            description: Validate the approved action output.
+            requirement_ids: [req_approval]
+            constraint_ids: []
+            kind:
+              kind: output_schema
+      plan:
+        schema_version: 1
+        input_schema:
+          type: object
+        output_schema:
+          type: object
+        nodes:
+          - id: draft_action
+            requirement_ids: [req_approval]
+            depends_on: []
+            input: {}
+            output_schema:
+              type: object
+            operation:
+              kind: capability
+              reference:
+                name: action://refund_policy.draft_refund
+                version: v1
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0
+          - id: approval
+            requirement_ids: [req_approval]
+            depends_on: [draft_action]
+            input:
+              draft:
+                $ref: $.nodes.draft_action.output
+            output_schema:
+              type: object
+            operation:
+              kind: review
+              prompt: Approve or reject the drafted customer-visible action.
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0
+          - id: execute_action
+            requirement_ids: [req_approval]
+            depends_on: [approval]
+            input:
+              decision:
+                $ref: $.nodes.approval.output
+            output_schema:
+              type: object
+            operation:
+              kind: capability
+              reference:
+                name: action://orders.refund
+                version: v1
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0
+          - id: output
+            requirement_ids: [req_approval]
+            depends_on: [execute_action]
+            input: {}
+            output_schema:
+              type: object
+            operation:
+              kind: output
+              value:
+                $ref: $.nodes.execute_action.output
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0

@@ -16,9 +16,9 @@ what must stay out of Restate state.
 
 | Restate primitive | Use in MOA | Reason |
 |---|---|---|
-| Service | Durable stateless calls such as `ActionReviews`, `AuthzChallenges`, `LearningReview`, `ToolExecutor`, `LLMGateway`, `SessionStore`, `Authz`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
+| Service | Durable stateless calls such as `ActionReviews`, `AuthzChallenges`, `Execution`, `LearningReview`, `ToolExecutor`, `LLMGateway`, `SessionStore`, `Authz`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` | Single-writer-per-key semantics and small hot state. |
-| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ProcedureExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run per ID with explicit progress and completion. |
+| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run or task per ID with explicit progress and completion. |
 
 Use the weakest primitive that gives the needed correctness property. Do not
 use a workflow for conversational actors; do not use virtual-object state as a
@@ -32,6 +32,8 @@ product database.
 | Top-level turn | Workflow | `turn_id` |
 | Worker | Virtual Object | `worker_id` |
 | Worker turn | Workflow | `turn_id` |
+| Execution run | Workflow plus `moa.execution_run` | `run_uid` |
+| Execution task | Workflow plus `moa.execution_task` | stable hash of `(run_uid, node_id, item_key)` |
 | Tool execution | Service | none |
 | LLM call | Service | none |
 | Graph-memory ingestion | Virtual Object plus Postgres ingestion claim rows | ingestion key |
@@ -43,10 +45,12 @@ product database.
 
 Sessions and workers are virtual objects because they receive multiple
 messages over time. `TurnExecution` and `WorkerTurnExecution` are workflows
-because one admitted turn should have one observable durable run. Procedure
-execution, tenant knowledge sync ingestion, and consolidation are
-workflows for the same reason. Hosted eval status is a Postgres row; it is not
-a workflow unless the eval body gains real durable-step semantics.
+because one admitted turn should have one observable durable run. `ExecutionRun`
+and `ExecutionTask` are workflows because typed graph work has stable run/task
+identities, durable waits, recovery, and explicit terminal outcomes. Tenant
+knowledge sync ingestion and consolidation are workflows for the same reason.
+Hosted eval status is a Postgres row; it is not a workflow unless the eval body
+gains real durable-step semantics.
 
 ## Runtime Flow
 
@@ -66,6 +70,17 @@ The `Session` VO serializes message admission, queue state, cancellation
 requests, and outcome recording. It starts `TurnExecution` and returns quickly.
 The workflow owns the long LLM/tool loop so read-only status, queueing, and
 cancellation do not wait behind a long turn.
+
+After context compilation, `TurnExecution` selects `respond`, `act`, or `run`.
+`respond` makes one no-tool model call. `act` retains the bounded root tool loop
+and optional conversational Worker delegation. `run` persists an immutable goal
+contract and canonical plan, starts `ExecutionRun` detached, and returns without
+making the root model poll status. A terminal run requests one guarded synthesis
+turn on the owning session. Only a root user-message trigger can enter `run` or
+emit an Act-to-Run escalation; child-signal and worker-result continuations stay
+inside the bounded `act` turn. Successful admission returns the terminal root-turn
+outcome `Accepted`, publishes one minimal `ExecutionRunStarted` event, and keeps
+the owning Session `Running` while detached execution continues.
 
 ## Admission Control
 
@@ -117,8 +132,8 @@ Core production bindings:
 | Primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
-| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ProcedureExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` |
-| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Eval`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
+| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` |
+| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Eval`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
 
 Feature-gated bindings:
 
@@ -149,6 +164,8 @@ Restate state should be small, replay-safe, and useful only for orchestration.
 | Pending message queue | `Session` VO |
 | Current session turn progress | `TurnExecution` workflow |
 | Current worker turn progress | `WorkerTurnExecution` workflow |
+| Execution goal, plans, provenance, budget, completion, aggregate counters | Postgres `moa.execution_run` |
+| Execution task state, generations, reservations, usage, citations, outputs | Postgres `moa.execution_task` |
 | Pending tenant action reviews | Postgres `tenant_action_reviews` rows |
 | Detached worker result waiters | `Worker` VO, resolved by child terminal delivery |
 | Child heartbeat, last turn summary, pending input requests | `Worker` VO state (`last_heartbeat_at`, `last_turn_summary`, `pending_input_requests`, `cleanup_generation`) |
@@ -173,11 +190,15 @@ ordinary process memory. Process-local maps are allowed only as reconnect
 caches, transport demultiplexing, or performance caches whose correctness owner
 is Postgres, Restate, or explicitly configured Redis runtime cache.
 
-## Main-Agent/Worker Coordination
+## Main-Agent/Worker Coordination In Act
 
 Coordinator turns can return while detached workers keep running across
 Kubernetes replicas. Coordination is split into two planes so the high-frequency
 path never serializes through the single-writer parent VO.
+
+This section describes conversational delegation in `act`. `Worker` remains
+available for interactive, steerable child-agent work but is not a plan node or
+bulk DAG primitive. Worker fan-out controls do not cap execution-run maps.
 
 **Telemetry plane (high-frequency, off the `Session` VO).**
 
@@ -266,6 +287,49 @@ coordinator turn and the whole recursive child tree (today's behavior);
 `CoordinatorOnly` cancels only the active `TurnExecution` and leaves children
 running. The dead `Soft`/`Hard` `CancelMode` is removed.
 
+## Execution Run Coordination
+
+`ExecutionRun` is the only durable graph controller. It loads the persisted
+goal contract and active canonical plan, asks the pure `moa-execution`
+interpreter for all ready logical work, materializes stable task rows, and sends
+every ready `ExecutionTask` invocation durably. It advances only from persisted
+typed outcomes. There is no application active-worker, plan-node, or
+execution-task concurrency constant. The run's approved `max_tasks` and other
+resource dimensions bound logical work; Restate scoped concurrency and provider
+pacing queue physical execution.
+
+The graph is acyclic and has exactly seven operations: `Capability`, `Agent`,
+`Map`, `Reduce`, `Review`, `WaitSignal`, and `Output`. A map creates one task for
+each stable item key and cannot contain another map. Reduce uses structured
+batches; an agent reducer is a deterministic hierarchical tree bounded by
+`batch_size`.
+
+Before dispatch, `ExecutionTask` atomically reserves worst-case microusd,
+tokens, tasks, tool calls, retrieved bytes, and deadline allowance. A task that
+cannot reserve does not start. On completion it reconciles actual integer usage
+and writes output/citations through the current generation fence. Retry and
+recovery can therefore neither double-spend nor let stale completion overwrite
+new work.
+
+Task-local agents may use declared instruction-only skills and governed
+capabilities for a bounded number of turns. They return only `Completed`,
+`NeedsInput`, `NeedsReplan`, or `Failed`. `NeedsInput` parks the exact run/task.
+`NeedsReplan` asks the planner for a structured amendment using the immutable
+goal, active plan, completed outputs, evidence, remaining budget, and current
+catalog. The compiler rejects changes to running/completed work, cycles,
+recursive maps, task-identity reuse with new semantics, excess budget, and
+authorization expansion. Accepted amendments increment `plan_revision` and
+append canonical patch/hash/reason records. Repeated hashes or failure
+fingerprints, no progress, deadline, or resource exhaustion terminate with
+exact partial/blocked coverage; there is no arbitrary amendment-count cap.
+
+Cancellation prevents new reservations and leaves completed task rows
+queryable. Terminal completion requires every immutable goal requirement,
+deliverable, coverage item, schema/citation check, and budget/deadline check to
+pass. The run writes compact aggregate output, citations, failures, and gaps,
+emits terminal session events, and requests at most one synthesis turn. Raw map
+outputs stay in execution persistence, not session history or Session VO state.
+
 ## Determinism Rules
 
 Code inside Restate handlers must keep replay safety in mind:
@@ -309,6 +373,10 @@ MOA supports both:
 |---|---|
 | Cooperative cancellation | User asks the session or turn to stop; workflow checks at deterministic boundaries and records a normal cancelled outcome. |
 | Restate invocation cancellation | Operator hard-stops a stuck invocation through Restate admin APIs. |
+
+`Execution/cancel` is the product cancellation path for a run. It fences new
+task reservations, durably records the run terminal/partial state, and preserves
+completed task evidence before terminal session delivery.
 
 Prefer cooperative cancellation for product flows because it preserves normal
 events, cleanup, and hand teardown.
@@ -368,6 +436,12 @@ attributes. The useful diagnostic chain is:
 4. OTel trace and span links.
 5. Provider/tool timing and retry counters.
 
+Execution spans add run ID, task ID, plan hash/revision, requirement IDs,
+reservation/actual usage, retry generation, capability reference, and terminal
+reason as trace fields rather than high-cardinality metric labels. Operators
+diagnose a run from `moa.execution_run`/`moa.execution_task`, Restate
+invocations, traces, and its compact session events.
+
 Dashboards should separate Restate health, turn latency, LLM/provider behavior,
 approval latency, tool execution, and sandbox fleet health.
 
@@ -391,8 +465,10 @@ awakeables plus parent-cached terminal results instead of status polling.
 2. Sessions and workers are virtual objects.
 3. Top-level turns run in `TurnExecution` workflows keyed by turn ID.
 4. Worker turns run in `WorkerTurnExecution` workflows keyed by turn ID.
-5. Tenant action reviews use the `ActionReviews` service plus Postgres rows
+5. `ExecutionRun` and `ExecutionTask` are the only durable typed-DAG runtime;
+   `Worker` remains conversational delegation in `act`.
+6. Tenant action reviews use the `ActionReviews` service plus Postgres rows
    and events; they do not block turn workflows.
-6. Product-visible events, learning, memory, lineage, and audit stay in
+7. Product-visible events, execution state, learning, memory, lineage, and audit stay in
    Postgres.
-7. Gateways and clients can always rebuild visible state from Postgres events.
+8. Gateways and clients can always rebuild visible state from Postgres records.

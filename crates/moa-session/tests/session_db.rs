@@ -8,6 +8,10 @@ mod events_append_only_db;
 mod events_concurrent_monotonicity_db;
 #[path = "session_db/events_partitioning_db.rs"]
 mod events_partitioning_db;
+#[path = "session_db/execution_events_db.rs"]
+mod execution_events_db;
+#[path = "session_db/learning_candidate_planning_audit_db.rs"]
+mod learning_candidate_planning_audit_db;
 #[path = "session_db/postgres_store_db.rs"]
 mod postgres_store_db;
 #[path = "session_db/recurrence_db.rs"]

@@ -9,6 +9,7 @@ use moa_core::{
     error::MoaError, types::action_policy::ActionEnvelope,
     types::action_policy::ActionPolicyEffect, types::action_policy::ActionPolicyRule,
     types::action_policy::ActionReviewPreview, types::action_policy::ActionRuleScope,
+    types::action_policy::CapabilityProvenance, types::action_policy::ExecutionTaskOrigin,
     types::agent::AgentPolicySnapshot, types::completion::ToolInvocation,
     types::contact::ContactId, types::identifiers::TenantId, types::identifiers::ToolCallId,
     types::identifiers::UserId, types::session::SessionMeta, types::worker::state::WorkerId,
@@ -36,15 +37,12 @@ pub struct PrepareActionReviewRequest {
     /// Worker that requested the action, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<WorkerId>,
-    /// Origin object kind for workflow or artifact-driven actions.
+    /// Capability-level provenance, independent of execution ownership.
+    #[serde(default)]
+    pub capability_provenance: CapabilityProvenance,
+    /// Execution task identity, when the capability belongs to a dynamic run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin_kind: Option<String>,
-    /// Origin object identifier for workflow or artifact-driven actions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin_id: Option<String>,
-    /// Origin step identifier for workflow or artifact-driven actions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin_step_id: Option<String>,
+    pub execution_origin: Option<ExecutionTaskOrigin>,
     /// Explicit idempotency key supplied for side-effecting tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
@@ -122,51 +120,16 @@ impl ActionPolicy for ActionPolicyImpl {
         ctx: Context<'_>,
         request: Json<PrepareActionReviewRequest>,
     ) -> Result<Json<PreparedActionReview>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ActionPolicy", "prepare_action_review");
         let request = request.into_inner();
         let router = self.router.clone();
 
         Ok(ctx
             .run(|| async move {
-                let prepared = router
-                    .prepare_invocation(&request.session, &request.invocation)
+                prepare_action_review_inner(router, request)
                     .await
-                    .map_err(moa_error_to_handler_error)?;
-                let base_policy = prepared.policy().clone();
-                let agent_policy = agent_action_policy_effect(
-                    &request.session,
-                    &request.invocation,
-                    request.origin_kind.as_deref(),
-                    request.origin_id.as_deref(),
-                )
-                .map_err(moa_error_to_handler_error)?;
-                let effect = stricter_effect(base_policy.effect, agent_policy.effect);
-                let base_reason = base_policy.reason.clone();
-                let reason = if effect == base_policy.effect {
-                    base_reason.or(agent_policy.reason)
-                } else {
-                    agent_policy.reason.or(base_reason)
-                };
-                let origin = ActionOrigin {
-                    origin_kind: request.origin_kind,
-                    origin_id: request.origin_id,
-                    origin_step_id: request.origin_step_id,
-                    idempotency_key: request.idempotency_key,
-                };
-                Ok(Json::from(PreparedActionReview {
-                    effect,
-                    reason,
-                    matched_rule: base_policy.matched_rule.clone(),
-                    input_summary: prepared.input_summary().to_string(),
-                    envelope: prepared.envelope(
-                        request.review_id,
-                        &request.session,
-                        request.tool_call_id,
-                        request.worker_id,
-                        origin,
-                    ),
-                    preview: prepared.review_preview(),
-                }))
+                    .map(Json::from)
             })
             .name("prepare_action_review")
             .await?)
@@ -178,6 +141,7 @@ impl ActionPolicy for ActionPolicyImpl {
         ctx: Context<'_>,
         request: Json<UpsertActionPolicyRuleRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ActionPolicy", "upsert_rule");
         let identity = require_identity(&ctx)?;
         let request = request.into_inner();
@@ -214,6 +178,50 @@ impl ActionPolicy for ActionPolicyImpl {
             .name("action_policy_upsert_rule")
             .await?)
     }
+}
+
+async fn prepare_action_review_inner(
+    router: Arc<ToolRouter>,
+    request: PrepareActionReviewRequest,
+) -> Result<PreparedActionReview, HandlerError> {
+    let prepared = router
+        .prepare_invocation(&request.session, &request.invocation)
+        .await
+        .map_err(moa_error_to_handler_error)?;
+    let base_policy = prepared.policy().clone();
+    let agent_policy = agent_action_policy_effect(
+        &request.session,
+        &request.invocation,
+        request.capability_provenance.kind.as_deref(),
+        request.capability_provenance.id.as_deref(),
+    )
+    .map_err(moa_error_to_handler_error)?;
+    let effect = stricter_effect(base_policy.effect, agent_policy.effect);
+    let base_reason = base_policy.reason.clone();
+    let reason = if effect == base_policy.effect {
+        base_reason.or(agent_policy.reason)
+    } else {
+        agent_policy.reason.or(base_reason)
+    };
+    let origin = ActionOrigin {
+        capability: request.capability_provenance,
+        execution: request.execution_origin,
+        idempotency_key: request.idempotency_key,
+    };
+    Ok(PreparedActionReview {
+        effect,
+        reason,
+        matched_rule: base_policy.matched_rule.clone(),
+        input_summary: prepared.input_summary().to_string(),
+        envelope: prepared.envelope(
+            request.review_id,
+            &request.session,
+            request.tool_call_id,
+            request.worker_id,
+            origin,
+        ),
+        preview: prepared.review_preview(),
+    })
 }
 
 async fn require_tenant_admin(
@@ -326,17 +334,160 @@ fn allow_agent_action() -> AgentActionPolicyDecision {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
     use moa_core::{
-        types::action_policy::ActionPolicyEffect, types::agent::AgentActionPolicy,
+        types::action_policy::ActionPolicyEffect, types::action_policy::CapabilityProvenance,
+        types::action_policy::ExecutionTaskOrigin, types::agent::AgentActionPolicy,
         types::agent::AgentContext, types::agent::AgentPolicySnapshot,
         types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode,
         types::agent::SYSTEM_DEFAULT_AGENT_POLICY_HASH, types::agent::SYSTEM_DEFAULT_AGENT_REF,
         types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID, types::completion::ToolInvocation,
-        types::session::SessionMeta,
+        types::identifiers::ToolCallId, types::session::SessionMeta,
     };
+    use moa_hands::{McpDiscoveredTool, ToolRegistry, ToolRouter};
     use serde_json::json;
+    use uuid::Uuid;
 
-    use super::{action_origin_ref, agent_action_policy_effect};
+    use super::{
+        PrepareActionReviewRequest, action_origin_ref, agent_action_policy_effect,
+        prepare_action_review_inner,
+    };
+
+    #[tokio::test]
+    async fn action_policy_root_and_execution_origins_have_exact_effect_parity() {
+        // Pins: every execution-backed policy class uses the same production preparation helper.
+        let mut registry = ToolRegistry::default_local();
+        registry
+            .register_mcp_tool(
+                "github",
+                McpDiscoveredTool {
+                    name: "github_issue_create".to_string(),
+                    description: "create an issue".to_string(),
+                    input_schema: json!({"type": "object"}),
+                },
+            )
+            .expect("MCP fixture should register");
+        let router = Arc::new(ToolRouter::new(registry, HashMap::new()));
+        let cases = [
+            (
+                "read",
+                "file_read",
+                json!({"path": "README.md"}),
+                ActionPolicyEffect::Allow,
+                false,
+            ),
+            (
+                "local_write",
+                "file_write",
+                json!({"path": "notes.txt", "content": "hello"}),
+                ActionPolicyEffect::Allow,
+                false,
+            ),
+            (
+                "command",
+                "bash",
+                json!({"cmd": "true"}),
+                ActionPolicyEffect::AdminReview,
+                false,
+            ),
+            (
+                "external_mcp",
+                "github_issue_create",
+                json!({"title": "issue"}),
+                ActionPolicyEffect::AdminReview,
+                false,
+            ),
+            (
+                "memory_read",
+                "memory_search",
+                json!({"query": "decision"}),
+                ActionPolicyEffect::Allow,
+                false,
+            ),
+            (
+                "memory_write",
+                "memory_remember",
+                json!({"text": "decision"}),
+                ActionPolicyEffect::Allow,
+                false,
+            ),
+            (
+                "agent_deny",
+                "file_read",
+                json!({"path": "README.md"}),
+                ActionPolicyEffect::Deny,
+                true,
+            ),
+        ];
+
+        for (label, tool_name, input, expected, denied_by_agent) in cases {
+            let session = if denied_by_agent {
+                session_with_snapshot(AgentPolicySnapshot {
+                    tool_policy: AgentToolPolicy {
+                        mode: AgentToolPolicyMode::Allowlist,
+                        tools: vec!["memory_search".to_string()],
+                        denied_tools: Vec::new(),
+                    },
+                    ..AgentPolicySnapshot::default()
+                })
+            } else {
+                SessionMeta::default()
+            };
+            let invocation = ToolInvocation {
+                id: Some(format!("{label}-call")),
+                name: tool_name.to_string(),
+                input,
+            };
+            let root = policy_request(session.clone(), invocation.clone(), None);
+            let execution = policy_request(
+                session,
+                invocation,
+                Some(ExecutionTaskOrigin {
+                    run_uid: Uuid::from_u128(10),
+                    task_uid: Uuid::from_u128(20),
+                    generation: 3,
+                }),
+            );
+
+            let root = prepare_action_review_inner(router.clone(), root)
+                .await
+                .unwrap_or_else(|error| panic!("{label} root preparation failed: {error:?}"));
+            let execution = prepare_action_review_inner(router.clone(), execution)
+                .await
+                .unwrap_or_else(|error| panic!("{label} execution preparation failed: {error:?}"));
+
+            assert_eq!(root.effect, expected, "{label} root effect changed");
+            assert_eq!(
+                execution.effect, expected,
+                "{label} execution effect changed"
+            );
+            assert_eq!(root.effect, execution.effect, "{label} parity changed");
+            assert_eq!(root.envelope.execution_origin, None);
+            assert!(execution.envelope.execution_origin.is_some());
+            assert_eq!(
+                root.envelope.normalized_input, execution.envelope.normalized_input,
+                "{label} normalization must be origin-independent"
+            );
+        }
+    }
+
+    fn policy_request(
+        session: SessionMeta,
+        invocation: ToolInvocation,
+        execution_origin: Option<ExecutionTaskOrigin>,
+    ) -> PrepareActionReviewRequest {
+        PrepareActionReviewRequest {
+            session,
+            invocation,
+            review_id: Uuid::now_v7(),
+            tool_call_id: ToolCallId::new(),
+            worker_id: None,
+            capability_provenance: CapabilityProvenance::default(),
+            execution_origin,
+            idempotency_key: None,
+        }
+    }
 
     #[test]
     fn agent_action_review_policy_upgrades_matching_action_to_review() {

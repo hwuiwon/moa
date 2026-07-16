@@ -33,6 +33,7 @@ workspace-hack = { workspace = true }
 
 [dev-dependencies]
 axum.workspace = true
+moa-execution.workspace = true
 moa-test-support.workspace = true
 proptest.workspace = true
 tempfile.workspace = true

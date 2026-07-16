@@ -63,7 +63,7 @@ rather than relying on implicit defaults or wildcard agent access. Presenting a
 contact JWT cannot call admin/operator APIs or become an workspace,
 tenant-admin, or tenant-operator principal.
 
-Identity verification can be initiated by skills or their procedures, but the platform
+Identity verification can be initiated by skills or execution runs, but the platform
 contact service enforces challenge creation, OTP-style completion, token
 upgrade, and session promotion. Low-assurance contact scopes can perform only
 the operations explicitly granted before verification.
@@ -129,6 +129,13 @@ one delegated task's untrusted code or files cannot reach a sibling's sandbox. A
 worker's sandbox is released when it self-cleans, and any remainder is released
 at session teardown.
 
+Conversational workers are available only as interactive delegation in `act`;
+they are not the bulk DAG primitive. Sandbox-using `ExecutionTask` instances
+receive equivalent isolation under a stable run/task identity and generation
+fence. Execution maps submit every budget-admitted logical task without an
+application fan-out cap; Restate concurrency and provider pacing control
+physical pressure.
+
 ## Prompt Injection Defenses
 
 MOA treats tool results, fetched content, and external files as untrusted.
@@ -146,6 +153,15 @@ Current defenses:
 If a model repeatedly emits malicious tool calls after receiving blocked-tool
 feedback, the remaining control point is the turn retry/circuit-breaker policy.
 Do not treat prompt filtering as a complete security boundary.
+
+Execution plans do not bypass these controls. The compiler accepts only
+registered capabilities with schema, policy, authorization, risk, idempotency,
+and provenance metadata. `Capability` and `Agent` tasks invoke the same governed
+boundary as root tools. An agent task is autonomous only inside its declared
+skills, capabilities, turn count, and budget. It cannot mutate durable state or
+the graph invisibly: unexpected conditions return typed `NeedsInput` or
+`NeedsReplan`, and every amendment is compiler-validated, replayable, and unable
+to broaden authorization.
 
 Progress narration treats child summaries and tool output as untrusted input.
 The per-session narrator summarizes that material into neutral, user-facing prose
@@ -173,6 +189,13 @@ input/output guardrails are explicitly out of scope for V1. Guardrails are also
 not a replacement for action or tool policy: tool visibility, authorization,
 approval, and deny/review decisions remain enforced by the orchestrator
 tool/action paths.
+
+Execution resource envelopes are not capability grants. Cost, token, task,
+tool-call, retrieved-byte, deadline, and unattended-spend limits govern how much
+work may run. Skills, capabilities, node shapes, strategies, and data access are
+restricted separately by the pinned agent policy, execution capability catalog,
+OpenFGA/RLS, action review, and node declarations. Raising a resource limit does
+not widen permission.
 
 ## Action Policy
 

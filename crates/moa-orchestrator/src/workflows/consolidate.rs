@@ -213,6 +213,7 @@ impl Consolidate for ConsolidateImpl {
         ctx: WorkflowContext<'_>,
         request: Json<ConsolidateRequest>,
     ) -> Result<Json<ConsolidateReport>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Consolidate", "run");
         let request = request.into_inner();
         let mut steps = RestateConsolidateSteps {
@@ -371,12 +372,14 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         &mut self,
         request: &ConsolidateRequest,
     ) -> Result<(), HandlerError> {
-        self.ctx
-            .object_client::<TenantObjectClient>(request.tenant_id.to_string())
-            .mark_consolidation_started(Json::from(request.target_date))
-            .call()
-            .await
-            .map_err(HandlerError::from)
+        crate::restate_identity::replay_safe_request(
+            self.ctx
+                .object_client::<TenantObjectClient>(request.tenant_id.to_string())
+                .mark_consolidation_started(Json::from(request.target_date)),
+        )
+        .call()
+        .await
+        .map_err(HandlerError::from)
     }
 
     async fn capture_now(&mut self) -> Result<DateTime<Utc>, HandlerError> {
@@ -572,12 +575,14 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         &mut self,
         report: &ConsolidateReport,
     ) -> Result<(), HandlerError> {
-        self.ctx
-            .object_client::<TenantObjectClient>(report.tenant_id.to_string())
-            .consolidation_completed(Json::from(report.clone()))
-            .call()
-            .await
-            .map_err(HandlerError::from)
+        crate::restate_identity::replay_safe_request(
+            self.ctx
+                .object_client::<TenantObjectClient>(report.tenant_id.to_string())
+                .consolidation_completed(Json::from(report.clone())),
+        )
+        .call()
+        .await
+        .map_err(HandlerError::from)
     }
 
     async fn advance_consolidation_watermark(

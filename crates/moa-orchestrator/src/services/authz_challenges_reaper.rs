@@ -245,16 +245,17 @@ impl AwakeableResolver for HttpAwakeableResolver {
         awakeable_id: &str,
         payload: &serde_json::Value,
     ) -> Result<(), AwakeableResolveError> {
-        let response = self
-            .client
-            .post(format!(
-                "{}/restate/awakeables/{}/resolve",
-                self.base_url, awakeable_id
-            ))
-            .json(payload)
-            .send()
-            .await
-            .map_err(|error| AwakeableResolveError::message(format!("transport: {error}")))?;
+        let response = crate::restate_identity::with_reqwest_trace_headers(
+            self.client
+                .post(format!(
+                    "{}/restate/awakeables/{}/resolve",
+                    self.base_url, awakeable_id
+                ))
+                .json(payload),
+        )
+        .send()
+        .await
+        .map_err(|error| AwakeableResolveError::message(format!("transport: {error}")))?;
         if !response.status().is_success() {
             let status = response.status();
             let body = match response.text().await {

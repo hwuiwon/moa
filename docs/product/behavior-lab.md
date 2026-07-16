@@ -2,8 +2,8 @@
 
 _Product boundary for behavior-lab artifacts, experiments, analytics, and live simulation._
 
-Behavior Lab is the product surface for testing how target agents or skill
-procedures behave under simulated users, profiles, data bundles, and scenarios.
+Behavior Lab is the product surface for testing how target agents or execution
+runs behave under simulated users, profiles, data bundles, and scenarios.
 It is not the regression-eval system. Regression evals remain in `moa-eval`;
 the `Eval` service is compiled into the orchestrator as an internal-only
 control-plane surface, with hosted run status persisted in Postgres.
@@ -100,8 +100,16 @@ An experiment plan expands into trials. `moa.experiment_run` stores the
 run-level ledger, links pinned artifact revisions, and points at the run
 `analytics.score_run`. `moa.experiment_trial` stores trial keys, variant,
 the pinned plan revision, selected persona/profile/scenario/data-bundle IDs,
-simulator settings, target session or procedure run links, trial score run ID,
+simulator settings, target session or execution-run links, trial score run ID,
 stop reason, and trace ID.
+
+Targets are `agent_loop` or `execution_run`. Agent-loop targets enter normal
+`respond`/`act`/`run` routing through `TurnExecution`. Execution-run targets pin
+either a published skill's `execution_plan` template or a compiled plan ID and
+use the same `ExecutionRun`/`ExecutionTask` runtime as user work. Trials retain
+the source kind/reference and canonical plan hash so a template and a one-off
+compiled snapshot remain distinguishable. Live trials never publish generated
+plans or mutate skill revisions.
 
 Score rows land in `analytics.scores`. `Experiments/scores` returns run score
 summaries plus trial rollups and scenario breakdowns. `Experiments/compare`

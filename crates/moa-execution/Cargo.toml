@@ -1,0 +1,24 @@
+[package]
+name = "moa-execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+blake3.workspace = true
+chrono.workspace = true
+jsonschema = { version = "0.47.0", default-features = false }
+moa-artifacts.workspace = true
+moa-core.workspace = true
+moa-db.workspace = true
+serde.workspace = true
+serde_canonical_json.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+workspace-hack.workspace = true
+
+[dev-dependencies]
+moa-test-support.workspace = true
+tokio.workspace = true

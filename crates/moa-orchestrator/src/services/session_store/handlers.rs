@@ -22,6 +22,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         meta: Json<SessionMeta>,
     ) -> Result<Json<SessionId>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "create_session");
         let store = self.store.clone();
         let pool = self.pool.clone();
@@ -50,10 +51,12 @@ impl RestateSessionStore for SessionStoreImpl {
             .await?
             .into_inner();
         ensure_session_authz_visible(&ctx, self.pool.clone(), fga, &identity, session_id).await?;
-        ctx.object_client::<SessionClient>(session_id.to_string())
-            .set_meta(Json::from(vo_meta))
-            .call()
-            .await?;
+        crate::restate_identity::replay_safe_request(
+            ctx.object_client::<SessionClient>(session_id.to_string())
+                .set_meta(Json::from(vo_meta)),
+        )
+        .call()
+        .await?;
         Ok(Json::from(session_id))
     }
 
@@ -63,6 +66,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<CreateAgentSessionRequest>,
     ) -> Result<Json<CreateAgentSessionResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "create_agent_session");
         let store = self.store.clone();
         let pool = self.pool.clone();
@@ -98,10 +102,12 @@ impl RestateSessionStore for SessionStoreImpl {
         ensure_session_authz_visible(&ctx, self.pool.clone(), fga, &identity, response.session_id)
             .await?;
         vo_meta.agent_context = Some(response.agent_context.clone());
-        ctx.object_client::<SessionClient>(response.session_id.to_string())
-            .set_meta(Json::from(vo_meta))
-            .call()
-            .await?;
+        crate::restate_identity::replay_safe_request(
+            ctx.object_client::<SessionClient>(response.session_id.to_string())
+                .set_meta(Json::from(vo_meta)),
+        )
+        .call()
+        .await?;
         Ok(Json::from(response))
     }
 
@@ -112,6 +118,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<AppendEventRequest>,
     ) -> Result<Json<EventRecord>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "append_event");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -137,6 +144,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<GetEventsRequest>,
     ) -> Result<Json<Vec<EventRecord>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "get_events");
         let request = request.into_inner();
         authorize_session_read(&ctx, request.session_id).await?;
@@ -160,6 +168,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         session_id: Json<SessionId>,
     ) -> Result<Json<SessionMeta>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "get_session");
         let session_id = session_id.into_inner();
         authorize_session_read(&ctx, session_id).await?;
@@ -184,6 +193,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<UpdateStatusRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "update_status");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -205,6 +215,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<SearchEventsRequest>,
     ) -> Result<Json<Vec<EventRecord>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "search_events");
         let request = request.into_inner();
         authorize_event_search(&ctx, &request).await?;
@@ -228,6 +239,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<ListSessionsRequest>,
     ) -> Result<Json<Vec<SessionSummary>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "list_sessions");
         let request = request.into_inner();
         let tenant_id = tenant_id_for_session_listing(&request)?;
@@ -252,6 +264,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<TenantCostSinceRequest>,
     ) -> Result<u32, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "tenant_cost_since");
         let request = request.into_inner();
         authorize_tenant_read(&ctx, request.tenant_id).await?;
@@ -275,12 +288,15 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<InitSessionVoRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "init_session_vo");
         let request = request.into_inner();
-        ctx.object_client::<SessionClient>(request.session_id.to_string())
-            .set_meta(Json::from(request.meta))
-            .call()
-            .await?;
+        crate::restate_identity::replay_safe_request(
+            ctx.object_client::<SessionClient>(request.session_id.to_string())
+                .set_meta(Json::from(request.meta)),
+        )
+        .call()
+        .await?;
         Ok(())
     }
 
@@ -291,6 +307,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<CreateSegmentRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "create_segment");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -313,6 +330,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<CompleteSegmentRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "complete_segment");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -335,6 +353,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         session_id: Json<SessionId>,
     ) -> Result<Json<Option<TaskSegment>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "get_active_segment");
         let session_id = session_id.into_inner();
         let store = self.store.clone();
@@ -358,6 +377,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         session_id: Json<SessionId>,
     ) -> Result<Json<Vec<TaskSegment>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "list_segments");
         let session_id = session_id.into_inner();
         let store = self.store.clone();
@@ -381,6 +401,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<UpdateSegmentAssessmentRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "update_segment_assessment");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -403,6 +424,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<GetSegmentBaselineRequest>,
     ) -> Result<Json<Option<SegmentBaseline>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "get_segment_baseline");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -427,6 +449,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<ListSkillResolutionRatesRequest>,
     ) -> Result<Json<Vec<SkillResolutionRate>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "list_skill_resolution_rates");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -451,6 +474,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<ListTaskStrategySuccessRatesRequest>,
     ) -> Result<Json<Vec<TaskStrategySuccessRate>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "list_task_strategy_success_rates");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -475,6 +499,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<AppendExperienceRecordRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "append_experience_record");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -496,6 +521,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<ListExperienceRecordsRequest>,
     ) -> Result<Json<Vec<ExperienceRecord>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "list_experience_records");
         let request = request.into_inner();
         authorize_session_read(&ctx, request.session_id).await?;
@@ -520,6 +546,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<AppendExperienceAttributionsRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "append_experience_attributions");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -542,6 +569,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<ListExperienceAttributionsRequest>,
     ) -> Result<Json<Vec<ExperienceAttribution>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "list_experience_attributions");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -565,6 +593,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<AppendLearningCandidateRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "append_learning_candidate");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -586,6 +615,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<GetLearningCandidateRequest>,
     ) -> Result<Json<LearningCandidate>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "get_learning_candidate");
         let request = request.into_inner();
         authorize_tenant_read(&ctx, request.tenant_id).await?;
@@ -619,6 +649,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<ListLearningCandidatesRequest>,
     ) -> Result<Json<Vec<LearningCandidate>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "list_learning_candidates");
         let request = request.into_inner();
         authorize_tenant_read(&ctx, request.tenant_id).await?;
@@ -644,6 +675,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<UpdateLearningCandidateStatusRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "update_learning_candidate_status");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -666,6 +698,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         _request: Json<serde_json::Value>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "refresh_segment_materialized_views");
         let store = self.store.clone();
 
@@ -687,6 +720,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         _request: Json<serde_json::Value>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "refresh_analytics_materialized_views");
         let store = self.store.clone();
 
@@ -709,6 +743,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         _request: Json<serde_json::Value>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "monitor_skill_regressions");
         let store = self.store.clone();
         let config = self.config.clone();
@@ -743,6 +778,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         _request: Json<serde_json::Value>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "backfill_learning_embeddings");
         let Some(embedder) = self.embedder.clone() else {
             // No embedder configured: the deployment runs without learning
@@ -787,6 +823,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         _request: Json<serde_json::Value>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "mine_task_recurrences");
         let store = self.store.clone();
         let config = self.config.clone();
@@ -815,10 +852,12 @@ impl RestateSessionStore for SessionStoreImpl {
         // tick from re-qualifying a fingerprint whose proposal is already filed.
         let dispatched = dispatches.len();
         for request in dispatches {
-            ctx.workflow_client::<crate::workflows::skill_learning::SkillLearningClient>(
-                request.experience_id.to_string(),
+            crate::restate_identity::replay_safe_request(
+                ctx.workflow_client::<crate::workflows::skill_learning::SkillLearningClient>(
+                    request.experience_id.to_string(),
+                )
+                .run(Json::from(request)),
             )
-            .run(Json::from(request))
             .send();
         }
         tracing::info!(
@@ -835,6 +874,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<RecordSegmentToolUseRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "record_segment_tool_use");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -857,6 +897,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<RecordSegmentSkillActivationRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "record_segment_skill_activation");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -879,6 +920,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<RecordSegmentSkillUseRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "record_segment_skill_use");
         let request = request.into_inner();
         let store = self.store.clone();
@@ -901,6 +943,7 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<RecordSegmentTurnUsageRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "record_segment_turn_usage");
         let request = request.into_inner();
         let store = self.store.clone();

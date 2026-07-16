@@ -13,6 +13,19 @@ use crate::error::{MoaError, Result};
 
 use super::{context::ContextMessage, identifiers::ModelId};
 
+/// Request-scoped policy for provider-native web search tools.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeWebSearchPolicy {
+    /// Preserve the provider adapter's configured native-web-search behavior.
+    #[default]
+    ProviderDefault,
+    /// Suppress provider-native web search for this request.
+    Disabled,
+}
+
 /// Request metadata key that asks `LLMGateway` to return without appending a `BrainResponse`.
 pub const DEFER_BRAIN_RESPONSE_METADATA_KEY: &str = "_moa.defer_brain_response";
 
@@ -146,6 +159,9 @@ pub struct CompletionRequest {
     /// Optional provider-native JSON response-format request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<JsonResponseFormat>,
+    /// Request-scoped provider-native web-search policy.
+    #[serde(default)]
+    pub native_web_search: NativeWebSearchPolicy,
     /// Request-scoped metadata.
     #[serde(serialize_with = "serialize_metadata_deterministically")]
     pub metadata: HashMap<String, Value>,
@@ -161,6 +177,7 @@ impl CompletionRequest {
             max_output_tokens: None,
             temperature: None,
             response_format: None,
+            native_web_search: NativeWebSearchPolicy::ProviderDefault,
             metadata: HashMap::new(),
         }
     }

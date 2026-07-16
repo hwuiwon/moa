@@ -9,7 +9,8 @@ use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::wire::tools::{ToolDescriptor, tool_descriptor};
 use moa_core::{
     error::MoaError, error::ToolFailureClass, error::classify_tool_error, events::Event,
-    events::EventType, types::completion::ToolInvocation, types::events_stream::ClaimCheck,
+    events::EventType, types::action_policy::ExecutionTaskOrigin,
+    types::completion::ToolInvocation, types::events_stream::ClaimCheck,
     types::events_stream::EventRecord, types::hands::SandboxFile, types::identifiers::SessionId,
     types::identifiers::TenantId, types::identifiers::ToolCallId, types::session::SessionMeta,
     types::session::SessionStatus, types::tools::IdempotencyClass, types::tools::ToolCallRequest,
@@ -36,6 +37,11 @@ pub trait ToolExecutor {
     /// Executes one tool call through the configured router.
     async fn execute(request: Json<ToolCallRequest>) -> Result<Json<ToolOutput>, HandlerError>;
 
+    /// Executes one dynamic execution task without writing root-session tool events.
+    async fn execute_execution_task(
+        request: Json<ExecutionTaskToolCallRequest>,
+    ) -> Result<Json<ToolOutput>, HandlerError>;
+
     /// Lists the currently registered tools for the requested tenant.
     async fn list_tools(
         tenant_id: Json<TenantId>,
@@ -46,10 +52,25 @@ pub trait ToolExecutor {
         request: Json<ReleaseWorkerHandsRequest>,
     ) -> Result<(), HandlerError>;
 
+    /// Releases the generation-independent hand scope owned by one execution task.
+    async fn release_execution_task_hands(
+        request: Json<ReleaseExecutionTaskHandsRequest>,
+    ) -> Result<(), HandlerError>;
+
     /// Releases every hand and durable lease under a session at terminal teardown.
     async fn release_session_hands(
         request: Json<ReleaseSessionHandsRequest>,
     ) -> Result<(), HandlerError>;
+}
+
+/// Tool request owned by one persisted dynamic execution task.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ExecutionTaskToolCallRequest {
+    /// Normal governed tool call carrying the owning session and trusted-file context.
+    pub call: ToolCallRequest,
+    /// Required execution provenance; optional on the wire so missing data fails explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ExecutionTaskOrigin>,
 }
 
 /// Request to release one finishing worker's scoped hands during its cleanup.
@@ -59,6 +80,17 @@ pub struct ReleaseWorkerHandsRequest {
     pub session_id: SessionId,
     /// Worker scope whose sandbox should be released.
     pub worker_id: String,
+}
+
+/// Request to release one terminal or cancelled execution task's scoped hands.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReleaseExecutionTaskHandsRequest {
+    /// Owning parent session.
+    pub session_id: SessionId,
+    /// Owning execution run.
+    pub run_uid: uuid::Uuid,
+    /// Stable task identifier shared by every generation.
+    pub task_id: moa_execution::state::ExecutionTaskId,
 }
 
 /// Request to release every hand under a session at terminal teardown.
@@ -124,8 +156,18 @@ impl ToolExecutorImpl {
         session: &SessionMeta,
         request: &ToolCallRequest,
     ) -> moa_core::error::Result<ToolOutput> {
+        self.execute_buffered_with_scope(session, request, request.worker_id.as_deref())
+            .await
+    }
+
+    async fn execute_buffered_with_scope(
+        &self,
+        session: &SessionMeta,
+        request: &ToolCallRequest,
+        hand_scope: Option<&str>,
+    ) -> moa_core::error::Result<ToolOutput> {
         let trusted_sandbox_files = self.trusted_sandbox_files_for_request(request).await?;
-        if request.worker_id.is_none() && request.tool_name == "file_read" {
+        if hand_scope.is_none() && request.tool_name == "file_read" {
             return Ok(
                 root_trusted_file_read(&request.input, &trusted_sandbox_files)
                     .unwrap_or_else(root_file_read_denied_output),
@@ -140,7 +182,6 @@ impl ToolExecutorImpl {
         // Scope the hand (and its trusted-file manifest) to the originating
         // worker so each worker owns its own sandbox; the root
         // coordinator keeps `None` for the shared session-level scope.
-        let hand_scope = request.worker_id.as_deref();
         self.router
             .set_trusted_sandbox_files(session, hand_scope, trusted_sandbox_files)
             .await;
@@ -222,6 +263,7 @@ impl ToolExecutor for ToolExecutorImpl {
         ctx: Context<'_>,
         request: Json<ToolCallRequest>,
     ) -> Result<Json<ToolOutput>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ToolExecutor", "execute");
         let request = request.into_inner();
         let session = resolve_session(&ctx, &request, self.session_store.clone()).await?;
@@ -317,28 +359,105 @@ impl ToolExecutor for ToolExecutorImpl {
         Ok(Json::from(output))
     }
 
-    #[tracing::instrument(skip(self, _ctx, tenant_id))]
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal execution workflow call; the embedded session is loaded as the policy and identity owner.
+    async fn execute_execution_task(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ExecutionTaskToolCallRequest>,
+    ) -> Result<Json<ToolOutput>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ToolExecutor", "execute_execution_task");
+        let request = request.into_inner();
+        let origin = require_execution_task_origin(&request)?;
+        let session_id = request.call.session_id.ok_or_else(|| {
+            TerminalError::new("execution task tool call requires owning session_id")
+        })?;
+        let session = resolve_session(
+            &ctx,
+            &request.call,
+            Some(self.required_session_repository()?),
+        )
+        .await?;
+        if session.id != session_id || session.tenant_id != request.call.tenant_id {
+            return Err(TerminalError::new(
+                "execution task tool call does not match its owning session",
+            )
+            .into());
+        }
+        annotate_tool_execution_span(&session, &request.call);
+
+        let serialized_input = serde_json::to_string(&request.call.input)
+            .map_err(|error| moa_error_to_handler_error(error.into()))?;
+        if matches!(
+            screen_tool_input_for_canary(request.call.active_canary.as_deref(), &serialized_input),
+            ToolInputCanaryScreening::Blocked(_)
+        ) {
+            return Ok(Json::from(blocked_canary_tool_output(
+                &request.call.tool_name,
+            )));
+        }
+        if let Some(output) = agent_tool_policy_denied_output(&session, &request.call) {
+            return Ok(Json::from(output));
+        }
+        let Some(definition) = self.router.tool_definition(&request.call.tool_name) else {
+            return Ok(Json::from(ToolOutput::from(ToolFailureClass::Fatal {
+                reason: format!("unknown tool: {}", request.call.tool_name),
+            })));
+        };
+        if let Err(error) = validate_request(&definition, &request.call) {
+            return Ok(Json::from(ToolOutput::from(classify_tool_error(&error, 0))));
+        }
+
+        let run_name = execution_task_tool_run_name(&definition, &request.call, origin);
+        let hand_scope = execution_task_hand_scope(origin);
+        let request_for_run = request.call.clone();
+        let session_for_run = session.clone();
+        let service = self.clone();
+        let output = ctx
+            .run(|| async move {
+                service
+                    .execute_buffered_with_scope(
+                        &session_for_run,
+                        &request_for_run,
+                        Some(hand_scope.as_str()),
+                    )
+                    .await
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name(run_name)
+            .retry_policy(tool_run_retry_policy(definition.idempotency_class))
+            .await?
+            .into_inner();
+
+        Ok(Json::from(output))
+    }
+
+    #[tracing::instrument(skip(self, ctx, tenant_id))]
     // SAFETY: Returns informational tool descriptors; the tenant id only scopes descriptor listing.
     async fn list_tools(
         &self,
-        _ctx: Context<'_>,
+        ctx: Context<'_>,
         tenant_id: Json<TenantId>,
     ) -> Result<Json<Vec<ToolDescriptor>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ToolExecutor", "list_tools");
         let _tenant_id = tenant_id.into_inner();
         Ok(Json::from(self.list_descriptors()))
     }
 
-    #[tracing::instrument(skip(self, _ctx, request))]
+    #[tracing::instrument(skip(self, ctx, request))]
     // SAFETY: internal teardown dispatched by a finishing Worker VO's own cleanup path.
     // It destroys only that worker's own `(session_id, worker_id)` sandbox scope and
     // reads no caller-owned data back. The router logs provider failures and reports an
     // incomplete release so the Worker VO can reschedule cleanup instead of clearing.
     async fn release_worker_hands(
         &self,
-        _ctx: Context<'_>,
+        ctx: Context<'_>,
         request: Json<ReleaseWorkerHandsRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ToolExecutor", "release_worker_hands");
         let request = request.into_inner();
         let complete = self
@@ -351,15 +470,41 @@ impl ToolExecutor for ToolExecutorImpl {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self, _ctx, request))]
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal terminal-task teardown reclaims only the typed run/task hand scope and returns no caller-owned data.
+    async fn release_execution_task_hands(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ReleaseExecutionTaskHandsRequest>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("ToolExecutor", "release_execution_task_hands");
+        let request = request.into_inner();
+        let scope = execution_task_hand_scope(ExecutionTaskOrigin {
+            run_uid: request.run_uid,
+            task_uid: request.task_id.as_uuid(),
+            generation: 1,
+        });
+        if !self
+            .router
+            .reclaim_hands(&request.session_id, Some(scope.as_str()))
+            .await
+        {
+            return Err(TerminalError::new("execution task hand cleanup incomplete").into());
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
     // SAFETY: internal teardown dispatched at session terminal teardown. It reclaims only
     // that session's own hands/leases and reads no caller-owned data back. The router logs
     // and swallows its own failures, so this is non-fatal and always returns Ok.
     async fn release_session_hands(
         &self,
-        _ctx: Context<'_>,
+        ctx: Context<'_>,
         request: Json<ReleaseSessionHandsRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ToolExecutor", "release_session_hands");
         let request = request.into_inner();
         self.router.reclaim_hands(&request.session_id, None).await;
@@ -382,6 +527,35 @@ pub fn tool_run_name(
             request.tool_name, request.tool_call_id
         )),
     }
+}
+
+/// Builds the isolated hand scope shared by generations of one execution task.
+pub fn execution_task_hand_scope(origin: ExecutionTaskOrigin) -> String {
+    format!("execution:{}:{}", origin.run_uid, origin.task_uid)
+}
+
+/// Builds the Restate run-operation name fenced by execution generation.
+pub fn execution_task_tool_run_name(
+    definition: &ToolDefinition,
+    request: &ToolCallRequest,
+    origin: ExecutionTaskOrigin,
+) -> String {
+    let idempotency = match definition.idempotency_class {
+        IdempotencyClass::Idempotent => "idempotent",
+        IdempotencyClass::NonIdempotent => "non_idempotent",
+    };
+    format!(
+        "execution_tool_execute:{idempotency}:{}:{}:{}:{}:{}",
+        origin.run_uid, origin.task_uid, origin.generation, request.tool_name, request.tool_call_id
+    )
+}
+
+fn require_execution_task_origin(
+    request: &ExecutionTaskToolCallRequest,
+) -> Result<ExecutionTaskOrigin, TerminalError> {
+    request
+        .origin
+        .ok_or_else(|| TerminalError::new("execution task tool call requires execution origin"))
 }
 
 /// Builds the derived `ctx.run()` plan for one tool call.
@@ -669,21 +843,23 @@ async fn append_tool_call_event(
         return Ok(());
     };
 
-    ctx.service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event: Event::ToolCall {
-                tool_id: request.tool_call_id,
-                provider_tool_use_id: request.provider_tool_use_id.clone(),
-                provider_thought_signature: None,
-                tool_name: request.tool_name.clone(),
-                input: request.input.clone(),
-                hand_id: None,
-            },
-            dedupe_key: None,
-        }))
-        .call()
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event: Event::ToolCall {
+                    tool_id: request.tool_call_id,
+                    provider_tool_use_id: request.provider_tool_use_id.clone(),
+                    provider_thought_signature: None,
+                    tool_name: request.tool_name.clone(),
+                    input: request.input.clone(),
+                    hand_id: None,
+                },
+                dedupe_key: None,
+            })),
+    )
+    .call()
+    .await?;
 
     Ok(())
 }
@@ -697,21 +873,23 @@ async fn append_tool_result_event(
         return Ok(());
     };
 
-    ctx.service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event: Event::ToolResult {
-                tool_id: request.tool_call_id,
-                provider_tool_use_id: request.provider_tool_use_id.clone(),
-                output: output.clone(),
-                original_output_tokens: output.original_output_tokens,
-                success: !output.is_error,
-                duration_ms: output.duration.as_millis() as u64,
-            },
-            dedupe_key: None,
-        }))
-        .call()
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event: Event::ToolResult {
+                    tool_id: request.tool_call_id,
+                    provider_tool_use_id: request.provider_tool_use_id.clone(),
+                    output: output.clone(),
+                    original_output_tokens: output.original_output_tokens,
+                    success: !output.is_error,
+                    duration_ms: output.duration.as_millis() as u64,
+                },
+                dedupe_key: None,
+            })),
+    )
+    .call()
+    .await?;
 
     Ok(())
 }
@@ -726,23 +904,25 @@ async fn append_tool_error_event(
         return Ok(());
     };
 
-    ctx.service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event: Event::ToolError {
-                tool_id: request.tool_call_id,
-                provider_tool_use_id: request.provider_tool_use_id.clone(),
-                tool_name: request.tool_name.clone(),
-                error,
-                retryable: !matches!(
-                    definition.idempotency_class,
-                    IdempotencyClass::NonIdempotent
-                ),
-            },
-            dedupe_key: None,
-        }))
-        .call()
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event: Event::ToolError {
+                    tool_id: request.tool_call_id,
+                    provider_tool_use_id: request.provider_tool_use_id.clone(),
+                    tool_name: request.tool_name.clone(),
+                    error,
+                    retryable: !matches!(
+                        definition.idempotency_class,
+                        IdempotencyClass::NonIdempotent
+                    ),
+                },
+                dedupe_key: None,
+            })),
+    )
+    .call()
+    .await?;
 
     Ok(())
 }
@@ -755,34 +935,38 @@ async fn append_tool_canary_block_events(
         return Ok(());
     };
 
-    ctx.service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event: Event::Warning {
-                message: format!(
-                    "blocked tool {} because the active canary leaked into tool input",
-                    request.tool_name
-                ),
-            },
-            dedupe_key: None,
-        }))
-        .call()
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event: Event::Warning {
+                    message: format!(
+                        "blocked tool {} because the active canary leaked into tool input",
+                        request.tool_name
+                    ),
+                },
+                dedupe_key: None,
+            })),
+    )
+    .call()
+    .await?;
 
-    ctx.service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event: Event::ToolError {
-                tool_id: request.tool_call_id,
-                provider_tool_use_id: request.provider_tool_use_id.clone(),
-                tool_name: request.tool_name.clone(),
-                error: blocked_canary_message(&request.tool_name),
-                retryable: false,
-            },
-            dedupe_key: None,
-        }))
-        .call()
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event: Event::ToolError {
+                    tool_id: request.tool_call_id,
+                    provider_tool_use_id: request.provider_tool_use_id.clone(),
+                    tool_name: request.tool_name.clone(),
+                    error: blocked_canary_message(&request.tool_name),
+                    retryable: false,
+                },
+                dedupe_key: None,
+            })),
+    )
+    .call()
+    .await?;
 
     Ok(())
 }
@@ -796,20 +980,22 @@ async fn append_agent_tool_policy_denied_event(
         return Ok(());
     };
 
-    ctx.service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event: Event::ToolError {
-                tool_id: request.tool_call_id,
-                provider_tool_use_id: request.provider_tool_use_id.clone(),
-                tool_name: request.tool_name.clone(),
-                error: output.to_text(),
-                retryable: false,
-            },
-            dedupe_key: None,
-        }))
-        .call()
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event: Event::ToolError {
+                    tool_id: request.tool_call_id,
+                    provider_tool_use_id: request.provider_tool_use_id.clone(),
+                    tool_name: request.tool_name.clone(),
+                    error: output.to_text(),
+                    retryable: false,
+                },
+                dedupe_key: None,
+            })),
+    )
+    .call()
+    .await?;
 
     Ok(())
 }
@@ -840,25 +1026,47 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use moa_core::{
-        events::Event, events::EventType, traits::HandProvider, types::action_policy::RiskLevel,
-        types::agent::AgentContext, types::agent::AgentPolicySnapshot,
-        types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode,
-        types::events_stream::EventRecord, types::hands::HandHandle, types::hands::HandSpec,
-        types::hands::HandStatus, types::hands::SandboxFile, types::hands::SandboxTier,
-        types::identifiers::SessionId, types::identifiers::TenantId,
-        types::identifiers::ToolCallId, types::identifiers::UserId, types::session::SessionMeta,
-        types::tools::IdempotencyClass, types::tools::ToolCallRequest,
-        types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolOutput,
-        types::tools::ToolPolicySpec, types::tools::TrustedSandboxFileEntry,
+        config::{McpServerConfig, McpTransportConfig, MoaConfig},
+        events::Event,
+        events::EventType,
+        traits::HandProvider,
+        types::action_policy::ExecutionTaskOrigin,
+        types::action_policy::RiskLevel,
+        types::agent::AgentContext,
+        types::agent::AgentPolicySnapshot,
+        types::agent::AgentToolPolicy,
+        types::agent::AgentToolPolicyMode,
+        types::events_stream::EventRecord,
+        types::hands::HandHandle,
+        types::hands::HandSpec,
+        types::hands::HandStatus,
+        types::hands::SandboxFile,
+        types::hands::SandboxTier,
+        types::identifiers::SessionId,
+        types::identifiers::TenantId,
+        types::identifiers::ToolCallId,
+        types::identifiers::UserId,
+        types::session::SessionMeta,
+        types::tools::IdempotencyClass,
+        types::tools::ToolCallRequest,
+        types::tools::ToolDiffStrategy,
+        types::tools::ToolInputShape,
+        types::tools::ToolOutput,
+        types::tools::ToolPolicySpec,
+        types::tools::TrustedSandboxFileEntry,
         types::tools::TrustedSandboxFileManifestRef,
     };
     use moa_hands::{HandRoute, ToolRegistry, ToolRouter};
+    use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use uuid::Uuid;
 
     use super::{
-        ToolExecutorImpl, TrustedSandboxFileManifestStore, agent_tool_policy_denied_output,
-        blocked_canary_tool_output, has_prior_tool_call_event, root_trusted_file_read,
-        synthetic_session_id,
+        ExecutionTaskToolCallRequest, ToolExecutorImpl, TrustedSandboxFileManifestStore,
+        agent_tool_policy_denied_output, blocked_canary_tool_output, execution_task_hand_scope,
+        execution_task_tool_run_name, has_prior_tool_call_event, require_execution_task_origin,
+        root_trusted_file_read, synthetic_session_id,
     };
 
     #[derive(Default)]
@@ -978,6 +1186,73 @@ mod tests {
     }
 
     #[test]
+    fn execution_task_tool_executor_rejects_missing_origin() {
+        // Pins: execution dispatch cannot silently fall back to the root tool path.
+        let request = ExecutionTaskToolCallRequest {
+            call: tool_request("memory_search"),
+            origin: None,
+        };
+
+        let error = require_execution_task_origin(&request)
+            .expect_err("missing execution provenance must fail closed");
+
+        assert!(error.to_string().contains("requires execution origin"));
+    }
+
+    #[test]
+    fn execution_task_tool_executor_scopes_hands_by_run_and_task() {
+        // Pins: sibling execution tasks never share a hand, while generations of one task do.
+        let first = ExecutionTaskOrigin {
+            run_uid: Uuid::from_u128(10),
+            task_uid: Uuid::from_u128(20),
+            generation: 1,
+        };
+        let next_generation = ExecutionTaskOrigin {
+            generation: 2,
+            ..first
+        };
+        let sibling = ExecutionTaskOrigin {
+            task_uid: Uuid::from_u128(21),
+            ..first
+        };
+
+        assert_eq!(
+            execution_task_hand_scope(first),
+            execution_task_hand_scope(next_generation)
+        );
+        assert_ne!(
+            execution_task_hand_scope(first),
+            execution_task_hand_scope(sibling)
+        );
+    }
+
+    #[test]
+    fn execution_task_tool_executor_run_name_fences_generation() {
+        // Pins: replay generations use distinct Restate run-operation names.
+        let definition = ToolRegistry::default_local()
+            .get("memory_search")
+            .expect("memory_search is registered")
+            .clone();
+        let request = tool_request("memory_search");
+        let first = ExecutionTaskOrigin {
+            run_uid: Uuid::from_u128(10),
+            task_uid: Uuid::from_u128(20),
+            generation: 3,
+        };
+        let next = ExecutionTaskOrigin {
+            generation: 4,
+            ..first
+        };
+
+        let first_name = execution_task_tool_run_name(&definition, &request, first);
+        let next_name = execution_task_tool_run_name(&definition, &request, next);
+
+        assert!(first_name.contains(":3:"));
+        assert!(next_name.contains(":4:"));
+        assert_ne!(first_name, next_name);
+    }
+
+    #[test]
     fn canary_block_output_is_terminal_tool_error() {
         // Pins: ToolExecutor reports blocked canary input as a tool error before backend execution.
         let output = blocked_canary_tool_output("bash");
@@ -1046,6 +1321,97 @@ mod tests {
             trusted_sandbox_manifest: None,
             worker_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn execute_buffered_propagates_reviewed_provider_identity_to_mcp_request() {
+        // Pins: after action-review reconstruction preserves provider_tool_use_id, the real
+        // ToolExecutor -> ToolInvocation -> MCP dispatch path emits that identity in `_meta`.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake MCP server");
+        let addr = listener.local_addr().expect("read fake MCP address");
+        let server = tokio::spawn(async move {
+            for request_index in 0..4 {
+                let (mut socket, _) = listener.accept().await.expect("accept MCP request");
+                let mut buffer = vec![0_u8; 4096];
+                let bytes = socket.read(&mut buffer).await.expect("read MCP request");
+                let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                let body = match request_index {
+                    0 => {
+                        assert!(request.contains("\"method\":\"initialize\""));
+                        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}"#
+                    }
+                    1 => {
+                        assert!(request.contains("\"method\":\"notifications/initialized\""));
+                        r"{}"
+                    }
+                    2 => {
+                        assert!(request.contains("\"method\":\"tools/list\""));
+                        r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"reviewed_lookup","description":"Reviewed lookup","inputSchema":{"type":"object","properties":{"item_key":{"type":"string"}},"required":["item_key"],"additionalProperties":false}}]}}"#
+                    }
+                    _ => {
+                        let (_, request_body) = request
+                            .split_once("\r\n\r\n")
+                            .expect("MCP request should contain an HTTP body");
+                        let request_json: serde_json::Value = serde_json::from_str(request_body)
+                            .expect("MCP request body should be JSON");
+                        assert_eq!(
+                            request_json["params"],
+                            serde_json::json!({
+                                "name": "reviewed_lookup",
+                                "arguments": {"item_key": "AAPL-10K"},
+                                "_meta": {
+                                    "moa/toolInvocationId": "provider-reviewed-call-1"
+                                }
+                            })
+                        );
+                        r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"filing"}]}}"#
+                    }
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write MCP response");
+            }
+        });
+
+        let dir = tempdir().expect("create router tempdir");
+        let mut config = MoaConfig::default();
+        config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
+        config.local.docker_enabled = false;
+        config
+            .cloud
+            .hands
+            .get_or_insert_with(Default::default)
+            .allow_local_provider = true;
+        config.mcp_servers = vec![McpServerConfig {
+            name: "reviewed-mcp".to_string(),
+            transport: McpTransportConfig::Http,
+            url: Some(format!("http://{addr}")),
+            credentials: None,
+            trust_tool_annotations: false,
+        }];
+        let router = ToolRouter::from_config(&config)
+            .await
+            .expect("build MCP router");
+        let executor = ToolExecutorImpl::new(Arc::new(router));
+        let mut request = tool_request("reviewed_lookup");
+        request.provider_tool_use_id = Some("provider-reviewed-call-1".to_string());
+        request.input = serde_json::json!({"item_key": "AAPL-10K"});
+
+        let output = executor
+            .execute_buffered(&SessionMeta::default(), &request)
+            .await
+            .expect("reviewed MCP request should dispatch");
+
+        assert_eq!(output.to_text(), "filing");
+        server.await.expect("fake MCP server should finish");
     }
 
     fn install_scenario() -> (

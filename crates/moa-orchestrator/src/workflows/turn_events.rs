@@ -37,17 +37,18 @@ pub(super) async fn append_session_event(
     let persist_span = event_persist_span(1);
     let persist_started = Instant::now();
     moa_core::coordination_counters::record_durable_append();
-    let record = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event,
-            dedupe_key: None,
-        }))
-        .call()
-        .instrument(persist_span)
-        .await?
-        .into_inner();
+    let record = crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event,
+                dedupe_key: None,
+            })),
+    )
+    .call()
+    .instrument(persist_span)
+    .await?
+    .into_inner();
     record_turn_event_persist_duration(persist_started.elapsed(), 1);
     Ok(record)
 }
@@ -110,12 +111,14 @@ pub(super) async fn record_segment_tool_use(
     session_id: SessionId,
     tool_name: &str,
 ) -> Result<(), HandlerError> {
-    ctx.service_client::<RestateSessionStoreClient>()
-        .record_segment_tool_use(Json(RecordSegmentToolUseRequest {
-            session_id,
-            tool_name: tool_name.to_string(),
-        }))
-        .send();
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .record_segment_tool_use(Json(RecordSegmentToolUseRequest {
+                session_id,
+                tool_name: tool_name.to_string(),
+            })),
+    )
+    .send();
     Ok(())
 }
 
@@ -135,12 +138,14 @@ pub(super) async fn record_segment_skill_use_for_tool_call(
     let engaged =
         moa_core::types::skill_use::skills_used_in_tool_call(tool_name, input, selected_skills);
     for skill_name in engaged {
-        ctx.service_client::<RestateSessionStoreClient>()
-            .record_segment_skill_use(Json(RecordSegmentSkillUseRequest {
-                session_id,
-                skill_name,
-            }))
-            .send();
+        crate::restate_identity::replay_safe_request(
+            ctx.service_client::<RestateSessionStoreClient>()
+                .record_segment_skill_use(Json(RecordSegmentSkillUseRequest {
+                    session_id,
+                    skill_name,
+                })),
+        )
+        .send();
     }
     Ok(())
 }
@@ -213,6 +218,7 @@ pub(super) async fn append_zero_cost_assistant_response_with_sequence(
 pub(super) fn turn_outcome_kind_label(kind: &TurnOutcomeKind) -> &'static str {
     match kind {
         TurnOutcomeKind::Completed => "completed",
+        TurnOutcomeKind::Accepted { .. } => "accepted",
         TurnOutcomeKind::Cancelled => "cancelled",
         TurnOutcomeKind::Failed => "failed",
     }

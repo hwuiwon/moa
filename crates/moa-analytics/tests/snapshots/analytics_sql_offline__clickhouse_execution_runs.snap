@@ -1,0 +1,5 @@
+---
+source: crates/moa-analytics/tests/analytics_sql_offline.rs
+expression: compiled.sql
+---
+SELECT d.active_plan_hash AS c0, toString(d.skill_template_revision_uid) AS c1, d.status AS c2, d.logical_task_count AS c3, count() AS c4, ifNull(sum(d.actual_cost_microusd), 0) AS c5, quantileExactInclusive(0.95)(d.queue_to_start_ms) AS c6, quantileExactInclusive(0.95)(d.duration_ms) AS c7 FROM dim_execution_runs AS d FINAL WHERE d.tenant_id = toUUID(?) AND d.started_at BETWEEN parseDateTime64BestEffort(?, 6, 'UTC') AND parseDateTime64BestEffort(?, 6, 'UTC') GROUP BY 1, 2, 3, 4 ORDER BY c4 DESC LIMIT 50

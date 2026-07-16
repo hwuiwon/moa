@@ -18,9 +18,9 @@ use moa_core::wire::experiments::{
     ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
 use moa_core::{
-    types::action_policy::ActionRuleScope, types::identifiers::ModelId,
-    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
-    types::identifiers::TenantId,
+    types::action_policy::ActionRuleScope, types::execution_planning::PinnedExecutionTemplateRef,
+    types::identifiers::ModelId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
 };
 use moa_experiments::app::{
     ExperimentLearningProposalEvidence, build_experiment_learning_candidate,
@@ -94,7 +94,7 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
         status: "accepted".to_string(),
         score_run_id: fixture_uuid(2),
         session_id: None,
-        procedure_run_uid: None,
+        execution_run_uid: None,
     });
     assert_has_tenant_id(ExperimentRunStatusRequest {
         tenant_id,
@@ -107,7 +107,7 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
         target_kind: Some("agent_loop".to_string()),
         score_run_id: Some(fixture_uuid(2)),
         session_id: None,
-        procedure_run_uid: None,
+        execution_run_uid: None,
         error: None,
         run: json!({}),
     });
@@ -145,13 +145,13 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
         run_uid: fixture_uuid(1),
         trial_uid: fixture_uuid(2),
         status: "completed".to_string(),
-        target_kind: "agent_loop".to_string(),
+        target_kind: "execution_template".to_string(),
         trial_key: "scenario-a/persona-a/profile-a/candidate/0".to_string(),
         variant_key: "candidate".to_string(),
         scenario_id: Some(fixture_uuid(3).to_string()),
         score_run_id: fixture_uuid(4),
         session_id: Some(SessionId(fixture_uuid(5))),
-        procedure_run_uid: Some(fixture_uuid(6)),
+        execution_run_uid: Some(fixture_uuid(6)),
         trace_id: Some("trace-fixture".to_string()),
         stop_reason: Some("success".to_string()),
         error: None,
@@ -183,7 +183,7 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
         scenario_id: trial_summary.scenario_id,
         score_run_id: trial_summary.score_run_id,
         session_id: trial_summary.session_id,
-        procedure_run_uid: trial_summary.procedure_run_uid,
+        execution_run_uid: trial_summary.execution_run_uid,
         trace_id: trial_summary.trace_id,
         stop_reason: trial_summary.stop_reason,
         error: trial_summary.error,
@@ -315,7 +315,7 @@ fn experiment_trial_responses_serialize_typed_ui_drilldown_fields() {
     let scenario_id = fixture_uuid(3);
     let score_run_id = fixture_uuid(4);
     let session_id = SessionId(fixture_uuid(5));
-    let procedure_run_uid = fixture_uuid(6);
+    let execution_run_uid = fixture_uuid(6);
 
     let response = ExperimentTrialsResponse {
         tenant_id,
@@ -325,13 +325,13 @@ fn experiment_trial_responses_serialize_typed_ui_drilldown_fields() {
             run_uid,
             trial_uid,
             status: "completed".to_string(),
-            target_kind: "agent_loop".to_string(),
+            target_kind: "execution_template".to_string(),
             trial_key: "scenario/persona/profile/candidate/0".to_string(),
             variant_key: "candidate".to_string(),
             scenario_id: Some(scenario_id.to_string()),
             score_run_id,
             session_id: Some(session_id),
-            procedure_run_uid: Some(procedure_run_uid),
+            execution_run_uid: Some(execution_run_uid),
             trace_id: Some("trace-fixture".to_string()),
             stop_reason: Some("success".to_string()),
             error: None,
@@ -344,7 +344,7 @@ fn experiment_trial_responses_serialize_typed_ui_drilldown_fields() {
     assert_eq!(encoded["run_uid"], run_uid.to_string());
     assert_eq!(encoded["trials"][0]["tenant_id"], tenant_id.to_string());
     assert_eq!(encoded["trials"][0]["trial_uid"], trial_uid.to_string());
-    assert_eq!(encoded["trials"][0]["target_kind"], "agent_loop");
+    assert_eq!(encoded["trials"][0]["target_kind"], "execution_template");
     assert_eq!(encoded["trials"][0]["variant_key"], "candidate");
     assert_eq!(encoded["trials"][0]["scenario_id"], scenario_id.to_string());
     assert_eq!(
@@ -353,8 +353,8 @@ fn experiment_trial_responses_serialize_typed_ui_drilldown_fields() {
     );
     assert_eq!(encoded["trials"][0]["session_id"], session_id.0.to_string());
     assert_eq!(
-        encoded["trials"][0]["procedure_run_uid"],
-        procedure_run_uid.to_string()
+        encoded["trials"][0]["execution_run_uid"],
+        execution_run_uid.to_string()
     );
     assert_eq!(encoded["trials"][0]["trace_id"], "trace-fixture");
     assert_eq!(encoded["trials"][0]["stop_reason"], "success");
@@ -407,7 +407,7 @@ fn experiment_compare_response_serializes_scenario_and_variant_deltas() {
 }
 
 // Authorization for the Experiments service is exercised behaviorally, not by source-grep:
-// `experiment_procedure_e2e::experiments_run_denies_caller_without_tenant_operator` calls
+// `experiment_agent_loop_e2e::experiments_run_denies_caller_without_tenant_operator` calls
 // `Experiments/run` over the real Restate + OpenFGA stack as a caller with no Tenant:Operator
 // grant and asserts a 403 denial. Every Experiments handler authorizes tenant
 // operator/admin access as its first statement, so that e2e is the template for
@@ -498,10 +498,10 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
             .to_string()
     );
     assert_eq!(
-        candidate.payload["evidence_refs"]["procedure_run_uids"][0],
+        candidate.payload["evidence_refs"]["execution_run_uids"][0],
         trials[0]
-            .procedure_run_uid
-            .expect("fixture should include procedure run")
+            .execution_run_uid
+            .expect("fixture should include execution run")
             .to_string()
     );
     assert_eq!(
@@ -583,27 +583,28 @@ fn score_row(
 }
 
 fn completed_run_record(storage_partition_id: StoragePartitionId) -> ExperimentRunRecord {
+    let template = pinned_execution_template(22);
     ExperimentRunRecord {
         scope: ActionRuleScope::Tenant {
             tenant_id: TenantId::new(),
         },
         run_uid: fixture_uuid(1),
         name: format!("proposal fixture {storage_partition_id}"),
-        target_kind: ExperimentTargetKind::AgentLoop,
+        target_kind: ExperimentTargetKind::ExecutionTemplate,
         status: ExperimentRunStatus::Completed,
-        target: ExperimentTarget::AgentLoop {
-            prompt: "Improve support behavior.".to_string(),
+        target: ExperimentTarget::ExecutionTemplate {
+            template: template.clone(),
+            objective: "Improve support behavior with the pinned support flow.".to_string(),
+            input: json!({"ticket_id": "ticket-42"}),
             session_id: Some(SessionId(fixture_uuid(2))),
-            agent: None,
-            model: ModelId::new("gpt-5.4"),
-            attachments: Vec::new(),
+            idempotency_key: Some("template-run-key".to_string()),
         },
         variant: ExperimentVariant {
             name: "candidate".to_string(),
-            model: Some(ModelId::new("gpt-5.4")),
-            artifact_revision_uids: vec![fixture_uuid(20), fixture_uuid(21)],
-            skill_refs: vec!["skill://support-style".to_string()],
-            procedure_ref: Some("skill://support-flow".to_string()),
+            model: None,
+            artifact_revision_uids: vec![fixture_uuid(20), fixture_uuid(21), template.revision_uid],
+            skill_refs: Vec::new(),
+            execution_template: Some(template),
             metadata: json!({"plan_revision_uid": fixture_uuid(20)}),
         },
         scorecard: ExperimentScorecard {
@@ -612,7 +613,7 @@ fn completed_run_record(storage_partition_id: StoragePartitionId) -> ExperimentR
         },
         score_run_id: fixture_uuid(3),
         session_id: Some(SessionId(fixture_uuid(4))),
-        procedure_run_uid: Some(fixture_uuid(5)),
+        execution_run_uid: Some(fixture_uuid(5)),
         artifact_revision_uids: vec![fixture_uuid(20), fixture_uuid(21)],
         idempotency_key: Some("run-key".to_string()),
         created_by_identity: json!({"type": "operator"}),
@@ -633,7 +634,7 @@ fn completed_trial_record(run_uid: Uuid) -> ExperimentTrialRecord {
         run_uid,
         trial_key: "scenario/persona/profile/candidate/0".to_string(),
         status: ExperimentTrialStatus::Completed,
-        target_kind: ExperimentTargetKind::AgentLoop,
+        target_kind: ExperimentTargetKind::ExecutionTemplate,
         variant_key: "candidate".to_string(),
         plan_revision_uid: fixture_uuid(20),
         persona_id: Some(fixture_uuid(7).to_string()),
@@ -651,7 +652,7 @@ fn completed_trial_record(run_uid: Uuid) -> ExperimentTrialRecord {
         target_model: Some(ModelId::new("gpt-5.4")),
         seed: Some("seed".to_string()),
         session_id: Some(SessionId(fixture_uuid(11))),
-        procedure_run_uid: Some(fixture_uuid(12)),
+        execution_run_uid: Some(fixture_uuid(12)),
         score_run_id: fixture_uuid(13),
         turn_count: 2,
         stop_reason: None,
@@ -661,6 +662,13 @@ fn completed_trial_record(run_uid: Uuid) -> ExperimentTrialRecord {
         completed_at: Some(fixture_time()),
         created_at: fixture_time(),
         updated_at: fixture_time(),
+    }
+}
+
+fn pinned_execution_template(last_byte: u8) -> PinnedExecutionTemplateRef {
+    PinnedExecutionTemplateRef {
+        skill_ref: "skill://support-flow".to_string(),
+        revision_uid: fixture_uuid(last_byte),
     }
 }
 

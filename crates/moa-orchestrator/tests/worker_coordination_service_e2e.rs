@@ -206,54 +206,6 @@ async fn record_child_signal(
     Ok(())
 }
 
-/// Registers a deterministic auto-delegation run via `Session/register_auto_delegation_run`
-/// (the same write `TurnExecution` performs after scheduling the plan's ready workers).
-async fn register_auto_delegation_run(
-    client: &reqwest::Client,
-    session: &InitializedSession,
-    user_sequence_num: u64,
-    worker_ids: &[String],
-) -> Result<()> {
-    client
-        .post(session_url(&session.key(), "register_auto_delegation_run"))
-        .json(&serde_json::json!({
-            "user_sequence_num": user_sequence_num,
-            "worker_ids": worker_ids,
-        }))
-        .send()
-        .await
-        .context("send Session register_auto_delegation_run")?
-        .error_for_status()
-        .context("Session register_auto_delegation_run should succeed")?;
-    Ok(())
-}
-
-/// Polls run-owned fan-in status via `Session/poll_auto_delegation_fan_in`, returning the raw
-/// `AutoDelegationFanInStatus` (`"Ready"` / `"NotRunning"` / `{"Pending": {...}}`).
-async fn poll_auto_delegation_fan_in(
-    client: &reqwest::Client,
-    session: &InitializedSession,
-    user_sequence_num: u64,
-    root_turn_id: &str,
-    force_complete: bool,
-) -> Result<serde_json::Value> {
-    client
-        .post(session_url(&session.key(), "poll_auto_delegation_fan_in"))
-        .json(&serde_json::json!({
-            "user_sequence_num": user_sequence_num,
-            "root_turn_id": root_turn_id,
-            "force_complete": force_complete,
-        }))
-        .send()
-        .await
-        .context("send Session poll_auto_delegation_fan_in")?
-        .error_for_status()
-        .context("Session poll_auto_delegation_fan_in should succeed")?
-        .json::<serde_json::Value>()
-        .await
-        .context("deserialize Session poll_auto_delegation_fan_in response")
-}
-
 /// Reads the root-owned active child registry via the shared `Session/child_refs`.
 async fn child_refs(
     client: &reqwest::Client,
@@ -337,24 +289,6 @@ fn count_signal_events(progress: &ProgressView, signal_id: &str) -> usize {
         .count()
 }
 
-/// Returns the `WorkerResultBundle` events for one `user_sequence_num` in a progress payload.
-///
-/// Each progress event is a serialized `EventRecord`; the durable `event` payload is adjacently
-/// tagged (`{"type": ..., "data": {...}}`), so the bundle's sequence lives at
-/// `event.data.user_sequence_num` and its ordered results at `event.data.results`.
-fn bundle_events(progress: &ProgressView, user_sequence_num: u64) -> Vec<serde_json::Value> {
-    progress
-        .events
-        .iter()
-        .filter(|record| {
-            let event = &record["event"];
-            event["type"] == "WorkerResultBundle"
-                && event["data"]["user_sequence_num"] == serde_json::json!(user_sequence_num)
-        })
-        .map(|record| record["event"].clone())
-        .collect()
-}
-
 /// Polls `Session/progress` until `predicate` holds or `timeout` elapses.
 async fn await_progress_matching<F>(
     client: &reqwest::Client,
@@ -425,8 +359,8 @@ fn completed_terminal(worker_id: &str, output: &str) -> WorkerTerminalResult {
 #[tokio::test]
 #[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
 async fn session_progress_includes_child_progress_service_e2e() -> Result<()> {
-    // Pins: Session/progress concurrently fans in active child summaries around an immediate
-    // cached terminal summary, then restores registration order regardless of completion order.
+    // Pins: Session/progress collects active child summaries around an immediate cached terminal
+    // summary, then restores registration order regardless of completion order.
     let client = reqwest::Client::new();
     let session = create_initialized_session(&client).await?;
     let active_before = unique_child_id();
@@ -686,125 +620,6 @@ async fn terminal_child_caches_and_consumes_result_service_e2e() -> Result<()> {
     assert!(
         refs.iter().all(|child| child.id != child_id),
         "consumed terminal child must be dropped from child_refs: {refs:?}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
-async fn auto_delegation_fan_in_emits_single_ordered_bundle_service_e2e() -> Result<()> {
-    // Pins (B1 slow-sibling fan-in + bundle dedupe): once every scheduled worker of an
-    // auto-delegation run reaches terminal, the Session VO emits exactly one durable
-    // WorkerResultBundle whose results follow the SCHEDULED order (not completion order), and a
-    // handler replay (Restate re-invoking mark_child_terminal, plus the root turn re-polling
-    // fan-in) never appends a second bundle. Driven directly through the durable VO handlers so no
-    // synthesis turn runs (no owning identity is recorded without a real turn), which keeps the
-    // event-log assertions deterministic under the mock provider.
-    const FAN_IN_SEQ: u64 = 1;
-    let client = reqwest::Client::new();
-    let session = create_initialized_session(&client).await?;
-    let worker_a = unique_child_id();
-    let worker_b = unique_child_id();
-
-    for (id, task) in [(&worker_a, "task-a"), (&worker_b, "task-b")] {
-        register_child(
-            &client,
-            &session,
-            &WorkerChildRef {
-                id: id.clone(),
-                task_hash: format!("hash-{task}"),
-                budget_tokens: 4_096,
-                terminal: None,
-            },
-        )
-        .await?;
-    }
-
-    // Schedule order is [worker_b, worker_a]; workers finish in the OPPOSITE order below, so the
-    // bundle order can only match if fan-in preserves the scheduled order rather than completion.
-    register_auto_delegation_run(
-        &client,
-        &session,
-        FAN_IN_SEQ,
-        &[worker_b.clone(), worker_a.clone()],
-    )
-    .await?;
-
-    mark_child_terminal(
-        &client,
-        &session,
-        &MarkWorkerChildTerminalInput {
-            worker_id: worker_a.clone(),
-            terminal: completed_terminal(&worker_a, "a finished first"),
-        },
-    )
-    .await?;
-    // Not complete yet: the slow sibling (worker_b) is still pending, so no bundle is emitted.
-    let mid = session_progress(&client, &session).await?;
-    assert!(
-        bundle_events(&mid, FAN_IN_SEQ).is_empty(),
-        "no bundle before every scheduled worker is terminal"
-    );
-    mark_child_terminal(
-        &client,
-        &session,
-        &MarkWorkerChildTerminalInput {
-            worker_id: worker_b.clone(),
-            terminal: completed_terminal(&worker_b, "b finished last"),
-        },
-    )
-    .await?;
-
-    let progress = await_progress_matching(&client, &session, Duration::from_secs(10), |p| {
-        !bundle_events(p, FAN_IN_SEQ).is_empty()
-    })
-    .await?;
-    let bundles = bundle_events(&progress, FAN_IN_SEQ);
-    assert_eq!(
-        bundles.len(),
-        1,
-        "fan-in emits exactly one WorkerResultBundle: {bundles:?}"
-    );
-    let results = bundles[0]["data"]["results"]
-        .as_array()
-        .context("bundle carries a results array")?;
-    let order: Vec<&str> = results
-        .iter()
-        .map(|result| result["result"]["worker_id"].as_str().unwrap_or_default())
-        .collect();
-    assert_eq!(
-        order,
-        vec![worker_b.as_str(), worker_a.as_str()],
-        "bundle results follow scheduled order, not completion order"
-    );
-
-    // Handler replay 1: Restate may redeliver the terminal write; a replayed mark_child_terminal
-    // must not re-emit (the run's bundle_emitted guard makes it a no-op).
-    mark_child_terminal(
-        &client,
-        &session,
-        &MarkWorkerChildTerminalInput {
-            worker_id: worker_b.clone(),
-            terminal: completed_terminal(&worker_b, "redelivered"),
-        },
-    )
-    .await?;
-    // Handler replay 2: the active root turn re-polling fan-in after emission reports Ready and,
-    // via the same auto_delegation_fan_in:{seq} dedupe key, appends no second bundle.
-    let status =
-        poll_auto_delegation_fan_in(&client, &session, FAN_IN_SEQ, "root-turn-replay", false)
-            .await?;
-    assert_eq!(
-        status,
-        serde_json::json!("Ready"),
-        "re-poll after emission reports Ready without re-emitting"
-    );
-
-    let after_replay = session_progress(&client, &session).await?;
-    assert_eq!(
-        bundle_events(&after_replay, FAN_IN_SEQ).len(),
-        1,
-        "handler replay must not append a second WorkerResultBundle"
     );
     Ok(())
 }

@@ -11,9 +11,12 @@ at exporter startup. `DateTime64(6, 'UTC')` everywhere; UUIDs as `UUID`;
 JSON payloads as `String`.
 
 Version columns: every `ReplacingMergeTree` table carries
-`export_version DateTime64(6, 'UTC')` — the exporter's observed
-`updated_at` (dims) or export batch time (facts). Readers must collapse
-duplicates with `FINAL` (dims and facts only, never `events_raw`).
+`export_version DateTime64(6, 'UTC')`. Timestamp-backed dimensions use the
+exporter's observed `updated_at`; facts use export batch time. Sequence-backed
+execution dimensions use a monotonic exporter version above the durable
+`export_version_floor`, while the schema-upgrade backfill uses one fixed
+`upgrade_version`. Readers must collapse duplicates with `FINAL` (dims and
+facts only, never `events_raw`).
 
 Tenant isolation: every table carries `tenant_id UUID`; the query compiler
 injects `tenant_id = ?` on every query, mirroring the Postgres matview model.
@@ -74,20 +77,56 @@ skills_activated Array(String), turn_count Int64, token_cost Int64,
 started_at DateTime64(6,'UTC'), ended_at Nullable(DateTime64(6,'UTC')),
 updated_at DateTime64(6,'UTC'), export_version DateTime64(6,'UTC')`
 
-`dim_artifact_run` — `ORDER BY (tenant_id, run_uid)`:
-`run_uid UUID, tenant_id UUID, storage_partition_id String, user_id String,
-session_id Nullable(UUID), revision_uid Nullable(UUID), procedure_ref String,
-status LowCardinality(String), error Nullable(String),
+`dim_execution_runs` — `ORDER BY (tenant_id, run_uid)`:
+`run_uid UUID, tenant_id UUID, contact_id Nullable(UUID), session_id UUID,
+source_kind LowCardinality(String), route_mode LowCardinality(String),
+route_reason LowCardinality(String), skill_template_ref Nullable(String),
+skill_template_revision_uid Nullable(UUID), initial_plan_hash String,
+active_plan_hash String, plan_revision UInt64,
+status LowCardinality(String), terminal_reason Nullable(String),
+requirement_count UInt64, satisfied_requirement_count UInt64,
+completion_check_count UInt64, logical_task_count UInt64,
+reserved_cost_microusd UInt64, actual_cost_microusd UInt64,
+reserved_tokens UInt64, actual_tokens UInt64,
+reserved_tasks UInt64, actual_tasks UInt64,
+reserved_tool_calls UInt64, actual_tool_calls UInt64,
+reserved_retrieved_bytes UInt64, actual_retrieved_bytes UInt64,
+queued_at Nullable(DateTime64(6,'UTC')),
 started_at Nullable(DateTime64(6,'UTC')),
-completed_at Nullable(DateTime64(6,'UTC')), created_at DateTime64(6,'UTC'),
-updated_at DateTime64(6,'UTC'), export_version DateTime64(6,'UTC')`
+queue_to_start_ms Nullable(Float64),
+completed_at Nullable(DateTime64(6,'UTC')), duration_ms Nullable(Float64),
+created_at DateTime64(6,'UTC'), updated_at DateTime64(6,'UTC'),
+export_version DateTime64(6,'UTC')`
 
-`dim_artifact_node_run` — `ORDER BY (tenant_id, run_uid, node_run_uid)`:
-`node_run_uid UUID, run_uid UUID, tenant_id UUID, node_id String,
-status LowCardinality(String), error Nullable(String),
+`dim_execution_tasks` — `ORDER BY (tenant_id, run_uid, task_id)`:
+`task_id UUID, run_uid UUID, tenant_id UUID, node_id String, item_key String,
+task_kind LowCardinality(String), capability_name Nullable(String),
+capability_version Nullable(String), plan_revision UInt64,
+status LowCardinality(String), failure_class Nullable(String),
+attempt UInt32, generation UInt64, citation_count UInt64,
+reserved_cost_microusd UInt64, actual_cost_microusd UInt64,
+reserved_tokens UInt64, actual_tokens UInt64,
+reserved_tasks UInt64, actual_tasks UInt64,
+reserved_tool_calls UInt64, actual_tool_calls UInt64,
+reserved_retrieved_bytes UInt64, actual_retrieved_bytes UInt64,
+queue_latency_ms Nullable(Float64), duration_ms Nullable(Float64),
 started_at Nullable(DateTime64(6,'UTC')),
-completed_at Nullable(DateTime64(6,'UTC')), created_at DateTime64(6,'UTC'),
-updated_at DateTime64(6,'UTC'), export_version DateTime64(6,'UTC')`
+completed_at Nullable(DateTime64(6,'UTC')),
+created_at DateTime64(6,'UTC'), updated_at DateTime64(6,'UTC'),
+export_version DateTime64(6,'UTC')`
+
+These tables match `analytics.execution_run_fact` and
+`analytics.execution_task_fact` value-for-value. `session_id` and `item_key`
+are non-null, and nullable skill/capability provenance remains nullable.
+`source_ref`, `capability_ref`, `task_uid`, and raw `error` columns do not exist.
+Raw input, output, gaps, cancellation reason, and error prose are never
+exported.
+
+Run `queue_to_start_ms` is exactly `started_at - queued_at`; it is null when
+either timestamp is null. Run `duration_ms` is `completed_at - started_at`.
+Task `queue_latency_ms` is first `started_at - created_at`. Task `duration_ms`
+uses `completed_at - started_at`, or `completed_at - created_at` for a task
+terminalized before start. Durations are milliseconds and clamped at zero.
 
 `dim_learning_candidates` — `ORDER BY (tenant_id, candidate_id)`:
 `candidate_id UUID, tenant_id UUID, storage_partition_id String,
@@ -152,8 +191,8 @@ the exporter stamps each tool call with its enclosing turn
 | tool_call_fact | `tool_call_fact FINAL` ⋈ `dim_session_agent_context FINAL` |
 | event_fact | `events_raw` ⋈ `dim_session_agent_context FINAL` (no FINAL on events_raw) |
 | task_segment_fact | `dim_task_segments FINAL` ⋈ `dim_session_agent_context FINAL` |
-| procedure_run_fact | `dim_artifact_run FINAL` ⋈ `dim_session_agent_context FINAL` |
-| procedure_node_run_fact | `dim_artifact_node_run FINAL` ⋈ `dim_artifact_run FINAL` |
+| execution_run_fact | `dim_execution_runs FINAL` |
+| execution_task_fact | `dim_execution_tasks FINAL` |
 | learning_candidate_fact | `dim_learning_candidates FINAL` |
 | experiment_run_fact | `dim_experiment_run FINAL` |
 
@@ -178,10 +217,10 @@ time in CH; MVs come later only if profiling demands (and any MV over
 3. **Percentiles** use `quantileExactInclusive` (matches `PERCENTILE_CONT`
    for parity); revisit approximate `quantile` only if profiling shows
    memory pressure.
-4. **Postgres cursor indexes.** Every exported mutable table must have a
-   plain `(updated_at)` btree index (added in the exporter migration where
-   missing) so the 15-second cursor pull is an index range scan, never a
-   sequential scan on the OLTP database.
+4. **Postgres cursor indexes.** Timestamp-backed mutable tables have a plain
+   `(updated_at)` btree index. Execution runs/tasks use the non-null
+   `analytics_change_seq` plus primary UUID tuple and its supporting index;
+   their exporter never scans or orders by `updated_at`.
 5. **Turn stamping is a full-prefix computation.** `turn_number` for an
    exported event counts BrainResponse events over the session's entire
    prefix (indexed per-session lookup over `(session_id, …)`), never a
@@ -195,14 +234,113 @@ time in CH; MVs come later only if profiling demands (and any MV over
 
 ```sql
 CREATE TABLE analytics.clickhouse_export_state (
-    table_name  TEXT PRIMARY KEY,
-    cursor_ts   TIMESTAMPTZ NOT NULL,
-    cursor_id   UUID,
-    exported_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    table_name          TEXT PRIMARY KEY,
+    cursor_ts           TIMESTAMPTZ NOT NULL,
+    cursor_id           UUID,
+    cursor_seq          BIGINT,
+    pass_high_water_seq BIGINT,
+    pass_high_water_id  UUID,
+    pass_started_at     TIMESTAMPTZ,
+    exported_at         TIMESTAMPTZ NOT NULL,
+    CHECK (
+        (pass_high_water_seq IS NULL AND pass_high_water_id IS NULL
+            AND pass_started_at IS NULL)
+        OR
+        (pass_high_water_seq IS NOT NULL AND pass_high_water_id IS NOT NULL
+            AND pass_started_at IS NOT NULL)
+    )
 );
 ```
 
-Overlap window: cursor rewinds `2 × export_poll_secs` on each poll; duplicate
-rows are absorbed by ReplacingMergeTree keys. Leader election: Postgres
-advisory lock (`pg_try_advisory_lock(hashtext('clickhouse-analytics-export'))`)
-held for the life of the loop; non-leaders sleep and retry.
+Timestamp-backed datasets keep `cursor_seq IS NULL` and continue using
+`(cursor_ts, cursor_id)` with the overlap window. Sequence-backed execution
+datasets use non-null `(cursor_seq, cursor_id)` and an exact zero sentinel of
+`(0, 00000000-0000-0000-0000-000000000000)`. For those rows, `cursor_ts` is
+the database time at which the exporter last durably reached the regular
+sequence cursor; it is not a source `updated_at` watermark.
+
+Each execution source row carries non-null `analytics_change_seq`. Every
+run/task insert or analytics-relevant update takes
+`pg_advisory_xact_lock_shared(1297047877, 337)`, then allocates the next
+sequence, then writes the row. Upgrade and incremental high-water capture take
+the matching exclusive transaction lock
+`pg_advisory_xact_lock(1297047877, 337)`. This orders commits around the fence:
+older shared writers are included, and writers queued behind the fence receive
+a larger sequence for the next pass.
+
+Under the single exporter lease, an incremental pass captures and persists the
+greatest `(analytics_change_seq, primary_uuid)` tuple for each execution
+dataset. Every page uses:
+
+```sql
+(analytics_change_seq, primary_uuid) > (cursor_seq, cursor_id)
+AND (analytics_change_seq, primary_uuid)
+    <= (pass_high_water_seq, pass_high_water_id)
+ORDER BY analytics_change_seq, primary_uuid
+```
+
+If a pass bound exists after restart, the exporter resumes it without
+recapturing. A page advances only after the idempotent
+`ReplacingMergeTree` insert succeeds. Reaching the bound atomically advances
+the regular cursor, clears the active pass, and sets `cursor_ts` and
+`exported_at` to one database timestamp. An empty caught-up pass performs the
+same timestamp update. Zero/reset and active or partial passes leave freshness
+at the previous caught-up value.
+
+`moa-edge` reports:
+
+```sql
+MIN(CASE WHEN cursor_seq IS NULL THEN cursor_ts ELSE exported_at END)
+```
+
+as `read_model_updated_at` across export-state rows.
+
+## Execution Dimension Upgrade
+
+`analytics.clickhouse_schema_upgrade_state`, keyed by
+`execution_dimensions_v2`, is the durable upgrade state. Its checked stages
+are:
+
+```text
+pending
+  -> schema_upgraded
+  -> cursors_reset
+  -> runs_exported
+  -> tasks_exported
+  -> complete
+```
+
+The row persists non-null `upgrade_version` and `export_version_floor`, complete
+run/task high-water sequence/UUID tuples, paired per-dataset page
+sequence/UUID cursors, and stage timestamps. Stages move only forward.
+
+Initialization captures both source high waters under the exclusive advisory
+lock. Empty tables use the zero sentinel. `upgrade_version` is greater than
+every existing execution-dimension version and becomes the initial
+`export_version_floor`.
+
+The upgrader then idempotently:
+
+1. renames `task_uid` to `task_id`;
+2. widens `plan_revision` from `UInt32` to `UInt64`;
+3. repairs nullable/non-nullable columns;
+4. adds every normalized execution fact field;
+5. drops `source_ref`, `capability_ref`, and raw `error`;
+6. validates the complete final column contract before recording
+   `schema_upgraded`;
+7. resets regular and upgrade page cursors to the zero sentinel;
+8. exports runs and tasks through their fixed high-water tuples with the fixed
+   `upgrade_version`;
+9. marks `complete` only after both regular cursors equal their stored high
+   waters and both caught-up timestamps are updated.
+
+ClickHouse mutations run synchronously or the upgrader waits for
+`system.mutations`. A restart resumes the durable stage and page cursor; it
+does not repeat completed logical work. Normal incremental export remains
+paused until the upgrade reaches `complete`. Each later page claims
+`max(database_now, export_version_floor + 1 microsecond)` and persists the new
+floor, so clock skew cannot resurrect upgrade or older rows.
+
+Leader election remains the Postgres advisory lock
+`pg_try_advisory_lock(hashtext('clickhouse-analytics-export'))` held for the
+life of the loop; non-leaders sleep and retry.

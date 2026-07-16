@@ -2,7 +2,7 @@
 
 #![recursion_limit = "256"]
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::Utc;
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
@@ -21,6 +21,7 @@ use moa_core::{
     types::identifiers::StoragePartitionId, types::identifiers::TenantId,
     types::learning::LearningEntry, types::segments::TaskSegment, types::session::SessionMeta,
 };
+use moa_hands::{ToolRegistry, ToolRouter};
 use moa_orchestrator::services::learning_review::{
     accept_rollback_candidate_after_authz, accept_skill_candidate_after_authz,
     get_learning_candidate_after_authz, reject_learning_candidate_after_authz,
@@ -173,10 +174,11 @@ mod skill_learning_review {
     }
 
     #[tokio::test]
-    async fn accept_terminally_rejects_candidate_without_generated_suite() {
+    async fn accept_terminally_rejects_candidate_without_generated_suite_or_planning_audit() {
         // Pins: a candidate missing its generated regression suite is a content defect —
         // accept fails closed by rejecting the candidate and preserving the draft artifact,
-        // instead of promoting with an "unavailable" regression report.
+        // instead of compiling, recording a planning audit, or promoting with an
+        // "unavailable" regression report.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
         let storage_partition_id = unique_workspace("review-no-suite");
         let scope = tenant_scope(&storage_partition_id);
@@ -201,6 +203,7 @@ mod skill_learning_review {
             store.pool().clone(),
             review_config(&test_db),
             review_providers(),
+            review_tool_router(),
             review_request(
                 &storage_partition_id,
                 candidate.id,
@@ -234,6 +237,15 @@ mod skill_learning_review {
             evaluation["regression_report"]["reason"],
             "candidate has no generated regression suite"
         );
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM moa.execution_compile_audit \
+             WHERE tenant_id = $1 AND source = 'skill_regression'",
+        )
+        .bind(tenant_id_from_storage_partition_id(&storage_partition_id).0)
+        .fetch_one(test_db.store().pool())
+        .await
+        .expect("count normalized skill-regression compile audits");
+        assert_eq!(audit_count, 0);
 
         let preserved = ArtifactRegistry::new(test_db.store().pool().clone())
             .load_revision(&scope, draft.revision_uid)
@@ -281,6 +293,7 @@ mod skill_learning_review {
             store.pool().clone(),
             review_config(&test_db),
             review_providers(),
+            review_tool_router(),
             review_request(
                 &storage_partition_id,
                 candidate.id,
@@ -340,6 +353,7 @@ mod skill_learning_review {
             store.pool().clone(),
             review_config(&test_db),
             review_providers(),
+            review_tool_router(),
             review_request(
                 &storage_partition_id,
                 candidate.id,
@@ -375,6 +389,15 @@ mod skill_learning_review {
             "status reason records the operational release: {:?}",
             released.status_reason
         );
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM moa.execution_compile_audit \
+             WHERE tenant_id = $1 AND source = 'skill_regression'",
+        )
+        .bind(tenant_id_from_storage_partition_id(&storage_partition_id).0)
+        .fetch_one(test_db.store().pool())
+        .await
+        .expect("count normalized skill-regression compile audits");
+        assert_eq!(audit_count, 0);
         let preserved = ArtifactRegistry::new(test_db.store().pool().clone())
             .load_revision(&scope, draft.revision_uid)
             .await
@@ -589,6 +612,7 @@ mod skill_learning_review {
                 pool.clone(),
                 config.clone(),
                 review_providers(),
+                review_tool_router(),
                 review_request(
                     &storage_partition_id,
                     policy_candidate.id,
@@ -616,6 +640,7 @@ mod skill_learning_review {
                 pool,
                 config,
                 review_providers(),
+                review_tool_router(),
                 review_request(
                     &storage_partition_id,
                     non_proposed.id,
@@ -1609,6 +1634,13 @@ mod skill_learning_review {
         Arc::new(moa_providers::ProviderRegistry::default())
     }
 
+    fn review_tool_router() -> Arc<ToolRouter> {
+        Arc::new(ToolRouter::new(
+            ToolRegistry::default_local(),
+            HashMap::new(),
+        ))
+    }
+
     fn unique_workspace(_prefix: &str) -> StoragePartitionId {
         StoragePartitionId::new(Uuid::now_v7().to_string())
     }
@@ -1633,7 +1665,7 @@ mod skill_learning_review {
            moa-estimated-tokens: \"300\"\n\
          ---\n\n\
          # {skill_name}\n\n\
-         Use this reviewed procedure when the task pattern recurs.\n"
+         Use this reviewed workflow when the task pattern recurs.\n"
         );
         SkillPackage::from_skill_markdown(markdown)
             .validate()
@@ -1651,7 +1683,7 @@ mod skill_learning_review {
             "---\nname: {skill_name}\ndescription: \"{description}\"\n\
              allowed-tools: bash file_read\nmetadata:\n  moa-version: \"1.0\"\n  \
              moa-tags: \"{tags_csv}\"\n  moa-estimated-tokens: \"300\"\n---\n\n# {skill_name}\n\n\
-             Use this reviewed procedure when the task pattern recurs.\n"
+             Use this reviewed workflow when the task pattern recurs.\n"
         );
         SkillPackage::from_skill_markdown(markdown)
             .validate()

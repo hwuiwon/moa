@@ -75,6 +75,7 @@ impl Memory for MemoryImpl {
         ctx: Context<'_>,
         request: Json<MemorySearchRequest>,
     ) -> Result<Json<MemorySearchResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Memory", "search");
         let request = request.into_inner();
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
@@ -99,6 +100,7 @@ impl Memory for MemoryImpl {
         ctx: Context<'_>,
         request: Json<MemoryShowRequest>,
     ) -> Result<Json<MemoryShowResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Memory", "show");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
@@ -116,6 +118,7 @@ impl Memory for MemoryImpl {
         ctx: Context<'_>,
         request: Json<MemoryIngestRequest>,
     ) -> Result<Json<MemoryIngestResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Memory", "ingest_documents");
         let request = request.into_inner();
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
@@ -133,6 +136,7 @@ impl Memory for MemoryImpl {
         ctx: Context<'_>,
         request: Json<MemoryRetrieveDebugRequest>,
     ) -> Result<Json<MemoryRetrieveDebugResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Memory", "retrieve_debug");
         let request = request.into_inner();
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;

@@ -92,6 +92,7 @@ impl LLMGateway for LLMGatewayImpl {
         request: Json<CompletionRequest>,
     ) -> Result<Json<CompletionResponse>, HandlerError> {
         let request = request.into_inner();
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("LLMGateway", "complete");
         let (provider_id, _) = self
             .providers
@@ -168,24 +169,27 @@ impl LLMGateway for LLMGatewayImpl {
                 llm_ttft_ms: None,
             };
 
-            let turn_seq = ctx
-                .service_client::<RestateSessionStoreClient>()
-                .append_event(Json(AppendEventRequest {
-                    session_id,
-                    event,
-                    dedupe_key: None,
-                }))
-                .call()
-                .await?
-                .into_inner()
-                .sequence_num;
+            let turn_seq = crate::restate_identity::replay_safe_request(
+                ctx.service_client::<RestateSessionStoreClient>()
+                    .append_event(Json(AppendEventRequest {
+                        session_id,
+                        event,
+                        dedupe_key: None,
+                    })),
+            )
+            .call()
+            .await?
+            .into_inner()
+            .sequence_num;
 
             if let Some(turn) =
                 session_turn_from_completion_request(&request, session_id, turn_seq, Utc::now())
             {
-                ctx.object_client::<IngestionVOClient>(ingestion_object_key(&turn))
-                    .ingest_turn(Json(turn))
-                    .send();
+                crate::restate_identity::replay_safe_request(
+                    ctx.object_client::<IngestionVOClient>(ingestion_object_key(&turn))
+                        .ingest_turn(Json(turn)),
+                )
+                .send();
             }
         }
 
@@ -199,6 +203,7 @@ impl LLMGateway for LLMGatewayImpl {
         ctx: Context<'_>,
         request: Json<NarrateSessionRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("LLMGateway", "narrate_session");
         crate::services::narration::run_narration_job(
             &ctx,
@@ -402,6 +407,7 @@ mod tests {
             max_output_tokens: None,
             temperature: None,
             response_format: None,
+            native_web_search: Default::default(),
             metadata,
         };
 
@@ -447,6 +453,7 @@ mod tests {
             max_output_tokens: None,
             temperature: None,
             response_format: None,
+            native_web_search: Default::default(),
             metadata,
         };
 

@@ -16,11 +16,15 @@ mod authz_challenges_db;
 mod contacts_db;
 #[path = "orchestrator_db/eval_run_status_db.rs"]
 mod eval_run_status_db;
+#[path = "orchestrator_db/execution_service_db.rs"]
+mod execution_service_db;
 #[path = "orchestrator_db/guardrail_hourly_db.rs"]
 mod guardrail_hourly_db;
 #[path = "orchestrator_db/lineage_postgres_db.rs"]
 mod lineage_postgres_db;
 #[path = "orchestrator_db/session_store_db.rs"]
 mod session_store_db;
+#[path = "orchestrator_db/skill_learning_workflow_db.rs"]
+mod skill_learning_workflow_db;
 #[path = "orchestrator_db/workspace_authz_db.rs"]
 mod workspace_authz_db;

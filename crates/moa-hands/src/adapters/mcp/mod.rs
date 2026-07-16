@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use chrono::NaiveDate;
 use eventsource_stream::Eventsource;
 use futures_util::{StreamExt, pin_mut};
 use moa_core::{
@@ -14,7 +15,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 const DEFAULT_MCP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// One tool discovered from a connected MCP server.
@@ -28,22 +29,87 @@ pub struct McpDiscoveredTool {
     pub input_schema: Value,
 }
 
+/// A discovered MCP tool plus the server evidence needed for safe registration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpDiscoveredToolRegistration {
+    tool: McpDiscoveredTool,
+    idempotent_hint: Option<bool>,
+    negotiated_protocol_version: Option<String>,
+    trust_tool_annotations: bool,
+}
+
+impl McpDiscoveredToolRegistration {
+    /// Returns the discovered tool definition.
+    #[must_use]
+    pub fn tool(&self) -> &McpDiscoveredTool {
+        &self.tool
+    }
+
+    /// Returns the raw standard `idempotentHint`, when the server supplied one.
+    #[must_use]
+    pub fn idempotent_hint(&self) -> Option<bool> {
+        self.idempotent_hint
+    }
+
+    /// Returns the protocol revision negotiated with the server, when known.
+    #[must_use]
+    pub fn negotiated_protocol_version(&self) -> Option<&str> {
+        self.negotiated_protocol_version.as_deref()
+    }
+
+    /// Returns whether this exact server was configured to trust tool annotations.
+    #[must_use]
+    pub fn trusts_tool_annotations(&self) -> bool {
+        self.trust_tool_annotations
+    }
+
+    /// Returns whether all negotiated trust conditions permit automatic retries.
+    pub(crate) fn allows_idempotent_retry(&self) -> bool {
+        self.trust_tool_annotations
+            && self.idempotent_hint == Some(true)
+            && self
+                .negotiated_protocol_version
+                .as_deref()
+                .is_some_and(protocol_supports_tool_annotations)
+    }
+
+    /// Consumes the registration evidence and returns its tool definition.
+    pub(crate) fn into_tool(self) -> McpDiscoveredTool {
+        self.tool
+    }
+}
+
+impl From<McpDiscoveredTool> for McpDiscoveredToolRegistration {
+    fn from(tool: McpDiscoveredTool) -> Self {
+        Self {
+            tool,
+            idempotent_hint: None,
+            negotiated_protocol_version: None,
+            trust_tool_annotations: false,
+        }
+    }
+}
+
 /// Async MCP client bound to a single configured server.
 pub struct MCPClient {
     server_name: String,
     transport: RemoteClient,
     next_id: AtomicU64,
+    negotiated_protocol_version: String,
+    trust_tool_annotations: bool,
 }
 
 impl MCPClient {
     /// Connects to an MCP server and performs the initialize handshake.
     pub async fn connect(config: &McpServerConfig) -> Result<Self> {
-        let client = Self {
+        let mut client = Self {
             server_name: config.name.clone(),
             transport: RemoteClient::new(config)?,
             next_id: AtomicU64::new(1),
+            negotiated_protocol_version: String::new(),
+            trust_tool_annotations: config.trust_tool_annotations,
         };
-        client.initialize().await?;
+        client.negotiated_protocol_version = client.initialize().await?;
         Ok(client)
     }
 
@@ -52,8 +118,14 @@ impl MCPClient {
         &self.server_name
     }
 
+    /// Returns the protocol revision selected by the server during initialization.
+    #[must_use]
+    pub fn negotiated_protocol_version(&self) -> &str {
+        &self.negotiated_protocol_version
+    }
+
     /// Lists all currently exposed tools from the server.
-    pub async fn list_tools(&self) -> Result<Vec<McpDiscoveredTool>> {
+    pub async fn list_tools(&self) -> Result<Vec<McpDiscoveredToolRegistration>> {
         let response = self
             .request("tools/list", json!({}), HeaderMap::new())
             .await?;
@@ -61,10 +133,17 @@ impl MCPClient {
         Ok(parsed
             .tools
             .into_iter()
-            .map(|tool| McpDiscoveredTool {
-                name: tool.name,
-                description: tool.description.unwrap_or_default(),
-                input_schema: tool.input_schema,
+            .map(|tool| McpDiscoveredToolRegistration {
+                tool: McpDiscoveredTool {
+                    name: tool.name,
+                    description: tool.description.unwrap_or_default(),
+                    input_schema: tool.input_schema,
+                },
+                idempotent_hint: tool
+                    .annotations
+                    .and_then(|annotations| annotations.idempotent_hint),
+                negotiated_protocol_version: Some(self.negotiated_protocol_version.clone()),
+                trust_tool_annotations: self.trust_tool_annotations,
             })
             .collect())
     }
@@ -74,24 +153,28 @@ impl MCPClient {
         &self,
         name: &str,
         arguments: Value,
+        tool_invocation_id: Option<&str>,
         extra_headers: HashMap<String, String>,
     ) -> Result<ToolOutput> {
         let headers = header_map_from_pairs(extra_headers)?;
+        let mut params = serde_json::Map::from_iter([
+            ("name".to_string(), Value::String(name.to_string())),
+            ("arguments".to_string(), arguments),
+        ]);
+        if let Some(tool_invocation_id) = tool_invocation_id {
+            params.insert(
+                "_meta".to_string(),
+                json!({"moa/toolInvocationId": tool_invocation_id}),
+            );
+        }
         let response = self
-            .request(
-                "tools/call",
-                json!({
-                    "name": name,
-                    "arguments": arguments,
-                }),
-                headers,
-            )
+            .request("tools/call", Value::Object(params), headers)
             .await?;
         Ok(flatten_call_result(response))
     }
 
-    async fn initialize(&self) -> Result<()> {
-        let _ = self
+    async fn initialize(&self) -> Result<String> {
+        let response = self
             .request(
                 "initialize",
                 json!({
@@ -105,7 +188,14 @@ impl MCPClient {
                 HeaderMap::new(),
             )
             .await?;
-        self.notify("notifications/initialized", json!({})).await
+        let initialized: InitializeResponse = serde_json::from_value(response)?;
+        if initialized.protocol_version.trim().is_empty() {
+            return Err(MoaError::StreamError(
+                "MCP initialize result contained an empty protocolVersion".to_string(),
+            ));
+        }
+        self.notify("notifications/initialized", json!({})).await?;
+        Ok(initialized.protocol_version)
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<()> {
@@ -224,11 +314,44 @@ struct ToolsListResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct InitializeResponse {
+    #[serde(rename = "protocolVersion")]
+    protocol_version: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ToolsListEntry {
     name: String,
     description: Option<String>,
     #[serde(rename = "inputSchema")]
     input_schema: Value,
+    annotations: Option<ToolAnnotations>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolAnnotations {
+    #[serde(rename = "idempotentHint")]
+    idempotent_hint: Option<bool>,
+}
+
+fn protocol_supports_tool_annotations(protocol_version: &str) -> bool {
+    parse_protocol_date(protocol_version).is_some_and(|version| {
+        NaiveDate::from_ymd_opt(2025, 3, 26).is_some_and(|minimum| version >= minimum)
+    })
+}
+
+fn parse_protocol_date(protocol_version: &str) -> Option<NaiveDate> {
+    let bytes = protocol_version.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes[..4].iter().all(u8::is_ascii_digit)
+        || !bytes[5..7].iter().all(u8::is_ascii_digit)
+        || !bytes[8..].iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+    NaiveDate::parse_from_str(protocol_version, "%Y-%m-%d").ok()
 }
 
 async fn read_sse_response(response: reqwest::Response) -> Result<Value> {

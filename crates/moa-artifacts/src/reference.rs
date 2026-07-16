@@ -1,7 +1,8 @@
 //! Stable references between artifacts, connector actions, and tools.
 
-use std::{fmt, str::FromStr};
+use std::{borrow::Cow, fmt, str::FromStr};
 
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{Error, Result, document::ArtifactKind};
@@ -31,6 +32,37 @@ pub enum ArtifactRef {
 }
 
 impl ArtifactRef {
+    /// Returns the exact canonical string or rejects an internally invalid reference.
+    pub fn canonical_string(&self) -> Result<String> {
+        let (scheme, target) = match self {
+            Self::Artifact { kind, name } => {
+                if *kind == ArtifactKind::Action && name.contains('.') {
+                    return Err(invalid_ref(
+                        name,
+                        "standalone action artifact target may not contain a dot",
+                    ));
+                }
+                (kind.as_str(), name.as_str())
+            }
+            Self::Action { connector, action } => {
+                validate_target_component(connector, "connector")?;
+                validate_target_component(action, "action")?;
+                if connector.contains('.') {
+                    return Err(invalid_ref(
+                        &format!("action://{connector}.{action}"),
+                        "connector action connector may not contain a dot",
+                    ));
+                }
+                let target = format!("{connector}.{action}");
+                validate_target(&target)?;
+                return Ok(format!("action://{target}"));
+            }
+            Self::Tool { name } => ("tool", name.as_str()),
+        };
+        validate_target(target)?;
+        Ok(format!("{scheme}://{target}"))
+    }
+
     /// Builds an artifact reference for a specific registry kind.
     #[must_use]
     pub fn artifact(kind: ArtifactKind, name: impl Into<String>) -> Self {
@@ -97,13 +129,8 @@ impl ArtifactRef {
 
 impl fmt::Display for ArtifactRef {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Artifact { kind, name } => write!(formatter, "{kind}://{name}"),
-            Self::Action { connector, action } => {
-                write!(formatter, "action://{connector}.{action}")
-            }
-            Self::Tool { name } => write!(formatter, "tool://{name}"),
-        }
+        let canonical = self.canonical_string().map_err(|_| fmt::Error)?;
+        formatter.write_str(&canonical)
     }
 }
 
@@ -114,14 +141,10 @@ impl FromStr for ArtifactRef {
         let (scheme, rest) = value
             .split_once("://")
             .ok_or_else(|| invalid_ref(value, "missing URI scheme"))?;
-        if rest.is_empty() {
-            return Err(invalid_ref(value, "missing reference target"));
-        }
-
-        match scheme {
+        let candidate = match scheme {
             "action" => {
                 let Some((connector, action)) = rest.split_once('.') else {
-                    return Ok(Self::action_artifact(rest));
+                    return canonical_round_trip(value, Self::action_artifact(rest));
                 };
                 if connector.is_empty() || action.is_empty() {
                     return Err(invalid_ref(
@@ -129,11 +152,12 @@ impl FromStr for ArtifactRef {
                         "action connector and action must be non-empty",
                     ));
                 }
-                Ok(Self::action(connector, action))
+                Self::action(connector, action)
             }
-            "tool" => Ok(Self::tool(rest)),
-            _ => ArtifactKind::from_str(scheme).map(|kind| Self::artifact(kind, rest)),
-        }
+            "tool" => Self::tool(rest),
+            _ => Self::artifact(ArtifactKind::from_str(scheme)?, rest),
+        };
+        canonical_round_trip(value, candidate)
     }
 }
 
@@ -142,7 +166,44 @@ impl Serialize for ArtifactRef {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&self.to_string())
+        let canonical = self.canonical_string().map_err(serde::ser::Error::custom)?;
+        serializer.serialize_str(&canonical)
+    }
+}
+
+impl JsonSchema for ArtifactRef {
+    fn schema_name() -> Cow<'static, str> {
+        "ArtifactRef".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::ArtifactRef").into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        let target = r"[A-Za-z0-9](?:[A-Za-z0-9_.~:/@#-]{0,510}[A-Za-z0-9])?";
+        let no_dot_target = r"[A-Za-z0-9](?:[A-Za-z0-9_~:/@#-]{0,510}[A-Za-z0-9])?";
+        json_schema!({
+            "type": "string",
+            "oneOf": [
+                {
+                    "pattern": format!(
+                        r"^(?:agent|skill|connector|experiment_plan|tool)://(?!.*://){target}$"
+                    ),
+                    "maxLength": 530
+                },
+                {
+                    "pattern": format!(r"^action://(?!.*://){no_dot_target}$"),
+                    "maxLength": 521
+                },
+                {
+                    "pattern": format!(
+                        r"^action://(?!.*://)(?=.{{1,512}}$){no_dot_target}\.{target}$"
+                    ),
+                    "maxLength": 521
+                }
+            ]
+        })
     }
 }
 
@@ -210,4 +271,61 @@ fn invalid_ref(reference: &str, message: &str) -> Error {
         reference: reference.to_string(),
         message: message.to_string(),
     }
+}
+
+fn canonical_round_trip(value: &str, candidate: ArtifactRef) -> Result<ArtifactRef> {
+    let canonical = candidate.canonical_string()?;
+    if canonical != value {
+        return Err(invalid_ref(
+            value,
+            "reference is not byte-identical canonical text",
+        ));
+    }
+    Ok(candidate)
+}
+
+fn validate_target(target: &str) -> Result<()> {
+    if target.is_empty() {
+        return Err(invalid_ref(target, "missing reference target"));
+    }
+    if target.len() > 512 {
+        return Err(invalid_ref(
+            target,
+            "reference target exceeds 512 UTF-8 bytes",
+        ));
+    }
+    if target.contains("://") {
+        return Err(invalid_ref(
+            target,
+            "reference target contains an embedded URI scheme",
+        ));
+    }
+    let bytes = target.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        || !bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+    {
+        return Err(invalid_ref(
+            target,
+            "reference target must start and end with an ASCII alphanumeric byte",
+        ));
+    }
+    if bytes.iter().any(|byte| {
+        !byte.is_ascii_alphanumeric()
+            && !matches!(byte, b'_' | b'-' | b'.' | b'~' | b':' | b'/' | b'@' | b'#')
+    }) {
+        return Err(invalid_ref(
+            target,
+            "reference target contains a noncanonical byte",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_target_component(component: &str, label: &str) -> Result<()> {
+    validate_target(component).map_err(|_| {
+        invalid_ref(
+            component,
+            &format!("connector action {label} is not canonical"),
+        )
+    })
 }

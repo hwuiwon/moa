@@ -27,7 +27,7 @@ pub async fn run_loadtest(options: LoadTestOptions) -> Result<LoadTestReport> {
     report.resource_bill = resource_bill_delta_report(
         before_metrics.as_ref(),
         after_metrics.as_ref(),
-        report.turns_completed,
+        report.successful_operations,
     );
     Ok(report)
 }

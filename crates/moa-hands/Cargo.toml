@@ -12,6 +12,7 @@ eventsource-stream.workspace = true
 futures-util.workspace = true
 globset.workspace = true
 ignore = "0.4"
+jsonschema = { version = "0.47.0", default-features = false }
 moa-core = { workspace = true }
 moa-observability = { workspace = true }
 moa-security = { workspace = true }

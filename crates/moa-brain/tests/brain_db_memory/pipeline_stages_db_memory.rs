@@ -493,6 +493,7 @@ fn stable_prefix_fingerprint_uses_tools_and_leading_system_sections_only() {
         max_output_tokens: None,
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: HashMap::new(),
     };
     let second = CompletionRequest {
@@ -509,6 +510,7 @@ fn stable_prefix_fingerprint_uses_tools_and_leading_system_sections_only() {
         max_output_tokens: None,
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: HashMap::new(),
     };
 

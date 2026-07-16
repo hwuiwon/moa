@@ -9,11 +9,18 @@ pub(super) async fn insert_or_load_trial(
     pool: &sqlx::PgPool,
 ) -> Result<ExperimentTrialRecord, HandlerError> {
     let pool = pool.clone();
-    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
-            ExperimentStore::new(pool)
-                .insert_trial(&scope, trial)
+            let store = ExperimentStore::new(pool);
+            let parent = store
+                .load_run_for_workflow(tenant_id, trial.run_uid)
+                .await
+                .map_err(moa_error_to_handler_error)?
+                .ok_or_else(|| {
+                    TerminalError::new_with_code(404, "parent experiment run not found")
+                })?;
+            store
+                .insert_trial(&parent.scope, trial)
                 .await
                 .map(Json::from)
                 .map_err(moa_error_to_handler_error)
@@ -25,7 +32,7 @@ pub(super) async fn insert_or_load_trial(
 
 pub(super) async fn persist_trial_status(
     ctx: &WorkflowContext<'_>,
-    tenant_id: TenantId,
+    scope: ActionRuleScope,
     trial_uid: Uuid,
     status: ExperimentTrialStatus,
     stop_reason: Option<ExperimentTrialStopReason>,
@@ -33,7 +40,6 @@ pub(super) async fn persist_trial_status(
     pool: &sqlx::PgPool,
 ) -> Result<ExperimentTrialRecord, HandlerError> {
     let pool = pool.clone();
-    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
             update_trial_status(pool, scope, trial_uid, status, stop_reason, error)
@@ -60,9 +66,14 @@ pub(super) async fn persist_trial_status_by_key(
     pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
     let pool = pool.clone();
-    let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         let store = ExperimentStore::new(pool.clone());
+        let scope = store
+            .load_run_for_workflow(tenant_id, run_uid)
+            .await
+            .map_err(moa_error_to_handler_error)?
+            .ok_or_else(|| TerminalError::new_with_code(404, "parent experiment run not found"))?
+            .scope;
         if let Some(trial) = store
             .load_trial_by_key(&scope, run_uid, &trial_key)
             .await
@@ -79,7 +90,7 @@ pub(super) async fn persist_trial_status_by_key(
 
 pub(super) async fn stop_trial(
     ctx: &WorkflowContext<'_>,
-    tenant_id: TenantId,
+    scope: ActionRuleScope,
     trial_uid: Uuid,
     status: ExperimentTrialStatus,
     stop_reason: ExperimentTrialStopReason,
@@ -88,7 +99,7 @@ pub(super) async fn stop_trial(
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
     let trial = persist_trial_status(
         ctx,
-        tenant_id,
+        scope,
         trial_uid,
         status,
         Some(stop_reason),
@@ -97,17 +108,16 @@ pub(super) async fn stop_trial(
     )
     .await?;
     ctx.set(K_STATUS, Json(trial.status));
-    status_response_from_record(tenant_id, trial)
+    status_response_from_record(scope.tenant_id(), trial)
 }
 
 pub(super) async fn increment_trial_turn(
     ctx: &WorkflowContext<'_>,
-    tenant_id: TenantId,
+    scope: ActionRuleScope,
     trial_uid: Uuid,
     pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
     let pool = pool.clone();
-    let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         ExperimentStore::new(pool)
             .increment_trial_turn(&scope, trial_uid)
@@ -145,7 +155,7 @@ pub(super) async fn attach_trial_session(
 
 pub(super) async fn attach_current_trial_trace(
     ctx: &WorkflowContext<'_>,
-    tenant_id: TenantId,
+    scope: ActionRuleScope,
     trial_uid: Uuid,
     pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
@@ -154,7 +164,6 @@ pub(super) async fn attach_current_trial_trace(
     };
     tracing::Span::current().set_attribute("moa.experiment.trace_id", trace_id.clone());
     let pool = pool.clone();
-    let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         ExperimentStore::new(pool)
             .attach_trial_trace(&scope, trial_uid, trace_id)
@@ -168,14 +177,14 @@ pub(super) async fn attach_current_trial_trace(
     Ok(())
 }
 
-pub(super) async fn attach_trial_procedure_run(
+pub(super) async fn attach_trial_execution_run(
     pool: sqlx::PgPool,
     scope: ActionRuleScope,
     trial_uid: Uuid,
-    procedure_run_uid: Uuid,
+    execution_run_uid: Uuid,
 ) -> Result<ExperimentTrialRecord, HandlerError> {
     ExperimentStore::new(pool)
-        .attach_trial_procedure_run(&scope, trial_uid, procedure_run_uid)
+        .attach_trial_execution_run(&scope, trial_uid, execution_run_uid)
         .await
         .map_err(moa_error_to_handler_error)?
         .ok_or_else(|| trial_not_found(trial_uid))
@@ -202,9 +211,16 @@ async fn update_trial_status(
 pub(super) async fn trial_status_response(
     pool: sqlx::PgPool,
     request: ExperimentTrialRunStatusRequest,
+    run_uid: Uuid,
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
-    let scope = tenant_scope(request.tenant_id);
-    let trial = ExperimentStore::new(pool)
+    let store = ExperimentStore::new(pool);
+    let scope = store
+        .load_run_for_workflow(request.tenant_id, run_uid)
+        .await
+        .map_err(moa_error_to_handler_error)?
+        .ok_or_else(|| TerminalError::new_with_code(404, "parent experiment run not found"))?
+        .scope;
+    let trial = store
         .load_trial(&scope, request.trial_uid)
         .await
         .map_err(moa_error_to_handler_error)?
@@ -229,7 +245,7 @@ pub(super) fn status_response_from_record(
         stop_reason: trial.stop_reason.map(|reason| reason.as_str().to_string()),
         turn_count: trial.turn_count,
         session_id: trial.session_id,
-        procedure_run_uid: trial.procedure_run_uid,
+        execution_run_uid: trial.execution_run_uid,
         score_run_id: trial.score_run_id,
         error: trial.error,
         trial: trial_value,

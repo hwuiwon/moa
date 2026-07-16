@@ -116,7 +116,7 @@ impl ExperimentOutcome {
             .report
             .windows
             .iter()
-            .rfind(|window| !window.warmup && window.turns_completed + window.turn_errors > 0)
+            .rfind(|window| !window.warmup && window_is_active(window))
             .context("no active post-warmup window; the run produced no work")?;
         if last_active.turn_errors > 0 {
             bail!(
@@ -128,8 +128,8 @@ impl ExperimentOutcome {
                 last_active.turns_completed
             );
         }
-        if self.report.turns_completed == 0 {
-            bail!("{}: no turns completed at all", self.name);
+        if !report_produced_work(&self.report) {
+            bail!("{}: no successful operations at all", self.name);
         }
         Ok(())
     }
@@ -181,8 +181,24 @@ impl ExperimentOutcome {
             .windows
             .iter()
             .filter(|window| window.end_ms > start_ms && window.start_ms < end_ms)
-            .any(|window| window.turn_errors > 0 || window.turns_completed == 0)
+            .any(|window| window.turn_errors > 0 || !window_is_successful(window))
     }
+}
+
+fn window_is_active(window: &WindowReport) -> bool {
+    window.turns_completed + window.execution_admissions + window.turn_errors > 0
+}
+
+fn window_is_successful(window: &WindowReport) -> bool {
+    window.turns_completed + window.execution_admissions > 0
+}
+
+fn report_produced_work(report: &LoadTestReport) -> bool {
+    successful_operations_produced_work(report.successful_operations)
+}
+
+fn successful_operations_produced_work(successful_operations: u64) -> bool {
+    successful_operations > 0
 }
 
 /// Runs `docker compose <args>` in the project directory.
@@ -423,4 +439,54 @@ pub async fn run_experiment(
         name: experiment.name.to_string(),
         report,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(answers: u64, admissions: u64, errors: u64) -> WindowReport {
+        let zero = PercentileSummary {
+            min: 0.0,
+            mean: 0.0,
+            p50: 0.0,
+            p95: 0.0,
+            p99: 0.0,
+            max: 0.0,
+        };
+        WindowReport {
+            start_ms: 0.0,
+            end_ms: 10_000.0,
+            warmup: false,
+            turns_completed: answers,
+            execution_admissions: admissions,
+            turn_errors: errors,
+            latency_corrected_ms: zero.clone(),
+            execution_admission_latency_corrected_ms: zero,
+        }
+    }
+
+    #[test]
+    fn chaos_activity_gates_include_execution_admissions() {
+        // Pins: activity/no-work gates share the successful-operation definition while answer
+        // latency gates remain answer-only elsewhere in this module.
+        let admission_only = window(0, 1, 0);
+        let answer_only = window(1, 0, 0);
+        let mixed = window(1, 1, 0);
+        let error_only = window(0, 0, 1);
+        let empty = window(0, 0, 0);
+
+        assert!(window_is_active(&admission_only));
+        assert!(window_is_successful(&admission_only));
+        assert!(window_is_active(&answer_only));
+        assert!(window_is_successful(&answer_only));
+        assert!(window_is_active(&mixed));
+        assert!(window_is_successful(&mixed));
+        assert!(window_is_active(&error_only));
+        assert!(!window_is_successful(&error_only));
+        assert!(!window_is_active(&empty));
+        assert!(!window_is_successful(&empty));
+        assert!(!successful_operations_produced_work(0));
+        assert!(successful_operations_produced_work(1));
+    }
 }

@@ -410,6 +410,87 @@ impl PostgresSessionStore {
         Ok(affected > 0)
     }
 
+    /// Finalizes a claimed learning candidate after validating its normalized compile audit.
+    pub async fn finalize_learning_candidate_status_from(
+        &self,
+        update: &LearningCandidateStatusUpdate,
+        expected_status: LearningCandidateStatus,
+        expected_compile_operation_key: Option<&str>,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let changed = self
+            .finalize_learning_candidate_status_from_in_tx(
+                &mut tx,
+                update,
+                expected_status,
+                expected_compile_operation_key,
+            )
+            .await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(changed)
+    }
+
+    /// Finalizes a claimed candidate in an open transaction with compile-audit CAS validation.
+    pub async fn finalize_learning_candidate_status_from_in_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        update: &LearningCandidateStatusUpdate,
+        expected_status: LearningCandidateStatus,
+        expected_compile_operation_key: Option<&str>,
+    ) -> Result<bool> {
+        if !matches!(
+            update.status,
+            LearningCandidateStatus::Promoted | LearningCandidateStatus::Rejected
+        ) {
+            return Err(MoaError::ValidationError(
+                "learning candidate finalization requires a terminal review status".to_string(),
+            ));
+        }
+        let learning_candidates = self.table_name("learning_candidates");
+        let row = sqlx::query(&format!(
+            "SELECT tenant_id, status, evaluation_payload FROM {learning_candidates} \
+             WHERE id = $1 FOR UPDATE"
+        ))
+        .bind(update.candidate_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        let status: String = row.try_get("status").map_err(map_sqlx_error)?;
+        if status != expected_status.as_str() {
+            return Ok(false);
+        }
+        let tenant_id: String = row.try_get("tenant_id").map_err(map_sqlx_error)?;
+        let current = row
+            .try_get::<Option<serde_json::Value>, _>("evaluation_payload")
+            .map_err(map_sqlx_error)?
+            .unwrap_or_else(|| serde_json::json!({}));
+        validate_expected_learning_compile_audit(conn, &tenant_id, expected_compile_operation_key)
+            .await?;
+        let merged = match &update.evaluation_payload {
+            Some(terminal) => merge_learning_evaluation_payload(current, terminal.clone())?,
+            None => current,
+        };
+        let affected = sqlx::query(&format!(
+            "UPDATE {learning_candidates} SET status = $1, status_reason = $2, \
+                 evaluation_payload = $3, updated_at = $4 \
+             WHERE id = $5 AND status = $6"
+        ))
+        .bind(update.status.as_str())
+        .bind(update.status_reason.as_deref())
+        .bind(Json(merged))
+        .bind(update.updated_at)
+        .bind(update.candidate_id)
+        .bind(expected_status.as_str())
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        Ok(affected == 1)
+    }
+
     async fn update_learning_candidate_status_with_expected(
         &self,
         update: &LearningCandidateStatusUpdate,
@@ -482,4 +563,72 @@ impl PostgresSessionStore {
 
 fn storage_partition_id(tenant_id: TenantId) -> String {
     StoragePartitionId::for_tenant(tenant_id).to_string()
+}
+
+async fn validate_expected_learning_compile_audit(
+    conn: &mut PgConnection,
+    tenant_id: &str,
+    expected_operation_key: Option<&str>,
+) -> Result<()> {
+    let Some(expected_operation_key) = expected_operation_key else {
+        return Ok(());
+    };
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (\
+             SELECT 1 FROM moa.execution_compile_audit \
+             WHERE tenant_id = $1::UUID \
+               AND contact_id IS NULL \
+               AND source = 'skill_regression' \
+               AND operation_key = $2\
+         )",
+    )
+    .bind(tenant_id)
+    .bind(expected_operation_key)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(map_sqlx_error)?;
+    if exists {
+        Ok(())
+    } else {
+        Err(MoaError::StorageError(format!(
+            "expected learning compile audit operation `{expected_operation_key}` was not persisted"
+        )))
+    }
+}
+
+fn merge_learning_evaluation_payload(
+    mut current: serde_json::Value,
+    terminal: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let current_object = current.as_object_mut().ok_or_else(|| {
+        MoaError::StorageError(
+            "learning candidate evaluation_payload must be an object".to_string(),
+        )
+    })?;
+    let terminal_object = terminal.as_object().ok_or_else(|| {
+        MoaError::ValidationError(
+            "terminal learning evaluation payload must be an object".to_string(),
+        )
+    })?;
+    deep_merge_json_objects(current_object, terminal_object);
+    Ok(current)
+}
+
+fn deep_merge_json_objects(
+    current: &mut serde_json::Map<String, serde_json::Value>,
+    terminal: &serde_json::Map<String, serde_json::Value>,
+) {
+    for (key, terminal_value) in terminal {
+        match (current.get_mut(key), terminal_value) {
+            (
+                Some(serde_json::Value::Object(current_child)),
+                serde_json::Value::Object(terminal_child),
+            ) => {
+                deep_merge_json_objects(current_child, terminal_child);
+            }
+            _ => {
+                current.insert(key.clone(), terminal_value.clone());
+            }
+        }
+    }
 }

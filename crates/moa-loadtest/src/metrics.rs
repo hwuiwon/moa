@@ -142,7 +142,7 @@ pub(crate) fn event_append_phase_latency_delta_reports(
 pub(crate) fn resource_bill_delta_report(
     before: Option<&RuntimeMetricsSnapshot>,
     after: Option<&RuntimeMetricsSnapshot>,
-    turns_completed: u64,
+    successful_operations: u64,
 ) -> ResourceBillReport {
     let Some(after) = after else {
         return ResourceBillReport::default();
@@ -186,11 +186,20 @@ pub(crate) fn resource_bill_delta_report(
         .unwrap_or_default();
     ResourceBillReport {
         durable_event_rows,
-        durable_event_rows_per_turn: per_turn(durable_event_rows, turns_completed),
+        durable_event_rows_per_successful_operation: per_successful_operation(
+            durable_event_rows,
+            successful_operations,
+        ),
         progress_update_rows,
-        progress_update_rows_per_turn: per_turn(progress_update_rows, turns_completed),
+        progress_update_rows_per_successful_operation: per_successful_operation(
+            progress_update_rows,
+            successful_operations,
+        ),
         progress_narrated_rows,
-        progress_narrated_rows_per_turn: per_turn(progress_narrated_rows, turns_completed),
+        progress_narrated_rows_per_successful_operation: per_successful_operation(
+            progress_narrated_rows,
+            successful_operations,
+        ),
         event_rows_by_type,
     }
 }
@@ -372,11 +381,11 @@ fn counter_delta(before: f64, after: f64) -> u64 {
     metric_delta(before, after).round() as u64
 }
 
-fn per_turn(rows: u64, turns_completed: u64) -> f64 {
-    if turns_completed == 0 {
+fn per_successful_operation(rows: u64, successful_operations: u64) -> f64 {
+    if successful_operations == 0 {
         return 0.0;
     }
-    rows as f64 / turns_completed as f64
+    rows as f64 / successful_operations as f64
 }
 
 fn metric_value(line: &str) -> Option<f64> {
@@ -519,7 +528,7 @@ moa_session_event_append_phase_seconds_count{phase="begin_transaction"} 5
     }
 
     #[test]
-    fn resource_bill_delta_reports_durable_rows_per_turn_and_progress_rows() {
+    fn resource_bill_uses_successful_operations() {
         // Pins: loadtest resource bills use Prometheus counter deltas, not cumulative totals.
         let before = parse_runtime_metrics_snapshot(
             r#"
@@ -540,11 +549,11 @@ moa_session_events_appended_total{event_type="ProgressNarrated"} 2
         let report = resource_bill_delta_report(Some(&before), Some(&after), 4);
 
         assert_eq!(report.durable_event_rows, 10);
-        assert_eq!(report.durable_event_rows_per_turn, 2.5);
+        assert_eq!(report.durable_event_rows_per_successful_operation, 2.5);
         assert_eq!(report.progress_update_rows, 0);
-        assert_eq!(report.progress_update_rows_per_turn, 0.0);
+        assert_eq!(report.progress_update_rows_per_successful_operation, 0.0);
         assert_eq!(report.progress_narrated_rows, 2);
-        assert_eq!(report.progress_narrated_rows_per_turn, 0.5);
+        assert_eq!(report.progress_narrated_rows_per_successful_operation, 0.5);
         assert_eq!(report.event_rows_by_type.len(), 3);
     }
 

@@ -1,11 +1,9 @@
 //! Deterministic single-agent (non-delegating) loop-cost measurement over the REAL Restate path.
 //!
-//! The coordination path is already minimal on model turns/tool calls (see
-//! `coordination_cost_service_e2e`). The common case — a plain single-agent turn (context → model →
-//! tools → repeat) — is where per-user-message turn/tool-call waste is most likely to hide. This
-//! test drives a plain tool-using conversation with a keyed scripted provider and reconstructs a
-//! [`moa_eval_core::ConversationCost`] so the exact model turns, tool calls, and internal round-trips per
-//! user message are pinned and any regression (or optimization) is provable with zero LLM noise.
+//! This test drives the common plain single-agent turn (context → model → tools
+//! → repeat) with a keyed scripted provider and reconstructs a
+//! [`moa_eval_core::ConversationCost`] so the exact model turns, tool calls, and
+//! internal round-trips per user message are pinned with zero LLM noise.
 //!
 //! Run: the fixture boots Postgres + Restate + OpenFGA testcontainers and builds
 //! `moa-orchestrator-bin` with `provider-overrides`. Requires Docker.

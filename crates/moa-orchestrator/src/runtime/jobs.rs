@@ -47,8 +47,12 @@ pub fn start_authz_challenge_reaper_if_configured(
 }
 
 /// Starts the tenant action-review timeout reaper and queue-gauge sampler.
-pub fn start_action_review_reaper(pool: &PgPool) -> ActionReviewReaperHandle {
-    let handle = ActionReviewReaper::new(pool.clone()).spawn();
+pub fn start_action_review_reaper(
+    pool: &PgPool,
+    restate_ingress_url: String,
+) -> ActionReviewReaperHandle {
+    let handle =
+        ActionReviewReaper::with_restate_ingress(pool.clone(), restate_ingress_url).spawn();
     tracing::info!("action review reaper started");
     handle
 }
@@ -218,20 +222,22 @@ async fn configure_cron_job(
     ingress_url: &str,
     job: &DefaultCronJob,
 ) -> Result<()> {
-    let response = client
-        .post(format!(
-            "{ingress_url}/restate/call/CronJob/{}/configure",
-            job.key
-        ))
-        .header(
-            "idempotency-key",
-            format!("cron-config-{}-{}", job.key, job.version),
-        )
-        .header("content-type", "application/json")
-        .json(&job.body)
-        .send()
-        .await
-        .with_context(|| format!("configure cron job {}", job.key))?;
+    let response = crate::restate_identity::with_reqwest_trace_headers(
+        client
+            .post(format!(
+                "{ingress_url}/restate/call/CronJob/{}/configure",
+                job.key
+            ))
+            .header(
+                "idempotency-key",
+                format!("cron-config-{}-{}", job.key, job.version),
+            )
+            .header("content-type", "application/json")
+            .json(&job.body),
+    )
+    .send()
+    .await
+    .with_context(|| format!("configure cron job {}", job.key))?;
 
     if !response.status().is_success() {
         let status = response.status();

@@ -5,6 +5,7 @@ use crate::{
     types::channel::Attachment,
     types::contact::ContactRef,
     types::events_stream::{EventRange, EventRecord},
+    types::execution_planning::{ExecutionRouteDecision, ExecutionTemplateInvocation},
     types::identifiers::AgentSignalId,
 };
 use crate::{
@@ -34,6 +35,10 @@ pub enum TurnTrigger {
     /// request's `user_message` carries a system-generated instruction, not a human
     /// message, and no `Event::UserMessage` is appended for the turn.
     WorkerResults,
+    /// A completed execution run initiated its linked final-response synthesis turn.
+    /// The request's `user_message` carries an internally authorized synthesis
+    /// instruction, not a human message, and no `Event::UserMessage` is appended.
+    ExecutionSynthesis,
 }
 
 /// Input accepted by one `TurnExecution` workflow run.
@@ -67,6 +72,9 @@ pub struct RunTurnRequest {
     /// only when `trigger == ChildSignal`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_signal_id: Option<AgentSignalId>,
+    /// Exact structured pinned-template invocation for a root user message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_template: Option<ExecutionTemplateInvocation>,
 }
 
 /// Input accepted by one `WorkerTurnExecution` workflow run.
@@ -100,24 +108,12 @@ pub enum TurnPhase {
     Persisting,
     /// Workflow completed successfully.
     Completed,
+    /// Workflow successfully handed off a detached execution run.
+    Accepted,
     /// Workflow was cancelled.
     Cancelled,
     /// Workflow failed.
     Failed,
-}
-
-/// Deterministic complexity class selected for one turn.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TurnComplexityClass {
-    /// The request is underspecified enough that the agent should ask first.
-    Clarification,
-    /// The request should normally finish in one model pass without tools.
-    Simple,
-    /// The request is normal interactive work with bounded model and tool loops.
-    #[default]
-    Standard,
-    /// The request is broad or workflow-shaped and may need the global hard cap.
-    Complex,
 }
 
 /// Terminal outcome returned by one turn workflow.
@@ -132,10 +128,15 @@ pub struct TurnOutcome {
 }
 
 /// Terminal outcome category for a turn workflow.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TurnOutcomeKind {
     /// The turn body completed.
     Completed,
+    /// The root turn admitted a detached execution run.
+    Accepted {
+        /// Committed execution-run identifier.
+        execution_run_uid: uuid::Uuid,
+    },
     /// The cancel awakeable resolved before the body completed.
     Cancelled,
     /// The turn body failed.
@@ -149,8 +150,9 @@ pub struct TurnProgress {
     pub turn_id: String,
     /// Current durable phase.
     pub phase: TurnPhase,
-    /// Deterministic complexity class selected for the turn.
-    pub complexity_class: TurnComplexityClass,
+    /// Deterministic execution route selected for a root turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_route: Option<ExecutionRouteDecision>,
     /// Current model-loop iteration, starting at `0` before the first call.
     pub iteration: u32,
     /// Effective model-loop cap for this turn, when bounded.
@@ -189,6 +191,9 @@ pub struct StartTurnRequest {
     /// Optional turn-iteration cap for this request.
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// Exact structured pinned-template invocation for this user message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_template: Option<ExecutionTemplateInvocation>,
 }
 
 /// Response returned by `Session/start_turn`.
@@ -217,6 +222,9 @@ pub struct QueueMessageRequest {
     /// Optional turn-iteration cap for this request.
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// Exact structured pinned-template invocation for this user message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_template: Option<ExecutionTemplateInvocation>,
 }
 
 /// Response returned by `Session/queue_message`.
@@ -258,6 +266,44 @@ pub struct PendingMessage {
     /// Optional turn-iteration cap for this queued request.
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// Exact structured pinned-template invocation preserved while queued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_template: Option<ExecutionTemplateInvocation>,
+}
+
+/// Exact user-addressed target that may consume the next plain session reply.
+///
+/// The budget type remains generic so the execution domain can instantiate this
+/// projection with its artifact-owned `ExecutionBudgetLimit` without introducing
+/// a `moa-core` -> `moa-artifacts` dependency cycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum PendingUserReplyTarget<ExecutionBudgetLimit> {
+    /// An admitted run awaits explicit approval of the displayed plan and budget.
+    ExecutionConfirmation {
+        /// Durable execution-run identifier.
+        run_uid: uuid::Uuid,
+        /// Exact plan hash shown to the owning user.
+        expected_plan_hash: [u8; 32],
+        /// Resource envelope approved by the owning user.
+        approved_budget: ExecutionBudgetLimit,
+    },
+    /// One user-addressed execution task awaits its exact generation-fenced input.
+    ExecutionInput {
+        /// Durable execution-run identifier.
+        run_uid: uuid::Uuid,
+        /// Stable logical task identifier.
+        task_id: uuid::Uuid,
+        /// Expected task generation fence.
+        generation: u64,
+    },
+    /// One conversational worker input request awaits the owning user's reply.
+    WorkerInput {
+        /// Durable worker identifier.
+        worker_id: crate::types::worker::state::WorkerId,
+        /// Exact worker input request identifier.
+        input_request_id: String,
+    },
 }
 
 /// Read-only projection of the additive `TurnExecution` session state.
@@ -271,6 +317,9 @@ pub struct SessionSnapshot {
     pub pending_message_count: u64,
     /// Last outcome delivered by `TurnExecution`.
     pub last_outcome: Option<TurnOutcome>,
+    /// Active detached execution runs that keep this session open.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_execution_run_uids: Vec<uuid::Uuid>,
 }
 
 /// Request payload for `Session/progress`.
@@ -312,6 +361,9 @@ pub struct SessionProgress {
     /// Active turn workflow progress, when a turn is currently running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_turn_progress: Option<TurnProgress>,
+    /// Last persisted aggregate progress for active detached execution runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_execution_progress: Vec<crate::events::ExecutionProgress>,
     /// Durable event history matching the requested range.
     pub events: Vec<EventRecord>,
     /// Compact fan-in summaries for active child workers. Omitted by older
@@ -334,7 +386,11 @@ mod tests {
         let progress = TurnProgress {
             turn_id: "turn-123".to_string(),
             phase: TurnPhase::Tooling,
-            complexity_class: TurnComplexityClass::Standard,
+            execution_route: Some(ExecutionRouteDecision::Routed {
+                mode: crate::types::execution_planning::ExecutionMode::Act,
+                reason:
+                    crate::types::execution_planning::ExecutionRouteReason::BoundedInteractiveWork,
+            }),
             iteration: 2,
             max_turns: Some(6),
             tool_calls: 3,
@@ -346,7 +402,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&progress).expect("serialize turn progress");
-        assert!(json.contains("\"complexity_class\":\"Standard\""));
+        assert!(json.contains("\"mode\":\"act\""));
         assert!(json.contains("\"iteration\":2"));
         assert!(json.contains("\"max_turns\":6"));
         assert!(json.contains("\"tool_calls\":3"));
@@ -393,25 +449,120 @@ mod tests {
     }
 
     #[test]
-    fn session_progress_response_omits_missing_active_turn_progress() {
-        // Pins: idle sessions can use the same convenience endpoint without a synthetic turn object.
+    fn session_progress_round_trips_exact_active_execution_progress() {
+        // Pins: compact detached-run progress remains a strict typed Session/progress field
+        // with the exact persisted run, origin, revision, status, and aggregate counts.
+        let run_uid = uuid::Uuid::from_u128(44);
+        let execution_progress = crate::events::ExecutionProgress {
+            run_uid,
+            originating_user_sequence_num: 17,
+            plan_revision: 3,
+            status: "waiting_input".to_string(),
+            total: 11,
+            completed: 7,
+            failed: 2,
+            cancelled: 1,
+        };
         let progress = SessionProgress {
             snapshot: SessionSnapshot {
                 session_id: "session-123".to_string(),
                 active_turn_id: None,
                 pending_message_count: 0,
                 last_outcome: None,
+                active_execution_run_uids: vec![run_uid],
             },
             active_turn_progress: None,
+            active_execution_progress: vec![execution_progress.clone()],
+            events: Vec::new(),
+            child_progress: Vec::new(),
+        };
+
+        let encoded = serde_json::to_value(&progress).expect("serialize session progress");
+        let decoded: SessionProgress =
+            serde_json::from_value(encoded).expect("deserialize session progress");
+
+        assert_eq!(decoded.active_execution_progress, vec![execution_progress]);
+        assert_eq!(decoded, progress);
+    }
+
+    #[test]
+    fn session_progress_additive_fields_omit_empty_without_dropping_active_run_ids() {
+        // Pins: a newly started detached run stays active before its first progress update,
+        // while additive empty progress fields remain absent from the wire payload.
+        let run_uid = uuid::Uuid::from_u128(45);
+        let progress = SessionProgress {
+            snapshot: SessionSnapshot {
+                session_id: "session-123".to_string(),
+                active_turn_id: None,
+                pending_message_count: 0,
+                last_outcome: None,
+                active_execution_run_uids: vec![run_uid],
+            },
+            active_turn_progress: None,
+            active_execution_progress: Vec::new(),
             events: Vec::new(),
             child_progress: Vec::new(),
         };
 
         let json = serde_json::to_string(&progress).expect("serialize session progress");
         assert!(!json.contains("active_turn_progress"));
+        assert!(!json.contains("active_execution_progress"));
 
         let decoded: SessionProgress =
             serde_json::from_str(&json).expect("deserialize session progress");
         assert_eq!(decoded, progress);
+        assert_eq!(decoded.snapshot.active_execution_run_uids, vec![run_uid]);
+        assert!(decoded.active_execution_progress.is_empty());
+    }
+
+    #[test]
+    fn pending_user_reply_target_round_trips_exact_strict_variants() {
+        // Pins: Session can persist one exact confirmation, execution-input, or worker-input
+        // target without reducing the typed execution budget to opaque JSON.
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct TestBudget {
+            max_tasks: Option<u64>,
+        }
+
+        let run_uid = uuid::Uuid::from_u128(31);
+        let cases = [
+            PendingUserReplyTarget::ExecutionConfirmation {
+                run_uid,
+                expected_plan_hash: [7; 32],
+                approved_budget: TestBudget {
+                    max_tasks: Some(12),
+                },
+            },
+            PendingUserReplyTarget::ExecutionInput {
+                run_uid,
+                task_id: uuid::Uuid::from_u128(32),
+                generation: 4,
+            },
+            PendingUserReplyTarget::WorkerInput {
+                worker_id: "worker-9".to_string(),
+                input_request_id: "request-3".to_string(),
+            },
+        ];
+
+        for target in cases {
+            let encoded = serde_json::to_value(&target).expect("serialize pending reply target");
+            let decoded =
+                serde_json::from_value::<PendingUserReplyTarget<TestBudget>>(encoded.clone())
+                    .expect("deserialize pending reply target");
+            assert_eq!(decoded, target);
+
+            let mut malformed = encoded;
+            malformed
+                .as_object_mut()
+                .and_then(|outer| outer.values_mut().next())
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("pending reply target payload is an object")
+                .insert("unexpected".to_string(), serde_json::json!(true));
+            assert!(
+                serde_json::from_value::<PendingUserReplyTarget<TestBudget>>(malformed).is_err(),
+                "pending reply target variants must reject unknown fields"
+            );
+        }
     }
 }

@@ -17,16 +17,15 @@ use observability::{deserialize_optional_headers, deserialize_optional_nonempty}
 use providers::deserialize_optional_list;
 
 use super::{
-    AsyncAuthzKind, AuthProviderKind, AuthzEngine, MoaConfig, OtlpProtocol, RuntimeCacheBackend,
-    SessionAttachmentBackend, SessionBlobBackend, TokenVaultKind,
+    AsyncAuthzKind, AuthProviderKind, AuthzEngine, McpServerConfig, MoaConfig, OtlpProtocol,
+    RuntimeCacheBackend, SessionAttachmentBackend, SessionBlobBackend, TokenVaultKind,
 };
 
 /// Optional flat environment overrides for `MoaConfig`.
 ///
 /// envy deserializes `MOA_*` environment variables directly into these typed
-/// fields. Only URL validation, header maps, and comma-separated lists need
-/// bespoke handling (`validate_urls`, `deserialize_optional_headers`, and
-/// `deserialize_optional_list`).
+/// fields. Only URL validation, header maps, comma-separated lists, and the MCP
+/// server JSON array need bespoke handling.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MoaEnvOverlay {
@@ -40,6 +39,9 @@ pub struct MoaEnvOverlay {
     pub general_workspace_instructions: Option<String>,
     /// `MOA_GENERAL_USER_INSTRUCTIONS`.
     pub general_user_instructions: Option<String>,
+    /// `MOA_MCP_SERVERS_JSON`.
+    #[serde(deserialize_with = "deserialize_optional_mcp_servers")]
+    pub mcp_servers_json: Option<Vec<McpServerConfig>>,
     /// `MOA_MODELS_MAIN`.
     pub models_main: Option<String>,
     /// `MOA_MODELS_AUXILIARY`.
@@ -575,6 +577,38 @@ pub struct MoaEnvOverlay {
     pub learning_recurrence_cluster_similarity: Option<f64>,
     /// `MOA_LEARNING_RECURRENCE_MAX_CANDIDATE_GROUPS`.
     pub learning_recurrence_max_candidate_groups: Option<usize>,
+    /// `MOA_EXECUTION_PLANNER_REPAIR_ATTEMPTS`.
+    pub execution_planner_repair_attempts: Option<u32>,
+    /// `MOA_EXECUTION_REPEATED_FAILURE_LIMIT`.
+    pub execution_repeated_failure_limit: Option<u32>,
+    /// `MOA_EXECUTION_MAX_TASKS`.
+    pub execution_max_tasks: Option<u64>,
+    /// `MOA_EXECUTION_MAX_TOKENS`.
+    pub execution_max_tokens: Option<u64>,
+    /// `MOA_EXECUTION_MAX_TOOL_CALLS`.
+    pub execution_max_tool_calls: Option<u64>,
+    /// `MOA_EXECUTION_MAX_RETRIEVED_BYTES`.
+    pub execution_max_retrieved_bytes: Option<u64>,
+    /// `MOA_EXECUTION_MAX_COST_MICROUSD`.
+    pub execution_max_cost_microusd: Option<u64>,
+    /// `MOA_EXECUTION_UNATTENDED_MAX_COST_MICROUSD`.
+    pub execution_unattended_max_cost_microusd: Option<u64>,
+    /// `MOA_EXECUTION_AGENT_TURN_COST_MICROUSD`.
+    pub execution_agent_turn_cost_microusd: Option<u64>,
+    /// `MOA_EXECUTION_AGENT_TURN_TOKENS`.
+    pub execution_agent_turn_tokens: Option<u64>,
+    /// `MOA_EXECUTION_AGENT_TURN_TOOL_CALLS`.
+    pub execution_agent_turn_tool_calls: Option<u64>,
+    /// `MOA_EXECUTION_AGENT_TURN_RETRIEVED_BYTES`.
+    pub execution_agent_turn_retrieved_bytes: Option<u64>,
+    /// `MOA_EXECUTION_VERIFIER_TURN_COST_MICROUSD`.
+    pub execution_verifier_turn_cost_microusd: Option<u64>,
+    /// `MOA_EXECUTION_VERIFIER_TURN_TOKENS`.
+    pub execution_verifier_turn_tokens: Option<u64>,
+    /// `MOA_EXECUTION_VERIFIER_TURN_TOOL_CALLS`.
+    pub execution_verifier_turn_tool_calls: Option<u64>,
+    /// `MOA_EXECUTION_VERIFIER_TURN_RETRIEVED_BYTES`.
+    pub execution_verifier_turn_retrieved_bytes: Option<u64>,
     /// `MOA_CONTEXT_SNAPSHOT_ENABLED`.
     pub context_snapshot_enabled: Option<bool>,
     /// `MOA_CONTEXT_SNAPSHOT_MAX_SIZE_BYTES`.
@@ -684,9 +718,30 @@ fn overlay_path(field: &str, schema: &Value) -> Result<Vec<String>> {
 }
 
 fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
+    if field == "mcp_servers_json" {
+        return Some(vec!["mcp_servers".to_string()]);
+    }
     providers::exact_overlay_path(field)
         .or_else(|| security::exact_overlay_path(field))
         .or_else(|| messaging::exact_overlay_path(field))
+}
+
+fn deserialize_optional_mcp_servers<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<McpServerConfig>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|error| {
+                serde::de::Error::custom(format!(
+                    "MOA_MCP_SERVERS_JSON contains invalid JSON: {error}"
+                ))
+            })
+        })
+        .transpose()
 }
 const PREFIX_ALIASES: &[(&str, &[&str])] = &[
     ("session_attachment", &["session", "attachments"]),
@@ -1163,6 +1218,7 @@ mod tests {
             "MOA_SKIP_FGA",                   // exact allowlist
             "MOA_CONFIG_ENV_STRICT",          // this audit's own switch
             "MOA_AUTH_CONTACT_TOKENS_ISSUER", // real overlay field
+            "MOA_MCP_SERVERS_JSON",           // JSON MCP server overlay
         ]));
         assert!(clean.is_empty(), "expected no unknown vars, got {clean:?}");
     }
@@ -1491,6 +1547,118 @@ mod tests {
         assert_eq!(
             config.permissions.default_effect,
             crate::types::action_policy::ActionPolicyEffect::AdminReview
+        );
+    }
+
+    #[test]
+    fn from_iter_applies_every_execution_resource_override() {
+        // Pins: every v1 execution default has exactly one flat MOA_EXECUTION_* override.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_EXECUTION_PLANNER_REPAIR_ATTEMPTS", "2"),
+            ("MOA_EXECUTION_REPEATED_FAILURE_LIMIT", "4"),
+            ("MOA_EXECUTION_MAX_TASKS", "20000"),
+            ("MOA_EXECUTION_MAX_TOKENS", "20000000"),
+            ("MOA_EXECUTION_MAX_TOOL_CALLS", "200000"),
+            ("MOA_EXECUTION_MAX_RETRIEVED_BYTES", "20000000000"),
+            ("MOA_EXECUTION_MAX_COST_MICROUSD", "200000000"),
+            ("MOA_EXECUTION_UNATTENDED_MAX_COST_MICROUSD", "6000000"),
+            ("MOA_EXECUTION_AGENT_TURN_COST_MICROUSD", "110000"),
+            ("MOA_EXECUTION_AGENT_TURN_TOKENS", "9000"),
+            ("MOA_EXECUTION_AGENT_TURN_TOOL_CALLS", "9"),
+            ("MOA_EXECUTION_AGENT_TURN_RETRIEVED_BYTES", "11000000"),
+            ("MOA_EXECUTION_VERIFIER_TURN_COST_MICROUSD", "210000"),
+            ("MOA_EXECUTION_VERIFIER_TURN_TOKENS", "17000"),
+            ("MOA_EXECUTION_VERIFIER_TURN_TOOL_CALLS", "5"),
+            ("MOA_EXECUTION_VERIFIER_TURN_RETRIEVED_BYTES", "2000000"),
+        ]))
+        .expect("execution overlay should deserialize");
+
+        let mut config = MoaConfig::default();
+        overlay
+            .apply_to(&mut config)
+            .expect("execution overlay should apply");
+
+        assert_eq!(config.execution.planner_repair_attempts, 2);
+        assert_eq!(config.execution.repeated_failure_limit, 4);
+        assert_eq!(config.execution.max_tasks, 20_000);
+        assert_eq!(config.execution.max_tokens, 20_000_000);
+        assert_eq!(config.execution.max_tool_calls, 200_000);
+        assert_eq!(config.execution.max_retrieved_bytes, 20_000_000_000);
+        assert_eq!(config.execution.max_cost_microusd, 200_000_000);
+        assert_eq!(config.execution.unattended_max_cost_microusd, 6_000_000);
+        assert_eq!(config.execution.agent_turn_cost_microusd, 110_000);
+        assert_eq!(config.execution.agent_turn_tokens, 9_000);
+        assert_eq!(config.execution.agent_turn_tool_calls, 9);
+        assert_eq!(config.execution.agent_turn_retrieved_bytes, 11_000_000);
+        assert_eq!(config.execution.verifier_turn_cost_microusd, 210_000);
+        assert_eq!(config.execution.verifier_turn_tokens, 17_000);
+        assert_eq!(config.execution.verifier_turn_tool_calls, 5);
+        assert_eq!(config.execution.verifier_turn_retrieved_bytes, 2_000_000);
+    }
+
+    #[test]
+    fn from_iter_rejects_invalid_values_for_every_execution_override() {
+        // Pins: every MOA_EXECUTION_* numeric field fails explicitly with its canonical env name.
+        for name in [
+            "MOA_EXECUTION_PLANNER_REPAIR_ATTEMPTS",
+            "MOA_EXECUTION_REPEATED_FAILURE_LIMIT",
+            "MOA_EXECUTION_MAX_TASKS",
+            "MOA_EXECUTION_MAX_TOKENS",
+            "MOA_EXECUTION_MAX_TOOL_CALLS",
+            "MOA_EXECUTION_MAX_RETRIEVED_BYTES",
+            "MOA_EXECUTION_MAX_COST_MICROUSD",
+            "MOA_EXECUTION_UNATTENDED_MAX_COST_MICROUSD",
+            "MOA_EXECUTION_AGENT_TURN_COST_MICROUSD",
+            "MOA_EXECUTION_AGENT_TURN_TOKENS",
+            "MOA_EXECUTION_AGENT_TURN_TOOL_CALLS",
+            "MOA_EXECUTION_AGENT_TURN_RETRIEVED_BYTES",
+            "MOA_EXECUTION_VERIFIER_TURN_COST_MICROUSD",
+            "MOA_EXECUTION_VERIFIER_TURN_TOKENS",
+            "MOA_EXECUTION_VERIFIER_TURN_TOOL_CALLS",
+            "MOA_EXECUTION_VERIFIER_TURN_RETRIEVED_BYTES",
+        ] {
+            assert_config_error_contains(
+                MoaEnvOverlay::from_iter(env_pairs([(name, "not-an-integer")])),
+                name,
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_servers_json_replaces_configured_servers() {
+        // Pins: the production env seam accepts the complete typed MCP server array and replaces,
+        // rather than appends to, file-backed server configuration.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([(
+            "MOA_MCP_SERVERS_JSON",
+            r#"[{"name":"fixture","transport":"http","url":"http://127.0.0.1:4321","trust_tool_annotations":true}]"#,
+        )]))
+        .expect("MCP JSON overlay should deserialize");
+        let mut config = MoaConfig::default();
+        config.mcp_servers.push(crate::config::McpServerConfig {
+            name: "file-backed".to_string(),
+            trust_tool_annotations: false,
+            ..crate::config::McpServerConfig::default()
+        });
+
+        overlay
+            .apply_to(&mut config)
+            .expect("MCP JSON overlay should apply");
+
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].name, "fixture");
+        assert_eq!(
+            config.mcp_servers[0].url.as_deref(),
+            Some("http://127.0.0.1:4321")
+        );
+        assert!(config.mcp_servers[0].trust_tool_annotations);
+    }
+
+    #[test]
+    fn mcp_servers_json_rejects_malformed_json_through_config_error() {
+        // Pins: malformed production MCP JSON fails startup through the ordinary typed config path.
+        assert_config_error_contains(
+            MoaEnvOverlay::from_iter(env_pairs([("MOA_MCP_SERVERS_JSON", "[{not-json]")])),
+            "MOA_MCP_SERVERS_JSON",
         );
     }
 }

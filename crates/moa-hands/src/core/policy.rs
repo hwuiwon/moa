@@ -1,16 +1,16 @@
 //! Policy evaluation and action-review rendering for tool invocations.
 
+use std::error::Error as StdError;
+
+use jsonschema::{Draft, Retrieve, Uri};
 use moa_core::{
-    error::MoaError, error::Result, types::action_policy::ActionClass,
-    types::action_policy::ActionEnvelope, types::action_policy::ActionPolicyEffect,
-    types::action_policy::ActionReviewField, types::action_policy::ActionReviewFileDiff,
-    types::action_policy::ActionReviewPreview, types::action_policy::RiskLevel,
+    error::MoaError, error::Result, types::action_policy::ActionEnvelope,
+    types::action_policy::ActionPolicyEffect, types::action_policy::ActionReviewField,
+    types::action_policy::ActionReviewFileDiff, types::action_policy::ActionReviewPreview,
+    types::action_policy::CapabilityProvenance, types::action_policy::ExecutionTaskOrigin,
     types::completion::ToolInvocation, types::contact::SessionActorRef,
-    types::identifiers::ToolCallId, types::identifiers::UserId,
-    types::procedure_tools::ProcedureToolKind, types::procedure_tools::is_procedure_tool_name,
-    types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::ToolDefinition,
-    types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolPolicyInput,
-    types::tools::ToolPolicySpec, types::worker::state::WorkerId,
+    types::identifiers::ToolCallId, types::identifiers::UserId, types::session::SessionMeta,
+    types::tools::ToolPolicyInput, types::worker::state::WorkerId,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -23,12 +23,10 @@ use super::normalization::{
 /// Optional origin metadata attached to an action envelope.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActionOrigin {
-    /// Origin object kind for workflow or artifact-driven actions.
-    pub origin_kind: Option<String>,
-    /// Origin object identifier for workflow or artifact-driven actions.
-    pub origin_id: Option<String>,
-    /// Origin step identifier for workflow or artifact-driven actions.
-    pub origin_step_id: Option<String>,
+    /// Capability-level source provenance.
+    pub capability: CapabilityProvenance,
+    /// Execution task identity, independent of capability provenance.
+    pub execution: Option<ExecutionTaskOrigin>,
     /// Explicit idempotency key supplied for side-effecting tools.
     pub idempotency_key: Option<String>,
 }
@@ -88,9 +86,10 @@ impl PreparedActionInvocation {
             input_summary: self.policy_input.input_summary.clone(),
             risk_level: self.policy_input.risk_level,
             action_class: self.policy_input.action_class,
-            origin_kind: origin.origin_kind,
-            origin_id: origin.origin_id,
-            origin_step_id: origin.origin_step_id,
+            origin_kind: origin.capability.kind,
+            origin_id: origin.capability.id,
+            origin_step_id: origin.capability.step_id,
+            execution_origin: origin.execution,
             idempotency_key: origin.idempotency_key,
             created_at: chrono::Utc::now(),
         }
@@ -130,23 +129,11 @@ impl ToolRouter {
         session: &SessionMeta,
         invocation: &ToolInvocation,
     ) -> Result<PreparedActionInvocation> {
-        // Workflow-owned procedure tools are not registered in the `ToolRegistry`
-        // because they execute on the Restate workflow path rather than through a
-        // hand/builtin/MCP executor. They still need a resolvable policy identity so
-        // tenant tool-policy rules can match them; genuinely unknown tools continue
-        // to fail closed.
-        let registered = self.registry.get(&invocation.name);
-        let synthetic_procedure_definition = if registered.is_none() {
-            procedure_tool_definition(&invocation.name)
-        } else {
-            None
-        };
-        let tool_definition = match registered {
-            Some(definition) => definition,
-            None => synthetic_procedure_definition
-                .as_ref()
-                .ok_or_else(|| MoaError::ToolError(format!("unknown tool: {}", invocation.name)))?,
-        };
+        let tool_definition = self
+            .registry
+            .get(&invocation.name)
+            .ok_or_else(|| MoaError::ToolError(format!("unknown tool: {}", invocation.name)))?;
+        validate_tool_invocation(tool_definition, invocation)?;
         let policy_input = self.describe_invocation(tool_definition, invocation)?;
         let rules = if let Some(rule_store) = &self.rule_store {
             let policy_actor = identity_actor_for_policy_lookup(session);
@@ -240,53 +227,46 @@ impl ToolRouter {
     }
 }
 
-/// Builds a synthetic policy-only definition for a workflow-owned procedure tool.
-///
-/// `run_procedure`/`procedure_status` run on the Restate workflow path and are
-/// deliberately absent from the [`ToolRegistry`]. Returning a definition here gives
-/// the policy service a resolvable identity for them — defaulting to `Allow` so the
-/// effective decision is unchanged unless a tenant rule matches — without registering
-/// them as executable tools. Returns `None` for any other name so unregistered tools
-/// still fail closed at the caller.
-fn procedure_tool_definition(name: &str) -> Option<ToolDefinition> {
-    if !is_procedure_tool_name(name) {
-        return None;
+/// Validates one invocation against its registered Draft 2020-12 input schema.
+pub(super) fn validate_tool_invocation(
+    definition: &moa_core::types::tools::ToolDefinition,
+    invocation: &ToolInvocation,
+) -> Result<()> {
+    let validator = jsonschema::options()
+        .with_draft(Draft::Draft202012)
+        .with_retriever(RejectExternalSchemaRetriever)
+        .build(&definition.schema)
+        .map_err(|error| {
+            MoaError::ValidationError(format!(
+                "tool {} has an invalid input schema: {error}",
+                definition.name
+            ))
+        })?;
+    if let Some(error) = validator.iter_errors(&invocation.input).next() {
+        let instance_path = error.instance_path().to_string();
+        let instance_path = if instance_path.is_empty() {
+            "/"
+        } else {
+            instance_path.as_str()
+        };
+        return Err(MoaError::ValidationError(format!(
+            "tool {} input at {instance_path}: {error}",
+            definition.name
+        )));
     }
-    let kind = ProcedureToolKind::from_name(name);
-    let (risk_level, action_class, idempotency_class) = match kind {
-        // Starting a run creates durable run state; individual side-effecting nodes
-        // remain separately action-policy governed inside the procedure executor.
-        // Classified NonIdempotent because the runtime cannot thread a durable
-        // idempotency key through tool invocation and hands recovery, so an
-        // automatic retry after uncertain execution could start a duplicate run.
-        Some(ProcedureToolKind::Run) => (
-            RiskLevel::Medium,
-            ActionClass::LocalWrite,
-            IdempotencyClass::NonIdempotent,
-        ),
-        // Polling only reads an existing run projection.
-        _ => (
-            RiskLevel::Low,
-            ActionClass::Read,
-            IdempotencyClass::Idempotent,
-        ),
-    };
-    Some(ToolDefinition {
-        name: name.to_string(),
-        description: String::new(),
-        schema: kind.map(ProcedureToolKind::schema).unwrap_or(Value::Null),
-        policy: ToolPolicySpec {
-            risk_level,
-            default_effect: ActionPolicyEffect::Allow,
-            action_class,
-            input_shape: ToolInputShape::Json,
-            diff_strategy: ToolDiffStrategy::None,
-        },
-        idempotency_class,
-        // The policy path never persists procedure-tool output through this budget;
-        // matches the shared default tool output budget for consistency.
-        max_output_tokens: 8_000,
-    })
+    Ok(())
+}
+
+#[derive(Debug)]
+struct RejectExternalSchemaRetriever;
+
+impl Retrieve for RejectExternalSchemaRetriever {
+    fn retrieve(
+        &self,
+        uri: &Uri<String>,
+    ) -> std::result::Result<Value, Box<dyn StdError + Send + Sync>> {
+        Err(format!("external tool schema retrieval is disabled: {uri}").into())
+    }
 }
 
 fn identity_actor_for_policy_lookup(session: &SessionMeta) -> UserId {
@@ -298,21 +278,19 @@ fn identity_actor_for_policy_lookup(session: &SessionMeta) -> UserId {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
-    use async_trait::async_trait;
     use moa_core::{
-        error::Result, types::action_policy::ActionPolicyEffect,
-        types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
-        types::completion::ToolInvocation, types::identifiers::TenantId,
-        types::identifiers::UserId, types::session::SessionMeta,
+        error::MoaError,
+        types::action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
+        types::completion::ToolInvocation,
+        types::identifiers::TenantId,
+        types::session::SessionMeta,
+        types::tools::{IdempotencyClass, ToolDiffStrategy, ToolInputShape, ToolPolicySpec},
     };
-    use moa_security::ActionPolicyRuleStore;
     use serde_json::json;
+    use std::collections::HashMap;
     use uuid::Uuid;
 
-    use super::{ToolRouter, procedure_tool_definition};
+    use super::ToolRouter;
     use crate::core::registration::ToolRegistry;
 
     fn session() -> SessionMeta {
@@ -322,117 +300,113 @@ mod tests {
         }
     }
 
-    fn run_procedure_invocation() -> ToolInvocation {
-        ToolInvocation {
-            id: None,
-            name: "run_procedure".to_string(),
-            input: json!({}),
+    fn admin_review_json_policy() -> ToolPolicySpec {
+        ToolPolicySpec {
+            risk_level: RiskLevel::High,
+            default_effect: ActionPolicyEffect::AdminReview,
+            action_class: ActionClass::ExternalWrite,
+            input_shape: ToolInputShape::Json,
+            diff_strategy: ToolDiffStrategy::None,
         }
-    }
-
-    struct StaticRuleStore {
-        rules: Vec<ActionPolicyRule>,
-    }
-
-    #[async_trait]
-    impl ActionPolicyRuleStore for StaticRuleStore {
-        async fn list_action_policy_rules_for_tool(
-            &self,
-            _tenant_id: &TenantId,
-            _user_id: &UserId,
-            tool: &str,
-        ) -> Result<Vec<ActionPolicyRule>> {
-            Ok(self
-                .rules
-                .iter()
-                .filter(|rule| rule.tool == tool)
-                .cloned()
-                .collect())
-        }
-
-        async fn upsert_action_policy_rule(&self, _rule: ActionPolicyRule) -> Result<()> {
-            Ok(())
-        }
-
-        async fn delete_action_policy_rule(
-            &self,
-            _tenant_id: &TenantId,
-            _user_id: Option<&UserId>,
-            _tool: &str,
-            _pattern: &str,
-        ) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn procedure_tools_resolve_to_allow_and_unknown_tools_do_not() {
-        // Pins: workflow-owned procedure tools get a resolvable policy identity that
-        // defaults to Allow, while any other unregistered tool stays unresolved so it
-        // fails closed at the caller.
-        let run = procedure_tool_definition("run_procedure").expect("run_procedure resolves");
-        assert_eq!(run.policy.default_effect, ActionPolicyEffect::Allow);
-        let status =
-            procedure_tool_definition("procedure_status").expect("procedure_status resolves");
-        assert_eq!(status.policy.default_effect, ActionPolicyEffect::Allow);
-        assert!(procedure_tool_definition("bash").is_none());
-        assert!(procedure_tool_definition("spawn_worker").is_none());
     }
 
     #[tokio::test]
-    async fn check_policy_resolves_procedure_tools_but_rejects_unknown_tools() {
-        // Pins: the policy service can evaluate a procedure tool that is absent from the
-        // registry (default Allow), yet a genuinely unknown tool still errors, so the
-        // default-deny posture for unregistered tools is preserved.
+    async fn provider_execution_lifecycle_names_are_not_synthetic_policy_tools() {
+        // Pins: execution lifecycle is entered through typed orchestration, so a model-facing
+        // lifecycle name absent from the registry remains unknown and fails closed.
         let router = ToolRouter::new(ToolRegistry::new(), HashMap::new());
         let session = session();
-
-        let allowed = router
-            .check_policy(&session, &run_procedure_invocation())
-            .await
-            .expect("procedure tool resolves");
-        assert_eq!(allowed.effect, ActionPolicyEffect::Allow);
 
         let unknown = router
             .check_policy(
                 &session,
                 &ToolInvocation {
                     id: None,
-                    name: "not_a_real_tool".to_string(),
+                    name: "execution_run_start".to_string(),
                     input: json!({}),
                 },
             )
             .await;
-        assert!(unknown.is_err(), "unknown tools remain unresolved");
+        let error = unknown.expect_err("unregistered lifecycle tools must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "tool error: unknown tool: execution_run_start"
+        );
     }
 
     #[tokio::test]
-    async fn tenant_deny_rule_for_run_procedure_now_fires() {
-        // Pins: because run_procedure is now policy-resolvable, a tenant Deny rule
-        // targeting it is applied instead of being silently unreachable.
-        let session = session();
-        let deny_rule = ActionPolicyRule {
-            id: Uuid::now_v7(),
-            tool: "run_procedure".to_string(),
-            pattern: "*".to_string(),
-            effect: ActionPolicyEffect::Deny,
-            scope: ActionRuleScope::Tenant {
-                tenant_id: session.tenant_id,
-            },
-            reason: Some("procedures disabled for this tenant".to_string()),
-            created_by: UserId::new("admin"),
-            created_at: chrono::Utc::now(),
-        };
-        let router = ToolRouter::new(ToolRegistry::new(), HashMap::new()).with_rule_store(
-            Arc::new(StaticRuleStore {
-                rules: vec![deny_rule],
+    async fn check_policy_rejects_invalid_registered_tool_input_before_review() {
+        // Pins: every registered definition's schema is enforced before policy review, not only
+        // at a concrete hand or MCP executor.
+        let mut registry = ToolRegistry::new();
+        registry.register_hand(
+            "lookup_filing",
+            "Lookup a filing",
+            json!({
+                "type": "object",
+                "properties": {"item_key": {"type": "string"}},
+                "required": ["item_key"],
+                "additionalProperties": false
             }),
+            admin_review_json_policy(),
+            IdempotencyClass::NonIdempotent,
         );
+        let router = ToolRouter::new(registry, HashMap::new());
 
-        let decision = router
-            .check_policy(&session, &run_procedure_invocation())
+        let error = router
+            .check_policy(
+                &session(),
+                &ToolInvocation {
+                    id: None,
+                    name: "lookup_filing".to_string(),
+                    input: json!({"item_key": 7}),
+                },
+            )
             .await
-            .expect("procedure tool resolves");
-        assert_eq!(decision.effect, ActionPolicyEffect::Deny);
+            .expect_err("invalid input must not reach policy review");
+
+        match error {
+            MoaError::ValidationError(message) => {
+                assert!(message.contains("lookup_filing"));
+                assert!(message.contains("/item_key"));
+                assert!(message.contains("string"));
+            }
+            other => panic!("expected ValidationError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_tool_schema_cannot_retrieve_external_references() {
+        // Pins: provider-controlled schemas cannot turn validation into an outbound network or
+        // file retrieval before policy review.
+        let mut registry = ToolRegistry::new();
+        registry.register_hand(
+            "external_schema",
+            "Tool with an untrusted remote schema reference",
+            json!({"$ref": "https://schemas.example.test/tool-input.json"}),
+            admin_review_json_policy(),
+            IdempotencyClass::NonIdempotent,
+        );
+        let router = ToolRouter::new(registry, HashMap::new());
+
+        let error = router
+            .check_policy(
+                &session(),
+                &ToolInvocation {
+                    id: None,
+                    name: "external_schema".to_string(),
+                    input: json!({}),
+                },
+            )
+            .await
+            .expect_err("external schema retrieval must fail closed");
+
+        match error {
+            MoaError::ValidationError(message) => {
+                assert!(message.contains("external_schema"));
+                assert!(message.contains("external tool schema retrieval is disabled"));
+            }
+            other => panic!("expected ValidationError, got {other:?}"),
+        }
     }
 }

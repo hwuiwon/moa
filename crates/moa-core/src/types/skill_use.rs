@@ -3,25 +3,22 @@
 //! Skill *activation* records every skill the injector placed in a turn manifest.
 //! Skill *use* is the narrower signal that the model actually engaged a skill:
 //! it read the skill's materialized package under `.moa/skills/<slug>/`, invoked
-//! a `skill://<name>` action reference, or started the skill's procedure through
-//! `run_procedure`. Detection is pure string matching over a tool call's input so
-//! it is cheap and replay-stable; there is no LLM or heuristic scoring.
+//! a `skill://<name>` action reference, or passed a selected skill reference to a
+//! governed capability. Detection is pure string matching over a tool call's input
+//! so it is cheap and replay-stable; there is no LLM or heuristic scoring.
 
 use serde_json::Value;
-
-use super::procedure_tools::{ProcedureToolKind, normalize_procedure_skill_ref};
 
 /// Returns the subset of `selected_skills` that this tool call engaged.
 ///
 /// A skill counts as engaged when the tool call references its materialized
-/// package path (`.moa/skills/<slug>/`), a `skill://` reference to it, or, for a
-/// `run_procedure` call, names it as the procedure target. Returned names are the
-/// exact strings from `selected_skills` so recorded uses line up with the
+/// package path (`.moa/skills/<slug>/`) or a `skill://` reference to it. Returned
+/// names are the exact strings from `selected_skills` so recorded uses line up with the
 /// activation names on the same segment. The result preserves `selected_skills`
 /// order and contains no duplicates.
 #[must_use]
 pub fn skills_used_in_tool_call(
-    tool_name: &str,
+    _tool_name: &str,
     input: &Value,
     selected_skills: &[String],
 ) -> Vec<String> {
@@ -34,18 +31,6 @@ pub fn skills_used_in_tool_call(
     let mut haystack = Vec::new();
     collect_lowercased_strings(input, &mut haystack);
 
-    // A `run_procedure` call names its target skill in a structured `skill` field
-    // rather than embedding a package path, so resolve that reference explicitly.
-    let procedure_ref = (ProcedureToolKind::from_name(tool_name) == Some(ProcedureToolKind::Run))
-        .then(|| {
-            input
-                .get("skill")
-                .and_then(Value::as_str)
-                .map(normalize_procedure_skill_ref)
-                .map(|reference| reference.to_ascii_lowercase())
-        })
-        .flatten();
-
     let mut used = Vec::new();
     for skill in selected_skills {
         let trimmed = skill.trim();
@@ -54,21 +39,27 @@ pub fn skills_used_in_tool_call(
         }
         let slug = skill_use_slug(trimmed);
         let path_needle = format!(".moa/skills/{slug}/");
-        let name_ref = normalize_procedure_skill_ref(trimmed).to_ascii_lowercase();
+        let name_ref = canonical_skill_ref(trimmed).to_ascii_lowercase();
         let slug_ref = format!("skill://{slug}");
 
-        let engaged_by_reference = procedure_ref
-            .as_deref()
-            .is_some_and(|reference| reference == name_ref || reference == slug_ref);
         let engaged_by_string = haystack.iter().any(|value| {
             value.contains(&path_needle) || value.contains(&name_ref) || value.contains(&slug_ref)
         });
 
-        if (engaged_by_reference || engaged_by_string) && !used.iter().any(|name| name == skill) {
+        if engaged_by_string && !used.iter().any(|name| name == skill) {
             used.push(skill.clone());
         }
     }
     used
+}
+
+fn canonical_skill_ref(skill: &str) -> String {
+    let trimmed = skill.trim();
+    if trimmed.starts_with("skill://") {
+        trimmed.to_string()
+    } else {
+        format!("skill://{trimmed}")
+    }
 }
 
 /// Converts a skill name into the slug used for its materialized package path.
@@ -145,28 +136,6 @@ mod tests {
             &["greeter".to_string()],
         );
         assert_eq!(used, vec!["greeter".to_string()]);
-    }
-
-    #[test]
-    fn detects_run_procedure_target_by_name() {
-        // Pins: run_procedure names its skill in the `skill` field, not a package path.
-        let used = skills_used_in_tool_call(
-            "run_procedure",
-            &json!({"skill": "damaged-food-order", "input": {"order_id": "A-1"}}),
-            &["damaged-food-order".to_string(), "other".to_string()],
-        );
-        assert_eq!(used, vec!["damaged-food-order".to_string()]);
-    }
-
-    #[test]
-    fn detects_run_procedure_target_by_qualified_reference() {
-        // Pins: run_procedure accepts an already-qualified skill:// reference.
-        let used = skills_used_in_tool_call(
-            "run_procedure",
-            &json!({"skill": "skill://greeter"}),
-            &["Greeter".to_string()],
-        );
-        assert_eq!(used, vec!["Greeter".to_string()]);
     }
 
     #[test]

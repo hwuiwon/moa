@@ -1,11 +1,8 @@
 //! Skills service DTO mapping tests.
 
 use chrono::{TimeZone, Utc};
-use moa_artifacts::registry::{ArtifactRun, ArtifactRunStatus};
 use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::TenantId};
-use moa_orchestrator::services::skills::{
-    procedure_run_summary_from_run, skill_summary_from_skill,
-};
+use moa_orchestrator::services::skills::skill_summary_from_skill;
 use moa_skills::package::SkillPackageManifest;
 use moa_skills::registry::Skill;
 use uuid::Uuid;
@@ -67,55 +64,4 @@ fn skill_summary_from_skill_preserves_visible_row_fields() {
     assert_eq!(summary.total_size_bytes, 64);
     assert_eq!(summary.created_at, now);
     assert_eq!(summary.updated_at, now);
-}
-
-#[test]
-fn procedure_run_summary_from_run_preserves_dashboard_fields() {
-    // Pins: procedure list summaries expose stable run identity, backing artifact,
-    // lifecycle state, and timestamps without requiring a status detail fetch.
-    let started_at = Utc
-        .with_ymd_and_hms(2026, 7, 5, 12, 0, 0)
-        .single()
-        .expect("fixture started_at should be valid");
-    let completed_at = Utc
-        .with_ymd_and_hms(2026, 7, 5, 12, 5, 0)
-        .single()
-        .expect("fixture completed_at should be valid");
-    let run_id =
-        Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("fixture run id parses");
-    let artifact_uid =
-        Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("artifact uid parses");
-    let revision_uid =
-        Uuid::parse_str("33333333-3333-3333-3333-333333333333").expect("revision uid parses");
-    let session_id =
-        Uuid::parse_str("44444444-4444-4444-4444-444444444444").expect("session id parses");
-
-    let summary = procedure_run_summary_from_run(ArtifactRun {
-        run_uid: run_id,
-        artifact_uid: Some(artifact_uid),
-        revision_uid: Some(revision_uid),
-        session_id: Some(moa_core::types::identifiers::SessionId(session_id)),
-        procedure_ref: "skill://support-flow".to_string(),
-        status: ArtifactRunStatus::PendingReview,
-        current_node_id: Some("review".to_string()),
-        input: serde_json::json!({ "secret": "not in summary" }),
-        state: serde_json::json!({ "internal": true }),
-        output: Some(serde_json::json!({ "raw": "not in summary" })),
-        error: Some("waiting for reviewer".to_string()),
-        started_at,
-        completed_at: Some(completed_at),
-    });
-
-    assert_eq!(summary.run_id, run_id);
-    assert_eq!(summary.artifact_uid, Some(artifact_uid));
-    assert_eq!(summary.revision_uid, Some(revision_uid));
-    assert_eq!(
-        summary.session_id,
-        Some(moa_core::types::identifiers::SessionId(session_id))
-    );
-    assert_eq!(summary.procedure_ref, "skill://support-flow");
-    assert_eq!(summary.status, "pending_review");
-    assert_eq!(summary.current_node_id.as_deref(), Some("review"));
-    assert_eq!(summary.started_at, started_at);
-    assert_eq!(summary.completed_at, Some(completed_at));
 }

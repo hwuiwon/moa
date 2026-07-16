@@ -142,6 +142,7 @@ impl SessionTarget for RemoteTarget {
                     model: Some(self.model.to_string()),
                     contact: None,
                     max_turns: None,
+                    execution_template: None,
                 },
                 Some(&format!("loadtest-turn-{session_id}-{}", Uuid::now_v7())),
             )
@@ -165,21 +166,7 @@ impl SessionTarget for RemoteTarget {
                 message: error.to_string(),
             })?;
 
-        match outcome.kind {
-            moa_core::wire::turn::TurnOutcomeKind::Completed => Ok(TurnObservation {
-                ttft: None,
-                edge_observation_wait: None,
-                auto_denied_approvals: 0,
-            }),
-            moa_core::wire::turn::TurnOutcomeKind::Cancelled => Err(TurnFailure {
-                kind: TurnFailureKind::Cancelled,
-                message: outcome.message,
-            }),
-            moa_core::wire::turn::TurnOutcomeKind::Failed => Err(TurnFailure {
-                kind: TurnFailureKind::Failed,
-                message: outcome.message,
-            }),
-        }
+        classify_turn_outcome(outcome)
     }
 
     async fn session_meta(&self, session_id: SessionId) -> Result<SessionMeta> {
@@ -214,6 +201,37 @@ impl SessionTarget for RemoteTarget {
             )
             .await
             .map_err(client_error)
+    }
+}
+
+fn classify_turn_outcome(
+    outcome: TurnOutcome,
+) -> std::result::Result<TurnObservation, TurnFailure> {
+    match outcome.kind {
+        moa_core::wire::turn::TurnOutcomeKind::Completed => Ok(TurnObservation {
+            kind: TurnObservationKind::CompletedAnswer,
+            ttft: None,
+            edge_observation_wait: None,
+            auto_denied_approvals: 0,
+        }),
+        moa_core::wire::turn::TurnOutcomeKind::Accepted { execution_run_uid } => {
+            Ok(TurnObservation {
+                kind: TurnObservationKind::ExecutionAdmission {
+                    run_uid: execution_run_uid,
+                },
+                ttft: None,
+                edge_observation_wait: None,
+                auto_denied_approvals: 0,
+            })
+        }
+        moa_core::wire::turn::TurnOutcomeKind::Cancelled => Err(TurnFailure {
+            kind: TurnFailureKind::Cancelled,
+            message: outcome.message,
+        }),
+        moa_core::wire::turn::TurnOutcomeKind::Failed => Err(TurnFailure {
+            kind: TurnFailureKind::Failed,
+            message: outcome.message,
+        }),
     }
 }
 
@@ -576,4 +594,32 @@ pub(crate) fn live_fga_client() -> Result<FgaClient> {
         timeout_ms: 5_000,
     })
     .map_err(|error| MoaError::ProviderError(format!("OpenFGA client config: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use moa_core::wire::turn::TurnOutcomeKind;
+
+    use super::*;
+
+    #[test]
+    fn accepted_execution_run_direct_backend_is_successful_admission() {
+        // Pins: the direct Restate backend treats Accepted as a successful admission, never as a
+        // completed answer or failed turn, and preserves the durable run identifier.
+        let run_uid = Uuid::now_v7();
+        let observation = classify_turn_outcome(TurnOutcome {
+            turn_id: "turn-1".to_string(),
+            kind: TurnOutcomeKind::Accepted {
+                execution_run_uid: run_uid,
+            },
+            message: "execution accepted".to_string(),
+        })
+        .expect("Accepted should be a successful backend result");
+
+        assert_eq!(
+            observation.kind,
+            TurnObservationKind::ExecutionAdmission { run_uid }
+        );
+        assert!(observation.ttft.is_none());
+    }
 }

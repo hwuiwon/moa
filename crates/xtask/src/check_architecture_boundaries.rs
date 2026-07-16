@@ -19,6 +19,7 @@ const SCAN_ROOTS: &[&str] = &[
 enum Rule {
     DirectSql,
     EventWildcardMatch,
+    ExecutionTraceManifest,
     ForbiddenDependency,
     HandlerAuthzSafety,
     LocBudget,
@@ -34,6 +35,9 @@ impl fmt::Display for Rule {
             Self::DirectSql => formatter.write_str("direct SQL in handler/workflow code"),
             Self::EventWildcardMatch => {
                 formatter.write_str("wildcard Event match in sensitive consumer")
+            }
+            Self::ExecutionTraceManifest => {
+                formatter.write_str("execution trace propagation manifest")
             }
             Self::ForbiddenDependency => formatter.write_str("forbidden dependency direction"),
             Self::HandlerAuthzSafety => {
@@ -129,17 +133,53 @@ const ALLOWANCES: &[Allowance] = &[
         1,
         "Knowledge query-trace inspection reads lineage diagnostics until an analytics repository owns it"
     ),
+    allow!(
+        DirectSql,
+        "crates/moa-orchestrator/src/services/execution.rs",
+        "sqlx::query(",
+        4,
+        "Task 9 keeps permanent external-template admission reserve, CAS, and replay reads beside the admission coordinator pending a dedicated repository seam"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/objects/session/execution_runs.rs",
+        "OrchestratorCtx::current_graph_pool()",
+        3,
+        "Task 9 keyed Session admission performs three control-plane replay transactions pending constructor-injected admission persistence"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/objects/session/execution_runs.rs",
+        "OrchestratorCtx::current_config()",
+        1,
+        "Task 7 Session-owned template planning reads the model and execution configuration pending constructor injection into SessionImpl"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
+        "OrchestratorCtx::current_config()",
+        2,
+        "Task 9 experiment-run execution targets select the internal model and compile against execution limits pending constructor injection into ExperimentRunImpl"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
+        "OrchestratorCtx::current_config()",
+        2,
+        "Task 9 experiment-trial execution targets select the internal model and compile against execution limits pending constructor injection into ExperimentTrialRunImpl"
+    ),
 ];
 
-const WORKSPACE_PACKAGE_COUNT_BUDGET: usize = 44;
-const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 41;
+// Task 3 adds `moa-execution` as one first-class workspace/default member.
+const WORKSPACE_PACKAGE_COUNT_BUDGET: usize = 45;
+const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 42;
 const MOA_CORE_ROOT_EXPORT_ALLOWLIST: &[&str] = &["MoaError", "Result", "WORKSPACE_ID"];
 
 const REVERSE_DEPENDENCY_BUDGETS: &[ReverseDependencyBudget] = &[ReverseDependencyBudget {
     package: "moa-core",
-    max_direct: 38,
-    max_transitive: 40,
-    reason: "Tasks 27-29 narrow the shared moa-core trait/DTO facade; new production fan-in must remain intentional",
+    max_direct: 39,
+    max_transitive: 41,
+    reason: "Tasks 3-4 add moa-execution as a deliberate direct moa-core dependent for shared IDs, configuration, and events while preserving the moa-execution -> moa-core direction; new production fan-in must remain intentional",
 }];
 
 const LOC_BUDGETS: &[LocBudget] = &[
@@ -147,29 +187,29 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "moa-core Rust source",
         path: "crates/moa-core/src",
         scope: LocScope::RustTree,
-        max_lines: 22_464,
-        reason: "Task 18 adds shared tenant-purge wire DTOs, Task 26 adds ownership modules, Tasks 27-29 narrow the moa-core facade, tenant-operations MCP moves transport-neutral agent-principal DTOs into moa-core, and the scalability actions add shared runtime configuration",
+        max_lines: 25_103,
+        reason: "Existing tenant-purge and scalability contracts remain; Tasks 7-11 add shared execution routing, configuration, planning-audit, session-event, and observability DTOs without rebuilding the moa-core root facade",
     },
     LocBudget {
         label: "public edge route ladder",
         path: "crates/moa-edge/src/routes.rs",
         scope: LocScope::File,
-        max_lines: 1_736,
+        max_lines: 1_749,
         reason: "Tasks 17-18 extract tenant-account routes and add durable purge admission/status orchestration; Task 27 makes its foundational imports explicit; tenant-operations MCP adds the authenticated edge-router composition seam",
     },
     LocBudget {
         label: "moa-core env overlay",
         path: "crates/moa-core/src/config/env_overlay/mod.rs",
         scope: LocScope::File,
-        max_lines: 1_474,
-        reason: "Task 26 split environment-overlay parsing by configuration ownership; the scalability actions add overlay knobs for shared runtime tuning",
+        max_lines: 1_664,
+        reason: "Task 7 adds the complete MOA_EXECUTION_* planning and resource override surface alongside the existing ownership split and shared runtime tuning knobs",
     },
     LocBudget {
         label: "turn execution workflow",
         path: "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
         scope: LocScope::File,
-        max_lines: 1_051,
-        reason: "Tasks 11-13 extract turn execution phases while preserving the durable workflow shell",
+        max_lines: 1_365,
+        reason: "Tasks 7-9 add respond/act/run routing, strict run admission, Act escalation, planning audits, durable amendment handling, replay-safe execution admission, and terminal synthesis within the durable workflow shell",
     },
     LocBudget {
         label: "worker state types",
@@ -182,8 +222,8 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "worker command types",
         path: "crates/moa-core/src/types/worker/commands.rs",
         scope: LocScope::File,
-        max_lines: 321,
-        reason: "Task 28 isolates worker command and turn-record DTOs from state and tool-schema concerns",
+        max_lines: 352,
+        reason: "Task 8 shares one typed Applied/Replayed/Conflict reply-delivery acknowledgement between worker and execution input flows while retaining the isolated worker command boundary",
     },
     LocBudget {
         label: "worker tool schemas",
@@ -566,6 +606,17 @@ struct SymbolBudgetReport {
 /// Runs the architecture-boundary scanner.
 pub fn run() -> Result<()> {
     let mut findings = scan_roots(SCAN_ROOTS)?;
+    findings.extend(
+        crate::execution_trace_manifest::audit(Path::new("."))?
+            .into_iter()
+            .map(|diagnostic| {
+                Finding::budget(
+                    Rule::ExecutionTraceManifest,
+                    diagnostic.path(),
+                    diagnostic.detail().to_string(),
+                )
+            }),
+    );
     findings.extend(scan_sensitive_event_consumers(
         Path::new("."),
         SENSITIVE_EVENT_CONSUMERS,

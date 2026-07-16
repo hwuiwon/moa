@@ -103,6 +103,7 @@ impl CronJob for CronJobImpl {
         ctx: ObjectContext<'_>,
         config: Json<CronJobConfig>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("CronJob", "configure");
         let config = config.into_inner();
         validate(&config)?;
@@ -124,6 +125,7 @@ impl CronJob for CronJobImpl {
 
     #[tracing::instrument(skip(self, ctx))]
     async fn pause(&self, ctx: ObjectContext<'_>) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("CronJob", "pause");
         let mut state = load_state(&ctx).await?;
         state.paused = true;
@@ -134,6 +136,7 @@ impl CronJob for CronJobImpl {
 
     #[tracing::instrument(skip(self, ctx))]
     async fn resume(&self, ctx: ObjectContext<'_>) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("CronJob", "resume");
         let mut state = load_state(&ctx).await?;
         if state.config.is_none() {
@@ -151,6 +154,7 @@ impl CronJob for CronJobImpl {
 
     #[tracing::instrument(skip(self, ctx))]
     async fn stop(&self, ctx: ObjectContext<'_>) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("CronJob", "stop");
         ctx.clear_all();
         Ok(())
@@ -162,6 +166,7 @@ impl CronJob for CronJobImpl {
         ctx: ObjectContext<'_>,
         payload: Json<TickPayload>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("CronJob", "tick");
         let payload = payload.into_inner();
         let state = load_state(&ctx).await?;
@@ -183,11 +188,13 @@ impl CronJob for CronJobImpl {
             payload.version,
             payload.scheduled_for.timestamp()
         );
-        ctx.request::<Json<serde_json::Value>, ()>(
-            RequestTarget::service(config.target_service, config.target_handler),
-            Json::from(config.payload),
+        crate::restate_identity::replay_safe_request(
+            ctx.request::<Json<serde_json::Value>, ()>(
+                RequestTarget::service(config.target_service, config.target_handler),
+                Json::from(config.payload),
+            )
+            .idempotency_key(idempotency_key),
         )
-        .idempotency_key(idempotency_key)
         .send();
 
         Ok(())
@@ -198,6 +205,7 @@ impl CronJob for CronJobImpl {
         &self,
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<CronJobStatus>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("CronJob", "status");
         let state = load_state(&ctx).await?;
         let now = ctx
@@ -307,10 +315,12 @@ async fn schedule_next_tick(
         state.version,
         next_utc.timestamp()
     );
-    ctx.object_client::<CronJobClient>(ctx.key().to_string())
-        .tick(Json::from(payload))
-        .idempotency_key(idempotency_key)
-        .send_after(delay);
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<CronJobClient>(ctx.key().to_string())
+            .tick(Json::from(payload))
+            .idempotency_key(idempotency_key),
+    )
+    .send_after(delay);
     tracing::info!(
         key = %ctx.key(),
         scheduled_for = %next_utc,

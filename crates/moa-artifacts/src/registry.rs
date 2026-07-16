@@ -1,12 +1,9 @@
 //! Postgres-backed artifact registry with MOA three-tier visibility.
 
-use std::{collections::BTreeMap, str::FromStr};
-
 use chrono::{DateTime, Utc};
 use moa_core::types::memory::RlsContext;
 use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionRuleScope,
-    types::contact::ContactId, types::identifiers::SessionId,
     types::identifiers::StoragePartitionId, types::identifiers::UserId,
 };
 use moa_db::ScopedConn;
@@ -20,7 +17,6 @@ use crate::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use crate::validation::ValidationReport;
 
 mod revisions;
-mod runs;
 mod skill_embeddings;
 
 pub use revisions::{RollbackApplication, insert_published_revision};
@@ -32,8 +28,6 @@ pub use skill_embeddings::{MissingSkillEmbedding, NewSkillEmbedding, SkillEmbedd
 /// scripts), so a 10 MiB ceiling rejects abusive uploads long before the
 /// `i64` byte-count conversion could overflow.
 pub const MAX_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
-const DEFAULT_RUN_PAGE_LIMIT: usize = 50;
-const MAX_RUN_PAGE_LIMIT: usize = 200;
 
 /// Artifact storage columns derived from artifact inheritance scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -219,240 +213,6 @@ pub struct ArtifactFile {
     pub executable: bool,
     /// File size in bytes.
     pub file_size_bytes: i64,
-}
-
-/// Procedure run status persisted for artifacts.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ArtifactRunStatus {
-    /// Run has been created but not started.
-    Queued,
-    /// Run is actively executing.
-    Running,
-    /// Run is pending tenant-admin action review.
-    PendingReview,
-    /// Run completed successfully.
-    Completed,
-    /// Run failed.
-    Failed,
-    /// Run was cancelled.
-    Cancelled,
-}
-
-impl ArtifactRunStatus {
-    /// Returns the lowercase database label for this status.
-    #[must_use]
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::PendingReview => "pending_review",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
-impl FromStr for ArtifactRunStatus {
-    type Err = MoaError;
-
-    fn from_str(value: &str) -> Result<Self> {
-        runs::run_status_from_str(value)
-    }
-}
-
-/// Procedure node-run status persisted for artifacts.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ArtifactNodeRunStatus {
-    /// Node run has been created but not started.
-    Queued,
-    /// Node run is actively executing.
-    Running,
-    /// Node run is pending tenant-admin action review.
-    PendingReview,
-    /// Node run completed successfully.
-    Completed,
-    /// Node run failed.
-    Failed,
-    /// Node run was cancelled.
-    Cancelled,
-    /// Node run was skipped.
-    Skipped,
-}
-
-impl ArtifactNodeRunStatus {
-    /// Returns the lowercase database label for this status.
-    #[must_use]
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::PendingReview => "pending_review",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-            Self::Skipped => "skipped",
-        }
-    }
-}
-
-/// New procedure run row.
-#[derive(Clone, Debug, PartialEq)]
-pub struct NewArtifactRun {
-    /// Referenced artifact UID, if already resolved.
-    pub artifact_uid: Option<Uuid>,
-    /// Referenced revision UID, if already resolved.
-    pub revision_uid: Option<Uuid>,
-    /// Session associated with this procedure run, when the run was started from a session.
-    pub session_id: Option<SessionId>,
-    /// Procedure reference string, pointing at the skill artifact that carries the procedure.
-    pub procedure_ref: String,
-    /// Initial run status.
-    pub status: ArtifactRunStatus,
-    /// Current node ID.
-    pub current_node_id: Option<String>,
-    /// Input payload.
-    pub input: Value,
-    /// Mutable procedure state.
-    pub state: Value,
-    /// Output payload.
-    pub output: Option<Value>,
-    /// Error text.
-    pub error: Option<String>,
-    /// Optional idempotency key.
-    pub idempotency_key: Option<String>,
-}
-
-/// Stored procedure run row.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ArtifactRun {
-    /// Run row identifier.
-    pub run_uid: Uuid,
-    /// Referenced artifact UID, if the run was started from a resolved artifact.
-    pub artifact_uid: Option<Uuid>,
-    /// Referenced revision UID, if the run was started from a resolved artifact revision.
-    pub revision_uid: Option<Uuid>,
-    /// Session associated with this procedure run, when present.
-    pub session_id: Option<SessionId>,
-    /// Procedure reference string, pointing at the skill artifact that carries the procedure.
-    pub procedure_ref: String,
-    /// Current status.
-    pub status: ArtifactRunStatus,
-    /// Current node ID.
-    pub current_node_id: Option<String>,
-    /// Input payload.
-    pub input: Value,
-    /// Mutable procedure state.
-    pub state: Value,
-    /// Output payload.
-    pub output: Option<Value>,
-    /// Error text.
-    pub error: Option<String>,
-    /// Run start timestamp.
-    pub started_at: DateTime<Utc>,
-    /// Run completion timestamp.
-    pub completed_at: Option<DateTime<Utc>>,
-}
-
-/// Keyset cursor for listing procedure runs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ArtifactRunListCursor {
-    /// Last seen run start timestamp.
-    pub started_at: DateTime<Utc>,
-    /// Last seen run identifier at that timestamp.
-    pub run_uid: Uuid,
-}
-
-/// Request for listing visible procedure runs.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ArtifactRunListRequest {
-    /// Optional status filter.
-    pub status: Option<ArtifactRunStatus>,
-    /// Maximum number of rows to return.
-    pub limit: Option<usize>,
-    /// Cursor returned by a previous page.
-    pub cursor: Option<ArtifactRunListCursor>,
-}
-
-/// One page of visible procedure runs.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ArtifactRunPage {
-    /// Runs in descending start order.
-    pub runs: Vec<ArtifactRun>,
-    /// Cursor for the next page when more rows are available.
-    pub next_cursor: Option<ArtifactRunListCursor>,
-}
-
-/// Registry patch payload for mutable procedure run fields.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ArtifactRunUpdate {
-    /// Replacement status when present.
-    pub status: Option<ArtifactRunStatus>,
-    /// Replacement current node ID when present, including clearing it to `NULL`.
-    pub current_node_id: Option<Option<String>>,
-    /// Replacement procedure state when present.
-    pub state: Option<Value>,
-    /// Replacement output when present, including clearing it to `NULL`.
-    pub output: Option<Option<Value>>,
-    /// Replacement error when present, including clearing it to `NULL`.
-    pub error: Option<Option<String>>,
-    /// Replacement completion timestamp when present, including clearing it to `NULL`.
-    pub completed_at: Option<Option<DateTime<Utc>>>,
-}
-
-/// New node-run row.
-#[derive(Clone, Debug, PartialEq)]
-pub struct NewArtifactNodeRun {
-    /// Parent run identifier.
-    pub run_uid: Uuid,
-    /// Procedure node ID.
-    pub node_id: String,
-    /// Node status.
-    pub status: ArtifactNodeRunStatus,
-    /// Node input payload.
-    pub input: Value,
-    /// Node output payload.
-    pub output: Option<Value>,
-    /// Error text.
-    pub error: Option<String>,
-    /// Optional completion timestamp.
-    pub completed_at: Option<DateTime<Utc>>,
-}
-
-/// Stored procedure node-run row.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ArtifactNodeRun {
-    /// Node-run row identifier.
-    pub node_run_uid: Uuid,
-    /// Parent run identifier.
-    pub run_uid: Uuid,
-    /// Procedure node ID.
-    pub node_id: String,
-    /// Node status.
-    pub status: ArtifactNodeRunStatus,
-    /// Node input payload.
-    pub input: Value,
-    /// Node output payload.
-    pub output: Option<Value>,
-    /// Error text.
-    pub error: Option<String>,
-    /// Node-run start timestamp.
-    pub started_at: DateTime<Utc>,
-    /// Node-run completion timestamp.
-    pub completed_at: Option<DateTime<Utc>>,
-}
-
-/// Registry patch payload for mutable procedure node-run fields.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ArtifactNodeRunUpdate {
-    /// Replacement status when present.
-    pub status: Option<ArtifactNodeRunStatus>,
-    /// Replacement output when present, including clearing it to `NULL`.
-    pub output: Option<Option<Value>>,
-    /// Replacement error when present, including clearing it to `NULL`.
-    pub error: Option<Option<String>>,
-    /// Replacement completion timestamp when present, including clearing it to `NULL`.
-    pub completed_at: Option<Option<DateTime<Utc>>>,
 }
 
 /// Postgres-backed canonical artifact registry.

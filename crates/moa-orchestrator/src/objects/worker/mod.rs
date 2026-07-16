@@ -18,7 +18,8 @@ use moa_core::{
     types::worker::commands::AttachWorkerResultWaiterOutput,
     types::worker::commands::MarkWorkerChildTerminalInput,
     types::worker::commands::RemoveWorkerResultWaiterInput,
-    types::worker::commands::WorkerToolRecord, types::worker::commands::WorkerTurnOutcomeRecord,
+    types::worker::commands::UserReplyDeliveryAck, types::worker::commands::WorkerToolRecord,
+    types::worker::commands::WorkerTurnOutcomeRecord,
     types::worker::commands::WorkerTurnPreparation,
     types::worker::commands::WorkerTurnResponseRecord, types::worker::state::ChildSignalKind,
     types::worker::state::ParentResumePolicy, types::worker::state::SignalSeverity,
@@ -62,6 +63,11 @@ pub(crate) const MAX_WORKER_TURNS_PER_WORKFLOW: usize = MAX_TURNS_PER_POST;
 pub trait Worker {
     /// Parent dispatches a message (initial task or follow-up).
     async fn post_message(msg: Json<WorkerMessage>) -> Result<(), HandlerError>;
+
+    /// Applies or replays one authenticated user reply to an exact input request.
+    async fn provide_input(
+        input: Json<WorkerProvideInputRequest>,
+    ) -> Result<Json<UserReplyDeliveryAck>, HandlerError>;
 
     /// Returns read-only child status without entering the single-writer queue.
     #[shared]
@@ -135,6 +141,18 @@ pub trait Worker {
     async fn cleanup(req: Json<CleanupRequest>) -> Result<(), HandlerError>;
 }
 
+/// Exact user reply delivered to one pending worker input request.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerProvideInputRequest {
+    /// Exact owning Session scope authorized by the caller.
+    pub parent_session: SessionId,
+    /// Stable request identifier minted by the blocked worker turn.
+    pub input_request_id: String,
+    /// User reply represented as the canonical execution/worker input value.
+    pub input: serde_json::Value,
+}
+
 /// Internal payload for a generation-guarded report-then-self-clean self-call.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CleanupRequest {
@@ -167,5 +185,52 @@ impl WorkerImpl {
             providers,
             tool_schemas,
         }
+    }
+}
+
+#[cfg(test)]
+mod provide_input_request_tests {
+    use super::WorkerProvideInputRequest;
+    use moa_core::types::identifiers::SessionId;
+
+    #[test]
+    fn worker_provide_input_request_requires_exact_parent_session() {
+        // Pins: callers must name the owning Session scope; omission and unknown fields fail
+        // strict deserialization before a Worker key can be addressed.
+        let parent_session = SessionId::new();
+        let encoded = serde_json::json!({
+            "parent_session": parent_session,
+            "input_request_id": "request-7",
+            "input": "answer",
+        });
+
+        let decoded: WorkerProvideInputRequest = serde_json::from_value(encoded.clone())
+            .expect("scoped worker input request should deserialize");
+        assert_eq!(decoded.parent_session, parent_session);
+        assert_eq!(decoded.input_request_id, "request-7");
+        assert_eq!(
+            decoded.input,
+            serde_json::Value::String("answer".to_string())
+        );
+
+        let mut missing_parent = encoded.clone();
+        missing_parent
+            .as_object_mut()
+            .expect("request fixture is an object")
+            .remove("parent_session");
+        assert!(
+            serde_json::from_value::<WorkerProvideInputRequest>(missing_parent).is_err(),
+            "parent_session must be required"
+        );
+
+        let mut unknown_field = encoded;
+        unknown_field
+            .as_object_mut()
+            .expect("request fixture is an object")
+            .insert("session_id".to_string(), serde_json::json!(parent_session));
+        assert!(
+            serde_json::from_value::<WorkerProvideInputRequest>(unknown_field).is_err(),
+            "the request must remain strict"
+        );
     }
 }

@@ -401,6 +401,7 @@ mod tests {
             max_output_tokens: Some(128),
             temperature: None,
             response_format: None,
+            native_web_search: Default::default(),
             metadata: Default::default(),
         };
         let second = CompletionRequest {

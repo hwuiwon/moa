@@ -2,6 +2,7 @@
 
 use super::state::{ClaimedHistoryEntry, MAX_CLEANUP_RELEASE_ATTEMPTS, WorkerHistoryEntry};
 use super::*;
+use crate::handlers::authz_shim::{authorize_session_participant, require_identity};
 use crate::objects::session::SessionClient;
 use crate::services::tool_executor::{ReleaseWorkerHandsRequest, ToolExecutorClient};
 use crate::workflows::worker_turn_execution::WorkerTurnExecutionClient;
@@ -15,6 +16,7 @@ impl Worker for WorkerImpl {
         mut ctx: ObjectContext<'_>,
         msg: Json<WorkerMessage>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "post_message");
         let message = msg.into_inner();
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
@@ -27,7 +29,10 @@ impl Worker for WorkerImpl {
                 input_request_id,
                 text,
             } => {
-                if let Some(awakeable_id) = state.take_input_awakeable(input_request_id) {
+                let reply = serde_json::Value::String(text.clone());
+                let (acknowledgement, awakeable_id) =
+                    state.apply_input_reply(input_request_id, &reply)?;
+                if let Some(awakeable_id) = awakeable_id {
                     ctx.resolve_awakeable(&awakeable_id, text.clone());
                     state.persist(&ctx);
                     tracing::info!(
@@ -35,7 +40,7 @@ impl Worker for WorkerImpl {
                         input_request_id = %input_request_id,
                         "resolved worker input request awakeable"
                     );
-                } else {
+                } else if acknowledgement == UserReplyDeliveryAck::Conflict {
                     tracing::debug!(
                         key = %ctx.key(),
                         input_request_id = %input_request_id,
@@ -86,11 +91,39 @@ impl Worker for WorkerImpl {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self, ctx, input))]
+    async fn provide_input(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<WorkerProvideInputRequest>,
+    ) -> Result<Json<UserReplyDeliveryAck>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Worker", "provide_input");
+        let input = input.into_inner();
+        require_identity(&ctx)?;
+        authorize_session_participant(&ctx, input.parent_session).await?;
+        let text = input
+            .input
+            .as_str()
+            .ok_or_else(|| TerminalError::new_with_code(422, "worker input must be a string"))?
+            .to_string();
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
+        state.ensure_parent_session_scope(input.parent_session)?;
+        let (acknowledgement, awakeable_id) =
+            state.apply_input_reply(&input.input_request_id, &input.input)?;
+        if let Some(awakeable_id) = awakeable_id {
+            ctx.resolve_awakeable(&awakeable_id, text);
+            state.persist(&ctx);
+        }
+        Ok(Json::from(acknowledgement))
+    }
+
     #[tracing::instrument(skip(self, ctx))]
     async fn status(
         &self,
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<WorkerStatus>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "status");
         Ok(Json::from(WorkerVoState::load_status_view(&ctx).await?))
     }
@@ -103,6 +136,7 @@ impl Worker for WorkerImpl {
         &self,
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<WorkerProgressSummary>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "progress_summary");
         let now = ctx
             .run(|| async { Ok::<_, HandlerError>(Json::from(Utc::now())) })
@@ -129,6 +163,7 @@ impl Worker for WorkerImpl {
         ctx: ObjectContext<'_>,
         at: Json<DateTime<Utc>>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "record_heartbeat");
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         state.last_heartbeat_at = Some(at.into_inner());
@@ -141,6 +176,7 @@ impl Worker for WorkerImpl {
         &self,
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<Option<WorkerResult>>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "result");
         let result = WorkerVoState::load_terminal_result(&ctx, ctx.key().to_string()).await?;
         Ok(Json::from(result))
@@ -148,6 +184,7 @@ impl Worker for WorkerImpl {
 
     #[tracing::instrument(skip(self, ctx, reason))]
     async fn cancel(&self, ctx: ObjectContext<'_>, reason: String) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "cancel");
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         let active_turn_id = state.active_turn_id.clone();
@@ -162,14 +199,18 @@ impl Worker for WorkerImpl {
         state.persist(&ctx);
 
         if let Some(turn_id) = active_turn_id {
-            ctx.workflow_client::<WorkerTurnExecutionClient>(turn_id)
-                .request_cancel(Json::from(reason.clone()))
-                .send();
+            crate::restate_identity::replay_safe_request(
+                ctx.workflow_client::<WorkerTurnExecutionClient>(turn_id)
+                    .request_cancel(Json::from(reason.clone())),
+            )
+            .send();
         }
         for child in children {
-            ctx.object_client::<WorkerClient>(child.id)
-                .cancel(reason.clone())
-                .send();
+            crate::restate_identity::replay_safe_request(
+                ctx.object_client::<WorkerClient>(child.id)
+                    .cancel(reason.clone()),
+            )
+            .send();
         }
         tracing::info!(key = %ctx.key(), %reason, "worker cancel requested");
         Ok(())
@@ -180,6 +221,7 @@ impl Worker for WorkerImpl {
         &self,
         mut ctx: ObjectContext<'_>,
     ) -> Result<Json<WorkerTurnPreparation>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "prepare_turn");
         Ok(Json::from(
             prepare_turn_inner(
@@ -198,6 +240,7 @@ impl Worker for WorkerImpl {
         ctx: ObjectContext<'_>,
         response: Json<WorkerTurnResponseRecord>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "record_response");
         let record = response.into_inner();
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
@@ -227,12 +270,14 @@ impl Worker for WorkerImpl {
         if let Some(parent_session) = parent_session
             && token_cost > 0
         {
-            ctx.service_client::<RestateSessionStoreClient>()
-                .record_segment_turn_usage(Json(RecordSegmentTurnUsageRequest {
-                    session_id: parent_session,
-                    token_cost,
-                }))
-                .send();
+            crate::restate_identity::replay_safe_request(
+                ctx.service_client::<RestateSessionStoreClient>()
+                    .record_segment_turn_usage(Json(RecordSegmentTurnUsageRequest {
+                        session_id: parent_session,
+                        token_cost,
+                    })),
+            )
+            .send();
         }
         Ok(())
     }
@@ -243,6 +288,7 @@ impl Worker for WorkerImpl {
         ctx: ObjectContext<'_>,
         record: Json<WorkerToolRecord>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "record_tool_result");
         record_tool_result_inner(
             &ctx,
@@ -259,6 +305,7 @@ impl Worker for WorkerImpl {
         ctx: ObjectContext<'_>,
         record: Json<WorkerToolRecord>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "record_denied_tool");
         record_tool_result_inner(
             &ctx,
@@ -275,6 +322,7 @@ impl Worker for WorkerImpl {
         ctx: ObjectContext<'_>,
         outcome: Json<WorkerTurnOutcomeRecord>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "apply_turn_outcome");
         let record = outcome.into_inner();
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
@@ -304,6 +352,7 @@ impl Worker for WorkerImpl {
         ctx: ObjectContext<'_>,
         input: Json<AttachWorkerResultWaiterInput>,
     ) -> Result<Json<AttachWorkerResultWaiterOutput>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "attach_result_waiter");
         let input = input.into_inner();
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
@@ -326,6 +375,7 @@ impl Worker for WorkerImpl {
         ctx: ObjectContext<'_>,
         input: Json<RemoveWorkerResultWaiterInput>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "remove_result_waiter");
         let input = input.into_inner();
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
@@ -344,6 +394,7 @@ impl Worker for WorkerImpl {
         ctx: ObjectContext<'_>,
         input: Json<WorkerPendingInput>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "register_input_request");
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         if state.register_input_request(input.into_inner()) {
@@ -361,6 +412,7 @@ impl Worker for WorkerImpl {
         ctx: ObjectContext<'_>,
         input_request_id: Json<String>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "clear_input_request");
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         if state
@@ -378,6 +430,7 @@ impl Worker for WorkerImpl {
         mut ctx: ObjectContext<'_>,
         outcome: Json<moa_core::wire::turn::TurnOutcome>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "record_turn_outcome");
         let outcome = outcome.into_inner();
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
@@ -416,6 +469,7 @@ impl Worker for WorkerImpl {
 
     #[tracing::instrument(skip(self, ctx))]
     async fn destroy(&self, ctx: ObjectContext<'_>) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "destroy");
         ctx.clear_all();
         tracing::info!(key = %ctx.key(), "worker VO state cleared");
@@ -433,6 +487,7 @@ impl Worker for WorkerImpl {
         ctx: ObjectContext<'_>,
         req: Json<CleanupRequest>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "cleanup");
         let req = req.into_inner();
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
@@ -564,11 +619,12 @@ async fn release_and_clear_worker(
     // delegated to the ToolExecutor service that owns the router and awaited before
     // clearing state.
     if let Some(request) = release_worker_hands_request(state.parent_session, &worker_id)
-        && let Err(error) = ctx
-            .service_client::<ToolExecutorClient>()
-            .release_worker_hands(Json::from(request))
-            .call()
-            .await
+        && let Err(error) = crate::restate_identity::replay_safe_request(
+            ctx.service_client::<ToolExecutorClient>()
+                .release_worker_hands(Json::from(request)),
+        )
+        .call()
+        .await
     {
         tracing::warn!(
             key = %worker_id,
@@ -580,9 +636,11 @@ async fn release_and_clear_worker(
 
     // Remove from the root parent fan-out via the existing removal handler (detached).
     if let Some(parent_session) = state.parent_session {
-        ctx.object_client::<SessionClient>(parent_session.to_string())
-            .remove_child(worker_id.clone())
-            .send();
+        crate::restate_identity::replay_safe_request(
+            ctx.object_client::<SessionClient>(parent_session.to_string())
+                .remove_child(worker_id.clone()),
+        )
+        .send();
     }
 
     // Clear all VO state (reuse `destroy` semantics). The parent keeps the cached
@@ -907,14 +965,16 @@ fn start_worker_turn_execution(
     max_turns: Option<u32>,
     trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
 ) {
-    ctx.workflow_client::<WorkerTurnExecutionClient>(turn_id.clone())
-        .run(Json::from(RunWorkerTurnRequest {
-            worker_id: ctx.key().to_string(),
-            turn_id,
-            max_turns,
-            trusted_sandbox_manifest,
-        }))
-        .send();
+    crate::restate_identity::replay_safe_request(
+        ctx.workflow_client::<WorkerTurnExecutionClient>(turn_id.clone())
+            .run(Json::from(RunWorkerTurnRequest {
+                worker_id: ctx.key().to_string(),
+                turn_id,
+                max_turns,
+                trusted_sandbox_manifest,
+            })),
+    )
+    .send();
 }
 
 async fn maybe_resolve_parent_awakeable(
@@ -1059,21 +1119,23 @@ async fn emit_terminal_idle_wake(
     } else {
         (ChildSignalKind::Finding, SignalSeverity::Info)
     };
-    ctx.object_client::<SessionClient>(parent_session.to_string())
-        .record_child_signal(Json::from(WorkerSignal {
-            signal_id,
-            worker_id: worker_id.to_string(),
-            parent_session,
-            kind,
-            severity,
-            summary,
-            payload: serde_json::Value::Null,
-            created_at,
-            resume_policy: ParentResumePolicy::IfIdle,
-            input_request_id: None,
-            input_audience: None,
-        }))
-        .send();
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<SessionClient>(parent_session.to_string())
+            .record_child_signal(Json::from(WorkerSignal {
+                signal_id,
+                worker_id: worker_id.to_string(),
+                parent_session,
+                kind,
+                severity,
+                summary,
+                payload: serde_json::Value::Null,
+                created_at,
+                resume_policy: ParentResumePolicy::IfIdle,
+                input_request_id: None,
+                input_audience: None,
+            })),
+    )
+    .send();
     Ok(())
 }
 
@@ -1087,10 +1149,12 @@ async fn cache_parent_terminal_result(
         terminal,
     };
     if let Some(parent_session) = state.parent_session {
-        ctx.object_client::<SessionClient>(parent_session.to_string())
-            .mark_child_terminal(Json::from(input))
-            .call()
-            .await?;
+        crate::restate_identity::replay_safe_request(
+            ctx.object_client::<SessionClient>(parent_session.to_string())
+                .mark_child_terminal(Json::from(input)),
+        )
+        .call()
+        .await?;
     }
     Ok(())
 }

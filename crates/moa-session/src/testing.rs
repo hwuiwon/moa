@@ -3,43 +3,36 @@
 //! Isolated test databases are provisioned by cloning a single, cached
 //! *template* database (`CREATE DATABASE ... TEMPLATE`) rather than replaying the
 //! full migration set into a fresh schema for every test. The template is built
-//! once per cluster (guarded across processes by an advisory lock and within a
-//! process by a [`OnceCell`]) and keyed by a fingerprint of the session
-//! migrations so it rebuilds automatically when those migrations change. Each
-//! test then gets its own physical database cloned from the template — a fast
-//! block copy that preserves full isolation and identical RLS semantics — and
-//! drops that database on cleanup.
+//! once per cluster under an advisory lock and keyed by the complete embedded
+//! refinery migration fingerprint. Each test then gets its own physical database
+//! cloned from the template — a fast block copy that preserves full isolation
+//! and identical RLS semantics — and drops that database on cleanup.
 
 use std::time::Duration;
 
 use moa_core::{error::MoaError, error::Result};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgConnection, PgPool};
-use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use crate::PostgresSessionStore;
 
 const DEFAULT_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
 
-/// Schema name that holds the session tables inside every cloned test database.
+/// Schema name that holds runtime tables inside every cloned test database.
 ///
-/// Each test owns its own physical database, so a fixed schema name is safe and
-/// keeps the value returned by `schema_name()` stable for callers that qualify
-/// table references with it.
-const TEMPLATE_SCHEMA: &str = "moa_test";
+/// Each test owns its own physical database, so the canonical production schema
+/// is isolated without replaying migrations into a synthetic schema.
+const TEMPLATE_SCHEMA: &str = "public";
 
 /// Bumped whenever the template build recipe in [`build_template_contents`]
 /// changes (extra schemas, role grants) without a corresponding migration-SQL
 /// change. Folded into the template name so cached templates rebuild.
-const TEMPLATE_RECIPE_VERSION: u32 = 3;
+const TEMPLATE_RECIPE_VERSION: u32 = 4;
 
 /// Advisory lock that serializes one-time template-database construction across
 /// parallel test processes.
 const TEMPLATE_BUILD_LOCK_ID: i64 = 0x4d4f_415f_5450_4c54;
-
-/// Per-process guard so the template is built or validated at most once.
-static TEMPLATE: OnceCell<String> = OnceCell::const_new();
 
 /// Returns the Postgres URL used by Postgres-backed tests.
 ///
@@ -66,10 +59,18 @@ pub async fn create_isolated_test_store() -> Result<(PostgresSessionStore, Strin
 ///
 /// Returns the per-test database URL and the schema name holding session tables.
 pub async fn provision_cloned_database() -> Result<(String, String)> {
-    let template_name = ensure_template().await?;
     let maintenance_url = test_database_url();
+    provision_cloned_database_from(&maintenance_url).await
+}
+
+/// Provisions a fresh per-test database from an explicit maintenance database.
+///
+/// The maintenance URL must identify a database on the target Postgres cluster
+/// whose user can create and drop databases.
+pub async fn provision_cloned_database_from(maintenance_url: &str) -> Result<(String, String)> {
+    let template_name = ensure_template(maintenance_url).await?;
     let db_name = format!("moa_test_{}", Uuid::now_v7().simple());
-    let mut admin = connect_maintenance(&maintenance_url).await?;
+    let mut admin = connect_maintenance(maintenance_url).await?;
 
     let statement = format!(
         "CREATE DATABASE {} TEMPLATE {}",
@@ -93,24 +94,21 @@ pub async fn provision_cloned_database() -> Result<(String, String)> {
         ))
     })?;
 
-    let url = with_database(&maintenance_url, &db_name)?;
+    let url = with_database(maintenance_url, &db_name)?;
     Ok((url, TEMPLATE_SCHEMA.to_string()))
 }
 
 /// Drops the isolated per-test database backing `database_url`.
 ///
-/// `schema_name` is accepted for backwards compatibility; with database-per-test
-/// isolation the whole database is dropped. The maintenance database and any
-/// shared template database are never dropped.
+/// With database-per-test isolation the whole database is dropped. The
+/// maintenance database and any shared template database are never dropped.
 pub async fn cleanup_test_schema(database_url: &str, _schema_name: &str) -> Result<()> {
     let (_, db_name, _) = split_database_url(database_url)?;
-    let maintenance_url = test_database_url();
-    let (_, maintenance_db, _) = split_database_url(&maintenance_url)?;
-
-    if db_name == maintenance_db || db_name == "postgres" || db_name.contains("template") {
+    if !db_name.starts_with("moa_test_") || db_name.contains("template") {
         return Ok(());
     }
 
+    let maintenance_url = with_database(database_url, "postgres")?;
     let mut admin = connect_maintenance(&maintenance_url).await?;
     let statement = format!(
         "DROP DATABASE IF EXISTS {} WITH (FORCE)",
@@ -158,8 +156,12 @@ fn clone_name_is_sweepable(db_name: &str, now_unix_secs: u64) -> bool {
 /// race a concurrent test that created its database but has not connected yet).
 pub async fn drop_orphaned_test_databases() -> Result<u64> {
     let maintenance_url = test_database_url();
-    let (_, maintenance_db, _) = split_database_url(&maintenance_url)?;
-    let mut admin = connect_maintenance(&maintenance_url).await?;
+    drop_orphaned_test_databases_from(&maintenance_url).await
+}
+
+async fn drop_orphaned_test_databases_from(maintenance_url: &str) -> Result<u64> {
+    let (_, maintenance_db, _) = split_database_url(maintenance_url)?;
+    let mut admin = connect_maintenance(maintenance_url).await?;
 
     let candidates: Vec<String> = sqlx::query_scalar(
         "SELECT d.datname FROM pg_database d
@@ -232,17 +234,16 @@ async fn drop_stale_templates(conn: &mut sqlx::PgConnection, keep: &str) {
 }
 
 /// Returns the cached template database name, building it if necessary.
-async fn ensure_template() -> Result<String> {
-    let name = TEMPLATE.get_or_try_init(build_template).await?;
-    Ok(name.clone())
+async fn ensure_template(maintenance_url: &str) -> Result<String> {
+    build_template(maintenance_url).await
 }
 
 /// Builds (or validates) the migration template database, returning its name.
-async fn build_template() -> Result<String> {
+async fn build_template(maintenance_url: &str) -> Result<String> {
     // Best-effort, once per process: reclaim clone databases leaked by prior
     // runs (e.g. tests that panicked before cleanup) so disk does not fill. Only
     // clones with no live connection are dropped, so in-flight tests are safe.
-    match drop_orphaned_test_databases().await {
+    match drop_orphaned_test_databases_from(maintenance_url).await {
         Ok(dropped) if dropped > 0 => {
             tracing::info!(dropped, "reclaimed orphaned test clone databases");
         }
@@ -250,17 +251,16 @@ async fn build_template() -> Result<String> {
         Err(error) => tracing::warn!(?error, "failed to sweep orphaned test databases"),
     }
 
-    let fingerprint = moa_migrations::session_schema_fingerprint();
+    let fingerprint = moa_migrations::full_database_template_fingerprint();
     let template_name = format!("moa_test_template_{fingerprint}_r{TEMPLATE_RECIPE_VERSION}");
-    let maintenance_url = test_database_url();
-    let mut conn = connect_maintenance(&maintenance_url).await?;
+    let mut conn = connect_maintenance(maintenance_url).await?;
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(TEMPLATE_BUILD_LOCK_ID)
         .execute(&mut conn)
         .await
         .map_err(|error| MoaError::StorageError(format!("acquire template build lock: {error}")))?;
 
-    let result = build_template_locked(&mut conn, &maintenance_url, &template_name).await;
+    let result = build_template_locked(&mut conn, maintenance_url, &template_name).await;
 
     let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(TEMPLATE_BUILD_LOCK_ID)
@@ -343,6 +343,9 @@ async fn build_template_locked(
 /// renamed.
 async fn build_staging_schema(maintenance_url: &str, staging: &str) -> Result<()> {
     let staging_url = with_database(maintenance_url, staging)?;
+    moa_migrations::run(&staging_url).await.map_err(|error| {
+        MoaError::StorageError(format!("migrate template staging database: {error:#}"))
+    })?;
     let build_pool = PgPoolOptions::new()
         .min_connections(1)
         .max_connections(4)
@@ -359,22 +362,9 @@ async fn build_staging_schema(maintenance_url: &str, staging: &str) -> Result<()
 
 /// Materializes the full schema surface every cloned test database needs.
 ///
-/// Runs the session baseline, the OCSF security-event schema (the edge audit
-/// path writes `security_events` on every authenticated request), the standalone
-/// lineage/analytics schema, and the `moa_app` role grants the runtime expects,
-/// so a clone behaves like the shared development database the old
-/// schema-per-test harness ran against.
+/// Ensures the standalone lineage schema and the runtime grants that sit outside
+/// the canonical refinery migration sequence.
 async fn build_template_contents(pool: &PgPool) -> Result<()> {
-    moa_migrations::run_session_schema(pool, TEMPLATE_SCHEMA)
-        .await
-        .map_err(|error| {
-            MoaError::StorageError(format!("build template session schema: {error:#}"))
-        })?;
-    moa_migrations::run_ocsf_schema(pool, TEMPLATE_SCHEMA)
-        .await
-        .map_err(|error| {
-            MoaError::StorageError(format!("build template ocsf schema: {error:#}"))
-        })?;
     moa_migrations::ensure_lineage_schema(pool)
         .await
         .map_err(|error| {
@@ -386,12 +376,8 @@ async fn build_template_contents(pool: &PgPool) -> Result<()> {
 /// Grants the `moa_app` test role the privileges the runtime expects on the
 /// template's schemas.
 ///
-/// `run_session_schema` only grants `moa_app` table privileges on RLS-managed
-/// tables; it never grants schema `USAGE` on the session or `analytics` schemas,
-/// nor `SELECT` on the analytics views the edge analytics store reads through a
-/// `moa_app`-scoped connection. The old schema-per-test harness inherited those
-/// grants from the shared development database; clones are isolated, so the
-/// template must reproduce them. Row visibility is still governed by RLS.
+/// The central migrations grant protected base-table privileges but do not grant
+/// `SELECT` on every analytics view materialized for test readers.
 async fn apply_template_grants(pool: &PgPool, schema: &str) -> Result<()> {
     let schema_ident = quote_identifier(schema);
     let schema_literal = quote_literal(schema);
@@ -503,11 +489,98 @@ fn quote_literal(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_DATABASE_URL, ORPHAN_CLONE_MIN_AGE, clone_name_is_sweepable,
-        maintenance_connection_error, split_database_url, with_database,
+        DEFAULT_DATABASE_URL, ORPHAN_CLONE_MIN_AGE, cleanup_test_schema, clone_name_is_sweepable,
+        maintenance_connection_error, provision_cloned_database_from, split_database_url,
+        test_database_url, with_database,
     };
     use moa_core::error::MoaError;
+    use sqlx::postgres::PgPoolOptions;
     use uuid::{NoContext, Timestamp, Uuid};
+
+    #[tokio::test]
+    #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+    async fn cloned_databases_are_independent_and_use_public_schema_db() {
+        // Pins: the explicit-maintenance helper clones the complete canonical
+        // template into separate physical databases whose public schemas,
+        // refinery history, and standalone lineage DDL are independent.
+        let maintenance_url = test_database_url();
+        let (first_url, first_schema) = provision_cloned_database_from(&maintenance_url)
+            .await
+            .expect("provision first clone");
+        let (second_url, second_schema) =
+            match provision_cloned_database_from(&maintenance_url).await {
+                Ok(clone) => clone,
+                Err(error) => {
+                    let _ = cleanup_test_schema(&first_url, &first_schema).await;
+                    panic!("provision second clone: {error}");
+                }
+            };
+
+        let outcome = async {
+            let first = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&first_url)
+                .await?;
+            let second = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&second_url)
+                .await?;
+
+            let first_cutovers: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM refinery_schema_history WHERE version IN (336, 337)",
+            )
+            .fetch_one(&first)
+            .await?;
+            let second_cutovers: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM refinery_schema_history WHERE version IN (336, 337)",
+            )
+            .fetch_one(&second)
+            .await?;
+            let first_lineage: bool =
+                sqlx::query_scalar("SELECT to_regclass('analytics.turn_lineage') IS NOT NULL")
+                    .fetch_one(&first)
+                    .await?;
+            let second_lineage: bool =
+                sqlx::query_scalar("SELECT to_regclass('analytics.turn_lineage') IS NOT NULL")
+                    .fetch_one(&second)
+                    .await?;
+
+            sqlx::query("CREATE TABLE public.clone_independence_probe (id INTEGER PRIMARY KEY)")
+                .execute(&first)
+                .await?;
+            let leaked_to_second: bool = sqlx::query_scalar(
+                "SELECT to_regclass('public.clone_independence_probe') IS NOT NULL",
+            )
+            .fetch_one(&second)
+            .await?;
+
+            first.close().await;
+            second.close().await;
+            Ok::<_, sqlx::Error>((
+                first_cutovers,
+                second_cutovers,
+                first_lineage,
+                second_lineage,
+                leaked_to_second,
+            ))
+        }
+        .await;
+
+        let first_cleanup = cleanup_test_schema(&first_url, &first_schema).await;
+        let second_cleanup = cleanup_test_schema(&second_url, &second_schema).await;
+        let (first_cutovers, second_cutovers, first_lineage, second_lineage, leaked_to_second) =
+            outcome.expect("inspect cloned databases");
+        first_cleanup.expect("cleanup first clone");
+        second_cleanup.expect("cleanup second clone");
+
+        assert_eq!(first_schema, "public");
+        assert_eq!(second_schema, "public");
+        assert_eq!(first_cutovers, 2);
+        assert_eq!(second_cutovers, 2);
+        assert!(first_lineage);
+        assert!(second_lineage);
+        assert!(!leaked_to_second);
+    }
 
     #[test]
     fn orphan_sweep_skips_recent_clone_names() {

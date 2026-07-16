@@ -54,6 +54,9 @@ impl IngestionVO for IngestionVOImpl {
         ctx: ObjectContext<'_>,
         turn: Json<SessionTurn>,
     ) -> Result<Json<IngestApplyReport>, HandlerError> {
+        moa_observability::adopt_remote_parent(&tracing::Span::current(), |name| {
+            ctx.headers().get(name).cloned()
+        });
         let turn = turn.into_inner();
         let done_key = done_key(turn.turn_seq);
         if ctx

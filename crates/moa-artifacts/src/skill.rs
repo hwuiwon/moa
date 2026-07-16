@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{document::empty_object, procedure::ProcedureDefinition, reference::ArtifactRef};
+use crate::{
+    document::empty_object, execution_plan::ExecutionPlanTemplate, reference::ArtifactRef,
+};
 
 /// Location of the instruction body used for a skill.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -23,6 +25,7 @@ impl Default for SkillInstructionSource {
 
 /// Canonical reusable skill definition.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SkillDefinition {
     /// Instruction source, normally `SKILL.md`.
     #[serde(default)]
@@ -42,14 +45,13 @@ pub struct SkillDefinition {
     /// Built-in or MCP tools the skill may use.
     #[serde(default)]
     pub allowed_tools: Vec<String>,
-    /// Optional deterministic graph execution plan for this skill.
+    /// Optional reusable execution-plan template for this skill.
     ///
-    /// A procedure is the skill's optional deterministic graph: when present it
-    /// describes an ordered node/edge plan the procedure interpreter runs
-    /// step by step. Skills without a procedure are purely agent-mediated and
-    /// rely on the autonomous agent loop instead of a fixed graph.
+    /// Instruction-only skills remain valid. When present, this plan uses the
+    /// canonical v1 execution DSL and is compiled into an immutable run
+    /// snapshot before execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub procedure: Option<ProcedureDefinition>,
+    pub execution_plan: Option<ExecutionPlanTemplate>,
     /// Builder-owned UI metadata.
     #[serde(default = "empty_object")]
     pub ui: Value,

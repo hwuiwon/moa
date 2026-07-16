@@ -1,4 +1,4 @@
-//! End-to-end coverage for artifact-backed skills and procedures through Restate.
+//! End-to-end coverage for artifact-backed skills through Restate.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -11,15 +11,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
-use moa_artifacts::validation::validate_for_status;
+use moa_artifacts::reference::ArtifactRef;
+use moa_artifacts::skill::SkillActionKind;
 use moa_core::traits::Identity;
-use moa_core::wire::artifacts::{
-    ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
-};
-use moa_core::wire::procedures::{
-    ProcedureRunRequest, ProcedureRunResponse, ProcedureRunStatus, ProcedureStatusRequest,
-};
 use moa_core::wire::skills::{
     SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
 };
@@ -28,6 +22,7 @@ use moa_core::{
     types::events_stream::EventRecord, types::identifiers::ModelId, types::identifiers::SessionId,
     types::identifiers::StoragePartitionId, types::session::SessionStatus,
 };
+use moa_skills::artifact::skill_definition_from_package;
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::test_database_url;
@@ -50,23 +45,9 @@ const REFUND_SKILL_PATH: &str = ".moa/skills/refund-triage/SKILL.md";
 const REFUND_SKILL_PROVIDER_ID: &str = "read_refund_triage_skill";
 
 #[test]
-fn damaged_food_procedure_fixture_is_publishable() -> Result<()> {
-    // Pins: the e2e procedure fixture remains a valid publishable procedure artifact.
-    let document = ArtifactDocument::from_yaml(damaged_food_procedure_source())
-        .context("parse damaged food procedure fixture")?;
-    let report = validate_for_status(&document, ArtifactStatus::Published);
-
-    assert!(
-        report.is_ok(),
-        "procedure fixture should publish cleanly: {report:?}"
-    );
-    assert_eq!(document.metadata.name, "damaged-food-replacement");
-    Ok(())
-}
-
-#[test]
-fn refund_skill_fixture_exposes_linkable_action_metadata() -> Result<()> {
-    // Pins: the e2e skill fixture keeps UI-authored actions available to skill selection.
+fn refund_skill_fixture_is_instruction_action_skill_without_execution_plan() -> Result<()> {
+    // Pins: an imported skill may combine instructions and a governed action without requiring
+    // an execution-plan template.
     let document = refund_skill_package();
     let mut files = Vec::new();
     for file in document.files {
@@ -81,11 +62,20 @@ fn refund_skill_fixture_exposes_linkable_action_metadata() -> Result<()> {
         files.push(package_file);
     }
     let package = SkillPackage::new(files).validate()?;
+    let definition = skill_definition_from_package(&package)?;
 
     assert_eq!(package.name, "refund-triage");
-    assert_eq!(package.manifest.actions.len(), 1);
-    assert_eq!(package.manifest.actions[0].id, "classify_refund");
+    assert_eq!(definition.instructions.path, "SKILL.md");
+    assert_eq!(definition.actions.len(), 1);
+    assert_eq!(definition.actions[0].id, "classify_refund");
+    assert_eq!(definition.actions[0].kind, SkillActionKind::ConnectorAction);
+    assert_eq!(
+        definition.actions[0].artifact_ref,
+        Some(ArtifactRef::action("orders", "classify_refund"))
+    );
     assert_eq!(package.manifest.allowed_tools, vec!["file_read"]);
+    assert_eq!(definition.allowed_tools, vec!["file_read"]);
+    assert!(definition.execution_plan.is_none());
     Ok(())
 }
 
@@ -135,7 +125,9 @@ fn spawn_orchestrator(
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn support_agent_selects_refund_skill_from_customer_message() -> Result<()> {
+async fn support_agent_selects_refund_skill_without_starting_execution_run() -> Result<()> {
+    // Pins: selecting a custom instruction/action skill in Act materializes its instructions but
+    // does not implicitly start a detached execution run.
     let _guard = RESTATE_E2E_LOCK.lock().await;
     if !cfg!(feature = "provider-overrides") {
         return Ok(());
@@ -182,213 +174,20 @@ async fn support_agent_selects_refund_skill_from_customer_message() -> Result<()
             wait_for_brain_response_text(&client, ingress, &identity, session_id, final_text)
                 .await?;
         wait_for_status(&client, ingress, &identity, session_id, SessionStatus::Paused).await?;
-        assert!(
-            saw_successful_skill_file_read(&events),
-            "expected the agent loop to read the selected refund skill package; observed events: {}",
+        assert_eq!(
+            skill_file_read_counts(&events),
+            (1, 1),
+            "expected exactly one call and one successful result for the selected refund skill package; observed events: {}",
             detailed_event_summary(&events)
         );
-        assert!(
-            !saw_procedure_tool_call(&events),
-            "skill-only support conversation should not invoke a procedure tool"
-        );
-
-        Ok(())
-    }
-    .await;
-
-    let _ = orchestrator.kill();
-    let _ = orchestrator.wait();
-
-    result
-}
-
-#[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
-async fn damaged_food_procedure_run_starts_from_published_artifact() -> Result<()> {
-    let _guard = RESTATE_E2E_LOCK.lock().await;
-
-    let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
-    let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
-    let fixture_path = memory_dir.path().join("damaged-food-procedure-script.json");
-    write_scripted_text_fixture(
-        &fixture_path,
-        "I checked the damaged food report and queued it for approval.",
-    )?;
-
-    let ports = reserve_orchestrator_ports()?;
-    let endpoint_url = deployment_endpoint_url(ports.restate);
-    let ingress = restate_ingress_url();
-    let ingress = ingress.as_str();
-    let client = reqwest::Client::new();
-    let mut identity = test_user_identity();
-    let mut meta = test_session_meta(&format!("agent-artifacts-procedure-{}", Uuid::now_v7()));
-    meta.model = ModelId::new("scripted-loadtest");
-    let storage_partition_id = storage_partition_id_from_meta(&meta);
-    identity.tenant_id = meta.tenant_id;
-    grant_tenant_admin(&identity, &storage_partition_id).await?;
-    let orchestrator_log = memory_dir.path().join("orchestrator.log");
-    let mut orchestrator = spawn_orchestrator(
-        ports,
-        &memory_dir,
-        &sandbox_dir,
-        Some(&fixture_path),
-        &orchestrator_log,
-    )?;
-
-    let result = async {
-        wait_for_orchestrator_live(&client, ports.health, &mut orchestrator, &orchestrator_log)
-            .await?;
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_and_publish_damaged_food_procedure(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-        )
-        .await?;
-        let session_id = create_session(&client, ingress, &identity, &meta).await?;
-
-        let response = start_damaged_food_procedure(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-            Some(session_id),
-            "ORD-4821",
-        )
-        .await?;
-        assert_eq!(response.status, "queued");
-
-        let status = wait_for_procedure_status(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-            response.run_id,
-            "pending_review",
-        )
-        .await?;
-        assert_eq!(status.session_id, Some(session_id));
-        assert_eq!(status.current_node_id.as_deref(), Some("review_resolution"));
         assert_eq!(
-            node_ids(&status),
-            vec![
-                "start",
-                "verify_evidence",
-                "choose_resolution",
-                "review_resolution"
-            ]
+            events
+                .iter()
+                .filter(|record| matches!(&record.event, Event::ExecutionRunStarted(_)))
+                .count(),
+            0,
+            "skill selection alone must not start an execution run"
         );
-        assert_eq!(status.node_runs[3].status, "pending_review");
-        assert!(
-            status.error.is_none(),
-            "procedure should pause cleanly: {status:?}"
-        );
-
-        Ok(())
-    }
-    .await;
-
-    let _ = orchestrator.kill();
-    let _ = orchestrator.wait();
-
-    result
-}
-
-#[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn procedure_association_and_skill_selection_share_one_support_session() -> Result<()> {
-    let _guard = RESTATE_E2E_LOCK.lock().await;
-    if !cfg!(feature = "provider-overrides") {
-        return Ok(());
-    }
-
-    let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
-    let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
-    let fixture_path = memory_dir.path().join("mixed-procedure-skill-script.json");
-    let final_text = "I used the refund triage runbook and kept the damaged-food procedure attached to this session for tracking.";
-    write_skill_file_read_fixture(&fixture_path, final_text)?;
-
-    let ports = reserve_orchestrator_ports()?;
-    let endpoint_url = deployment_endpoint_url(ports.restate);
-    let ingress = restate_ingress_url();
-    let ingress = ingress.as_str();
-    let client = reqwest::Client::new();
-    let mut identity = test_user_identity();
-    let mut meta = test_session_meta(&format!("agent-artifacts-mixed-{}", Uuid::now_v7()));
-    meta.model = ModelId::new("scripted-loadtest");
-    let storage_partition_id = storage_partition_id_from_meta(&meta);
-    identity.tenant_id = meta.tenant_id;
-    grant_tenant_admin(&identity, &storage_partition_id).await?;
-    let orchestrator_log = memory_dir.path().join("orchestrator.log");
-    let mut orchestrator = spawn_orchestrator(
-        ports,
-        &memory_dir,
-        &sandbox_dir,
-        Some(&fixture_path),
-        &orchestrator_log,
-    )?;
-
-    let result = async {
-        wait_for_orchestrator_live(&client, ports.health, &mut orchestrator, &orchestrator_log)
-            .await?;
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_refund_skill(&client, ingress, &identity, &storage_partition_id).await?;
-        import_and_publish_damaged_food_procedure(&client, ingress, &identity, &storage_partition_id)
-            .await?;
-        let session_id = create_session(&client, ingress, &identity, &meta).await?;
-
-        let prompt = "Use our refund triage guidance while tracking the damaged-food procedure \
-            for order ORD-7002. The customer says sauce leaked through the bag and wants a credit.";
-        post_user_message(&client, ingress, &identity, session_id, prompt).await?;
-
-        let events =
-            wait_for_brain_response_text(&client, ingress, &identity, session_id, final_text)
-                .await?;
-        wait_for_status(&client, ingress, &identity, session_id, SessionStatus::Paused).await?;
-        assert!(
-            saw_successful_skill_file_read(&events),
-            "mixed session should still materialize and read the selected refund skill; observed events: {}",
-            detailed_event_summary(&events)
-        );
-        assert!(
-            !saw_procedure_tool_call(&events),
-            "procedure association should not make the agent loop invent procedure tool calls"
-        );
-
-        let procedure_run = start_damaged_food_procedure(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-            Some(session_id),
-            "ORD-7002",
-        )
-        .await?;
-        assert_eq!(procedure_run.status, "queued");
-
-        let status = wait_for_procedure_status(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-            procedure_run.run_id,
-            "pending_review",
-        )
-        .await?;
-        assert_eq!(status.session_id, Some(session_id));
-        assert_eq!(status.current_node_id.as_deref(), Some("review_resolution"));
-        assert_eq!(
-            node_ids(&status),
-            vec![
-                "start",
-                "verify_evidence",
-                "choose_resolution",
-                "review_resolution"
-            ]
-        );
-        assert_eq!(status.node_runs[3].status, "pending_review");
-        assert!(status.error.is_none(), "procedure should pause cleanly: {status:?}");
 
         Ok(())
     }
@@ -419,118 +218,9 @@ async fn import_refund_skill(
     Ok(())
 }
 
-async fn import_and_publish_damaged_food_procedure(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-) -> Result<ArtifactPublishResponse> {
-    let scope = tenant_scope(storage_partition_id)?;
-    let import_request = ArtifactImportRequest {
-        scope,
-        source_format: "yaml".to_string(),
-        source_text: damaged_food_procedure_source().to_string(),
-        files: Vec::new(),
-    };
-    let imported = post_json_with_identity(
-        client,
-        ingress,
-        "Artifacts",
-        "import",
-        identity,
-        &import_request,
-    )
-    .await?
-    .json::<ArtifactImportResponse>()
-    .await
-    .context("deserialize artifact import response")?;
-    assert_eq!(imported.status, "draft");
-
-    let publish_request = ArtifactPublishRequest {
-        scope,
-        revision_uid: imported.revision_uid,
-    };
-    let published = post_json_with_identity(
-        client,
-        ingress,
-        "Artifacts",
-        "publish",
-        identity,
-        &publish_request,
-    )
-    .await?
-    .json::<ArtifactPublishResponse>()
-    .await
-    .context("deserialize artifact publish response")?;
-    assert_eq!(published.status, "published");
-    assert_validation_report_has_no_errors(&published.validation_report)?;
-    Ok(published)
-}
-
 fn tenant_scope(storage_partition_id: &StoragePartitionId) -> Result<ActionRuleScope> {
     let tenant_id = tenant_id_from_storage_partition_id(storage_partition_id);
     Ok(ActionRuleScope::Tenant { tenant_id })
-}
-
-async fn start_damaged_food_procedure(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-    session_id: Option<SessionId>,
-    order_id: &str,
-) -> Result<ProcedureRunResponse> {
-    let request = ProcedureRunRequest {
-        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
-        procedure_ref: "skill://damaged-food-replacement".to_string(),
-        input: json!({
-            "order_id": order_id,
-            "damage_summary": "clear photo shows sauce leaked through the delivery bag",
-            "customer_requested": "refund_or_replacement"
-        }),
-        session_id,
-        idempotency_key: Some(format!("procedure-{order_id}")),
-    };
-    post_json_with_identity(client, ingress, "Skills", "run", identity, &request)
-        .await?
-        .json::<ProcedureRunResponse>()
-        .await
-        .context("deserialize procedure run response")
-}
-
-async fn wait_for_procedure_status(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-    run_id: Uuid,
-    expected: &str,
-) -> Result<ProcedureRunStatus> {
-    let request = ProcedureStatusRequest {
-        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
-        run_id,
-    };
-    let mut last_status = None;
-    for _attempt in 0..60 {
-        let status =
-            post_json_with_identity(client, ingress, "Skills", "status", identity, &request)
-                .await?
-                .json::<ProcedureRunStatus>()
-                .await
-                .context("deserialize procedure status response")?;
-        if status.status == expected {
-            return Ok(status);
-        }
-        if status.status == "failed" {
-            bail!("procedure run failed before reaching {expected}: {status:?}");
-        }
-        last_status = Some(status);
-        sleep(Duration::from_secs(1)).await;
-    }
-
-    bail!(
-        "timed out waiting for procedure run {run_id} to reach {expected}; last status: {last_status:?}"
-    )
 }
 
 async fn wait_for_orchestrator_live(
@@ -752,7 +442,7 @@ fn object_url(ingress: &str, service: &str, object_id: SessionId, handler: &str)
     )
 }
 
-fn saw_successful_skill_file_read(events: &[EventRecord]) -> bool {
+fn skill_file_read_counts(events: &[EventRecord]) -> (usize, usize) {
     let read_tool_ids = events
         .iter()
         .filter_map(|record| match &record.event {
@@ -770,26 +460,21 @@ fn saw_successful_skill_file_read(events: &[EventRecord]) -> bool {
         })
         .collect::<HashSet<_>>();
 
-    events.iter().any(|record| {
-        matches!(
-            &record.event,
-            Event::ToolResult {
-                tool_id,
-                output,
-                success: true,
-                ..
-            } if read_tool_ids.contains(tool_id) && output.to_text().contains("Refund Triage")
-        )
-    })
-}
-
-fn saw_procedure_tool_call(events: &[EventRecord]) -> bool {
-    events.iter().any(|record| {
-        matches!(
-            &record.event,
-            Event::ToolCall { tool_name, .. } if tool_name.contains("procedure")
-        )
-    })
+    let successful_results = events
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::ToolResult {
+                    tool_id,
+                    output,
+                    success: true,
+                    ..
+                } if read_tool_ids.contains(tool_id) && output.to_text().contains("Refund Triage")
+            )
+        })
+        .count();
+    (read_tool_ids.len(), successful_results)
 }
 
 fn summarize_events(events: &[EventRecord]) -> String {
@@ -854,14 +539,6 @@ fn detailed_event_summary(events: &[EventRecord]) -> String {
         .join("; ")
 }
 
-fn node_ids(status: &ProcedureRunStatus) -> Vec<&str> {
-    status
-        .node_runs
-        .iter()
-        .map(|node_run| node_run.node_id.as_str())
-        .collect()
-}
-
 fn truncate_for_summary(value: &str) -> String {
     const LIMIT: usize = 500;
     if value.chars().count() <= LIMIT {
@@ -901,19 +578,6 @@ fn write_skill_file_read_fixture(path: &Path, final_text: &str) -> Result<()> {
     });
     let body = serde_json::to_vec_pretty(&fixture).context("serialize scripted skill fixture")?;
     fs::write(path, body).context("write scripted skill fixture")
-}
-
-fn write_scripted_text_fixture(path: &Path, final_text: &str) -> Result<()> {
-    let fixture = json!({
-        "default": {
-            "completion": {
-                "content": final_text,
-                "tool_calls": []
-            }
-        }
-    });
-    let body = serde_json::to_vec_pretty(&fixture).context("serialize scripted text fixture")?;
-    fs::write(path, body).context("write scripted text fixture")
 }
 
 fn refund_skill_package() -> SkillPackageDocument {
@@ -977,100 +641,4 @@ fn skill_file(
         content_type: content_type.map(ToOwned::to_owned),
         executable: false,
     }
-}
-
-fn damaged_food_procedure_source() -> &'static str {
-    r#"
-api_version: moa.artifact/v1
-kind: skill
-metadata:
-  name: damaged-food-replacement
-  description: Procedure for refund, credit, or replacement when food arrives damaged.
-  tags:
-    - support
-    - food-delivery
-    - refund
-status: draft
-definition:
-  type: skill
-  spec:
-    instructions:
-      path: SKILL.md
-    procedure:
-      input_schema:
-        type: object
-        required:
-          - order_id
-          - damage_summary
-        properties:
-          order_id:
-            type: string
-          damage_summary:
-            type: string
-          customer_requested:
-            type: string
-      state_schema:
-        type: object
-        properties:
-          evidence_sufficient:
-            type: boolean
-      nodes:
-        - id: start
-          kind: start
-          ui:
-            x: 80
-            y: 120
-        - id: verify_evidence
-          kind: condition
-          condition:
-            type: exists
-            path: $.damage_summary
-          ui:
-            x: 280
-            y: 120
-        - id: choose_resolution
-          kind: agent
-          max_turns: 2
-          input:
-            instruction: Decide refund, credit, replacement, or escalation after evidence review.
-          ui:
-            x: 520
-            y: 120
-        - id: review_resolution
-          kind: review
-          input:
-            prompt: Review the proposed refund, credit, replacement, or escalation before notifying the customer.
-          ui:
-            x: 760
-            y: 120
-        - id: done
-          kind: end
-          ui:
-            x: 1000
-            y: 120
-      edges:
-        - id: start-to-verify
-          from: start
-          to: verify_evidence
-        - id: verify-to-resolution
-          from: verify_evidence
-          to: choose_resolution
-        - id: resolution-to-review
-          from: choose_resolution
-          to: review_resolution
-        - id: review-to-done
-          from: review_resolution
-          to: done
-"#
-}
-
-fn assert_validation_report_has_no_errors(report: &Value) -> Result<()> {
-    let Some(errors) = report.get("errors").and_then(Value::as_array) else {
-        bail!("validation report did not include an errors array: {report}");
-    };
-    if errors.is_empty() {
-        return Ok(());
-    }
-
-    bail!("published procedure had validation errors: {errors:?}")
 }

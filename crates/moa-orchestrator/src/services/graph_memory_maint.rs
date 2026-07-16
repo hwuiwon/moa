@@ -121,6 +121,7 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
         ctx: Context<'_>,
         request: Json<CompactRequest>,
     ) -> Result<Json<CompactReport>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("GraphMemoryMaint", "compact");
         let request = request.into_inner();
         let target_date = match request.target_date {
@@ -145,9 +146,11 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
         let dispatches = build_dispatch_plan(tenant_cursors, target_date);
 
         for dispatch in &dispatches {
-            ctx.workflow_client::<ConsolidateClient>(dispatch.workflow_id.clone())
-                .run(Json::from(dispatch.request.clone()))
-                .send();
+            crate::restate_identity::replay_safe_request(
+                ctx.workflow_client::<ConsolidateClient>(dispatch.workflow_id.clone())
+                    .run(Json::from(dispatch.request.clone())),
+            )
+            .send();
         }
 
         let report = compact_report(target_date, dispatches.len() as u64);
@@ -167,6 +170,7 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
         ctx: Context<'_>,
         request: Json<VectorSyncDrainRequest>,
     ) -> Result<Json<VectorSyncReport>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("GraphMemoryMaint", "sync_vectors");
         let request = request.into_inner();
         if request.limit <= 0 {
@@ -193,6 +197,7 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
         ctx: Context<'_>,
         request: Json<VectorSyncRedriveRequest>,
     ) -> Result<Json<VectorSyncRedriveReport>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("GraphMemoryMaint", "redrive_dead_lettered_vectors");
         let request = request.into_inner();
         let scope_label = request.storage_partition_id.clone();

@@ -6,11 +6,14 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+blake3.workspace = true
 chrono.workspace = true
 envy.workspace = true
 serde.workspace = true
+serde_canonical_json.workspace = true
 serde_json.workspace = true
 secrecy.workspace = true
+schemars.workspace = true
 shell-words.workspace = true
 similar.workspace = true
 sqlx = { workspace = true, features = ["chrono", "uuid"] }

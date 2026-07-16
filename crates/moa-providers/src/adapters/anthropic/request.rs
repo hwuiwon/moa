@@ -96,7 +96,9 @@ pub(super) fn build_request_body(
         .iter()
         .map(anthropic_tool_from_schema)
         .collect::<Vec<_>>();
-    if web_search_enabled {
+    if web_search_enabled
+        && request.native_web_search != moa_core::types::completion::NativeWebSearchPolicy::Disabled
+    {
         tools.extend(
             capabilities
                 .native_tools

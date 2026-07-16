@@ -44,81 +44,57 @@ skill artifact metadata: input and output schemas, connector references, named
 actions, allowed tools, and UI metadata. When it is absent, MOA converts the
 package to a minimal skill artifact that points at `SKILL.md`.
 
-## Procedures
+## Execution-Plan Templates
 
 A skill is open-ended and agent-mediated: the context pipeline selects it,
-materializes its package, and the `Session`/`TurnExecution` loop decides how to
-use it. A skill may additionally declare an optional `procedure` in its
-`skill.moa.yaml` definition — a deterministic, graph-mediated execution plan.
-`ProcedureDefinition` stores explicit nodes and edges, and `ProcedureExecution`
-advances the graph through persisted node runs, with durable runs, review gates,
-and wait-signals: `review` nodes pause the run until a reviewer decides, and
-`wait_signal` nodes suspend until an external signal arrives. Parallel nodes
-express graph fan-out/join semantics; their side effects currently execute
-sequentially in a deterministic order rather than concurrently.
-Dashboard and operator clients list procedure runs through
-`POST /v1/skills/runs/list`, then inspect or control an individual run through
-`POST /v1/skills/status`, `POST /v1/skills/cancel`,
-`POST /v1/skills/signal`, and `POST /v1/skills/decide-review`.
+materializes its package, and `act` decides how to use its instructions and
+capabilities. Instruction-only skills remain valid. A skill may also declare an
+optional `execution_plan` in `skill.moa.yaml`; this is a pinned reusable plan
+template, not a second skill type.
 
-When a procedure run starts, caller inputs are validated against the skill's
-input schema. A run with missing required inputs is rejected with a structured
-missing-inputs error so the agent can collect them first, rather than creating a
-run that fails midway. Skills without a procedure keep the open-ended
-agent-mediated behavior, and skill ranking and context injection are identical
-whether or not a skill carries a procedure.
+The template uses the shared acyclic `ExecutionPlanDefinition` with exactly
+seven operations: `Capability`, `Agent`, `Map`, `Reduce`, `Review`,
+`WaitSignal`, and `Output`. A map task can only be a capability or bounded agent
+and cannot recursively map. Instruction text belongs in an `Agent` node's
+instructions; labels and canvas layout belong in non-semantic `ui` metadata.
+Visual editors round-trip the same artifact document and preserve stable node
+IDs.
 
-A procedure is part of the skill artifact, not a separate artifact type. Both
-the package and its optional procedure are imported, validated, revised,
-reviewed, published, and rolled back through the artifact and learning-review
-boundary. Procedure improvements are skill revisions: generated or
-experiment-derived procedure changes must first become draft skill artifact
-revisions plus `LearningCandidateType::Skill` rows. They are not auto-promoted
-from a live run, and a visual/dashboard edit must round-trip through the same
-artifact document with stable node IDs, edge IDs, and non-semantic `ui`
-metadata. `moa-skills` owns package parsing, learning/review mechanics, and the
-deterministic procedure interpreter.
+When `run` selects a high-confidence published skill template, it pins the
+artifact revision, template hash, and input, then compiles an immutable run
+snapshot without a planning-model call. A one-off generated plan instead stores
+its planner model/prompt, candidate JSON, compiler report, capability-catalog
+snapshot, and canonical hash. It is not a skill artifact and is never
+auto-published. Both sources enter the same `ExecutionRun` runtime and
+`moa.execution_run`/`moa.execution_task` persistence.
 
-Step prose has a fixed home so the same document survives the code ↔ canvas
-round-trip. Instruction text that should influence execution belongs in an
-`Agent` node's `input` (the model reads it); presentation-only labels, ordering
-hints, and layout belong in non-semantic `ui` metadata (the interpreter ignores
-it). A visual builder edits and re-serializes the same artifact document,
-preserving node and edge IDs, so a numbered step rendered in the dashboard maps
-back to exactly one node and no meaning is lost on save. This is the concrete
-procedures form of the general code-first, canvas-second rule in
-`docs/01-architecture-overview.md`.
+`Agent` nodes may activate instruction-only skills and reason freely within
+their declared skill references, capability references, turns, and resource
+budget. They return `Completed`, `NeedsInput`, `NeedsReplan`, or `Failed`; they
+cannot mutate the graph. A `NeedsReplan` amendment is compiler-validated and may
+change only pending/downstream work without broadening authorization. Accepted
+patches and reasons are persisted in `plan_history` and remain replayable.
 
-## Capabilities catalog
+Skill-template changes use normal artifact revisions: generated or
+experiment-derived improvements first become draft skill revisions plus
+`LearningCandidateType::Skill` rows. A live run never mutates or publishes a
+skill. Skills without an `execution_plan` retain identical ranking and context
+injection and remain usable in `act` and in plan `Agent` nodes.
 
-The tenant-admin procedure builder renders a procedure as numbered steps and
-offers an `@`-mention dropdown of everything a step can attach to. That dropdown
-is fed by a single read-only endpoint, `POST /v1/capabilities/list` (translated
-to `Skills/list_capabilities`), authorized like `Skills/list` with a tenant
-`Operator` check.
+## Execution Capability Catalog
 
-The handler merges five sources into one deterministic list, sorted by kind then
-name, where each entry carries the stable `reference` a `ProcedureNode` attaches
-to:
+One read-only execution capability catalog feeds planners, compilers, builders,
+`act`, and run nodes. It is tenant-authorized and deterministically ordered.
+Every entry includes a stable reference/version, description, input/output
+schemas, action/risk and idempotency classes, execution class, source
+provenance, authorization metadata, and optional cost estimate.
 
-| Kind | Source | Reference form |
-|---|---|---|
-| `tool` | statically declarable built-in tools: default local hand/built-in registry plus delegation and procedure tools | bare tool name |
-| `connector_action` | published `Action` artifacts and the actions of published `Connector` artifacts | `action://<name>` and `action://<connector>.<action>` |
-| `skill_action` | actions declared by published `Skill` artifacts (procedures themselves are excluded — they are what is being edited) | `skill://<skill>#<action_id>` |
-| `memory` | the two graph-memory operations | `memory_read` / `memory_write` |
-| `datasource` | tenant knowledge connections, read through the same repository the `Knowledge` service uses | connection identifier |
-
-Each entry also carries a short `source` provenance string (`builtin`,
-`artifact`, or `knowledge_connection:<provider>`). Datasource entries are
-provider-agnostic: connections come from any enabled linked-account provider
-(nango, merge, and any future provider in `config/knowledge.rs`), so the handler
-enumerates whatever the connections store returns without special-casing a
-provider and tags each entry's `source` with that connection's provider id.
-
-Tool coverage is limited to the statically declarable set. MCP-discovered tools
-and the child-only report tools exposed only inside a worker subset are per-turn
-or configuration-dependent and are intentionally omitted.
+The catalog merges typed built-ins, published actions and connector actions,
+published skill actions/code, memory operations, currently connected MCP tools
+with stable schemas and policies, and datasource reads backed by typed query
+operations. A connection ID alone is not a capability. Every invocation goes
+through the existing action-policy and `ToolExecutor` or typed service owner;
+the execution interpreter never bypasses governance.
 
 ## Storage
 
@@ -138,7 +114,7 @@ Skill packages use tenant scope, not runtime memory scope:
 
 | Scope | Stored as | Visibility | Typical use |
 |---|---|---|---|
-| Tenant | `tenant_id` set | One tenant | Tenant conventions, approved learned skills, and tenant-specific procedures |
+| Tenant | `tenant_id` set | One tenant | Tenant conventions, approved learned skills, and optional execution-plan templates |
 
 Visible skill resolution is name-based within a tenant. Tenant imports go
 through `/v1/skills/import` after tenant authorization. There is no
@@ -153,22 +129,20 @@ hand under `.moa/skills/<skill>/...` before the first hand tool executes.
 
 | Tier | Loaded into context | When |
 |---|---|---|
-| Metadata | name, description, tags, action names, estimates | stage 5 skill manifest |
+| Metadata | name, description, tags, action names, estimates | stage 7 skill manifest |
 | `SKILL.md` | full instructions | read from `.moa/skills/<skill>/SKILL.md` when the agent activates the skill |
 | Resources | scripts, references, assets | only when needed for execution |
 
 The skill manifest is budgeted and sorted deterministically for cache stability.
-When a skill applies to a larger task, the coordinator uses the manifest and any
-activated `SKILL.md` content to build a subtask DAG. Independent ready nodes are
-delegated to workers in parallel, and dependent nodes receive the relevant
-worker results in their task text. Skills and action names guide decomposition;
-they are not strict worker-wire fields.
+In `act`, the coordinator can activate `SKILL.md`, invoke its governed actions,
+or use a conversational `Worker` for interactive delegation. Worker remains a
+bounded child-agent primitive, not a bulk DAG scheduler. If the request's shape
+requires durable fan-out, joins, reviews, or recovery, `TurnExecution` selects
+or escalates to `run`; the execution compiler and runtime own that graph.
 
-The context pipeline also emits a conservative `delegation_plan` metadata object
-when the current request clearly names independent workstreams. That object can
-reference the selected skill context. Root `TurnExecution` may consume it to
-auto-spawn dependency-free ready nodes, but skill selection alone does not imply
-procedure routing and worker task payloads stay generic text envelopes.
+Skill selection alone does not select `run`. A published template is used only
+after mode routing chooses `run` and the template matches with high confidence.
+Otherwise a strict one-off plan is compiled from the current capability catalog.
 
 ## Skill Ranking
 
@@ -275,9 +249,9 @@ in the learning log when promotion succeeds.
 
 Live behavior experiments use the same review boundary for any derived skill
 improvement. Experiment-derived skill proposals capture reusable handling
-instructions, optimized execution patterns, and procedure-shape changes as
+instructions, optimized execution patterns, and execution-plan-template changes as
 `LearningCandidateType::Skill`.
-An experiment run may provide evidence through its linked session, procedure run,
+An experiment run may provide evidence through its linked session, execution run,
 artifact revisions, and `analytics.score_run`, but the experiment path itself
 does not auto-promote skills. Any experiment-derived improvement
 writer must first append a `learning_candidates` proposal with the experiment
@@ -341,7 +315,7 @@ duplicates, and candidates a reviewer already claimed keep their review state.
 `learning_candidates` is not a replacement for `learning_log`. Candidates are
 mutable proposal state with evaluation payloads and explicit status transitions.
 They are also the required boundary for experiment-derived skill improvements;
-experiment outcomes must not mutate skill packages or procedures directly.
+experiment outcomes must not mutate skill packages or execution-plan templates directly.
 `learning_log` remains the append-only audit stream for promoted learning.
 
 ## Memory Learning

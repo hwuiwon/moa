@@ -18,22 +18,21 @@ The implementation lives in `crates/moa-brain/src/pipeline/`.
 The code reports fixed stage numbers through each `ContextProcessor`; execution
 order is the builder's stage list, which intentionally runs history before the
 per-turn dynamic sections. With query rewriting and memory digests enabled, the
-default graph-backed pipeline contains eleven processors, executed in this
+default graph-backed pipeline contains ten processors, executed in this
 order:
 
 | Execution | Processor | Cache role | Purpose |
 |---|---|---|---|
 | 1 | `IdentityProcessor` | Stable prefix | MOA identity and high-level behavior |
-| 2 | `AgentInstructionProcessor` | Stable prefix | session-pinned configured-agent instructions and procedure affordances |
+| 2 | `AgentInstructionProcessor` | Stable prefix | session-pinned configured-agent instructions and execution affordances |
 | 3 | `InstructionProcessor` | Stable prefix | tenant and contact/session instructions |
 | 4 | `ToolDefinitionProcessor` | Stable prefix | deterministic tool schema list, capped at 30 and filtered by pinned agent tool policy |
 | 5 | `QueryRewriter` | Dynamic metadata | retrieval query preparation and task transition signal |
 | 6 | `HistoryCompiler` | Frozen history | replayed events, checkpoints, recent turns, errors, checkpoint compaction |
-| 7 | `DelegationPlanningProcessor` | Dynamic tail | conservative coordinator DAG candidate for high-confidence multi-workstream tasks |
-| 8 | `SkillInjector` | Dynamic tail | budgeted visible skill manifest ranked within pinned agent skill policy |
-| 9 | `DigestProcessor` | Dynamic tail | standing contact digest for contact sessions |
-| 10 | `MemoryRetriever` | Dynamic tail | tenant knowledge plus admitted contact memory filtered by pinned agent knowledge policy |
-| 11 | `RuntimeContextProcessor` | Dynamic tail | current date, tenant, working directory, branch, and contact when present |
+| 7 | `SkillInjector` | Dynamic tail | budgeted visible skill manifest ranked within pinned agent skill policy |
+| 8 | `DigestProcessor` | Dynamic tail | standing contact digest for contact sessions |
+| 9 | `MemoryRetriever` | Dynamic tail | tenant knowledge plus admitted contact memory filtered by pinned agent knowledge policy |
+| 10 | `RuntimeContextProcessor` | Dynamic tail | current date, tenant, working directory, branch, and contact when present |
 
 History runs before the skill manifest, digest, and memory retrieval so those
 per-turn sections insert near the active user turn instead of ahead of replayed
@@ -94,7 +93,7 @@ snapshot can:
 - filter prompt-visible tool schemas
 - constrain skill selection by `auto`, `allowlist`, `pinned`, or `denylist`
 - constrain graph-memory retrieval mode, filters, budget, and PII floor
-- expose allowed procedure affordances without starting procedures implicitly
+- expose allowed execution affordances without granting new capabilities
 - configure input and output LLM-judge text guardrails
 
 Durable execution still enforces policy again in the orchestrator tool/action
@@ -142,40 +141,46 @@ Artifact-backed skills can expose named actions. When present, action names are
 included in the compact manifest so the model can choose a linked capability
 without loading the full package body.
 
+The manifest also states whether a published revision carries a pinned
+`execution_plan` template and its stable reference/hash. Instruction-only
+skills remain fully valid and selectable. A template marker does not start a
+run by itself; routing chooses `run`, and the compiler validates the instantiated
+snapshot against the current capability catalog and budget.
+
 The selected manifest is not part of the stable prefix because query keywords
 and tenant-level learning can legitimately change which skills are shown for one
 turn.
 
-## Delegation Planning
+## Execution Routing And Planning
 
-`DelegationPlanningProcessor` runs after history compilation so it can read the
-actual recent user event instead of synthetic user-role context such as the skill
-manifest. It emits a structured `delegation_plan` metadata object plus a concise
-dynamic hint when the request has high-confidence independent workstreams, such
-as explicit reports from several inputs, readiness checks across named areas,
-reconciliations, incident investigations, audits, or option comparisons.
+Execution-mode routing happens after context compilation and is not retrieval
+routing. A cheap deterministic gate returns `respond`, `act`, or `run` plus a
+stable reason. Simple requests use one no-tool `respond`; bounded work uses the
+existing tool loop in `act`; explicit bulk, multi-entity, resumable,
+long-running, approval-bearing, or high-fan-out work uses `run`. Open-ended hard
+work may stay in `act`, and `act` may escalate after gathering evidence.
 
-The deterministic planner emits a minimal ready-node hint, not a durable worker
-contract. Node metadata is intentionally limited to the node id, title, and
-dependencies, and the planner does not create a separate task-name contract. The
-coordinator should place richer worker instructions inside `spawn_worker.task`:
-purpose, relevant context, expected output, evidence needs, constraints, and
-relevant skill steps. Additional durable worker contract fields stay deferred
-until evals, traces, or incidents show they solve a real coordination failure.
+`respond` and `act` make no execution-planning call. For `run`, a selected
+high-confidence skill template is instantiated without a model planning call.
+Otherwise `ExecutionPlanner` gives the auxiliary model only the immutable user
+goal, selected skill metadata, current governed capability catalog, resource
+budget, and strict output schema. It first preserves scope, definitions, time
+range, universe, output form, evidence expectations, and exclusions as stable
+goal-contract requirement IDs, then emits only the exact seven-node acyclic
+DSL. One repair call may receive compiler violations; an invalid second
+candidate becomes a typed missing-input or unsupported result rather than a
+silent direct answer.
 
-The processor itself does not route procedures and does not add strict
-`selected_skill` or `selected_action` fields to the worker contract. Root
-`TurnExecution` consumes the metadata once per admitted user message: when
-`spawn_worker` is available, it auto-spawns dependency-free ready nodes as
-ordinary `ToolCall` / `ToolResult` history events, capped by worker fan-out and
-the remaining tool-call cap. It also raises a low requested coordinator
-model-loop turn cap to `4 + 2 * ready_node_count`, still bounded by the global
-session hard cap, so delegated turns have room for fan-in and synthesis.
-After auto-spawn, the root workflow waits for tracked ready-node workers through
-the existing worker result awakeable path and emits a single `WorkerResultBundle`
-event when they are terminal. History replay renders that bundle as one system
-directive for synthesis. Dependent DAG nodes are left for coordinator synthesis
-after worker results are available.
+`ExecutionCompiler` validates capability/schema references, dependencies,
+non-recursive maps, reducer bounds, authorization metadata, data bindings,
+worst-case resources, completion coverage, and amendments. Planner provenance,
+candidate JSON, compiler report, route reason, and final canonical hash are
+persisted. One-off compiled snapshots are not skills and are never
+auto-published.
+
+Conversational `Worker` remains an interactive delegation tool in `act`, not a
+bulk graph scheduler. `ExecutionRun` materializes map items as stable tasks and
+submits all ready work without an application fan-out cap.
 
 ## Memory Retrieval
 
@@ -235,7 +240,7 @@ These values are intentionally outside the stable prefix.
 
 ## Compaction
 
-There is no separate stage-10 compactor. Threshold checks, checkpoint writes, snapshot reuse, file-read deduplication, recent-turn preservation, and old-error carry-forward are all coordinated by `HistoryCompiler`. Keeping one owner prevents a later processor from rewriting already-budgeted history, mutating snapshots after history has produced them, or issuing a second summarization pass for the same turn.
+There is no separate compactor stage. Threshold checks, checkpoint writes, snapshot reuse, file-read deduplication, recent-turn preservation, and old-error carry-forward are all coordinated by `HistoryCompiler`. Keeping one owner prevents a later processor from rewriting already-budgeted history, mutating snapshots after history has produced them, or issuing a second summarization pass for the same turn.
 
 ## Cache-Stable File-Read Deduplication
 

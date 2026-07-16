@@ -134,10 +134,12 @@ pub(super) async fn run_narration_tick(
                 };
                 // DETACHED: the LLM call must never block the single-writer VO, so the
                 // narration job is `.send()` (never `.call()`).
-                ctx.service_client::<LLMGatewayClient>()
-                    .narrate_session(Json::from(request))
-                    .idempotency_key(format!("narration:{session_id}:{}", state.narration_seq))
-                    .send();
+                crate::restate_identity::replay_safe_request(
+                    ctx.service_client::<LLMGatewayClient>()
+                        .narrate_session(Json::from(request))
+                        .idempotency_key(format!("narration:{session_id}:{}", state.narration_seq)),
+                )
+                .send();
                 window.count = window.count.saturating_add(1);
                 state.last_narrated_marker = Some(marker);
                 state.last_narration_at = Some(now);
@@ -216,11 +218,12 @@ async fn collect_active_marker_sources(
     let mut sources = Vec::new();
 
     if let Some(turn_id) = active_turn_id {
-        match ctx
-            .workflow_client::<TurnExecutionClient>(turn_id.to_string())
-            .progress()
-            .call()
-            .await
+        match crate::restate_identity::replay_safe_request(
+            ctx.workflow_client::<TurnExecutionClient>(turn_id.to_string())
+                .progress(),
+        )
+        .call()
+        .await
         {
             Ok(progress) => {
                 let progress = progress.into_inner();
@@ -243,11 +246,12 @@ async fn collect_active_marker_sources(
         let ChildProgressFetch::Fetch(child_id) = item else {
             continue; // terminal children are not active sources
         };
-        match ctx
-            .object_client::<WorkerClient>(child_id.clone())
-            .progress_summary()
-            .call()
-            .await
+        match crate::restate_identity::replay_safe_request(
+            ctx.object_client::<WorkerClient>(child_id.clone())
+                .progress_summary(),
+        )
+        .call()
+        .await
         {
             Ok(summary) => {
                 let summary = summary.into_inner();

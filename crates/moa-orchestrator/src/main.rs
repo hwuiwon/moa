@@ -161,7 +161,8 @@ async fn async_main() -> anyhow::Result<()> {
         moa_config.as_ref(),
         runtime_deps.awakeable_resolver.clone(),
     )?;
-    let action_review_reaper_handle = start_action_review_reaper(&runtime_deps.background_pool);
+    let action_review_reaper_handle =
+        start_action_review_reaper(&runtime_deps.background_pool, restate_ingress_url.clone());
 
     let restate_listener = bind_listener(args.port).await?;
     let health_listener = bind_listener(args.health_port).await?;

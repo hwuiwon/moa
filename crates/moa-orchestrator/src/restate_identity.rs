@@ -4,10 +4,24 @@ use moa_core::traits::{Identity, IdentityType};
 use reqwest::RequestBuilder;
 use restate_sdk::prelude::Request;
 
-/// Attaches trusted identity headers to a generated Restate client request.
+/// Marks a generated Restate request as safe for deterministic journal replay.
 ///
-/// Also injects the active span's W3C trace context so the downstream Restate
-/// handler continues the same end-to-end trace instead of starting a new root.
+/// Attempt-local OpenTelemetry headers must not be attached to Restate commands:
+/// a process restart creates a new handler span, which would rebuild a different
+/// command and trigger a journal mismatch. Durable callbacks that require exact
+/// W3C causality persist and reinject a validated context explicitly.
+pub(crate) fn replay_safe_request<'a, Req, Res>(
+    request: Request<'a, Req, Res>,
+) -> Request<'a, Req, Res> {
+    request
+}
+
+/// Attaches the active span's W3C trace context to a raw HTTP request.
+pub(crate) fn with_reqwest_trace_headers(request: RequestBuilder) -> RequestBuilder {
+    moa_observability::propagation::with_reqwest_trace_headers(request)
+}
+
+/// Attaches trusted identity headers to a generated Restate client request.
 pub(crate) fn with_identity_headers<'a, Req, Res>(
     request: Request<'a, Req, Res>,
     identity: &Identity,
@@ -32,11 +46,7 @@ pub(crate) fn with_identity_headers<'a, Req, Res>(
     } else {
         request
     };
-    moa_observability::current_trace_headers()
-        .into_iter()
-        .fold(request, |request, (name, value)| {
-            request.header(name, value)
-        })
+    replay_safe_request(request)
 }
 
 /// Attaches trusted identity headers to an HTTP Restate ingress request.
@@ -64,11 +74,7 @@ pub(crate) fn with_reqwest_identity_headers(
     } else {
         request
     };
-    moa_observability::current_trace_headers()
-        .into_iter()
-        .fold(request, |request, (name, value)| {
-            request.header(name, value)
-        })
+    with_reqwest_trace_headers(request)
 }
 
 fn identity_type_header(identity_type: IdentityType) -> &'static str {

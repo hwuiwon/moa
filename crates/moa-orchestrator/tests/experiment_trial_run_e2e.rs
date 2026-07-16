@@ -16,16 +16,14 @@ use moa_core::{
     events::Event,
     traits::Identity,
     types::action_policy::ActionRuleScope,
+    types::contact::ContactId,
     types::events_stream::EventRange,
     types::events_stream::EventRecord,
+    types::execution_planning::PinnedExecutionTemplateRef,
     types::identifiers::ModelId,
     types::identifiers::SessionId,
     types::identifiers::TenantId,
     types::session::SessionMeta,
-    wire::procedures::{
-        ProcedureReviewDecisionKind, ProcedureReviewDecisionRequest,
-        ProcedureReviewDecisionResponse, ProcedureRunStatus, ProcedureStatusRequest,
-    },
     wire::turn::{TurnOutcome, TurnOutcomeKind},
 };
 use moa_experiments::{
@@ -187,8 +185,8 @@ fn spawn_orchestrator_without_provider_override(
 }
 
 /// Spawns an orchestrator against the shared test database with real OpenFGA and
-/// no scripted provider override. Procedure trials run deterministic procedures
-/// and never call a provider, so no scripted fixture is required.
+/// no scripted provider override. Output-only execution templates never call a
+/// provider, so no scripted fixture is required.
 fn spawn_orchestrator_no_provider_override_with_fga(
     ports: OrchestratorPorts,
     memory_dir: &TempDir,
@@ -215,7 +213,7 @@ fn spawn_orchestrator_no_provider_override_with_fga(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("spawn moa-orchestrator binary for procedure trial e2e")
+        .context("spawn moa-orchestrator binary for execution-template trial e2e")
 }
 
 struct ProbeEndpoint {
@@ -382,16 +380,28 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
-async fn procedure_trial_awaits_pending_review_procedure_before_resolving_service_e2e() -> Result<()>
-{
-    // Pins: a procedure-backed trial does not resolve while its procedure is still executing.
-    // The trial's ExperimentTrialRun/run invocation must stay in-flight while the procedure is
-    // paused on a review node, and only return a terminal (completed) status once the review is
-    // decided and the procedure reaches a terminal state. The prior fire-and-forget `.send()`
-    // returned a non-terminal "running" response immediately, resolving the parent fan-in while
-    // the procedure was still running.
-    let _guard = RESTATE_E2E_LOCK.lock().await;
+async fn execution_template_trial_target_tenant_scoped_internal_session() -> Result<()> {
+    // Pins: a target-session-null tenant trial creates one deterministic internal Session,
+    // executes the exact pinned template, and owns the compile audit only on the trial row.
+    let tenant_id = TenantId::new();
+    run_execution_template_internal_session_trial(ActionRuleScope::Tenant { tenant_id }).await
+}
 
+#[tokio::test]
+#[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
+async fn execution_template_trial_target_contact_scoped_internal_session() -> Result<()> {
+    // Pins: a target-session-null contact trial preserves its exact contact scope in the
+    // deterministic internal Session and typed Execution route.
+    let tenant_id = TenantId::new();
+    run_execution_template_internal_session_trial(ActionRuleScope::Contact {
+        tenant_id,
+        contact_id: ContactId::new(),
+    })
+    .await
+}
+
+async fn run_execution_template_internal_session_trial(scope: ActionRuleScope) -> Result<()> {
+    let _guard = RESTATE_E2E_LOCK.lock().await;
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
     let ports = reserve_orchestrator_ports()?;
@@ -399,10 +409,9 @@ async fn procedure_trial_awaits_pending_review_procedure_before_resolving_servic
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let tenant_id = TenantId::new();
+    let tenant_id = scope.tenant_id();
     let mut identity = test_user_identity();
     identity.tenant_id = tenant_id;
-    let scope = ActionRuleScope::Tenant { tenant_id };
     grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator =
         spawn_orchestrator_no_provider_override_with_fga(ports, &memory_dir, &sandbox_dir)?;
@@ -414,102 +423,95 @@ async fn procedure_trial_awaits_pending_review_procedure_before_resolving_servic
             .await
             .context("connect to test Postgres")?;
         let store = ExperimentStore::new(pool.clone());
-
         let agent_revision_uid = publish_trial_agent(&pool, &scope).await?;
         let plan_revision_uid = publish_trial_plan(&pool, &scope, agent_revision_uid).await?;
-        publish_artifact_revision(
-            &pool,
-            &scope,
-            review_gated_procedure_source(),
-            "review-gated procedure",
-        )
-        .await?;
-
+        let template_revision_uid = publish_execution_template(&pool, &scope).await?;
+        let template = PinnedExecutionTemplateRef {
+            skill_ref: "skill://experiment-trial-output".to_string(),
+            revision_uid: template_revision_uid,
+        };
+        let objective = "Return the exact Task 9 experiment-trial result.";
+        let target = execution_template_target(&template, objective);
+        let variant = execution_template_variant(&template);
         let run = store
-            .insert_run(&scope, new_parent_run(&identity, agent_revision_uid))
+            .insert_run(
+                &scope,
+                new_execution_template_parent_run(&identity, target.clone(), variant.clone()),
+            )
             .await
-            .context("seed parent experiment run")?;
-        let trial = new_procedure_trial(run.run_uid, plan_revision_uid);
+            .context("seed execution-template parent experiment run")?;
+        let trial = new_execution_template_trial(run.run_uid, plan_revision_uid);
         let trial_key = trial.trial_key.clone();
         let workflow_request = ExperimentTrialRunWorkflowRequest {
             tenant_id,
-            trial: trial.clone(),
-            target: procedure_review_target(),
-            variant: baseline_variant(),
+            trial,
+            target,
+            variant,
             identity: identity.clone(),
             completion_awakeable_id: None,
         };
 
-        // Invoke ExperimentTrialRun/run in the background: with the fix it blocks until the
-        // procedure reaches a terminal state, so the request stays in-flight until the review
-        // is decided below.
-        let mut run_task = spawn_procedure_trial_run(
+        let response = run_trial_workflow(
             &client,
             ingress,
             &identity,
             run.run_uid,
             &trial_key,
             &workflow_request,
-        );
-
-        // Wait until the trial has started and linked its procedure run.
-        let linked = wait_for_trial_procedure_link(&store, &scope, run.run_uid, &trial_key).await?;
-        let procedure_run_uid = linked
-            .procedure_run_uid
-            .context("procedure trial should link a procedure run")?;
-
-        // Wait until the procedure has paused on its review node.
-        let pending = wait_for_procedure_status(
-            &client,
-            ingress,
-            &identity,
-            tenant_id,
-            procedure_run_uid,
-            "pending_review",
         )
         .await?;
-        assert_eq!(pending.current_node_id.as_deref(), Some("gate"));
-
-        // While the procedure is paused, the trial must not have resolved: the persisted trial
-        // is still running and the run invocation is still in-flight.
-        let blocked = store
-            .load_trial_by_key(&scope, run.run_uid, &trial_key)
-            .await
-            .context("load trial while procedure is paused")?
-            .context("trial should exist while procedure is paused")?;
-        assert_eq!(
-            blocked.status.as_str(),
-            "running",
-            "trial must remain running while its procedure is paused on review"
-        );
-        assert!(
-            !run_task.is_finished(),
-            "ExperimentTrialRun/run must stay in-flight while the procedure is paused on review"
-        );
-
-        // Decide the review; the procedure resumes to completion and the trial can resolve.
-        let decision =
-            decide_procedure_review(&client, ingress, &identity, tenant_id, procedure_run_uid)
-                .await?;
-        assert!(decision.accepted);
-
-        let response = tokio::time::timeout(Duration::from_secs(60), &mut run_task)
-            .await
-            .context("timed out waiting for ExperimentTrialRun/run to resolve after review")?
-            .context("join ExperimentTrialRun/run task")??;
-        assert_eq!(
-            response.status, "completed",
-            "trial should report a terminal completed status once the procedure completes"
-        );
+        assert_eq!(response.status, "completed");
         assert_eq!(response.stop_reason.as_deref(), Some("target_terminal"));
-        assert_eq!(response.procedure_run_uid, Some(procedure_run_uid));
+        assert_eq!(response.turn_count, 0);
+        let session_id = response
+            .session_id
+            .context("execution-template trial should link its effective Session")?;
+        let execution_run_uid = response
+            .execution_run_uid
+            .context("execution-template trial should link its typed Execution run")?;
+        assert_eq!(
+            session_id,
+            expected_execution_trial_session_id(
+                tenant_id,
+                run.run_uid,
+                response.score_run_id,
+                response.trial_uid,
+            ),
+            "target-session-null trials must use the exact replay-stable Session key",
+        );
 
         let persisted = store
-            .load_trial_by_key(&scope, run.run_uid, &trial_key)
+            .load_trial(&scope, response.trial_uid)
             .await
-            .context("load persisted trial after completion")?
-            .context("trial should exist after completion")?;
-        assert_eq!(persisted.status.as_str(), "completed");
+            .context("load persisted execution-template trial")?
+            .context("execution-template trial should exist")?;
+        assert_eq!(persisted.scope, scope);
+        assert_eq!(persisted.session_id, Some(session_id));
+        assert_eq!(persisted.execution_run_uid, Some(execution_run_uid));
+        let expected_operation_key = format!(
+            "experiment:{}:{}:{}",
+            run.run_uid, response.score_run_id, response.trial_uid
+        );
+        let audits: Vec<(String, String)> = sqlx::query_as(
+            "SELECT source, operation_key FROM moa.execution_compile_audit \
+             WHERE tenant_id = $1 AND session_id = $2 ORDER BY created_at",
+        )
+        .bind(tenant_id.0)
+        .bind(session_id.0)
+        .fetch_all(&pool)
+        .await
+        .context("load normalized experiment-trial compile audit")?;
+        assert_eq!(
+            audits,
+            vec![("experiment_template".to_string(), expected_operation_key)]
+        );
+
+        let events = fetch_events(&client, ingress, &identity, session_id).await?;
+        assert_eq!(user_message_texts(&events), vec![objective]);
+        assert!(events.iter().any(|record| matches!(
+            &record.event,
+            Event::ExecutionRunStarted(started) if started.run_uid == execution_run_uid
+        )));
 
         pool.close().await;
         Ok(())
@@ -518,7 +520,6 @@ async fn procedure_trial_awaits_pending_review_procedure_before_resolving_servic
 
     let _ = orchestrator.kill();
     let _ = orchestrator.wait();
-
     result
 }
 
@@ -1005,7 +1006,7 @@ fn new_parent_run(identity: &Identity, agent_revision_uid: Uuid) -> NewExperimen
         },
         score_run_id: Uuid::now_v7(),
         session_id: None,
-        procedure_run_uid: None,
+        execution_run_uid: None,
         artifact_revision_uids: Vec::new(),
         idempotency_key: Some(format!("trial-parent-{}", Uuid::now_v7())),
         created_by_identity: json!({
@@ -1164,17 +1165,64 @@ fn baseline_variant() -> Value {
         "model": "scripted-loadtest",
         "artifact_revision_uids": [],
         "skill_refs": [],
-        "procedure_ref": null,
+        "execution_template": null,
         "metadata": { "lane": "experiment_trial_run_e2e" }
     })
 }
 
-fn new_procedure_trial(run_uid: Uuid, plan_revision_uid: Uuid) -> NewExperimentTrial {
+fn execution_template_target(template: &PinnedExecutionTemplateRef, objective: &str) -> Value {
+    json!({
+        "kind": "execution_template",
+        "template": template,
+        "objective": objective,
+        "input": {},
+        "session_id": null,
+        "idempotency_key": null
+    })
+}
+
+fn execution_template_variant(template: &PinnedExecutionTemplateRef) -> Value {
+    json!({
+        "name": "execution-template-baseline",
+        "model": "scripted-loadtest",
+        "artifact_revision_uids": [],
+        "skill_refs": [],
+        "execution_template": template,
+        "metadata": { "lane": "experiment_trial_run_e2e" }
+    })
+}
+
+fn new_execution_template_parent_run(
+    identity: &Identity,
+    target: Value,
+    variant: Value,
+) -> NewExperimentRun {
+    NewExperimentRun {
+        name: "execution-template trial workflow".to_string(),
+        target: serde_json::from_value(target).expect("execution-template target should parse"),
+        variant: serde_json::from_value(variant).expect("execution-template variant should parse"),
+        scorecard: ExperimentScorecard {
+            score_names: vec!["task_success".to_string()],
+            evaluator_metadata: json!({ "judge": "manual-or-later" }),
+        },
+        score_run_id: Uuid::now_v7(),
+        session_id: None,
+        execution_run_uid: None,
+        artifact_revision_uids: Vec::new(),
+        idempotency_key: Some(format!("execution-trial-parent-{}", Uuid::now_v7())),
+        created_by_identity: json!({
+            "type": "operator",
+            "id": identity.id.to_string(),
+        }),
+    }
+}
+
+fn new_execution_template_trial(run_uid: Uuid, plan_revision_uid: Uuid) -> NewExperimentTrial {
     NewExperimentTrial {
         run_uid,
-        trial_key: "procedure-review-trial".to_string(),
-        target_kind: ExperimentTargetKind::Procedure,
-        variant_key: "baseline".to_string(),
+        trial_key: "execution-template-internal-session".to_string(),
+        target_kind: ExperimentTargetKind::ExecutionTemplate,
+        variant_key: "execution-template-baseline".to_string(),
         plan_revision_uid,
         scenario_id: Some("delayed-order".to_string()),
         persona_id: Some("careful-customer".to_string()),
@@ -1184,181 +1232,98 @@ fn new_procedure_trial(run_uid: Uuid, plan_revision_uid: Uuid) -> NewExperimentT
         simulator: ExperimentSimulatorConfig {
             model: ModelId::new("scripted-loadtest"),
             temperature: Some(0.0),
-            max_turns: 2,
+            max_turns: 1,
             token_budget: Some(1_000),
-            metadata: json!({ "fixture": "experiment_trial_run_e2e_procedure" }),
+            metadata: json!({ "fixture": "experiment_trial_run_e2e_execution_template" }),
         },
-        target_model: None,
-        seed: Some("procedure-review-seed".to_string()),
+        target_model: Some(ModelId::new("scripted-loadtest")),
+        seed: Some("execution-template-trial-seed".to_string()),
         score_run_id: Uuid::now_v7(),
     }
 }
 
-fn procedure_review_target() -> Value {
-    json!({
-        "kind": "procedure",
-        "procedure_ref": "skill://review-gated-procedure",
-        "input": {},
-        "session_id": null,
-        "idempotency_key": null
-    })
-}
-
-fn spawn_procedure_trial_run(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    run_uid: Uuid,
-    trial_key: &str,
-    request: &ExperimentTrialRunWorkflowRequest,
-) -> JoinHandle<Result<ExperimentTrialRunStatusResponse>> {
-    let client = client.clone();
-    let ingress = ingress.to_string();
-    let identity = identity.clone();
-    let key = trial_workflow_key(run_uid, trial_key);
-    let request = request.clone();
-    tokio::spawn(async move {
-        post_json_with_identity(
-            &client,
-            &ingress,
-            &format!("ExperimentTrialRun/{key}"),
-            "run",
-            &identity,
-            &request,
-        )
-        .await?
-        .json::<ExperimentTrialRunStatusResponse>()
-        .await
-        .context("deserialize backgrounded ExperimentTrialRun/run response")
-    })
-}
-
-async fn wait_for_trial_procedure_link(
-    store: &ExperimentStore,
-    scope: &ActionRuleScope,
-    run_uid: Uuid,
-    trial_key: &str,
-) -> Result<ExperimentTrialRecord> {
-    for _attempt in 0..60 {
-        if let Some(trial) = store
-            .load_trial_by_key(scope, run_uid, trial_key)
-            .await
-            .context("load trial while waiting for procedure link")?
-            && trial.procedure_run_uid.is_some()
-        {
-            return Ok(trial);
-        }
-        sleep(Duration::from_secs(1)).await;
-    }
-
-    bail!("timed out waiting for trial {trial_key} to link a procedure run")
-}
-
-async fn wait_for_procedure_status(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
+fn expected_execution_trial_session_id(
     tenant_id: TenantId,
-    run_id: Uuid,
-    expected: &str,
-) -> Result<ProcedureRunStatus> {
-    let request = ProcedureStatusRequest { tenant_id, run_id };
-    let mut last_status = None;
-    for _attempt in 0..60 {
-        let status =
-            post_json_with_identity(client, ingress, "Skills", "status", identity, &request)
-                .await?
-                .json::<ProcedureRunStatus>()
-                .await
-                .context("deserialize procedure status response")?;
-        if status.status == expected {
-            return Ok(status);
-        }
-        if status.status == "failed" {
-            bail!("procedure run {run_id} failed before reaching {expected}: {status:?}");
-        }
-        last_status = Some(status);
-        sleep(Duration::from_secs(1)).await;
+    experiment_run_uid: Uuid,
+    score_run_id: Uuid,
+    trial_uid: Uuid,
+) -> SessionId {
+    let namespace = Uuid::parse_str("c2a6731c-2d80-5d4a-9d10-2d201283c6ec")
+        .expect("Task 9 execution Session namespace should parse");
+    let mut name = b"moa.experiment.execution-session.v1".to_vec();
+    for value in [
+        tenant_id.to_string(),
+        experiment_run_uid.to_string(),
+        score_run_id.to_string(),
+        trial_uid.to_string(),
+    ] {
+        name.push(1);
+        name.extend_from_slice(
+            &u32::try_from(value.len())
+                .expect("UUID text length should fit u32")
+                .to_be_bytes(),
+        );
+        name.extend_from_slice(value.as_bytes());
     }
-
-    bail!("timed out waiting for procedure run {run_id} to reach {expected}; last: {last_status:?}")
+    SessionId(Uuid::new_v5(&namespace, &name))
 }
 
-async fn decide_procedure_review(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    tenant_id: TenantId,
-    run_id: Uuid,
-) -> Result<ProcedureReviewDecisionResponse> {
-    let request = ProcedureReviewDecisionRequest {
-        tenant_id,
-        run_id,
-        node_id: Some("gate".to_string()),
-        decision: ProcedureReviewDecisionKind::Approved,
-        reason: Some("approved in procedure trial e2e".to_string()),
-        output: Some(json!({ "approved": true })),
-    };
-    post_json_with_identity(
-        client,
-        ingress,
-        "Skills",
-        "decide_review",
-        identity,
-        &request,
-    )
-    .await?
-    .json::<ProcedureReviewDecisionResponse>()
-    .await
-    .context("deserialize procedure review decision response")
-}
-
-fn review_gated_procedure_source() -> &'static str {
-    r#"
+async fn publish_execution_template(pool: &PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
+    let source = r#"
 api_version: moa.artifact/v1
 kind: skill
 metadata:
-  name: review-gated-procedure
-  description: Procedure that pauses on an explicit review node.
-  tags:
-    - test
+  name: experiment-trial-output
+  description: Deterministic output-only execution template for experiment trials.
 status: draft
 definition:
   type: skill
   spec:
-    instructions:
-      path: SKILL.md
-    procedure:
-      nodes:
-        - id: start
-          kind: start
-          ui:
-            x: 80
-            y: 120
-        - id: gate
-          kind: review
-          input:
-            prompt: Approve before completing the procedure.
-          ui:
-            x: 280
-            y: 120
-        - id: done
-          kind: end
-          input:
-            reviewed: true
-          ui:
-            x: 520
-            y: 120
-      edges:
-        - id: start-gate
-          from: start
-          to: gate
-        - id: gate-done
-          from: gate
-          to: done
-      ui:
-        layout: dagre
-"#
+    inputs:
+      type: object
+      additionalProperties: false
+    outputs:
+      type: object
+    allowed_tools: []
+    execution_plan:
+      goal:
+        requirements:
+          - id: trial_result
+            description: Return the deterministic experiment-trial result.
+        deliverables: []
+        coverage: []
+        constraints: []
+        completion_checks:
+          - id: output_schema
+            description: Validate the deterministic result.
+            requirement_ids: [trial_result]
+            constraint_ids: []
+            kind:
+              kind: output_schema
+      plan:
+        schema_version: 1
+        input_schema:
+          type: object
+          additionalProperties: false
+        output_schema:
+          type: object
+        nodes:
+          - id: result
+            requirement_ids: [trial_result]
+            depends_on: []
+            input: {}
+            output_schema:
+              type: object
+            operation:
+              kind: output
+              value:
+                result: task-9-trial-complete
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0
+"#;
+    publish_artifact_revision(pool, scope, source, "execution-template skill").await
 }
 
 fn write_scripted_fixture(path: &Path) -> Result<()> {

@@ -55,6 +55,15 @@ fn gemini_request_sets_structured_output_schema() {
     );
 }
 
+#[test]
+fn native_web_search_policy_disables_gemini_native_tool_per_request() {
+    // Pins: request-scoped planning policy narrows globally enabled Gemini grounding.
+    let mut request = CompletionRequest::new("Plan without web search.");
+    request.native_web_search = moa_core::types::completion::NativeWebSearchPolicy::Disabled;
+    let body = super::debug_build_gemini_request_body(&request, true).expect("request");
+    assert!(body.get("tools").is_none());
+}
+
 #[tokio::test]
 async fn gemini_provider_serializes_system_messages_and_tools() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -131,6 +140,7 @@ async fn gemini_provider_serializes_system_messages_and_tools() {
             max_output_tokens: Some(1024),
             temperature: Some(0.2),
             response_format: None,
+            native_web_search: Default::default(),
             metadata: Default::default(),
         })
         .await
@@ -252,6 +262,7 @@ fn gemini_request_body_keeps_cacheable_prompt_inline() {
         max_output_tokens: Some(256),
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     };
 
@@ -340,6 +351,7 @@ async fn gemini_provider_groups_tool_history_and_preserves_thought_signatures() 
             max_output_tokens: Some(1024),
             temperature: None,
             response_format: None,
+            native_web_search: Default::default(),
             metadata: Default::default(),
         })
         .await

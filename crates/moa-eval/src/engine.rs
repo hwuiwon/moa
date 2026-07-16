@@ -24,9 +24,11 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::collector::{CollectedExecution, TrajectoryCollector};
-use crate::long_conversation::run_scenario_with_provider;
+use crate::long_conversation::transcript_runner::run_scenario_in_environment;
 use crate::plan::build_eval_plan;
-use crate::setup::{build_agent_environment, build_agent_environment_with_provider};
+use crate::setup::{
+    AgentEnvironment, build_agent_environment, build_agent_environment_with_provider,
+};
 
 const DEFAULT_SINGLE_TIMEOUT_SECONDS: u64 = 300;
 const MAX_AGENT_TURNS: usize = 32;
@@ -232,36 +234,12 @@ impl EvalEngine {
         let trace_id = extract_trace_id(&span);
         let engine_options = self.options.clone();
         let case_input = case.input.clone();
-        let execution =
-            async move { run_environment(case_input, environment, &engine_options).await }
-                .instrument(span);
-        let mut handle = tokio::spawn(execution);
-
-        let run_outcome = tokio::select! {
-            joined = &mut handle => {
-                match joined {
-                    Ok(result) => result,
-                    Err(error) => Err(EvalError::Join(error)),
-                }
-            }
-            _ = tokio::time::sleep(timeout) => {
-                handle.abort();
-                let _ = cleanup_workspace(&run_root).await;
-                let mut result = build_error_result(
-                    case,
-                    config,
-                    started_at,
-                    format!("run exceeded timeout of {} seconds", timeout.as_secs()),
-                    EvalStatus::Timeout,
-                );
-                result.trace_id = trace_id;
-                return Ok(result);
-            }
-        };
+        let execution = run_environment(case_input, &environment, &engine_options).instrument(span);
+        let run_outcome = tokio::time::timeout(timeout, execution).await;
 
         let completed_at = Utc::now();
         let result = match run_outcome {
-            Ok(execution) => EvalResult {
+            Ok(Ok(execution)) => EvalResult {
                 test_case: case.name.clone(),
                 agent_config: config.name.clone(),
                 status: EvalStatus::Passed,
@@ -274,7 +252,7 @@ impl EvalEngine {
                 completed_at,
                 ..EvalResult::default()
             },
-            Err(error) => {
+            Ok(Err(error)) => {
                 let mut result = build_error_result(
                     case,
                     config,
@@ -285,10 +263,23 @@ impl EvalEngine {
                 result.trace_id = trace_id;
                 result
             }
+            Err(_) => {
+                let mut result = build_error_result(
+                    case,
+                    config,
+                    started_at,
+                    format!("run exceeded timeout of {} seconds", timeout.as_secs()),
+                    EvalStatus::Timeout,
+                );
+                result.trace_id = trace_id;
+                result
+            }
         };
 
-        let _ = cleanup_workspace(&run_root).await;
-        Ok(result)
+        Ok(apply_cleanup_errors(
+            result,
+            cleanup_run_resources(&run_root, environment).await,
+        ))
     }
 
     async fn run_long_with_timeout(
@@ -308,41 +299,64 @@ impl EvalEngine {
                 EvalStatus::Error,
             ));
         };
-        let timeout = Duration::from_secs(case.timeout_seconds.unwrap_or(default_timeout_seconds));
-        match tokio::time::timeout(
-            timeout,
-            run_scenario_with_provider(
-                &self.base_config,
-                config,
-                &self.options,
-                case,
-                llm_provider,
-            ),
+        let environment = match build_agent_environment_with_provider(
+            &self.base_config,
+            config,
+            &self.options.temp_dir,
+            llm_provider,
         )
         .await
         {
-            Ok(Ok(report)) => Ok(report.result),
-            Ok(Err(error)) => Ok(build_error_result(
+            Ok(environment) => environment,
+            Err(error) => {
+                return Ok(build_error_result(
+                    case,
+                    config,
+                    started_at,
+                    error.to_string(),
+                    EvalStatus::Error,
+                ));
+            }
+        };
+        let run_root = environment
+            .workspace_dir
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| environment.workspace_dir.clone());
+        let timeout = Duration::from_secs(case.timeout_seconds.unwrap_or(default_timeout_seconds));
+        let result = match tokio::time::timeout(
+            timeout,
+            run_scenario_in_environment(config, &self.options, case, &environment),
+        )
+        .await
+        {
+            Ok(Ok(report)) => report.result,
+            Ok(Err(error)) => build_error_result(
                 case,
                 config,
                 started_at,
                 error.to_string(),
                 EvalStatus::Error,
-            )),
-            Err(_) => Ok(build_error_result(
+            ),
+            Err(_) => build_error_result(
                 case,
                 config,
                 started_at,
                 format!("run exceeded timeout of {} seconds", timeout.as_secs()),
                 EvalStatus::Timeout,
-            )),
-        }
+            ),
+        };
+
+        Ok(apply_cleanup_errors(
+            result,
+            cleanup_run_resources(&run_root, environment).await,
+        ))
     }
 }
 
 async fn run_environment(
     input: String,
-    environment: crate::AgentEnvironment,
+    environment: &crate::AgentEnvironment,
     options: &EngineOptions,
 ) -> Result<CollectedExecution> {
     environment
@@ -402,6 +416,35 @@ async fn run_environment(
     );
     collector.process_events(&events);
     Ok(collector.finish())
+}
+
+async fn cleanup_run_resources(run_root: &Path, environment: AgentEnvironment) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Err(error) = cleanup_workspace(run_root).await {
+        errors.push(format!("workspace cleanup failed: {error}"));
+    }
+    if let Err(error) = environment.cleanup().await {
+        errors.push(format!("database cleanup failed: {error}"));
+    }
+    errors
+}
+
+fn apply_cleanup_errors(mut result: EvalResult, cleanup_errors: Vec<String>) -> EvalResult {
+    if cleanup_errors.is_empty() {
+        return result;
+    }
+    let cleanup_error = cleanup_errors.join("; ");
+    if result.status == EvalStatus::Passed {
+        result.status = EvalStatus::Error;
+        result.error = Some(cleanup_error);
+    } else {
+        tracing::warn!(
+            error = %cleanup_error,
+            status = ?result.status,
+            "eval run cleanup failed after a non-passing outcome"
+        );
+    }
+    result
 }
 
 async fn cleanup_workspace(path: &Path) -> Result<()> {
@@ -585,7 +628,7 @@ mod tests {
 
         let result = run_environment(
             "the with your".to_string(),
-            environment,
+            &environment,
             &EngineOptions {
                 temp_dir: temp.path().to_path_buf(),
                 ..EngineOptions::default()
@@ -597,6 +640,10 @@ mod tests {
         assert_eq!(result.response.as_deref(), Some("hello from eval"));
         assert_eq!(result.metrics.total_tokens, 49);
         assert_eq!(result.metrics.turn_count, 1);
+        environment
+            .cleanup()
+            .await
+            .expect("cleanup eval engine test database");
     }
 
     #[test]

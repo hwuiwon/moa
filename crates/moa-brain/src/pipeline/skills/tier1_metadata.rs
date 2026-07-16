@@ -3,6 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
+use moa_artifacts::{document::ArtifactKind, reference::ArtifactRef};
 use moa_core::{
     types::context::ExcludedItem, types::experience::TaskStrategySuccessRate,
     types::memory::SkillMetadata,
@@ -262,9 +263,14 @@ fn format_manifest_entry(metadata: &SkillMetadata, budget: &ResolvedSkillBudget)
     if !actions.is_empty() {
         entry.push_str(&format!(" [actions: {}]", actions.join(", ")));
     }
-    if metadata.has_procedure {
-        // Marks skills the agent can execute deterministically via `run_procedure`.
-        entry.push_str(" [procedure]");
+    if metadata.has_execution_plan
+        && let Some(revision_uid) = metadata.artifact_revision_uid
+    {
+        let artifact_ref =
+            ArtifactRef::artifact(ArtifactKind::Skill, metadata.name.clone()).to_string();
+        entry.push_str(&format!(
+            " [execution-plan: ref={artifact_ref}, revision_uid={revision_uid}]"
+        ));
     }
     if budget.show_token_estimates {
         entry.push_str(&format!(" (est. {} tok)", metadata.estimated_tokens));
@@ -347,7 +353,7 @@ mod tests {
         format_manifest_entry, format_skill_manifest, rank_skills, select_skills_within_budget,
     };
     use crate::pipeline::skills::test_support::{
-        resolved_budget, test_skill, test_skill_with_procedure,
+        resolved_budget, test_skill, test_skill_with_execution_plan,
     };
 
     #[test]
@@ -593,10 +599,9 @@ mod tests {
     }
 
     #[test]
-    fn manifest_entry_marks_procedure_skills_deterministically() {
-        // Pins: a skill carrying a procedure is tagged [procedure] so the model
-        // knows deterministic execution via run_procedure is available; a skill
-        // without one is not tagged.
+    fn manifest_entry_marks_execution_plan_with_exact_ref_and_revision() {
+        // Pins: an optional execution template is identified by its canonical skill
+        // artifact ref and exact immutable revision; instruction-only skills stay valid.
         let budget = ResolvedSkillBudget {
             max_manifest_chars: DEFAULT_MIN_MANIFEST_CHARS,
             max_per_skill_chars: 512,
@@ -606,12 +611,14 @@ mod tests {
         let without =
             format_manifest_entry(&test_skill("agentic", "Agent-mediated skill"), &budget);
         let with = format_manifest_entry(
-            &test_skill_with_procedure("refund", "Refund procedure"),
+            &test_skill_with_execution_plan("refund", "Refund execution plan"),
             &budget,
         );
 
-        assert!(!without.contains("[procedure]"));
-        assert!(with.contains("[procedure]"));
+        assert!(!without.contains("[execution-plan:"));
+        assert!(with.contains(
+            "[execution-plan: ref=skill://refund, revision_uid=00000000-0000-0000-0000-000000000001]"
+        ));
     }
 
     #[test]

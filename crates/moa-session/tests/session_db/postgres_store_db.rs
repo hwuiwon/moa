@@ -2426,6 +2426,9 @@ async fn postgres_analytics_query_read_models_refresh() {
         .await
         .expect("emit brain response");
 
+    let (execution_run_uid, execution_task_id, execution_skill_revision_uid) =
+        seed_execution_analytics_rows(store.pool(), tenant_id.0, contact_id.0, session_id.0).await;
+
     store
         .refresh_analytics_materialized_views()
         .await
@@ -2540,9 +2543,119 @@ async fn postgres_analytics_query_read_models_refresh() {
         1e-9
     ));
 
+    // Pins: V337's execution facts expose exact normalized values and bounded
+    // failure metadata, without Task 9 aliases or raw error prose.
+    let run_row = sqlx::query(
+        "SELECT tenant_id, contact_id, session_id, initial_plan_hash, active_plan_hash, \
+                plan_revision, route_mode, route_reason, source_kind, skill_template_ref, \
+                skill_template_revision_uid, status, terminal_reason, requirement_count, \
+                satisfied_requirement_count, completion_check_count, logical_task_count, \
+                queue_to_start_ms, duration_ms, reserved_cost_microusd, actual_cost_microusd, \
+                reserved_tokens, actual_tokens, reserved_tasks, actual_tasks, reserved_tool_calls, \
+                actual_tool_calls, reserved_retrieved_bytes, actual_retrieved_bytes \
+         FROM analytics.execution_run_fact WHERE run_uid = $1",
+    )
+    .bind(execution_run_uid)
+    .fetch_one(&pool)
+    .await
+    .expect("query normalized execution run fact");
+    assert_eq!(run_row.get::<Uuid, _>("tenant_id"), tenant_id.0);
+    assert_eq!(run_row.get::<Uuid, _>("contact_id"), contact_id.0);
+    assert_eq!(run_row.get::<Uuid, _>("session_id"), session_id.0);
+    assert_eq!(
+        run_row.get::<String, _>("initial_plan_hash"),
+        "2".repeat(64)
+    );
+    assert_eq!(run_row.get::<String, _>("active_plan_hash"), "2".repeat(64));
+    assert_eq!(run_row.get::<i64, _>("plan_revision"), 1);
+    assert_eq!(run_row.get::<String, _>("route_mode"), "run");
+    assert_eq!(
+        run_row.get::<String, _>("route_reason"),
+        "selected_execution_template"
+    );
+    assert_eq!(run_row.get::<String, _>("source_kind"), "skill_template");
+    assert_eq!(
+        run_row.get::<String, _>("skill_template_ref"),
+        "skill://billing-flow"
+    );
+    assert_eq!(
+        run_row.get::<Uuid, _>("skill_template_revision_uid"),
+        execution_skill_revision_uid
+    );
+    assert_eq!(run_row.get::<String, _>("status"), "completed");
+    assert_eq!(run_row.get::<String, _>("terminal_reason"), "completed");
+    assert_eq!(run_row.get::<i64, _>("requirement_count"), 2);
+    assert_eq!(run_row.get::<i64, _>("satisfied_requirement_count"), 2);
+    assert_eq!(run_row.get::<i64, _>("completion_check_count"), 1);
+    assert_eq!(run_row.get::<i64, _>("logical_task_count"), 1);
+    assert!(approx_eq(
+        run_row.get::<f64, _>("queue_to_start_ms"),
+        250.0,
+        1e-9
+    ));
+    assert!(approx_eq(
+        run_row.get::<f64, _>("duration_ms"),
+        2_000.0,
+        1e-9
+    ));
+    for (field, expected) in [
+        ("reserved_cost_microusd", 0_i64),
+        ("actual_cost_microusd", 125),
+        ("reserved_tokens", 0),
+        ("actual_tokens", 456),
+        ("reserved_tasks", 0),
+        ("actual_tasks", 1),
+        ("reserved_tool_calls", 0),
+        ("actual_tool_calls", 3),
+        ("reserved_retrieved_bytes", 0),
+        ("actual_retrieved_bytes", 4096),
+    ] {
+        assert_eq!(run_row.get::<i64, _>(field), expected, "{field}");
+    }
+
+    let task_row = sqlx::query(
+        "SELECT tenant_id, run_uid, node_id, item_key, task_kind, capability_name, \
+                capability_version, plan_revision, status, failure_class, attempt, generation, \
+                citation_count, queue_latency_ms, duration_ms, reserved_cost_microusd, \
+                actual_cost_microusd, reserved_tokens, actual_tokens, reserved_tasks, \
+                actual_tasks, reserved_tool_calls, actual_tool_calls, reserved_retrieved_bytes, \
+                actual_retrieved_bytes \
+         FROM analytics.execution_task_fact WHERE task_id = $1",
+    )
+    .bind(execution_task_id)
+    .fetch_one(&pool)
+    .await
+    .expect("query normalized execution task fact");
+    assert_eq!(task_row.get::<Uuid, _>("tenant_id"), tenant_id.0);
+    assert_eq!(task_row.get::<Uuid, _>("run_uid"), execution_run_uid);
+    assert_eq!(task_row.get::<String, _>("node_id"), "lookup");
+    assert_eq!(task_row.get::<String, _>("item_key"), "invoice-42");
+    assert_eq!(task_row.get::<String, _>("task_kind"), "capability");
+    assert_eq!(task_row.get::<String, _>("capability_name"), "docs.search");
+    assert_eq!(task_row.get::<String, _>("capability_version"), "v2");
+    assert_eq!(task_row.get::<i64, _>("plan_revision"), 1);
+    assert_eq!(task_row.get::<String, _>("status"), "failed");
+    assert_eq!(task_row.get::<String, _>("failure_class"), "invalid_output");
+    assert_eq!(task_row.get::<i32, _>("attempt"), 2);
+    assert_eq!(task_row.get::<i64, _>("generation"), 3);
+    assert_eq!(task_row.get::<i64, _>("citation_count"), 2);
+    assert!(approx_eq(
+        task_row.get::<f64, _>("queue_latency_ms"),
+        150.0,
+        1e-9
+    ));
+    assert!(approx_eq(
+        task_row.get::<f64, _>("duration_ms"),
+        800.0,
+        1e-9
+    ));
+    assert_eq!(task_row.get::<i64, _>("actual_cost_microusd"), 75);
+    assert_eq!(task_row.get::<i64, _>("actual_tokens"), 110);
+    assert_eq!(task_row.get::<i64, _>("actual_tasks"), 1);
+    assert_eq!(task_row.get::<i64, _>("actual_tool_calls"), 2);
+    assert_eq!(task_row.get::<i64, _>("actual_retrieved_bytes"), 900);
+
     for view_name in [
-        "analytics.procedure_run_fact",
-        "analytics.procedure_node_run_fact",
         "analytics.learning_candidate_fact",
         "analytics.experiment_run_fact",
     ] {
@@ -2746,6 +2859,132 @@ async fn append_events_batches_inserts_aggregates_and_dedupe_db() {
     pool.close().await;
     drop(store);
     cleanup_schema(&database_url, &schema_name).await;
+}
+
+async fn seed_execution_analytics_rows(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    contact_id: Uuid,
+    session_id: Uuid,
+) -> (Uuid, Uuid, Uuid) {
+    let run_uid = Uuid::now_v7();
+    let task_id = Uuid::now_v7();
+    let planning_context_uid = Uuid::now_v7();
+    let skill_template_revision_uid = Uuid::now_v7();
+    let planning_hash = "1".repeat(64);
+    let plan_hash = "2".repeat(64);
+
+    sqlx::query(
+        "INSERT INTO moa.execution_planning_context \
+             (planning_context_uid, tenant_id, contact_id, session_id, \
+              originating_user_sequence_num, originating_user_event_hash, owner_user_id, \
+              planning_context_hash, snapshot) \
+         VALUES ($1, $2, $3, $4, 1, $5, 'analytics-user', $5, '{}'::JSONB)",
+    )
+    .bind(planning_context_uid)
+    .bind(tenant_id)
+    .bind(contact_id)
+    .bind(session_id)
+    .bind(&planning_hash)
+    .execute(pool)
+    .await
+    .expect("insert execution planning context");
+    sqlx::query(
+        "INSERT INTO moa.execution_run \
+             (run_uid, tenant_id, contact_id, session_id, originating_user_sequence_num, \
+              planning_context_uid, planning_context_hash, owner_user_id, goal_contract, \
+              initial_plan, active_plan, initial_plan_hash, active_plan_hash, capability_catalog, \
+              authorization_envelope, source_provenance, source_kind, route_mode, route_reason, \
+              skill_template_ref, skill_template_revision_uid, input, status, \
+              progress_total_tasks) \
+         VALUES ($1, $2, $3, $4, 1, $5, $6, 'analytics-user', \
+                 '{\"requirements\":[{\"id\":\"r1\"},{\"id\":\"r2\"}], \
+                   \"completion_checks\":[{\"id\":\"c1\"}]}'::JSONB, \
+                 '{}'::JSONB, '{}'::JSONB, $7, $7, '{}'::JSONB, '{}'::JSONB, \
+                 jsonb_build_object( \
+                    'kind', 'skill_template', \
+                    'route_reason', 'selected_execution_template', \
+                    'skill_template_ref', 'skill://billing-flow', \
+                    'skill_template_revision_uid', lower($8::TEXT)), \
+                 'skill_template', 'run', 'selected_execution_template', \
+                 'skill://billing-flow', $8, '{}'::JSONB, 'queued', 1)",
+    )
+    .bind(run_uid)
+    .bind(tenant_id)
+    .bind(contact_id)
+    .bind(session_id)
+    .bind(planning_context_uid)
+    .bind(&planning_hash)
+    .bind(&plan_hash)
+    .bind(skill_template_revision_uid)
+    .execute(pool)
+    .await
+    .expect("insert execution run");
+    sqlx::query(
+        "UPDATE moa.execution_run \
+         SET status = 'running', started_at = queued_at + INTERVAL '250 milliseconds', \
+             updated_at = queued_at + INTERVAL '250 milliseconds' \
+         WHERE run_uid = $1",
+    )
+    .bind(run_uid)
+    .execute(pool)
+    .await
+    .expect("start execution run");
+
+    let task_created_at: chrono::DateTime<Utc> = sqlx::query_scalar(
+        "SELECT started_at + INTERVAL '100 milliseconds' \
+         FROM moa.execution_run WHERE run_uid = $1",
+    )
+    .bind(run_uid)
+    .fetch_one(pool)
+    .await
+    .expect("read execution task fixture timestamp");
+    sqlx::query(
+        "INSERT INTO moa.execution_task \
+             (task_id, run_uid, tenant_id, contact_id, node_id, item_key, plan_revision, status, \
+              attempt, generation, input, task_kind, retry_policy, estimate_cost_microusd, \
+              estimate_tokens, estimate_tasks, estimate_tool_calls, estimate_retrieved_bytes, \
+              actual_cost_microusd, actual_tokens, actual_tasks, actual_tool_calls, \
+              actual_retrieved_bytes, current_outcome, error, citations, created_at, started_at, \
+              completed_at, updated_at) \
+         VALUES ($1, $2, $3, $4, 'lookup', 'invoice-42', 1, 'failed', 2, 3, '{}'::JSONB, \
+                 '{\"kind\":\"capability\", \
+                   \"reference\":{\"name\":\"docs.search\",\"version\":\"v2\"}}'::JSONB, \
+                 '{\"max_attempts\":2,\"initial_backoff_ms\":5,\"max_backoff_ms\":10}'::JSONB, \
+                 80, 120, 1, 2, 1024, 75, 110, 1, 2, 900, \
+                 '{\"class\":\"invalid_output\"}'::JSONB, \
+                 '{\"class\":\"invalid_output\",\"message\":\"raw prose must not export\"}'::JSONB, \
+                 '[{\"source\":\"doc-1\"},{\"source\":\"doc-2\"}]'::JSONB, \
+                 $5, $5 + INTERVAL '150 milliseconds', \
+                 $5 + INTERVAL '950 milliseconds', $5 + INTERVAL '950 milliseconds')",
+    )
+    .bind(task_id)
+    .bind(run_uid)
+    .bind(tenant_id)
+    .bind(contact_id)
+    .bind(task_created_at)
+    .execute(pool)
+    .await
+    .expect("insert execution task");
+    sqlx::query(
+        "UPDATE moa.execution_run \
+         SET status = 'completed', output = '{}'::JSONB, \
+             completion_check_results = '[{\"check_id\":\"c1\"}]'::JSONB, \
+             terminal_cause = '{\"kind\":\"completion\",\"limit_stop\":null}'::JSONB, \
+             terminal_reason = 'completed', terminal_satisfied_requirement_count = 2, \
+             terminal_requirement_count = 2, consumed_cost_microusd = 125, \
+             consumed_tokens = 456, consumed_tasks = 1, consumed_tool_calls = 3, \
+             consumed_retrieved_bytes = 4096, progress_completed_tasks = 1, \
+             completed_at = started_at + INTERVAL '2 seconds', \
+             updated_at = started_at + INTERVAL '2 seconds' \
+         WHERE run_uid = $1",
+    )
+    .bind(run_uid)
+    .execute(pool)
+    .await
+    .expect("complete execution run");
+
+    (run_uid, task_id, skill_template_revision_uid)
 }
 
 fn approx_eq(left: f64, right: f64, epsilon: f64) -> bool {

@@ -96,7 +96,7 @@ fn mixed_profile_includes_long_and_short_plans_with_tool_turns() {
 }
 
 #[test]
-fn human_report_renders_endpoint_error_taxonomy_and_windows() {
+fn execution_admission_report_rendering() {
     // Pins: reports expose the remote endpoint, the corrected/uncorrected
     // latency split, the error taxonomy line, and the window series.
     let summary = |value: f64| PercentileSummary {
@@ -113,11 +113,15 @@ fn human_report_renders_endpoint_error_taxonomy_and_windows() {
         profile: SessionProfileKind::Short,
         requested_rate_qps: 20.0,
         achieved_rate_qps: 19.5,
+        admission_rate_qps: 1.0,
+        successful_operation_rate_qps: 20.5,
         sessions_started: 1,
         sessions_completed: 1,
         sessions_failed: 0,
         turns_scheduled: 10,
         turns_completed: 9,
+        execution_admissions: 1,
+        successful_operations: 10,
         errors: ErrorTaxonomy {
             turn_timeouts: 1,
             ..ErrorTaxonomy::default()
@@ -128,6 +132,8 @@ fn human_report_renders_endpoint_error_taxonomy_and_windows() {
         warmup_ms: 1_000.0,
         turn_latency_corrected_ms: summary(12.0),
         turn_latency_ms: summary(10.0),
+        execution_admission_latency_corrected_ms: summary(8.0),
+        execution_admission_latency_ms: summary(6.0),
         dispatch_delay_ms: summary(2.0),
         ttft_ms: summary(0.0),
         edge_observation_wait_ms: summary(250.0),
@@ -143,11 +149,11 @@ fn human_report_renders_endpoint_error_taxonomy_and_windows() {
         }],
         resource_bill: ResourceBillReport {
             durable_event_rows: 6,
-            durable_event_rows_per_turn: 1.5,
+            durable_event_rows_per_successful_operation: 0.6,
             progress_update_rows: 0,
-            progress_update_rows_per_turn: 0.0,
+            progress_update_rows_per_successful_operation: 0.0,
             progress_narrated_rows: 2,
-            progress_narrated_rows_per_turn: 0.5,
+            progress_narrated_rows_per_successful_operation: 0.2,
             event_rows_by_type: vec![
                 EventAppendTypeReport {
                     event_type: "BrainResponse".to_string(),
@@ -166,8 +172,10 @@ fn human_report_renders_endpoint_error_taxonomy_and_windows() {
             end_ms: 10_000.0,
             warmup: false,
             turns_completed: 9,
+            execution_admissions: 1,
             turn_errors: 1,
             latency_corrected_ms: summary(12.0),
+            execution_admission_latency_corrected_ms: summary(8.0),
         }],
         tenant_ids: Vec::new(),
         hdr: None,
@@ -180,8 +188,10 @@ fn human_report_renders_endpoint_error_taxonomy_and_windows() {
     assert!(rendered.contains("pipeline_compile (n=1): p50 4ms  p95 4ms  p99 4ms"));
     assert!(rendered.contains("lock_session (n=2): p50 7ms  p95 7ms  p99 7ms"));
     assert!(rendered.contains("Edge Observation Wait:"));
+    assert!(rendered.contains("1.0/s admissions, 20.5/s successful operations"));
+    assert!(rendered.contains("9 answers, 1 admissions, 10 successful operations"));
     assert!(rendered.contains(
-        "durable event rows: 6 (1.50/turn) | ProgressUpdate: 0 (0.00/turn) | ProgressNarrated: 2 (0.50/turn)"
+        "durable event rows: 6 (0.60/successful operation) | ProgressUpdate: 0 (0.00/successful operation) | ProgressNarrated: 2 (0.20/successful operation)"
     ));
     assert!(rendered.contains("Turn Latency (corrected, from intended arrival):"));
     assert!(rendered.contains("timeout 1"));

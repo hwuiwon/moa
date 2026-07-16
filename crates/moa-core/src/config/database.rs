@@ -17,7 +17,11 @@ pub struct DatabaseConfig {
     pub url: String,
     /// Optional direct/admin database URL for migrations and other session-sensitive flows.
     pub admin_url: Option<String>,
-    /// Optional Postgres schema name for isolated runtime stores.
+    /// Optional already-provisioned Postgres schema for runtime queries.
+    ///
+    /// When set, session-store construction binds to this schema and does not
+    /// run migrations. Automatic full-database migration is only used when this
+    /// value is `None`.
     pub schema: Option<String>,
     /// Maximum pool size for the shared Postgres client.
     pub max_connections: u32,

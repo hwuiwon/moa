@@ -138,11 +138,12 @@ async fn fetch_child_summary(
     ctx: &ObjectContext<'_>,
     worker_id: &str,
 ) -> Option<WorkerProgressSummary> {
-    match ctx
-        .object_client::<WorkerClient>(worker_id.to_string())
-        .progress_summary()
-        .call()
-        .await
+    match crate::restate_identity::replay_safe_request(
+        ctx.object_client::<WorkerClient>(worker_id.to_string())
+            .progress_summary(),
+    )
+    .call()
+    .await
     {
         Ok(summary) => Some(summary.into_inner()),
         Err(error) => {
@@ -288,21 +289,23 @@ async fn raise_child_stale(
 
     let summary =
         format!("worker {worker_id} heartbeat went stale (no progress for over {threshold_ms}ms)");
-    ctx.object_client::<SessionClient>(session_id.to_string())
-        .record_child_signal(Json::from(WorkerSignal {
-            signal_id,
-            worker_id: worker_id.to_string(),
-            parent_session: session_id,
-            kind: ChildSignalKind::HeartbeatStale,
-            severity: SignalSeverity::Warning,
-            summary,
-            payload: serde_json::Value::Null,
-            created_at,
-            resume_policy: ParentResumePolicy::IfIdle,
-            input_request_id: None,
-            input_audience: None,
-        }))
-        .send();
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<SessionClient>(session_id.to_string())
+            .record_child_signal(Json::from(WorkerSignal {
+                signal_id,
+                worker_id: worker_id.to_string(),
+                parent_session: session_id,
+                kind: ChildSignalKind::HeartbeatStale,
+                severity: SignalSeverity::Warning,
+                summary,
+                payload: serde_json::Value::Null,
+                created_at,
+                resume_policy: ParentResumePolicy::IfIdle,
+                input_request_id: None,
+                input_audience: None,
+            })),
+    )
+    .send();
     tracing::info!(
         key = %ctx.key(),
         worker_id = %worker_id,

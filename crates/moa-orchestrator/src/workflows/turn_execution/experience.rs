@@ -158,14 +158,16 @@ async fn dispatch_skill_learning_after_experience(
     session_id: SessionId,
     experience_id: uuid::Uuid,
 ) -> Result<(), HandlerError> {
-    ctx.workflow_client::<SkillLearningClient>(experience_id.to_string())
-        .run(Json(RunSkillLearningRequest {
-            session_id,
-            experience_id,
-            // Single-session dispatch: the per-session gate is the sole evidence.
-            recurrence: None,
-        }))
-        .send();
+    crate::restate_identity::replay_safe_request(
+        ctx.workflow_client::<SkillLearningClient>(experience_id.to_string())
+            .run(Json(RunSkillLearningRequest {
+                session_id,
+                experience_id,
+                // Single-session dispatch: the per-session gate is the sole evidence.
+                recurrence: None,
+            })),
+    )
+    .send();
     tracing::debug!(
         session_id = %session_id,
         experience_id = %experience_id,

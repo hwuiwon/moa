@@ -1,14 +1,26 @@
 //! Root-turn governed tool selection, dispatch, persistence, and approval routing.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use moa_core::wire::turn::TurnPhase;
 use moa_core::{
-    types::completion::ToolCallContent, types::completion::ToolInvocation,
-    types::identifiers::SessionId, types::session::SessionMeta, types::tools::ToolOutput,
+    types::completion::ToolCallContent,
+    types::completion::ToolInvocation,
+    types::execution_planning::{
+        ActEscalationSignal, ExecutionPlanningEvidence, ExecutionRouteReason,
+    },
+    types::identifiers::{SessionId, ToolCallId},
+    types::session::SessionMeta,
+    types::tools::ToolOutput,
     types::tools::TrustedSandboxFileManifestRef,
 };
 use restate_sdk::prelude::*;
+use serde::Deserialize;
+use tracing::Instrument;
+
+use moa_observability::{
+    record_turn_tool_dispatch_duration, restate_observability::tool_dispatch_span,
+};
 
 use crate::tool_invocation::governed::{
     GovernedInvocationOrigin, GovernedInvocationOutcome, GovernedInvocationRequest,
@@ -17,18 +29,150 @@ use crate::tool_invocation::governed::{
 };
 use crate::turn::util::{TurnEvidence, stable_tool_call_id};
 use crate::turn_driver::progress as driver_progress;
+use crate::workflows::errors::moa_error_to_handler_error;
+use crate::workflows::turn_events::{
+    append_tool_call_event, append_tool_result_event, record_segment_tool_use,
+};
+use crate::workflows::turn_progress;
 use crate::workflows::turn_responsiveness::{
     ToolBudgetDecision, ToolBudgetExhausted, ToolBudgetState,
 };
 
 use super::TurnExecutionImpl;
-use super::delegation::{DelegationToolRequest, handle_delegation_tool};
+
+struct DelegationToolRequest<'a> {
+    meta: &'a SessionMeta,
+    session_id: SessionId,
+    tool_id: ToolCallId,
+    tool_call: &'a ToolCallContent,
+    trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
+}
+
+async fn handle_delegation_tool(
+    workflow: &TurnExecutionImpl,
+    ctx: &WorkflowContext<'_>,
+    request: DelegationToolRequest<'_>,
+    turn_evidence: &mut TurnEvidence,
+) -> Result<ToolOutput, HandlerError> {
+    let DelegationToolRequest {
+        meta,
+        session_id,
+        tool_id,
+        tool_call,
+        trusted_sandbox_manifest,
+    } = request;
+    let invocation = tool_call.invocation.clone();
+    append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
+    let Some(tool) =
+        moa_core::types::worker::tool_schema::DelegationTool::from_invocation(&invocation)
+            .map_err(moa_error_to_handler_error)?
+    else {
+        return Err(
+            TerminalError::new(format!("unsupported delegation tool {}", invocation.name)).into(),
+        );
+    };
+
+    let span = tool_dispatch_span(&invocation.name);
+    turn_progress::maybe_emit(
+        ctx,
+        session_id,
+        turn_progress::running_tool_summary(&invocation.name),
+        workflow.session_limits(),
+        workflow.session_store.clone(),
+        workflow.channel_adapters.as_ref(),
+    )
+    .await?;
+    let dispatch_started = Instant::now();
+    let output = crate::delegation::execute_delegation_tool(
+        ctx,
+        crate::delegation::DelegationParent::RootSession { session_id, meta },
+        tool,
+        trusted_sandbox_manifest,
+    )
+    .instrument(span)
+    .await?;
+    record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
+
+    append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
+    turn_evidence.record_tool_result(&invocation, &output);
+    if !output.is_error {
+        record_segment_tool_use(ctx, session_id, &invocation.name).await?;
+    }
+    Ok(output)
+}
 
 #[derive(Clone, Debug)]
 pub(super) enum ToolDispatchOutcome {
     Completed,
+    ActEscalation(ActEscalationSignal),
+    ActEscalationUnsupported(String),
     Cancelled,
     ToolBudgetExceeded(ToolBudgetExhausted),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ActToolResultRoute {
+    Continue,
+    Escalate(ActEscalationSignal),
+    Unsupported(String),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoveredExecutionShape {
+    reason: ExecutionRouteReason,
+    summary: String,
+    value: serde_json::Value,
+}
+
+fn reevaluate_act_tool_result(
+    objective: &str,
+    origin_allows_run: bool,
+    invocation: &ToolInvocation,
+    output: &ToolOutput,
+) -> ActToolResultRoute {
+    if !origin_allows_run || output.is_error {
+        return ActToolResultRoute::Continue;
+    }
+    let Some(shape) = output
+        .structured
+        .as_ref()
+        .and_then(|structured| structured.get("execution_shape"))
+    else {
+        return ActToolResultRoute::Continue;
+    };
+    let discovered = match serde_json::from_value::<DiscoveredExecutionShape>(shape.clone()) {
+        Ok(discovered) => discovered,
+        Err(error) => {
+            return ActToolResultRoute::Unsupported(format!(
+                "invalid structured execution-shape evidence: {error}"
+            ));
+        }
+    };
+    if !matches!(
+        discovered.reason,
+        ExecutionRouteReason::BulkCollection
+            | ExecutionRouteReason::DurableOrResumable
+            | ExecutionRouteReason::HighFanout
+            | ExecutionRouteReason::ApprovalOrSignal
+    ) {
+        return ActToolResultRoute::Unsupported(
+            "tool result execution_shape reason is not a newly discovered run shape".to_string(),
+        );
+    }
+    let signal = ActEscalationSignal {
+        objective: objective.to_string(),
+        reason: discovered.reason,
+        evidence: vec![ExecutionPlanningEvidence {
+            source: format!("tool:{}", invocation.name),
+            summary: discovered.summary,
+            value: discovered.value,
+        }],
+    };
+    match signal.validate() {
+        Ok(()) => ActToolResultRoute::Escalate(signal),
+        Err(error) => ActToolResultRoute::Unsupported(error.to_string()),
+    }
 }
 
 /// Number of cache serves of one file after which the notice escalates to a STOP.
@@ -177,9 +321,10 @@ pub(super) struct RootToolContext<'a> {
     pub(super) session_id: SessionId,
     pub(super) active_canary: Option<&'a str>,
     pub(super) trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
-    pub(super) selected_procedure_skills: &'a std::collections::BTreeSet<String>,
     /// Skills injected into this turn's manifest, used to detect which the model engaged.
     pub(super) selected_skills: &'a [String],
+    pub(super) objective: &'a str,
+    pub(super) act_escalation_allowed: bool,
     pub(super) turn_evidence: &'a mut TurnEvidence,
     /// Per-turn `file_read` result memory shared across this turn's model-loop iterations.
     pub(super) file_read_cache: &'a mut FileReadTurnCache,
@@ -209,7 +354,7 @@ pub(super) async fn dispatch_response_tool_calls(
         {
             return Ok(ToolDispatchOutcome::ToolBudgetExceeded(exhaustion));
         }
-        handle_tool_call(
+        match handle_tool_call(
             workflow,
             ctx,
             &mut tool_context,
@@ -217,7 +362,16 @@ pub(super) async fn dispatch_response_tool_calls(
             index,
             tool_call,
         )
-        .await?;
+        .await?
+        {
+            ActToolResultRoute::Continue => {}
+            ActToolResultRoute::Escalate(signal) => {
+                return Ok(ToolDispatchOutcome::ActEscalation(signal));
+            }
+            ActToolResultRoute::Unsupported(message) => {
+                return Ok(ToolDispatchOutcome::ActEscalationUnsupported(message));
+            }
+        }
     }
     Ok(ToolDispatchOutcome::Completed)
 }
@@ -254,7 +408,7 @@ async fn handle_tool_call(
     allowed_tools: &std::collections::BTreeSet<String>,
     index: usize,
     tool_call: &ToolCallContent,
-) -> Result<(), HandlerError> {
+) -> Result<ActToolResultRoute, HandlerError> {
     driver_progress::set_phase(ctx, TurnPhase::Tooling);
     let meta = tool_context.meta;
     let session_id = tool_context.session_id;
@@ -276,16 +430,21 @@ async fn handle_tool_call(
             tool_id,
             tool_call,
             allowed_tools,
-            selected_procedure_skills: tool_context.selected_procedure_skills,
             active_canary,
             trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
             origin: GovernedInvocationOrigin::RootTurn,
+            capability_provenance: None,
         };
         append_cached_tool_result(ctx, &request, &cached_output).await?;
         tool_context
             .turn_evidence
             .record_tool_result(&tool_call.invocation, &cached_output);
-        return Ok(());
+        return Ok(reevaluate_act_tool_result(
+            tool_context.objective,
+            tool_context.act_escalation_allowed,
+            &tool_call.invocation,
+            &cached_output,
+        ));
     }
 
     let turn_evidence = &mut *tool_context.turn_evidence;
@@ -297,10 +456,10 @@ async fn handle_tool_call(
             tool_id,
             tool_call,
             allowed_tools,
-            selected_procedure_skills: tool_context.selected_procedure_skills,
             active_canary,
             trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
             origin: GovernedInvocationOrigin::RootTurn,
+            capability_provenance: None,
         },
         workflow.session_limits(),
         workflow.session_store.clone(),
@@ -308,7 +467,7 @@ async fn handle_tool_call(
     )
     .await?;
 
-    match outcome {
+    let (invocation, output) = match outcome {
         GovernedInvocationOutcome::Completed(result) => {
             turn_evidence.record_tool_result(&result.invocation, &result.output);
             tool_context
@@ -325,9 +484,10 @@ async fn handle_tool_call(
                 selected_skills,
             )
             .await?;
+            (result.invocation, result.output)
         }
         GovernedInvocationOutcome::Delegation { tool_id, .. } => {
-            handle_delegation_tool(
+            let output = handle_delegation_tool(
                 workflow,
                 ctx,
                 DelegationToolRequest {
@@ -340,9 +500,15 @@ async fn handle_tool_call(
                 turn_evidence,
             )
             .await?;
+            (tool_call.invocation.clone(), output)
         }
-    }
-    Ok(())
+    };
+    Ok(reevaluate_act_tool_result(
+        tool_context.objective,
+        tool_context.act_escalation_allowed,
+        &invocation,
+        &output,
+    ))
 }
 
 #[cfg(test)]
@@ -352,6 +518,85 @@ mod tests {
     use moa_core::types::completion::ToolInvocation;
     use moa_core::types::tools::ToolOutput;
     use serde_json::json;
+
+    use super::{ActToolResultRoute, reevaluate_act_tool_result};
+
+    #[test]
+    fn qualifying_structured_act_result_escalates_with_bounded_preserved_evidence() {
+        // Pins: a trusted structured run-shape fact becomes one bounded signal with the root objective intact.
+        let objective = "Inspect the affected tenant accounts";
+        let invocation = ToolInvocation {
+            id: Some("discover-shape".to_string()),
+            name: "tenant_inventory".to_string(),
+            input: json!({"tenant": "acme"}),
+        };
+        let discovered = json!({"account_count": 420, "batch_key": "tenant:acme"});
+        let output = ToolOutput {
+            content: Vec::new(),
+            is_error: false,
+            structured: Some(json!({
+                "execution_shape": {
+                    "reason": "high_fanout",
+                    "summary": "inventory contains 420 independently processable accounts",
+                    "value": discovered
+                }
+            })),
+            duration: Duration::ZERO,
+            truncated: false,
+            original_output_tokens: None,
+            artifact: None,
+        };
+
+        let ActToolResultRoute::Escalate(signal) =
+            reevaluate_act_tool_result(objective, true, &invocation, &output)
+        else {
+            panic!("qualifying Act result should emit an escalation signal");
+        };
+        assert_eq!(signal.objective, objective);
+        assert_eq!(
+            signal.reason,
+            moa_core::types::execution_planning::ExecutionRouteReason::HighFanout
+        );
+        assert_eq!(signal.evidence.len(), 1);
+        assert_eq!(signal.evidence[0].source, "tool:tenant_inventory");
+        assert_eq!(
+            signal.evidence[0].summary,
+            "inventory contains 420 independently processable accounts"
+        );
+        assert_eq!(signal.evidence[0].value, discovered);
+        signal.validate().expect("emitted evidence must be bounded");
+    }
+
+    #[test]
+    fn ordinary_or_non_user_act_results_never_escalate() {
+        // Pins: ordinary tool output and forbidden origins remain in Act even when text mentions fan-out.
+        let invocation = ToolInvocation {
+            id: None,
+            name: "search".to_string(),
+            input: json!({"query": "fan out"}),
+        };
+        let ordinary = ToolOutput::text("hundreds of matches", Duration::ZERO);
+        assert_eq!(
+            reevaluate_act_tool_result("investigate", true, &invocation, &ordinary),
+            ActToolResultRoute::Continue
+        );
+
+        let structured = ToolOutput::json(
+            "shape",
+            json!({
+                "execution_shape": {
+                    "reason": "high_fanout",
+                    "summary": "many independent items",
+                    "value": {"count": 500}
+                }
+            }),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            reevaluate_act_tool_result("investigate", false, &invocation, &structured),
+            ActToolResultRoute::Continue
+        );
+    }
 
     use super::{ESCALATED_SERVE_THRESHOLD, FileReadTurnCache};
 

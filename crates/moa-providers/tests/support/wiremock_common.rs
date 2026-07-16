@@ -22,6 +22,7 @@ pub fn tool_request(prompt: impl Into<String>) -> CompletionRequest {
         max_output_tokens: Some(128),
         temperature: Some(0.0),
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     }
 }

@@ -1,4 +1,4 @@
-//! Combined behavior-lab simulation E2E coverage through Restate.
+//! Execution-template experiment-run delivery coverage through Restate.
 
 #![cfg(feature = "integration")]
 
@@ -10,32 +10,29 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use moa_core::types::memory::RlsContext;
-use moa_core::wire::artifacts::{
-    ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
-};
-use moa_core::wire::experiments::{
-    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
-    ExperimentRunStatusResponse, ExperimentScoresRequest, ExperimentScoresResponse,
-    ExperimentTrialStatusRequest, ExperimentTrialStatusResponse, ExperimentTrialSummary,
-    ExperimentTrialsRequest, ExperimentTrialsResponse,
-};
-use moa_core::wire::procedures::{
-    ProcedureRunRequest, ProcedureRunResponse, ProcedureRunStatus, ProcedureStatusRequest,
-};
-use moa_core::wire::skills::{
-    SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
-};
 use moa_core::{
-    events::Event, traits::Identity, types::action_policy::ActionRuleScope,
-    types::events_stream::EventRange, types::events_stream::EventRecord,
-    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
-    types::identifiers::TenantId,
+    events::Event,
+    traits::Identity,
+    types::{
+        action_policy::ActionRuleScope,
+        contact::ContactId,
+        events_stream::{EventRange, EventRecord},
+        execution_planning::{ExecutionRunStarted, PinnedExecutionTemplateRef},
+        identifiers::{ModelId, SessionId, TenantId},
+    },
+    wire::{
+        artifacts::{
+            ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest,
+            ArtifactPublishResponse,
+        },
+        experiments::{ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusResponse},
+    },
 };
-use moa_db::ScopedConn;
-use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
+use moa_experiments::{
+    model::{ExperimentScorecard, ExperimentTarget, ExperimentVariant, NewExperimentRun},
+    store::ExperimentStore,
+};
+use moa_orchestrator::workflows::experiment_run::ExperimentRunWorkflowRequest;
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -55,8 +52,10 @@ use crate::support::{
 #[path = "support/mod.rs"]
 mod support;
 
-const SUPPORT_SKILL_PATH: &str = ".moa/skills/delivery-support/SKILL.md";
-const SUPPORT_SKILL_PROVIDER_ID: &str = "behavior-lab-read-delivery-support";
+const EXPERIMENT_EXECUTION_SESSION_NAMESPACE: Uuid =
+    Uuid::from_u128(0xc2a6_731c_2d80_5d4a_9d10_2d20_1283_c6ec);
+const EXPERIMENT_EXECUTION_SESSION_DOMAIN: &str = "moa.experiment.execution-session.v1";
+const TEMPLATE_SKILL_REF: &str = "skill://experiment-resolution";
 
 fn spawn_orchestrator(
     ports: OrchestratorPorts,
@@ -75,6 +74,8 @@ fn spawn_orchestrator(
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
+        .env("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true")
+        .env("MOA_RUNTIME_CACHE_REDIS_URL", "redis://127.0.0.1:10051/0")
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env(
             "MOA_PROVIDERS_OVERRIDE",
@@ -88,13 +89,15 @@ fn spawn_orchestrator(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("spawn moa-orchestrator binary for behavior-lab simulation e2e")
+        .context("spawn moa-orchestrator binary for execution-template experiment e2e")
 }
 
 #[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn damaged_food_plan_links_trial_session_procedure_skill_and_score_runs() -> Result<()> {
-    // Pins: a behavior-lab plan drives a damaged-food simulator trial through skills and same-session procedure association.
+#[ignore = "requires a local restate-server, Postgres, OpenFGA, Valkey, and provider-overrides feature"]
+async fn execution_template_run_target_tenant_scoped_internal_session() -> Result<()> {
+    // Pins: a tenant-scoped sessionless execution-template experiment creates one deterministic
+    // internal Session and delivers its objective, admitted run, and terminal result as typed
+    // Session events without polling an execution lifecycle API.
     let _guard = RESTATE_E2E_LOCK.lock().await;
     if !cfg!(feature = "provider-overrides") {
         return Ok(());
@@ -102,10 +105,8 @@ async fn damaged_food_plan_links_trial_session_procedure_skill_and_score_runs() 
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
-    let fixture_path = memory_dir
-        .path()
-        .join("damaged-food-behavior-lab-script.json");
-    write_damaged_food_fixture(&fixture_path)?;
+    let fixture_path = memory_dir.path().join("tenant-template-experiment.json");
+    write_scripted_fixture(&fixture_path)?;
 
     let ports = reserve_orchestrator_ports()?;
     let endpoint_url = deployment_endpoint_url(ports.restate);
@@ -113,303 +114,47 @@ async fn damaged_food_plan_links_trial_session_procedure_skill_and_score_runs() 
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
     let tenant_id = TenantId::new();
+    let scope = ActionRuleScope::Tenant { tenant_id };
     let mut identity = test_user_identity();
     identity.tenant_id = tenant_id;
-    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
-    let scope = ActionRuleScope::Tenant { tenant_id };
     grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_support_skill(&client, ingress, &identity, &storage_partition_id).await?;
-        let agent = import_and_publish_artifact(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-            behavior_lab_agent_source(),
-        )
-        .await?;
-
-        let procedure = import_and_publish_artifact(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-            damaged_food_procedure_source(),
-        )
-        .await?;
-        let plan_source = damaged_food_plan_source(agent.revision_uid);
-        let plan = import_and_publish_artifact(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-            plan_source.as_str(),
-        )
-        .await?;
-
-        let run = run_plan_experiment(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-            "damaged-food-behavior-lab",
-            plan.revision_uid,
-        )
-        .await?;
-        assert_eq!(run.status, "accepted");
-        assert_ne!(run.score_run_id, Uuid::nil());
-        assert!(run.session_id.is_none());
-        assert!(run.procedure_run_uid.is_none());
-
-        let status =
-            wait_for_run_status(&client, ingress, &identity, &storage_partition_id, run.run_uid, |status| {
-                status.status == "completed"
-            })
-            .await?;
-        assert_eq!(status.status, "completed");
-        assert_eq!(status.score_run_id, Some(run.score_run_id));
-
-        let trial =
-            wait_for_single_completed_trial(&client, ingress, &identity, &storage_partition_id, run.run_uid)
+        let published = publish_execution_template(&client, ingress, &identity, scope).await?;
+        let objective = "Resolve tenant case TENANT-42 through the pinned execution template.";
+        let (target, variant) = execution_template_fixture(
+            published.revision_uid,
+            objective,
+            json!({"case_id": "TENANT-42", "resolution": "replacement"}),
+        );
+        let response =
+            run_tenant_experiment(&client, ingress, &identity, tenant_id, &target, &variant)
                 .await?;
-        assert_eq!(trial.run_uid, run.run_uid);
-        assert_eq!(trial.status, "completed");
-        assert_eq!(trial.target_kind, "agent_loop");
-        assert_eq!(trial.variant_key, "support-agent");
-        assert_eq!(
-            trial.scenario_id.as_deref(),
-            Some("damaged-food-unclear-photo")
-        );
-        assert_eq!(trial.turn_count, 2);
-        assert_eq!(trial.stop_reason.as_deref(), Some("max_turns"));
-        assert_ne!(trial.score_run_id, Uuid::nil());
-        assert!(trial.procedure_run_uid.is_none());
-        let session_id = trial
-            .session_id
-            .context("damaged-food trial should link the target session")?;
+        assert_eq!(response.status, "accepted");
+        assert_eq!(response.session_id, None);
+        assert_eq!(response.execution_run_uid, None);
 
-        let trial_status = trial_status(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-            trial.trial_uid,
-        )
-        .await?;
-        assert_trial_status_matches_summary(&trial_status, &trial);
-
-        let events =
-            wait_for_session_messages(&client, ingress, &identity, session_id, 2, 2).await?;
-        assert_eq!(
-            user_message_texts(&events),
-            vec![
-                "The photo is blurry, but it looks like soup leaked through the delivery bag.",
-                "Order FOOD-42 arrived with soup pooled under the container and sauce on every item.",
-            ]
-        );
-        assert_eq!(
-            brain_response_texts(&events),
-            vec![
-                "I can help, but the photo is unclear. Please describe the damage and share the order id before I recommend a replacement.",
-                "Thanks for the clearer description. The damaged-food workflow can be associated with FOOD-42 for replacement review.",
-            ]
-        );
-        assert!(
-            saw_successful_skill_file_read(&events),
-            "expected target to read the imported delivery support skill; observed events: {}",
-            summarize_events(&events)
-        );
-
-        let procedure_run =
-            run_procedure_for_session(&client, ingress, &identity, &storage_partition_id, session_id).await?;
-        assert_eq!(procedure_run.status, "queued");
-        let procedure_status =
-            wait_for_procedure_status(&client, ingress, &identity, &storage_partition_id, procedure_run.run_id, "completed")
-                .await?;
-        assert_eq!(procedure_status.run_id, procedure_run.run_id);
-        assert_eq!(procedure_status.session_id, Some(session_id));
-        assert_eq!(procedure_status.status, "completed");
-        assert_eq!(procedure_status.current_node_id.as_deref(), Some("done"));
-        assert_eq!(node_ids(&procedure_status), vec!["start", "verify_evidence", "done"]);
-        assert!(
-            procedure_status
-                .node_runs
-                .iter()
-                .all(|node_run| node_run.status == "completed"),
-            "associated deterministic procedure should complete visible nodes: {procedure_status:?}"
-        );
+        let session_id =
+            experiment_execution_session_id(tenant_id, response.run_uid, response.score_run_id);
+        let delivery =
+            wait_for_execution_delivery(&client, ingress, &identity, session_id, objective).await?;
 
         let pool = PgPool::connect(&test_database_url())
             .await
             .context("connect to test Postgres")?;
-        assert_score_run_parent(&pool, &scope, run.score_run_id, "experiment_run").await?;
-        assert_score_run_parent(&pool, &scope, trial.score_run_id, "experiment_trial").await?;
-        assert_no_analytics_scores(&pool, &storage_partition_id, &[run.score_run_id, trial.score_run_id])
-            .await?;
-        assert_no_learning_candidates(&pool, &scope, &storage_partition_id).await?;
-
-        let scores = experiment_scores(&client, ingress, &identity, &storage_partition_id, run.run_uid)
-            .await?;
-        assert_eq!(scores.score_run_id, run.score_run_id);
-        assert!(scores.rows.is_empty());
-        assert!(scores.trial_rollup_rows.is_empty());
-        assert!(
-            scores.trials.is_empty(),
-            "no scorer has emitted analytics.scores rows yet"
-        );
-
-        assert_ne!(procedure.revision_uid, Uuid::nil());
-
-        pool.close().await;
-        Ok(())
-    }
-    .await;
-
-    let _ = orchestrator.kill();
-    let _ = orchestrator.wait();
-
-    result
-}
-
-#[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Result<()> {
-    // Pins: ambiguous transaction-dispute simulations ask clarifying questions before action review.
-    let _guard = RESTATE_E2E_LOCK.lock().await;
-    if !cfg!(feature = "provider-overrides") {
-        return Ok(());
-    }
-
-    let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
-    let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
-    let fixture_path = memory_dir
-        .path()
-        .join("transaction-dispute-behavior-lab-script.json");
-    write_transaction_dispute_fixture(&fixture_path)?;
-
-    let ports = reserve_orchestrator_ports()?;
-    let endpoint_url = deployment_endpoint_url(ports.restate);
-    let ingress = restate_ingress_url();
-    let ingress = ingress.as_str();
-    let client = reqwest::Client::new();
-    let tenant_id = TenantId::new();
-    let mut identity = test_user_identity();
-    identity.tenant_id = tenant_id;
-    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
-    let scope = ActionRuleScope::Tenant { tenant_id };
-    grant_tenant_admin(&identity, tenant_id).await?;
-    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
-
-    let result = async {
-        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        let agent = import_and_publish_artifact(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-            behavior_lab_agent_source(),
+        assert_internal_session_scope(&pool, session_id, tenant_id, None, &identity).await?;
+        assert_execution_links(
+            &pool,
+            response.run_uid,
+            session_id,
+            delivery.started.run_uid,
+            tenant_id,
+            None,
+            delivery.objective_sequence,
         )
         .await?;
-
-        let plan_source = transaction_plan_source(agent.revision_uid);
-        let plan = import_and_publish_artifact(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-            plan_source.as_str(),
-        )
-        .await?;
-
-        let run = run_plan_experiment(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-            "transaction-dispute-behavior-lab",
-            plan.revision_uid,
-        )
-        .await?;
-        assert_eq!(run.status, "accepted");
-        assert_ne!(run.score_run_id, Uuid::nil());
-
-        let status =
-            wait_for_run_status(&client, ingress, &identity, &storage_partition_id, run.run_uid, |status| {
-                status.status == "completed"
-            })
-            .await?;
-        assert_eq!(status.status, "completed");
-        assert_eq!(status.score_run_id, Some(run.score_run_id));
-
-        let trial =
-            wait_for_single_completed_trial(&client, ingress, &identity, &storage_partition_id, run.run_uid)
-                .await?;
-        assert_eq!(trial.status, "completed");
-        assert_eq!(trial.target_kind, "agent_loop");
-        assert_eq!(trial.variant_key, "dispute-agent");
-        assert_eq!(
-            trial.scenario_id.as_deref(),
-            Some("ambiguous-merchant-dispute")
-        );
-        assert_eq!(trial.turn_count, 2);
-        assert_eq!(trial.stop_reason.as_deref(), Some("max_turns"));
-        assert!(trial.procedure_run_uid.is_none());
-        let session_id = trial
-            .session_id
-            .context("transaction-dispute trial should link target session")?;
-
-        let trial_status = trial_status(
-            &client,
-            ingress,
-            &identity,
-            &storage_partition_id,
-            trial.trial_uid,
-        )
-        .await?;
-        assert_trial_status_matches_summary(&trial_status, &trial);
-
-        let events =
-            wait_for_action_review_or_tool_result(&client, ingress, &identity, session_id).await?;
-        assert_eq!(
-            user_message_texts(&events),
-            vec![
-                "I see a card charge labeled SQ * CITY MARKET, but I do not know the exact merchant.",
-                "It was $48.10 on May 8. I still do not recognize it and want to dispute it.",
-            ]
-        );
-        assert_eq!(
-            brain_response_texts(&events),
-            vec![
-                "Before drafting a dispute, please confirm the merchant's legal name, transaction date, amount, and whether your card was present.",
-            ]
-        );
-        assert_eq!(tool_call_names(&events), vec!["bash".to_string()]);
-        let action_reviews = action_review_request_count(&events);
-        let successful_bash_results = successful_tool_results_for(&events, "bash");
-        assert!(
-            action_reviews == 1 || successful_bash_results == 1,
-            "dispute action should either execute in auto mode or record an action review"
-        );
-        assert!(
-            !events.iter().any(|record| matches!(
-                &record.event,
-                Event::ToolCall { tool_name, .. } if tool_name.starts_with("connector:")
-                    || tool_name.starts_with("connector.")
-            )),
-            "target should not invent connector tools when the data bundle has only mock data"
-        );
-
-        let pool = PgPool::connect(&test_database_url())
-            .await
-            .context("connect to test Postgres")?;
-        assert_score_run_parent(&pool, &scope, run.score_run_id, "experiment_run").await?;
-        assert_score_run_parent(&pool, &scope, trial.score_run_id, "experiment_trial").await?;
-        assert_no_analytics_scores(&pool, &storage_partition_id, &[run.score_run_id, trial.score_run_id])
-            .await?;
-        assert_no_learning_candidates(&pool, &scope, &storage_partition_id).await?;
         pool.close().await;
 
         Ok(())
@@ -422,393 +167,300 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
     result
 }
 
-/// Returns `true` when `name` is set to a common truthy value (`1`, `true`,
-/// `yes`, or `on`, case-insensitively after trimming), matching how live-test
-/// flags are written in a developer's `.env`.
-fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
+#[tokio::test]
+#[ignore = "requires a local restate-server, Postgres, OpenFGA, Valkey, and provider-overrides feature"]
+async fn execution_template_run_target_contact_scoped_internal_session() -> Result<()> {
+    // Pins: a contact-scoped sessionless execution-template experiment preserves the exact
+    // contact on its deterministic internal Session and common ExecutionRun while delivering the
+    // objective and lifecycle through typed Session events.
+    let _guard = RESTATE_E2E_LOCK.lock().await;
+    if !cfg!(feature = "provider-overrides") {
+        return Ok(());
+    }
+
+    let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
+    let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
+    let fixture_path = memory_dir.path().join("contact-template-experiment.json");
+    write_scripted_fixture(&fixture_path)?;
+
+    let ports = reserve_orchestrator_ports()?;
+    let endpoint_url = deployment_endpoint_url(ports.restate);
+    let ingress = restate_ingress_url();
+    let ingress = ingress.as_str();
+    let client = reqwest::Client::new();
+    let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
+    let scope = ActionRuleScope::Contact {
+        tenant_id,
+        contact_id,
+    };
+    let mut identity = test_user_identity();
+    identity.tenant_id = tenant_id;
+    grant_tenant_admin(&identity, tenant_id).await?;
+    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
+
+    let result = async {
+        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+        let published = publish_execution_template(&client, ingress, &identity, scope).await?;
+        let objective = "Resolve contact case CONTACT-42 without widening its storage scope.";
+        let (target, variant) = execution_template_fixture(
+            published.revision_uid,
+            objective,
+            json!({"case_id": "CONTACT-42", "resolution": "credit"}),
+        );
+        let pool = PgPool::connect(&test_database_url())
+            .await
+            .context("connect to test Postgres")?;
+        let score_run_id = Uuid::now_v7();
+        let run = ExperimentStore::new(pool.clone())
+            .insert_run(
+                &scope,
+                NewExperimentRun {
+                    name: "contact-scoped-template-experiment".to_string(),
+                    target: target.clone(),
+                    variant: variant.clone(),
+                    scorecard: experiment_scorecard(),
+                    score_run_id,
+                    session_id: None,
+                    execution_run_uid: None,
+                    artifact_revision_uids: vec![published.revision_uid],
+                    idempotency_key: Some(format!(
+                        "contact-template-experiment-{}",
+                        Uuid::now_v7()
+                    )),
+                    created_by_identity: serde_json::to_value(&identity)
+                        .context("serialize experiment creator identity")?,
+                },
             )
-        })
-        .unwrap_or(false)
-}
-
-#[tokio::test]
-#[ignore = "requires MOA_RUN_LIVE_SIMULATION_TESTS=1 and live provider credentials"]
-async fn live_behavior_lab_simulation_gate_requires_flag_and_provider_credentials() -> Result<()> {
-    // Pins: live simulation tests are double-gated before any billed provider can be used.
-    if !env_flag_enabled("MOA_RUN_LIVE_SIMULATION_TESTS") {
-        return Ok(());
-    }
-
-    let has_credentials = [
-        "MOA_ANTHROPIC_API_KEY",
-        "MOA_OPENAI_API_KEY",
-        "MOA_GOOGLE_API_KEY",
-    ]
-    .iter()
-    .any(|key| std::env::var_os(key).is_some());
-    if !has_credentials {
-        bail!(
-            "MOA_RUN_LIVE_SIMULATION_TESTS=1 requires one of MOA_ANTHROPIC_API_KEY, MOA_OPENAI_API_KEY, or MOA_GOOGLE_API_KEY"
-        );
-    }
-
-    Ok(())
-}
-
-async fn import_support_skill(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-) -> Result<()> {
-    let request = SkillImportRequest {
-        scope: ActionRuleScope::Tenant {
-            tenant_id: TenantId::from(
-                Uuid::parse_str(storage_partition_id.as_str())
-                    .context("storage partition id is tenant uuid")?,
-            ),
-        },
-        packages: vec![support_skill_package()],
-    };
-    let imported = post_json_with_identity(client, ingress, "Skills", "import", identity, &request)
+            .await
+            .context("seed contact-scoped execution-template experiment")?;
+        let workflow_request = ExperimentRunWorkflowRequest {
+            tenant_id,
+            run_uid: run.run_uid,
+            target: serde_json::to_value(&target).context("serialize experiment target")?,
+            variant: serde_json::to_value(&variant).context("serialize experiment variant")?,
+            plan_revision_uid: None,
+            identity: identity.clone(),
+            score_run_id,
+            agent_revision_variants: Vec::new(),
+        };
+        let workflow_service = format!("ExperimentRun/{}", run.run_uid);
+        let workflow_response = post_json_with_identity(
+            &client,
+            ingress,
+            &workflow_service,
+            "run",
+            &identity,
+            &workflow_request,
+        )
         .await?
-        .json::<SkillImportResponse>()
+        .json::<ExperimentRunStatusResponse>()
         .await
-        .context("deserialize skill import response")?;
-    assert_eq!(imported.imported, 1);
-    Ok(())
+        .context("deserialize contact-scoped ExperimentRun response")?;
+        assert_eq!(
+            workflow_response.target_kind.as_deref(),
+            Some("execution_template")
+        );
+
+        let session_id = experiment_execution_session_id(tenant_id, run.run_uid, score_run_id);
+        let delivery =
+            wait_for_execution_delivery(&client, ingress, &identity, session_id, objective).await?;
+        assert_internal_session_scope(&pool, session_id, tenant_id, Some(contact_id), &identity)
+            .await?;
+        assert_execution_links(
+            &pool,
+            run.run_uid,
+            session_id,
+            delivery.started.run_uid,
+            tenant_id,
+            Some(contact_id),
+            delivery.objective_sequence,
+        )
+        .await?;
+        pool.close().await;
+
+        Ok(())
+    }
+    .await;
+
+    let _ = orchestrator.kill();
+    let _ = orchestrator.wait();
+
+    result
 }
 
-async fn import_and_publish_artifact(
+struct ExecutionDelivery {
+    objective_sequence: u64,
+    started: ExecutionRunStarted,
+}
+
+async fn publish_execution_template(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-    source_text: &str,
+    scope: ActionRuleScope,
 ) -> Result<ArtifactPublishResponse> {
-    let scope = ActionRuleScope::Tenant {
-        tenant_id: TenantId::from(
-            Uuid::parse_str(storage_partition_id.as_str())
-                .context("storage partition id is tenant uuid")?,
-        ),
-    };
-    let import_request = ArtifactImportRequest {
-        scope,
-        source_format: "yaml".to_string(),
-        source_text: source_text.to_string(),
-        files: Vec::new(),
-    };
     let imported = post_json_with_identity(
         client,
         ingress,
         "Artifacts",
         "import",
         identity,
-        &import_request,
+        &ArtifactImportRequest {
+            scope,
+            source_format: "yaml".to_string(),
+            source_text: execution_template_source().to_string(),
+            files: Vec::new(),
+        },
     )
     .await?
     .json::<ArtifactImportResponse>()
     .await
-    .context("deserialize artifact import response")?;
+    .context("deserialize execution-template artifact import")?;
     assert_eq!(imported.status, "draft");
 
-    let publish_request = ArtifactPublishRequest {
-        scope,
-        revision_uid: imported.revision_uid,
-    };
     let published = post_json_with_identity(
         client,
         ingress,
         "Artifacts",
         "publish",
         identity,
-        &publish_request,
+        &ArtifactPublishRequest {
+            scope,
+            revision_uid: imported.revision_uid,
+        },
     )
     .await?
     .json::<ArtifactPublishResponse>()
     .await
-    .context("deserialize artifact publish response")?;
+    .context("deserialize execution-template artifact publish")?;
     assert_eq!(published.status, "published");
     assert_validation_report_has_no_errors(&published.validation_report)?;
     Ok(published)
 }
 
-async fn run_plan_experiment(
+fn execution_template_fixture(
+    revision_uid: Uuid,
+    objective: &str,
+    input: Value,
+) -> (ExperimentTarget, ExperimentVariant) {
+    let template = PinnedExecutionTemplateRef {
+        skill_ref: TEMPLATE_SKILL_REF.to_string(),
+        revision_uid,
+    };
+    (
+        ExperimentTarget::ExecutionTemplate {
+            template: template.clone(),
+            objective: objective.to_string(),
+            input,
+            session_id: None,
+            idempotency_key: Some(format!("template-target-{}", Uuid::now_v7())),
+        },
+        ExperimentVariant {
+            name: "pinned-template".to_string(),
+            model: Some(ModelId::new("scripted-loadtest")),
+            artifact_revision_uids: vec![revision_uid],
+            skill_refs: Vec::new(),
+            execution_template: Some(template),
+            metadata: json!({"lane": "execution-template-experiment-e2e"}),
+        },
+    )
+}
+
+async fn run_tenant_experiment(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-    name: &str,
-    plan_revision_uid: Uuid,
+    tenant_id: TenantId,
+    target: &ExperimentTarget,
+    variant: &ExperimentVariant,
 ) -> Result<ExperimentRunResponse> {
     let request = ExperimentRunRequest {
-        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
-        name: name.to_string(),
-        plan_revision_uid: Some(plan_revision_uid),
-        target: None,
-        variant: None,
-        scorecard: json!({}),
+        tenant_id,
+        name: "tenant-scoped-template-experiment".to_string(),
+        plan_revision_uid: None,
+        target: Some(serde_json::to_value(target).context("serialize experiment target")?),
+        variant: Some(serde_json::to_value(variant).context("serialize experiment variant")?),
+        scorecard: serde_json::to_value(experiment_scorecard())
+            .context("serialize experiment scorecard")?,
         score_run_id: None,
-        idempotency_key: Some(format!("{name}-{}", Uuid::now_v7())),
+        idempotency_key: Some(format!("tenant-template-experiment-{}", Uuid::now_v7())),
         agent_revision_variants: Vec::new(),
     };
     post_json_with_identity(client, ingress, "Experiments", "run", identity, &request)
         .await?
         .json::<ExperimentRunResponse>()
         .await
-        .context("deserialize experiment run response")
+        .context("deserialize execution-template experiment admission")
 }
 
-async fn wait_for_run_status(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-    run_uid: Uuid,
-    done: impl Fn(&ExperimentRunStatusResponse) -> bool,
-) -> Result<ExperimentRunStatusResponse> {
-    let request = ExperimentRunStatusRequest {
-        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
-        run_uid,
-    };
-    let mut last_status = None;
-    for _attempt in 0..90 {
-        let status =
-            post_json_with_identity(client, ingress, "Experiments", "status", identity, &request)
-                .await?
-                .json::<ExperimentRunStatusResponse>()
-                .await
-                .context("deserialize experiment status response")?;
-        if done(&status) {
-            return Ok(status);
-        }
-        last_status = Some(status);
-        sleep(Duration::from_secs(1)).await;
+fn experiment_scorecard() -> ExperimentScorecard {
+    ExperimentScorecard {
+        score_names: vec!["template_completed".to_string()],
+        evaluator_metadata: json!({"mode": "manual-or-later"}),
     }
-
-    bail!("timed out waiting for experiment {run_uid}; last status: {last_status:?}")
 }
 
-async fn list_trials(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-    run_uid: Uuid,
-) -> Result<ExperimentTrialsResponse> {
-    let request = ExperimentTrialsRequest {
-        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
-        run_uid,
-        status: None,
-        limit: Some(10),
-    };
-    post_json_with_identity(client, ingress, "Experiments", "trials", identity, &request)
-        .await?
-        .json::<ExperimentTrialsResponse>()
-        .await
-        .context("deserialize experiment trials response")
-}
-
-async fn wait_for_single_completed_trial(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-    run_uid: Uuid,
-) -> Result<ExperimentTrialSummary> {
-    let mut last_trials = None;
-    for _attempt in 0..90 {
-        let trials = list_trials(client, ingress, identity, storage_partition_id, run_uid).await?;
-        if trials.trials.len() == 1 && trials.trials[0].status == "completed" {
-            return Ok(trials.trials[0].clone());
-        }
-        last_trials = Some(trials);
-        sleep(Duration::from_secs(1)).await;
-    }
-
-    bail!(
-        "timed out waiting for one completed trial in run {run_uid}; last trials: {last_trials:?}"
-    )
-}
-
-async fn trial_status(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-    trial_uid: Uuid,
-) -> Result<ExperimentTrialStatusResponse> {
-    let request = ExperimentTrialStatusRequest {
-        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
-        trial_uid,
-    };
-    post_json_with_identity(
-        client,
-        ingress,
-        "Experiments",
-        "trial_status",
-        identity,
-        &request,
-    )
-    .await?
-    .json::<ExperimentTrialStatusResponse>()
-    .await
-    .context("deserialize experiment trial status response")
-}
-
-async fn experiment_scores(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-    run_uid: Uuid,
-) -> Result<ExperimentScoresResponse> {
-    let request = ExperimentScoresRequest {
-        tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
-        run_uid,
-    };
-    post_json_with_identity(client, ingress, "Experiments", "scores", identity, &request)
-        .await?
-        .json::<ExperimentScoresResponse>()
-        .await
-        .context("deserialize experiment scores response")
-}
-
-async fn run_procedure_for_session(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-    session_id: SessionId,
-) -> Result<ProcedureRunResponse> {
-    let request = ProcedureRunRequest {
-        tenant_id: TenantId::from(
-            Uuid::parse_str(storage_partition_id.as_str())
-                .context("storage partition id is tenant uuid")?,
-        ),
-        procedure_ref: "skill://damaged-food-replacement".to_string(),
-        input: json!({
-            "order_id": "FOOD-42",
-            "damage_summary": "soup pooled under the container and sauce on every item",
-            "customer_requested": "replacement"
-        }),
-        session_id: Some(session_id),
-        idempotency_key: Some(format!("damaged-food-procedure-{}", Uuid::now_v7())),
-    };
-    post_json_with_identity(client, ingress, "Skills", "run", identity, &request)
-        .await?
-        .json::<ProcedureRunResponse>()
-        .await
-        .context("deserialize procedure run response")
-}
-
-async fn procedure_status(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-    run_id: Uuid,
-) -> Result<ProcedureRunStatus> {
-    let request = ProcedureStatusRequest {
-        tenant_id: TenantId::from(
-            Uuid::parse_str(storage_partition_id.as_str())
-                .context("storage partition id is tenant uuid")?,
-        ),
-        run_id,
-    };
-    post_json_with_identity(client, ingress, "Skills", "status", identity, &request)
-        .await?
-        .json::<ProcedureRunStatus>()
-        .await
-        .context("deserialize procedure status response")
-}
-
-async fn wait_for_procedure_status(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    storage_partition_id: &StoragePartitionId,
-    run_id: Uuid,
-    expected: &str,
-) -> Result<ProcedureRunStatus> {
-    let mut last_status = None;
-    for _attempt in 0..60 {
-        let status =
-            procedure_status(client, ingress, identity, storage_partition_id, run_id).await?;
-        if status.status == expected {
-            return Ok(status);
-        }
-        if status.status == "failed" {
-            bail!("procedure run failed before reaching {expected}: {status:?}");
-        }
-        last_status = Some(status);
-        sleep(Duration::from_secs(1)).await;
-    }
-
-    bail!(
-        "timed out waiting for procedure run {run_id} to reach {expected}; last status: {last_status:?}"
-    )
-}
-
-fn node_ids(status: &ProcedureRunStatus) -> Vec<&str> {
-    status
-        .node_runs
-        .iter()
-        .map(|node_run| node_run.node_id.as_str())
-        .collect()
-}
-
-async fn wait_for_session_messages(
+async fn wait_for_execution_delivery(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     session_id: SessionId,
-    expected_user_messages: usize,
-    expected_brain_responses: usize,
-) -> Result<Vec<EventRecord>> {
+    objective: &str,
+) -> Result<ExecutionDelivery> {
     let mut last_events = Vec::new();
     for _attempt in 0..90 {
         let events = fetch_events(client, ingress, identity, session_id).await?;
-        if user_message_texts(&events).len() == expected_user_messages
-            && brain_response_texts(&events).len() == expected_brain_responses
-        {
-            return Ok(events);
+        let objectives = events
+            .iter()
+            .filter(|record| {
+                matches!(&record.event, Event::UserMessage { text, .. } if text == objective)
+            })
+            .collect::<Vec<_>>();
+        let starts = events
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::ExecutionRunStarted(started) => Some((record.sequence_num, started)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let completions = events
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::ExecutionCompleted(summary) => Some((record.sequence_num, summary.run_uid)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        if objectives.len() > 1 || starts.len() > 1 || completions.len() > 1 {
+            bail!(
+                "execution delivery duplicated for session {session_id}: {}",
+                summarize_events(&events)
+            );
+        }
+        if let ([objective_event], [(started_sequence, started)], [(completed_sequence, run_uid)]) = (
+            objectives.as_slice(),
+            starts.as_slice(),
+            completions.as_slice(),
+        ) {
+            assert_eq!(
+                started.originating_user_sequence_num,
+                objective_event.sequence_num
+            );
+            assert_eq!(*run_uid, started.run_uid);
+            assert!(objective_event.sequence_num < *started_sequence);
+            assert!(*started_sequence < *completed_sequence);
+            return Ok(ExecutionDelivery {
+                objective_sequence: objective_event.sequence_num,
+                started: (*started).clone(),
+            });
         }
         last_events = events;
         sleep(Duration::from_secs(1)).await;
     }
 
     bail!(
-        "timed out waiting for session {session_id} messages; observed events: {}",
-        summarize_events(&last_events)
-    )
-}
-
-async fn wait_for_action_review_or_tool_result(
-    client: &reqwest::Client,
-    ingress: &str,
-    identity: &Identity,
-    session_id: SessionId,
-) -> Result<Vec<EventRecord>> {
-    let mut last_events = Vec::new();
-    for _attempt in 0..90 {
-        let events = fetch_events(client, ingress, identity, session_id).await?;
-        if action_review_request_count(&events) == 1
-            || successful_tool_results_for(&events, "bash") == 1
-        {
-            return Ok(events);
-        }
-        last_events = events;
-        sleep(Duration::from_secs(1)).await;
-    }
-
-    bail!(
-        "timed out waiting for action review or tool result in session {session_id}; observed events: {}",
+        "timed out waiting for typed execution delivery in session {session_id}; observed events: {}",
         summarize_events(&last_events)
     )
 }
@@ -831,6 +483,107 @@ async fn fetch_events(
     .json::<Vec<EventRecord>>()
     .await
     .context("deserialize session events")
+}
+
+async fn assert_internal_session_scope(
+    pool: &PgPool,
+    session_id: SessionId,
+    tenant_id: TenantId,
+    contact_id: Option<ContactId>,
+    identity: &Identity,
+) -> Result<()> {
+    let row = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<String>, Option<Uuid>)>(
+        r#"
+        SELECT tenant_id, contact_id, created_by_actor_type, created_by_actor_id
+        FROM sessions
+        WHERE id = $1
+        "#,
+    )
+    .bind(session_id.0)
+    .fetch_one(pool)
+    .await
+    .context("load deterministic internal experiment session")?;
+    assert_eq!(row.0, tenant_id.0);
+    assert_eq!(row.1, contact_id.map(|value| value.0));
+    assert_eq!(row.2.as_deref(), Some("identity"));
+    assert_eq!(
+        row.3,
+        Some(identity.acting_on_behalf_of.unwrap_or(identity.id))
+    );
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the assertion keeps every persisted execution-scope dimension explicit"
+)]
+async fn assert_execution_links(
+    pool: &PgPool,
+    experiment_run_uid: Uuid,
+    session_id: SessionId,
+    execution_run_uid: Uuid,
+    tenant_id: TenantId,
+    contact_id: Option<ContactId>,
+    objective_sequence: u64,
+) -> Result<()> {
+    let experiment = sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>, String)>(
+        r#"
+        SELECT session_id, execution_run_uid, target_kind
+        FROM moa.experiment_run
+        WHERE run_uid = $1
+        "#,
+    )
+    .bind(experiment_run_uid)
+    .fetch_one(pool)
+    .await
+    .context("load experiment execution links")?;
+    assert_eq!(experiment.0, Some(session_id.0));
+    assert_eq!(experiment.1, Some(execution_run_uid));
+    assert_eq!(experiment.2, "execution_template");
+
+    let execution = sqlx::query_as::<_, (Uuid, Option<Uuid>, Uuid, i64)>(
+        r#"
+        SELECT tenant_id, contact_id, session_id, originating_user_sequence_num
+        FROM moa.execution_run
+        WHERE run_uid = $1
+        "#,
+    )
+    .bind(execution_run_uid)
+    .fetch_one(pool)
+    .await
+    .context("load common execution run linked by experiment")?;
+    assert_eq!(execution.0, tenant_id.0);
+    assert_eq!(execution.1, contact_id.map(|value| value.0));
+    assert_eq!(execution.2, session_id.0);
+    assert_eq!(execution.3, i64::try_from(objective_sequence)?);
+    Ok(())
+}
+
+fn experiment_execution_session_id(
+    tenant_id: TenantId,
+    experiment_run_uid: Uuid,
+    score_run_id: Uuid,
+) -> SessionId {
+    let mut name = EXPERIMENT_EXECUTION_SESSION_DOMAIN.as_bytes().to_vec();
+    append_nullable_frame(&mut name, Some(tenant_id.to_string().as_bytes()));
+    append_nullable_frame(&mut name, Some(experiment_run_uid.to_string().as_bytes()));
+    append_nullable_frame(&mut name, Some(score_run_id.to_string().as_bytes()));
+    append_nullable_frame(&mut name, None);
+    SessionId(Uuid::new_v5(&EXPERIMENT_EXECUTION_SESSION_NAMESPACE, &name))
+}
+
+fn append_nullable_frame(output: &mut Vec<u8>, value: Option<&[u8]>) {
+    let Some(value) = value else {
+        output.push(0);
+        return;
+    };
+    output.push(1);
+    output.extend_from_slice(
+        &u32::try_from(value.len())
+            .expect("UUID identity frame should fit in u32")
+            .to_be_bytes(),
+    );
+    output.extend_from_slice(value);
 }
 
 async fn post_json_with_identity<T: serde::Serialize + ?Sized>(
@@ -868,239 +621,10 @@ fn service_url(ingress: &str, service: &str, handler: &str) -> String {
     )
 }
 
-async fn assert_score_run_parent(
-    pool: &PgPool,
-    scope: &ActionRuleScope,
-    score_run_id: Uuid,
-    source: &str,
-) -> Result<()> {
-    let (scope_label, storage_partition_id, user_id) = scope_parts(scope);
-    let scope_context = scope_context(scope);
-    let mut conn = ScopedConn::begin(pool, &scope_context).await?;
-    let exists = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM analytics.score_run
-            WHERE run_id = $1
-              AND source = $5
-              AND scope = $2
-              AND storage_partition_id IS NOT DISTINCT FROM $3
-              AND user_id IS NOT DISTINCT FROM $4
-        )
-        "#,
-    )
-    .bind(score_run_id)
-    .bind(scope_label)
-    .bind(storage_partition_id.as_deref())
-    .bind(user_id.as_deref())
-    .bind(source)
-    .fetch_one(conn.as_mut())
-    .await
-    .with_context(|| format!("query score_run parent {score_run_id}"))?;
-    conn.commit().await?;
-    assert!(
-        exists,
-        "expected score_run parent {score_run_id} with source {source}"
-    );
-    Ok(())
-}
-
-async fn assert_no_analytics_scores(
-    pool: &PgPool,
-    storage_partition_id: &StoragePartitionId,
-    score_run_ids: &[Uuid],
-) -> Result<()> {
-    let count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)
-        FROM analytics.scores
-        WHERE storage_partition_id = $1
-          AND run_id = ANY($2)
-        "#,
-    )
-    .bind(storage_partition_id.to_string())
-    .bind(score_run_ids)
-    .fetch_one(pool)
-    .await
-    .context("count behavior-lab analytics score rows")?;
-    assert_eq!(
-        count, 0,
-        "simulation should not fake analytics.scores rows before a scorer emits them"
-    );
-    Ok(())
-}
-
-async fn assert_no_learning_candidates(
-    pool: &PgPool,
-    scope: &ActionRuleScope,
-    storage_partition_id: &StoragePartitionId,
-) -> Result<()> {
-    let scope_context = scope_context(scope);
-    let mut conn = ScopedConn::begin(pool, &scope_context).await?;
-    let count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)
-        FROM learning_candidates
-        WHERE storage_partition_id = $1
-        "#,
-    )
-    .bind(storage_partition_id.to_string())
-    .fetch_one(conn.as_mut())
-    .await
-    .context("count learning candidates for behavior-lab tenant")?;
-    conn.commit().await?;
-    assert_eq!(
-        count, 0,
-        "simulation should not auto-promote or propose learning"
-    );
-    Ok(())
-}
-
-fn scope_parts(scope: &ActionRuleScope) -> (&'static str, Option<String>, Option<String>) {
-    match scope {
-        ActionRuleScope::Tenant { tenant_id } => ("tenant", Some(tenant_id.to_string()), None),
-        ActionRuleScope::Contact {
-            tenant_id,
-            contact_id,
-        } => (
-            "contact",
-            Some(tenant_id.to_string()),
-            Some(contact_id.to_string()),
-        ),
-    }
-}
-
-fn scope_context(scope: &ActionRuleScope) -> RlsContext {
-    match scope {
-        ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
-        ActionRuleScope::Contact {
-            tenant_id,
-            contact_id,
-        } => RlsContext::contact(*tenant_id, *contact_id),
-    }
-}
-
-fn assert_trial_status_matches_summary(
-    status: &ExperimentTrialStatusResponse,
-    summary: &ExperimentTrialSummary,
-) {
-    assert_eq!(status.tenant_id, summary.tenant_id);
-    assert_eq!(status.run_uid, summary.run_uid);
-    assert_eq!(status.trial_uid, summary.trial_uid);
-    assert_eq!(status.status, summary.status);
-    assert_eq!(status.target_kind, summary.target_kind);
-    assert_eq!(status.trial_key, summary.trial_key);
-    assert_eq!(status.variant_key, summary.variant_key);
-    assert_eq!(status.scenario_id, summary.scenario_id);
-    assert_eq!(status.score_run_id, summary.score_run_id);
-    assert_eq!(status.session_id, summary.session_id);
-    assert_eq!(status.procedure_run_uid, summary.procedure_run_uid);
-    assert_eq!(status.stop_reason, summary.stop_reason);
-    assert_eq!(status.turn_count, summary.turn_count);
-}
-
-fn user_message_texts(events: &[EventRecord]) -> Vec<String> {
-    events
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::UserMessage { text, .. } => Some(text.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn brain_response_texts(events: &[EventRecord]) -> Vec<String> {
-    events
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::BrainResponse { text, .. } if !text.is_empty() => Some(text.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn tool_call_names(events: &[EventRecord]) -> Vec<String> {
-    events
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::ToolCall { tool_name, .. } => Some(tool_name.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn action_review_request_count(events: &[EventRecord]) -> usize {
-    events
-        .iter()
-        .filter(|record| matches!(record.event, Event::ActionReviewRequested { .. }))
-        .count()
-}
-
-fn successful_tool_results_for(events: &[EventRecord], tool_name: &str) -> usize {
-    let tool_ids = events
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::ToolCall {
-                tool_id,
-                tool_name: event_tool_name,
-                ..
-            } if event_tool_name == tool_name => Some(*tool_id),
-            _ => None,
-        })
-        .collect::<std::collections::HashSet<_>>();
-
-    events
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                Event::ToolResult {
-                    tool_id,
-                    success: true,
-                    ..
-                } if tool_ids.contains(tool_id)
-            )
-        })
-        .count()
-}
-
-fn saw_successful_skill_file_read(events: &[EventRecord]) -> bool {
-    let read_tool_ids = events
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::ToolCall {
-                tool_id,
-                tool_name,
-                input,
-                ..
-            } if tool_name == "file_read"
-                && input.get("path").and_then(Value::as_str) == Some(SUPPORT_SKILL_PATH) =>
-            {
-                Some(*tool_id)
-            }
-            _ => None,
-        })
-        .collect::<std::collections::HashSet<_>>();
-
-    events.iter().any(|record| {
-        matches!(
-            &record.event,
-            Event::ToolResult {
-                tool_id,
-                output,
-                success: true,
-                ..
-            } if read_tool_ids.contains(tool_id) && output.to_text().contains("Delivery Support")
-        )
-    })
-}
-
 fn summarize_events(events: &[EventRecord]) -> String {
     if events.is_empty() {
         return "<none>".to_string();
     }
-
     events
         .iter()
         .map(|record| format!("#{} {:?}", record.sequence_num, record.event_type))
@@ -1115,379 +639,96 @@ fn assert_validation_report_has_no_errors(report: &Value) -> Result<()> {
     if errors.is_empty() {
         return Ok(());
     }
-
     bail!("published artifact had validation errors: {errors:?}")
 }
 
-fn write_damaged_food_fixture(path: &Path) -> Result<()> {
+fn write_scripted_fixture(path: &Path) -> Result<()> {
     let fixture = json!({
         "default": {
             "completion": {
-                "content": "OK",
+                "content": "The pinned experiment execution completed.",
                 "tool_calls": []
             }
-        },
-        "responses": [
-            {
-                "completion": {
-                    "content": "The photo is blurry, but it looks like soup leaked through the delivery bag.",
-                    "tool_calls": []
-                }
-            },
-            {
-                "completion": {
-                    "content": "",
-                    "tool_calls": [{
-                        "name": "file_read",
-                        "id": SUPPORT_SKILL_PROVIDER_ID,
-                        "input": { "path": SUPPORT_SKILL_PATH }
-                    }]
-                }
-            },
-            {
-                "completion": {
-                    "content": "I can help, but the photo is unclear. Please describe the damage and share the order id before I recommend a replacement.",
-                    "tool_calls": []
-                }
-            },
-            {
-                "completion": {
-                    "content": "Order FOOD-42 arrived with soup pooled under the container and sauce on every item.",
-                    "tool_calls": []
-                }
-            },
-            {
-                "completion": {
-                    "content": "Thanks for the clearer description. The damaged-food workflow can be associated with FOOD-42 for replacement review.",
-                    "tool_calls": []
-                }
-            }
-        ]
+        }
     });
-    let body = serde_json::to_vec_pretty(&fixture).context("serialize damaged-food fixture")?;
-    fs::write(path, body).context("write damaged-food fixture")
-}
-
-fn write_transaction_dispute_fixture(path: &Path) -> Result<()> {
-    let fixture = json!({
-        "default": {
-            "completion": {
-                "content": "",
-                "tool_calls": []
-            }
-        },
-        "responses": [
-            {
-                "completion": {
-                    "content": "I see a card charge labeled SQ * CITY MARKET, but I do not know the exact merchant.",
-                    "tool_calls": []
-                }
-            },
-            {
-                "completion": {
-                    "content": "Before drafting a dispute, please confirm the merchant's legal name, transaction date, amount, and whether your card was present.",
-                    "tool_calls": []
-                }
-            },
-            {
-                "completion": {
-                    "content": "It was $48.10 on May 8. I still do not recognize it and want to dispute it.",
-                    "tool_calls": []
-                }
-            },
-            {
-                "completion": {
-                    "content": "",
-                    "tool_calls": [{
-                        "name": "bash",
-                        "id": "draft-dispute-review-tool-call",
-                        "input": { "cmd": "printf 'draft transaction dispute for review\\n'" }
-                    }]
-                }
-            }
-        ]
-    });
-    let body =
-        serde_json::to_vec_pretty(&fixture).context("serialize transaction-dispute fixture")?;
-    fs::write(path, body).context("write transaction-dispute fixture")
-}
-
-fn support_skill_package() -> SkillPackageDocument {
-    let skill_md = r#"---
-name: delivery-support
-description: "Resolve damaged or spilled food delivery support requests from clear customer evidence."
-allowed-tools: file_read
-metadata:
-  moa-tags: "support,delivery,refund,replacement,food"
----
-
-# Delivery Support
-
-Use this when a customer reports a delivery that arrived spilled, crushed, leaking, missing items, unsafe, or otherwise damaged.
-
-When there is a clear customer description and order id, recommend a replacement review or refund review. Ask for clearer evidence when the photo or description is ambiguous.
-"#;
-    SkillPackageDocument {
-        name: Some("delivery-support".to_string()),
-        description: Some(
-            "Resolve damaged or spilled food delivery support requests from clear customer evidence."
-                .to_string(),
-        ),
-        files: vec![SkillPackageDocumentFile {
-            path: "SKILL.md".to_string(),
-            content_base64: BASE64.encode(skill_md.as_bytes()),
-            content_type: Some("text/markdown".to_string()),
-            executable: false,
-        }],
-        source_uri: Some("test://behavior-lab/delivery-support".to_string()),
-        metadata: json!({}),
-    }
-}
-
-fn damaged_food_plan_source(agent_revision_uid: Uuid) -> String {
-    format!(
-        r#"
-api_version: moa.artifact/v1
-kind: experiment_plan
-metadata:
-  name: damaged-food-behavior-lab
-  description: Behavior-lab plan for damaged food support.
-status: draft
-definition:
-  type: experiment_plan
-  spec:
-    simulation:
-      scenarios:
-        - id: damaged-food-unclear-photo
-          initial_situation: The customer reports damaged food with an unclear photo.
-          goals:
-            - Agent asks for clearer evidence when the photo is ambiguous.
-            - Agent uses support instructions before recommending a next step.
-          allowed_user_intents:
-            - report_damaged_food
-            - clarify_damage
-          success_criteria:
-            - The target asks for clearer details before replacement review.
-            - The target links the case to the damaged-food workflow after clarification.
-          failure_criteria:
-            - The target promises a refund before evidence is clear.
-          max_turns: 2
-          admin_review_behavior: stop_on_admin_review
-          scoring_rubric:
-            score_names:
-              - evidence_clarified
-      personas:
-        - id: damaged-food-unclear-photo
-          voice: Patient, concise, and mildly frustrated.
-          goals:
-            - Get a replacement or refund review for a damaged delivery.
-          constraints:
-            - Do not invent a clear photo when the first message says the photo is blurry.
-            - Provide a clearer text description only after the agent asks.
-          likely_missing_information:
-            - order id
-            - clear damage description
-          stop_behavior: Stop after the agent gives a concrete replacement-review next step.
-      profiles:
-        - id: damaged-food-order-profile
-          facts:
-            order_id: FOOD-42
-            merchant: Noodle House
-            item: tomato soup combo
-            delivery_state: arrived damaged
-          data_classification: synthetic_test_data
-    target_variants:
-      - key: support-agent
-        kind: agent_loop
-        config:
-          prompt: Start the damaged-food support trial. Use the delivery support skill before recommending a refund or replacement, and associate the damaged-food workflow once details are clear.
-          agent_revision_uid: "{agent_revision_uid}"
-    simulator_model: scripted-loadtest
-    target_model: scripted-loadtest
-    parallelism: 1
-    trials_per_combination: 1
-    budget:
-      max_total_cents: 100
-      max_trial_cents: 100
-      max_total_tokens: 10000
-      max_trial_tokens: 2000
-    scorecard:
-      metrics:
-        - evidence_clarified
-    learning_proposals:
-      enabled: false
-"#
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&fixture).context("serialize scripted fixture")?,
     )
+    .context("write scripted fixture")
 }
 
-fn damaged_food_procedure_source() -> &'static str {
+fn execution_template_source() -> &'static str {
     r#"
 api_version: moa.artifact/v1
 kind: skill
 metadata:
-  name: damaged-food-replacement
-  description: Procedure for replacement review when food arrives damaged.
-  tags:
-    - support
-    - food-delivery
-    - replacement
+  name: experiment-resolution
+  description: Deterministic execution template for experiment-run delivery tests.
 status: draft
 definition:
   type: skill
   spec:
-    instructions:
-      path: SKILL.md
-    procedure:
-      input_schema:
-        type: object
-        required:
-          - order_id
-          - damage_summary
-        properties:
-          order_id:
-            type: string
-          damage_summary:
-            type: string
-          customer_requested:
-            type: string
-      state_schema:
-        type: object
-        properties:
-          evidence_sufficient:
-            type: boolean
-      nodes:
-        - id: start
-          kind: start
-        - id: verify_evidence
-          kind: condition
-          condition:
-            type: exists
-            path: $.damage_summary
-        - id: done
-          kind: end
-          input:
-            status: evidence_verified
-      edges:
-        - id: start-to-verify
-          from: start
-          to: verify_evidence
-        - id: verify-to-resolution
-          from: verify_evidence
-          to: done
-"#
-}
-
-fn transaction_plan_source(agent_revision_uid: Uuid) -> String {
-    format!(
-        r#"
-api_version: moa.artifact/v1
-kind: experiment_plan
-metadata:
-  name: transaction-dispute-behavior-lab
-  description: Behavior-lab plan for transaction dispute clarification.
-status: draft
-definition:
-  type: experiment_plan
-  spec:
-    simulation:
-      scenarios:
-        - id: ambiguous-merchant-dispute
-          initial_situation: The user sees an unfamiliar card charge with an ambiguous Square merchant label.
-          goals:
-            - The target asks for clarifying transaction details before drafting a dispute.
-            - The target reaches action review before taking the dispute action when review policy applies.
-          allowed_user_intents:
-            - ask_about_dispute
-            - provide_partial_transaction_details
-          success_criteria:
-            - Clarifying question asks for merchant, date, amount, and authorization context.
-            - Action review is recorded before the dispute action executes when review policy applies.
-          failure_criteria:
-            - The target files or drafts a dispute action without required review.
-          max_turns: 2
-          admin_review_behavior: stop_on_admin_review
-          data_bundle_ids:
-            - transaction-dispute-mock-data
-          scoring_rubric:
-            score_names:
-              - clarifies_before_dispute
-      personas:
-        - id: ambiguous-dispute-cardholder
-          voice: Concerned and uncertain.
-          goals:
-            - Understand whether an unfamiliar card charge can be disputed.
-          constraints:
-            - Begin with ambiguous merchant details.
-            - Provide amount and date only after the agent asks.
-          likely_missing_information:
-            - legal merchant name
-            - card-present status
-          stop_behavior: Stop when the target reaches action review or asks for the required dispute details.
-      profiles:
-        - id: ambiguous-dispute-profile
-          facts:
-            posted_label: SQ * CITY MARKET
-            amount: "48.10"
-            posted_date: "2026-05-08"
-            recognized: false
-          data_classification: synthetic_test_data
-      data_bundles:
-        - id: transaction-dispute-mock-data
-          sources:
-            - id: posted-card-charge
-              kind: mock_data
-              fixture:
-                posted_label: SQ * CITY MARKET
-                amount: "48.10"
-                posted_date: "2026-05-08"
-              notes: Inline mock data only; no connector_ref is available.
-    target_variants:
-      - key: dispute-agent
-        kind: agent_loop
-        config:
-          prompt: Ask clarifying questions for ambiguous merchant details. Do not draft a dispute action until the required details are present and action review is satisfied when required.
-          agent_revision_uid: "{agent_revision_uid}"
-    simulator_model: scripted-loadtest
-    target_model: scripted-loadtest
-    parallelism: 1
-    trials_per_combination: 1
-    budget:
-      max_total_cents: 100
-      max_trial_cents: 100
-      max_total_tokens: 10000
-      max_trial_tokens: 2000
-    scorecard:
-      metrics:
-        - clarifies_before_dispute
-    learning_proposals:
-      enabled: false
-"#
-    )
-}
-
-fn behavior_lab_agent_source() -> &'static str {
-    r#"
-api_version: moa.artifact/v1
-kind: agent
-metadata:
-  name: behavior-lab-agent
-  description: Test agent for deterministic behavior-lab E2E coverage.
-status: draft
-definition:
-  type: agent
-  spec:
-    display_name: Behavior Lab Agent
-    purpose:
-      summary: Handle deterministic support simulations.
-      default_task: Follow the simulation prompt and use available support context.
-      expected_outputs:
-        - support next step
-    instruction_policy:
-      system_prompt: You are a behavior-lab support agent. Follow the scenario instructions exactly.
-    tool_policy:
-      mode: allowlist
-      tools:
-        - bash
-        - file_read
+    inputs:
+      type: object
+      additionalProperties: false
+      required: [case_id, resolution]
+      properties:
+        case_id: { type: string }
+        resolution: { type: string }
+    execution_plan:
+      goal:
+        requirements:
+          - id: req_resolution
+            description: Persist the requested case resolution.
+        deliverables: []
+        coverage: []
+        constraints: []
+        completion_checks:
+          - id: check_output
+            description: Validate the exact structured resolution output.
+            requirement_ids: [req_resolution]
+            constraint_ids: []
+            kind:
+              kind: output_schema
+      plan:
+        schema_version: 1
+        input_schema:
+          type: object
+          additionalProperties: false
+          required: [case_id, resolution]
+          properties:
+            case_id: { type: string }
+            resolution: { type: string }
+        output_schema:
+          type: object
+          additionalProperties: false
+          required: [case_id, resolution]
+          properties:
+            case_id: { type: string }
+            resolution: { type: string }
+        nodes:
+          - id: output
+            requirement_ids: [req_resolution]
+            depends_on: []
+            input: {}
+            output_schema:
+              type: object
+              additionalProperties: false
+              required: [case_id, resolution]
+              properties:
+                case_id: { type: string }
+                resolution: { type: string }
+            operation:
+              kind: output
+              value:
+                case_id:
+                  $ref: $.input.case_id
+                resolution:
+                  $ref: $.input.resolution
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0
 "#
 }

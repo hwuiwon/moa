@@ -1,6 +1,7 @@
 //! Test-only scripted provider utilities for deterministic integration coverage.
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -16,8 +17,93 @@ use moa_core::{
     types::model::ModelCapabilities,
 };
 use serde_json::Value;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex as AsyncMutex;
+
 const DEFAULT_INPUT_TOKENS: usize = 64;
 const DEFAULT_DURATION_MS: u64 = 1;
+
+/// Append-only request journal shared by every clone of one scripted provider.
+///
+/// One async lock owns both lazy file initialization and writes so concurrent
+/// completions cannot interleave JSONL records. The file is opened in append
+/// mode to retain records when a test restarts the orchestrator process.
+struct ScriptedRequestJournal {
+    path: PathBuf,
+    file: AsyncMutex<Option<tokio::fs::File>>,
+}
+
+impl ScriptedRequestJournal {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            file: AsyncMutex::new(None),
+        }
+    }
+
+    async fn append(&self, request: &CompletionRequest) -> Result<()> {
+        let mut line = request_journal_json_bytes(request).map_err(|error| {
+            MoaError::ProviderError(format!(
+                "failed to serialize scripted provider request journal record: {error}"
+            ))
+        })?;
+        line.push(b'\n');
+
+        let mut file = self.file.lock().await;
+        if file.is_none() {
+            let opened = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+                .await
+                .map_err(|error| request_journal_io_error("open", &self.path, error))?;
+            *file = Some(opened);
+        }
+        let Some(file) = file.as_mut() else {
+            return Err(MoaError::ProviderError(
+                "scripted provider request journal was not initialized".to_string(),
+            ));
+        };
+        file.write_all(&line)
+            .await
+            .map_err(|error| request_journal_io_error("write", &self.path, error))?;
+        file.flush()
+            .await
+            .map_err(|error| request_journal_io_error("flush", &self.path, error))?;
+        file.sync_data()
+            .await
+            .map_err(|error| request_journal_io_error("sync", &self.path, error))?;
+        Ok(())
+    }
+}
+
+fn request_journal_json_bytes(request: &CompletionRequest) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(&sort_json_objects(serde_json::to_value(request)?))
+}
+
+fn sort_json_objects(value: Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut entries = object.into_iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, sort_json_objects(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(values) => Value::Array(values.into_iter().map(sort_json_objects).collect()),
+        scalar => scalar,
+    }
+}
+
+fn request_journal_io_error(operation: &str, path: &Path, error: std::io::Error) -> MoaError {
+    MoaError::ProviderError(format!(
+        "failed to {operation} scripted provider request journal {}: {error}",
+        path.display()
+    ))
+}
 
 /// Wall-clock pacing simulated by a scripted response.
 ///
@@ -275,6 +361,7 @@ pub struct ScriptedProvider {
     responses: Arc<Mutex<VecDeque<ScriptedResponse>>>,
     fallback_response: Arc<Mutex<Option<ScriptedResponse>>>,
     recorded_requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    request_journal: Option<Arc<ScriptedRequestJournal>>,
 }
 
 impl ScriptedProvider {
@@ -286,7 +373,14 @@ impl ScriptedProvider {
             responses: Arc::new(Mutex::new(VecDeque::new())),
             fallback_response: Arc::new(Mutex::new(None)),
             recorded_requests: Arc::new(Mutex::new(Vec::new())),
+            request_journal: None,
         }
+    }
+
+    /// Enables append-only JSONL request journaling at the configured test-owned path.
+    pub(crate) fn with_request_journal(mut self, path: PathBuf) -> Self {
+        self.request_journal = Some(Arc::new(ScriptedRequestJournal::new(path)));
+        self
     }
 
     /// Appends one prebuilt scripted response.
@@ -375,6 +469,9 @@ impl LLMProvider for ScriptedProvider {
         // Resolve the keyed match before recording moves the request; keyed lookup is pure so it
         // stays correct under concurrent callers.
         let keyed_response = self.match_keyed(&request);
+        if let Some(journal) = &self.request_journal {
+            journal.append(&request).await?;
+        }
         self.recorded_requests
             .lock()
             .map_err(|error| {
@@ -520,12 +617,94 @@ impl LLMProvider for ScriptedProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeSet, HashMap};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
     use moa_core::types::context::ContextMessage;
+
+    static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDirectory(PathBuf);
+
+    impl TempDirectory {
+        fn new(test_name: &str) -> Self {
+            let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "moa-scripted-provider-{test_name}-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("create isolated request journal test directory");
+            Self(path)
+        }
+
+        fn join(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TempDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     /// Builds a request whose concatenated system + user text contains `text`.
     fn user_request(text: &str) -> CompletionRequest {
         CompletionRequest::new(text)
+    }
+
+    fn ordered_object<const N: usize>(entries: [(&str, Value); N]) -> Value {
+        let mut object = serde_json::Map::new();
+        for (key, value) in entries {
+            object.insert(key.to_string(), value);
+        }
+        Value::Object(object)
+    }
+
+    fn nested_value(reverse: bool) -> Value {
+        let leaf = if reverse {
+            ordered_object([
+                ("zeta", serde_json::json!(2)),
+                ("alpha", serde_json::json!(1)),
+            ])
+        } else {
+            ordered_object([
+                ("alpha", serde_json::json!(1)),
+                ("zeta", serde_json::json!(2)),
+            ])
+        };
+        if reverse {
+            ordered_object([("second", serde_json::json!(true)), ("first", leaf)])
+        } else {
+            ordered_object([("first", leaf), ("second", serde_json::json!(true))])
+        }
+    }
+
+    fn request_with_nested_object_order(reverse: bool) -> CompletionRequest {
+        let mut message = ContextMessage::user("canonical request");
+        message.tools = Some(nested_value(reverse));
+        message.tool_invocation = Some(ToolInvocation {
+            id: Some("tool-use-1".to_string()),
+            name: "fixture_tool".to_string(),
+            input: nested_value(reverse),
+        });
+
+        let mut request = CompletionRequest::new("ignored");
+        request.messages = vec![message];
+        request.tools = vec![nested_value(reverse)];
+        request.response_format = Some(moa_core::types::completion::JsonResponseFormat {
+            name: "fixture_output".to_string(),
+            description: Some("nested canonical schema".to_string()),
+            schema: nested_value(reverse),
+            strict: true,
+        });
+        request
+            .metadata
+            .insert("nested".to_string(), nested_value(reverse));
+        request
     }
 
     /// Drains a completion stream and returns its aggregated assistant text.
@@ -538,6 +717,216 @@ mod tests {
             .await
             .expect("aggregated response")
             .text
+    }
+
+    #[tokio::test]
+    async fn request_journal_disabled_preserves_existing_in_memory_behavior() {
+        // Pins: a provider without an explicitly configured journal performs no
+        // filesystem I/O and still records the exact request in memory.
+        let request = user_request("journal disabled");
+        let provider = ScriptedProvider::new(ModelCapabilities::default()).push_text("done");
+
+        assert_eq!(complete_text(&provider, request.clone()).await, "done");
+        assert_eq!(provider.recorded_requests(), vec![request]);
+    }
+
+    #[tokio::test]
+    async fn request_journal_appends_canonical_jsonl_across_provider_restarts() {
+        // Pins: a fixture-owned journal survives provider reconstruction, keeps
+        // request order, and stores the actual CompletionRequest DTO per line.
+        let temp = TempDirectory::new("append");
+        let journal_path = temp.join("requests.jsonl");
+        let mut first_request = user_request("first request");
+        first_request.metadata = HashMap::from([
+            ("zeta".to_string(), serde_json::json!(2)),
+            ("alpha".to_string(), serde_json::json!(1)),
+        ]);
+        let second_request = user_request("second request");
+
+        let first_provider = ScriptedProvider::new(ModelCapabilities::default())
+            .with_request_journal(journal_path.clone())
+            .push_text("first response");
+        assert_eq!(
+            complete_text(&first_provider, first_request.clone()).await,
+            "first response"
+        );
+        drop(first_provider);
+
+        let restarted_provider = ScriptedProvider::new(ModelCapabilities::default())
+            .with_request_journal(journal_path.clone())
+            .push_text("second response");
+        assert_eq!(
+            complete_text(&restarted_provider, second_request.clone()).await,
+            "second response"
+        );
+
+        let journal = fs::read_to_string(&journal_path).expect("read request journal");
+        let lines = journal.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2, "one JSON value must be written per request");
+        assert!(
+            lines[0].contains("\"metadata\":{\"alpha\":1,\"zeta\":2}"),
+            "metadata keys must be serialized deterministically: {}",
+            lines[0]
+        );
+        let persisted = lines
+            .iter()
+            .map(|line| {
+                serde_json::from_str::<CompletionRequest>(line)
+                    .expect("journal line should be a CompletionRequest")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(persisted, vec![first_request, second_request]);
+        assert!(
+            journal.ends_with('\n'),
+            "JSONL journal must end each record"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_journal_accepts_float_bearing_completion_requests() {
+        // Pins: request journaling accepts valid completion DTO floats instead of applying the
+        // stricter execution-plan canonicalization contract that forbids floating-point values.
+        let temp = TempDirectory::new("float-request");
+        let journal_path = temp.join("requests.jsonl");
+        let mut request = user_request("float-bearing request");
+        request.temperature = Some(0.25);
+        request
+            .metadata
+            .insert("ranking_score".to_string(), serde_json::json!(0.875));
+        let provider = ScriptedProvider::new(ModelCapabilities::default())
+            .with_request_journal(journal_path.clone())
+            .push_text("done");
+
+        assert_eq!(complete_text(&provider, request.clone()).await, "done");
+
+        let persisted = fs::read_to_string(&journal_path)
+            .expect("read float-bearing request journal")
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<CompletionRequest>(line)
+                    .expect("float-bearing journal line should round-trip")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(persisted, vec![request]);
+    }
+
+    #[tokio::test]
+    async fn request_journal_canonicalizes_every_nested_request_object() {
+        // Pins: object insertion order in any Value-bearing CompletionRequest
+        // field cannot alter the durable JSONL bytes.
+        let temp = TempDirectory::new("nested-canonical");
+        let journal_path = temp.join("requests.jsonl");
+        let forward = request_with_nested_object_order(false);
+        let reverse = request_with_nested_object_order(true);
+        assert_eq!(forward, reverse, "requests must be semantically equivalent");
+        let provider = ScriptedProvider::new(ModelCapabilities::default())
+            .with_request_journal(journal_path.clone())
+            .with_fallback_response(ScriptedResponse::text("done"));
+
+        assert_eq!(complete_text(&provider, forward.clone()).await, "done");
+        assert_eq!(complete_text(&provider, reverse.clone()).await, "done");
+
+        let journal = fs::read_to_string(&journal_path).expect("read canonical request journal");
+        let lines = journal.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0].as_bytes(),
+            lines[1].as_bytes(),
+            "semantically equal nested request objects must have identical canonical bytes"
+        );
+        for line in lines {
+            let persisted = serde_json::from_str::<CompletionRequest>(line)
+                .expect("canonical journal line should round-trip as CompletionRequest");
+            assert_eq!(persisted, forward);
+        }
+    }
+
+    #[tokio::test]
+    async fn request_journal_concurrent_completions_write_exact_parseable_records() {
+        // Pins: concurrent completions share one append lock, yielding one
+        // complete parseable line per request without relying on task order.
+        const REQUEST_COUNT: usize = 32;
+
+        let temp = TempDirectory::new("concurrent");
+        let journal_path = temp.join("requests.jsonl");
+        let provider = Arc::new(
+            ScriptedProvider::new(ModelCapabilities::default())
+                .with_request_journal(journal_path.clone())
+                .with_fallback_response(ScriptedResponse::text("done")),
+        );
+        let mut completions = Vec::with_capacity(REQUEST_COUNT);
+        for index in 0..REQUEST_COUNT {
+            let provider = provider.clone();
+            completions.push(tokio::spawn(async move {
+                let request = user_request(&format!("concurrent-request-{index:02}"));
+                provider
+                    .complete(request)
+                    .await
+                    .expect("open concurrent scripted completion")
+                    .collect()
+                    .await
+                    .expect("collect concurrent scripted completion")
+            }));
+        }
+        for completion in completions {
+            let response = completion.await.expect("join concurrent completion task");
+            assert_eq!(response.text, "done");
+        }
+
+        let journal = fs::read(&journal_path).expect("read concurrent request journal");
+        assert_eq!(
+            journal.iter().filter(|byte| **byte == b'\n').count(),
+            REQUEST_COUNT,
+            "every request must end in exactly one JSONL record"
+        );
+        let journal = std::str::from_utf8(&journal).expect("journal must be UTF-8 JSONL");
+        let lines = journal.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), REQUEST_COUNT);
+        let observed = lines
+            .iter()
+            .map(|line| {
+                serde_json::from_str::<CompletionRequest>(line)
+                    .expect("concurrent journal record must be complete JSON")
+                    .messages
+                    .into_iter()
+                    .next()
+                    .expect("concurrent request must retain its message")
+                    .content
+            })
+            .collect::<BTreeSet<_>>();
+        let expected = (0..REQUEST_COUNT)
+            .map(|index| format!("concurrent-request-{index:02}"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
+    async fn request_journal_open_failure_is_a_typed_provider_error() {
+        // Pins: an invalid fixture journal path fails the provider request
+        // without panicking or consuming the scripted response.
+        let temp = TempDirectory::new("open-failure");
+        let provider = ScriptedProvider::new(ModelCapabilities::default())
+            .with_request_journal(temp.0.clone())
+            .push_text("must remain queued");
+
+        let error = provider
+            .complete(user_request("cannot journal"))
+            .await
+            .expect_err("opening a directory as the journal must fail");
+        assert!(
+            matches!(&error, MoaError::ProviderError(message) if message.contains("failed to open scripted provider request journal")),
+            "journal open failure must stay in the provider error boundary: {error:?}"
+        );
+        assert!(provider.recorded_requests().is_empty());
+        assert_eq!(
+            provider
+                .responses
+                .lock()
+                .expect("scripted response queue lock")
+                .len(),
+            1,
+            "journal failure must not consume the scripted completion"
+        );
     }
 
     #[tokio::test]

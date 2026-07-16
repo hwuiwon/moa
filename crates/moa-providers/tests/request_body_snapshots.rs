@@ -84,6 +84,7 @@ fn minimal_request(model: &str) -> CompletionRequest {
         max_output_tokens: Some(MAX_OUTPUT_TOKENS),
         temperature: Some(TEMPERATURE),
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     }
 }

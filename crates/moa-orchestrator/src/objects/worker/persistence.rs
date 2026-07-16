@@ -7,14 +7,16 @@ pub(super) async fn persist_parent_session_event(
     session_id: SessionId,
     event: Event,
 ) -> Result<(), HandlerError> {
-    ctx.service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event,
-            dedupe_key: None,
-        }))
-        .call()
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event,
+                dedupe_key: None,
+            })),
+    )
+    .call()
+    .await?;
     Ok(())
 }
 

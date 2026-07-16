@@ -14,7 +14,7 @@
 
 #![recursion_limit = "256"]
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::Utc;
 use moa_artifacts::document::ArtifactStatus;
@@ -28,12 +28,10 @@ use moa_core::{
     types::experience::LearningCandidateStatus, types::experience::LearningCandidateType,
     types::experience::LearningRiskClass, types::identifiers::StoragePartitionId,
 };
+use moa_hands::{ToolRegistry, ToolRouter};
 use moa_orchestrator::services::learning_review::accept_skill_candidate_after_authz;
 use moa_skills::artifact::skill_artifact_document_from_package;
 use moa_skills::package::{SkillPackage, SkillPackageFile, ValidatedSkillPackage};
-use moa_skills::procedure::interpreter::{
-    ProcedureAdvance, ProcedureExecutionState, ProcedureInterpreter,
-};
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::bootstrap_test_db;
 use serde_json::json;
@@ -158,15 +156,24 @@ mod skill_learning_gate {
 
     #[tokio::test]
     #[ignore = "requires compose Postgres and the provider-overrides feature"]
-    async fn accepted_procedure_skill_publishes_and_interpreter_completes_e2e() {
-        // Pins: a skill candidate carrying a procedure graph survives the review gate
-        // with its procedure intact, and the published definition drives the pure
-        // interpreter to completion — a broken graph cannot silently pass review.
-        let harness = GateHarness::bootstrap("gate-procedure").await;
-        let package = procedure_skill_package(&harness.skill_name);
+    async fn accepted_execution_template_skill_compiles_audits_and_publishes_e2e() {
+        // Pins: a template-bearing skill candidate compiles through moa-execution, persists
+        // its strict preterminal planning audit, and publishes the same validated template.
+        let harness = GateHarness::bootstrap("gate-execution-template").await;
+        let package = execution_template_skill_package(&harness.skill_name);
         let draft = harness.create_draft(&package).await;
+        let skill_name = &harness.skill_name;
+        let suite = json!({
+            "relative_path": format!("skills/{skill_name}/tests/suite.toml"),
+            "source_format": "toml",
+            "source_text": format!(
+                "[suite]\nname = \"{skill_name}-regression\"\ndefault_timeout_seconds = 90\n\n\
+                 [[cases]]\nname = \"smoke\"\ninput = \"run the recorded workflow\"\n\
+                 [cases.metadata]\nexecution_input = {{}}\n"
+            ),
+        });
         let candidate = harness
-            .append_proposed_candidate("skill_created", &draft, None)
+            .append_proposed_candidate("skill_created", &draft, Some(suite))
             .await;
 
         let response = harness.accept(candidate.id).await.expect("accept promotes");
@@ -179,21 +186,27 @@ mod skill_learning_gate {
         else {
             panic!("published artifact must be a skill definition");
         };
-        let procedure = definition
-            .procedure
-            .expect("published skill keeps its procedure through review");
-
-        let interpreter = ProcedureInterpreter::new(&procedure);
-        let advance = interpreter
-            .advance(ProcedureExecutionState::new(
-                Uuid::now_v7(),
-                json!({"ticket": "MOA-1"}),
-            ))
-            .expect("published procedure advances");
-        let ProcedureAdvance::Completed { output, .. } = advance else {
-            panic!("start -> end procedure must run to completion, got a blocked graph");
-        };
-        assert_eq!(output["route"], "done");
+        assert!(
+            definition.execution_plan.is_some(),
+            "published skill keeps its compiled execution-plan template"
+        );
+        let audits: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT source, outcome, operation_key \
+             FROM moa.execution_compile_audit \
+             WHERE tenant_id = $1 AND source = 'skill_regression'",
+        )
+        .bind(tenant_id_from_storage_partition_id(&harness.storage_partition_id).0)
+        .fetch_all(harness.test_db.store().pool())
+        .await
+        .expect("load normalized skill-regression compile audit");
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].0, "skill_regression");
+        assert_eq!(audits[0].1, "accepted");
+        assert!(
+            audits[0]
+                .2
+                .starts_with(&format!("skill_regression:{}:", draft.revision_uid))
+        );
     }
 
     /// Shared fixtures for one gate acceptance flow against an isolated database.
@@ -252,6 +265,10 @@ mod skill_learning_gate {
                 store.pool().clone(),
                 self.config.clone(),
                 providers,
+                Arc::new(ToolRouter::new(
+                    ToolRegistry::default_local(),
+                    HashMap::new(),
+                )),
                 LearningCandidateReviewRequest {
                     tenant_id: tenant_id_from_storage_partition_id(&self.storage_partition_id),
                     candidate_id,
@@ -438,42 +455,66 @@ mod skill_learning_gate {
             .expect("suite-carrying gate package validates")
     }
 
-    /// A skill package whose `skill.moa.yaml` carries a minimal start -> end procedure.
-    fn procedure_skill_package(skill_name: &str) -> ValidatedSkillPackage {
+    /// A skill package whose `skill.moa.yaml` carries a minimal output-only execution plan.
+    fn execution_template_skill_package(skill_name: &str) -> ValidatedSkillPackage {
         let markdown = format!(
             "---\n\
              name: {skill_name}\n\
-             description: \"Procedure-carrying gate skill\"\n\
+             description: \"Execution-template gate skill\"\n\
              allowed-tools: bash\n\
              metadata:\n\
              \x20 moa-version: \"1.0\"\n\
-             \x20 moa-tags: \"gate, procedure\"\n\
+             \x20 moa-tags: \"gate, execution-template\"\n\
              \x20 moa-estimated-tokens: \"300\"\n\
              ---\n\n\
              # {skill_name}\n\n\
-             Run the deterministic triage procedure.\n"
+             Run the deterministic execution template.\n"
         );
         let skill_yaml = "\
 inputs:
   type: object
+  additionalProperties: false
 outputs:
   type: object
 allowed_tools:
   - bash
-procedure:
-  input_schema:
-    type: object
-  nodes:
-    - id: start
-      kind: start
-    - id: done
-      kind: end
-      input:
-        route: done
-  edges:
-    - id: start-done
-      from: start
-      to: done
+execution_plan:
+  goal:
+    requirements:
+      - id: regression_result
+        description: Return the deterministic regression result.
+    deliverables: []
+    coverage: []
+    constraints: []
+    completion_checks:
+      - id: output_schema
+        description: Validate the regression output.
+        requirement_ids: [regression_result]
+        constraint_ids: []
+        kind:
+          kind: output_schema
+  plan:
+    schema_version: 1
+    input_schema:
+      type: object
+      additionalProperties: false
+    output_schema:
+      type: object
+    nodes:
+      - id: result
+        requirement_ids: [regression_result]
+        depends_on: []
+        input: {}
+        output_schema:
+          type: object
+        operation:
+          kind: output
+          value:
+            route: done
+        retry:
+          max_attempts: 1
+          initial_backoff_ms: 0
+          max_backoff_ms: 0
 ";
         SkillPackage::new(vec![
             SkillPackageFile::new("SKILL.md", markdown.into_bytes())
@@ -485,6 +526,6 @@ procedure:
             .with_content_type("application/yaml; charset=utf-8"),
         ])
         .validate()
-        .expect("gate procedure package validates")
+        .expect("gate execution-template package validates")
     }
 }

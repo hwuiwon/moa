@@ -15,6 +15,8 @@ pub struct SessionReport {
     pub planned_turns: usize,
     /// Number of completed turns observed by the harness.
     pub completed_turns: usize,
+    /// Number of successful detached execution admissions.
+    pub execution_admissions: usize,
     /// Session-scoped cache hit rate.
     pub cache_hit_rate: f64,
     /// Total session cost in cents.
@@ -76,16 +78,16 @@ pub struct EventAppendTypeReport {
 pub struct ResourceBillReport {
     /// Total durable session-event rows appended during the measured run.
     pub durable_event_rows: u64,
-    /// Durable event rows per completed turn.
-    pub durable_event_rows_per_turn: f64,
+    /// Durable event rows per successful answer or execution admission.
+    pub durable_event_rows_per_successful_operation: f64,
     /// Durable `ProgressUpdate` rows appended during the measured run.
     pub progress_update_rows: u64,
-    /// Durable `ProgressUpdate` rows per completed turn.
-    pub progress_update_rows_per_turn: f64,
+    /// Durable `ProgressUpdate` rows per successful operation.
+    pub progress_update_rows_per_successful_operation: f64,
     /// Durable `ProgressNarrated` rows appended during the measured run.
     pub progress_narrated_rows: u64,
-    /// Durable `ProgressNarrated` rows per completed turn.
-    pub progress_narrated_rows_per_turn: f64,
+    /// Durable `ProgressNarrated` rows per successful operation.
+    pub progress_narrated_rows_per_successful_operation: f64,
     /// Durable event rows split by event type.
     pub event_rows_by_type: Vec<EventAppendTypeReport>,
 }
@@ -139,10 +141,14 @@ pub struct WindowReport {
     pub warmup: bool,
     /// Turns completed inside this window.
     pub turns_completed: u64,
+    /// Execution admissions inside this window.
+    pub execution_admissions: u64,
     /// Turns failed inside this window.
     pub turn_errors: u64,
     /// Corrected turn latency inside this window.
     pub latency_corrected_ms: PercentileSummary,
+    /// Corrected execution-admission latency inside this window.
+    pub execution_admission_latency_corrected_ms: PercentileSummary,
 }
 
 /// Aggregate load-test report.
@@ -158,6 +164,10 @@ pub struct LoadTestReport {
     pub requested_rate_qps: f64,
     /// Completed-turn throughput actually achieved (post-warmup window).
     pub achieved_rate_qps: f64,
+    /// Detached execution-admission throughput achieved post-warmup.
+    pub admission_rate_qps: f64,
+    /// Combined successful answer and admission throughput post-warmup.
+    pub successful_operation_rate_qps: f64,
     /// Sessions created over the run (pool churn included).
     pub sessions_started: usize,
     /// Completed sessions.
@@ -168,6 +178,10 @@ pub struct LoadTestReport {
     pub turns_scheduled: u64,
     /// Turns that completed successfully.
     pub turns_completed: u64,
+    /// Detached execution runs admitted successfully.
+    pub execution_admissions: u64,
+    /// Exact sum of completed answers and execution admissions.
+    pub successful_operations: u64,
     /// Failure counts by kind.
     pub errors: ErrorTaxonomy,
     /// Total observed tool calls.
@@ -183,6 +197,10 @@ pub struct LoadTestReport {
     pub turn_latency_corrected_ms: PercentileSummary,
     /// Uncorrected service time (measured from actual dispatch).
     pub turn_latency_ms: PercentileSummary,
+    /// Corrected execution-admission latency measured from intended arrival.
+    pub execution_admission_latency_corrected_ms: PercentileSummary,
+    /// Uncorrected execution-admission latency measured from dispatch.
+    pub execution_admission_latency_ms: PercentileSummary,
     /// Delay between intended arrival and actual dispatch; sustained growth
     /// means the offered rate exceeds capacity.
     pub dispatch_delay_ms: PercentileSummary,
@@ -247,9 +265,11 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
     );
     let _ = writeln!(
         &mut output,
-        "Rate: {:.1}/s requested, {:.1}/s achieved | Duration: {:.2}s (warmup {:.1}s excluded)",
+        "Rate: {:.1}/s requested, {:.1}/s answers, {:.1}/s admissions, {:.1}/s successful operations | Duration: {:.2}s (warmup {:.1}s excluded)",
         report.requested_rate_qps,
         report.achieved_rate_qps,
+        report.admission_rate_qps,
+        report.successful_operation_rate_qps,
         report.duration_ms / 1_000.0,
         report.warmup_ms / 1_000.0
     );
@@ -268,6 +288,14 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
         format_millis(report.turn_latency_ms.p50),
         format_millis(report.turn_latency_ms.p95),
         format_millis(report.turn_latency_ms.p99)
+    );
+    let _ = writeln!(
+        &mut output,
+        "Execution Admission Latency (corrected):\n  p50: {}  p95: {}  p99: {}  max: {}",
+        format_millis(report.execution_admission_latency_corrected_ms.p50),
+        format_millis(report.execution_admission_latency_corrected_ms.p95),
+        format_millis(report.execution_admission_latency_corrected_ms.p99),
+        format_millis(report.execution_admission_latency_corrected_ms.max)
     );
     let _ = writeln!(
         &mut output,
@@ -323,13 +351,19 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
     if report.resource_bill.durable_event_rows > 0 {
         let _ = writeln!(
             &mut output,
-            "Resource Bill:\n  durable event rows: {} ({:.2}/turn) | ProgressUpdate: {} ({:.2}/turn) | ProgressNarrated: {} ({:.2}/turn)",
+            "Resource Bill:\n  durable event rows: {} ({:.2}/successful operation) | ProgressUpdate: {} ({:.2}/successful operation) | ProgressNarrated: {} ({:.2}/successful operation)",
             report.resource_bill.durable_event_rows,
-            report.resource_bill.durable_event_rows_per_turn,
+            report
+                .resource_bill
+                .durable_event_rows_per_successful_operation,
             report.resource_bill.progress_update_rows,
-            report.resource_bill.progress_update_rows_per_turn,
+            report
+                .resource_bill
+                .progress_update_rows_per_successful_operation,
             report.resource_bill.progress_narrated_rows,
-            report.resource_bill.progress_narrated_rows_per_turn
+            report
+                .resource_bill
+                .progress_narrated_rows_per_successful_operation
         );
     }
     let _ = writeln!(
@@ -341,9 +375,11 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
     );
     let _ = writeln!(
         &mut output,
-        "Turns: {} scheduled, {} completed | error rate: {:.4}",
+        "Turns: {} scheduled, {} answers, {} admissions, {} successful operations | error rate: {:.4}",
         report.turns_scheduled,
         report.turns_completed,
+        report.execution_admissions,
+        report.successful_operations,
         report.turn_error_rate()
     );
     let _ = writeln!(

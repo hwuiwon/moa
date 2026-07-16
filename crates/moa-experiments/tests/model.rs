@@ -1,7 +1,8 @@
 use chrono::Utc;
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::{
-    types::action_policy::ActionRuleScope, types::channel::Attachment, types::identifiers::ModelId,
+    types::action_policy::ActionRuleScope, types::channel::Attachment,
+    types::execution_planning::PinnedExecutionTemplateRef, types::identifiers::ModelId,
     types::identifiers::SessionId, types::identifiers::TenantId,
 };
 use moa_experiments::model::{
@@ -46,38 +47,55 @@ fn agent_loop_target_round_trips_through_public_model_offline() {
     assert_eq!(decoded.target_kind, ExperimentTargetKind::AgentLoop);
     assert_eq!(decoded.target.kind(), ExperimentTargetKind::AgentLoop);
     assert_eq!(decoded.session_id, Some(session_id));
-    assert_eq!(decoded.procedure_run_uid, None);
+    assert_eq!(decoded.execution_run_uid, None);
     assert_eq!(decoded, record);
 }
 
 #[test]
-fn procedure_target_round_trips_through_public_model_offline() {
-    // Pins: procedure experiments preserve procedure refs, inputs, and idempotency.
-    let procedure_run_uid = Uuid::now_v7();
-    let target = ExperimentTarget::Procedure {
-        procedure_ref: "skill://damaged-food-order".to_string(),
+fn execution_template_target_round_trips_through_public_model_offline() {
+    // Pins: execution-template experiments preserve the exact revision, objective, input, and link.
+    let execution_run_uid = Uuid::now_v7();
+    let template = PinnedExecutionTemplateRef {
+        skill_ref: "skill://damaged-food-order".to_string(),
+        revision_uid: Uuid::now_v7(),
+    };
+    let target = ExperimentTarget::ExecutionTemplate {
+        template: template.clone(),
+        objective: "Resolve the damaged order without widening contact scope.".to_string(),
         input: json!({ "order_id": "order-123", "priority": "high" }),
         session_id: None,
-        idempotency_key: Some("experiment-live-procedure-123".to_string()),
+        idempotency_key: Some("experiment-live-execution-template-123".to_string()),
     };
     let record = record_for_target(
-        ExperimentTargetKind::Procedure,
+        ExperimentTargetKind::ExecutionTemplate,
         target,
         None,
-        Some(procedure_run_uid),
+        Some(execution_run_uid),
     );
 
-    let encoded = serde_json::to_value(&record).expect("procedure record serializes");
+    let encoded = serde_json::to_value(&record).expect("execution-template record serializes");
+    assert_eq!(encoded["target"]["kind"], "execution_template");
+    assert_eq!(
+        encoded["target"]["template"]["skill_ref"],
+        template.skill_ref
+    );
+    assert_eq!(
+        encoded["target"]["template"]["revision_uid"],
+        template.revision_uid.to_string()
+    );
     let decoded: ExperimentRunRecord =
-        serde_json::from_value(encoded).expect("procedure record deserializes");
+        serde_json::from_value(encoded).expect("execution-template record deserializes");
 
-    assert_eq!(decoded.target_kind, ExperimentTargetKind::Procedure);
-    assert_eq!(decoded.target.kind(), ExperimentTargetKind::Procedure);
+    assert_eq!(decoded.target_kind, ExperimentTargetKind::ExecutionTemplate);
+    assert_eq!(
+        decoded.target.kind(),
+        ExperimentTargetKind::ExecutionTemplate
+    );
     assert_eq!(decoded.session_id, None);
-    assert_eq!(decoded.procedure_run_uid, Some(procedure_run_uid));
+    assert_eq!(decoded.execution_run_uid, Some(execution_run_uid));
     assert_eq!(
         decoded.idempotency_key.as_deref(),
-        Some("experiment-live-procedure-123")
+        Some("experiment-live-execution-template-123")
     );
     assert_eq!(decoded, record);
 }
@@ -108,8 +126,8 @@ fn storage_enum_conversions_reject_unknown_database_values_offline() {
     assert_eq!(ExperimentRunStatus::from_db("queued"), None);
     assert_eq!(ExperimentTargetKind::AgentLoop.as_str(), "agent_loop");
     assert_eq!(
-        ExperimentTargetKind::from_db("procedure"),
-        Some(ExperimentTargetKind::Procedure)
+        ExperimentTargetKind::from_db("execution_template"),
+        Some(ExperimentTargetKind::ExecutionTemplate)
     );
     assert_eq!(ExperimentTargetKind::from_db("dataset"), None);
     assert_eq!(ExperimentTrialStatus::Dispatched.as_str(), "dispatched");
@@ -143,7 +161,7 @@ fn trial_record_round_trips_through_public_model_offline() {
     // Pins: trial records preserve simulator config, artifact pins, links, and stop reason.
     let now = Utc::now();
     let session_id = SessionId::new();
-    let procedure_run_uid = Uuid::now_v7();
+    let execution_run_uid = Uuid::now_v7();
     let trial = ExperimentTrialRecord {
         scope: ActionRuleScope::Tenant {
             tenant_id: TenantId::from(Uuid::now_v7()),
@@ -170,7 +188,7 @@ fn trial_record_round_trips_through_public_model_offline() {
         target_model: Some(ModelId::new("gpt-5.1")),
         seed: Some("seed-123".to_string()),
         session_id: Some(session_id),
-        procedure_run_uid: Some(procedure_run_uid),
+        execution_run_uid: Some(execution_run_uid),
         score_run_id: Uuid::now_v7(),
         turn_count: 4,
         stop_reason: Some(ExperimentTrialStopReason::Success),
@@ -189,7 +207,7 @@ fn trial_record_round_trips_through_public_model_offline() {
     assert_eq!(decoded.trial_key, "scenario-a/persona-b/baseline");
     assert_eq!(decoded.simulator.model, ModelId::new("gpt-5.1-mini"));
     assert_eq!(decoded.session_id, Some(session_id));
-    assert_eq!(decoded.procedure_run_uid, Some(procedure_run_uid));
+    assert_eq!(decoded.execution_run_uid, Some(execution_run_uid));
     assert_eq!(
         decoded.stop_reason,
         Some(ExperimentTrialStopReason::Success)
@@ -201,7 +219,7 @@ fn record_for_target(
     target_kind: ExperimentTargetKind,
     target: ExperimentTarget,
     session_id: Option<SessionId>,
-    procedure_run_uid: Option<Uuid>,
+    execution_run_uid: Option<Uuid>,
 ) -> ExperimentRunRecord {
     let now = Utc::now();
 
@@ -219,7 +237,10 @@ fn record_for_target(
             model: Some(ModelId::new("gpt-5.1")),
             artifact_revision_uids: vec![Uuid::now_v7()],
             skill_refs: vec!["skill://citation-checker".to_string()],
-            procedure_ref: Some("skill://damaged-food-order".to_string()),
+            execution_template: Some(PinnedExecutionTemplateRef {
+                skill_ref: "skill://damaged-food-order".to_string(),
+                revision_uid: Uuid::now_v7(),
+            }),
             metadata: json!({ "cohort": "offline" }),
         },
         scorecard: ExperimentScorecard {
@@ -228,11 +249,13 @@ fn record_for_target(
         },
         score_run_id: Uuid::now_v7(),
         session_id,
-        procedure_run_uid,
+        execution_run_uid,
         artifact_revision_uids: vec![Uuid::now_v7()],
         idempotency_key: match target_kind {
             ExperimentTargetKind::AgentLoop => None,
-            ExperimentTargetKind::Procedure => Some("experiment-live-procedure-123".to_string()),
+            ExperimentTargetKind::ExecutionTemplate => {
+                Some("experiment-live-execution-template-123".to_string())
+            }
         },
         created_by_identity: json!({
             "type": "user",

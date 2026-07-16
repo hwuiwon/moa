@@ -30,7 +30,6 @@ pub struct TurnExecutionImpl {
     pub(super) session_store: Arc<PostgresSessionStore>,
     pub(super) config: Arc<MoaConfig>,
     pub(super) tool_router: Arc<ToolRouter>,
-    pub(super) tool_schemas: Arc<Vec<Value>>,
     pub(super) lineage: Arc<dyn LineageHandle>,
     pub(super) channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
 }
@@ -42,7 +41,7 @@ impl TurnExecutionImpl {
         session_store: Arc<PostgresSessionStore>,
         config: Arc<MoaConfig>,
         tool_router: Arc<ToolRouter>,
-        tool_schemas: Arc<Vec<Value>>,
+        _tool_schemas: Arc<Vec<Value>>,
         lineage: Arc<dyn LineageHandle>,
         channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
     ) -> Self {
@@ -50,7 +49,6 @@ impl TurnExecutionImpl {
             session_store,
             config,
             tool_router,
-            tool_schemas,
             lineage,
             channel_adapters,
         }
@@ -68,8 +66,8 @@ impl TurnExecution for TurnExecutionImpl {
         ctx: WorkflowContext<'_>,
         request: Json<RunTurnRequest>,
     ) -> Result<Json<TurnOutcome>, HandlerError> {
-        annotate_restate_handler_span("TurnExecution", "run");
         crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("TurnExecution", "run");
         let request = request.into_inner();
 
         driver_progress::set_phase(&ctx, TurnPhase::Compiling);
@@ -86,6 +84,7 @@ impl TurnExecution for TurnExecutionImpl {
                 Ok(body) => {
                     let phase = match body.kind {
                         TurnOutcomeKind::Completed => TurnPhase::Completed,
+                        TurnOutcomeKind::Accepted { .. } => TurnPhase::Accepted,
                         TurnOutcomeKind::Cancelled => TurnPhase::Cancelled,
                         TurnOutcomeKind::Failed => TurnPhase::Failed,
                     };
@@ -146,6 +145,7 @@ impl TurnExecution for TurnExecutionImpl {
         ctx: SharedWorkflowContext<'_>,
         reason: Json<String>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("TurnExecution", "request_cancel");
         driver_progress::request_cancel(&ctx, reason.into_inner()).await
     }
@@ -155,6 +155,7 @@ impl TurnExecution for TurnExecutionImpl {
         &self,
         ctx: SharedWorkflowContext<'_>,
     ) -> Result<Json<TurnProgress>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("TurnExecution", "progress");
         driver_progress::snapshot(&ctx).await
     }

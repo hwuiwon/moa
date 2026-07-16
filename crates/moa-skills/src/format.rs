@@ -122,9 +122,9 @@ pub fn skill_metadata_from_document(path: String, skill: &SkillDocument) -> Skil
         tags: skill.frontmatter.tags(),
         allowed_tools: skill.frontmatter.allowed_tools.clone(),
         actions: Vec::new(),
-        // Procedures are defined on the skill artifact, not in the Markdown body,
-        // so a document-derived metadata never carries a procedure.
-        has_procedure: false,
+        // Execution plans are defined on the skill artifact, not in `SKILL.md`,
+        // so document-only metadata never claims to carry one.
+        has_execution_plan: false,
         estimated_tokens: skill.frontmatter.estimated_tokens(&skill.body),
     }
 }

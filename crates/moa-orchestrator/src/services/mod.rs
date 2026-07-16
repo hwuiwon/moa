@@ -13,6 +13,7 @@ pub mod authz_challenges;
 pub mod authz_challenges_reaper;
 pub mod contacts;
 pub mod eval;
+pub mod execution;
 pub mod experiments;
 pub mod graph_memory_maint;
 pub mod knowledge;

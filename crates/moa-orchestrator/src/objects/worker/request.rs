@@ -23,6 +23,7 @@ pub(super) fn build_completion_request(
         max_output_tokens: Some(max_output_tokens),
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: HashMap::new(),
     };
     request

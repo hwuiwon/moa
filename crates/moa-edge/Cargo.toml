@@ -24,6 +24,7 @@ moa-auth-providers.workspace = true
 moa-authz.workspace = true
 moa-authz-schema.workspace = true
 moa-core.workspace = true
+moa-execution.workspace = true
 moa-db.workspace = true
 moa-lineage-audit.workspace = true
 moa-lineage-sink.workspace = true

@@ -65,6 +65,7 @@ pub(crate) fn completion_request(
         max_output_tokens: Some(SKILL_LEARNING_MAX_OUTPUT_TOKENS),
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     }
 }

@@ -61,6 +61,18 @@ pub struct ProvideWorkerInputInput {
     pub text: String,
 }
 
+/// Idempotent acknowledgement returned when a plain user reply is delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserReplyDeliveryAck {
+    /// This reply was accepted and applied for the first time.
+    Applied,
+    /// The same canonical reply was already applied to this target.
+    Replayed,
+    /// The target is unknown, stale, ambiguous, or already has different input.
+    Conflict,
+}
+
 /// Kind of model-driven child→parent report raised by the child `report_to_parent` tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -309,4 +321,32 @@ pub fn default_wait_timeout_ms() -> u64 {
 
 fn default_cancel_reason() -> String {
     "cancelled by parent".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UserReplyDeliveryAck;
+
+    #[test]
+    fn user_reply_delivery_ack_has_exact_strict_wire_values() {
+        // Pins: execution and worker input delivery share one stable acknowledgement contract.
+        let cases = [
+            (UserReplyDeliveryAck::Applied, "\"applied\""),
+            (UserReplyDeliveryAck::Replayed, "\"replayed\""),
+            (UserReplyDeliveryAck::Conflict, "\"conflict\""),
+        ];
+
+        for (ack, expected) in cases {
+            assert_eq!(
+                serde_json::to_string(&ack).expect("serialize reply delivery acknowledgement"),
+                expected
+            );
+            assert_eq!(
+                serde_json::from_str::<UserReplyDeliveryAck>(expected)
+                    .expect("deserialize reply delivery acknowledgement"),
+                ack
+            );
+        }
+        assert!(serde_json::from_str::<UserReplyDeliveryAck>("\"unknown\"").is_err());
+    }
 }

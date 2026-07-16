@@ -96,6 +96,7 @@ fn four_segment_request(latest_user_turn: &str, include_tools: bool) -> Completi
         max_output_tokens: Some(1024),
         temperature: Some(0.0),
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     }
 }

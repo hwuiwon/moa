@@ -97,16 +97,8 @@ pub fn clickhouse_from_sql(dataset_id: &str) -> Option<&'static str> {
              WHERE length(ts.skills_activated) > 0 \
              ) AS d"
         }
-        "procedure_runs" => {
-            "dim_artifact_run AS d FINAL \
-             LEFT JOIN dim_session_agent_context AS sac FINAL \
-             ON sac.session_id = d.session_id AND sac.tenant_id = d.tenant_id"
-        }
-        "procedure_node_runs" => {
-            "dim_artifact_node_run AS d FINAL \
-             INNER JOIN dim_artifact_run AS ar FINAL \
-             ON ar.run_uid = d.run_uid AND ar.tenant_id = d.tenant_id"
-        }
+        "execution_runs" => "dim_execution_runs AS d FINAL",
+        "execution_tasks" => "dim_execution_tasks AS d FINAL",
         "learning_candidates" => "dim_learning_candidates AS d FINAL",
         "experiment_runs" => "dim_experiment_run AS d FINAL",
         "events" => {
@@ -139,7 +131,7 @@ pub fn clickhouse_from_sql(dataset_id: &str) -> Option<&'static str> {
 /// The expression is the raw value form used in filters, `GROUP BY`, and as the
 /// argument to aggregates; the compiler wraps it for output (`toString` for
 /// UUIDs, `toUnixTimestamp64Micro` for timestamps). Expressions reference the
-/// aliases established by [`clickhouse_from_sql`] (`d`, `sac`, `s`, `ar`, `ev`).
+/// aliases established by [`clickhouse_from_sql`] (`d`, `sac`, `s`, `er`, `ev`).
 ///
 /// A `None` return means the catalog exposes a field the ClickHouse sources do
 /// not provide and the compiler cannot emit it; every catalog field of every
@@ -252,37 +244,74 @@ pub fn clickhouse_field_expr(dataset_id: &str, field_id: &str) -> Option<&'stati
         ("skills", "token_cost") => "d.token_cost",
         ("skills", "duration_ms") => "d.duration_ms",
 
-        // procedure_runs -> dim_artifact_run (d) + dim_session_agent_context (sac)
-        ("procedure_runs", "tenant_id") => "d.tenant_id",
-        ("procedure_runs", "run_uid") => "d.run_uid",
-        ("procedure_runs", "session_id") => "d.session_id",
-        ("procedure_runs", "agent_id") => "sac.agent_id",
-        ("procedure_runs", "procedure_ref") => "d.procedure_ref",
-        // Requires dim_artifact_run.revision_uid (see module docs / exporter contract).
-        ("procedure_runs", "revision_uid") => "d.revision_uid",
-        ("procedure_runs", "status") => "d.status",
-        ("procedure_runs", "error_present") => "(d.error IS NOT NULL)",
-        ("procedure_runs", "started_at") => "d.started_at",
-        ("procedure_runs", "completed_at") => "d.completed_at",
-        ("procedure_runs", "duration_ms") => {
-            "if(d.completed_at IS NULL, NULL, \
-             (toUnixTimestamp64Micro(d.completed_at) - toUnixTimestamp64Micro(d.started_at)) / 1000.0)"
-        }
+        // execution_runs -> dim_execution_runs (d)
+        ("execution_runs", "tenant_id") => "d.tenant_id",
+        ("execution_runs", "run_uid") => "d.run_uid",
+        ("execution_runs", "contact_id") => "d.contact_id",
+        ("execution_runs", "session_id") => "d.session_id",
+        ("execution_runs", "initial_plan_hash") => "d.initial_plan_hash",
+        ("execution_runs", "active_plan_hash") => "d.active_plan_hash",
+        ("execution_runs", "plan_revision") => "d.plan_revision",
+        ("execution_runs", "route_mode") => "d.route_mode",
+        ("execution_runs", "route_reason") => "d.route_reason",
+        ("execution_runs", "source_kind") => "d.source_kind",
+        ("execution_runs", "skill_template_ref") => "d.skill_template_ref",
+        ("execution_runs", "skill_template_revision_uid") => "d.skill_template_revision_uid",
+        ("execution_runs", "status") => "d.status",
+        ("execution_runs", "terminal_reason") => "d.terminal_reason",
+        ("execution_runs", "logical_task_count") => "d.logical_task_count",
+        ("execution_runs", "queued_at") => "d.queued_at",
+        ("execution_runs", "started_at") => "d.started_at",
+        ("execution_runs", "completed_at") => "d.completed_at",
+        ("execution_runs", "created_at") => "d.created_at",
+        ("execution_runs", "updated_at") => "d.updated_at",
+        ("execution_runs", "requirement_count") => "d.requirement_count",
+        ("execution_runs", "satisfied_requirement_count") => "d.satisfied_requirement_count",
+        ("execution_runs", "completion_check_count") => "d.completion_check_count",
+        ("execution_runs", "reserved_cost_microusd") => "d.reserved_cost_microusd",
+        ("execution_runs", "actual_cost_microusd") => "d.actual_cost_microusd",
+        ("execution_runs", "reserved_tokens") => "d.reserved_tokens",
+        ("execution_runs", "actual_tokens") => "d.actual_tokens",
+        ("execution_runs", "reserved_tasks") => "d.reserved_tasks",
+        ("execution_runs", "actual_tasks") => "d.actual_tasks",
+        ("execution_runs", "reserved_tool_calls") => "d.reserved_tool_calls",
+        ("execution_runs", "actual_tool_calls") => "d.actual_tool_calls",
+        ("execution_runs", "reserved_retrieved_bytes") => "d.reserved_retrieved_bytes",
+        ("execution_runs", "actual_retrieved_bytes") => "d.actual_retrieved_bytes",
+        ("execution_runs", "queue_to_start_ms") => "d.queue_to_start_ms",
+        ("execution_runs", "duration_ms") => "d.duration_ms",
 
-        // procedure_node_runs -> dim_artifact_node_run (d) + dim_artifact_run (ar)
-        ("procedure_node_runs", "tenant_id") => "d.tenant_id",
-        ("procedure_node_runs", "node_run_uid") => "d.node_run_uid",
-        ("procedure_node_runs", "run_uid") => "d.run_uid",
-        ("procedure_node_runs", "procedure_ref") => "ar.procedure_ref",
-        ("procedure_node_runs", "node_id") => "d.node_id",
-        ("procedure_node_runs", "status") => "d.status",
-        ("procedure_node_runs", "error_present") => "(d.error IS NOT NULL)",
-        ("procedure_node_runs", "started_at") => "d.started_at",
-        ("procedure_node_runs", "completed_at") => "d.completed_at",
-        ("procedure_node_runs", "duration_ms") => {
-            "if(d.completed_at IS NULL, NULL, \
-             (toUnixTimestamp64Micro(d.completed_at) - toUnixTimestamp64Micro(d.started_at)) / 1000.0)"
-        }
+        // execution_tasks -> dim_execution_tasks (d) + dim_execution_runs (er)
+        ("execution_tasks", "tenant_id") => "d.tenant_id",
+        ("execution_tasks", "task_id") => "d.task_id",
+        ("execution_tasks", "run_uid") => "d.run_uid",
+        ("execution_tasks", "node_id") => "d.node_id",
+        ("execution_tasks", "item_key") => "d.item_key",
+        ("execution_tasks", "task_kind") => "d.task_kind",
+        ("execution_tasks", "capability_name") => "d.capability_name",
+        ("execution_tasks", "capability_version") => "d.capability_version",
+        ("execution_tasks", "plan_revision") => "d.plan_revision",
+        ("execution_tasks", "status") => "d.status",
+        ("execution_tasks", "attempt") => "d.attempt",
+        ("execution_tasks", "generation") => "d.generation",
+        ("execution_tasks", "failure_class") => "d.failure_class",
+        ("execution_tasks", "started_at") => "d.started_at",
+        ("execution_tasks", "completed_at") => "d.completed_at",
+        ("execution_tasks", "created_at") => "d.created_at",
+        ("execution_tasks", "updated_at") => "d.updated_at",
+        ("execution_tasks", "reserved_cost_microusd") => "d.reserved_cost_microusd",
+        ("execution_tasks", "actual_cost_microusd") => "d.actual_cost_microusd",
+        ("execution_tasks", "reserved_tokens") => "d.reserved_tokens",
+        ("execution_tasks", "actual_tokens") => "d.actual_tokens",
+        ("execution_tasks", "reserved_tasks") => "d.reserved_tasks",
+        ("execution_tasks", "actual_tasks") => "d.actual_tasks",
+        ("execution_tasks", "reserved_tool_calls") => "d.reserved_tool_calls",
+        ("execution_tasks", "actual_tool_calls") => "d.actual_tool_calls",
+        ("execution_tasks", "reserved_retrieved_bytes") => "d.reserved_retrieved_bytes",
+        ("execution_tasks", "actual_retrieved_bytes") => "d.actual_retrieved_bytes",
+        ("execution_tasks", "citation_count") => "d.citation_count",
+        ("execution_tasks", "queue_latency_ms") => "d.queue_latency_ms",
+        ("execution_tasks", "duration_ms") => "d.duration_ms",
 
         // learning_candidates -> dim_learning_candidates (d)
         ("learning_candidates", "tenant_id") => "d.tenant_id",

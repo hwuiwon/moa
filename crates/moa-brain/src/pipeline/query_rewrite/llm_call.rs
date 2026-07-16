@@ -38,6 +38,7 @@ impl QueryRewriter {
             max_output_tokens: Some(REWRITER_OUTPUT_TOKENS),
             temperature: Some(0.0),
             response_format: Some(query_rewrite_response_format()),
+            native_web_search: Default::default(),
             metadata: HashMap::from([
                 ("moa.pipeline.stage".to_string(), json!("query_rewrite")),
                 (

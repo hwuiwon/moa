@@ -33,6 +33,35 @@ impl ExperimentStore {
         Self { pool }
     }
 
+    /// Loads a workflow-owned run by its already-authorized tenant and durable key.
+    ///
+    /// Experiment workflow requests predate contact-scoped targets and carry no
+    /// second scope DTO. The persisted row remains the authority: this
+    /// control-plane read recovers its exact closed tenant/contact scope without
+    /// widening a contact row to tenant RLS.
+    pub async fn load_run_for_workflow(
+        &self,
+        tenant_id: TenantId,
+        run_uid: Uuid,
+    ) -> MoaResult<Option<ExperimentRunRecord>> {
+        let mut conn = ScopedConn::begin_control_plane(&self.pool).await?;
+        let row = sqlx::query(&format!(
+            r#"
+            SELECT {RUN_COLUMNS}
+            FROM moa.experiment_run
+            WHERE run_uid = $1
+              AND storage_partition_id = $2
+            "#
+        ))
+        .bind(run_uid)
+        .bind(StoragePartitionId::for_tenant(tenant_id).to_string())
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await?;
+        row.as_ref().map(run_from_row).transpose()
+    }
+
     /// Inserts a new experiment run or returns the scoped idempotent existing row.
     pub async fn insert_run(
         &self,
@@ -78,7 +107,7 @@ impl ExperimentStore {
             INSERT INTO moa.experiment_run (
                 run_uid, storage_partition_id, user_id, name, target_kind, status,
                 target, variant, scorecard, score_run_id, session_id,
-                procedure_run_uid, artifact_revision_uids, idempotency_key,
+                execution_run_uid, artifact_revision_uids, idempotency_key,
                 created_by_identity
             )
             VALUES ($1, $2, $3, $4, $5, 'accepted', $6, $7, $8, $9, $10, $11, $12, $13, $14)
@@ -95,7 +124,7 @@ impl ExperimentStore {
         .bind(scorecard)
         .bind(score_run_id)
         .bind(run.session_id.map(|session_id| session_id.0))
-        .bind(run.procedure_run_uid)
+        .bind(run.execution_run_uid)
         .bind(&artifact_revision_uids)
         .bind(run.idempotency_key)
         .bind(run.created_by_identity)
@@ -232,14 +261,17 @@ impl ExperimentStore {
             .await
     }
 
-    /// Attaches a skill-backed procedure run to a scoped experiment run.
-    pub async fn attach_procedure_run(
+    /// Attaches a durable execution run to a scoped experiment run.
+    pub async fn attach_execution_run(
         &self,
         scope: &ActionRuleScope,
         run_uid: Uuid,
-        procedure_run_uid: Uuid,
+        execution_run_uid: Uuid,
     ) -> MoaResult<Option<ExperimentRunRecord>> {
-        self.update_link(scope, run_uid, None, Some(procedure_run_uid))
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
+        ensure_execution_run_visible(conn.as_mut(), scope, execution_run_uid).await?;
+        conn.commit().await?;
+        self.update_link(scope, run_uid, None, Some(execution_run_uid))
             .await
     }
 
@@ -637,17 +669,17 @@ impl ExperimentStore {
             .await
     }
 
-    /// Attaches a skill-backed procedure run to a scoped experiment trial.
-    pub async fn attach_trial_procedure_run(
+    /// Attaches a durable execution run to a scoped experiment trial.
+    pub async fn attach_trial_execution_run(
         &self,
         scope: &ActionRuleScope,
         trial_uid: Uuid,
-        procedure_run_uid: Uuid,
+        execution_run_uid: Uuid,
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
-        ensure_procedure_run_visible(conn.as_mut(), scope, procedure_run_uid).await?;
+        ensure_execution_run_visible(conn.as_mut(), scope, execution_run_uid).await?;
         conn.commit().await?;
-        self.update_trial_links(scope, trial_uid, None, Some(procedure_run_uid), None)
+        self.update_trial_links(scope, trial_uid, None, Some(execution_run_uid), None)
             .await
     }
 
@@ -698,7 +730,7 @@ impl ExperimentStore {
         scope: &ActionRuleScope,
         trial_uid: Uuid,
         session_id: Option<Uuid>,
-        procedure_run_uid: Option<Uuid>,
+        execution_run_uid: Option<Uuid>,
         trace_id: Option<String>,
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
         let parts = ScopeParts::from_scope(scope);
@@ -707,8 +739,8 @@ impl ExperimentStore {
             r#"
             UPDATE moa.experiment_trial
             SET session_id = COALESCE($5, session_id),
-                procedure_run_uid = COALESCE($6, procedure_run_uid),
-                trace_id = COALESCE($7, trace_id),
+                execution_run_uid = COALESCE($6, execution_run_uid),
+                trace_id = COALESCE(trace_id, $7),
                 updated_at = now()
             WHERE trial_uid = $4
               AND scope = $1
@@ -722,7 +754,7 @@ impl ExperimentStore {
         .bind(parts.user_id.as_deref())
         .bind(trial_uid)
         .bind(session_id)
-        .bind(procedure_run_uid)
+        .bind(execution_run_uid)
         .bind(trace_id)
         .fetch_optional(conn.as_mut())
         .await
@@ -736,7 +768,7 @@ impl ExperimentStore {
         scope: &ActionRuleScope,
         run_uid: Uuid,
         session_id: Option<Uuid>,
-        procedure_run_uid: Option<Uuid>,
+        execution_run_uid: Option<Uuid>,
     ) -> MoaResult<Option<ExperimentRunRecord>> {
         let parts = ScopeParts::from_scope(scope);
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
@@ -744,7 +776,7 @@ impl ExperimentStore {
             r#"
             UPDATE moa.experiment_run
             SET session_id = COALESCE($5, session_id),
-                procedure_run_uid = COALESCE($6, procedure_run_uid),
+                execution_run_uid = COALESCE($6, execution_run_uid),
                 updated_at = now()
             WHERE run_uid = $4
               AND scope = $1
@@ -758,7 +790,7 @@ impl ExperimentStore {
         .bind(parts.user_id.as_deref())
         .bind(run_uid)
         .bind(session_id)
-        .bind(procedure_run_uid)
+        .bind(execution_run_uid)
         .fetch_optional(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -914,28 +946,32 @@ async fn load_scoped_trial_by_key(
     .map_err(map_sqlx_error)
 }
 
-async fn ensure_procedure_run_visible(
+async fn ensure_execution_run_visible(
     conn: &mut PgConnection,
     scope: &ActionRuleScope,
-    procedure_run_uid: Uuid,
+    execution_run_uid: Uuid,
 ) -> MoaResult<()> {
-    let parts = ScopeParts::from_scope(scope);
+    let (tenant_id, contact_id) = match scope {
+        ActionRuleScope::Tenant { tenant_id } => (*tenant_id, None),
+        ActionRuleScope::Contact {
+            tenant_id,
+            contact_id,
+        } => (*tenant_id, Some(*contact_id)),
+    };
     let exists = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS (
             SELECT 1
-            FROM moa.artifact_run
-            WHERE run_uid = $4
-              AND scope = $1
-              AND storage_partition_id IS NOT DISTINCT FROM $2
-              AND user_id IS NOT DISTINCT FROM $3
+            FROM moa.execution_run
+            WHERE run_uid = $3
+              AND tenant_id = $1
+              AND contact_id IS NOT DISTINCT FROM $2
         )
         "#,
     )
-    .bind(parts.scope)
-    .bind(parts.storage_partition_id.as_deref())
-    .bind(parts.user_id.as_deref())
-    .bind(procedure_run_uid)
+    .bind(tenant_id.0)
+    .bind(contact_id.map(|id| id.0))
+    .bind(execution_run_uid)
     .fetch_one(conn)
     .await
     .map_err(map_sqlx_error)?;
@@ -945,7 +981,7 @@ async fn ensure_procedure_run_visible(
     }
 
     Err(MoaError::StorageError(format!(
-        "procedure run `{procedure_run_uid}` is not visible in the requested experiment scope"
+        "execution run `{execution_run_uid}` is not visible in the requested experiment scope"
     )))
 }
 
@@ -1016,7 +1052,7 @@ impl RowExt for sqlx::postgres::PgRow {
 /// The order here must stay in lockstep with [`run_from_row`], which reads each
 /// column by name; keep both in sync when columns are added or removed.
 const RUN_COLUMNS: &str = "run_uid, storage_partition_id, user_id, scope, name, target_kind, status, \
-     target, variant, scorecard, score_run_id, session_id, procedure_run_uid, \
+     target, variant, scorecard, score_run_id, session_id, execution_run_uid, \
      artifact_revision_uids, idempotency_key, created_by_identity, error, \
      started_at, completed_at, created_at, updated_at";
 
@@ -1027,7 +1063,7 @@ const RUN_COLUMNS: &str = "run_uid, storage_partition_id, user_id, scope, name, 
 const TRIAL_COLUMNS: &str = "trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status, \
      target_kind, variant_key, plan_revision_uid, persona_id, profile_id, \
      scenario_id, data_bundle_ids, artifact_revision_uids, \
-     simulator, target_model, seed, session_id, procedure_run_uid, \
+     simulator, target_model, seed, session_id, execution_run_uid, \
      score_run_id, turn_count, stop_reason, error, trace_id, \
      started_at, completed_at, created_at, updated_at";
 
@@ -1061,7 +1097,7 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentRunRecord> {
             .map_err(|error| MoaError::SerializationError(error.to_string()))?,
         score_run_id: row.col("score_run_id")?,
         session_id: row.col::<Option<Uuid>>("session_id")?.map(SessionId),
-        procedure_run_uid: row.col("procedure_run_uid")?,
+        execution_run_uid: row.col("execution_run_uid")?,
         artifact_revision_uids: row
             .col::<Option<Vec<Uuid>>>("artifact_revision_uids")?
             .unwrap_or_default(),
@@ -1120,7 +1156,7 @@ fn trial_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentTrialRecor
         target_model: target_model.map(ModelId::new),
         seed: row.col("seed")?,
         session_id: row.col::<Option<Uuid>>("session_id")?.map(SessionId),
-        procedure_run_uid: row.col("procedure_run_uid")?,
+        execution_run_uid: row.col("execution_run_uid")?,
         score_run_id: row.col("score_run_id")?,
         turn_count: row.col("turn_count")?,
         stop_reason: stop_reason_text

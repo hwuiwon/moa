@@ -1611,6 +1611,7 @@ fn reader_request(
         max_output_tokens: usize::try_from(output_token_reserve).ok(),
         temperature: Some(0.0),
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     }
 }
@@ -1658,6 +1659,7 @@ fn longmemeval_judge_request(
         max_output_tokens: Some(8),
         temperature: Some(0.0),
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     })
 }
@@ -2528,6 +2530,7 @@ mod tests {
             max_output_tokens: Some(max_output_tokens),
             temperature: Some(0.0),
             response_format: None,
+            native_web_search: Default::default(),
             metadata: Default::default(),
         }
     }

@@ -65,24 +65,20 @@ pub fn init_observability(
                 .with_target(true)
                 .with_current_span(true)
                 .flatten_event(true)
+                .with_filter(configured_env_filter())
                 .boxed(),
         )
     } else {
         Some(
             tracing_subscriber::fmt::layer()
                 .with_target(true)
-                .with_filter(LevelFilter::WARN)
+                .with_filter(configured_env_filter())
                 .boxed(),
         )
     };
-    let env_filter = Some(
-        EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new(default_env_filter_directive())),
-    );
 
     if !config.observability.enabled {
         let _ = tracing_subscriber::registry()
-            .with(env_filter)
             .with(console_layer)
             .try_init();
         init_metrics(&config.metrics)?;
@@ -96,10 +92,11 @@ pub fn init_observability(
         .with_sampler(build_sampler(config.observability.sample_rate))
         .build();
     let tracer = provider.tracer(config.observability.service_name.clone());
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    let otel_layer = tracing_opentelemetry::layer()
+        .with_tracer(tracer)
+        .with_filter(LevelFilter::INFO);
 
     let _ = tracing_subscriber::registry()
-        .with(env_filter)
         .with(console_layer)
         .with(otel_layer)
         .try_init();
@@ -108,6 +105,11 @@ pub fn init_observability(
     Ok(TelemetryGuard {
         provider: Some(provider),
     })
+}
+
+fn configured_env_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default_env_filter_directive()))
 }
 
 fn default_env_filter_directive() -> &'static str {

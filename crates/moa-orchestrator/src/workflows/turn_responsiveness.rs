@@ -1,13 +1,20 @@
 //! Deterministic turn responsiveness classification and cap policy.
 
-use moa_core::config::SessionLimitsConfig;
-use moa_core::wire::turn::TurnComplexityClass;
+#[cfg(test)]
+use moa_brain::execution_planning::{ExecutionRoutingInput, route_execution};
+#[cfg(test)]
+use moa_core::types::execution_planning::ExecutionRouteReason;
+use moa_core::{
+    config::SessionLimitsConfig,
+    types::execution_planning::{ExecutionMode, ExecutionRouteDecision},
+};
 use moa_core::{
     events::Event, types::completion::ToolInvocation, types::events_stream::EventRecord,
     types::tools::ToolContent, types::tools::ToolOutput,
 };
 
 /// Cheap, deterministic inputs used to classify one turn request.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TurnResponsivenessInput<'a> {
     /// Current user-visible request text.
@@ -24,6 +31,7 @@ pub(crate) struct TurnResponsivenessInput<'a> {
     pub(crate) available_tool_count: usize,
 }
 
+#[cfg(test)]
 impl<'a> TurnResponsivenessInput<'a> {
     /// Creates a root-turn classifier input with no optional context signals.
     #[cfg(test)]
@@ -44,58 +52,60 @@ impl<'a> TurnResponsivenessInput<'a> {
 }
 
 /// Selects a deterministic responsiveness class for one turn request.
-pub(crate) fn classify_turn_request(input: TurnResponsivenessInput<'_>) -> TurnComplexityClass {
-    let normalized = normalize_text(input.user_text);
-    let text = normalized.as_str();
+#[cfg(test)]
+pub(crate) fn classify_turn_request(input: TurnResponsivenessInput<'_>) -> ExecutionRouteDecision {
     if input.is_worker_context {
-        return TurnComplexityClass::Complex;
+        return ExecutionRouteDecision::Routed {
+            mode: ExecutionMode::Act,
+            reason: ExecutionRouteReason::BoundedInteractiveWork,
+        };
     }
-
-    let direct_question = is_direct_question(input.user_text, text);
-    if !direct_question
-        && !input.has_attachments()
-        && !input.has_recent_target
-        && (text.is_empty() || is_vague_deictic_action(text))
-    {
-        return TurnComplexityClass::Clarification;
+    let route = route_execution(ExecutionRoutingInput {
+        objective: input.user_text,
+        execution_template: None,
+        escalation: None,
+    });
+    match route {
+        ExecutionRouteDecision::NeedsInput { .. }
+            if input.has_recent_target || input.has_attachments() =>
+        {
+            ExecutionRouteDecision::Routed {
+                mode: ExecutionMode::Act,
+                reason: ExecutionRouteReason::BoundedInteractiveWork,
+            }
+        }
+        ExecutionRouteDecision::Routed {
+            mode: ExecutionMode::Respond,
+            ..
+        } if input.has_attachments()
+            || input.has_recent_target
+            || input.available_tool_count > 0
+                && input.request_max_turns.is_some_and(|cap| cap > 1) =>
+        {
+            ExecutionRouteDecision::Routed {
+                mode: ExecutionMode::Act,
+                reason: ExecutionRouteReason::BoundedInteractiveWork,
+            }
+        }
+        route => route,
     }
-
-    if is_complex_or_workflow_shaped(text) {
-        return TurnComplexityClass::Complex;
-    }
-
-    if input.has_attachments() || input.has_recent_target {
-        return TurnComplexityClass::Standard;
-    }
-
-    if is_tool_work_request(text, input.available_tool_count) {
-        return TurnComplexityClass::Standard;
-    }
-
-    if direct_question && input.available_tool_count > 0 && !is_short_prompt(text) {
-        return TurnComplexityClass::Standard;
-    }
-
-    if input
-        .request_max_turns
-        .is_some_and(|max_turns| max_turns > 1)
-    {
-        return TurnComplexityClass::Standard;
-    }
-
-    if direct_question || is_short_prompt(text) {
-        return TurnComplexityClass::Simple;
-    }
-
-    TurnComplexityClass::Standard
 }
 
 /// Returns the effective model-loop cap for a selected turn class.
 pub(crate) fn effective_turn_cap(
     request_max_turns: Option<u32>,
-    selected_class: TurnComplexityClass,
+    route: &ExecutionRouteDecision,
     session_limits: &SessionLimitsConfig,
 ) -> usize {
+    if matches!(
+        route,
+        ExecutionRouteDecision::Routed {
+            mode: ExecutionMode::Run,
+            ..
+        }
+    ) {
+        return 0;
+    }
     let hard_cap = session_limits.max_turns as usize;
     if let Some(request_cap) = request_max_turns {
         let request_cap = (request_cap as usize).max(1);
@@ -110,26 +120,39 @@ pub(crate) fn effective_turn_cap(
         return usize::MAX;
     }
 
-    let class_cap = match selected_class {
-        TurnComplexityClass::Clarification | TurnComplexityClass::Simple => {
-            session_limits.simple_max_turns as usize
-        }
-        TurnComplexityClass::Standard => session_limits.standard_max_turns as usize,
-        TurnComplexityClass::Complex => hard_cap,
+    let class_cap = match route {
+        ExecutionRouteDecision::NeedsInput { .. }
+        | ExecutionRouteDecision::Routed {
+            mode: ExecutionMode::Respond,
+            ..
+        } => session_limits.simple_max_turns as usize,
+        ExecutionRouteDecision::Routed {
+            mode: ExecutionMode::Act,
+            ..
+        } => session_limits.standard_max_turns as usize,
+        ExecutionRouteDecision::Routed {
+            mode: ExecutionMode::Run,
+            ..
+        } => 0,
     };
     class_cap.max(1).min(hard_cap)
 }
 
 /// Returns the effective tool-call cap for a selected turn class.
 pub(crate) fn effective_tool_cap(
-    selected_class: TurnComplexityClass,
+    route: &ExecutionRouteDecision,
     session_limits: &SessionLimitsConfig,
 ) -> usize {
-    match selected_class {
-        TurnComplexityClass::Clarification | TurnComplexityClass::Simple => 0,
-        TurnComplexityClass::Standard | TurnComplexityClass::Complex => {
-            session_limits.max_tool_calls as usize
-        }
+    match route {
+        ExecutionRouteDecision::NeedsInput { .. }
+        | ExecutionRouteDecision::Routed {
+            mode: ExecutionMode::Respond | ExecutionMode::Run,
+            ..
+        } => 0,
+        ExecutionRouteDecision::Routed {
+            mode: ExecutionMode::Act,
+            ..
+        } => session_limits.max_tool_calls as usize,
     }
 }
 
@@ -262,12 +285,6 @@ impl ToolBudgetState {
     /// Returns the number of tool calls attempted during this turn.
     pub(crate) fn attempted_tool_calls(&self) -> usize {
         self.attempted_tool_calls
-    }
-
-    /// Returns remaining dispatch capacity before this turn hits the tool-call cap.
-    pub(crate) fn remaining_tool_calls(&self) -> usize {
-        self.max_tool_calls
-            .saturating_sub(self.attempted_tool_calls)
     }
 }
 
@@ -430,6 +447,10 @@ fn tool_name_implies_target(tool_name: &str) -> bool {
     )
 }
 
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
 fn tool_output_has_target(output: &ToolOutput) -> bool {
     output.artifact.is_some()
         || output.content.iter().any(|content| match content {
@@ -579,162 +600,17 @@ fn token_has_target_signal(raw_token: &str) -> bool {
     )
 }
 
-fn normalize_text(text: &str) -> String {
-    text.to_ascii_lowercase()
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-                ch
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn is_direct_question(original: &str, normalized: &str) -> bool {
-    let trimmed = original.trim();
-    trimmed.ends_with('?')
-        || starts_with_any(
-            normalized,
-            &[
-                "what ",
-                "why ",
-                "how ",
-                "when ",
-                "where ",
-                "who ",
-                "which ",
-                "can you ",
-                "could you ",
-                "should ",
-                "is ",
-                "are ",
-                "does ",
-                "did ",
-            ],
-        )
-}
-
-fn is_vague_deictic_action(text: &str) -> bool {
-    matches!(
-        text,
-        "fix this"
-            | "fix it"
-            | "fix that"
-            | "change this"
-            | "change it"
-            | "change that"
-            | "update this"
-            | "update it"
-            | "update that"
-            | "do this"
-            | "do it"
-            | "do that"
-            | "handle this"
-            | "handle it"
-            | "handle that"
-            | "make this work"
-            | "make it work"
-            | "clean this up"
-            | "clean it up"
-            | "improve this"
-            | "improve it"
-            | "review this"
-            | "review it"
-            | "check this"
-            | "check it"
-            | "take care of this"
-            | "take care of it"
-    ) || starts_with_any(
-        text,
-        &["fix the above", "change the above", "update the above"],
-    )
-}
-
-fn is_complex_or_workflow_shaped(text: &str) -> bool {
-    if text.len() > 600 {
-        return true;
-    }
-
-    contains_any(
-        text,
-        &[
-            "acceptance criteria",
-            "all scenarios",
-            "architecture",
-            "audit",
-            "break this into",
-            "codebase",
-            "cross-crate",
-            "end to end",
-            "end-to-end",
-            "execute the plan",
-            "final report",
-            "full coverage",
-            "implement",
-            "milestone",
-            "refactor",
-            "release gate",
-            "run the plan",
-            "task goal",
-            "workflow",
-            "write scope",
-        ],
-    )
-}
-
-fn is_tool_work_request(text: &str, available_tool_count: usize) -> bool {
-    contains_any(
-        text,
-        &[
-            "cargo ", "clippy", "compile", "git ", "test ", "tests", "tool ", "tools",
-        ],
-    ) || starts_with_any(
-        text,
-        &[
-            "add ", "check ", "edit ", "execute ", "find ", "fix ", "inspect ", "list ",
-            "look up ", "modify ", "open ", "read ", "run ", "search ", "show ", "update ",
-            "write ",
-        ],
-    ) || (available_tool_count > 0
-        && contains_any(
-            text,
-            &[
-                "file",
-                "files",
-                "repo",
-                "repository",
-                "search",
-                "run",
-                "command",
-            ],
-        ))
-}
-
-fn is_short_prompt(text: &str) -> bool {
-    text.split_whitespace().count() <= 12
-}
-
-fn contains_any(text: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| text.contains(needle))
-}
-
-fn starts_with_any(text: &str, prefixes: &[&str]) -> bool {
-    prefixes.iter().any(|prefix| text.starts_with(prefix))
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
     use moa_core::config::SessionLimitsConfig;
-    use moa_core::wire::turn::TurnComplexityClass;
     use moa_core::{
-        events::Event, types::channel::Attachment, types::completion::ToolInvocation,
-        types::events_stream::EventRecord, types::identifiers::SessionId,
+        events::Event,
+        types::channel::Attachment,
+        types::completion::ToolInvocation,
+        types::events_stream::EventRecord,
+        types::execution_planning::{ExecutionMode, ExecutionRouteDecision, ExecutionRouteReason},
+        types::identifiers::SessionId,
         types::identifiers::ToolCallId,
     };
     use uuid::Uuid;
@@ -790,11 +666,38 @@ mod tests {
         }
     }
 
+    fn respond() -> ExecutionRouteDecision {
+        ExecutionRouteDecision::Routed {
+            mode: ExecutionMode::Respond,
+            reason: ExecutionRouteReason::SimpleResponse,
+        }
+    }
+
+    fn act() -> ExecutionRouteDecision {
+        ExecutionRouteDecision::Routed {
+            mode: ExecutionMode::Act,
+            reason: ExecutionRouteReason::BoundedInteractiveWork,
+        }
+    }
+
+    fn run() -> ExecutionRouteDecision {
+        ExecutionRouteDecision::Routed {
+            mode: ExecutionMode::Run,
+            reason: ExecutionRouteReason::ExplicitRun,
+        }
+    }
+
+    fn needs_input() -> ExecutionRouteDecision {
+        ExecutionRouteDecision::NeedsInput {
+            reason: ExecutionRouteReason::PreflightInputMissing,
+        }
+    }
+
     #[test]
     fn direct_simple_request_is_simple() {
         // Pins: direct questions are answerable requests, not clarification prompts.
         let input = TurnResponsivenessInput::root("What is the configured model?");
-        assert_eq!(classify_turn_request(input), TurnComplexityClass::Simple);
+        assert_eq!(classify_turn_request(input), respond());
     }
 
     #[test]
@@ -804,7 +707,7 @@ mod tests {
             let input = TurnResponsivenessInput::root(text);
             assert_eq!(
                 classify_turn_request(input),
-                TurnComplexityClass::Clarification,
+                needs_input(),
                 "{text:?} should ask for clarification"
             );
         }
@@ -817,14 +720,14 @@ mod tests {
             has_recent_target: true,
             ..TurnResponsivenessInput::root("fix this")
         };
-        assert_eq!(classify_turn_request(input), TurnComplexityClass::Standard);
+        assert_eq!(classify_turn_request(input), act());
     }
 
     #[test]
     fn direct_question_without_question_mark_is_simple() {
         // Pins: direct "what is X" requests do not get mistaken for vague edits.
         let input = TurnResponsivenessInput::root("what is X");
-        assert_eq!(classify_turn_request(input), TurnComplexityClass::Simple);
+        assert_eq!(classify_turn_request(input), respond());
     }
 
     #[test]
@@ -837,7 +740,7 @@ mod tests {
             )
         };
 
-        assert_eq!(classify_turn_request(input), TurnComplexityClass::Standard);
+        assert_eq!(classify_turn_request(input), act());
     }
 
     #[test]
@@ -847,7 +750,7 @@ mod tests {
             available_tool_count: 3,
             ..TurnResponsivenessInput::root("run cargo test -p moa-orchestrator")
         };
-        assert_eq!(classify_turn_request(input), TurnComplexityClass::Standard);
+        assert_eq!(classify_turn_request(input), act());
     }
 
     #[test]
@@ -856,10 +759,7 @@ mod tests {
         let task_input = TurnResponsivenessInput::root(
             "Task Goal: implement the new workflow policy. Acceptance Criteria: run verification.",
         );
-        assert_eq!(
-            classify_turn_request(task_input),
-            TurnComplexityClass::Complex
-        );
+        assert_eq!(classify_turn_request(task_input), act());
     }
 
     #[test]
@@ -932,46 +832,25 @@ mod tests {
     fn effective_turn_cap_applies_class_and_hard_limits() {
         // Pins: class defaults are bounded by the global hard cap and never return zero turns.
         let limits = limits();
-        assert_eq!(
-            effective_turn_cap(None, TurnComplexityClass::Simple, &limits),
-            1
-        );
-        assert_eq!(
-            effective_turn_cap(None, TurnComplexityClass::Standard, &limits),
-            4
-        );
-        assert_eq!(
-            effective_turn_cap(None, TurnComplexityClass::Complex, &limits),
-            8
-        );
+        assert_eq!(effective_turn_cap(None, &respond(), &limits), 1);
+        assert_eq!(effective_turn_cap(None, &act(), &limits), 4);
+        assert_eq!(effective_turn_cap(None, &run(), &limits), 0);
 
         let tiny_hard_cap = SessionLimitsConfig {
             max_turns: 1,
             standard_max_turns: 4,
             ..limits
         };
-        assert_eq!(
-            effective_turn_cap(None, TurnComplexityClass::Standard, &tiny_hard_cap),
-            1
-        );
+        assert_eq!(effective_turn_cap(None, &act(), &tiny_hard_cap), 1);
     }
 
     #[test]
     fn effective_turn_cap_bounds_explicit_request_caps() {
         // Pins: explicit workflow/request caps continue to work but cannot exceed the hard cap.
         let limits = limits();
-        assert_eq!(
-            effective_turn_cap(Some(3), TurnComplexityClass::Complex, &limits),
-            3
-        );
-        assert_eq!(
-            effective_turn_cap(Some(30), TurnComplexityClass::Complex, &limits),
-            8
-        );
-        assert_eq!(
-            effective_turn_cap(Some(0), TurnComplexityClass::Complex, &limits),
-            1
-        );
+        assert_eq!(effective_turn_cap(Some(3), &act(), &limits), 3);
+        assert_eq!(effective_turn_cap(Some(30), &act(), &limits), 8);
+        assert_eq!(effective_turn_cap(Some(0), &act(), &limits), 1);
     }
 
     #[test]
@@ -983,14 +862,8 @@ mod tests {
             standard_max_turns: 4,
             ..limits()
         };
-        assert_eq!(
-            effective_turn_cap(None, TurnComplexityClass::Standard, &limits),
-            usize::MAX
-        );
-        assert_eq!(
-            effective_turn_cap(Some(5), TurnComplexityClass::Standard, &limits),
-            5
-        );
+        assert_eq!(effective_turn_cap(None, &act(), &limits), usize::MAX);
+        assert_eq!(effective_turn_cap(Some(5), &act(), &limits), 5);
         assert_eq!(progress_cap(usize::MAX), None);
     }
 
@@ -998,19 +871,10 @@ mod tests {
     fn effective_tool_cap_uses_selected_class() {
         // Pins: direct/clarification turns do not receive tool budget; work turns do.
         let limits = limits();
-        assert_eq!(
-            effective_tool_cap(TurnComplexityClass::Clarification, &limits),
-            0
-        );
-        assert_eq!(effective_tool_cap(TurnComplexityClass::Simple, &limits), 0);
-        assert_eq!(
-            effective_tool_cap(TurnComplexityClass::Standard, &limits),
-            12
-        );
-        assert_eq!(
-            effective_tool_cap(TurnComplexityClass::Complex, &limits),
-            12
-        );
+        assert_eq!(effective_tool_cap(&needs_input(), &limits), 0);
+        assert_eq!(effective_tool_cap(&respond(), &limits), 0);
+        assert_eq!(effective_tool_cap(&act(), &limits), 12);
+        assert_eq!(effective_tool_cap(&run(), &limits), 0);
     }
 
     #[test]

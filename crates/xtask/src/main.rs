@@ -18,6 +18,7 @@ mod check_eval_budgets;
 mod compare_eval_reports;
 #[cfg(feature = "eval-tools")]
 mod compute_memory_quality_scores;
+mod execution_trace_manifest;
 #[cfg(feature = "eval-tools")]
 mod fetch_memory_benchmark;
 #[cfg(feature = "eval-tools")]

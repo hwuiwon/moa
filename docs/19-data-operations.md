@@ -1,7 +1,7 @@
 # 19 - Data Operations
 
-_Postgres extensions, relational graph changelog replication, pgaudit
-retention, and the PII sidecar._
+_Execution operations, Postgres extensions, analytics recovery, relational
+graph replication, pgaudit retention, and the PII sidecar._
 
 ## Local Postgres Extensions
 
@@ -31,6 +31,120 @@ search-path setup. MOA's `ScopedConn` installs tenant row-level-security GUCs
 before tenant queries run. The tenant is the hard runtime isolation boundary;
 deployment maintenance reads must use an explicit control-plane scope instead
 of the default tenant connection.
+
+## Execution Run Operations
+
+### Capacity And Backpressure
+
+Execution plans have no application active-worker, plan-node, map-item, or task
+fan-out ceiling below the approved run budget. `max_tasks` bounds logical work;
+the other four resource dimensions and the deadline bound what that work may
+consume. Do not add an application fan-out constant to mitigate provider or
+tool pressure.
+
+Physical backpressure is supplied independently:
+
+- Restate scoped concurrency queues invocations. Expensive tenant-scoped work
+  uses the `tenant-{tenant_id}` scope; the default wildcard rule is
+  `concurrency 1000` per scope. Inspect `sys_rules` and `sys_user_limits` before
+  changing it.
+- Provider calls acquire an in-flight permit before request/input pacing and
+  hold it for the request. Tune
+  `MOA_PROVIDERS_CONCURRENCY_DEFAULT_MAX_IN_FLIGHT`,
+  `MOA_<PROVIDER>_MAX_CONCURRENT_REQUESTS`,
+  `MOA_PROVIDERS_CONCURRENCY_SCOPE`,
+  `MOA_PROVIDERS_CONCURRENCY_LEASE_TTL_MS`, and
+  `MOA_PROVIDERS_CONCURRENCY_BLOCK_THRESHOLD_MS` to the credential tier.
+- Capability and agent tasks remain governed through
+  `ActionPolicy`/`ToolExecutor`/`HandProvider`. Tool, MCP, sandbox, and external
+  service quotas queue, retry, or return typed failures at that boundary; they
+  do not reduce logical map coverage.
+
+### Budgets And Terminal Semantics
+
+Every task atomically reserves its worst-case values before dispatch, and a
+failed reservation starts no work. The five integer dimensions are:
+
+| Dimension | Reserved field | Actual field |
+|---|---|---|
+| Cost | `reserved_cost_microusd` | `actual_cost_microusd` / run `consumed_cost_microusd` |
+| Tokens | `reserved_tokens` | `actual_tokens` / run `consumed_tokens` |
+| Logical tasks | `reserved_tasks` | `actual_tasks` / run `consumed_tasks` |
+| Tool calls | `reserved_tool_calls` | `actual_tool_calls` / run `consumed_tool_calls` |
+| Retrieved bytes | `reserved_retrieved_bytes` | `actual_retrieved_bytes` / run `consumed_retrieved_bytes` |
+
+Completion reconciles actual usage and releases the reservation in the same
+transaction. Every terminal run must have all five reserved values at zero.
+
+Deadline and budget stops are typed; no operator or analytics path infers them
+from gaps, error text, cancellation prose, or status alone. When both are
+exhausted, `deadline_exceeded` wins. A deadline or budget stop produces:
+
+- `partial` with the exact typed reason when useful output exists or at least
+  one goal requirement is satisfied;
+- `failed` with the same typed reason when no useful result exists.
+
+Ordinary incomplete completion with no typed limit produces
+`goal_incomplete`. Cancellation produces `cancelled`; scheduler, replan, task,
+unsupported, blocked, and internal failures retain their own closed terminal
+reasons.
+
+### Stuck-Run Checklist
+
+Inspect sources in this order. Do not skip directly to logs or traces:
+
+1. Inspect the durable run through `Execution/status` and
+   `moa.execution_run`: `status`, `wake_epoch`, `processed_wake_epoch`,
+   `plan_revision`, waiting reasons, and timestamps. A greater `wake_epoch`
+   means the latest scheduling mutation is not yet acknowledged.
+2. Inspect active `moa.execution_task` rows: state, `task_id`, attempt,
+   generation fence, reservation/actual values, and
+   `reserved_at`/`started_at`/`completed_at`. A stale generation must never
+   overwrite the current one.
+3. Inspect the exact waiting input, review, or signal state in the run's
+   waiting reasons and the owning task generation. Resolve it through
+   `Execution/deliver_input`, `Execution/decide_review`, or
+   `Execution/deliver_signal`; do not edit the task.
+4. For action reviews, inspect `moa.execution_action_review_outbox`:
+   `attempt_count`, `next_attempt_at`, `claimed_at`, `delivered_at`, and
+   `last_error`, plus the matching tenant action-review row.
+5. Inspect Restate invocation and journal state for the keyed `ExecutionRun`
+   and `ExecutionTask` workflows, including retries and scoped-concurrency
+   admission.
+6. Query spans by stable session/run/task/action-review attributes, then inspect
+   any persisted W3C parent/link contexts on durable callbacks. Do not infer
+   causality from an attempt-local header embedded in a Restate journal command.
+
+### Cancellation And Replay Safety
+
+Use the parent-scoped product cancellation mutation:
+
+- REST: `POST /v1/execution-runs/cancel`;
+- MCP: `execution_run_cancel`;
+- internal Restate: `Execution/cancel`.
+
+The terminal cancellation transaction fences new reservations, replaces every
+active task outcome with cancellation, releases all five reservation
+dimensions, preserves completed task evidence, writes the typed cancellation
+cause/reason, and wakes terminal delivery. Confirm the result through
+`Execution/status` or `execution_run_status`.
+
+Restate admin cancellation is only a hard stop for a stuck invocation. It is
+not the product-state transition and does not replace `Execution/cancel`.
+Never repair, cancel, advance, release, or terminalize a run with ad hoc SQL.
+
+Mutation results distinguish durable effects:
+
+- `Applied` means this call committed the logical mutation and carries the
+  persisted evidence used for follow-up work and metrics.
+- `Replayed` means the same logical mutation was already committed, including
+  commit-before-handler-result recovery; it repeats no logical effect and emits
+  no mutation metric.
+- conflicts, stale generations, and rejections carry no applied evidence.
+
+Duplicate Restate sends are therefore safe only through the typed repository
+contract. They are not permission to make an external non-idempotent tool call
+twice.
 
 ## Graph Changelog Replication
 
@@ -114,6 +228,51 @@ Retention inside ClickHouse: `turn_lineage` drops via table TTL
 (`clickhouse.lineage_ttl_days`, default 30); the analytics tables currently
 have no TTL — their Postgres sources are the retention authority until the
 events tiering phase (see the plan's north-star section).
+
+### Execution Analytics Upgrade And Recovery
+
+The execution-dimension upgrade and normal incremental export are resumable
+state machines under the existing single exporter lease. Do not drop tables,
+reset cursors, or recapture a high water manually.
+
+For an interrupted schema upgrade, inspect
+`analytics.clickhouse_schema_upgrade_state` at key
+`execution_dimensions_v2`. The durable stages are:
+
+```text
+pending
+  -> schema_upgraded
+  -> cursors_reset
+  -> runs_exported
+  -> tasks_exported
+  -> complete
+```
+
+Restart the exporter after correcting ClickHouse availability or credentials.
+It resumes the recorded stage, validates completed DDL, and continues from the
+persisted per-dataset page cursor to the stored run/task high-water tuples.
+Schema mutations are synchronous, or the upgrader waits for
+`system.mutations` before advancing the stage.
+
+Normal execution export also persists an immutable active pass bound
+`(pass_high_water_seq, pass_high_water_id)` and `pass_started_at`. After a
+restart it resumes that same bound; it never recaptures or advances an
+unbounded cursor. Each page advances only after the idempotent
+`ReplacingMergeTree` insert returns. The pass becomes caught up only when the
+regular `(cursor_seq, cursor_id)` reaches the bound and the active-pass fields
+are cleared in the same transaction.
+
+Sequence-backed freshness is the durable caught-up time, not a source-row
+`updated_at` watermark. Zero/reset state uses Unix epoch, and an active or
+partially exported pass leaves `cursor_ts` and `exported_at` unchanged, so it
+cannot appear fresh. `read_model_updated_at` is:
+
+```sql
+MIN(CASE WHEN cursor_seq IS NULL THEN cursor_ts ELSE exported_at END)
+```
+
+across export-state rows. Existing timestamp-backed datasets continue to use
+`cursor_ts`; execution datasets use their last completed pass time.
 
 ## Audit Log Retention
 

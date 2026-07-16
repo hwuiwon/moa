@@ -15,7 +15,8 @@ use chrono::{DateTime, Duration, Utc};
 use clickhouse::Client;
 use clickhouse::test::{Mock, handlers};
 use moa_orchestrator::analytics_export::{
-    AnalyticsExporter, DimSessionRow, EventRawRow, ToolCallFactRow, TurnFactRow,
+    AnalyticsExporter, DimExecutionRunRow, DimExecutionTaskRow, DimSessionRow, EventRawRow,
+    ToolCallFactRow, TurnFactRow,
 };
 use serde_json::json;
 use sqlx::PgPool;
@@ -184,6 +185,387 @@ struct MatviewTurn {
     total_input_tokens: i64,
     output_tokens: i64,
     cost_cents: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExecutionAnalyticsFixture {
+    run_uid: Uuid,
+    task_id: Uuid,
+    skill_template_revision_uid: Uuid,
+}
+
+async fn seed_execution_analytics_fixture(
+    pool: &PgPool,
+    tenant: Uuid,
+    session: Uuid,
+) -> TestResult<ExecutionAnalyticsFixture> {
+    let fixture = ExecutionAnalyticsFixture {
+        run_uid: Uuid::now_v7(),
+        task_id: Uuid::now_v7(),
+        skill_template_revision_uid: Uuid::now_v7(),
+    };
+    let planning_context_uid = Uuid::now_v7();
+    let planning_hash = "1".repeat(64);
+    let plan_hash = "2".repeat(64);
+
+    sqlx::query(
+        "INSERT INTO moa.execution_planning_context \
+             (planning_context_uid, tenant_id, session_id, originating_user_sequence_num, \
+              originating_user_event_hash, owner_user_id, planning_context_hash, snapshot) \
+         VALUES ($1, $2, $3, 1, $4, 'user-1', $4, '{}'::JSONB)",
+    )
+    .bind(planning_context_uid)
+    .bind(tenant)
+    .bind(session)
+    .bind(&planning_hash)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO moa.execution_run \
+             (run_uid, tenant_id, session_id, originating_user_sequence_num, planning_context_uid, \
+              planning_context_hash, owner_user_id, goal_contract, initial_plan, active_plan, \
+              initial_plan_hash, active_plan_hash, capability_catalog, authorization_envelope, \
+              source_provenance, source_kind, route_mode, route_reason, skill_template_ref, \
+              skill_template_revision_uid, input, status, progress_total_tasks) \
+         VALUES ($1, $2, $3, 1, $4, $5, 'user-1', \
+                 '{\"requirements\":[{\"id\":\"r1\"},{\"id\":\"r2\"}], \
+                   \"completion_checks\":[{\"id\":\"c1\"},{\"id\":\"c2\"}]}'::JSONB, \
+                 '{}'::JSONB, '{}'::JSONB, $6, $6, '{}'::JSONB, '{}'::JSONB, \
+                 jsonb_build_object( \
+                    'kind', 'skill_template', \
+                    'route_reason', 'selected_execution_template', \
+                    'skill_template_ref', 'skill://billing-flow', \
+                    'skill_template_revision_uid', lower($7::TEXT)), \
+                 'skill_template', 'run', 'selected_execution_template', \
+                 'skill://billing-flow', $7, '{}'::JSONB, 'queued', 1)",
+    )
+    .bind(fixture.run_uid)
+    .bind(tenant)
+    .bind(session)
+    .bind(planning_context_uid)
+    .bind(&planning_hash)
+    .bind(&plan_hash)
+    .bind(fixture.skill_template_revision_uid)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE moa.execution_run \
+         SET status = 'running', started_at = queued_at + INTERVAL '250 milliseconds', \
+             updated_at = queued_at + INTERVAL '250 milliseconds' \
+         WHERE run_uid = $1",
+    )
+    .bind(fixture.run_uid)
+    .execute(pool)
+    .await?;
+
+    let task_created_at: DateTime<Utc> = sqlx::query_scalar(
+        "SELECT started_at + INTERVAL '100 milliseconds' \
+         FROM moa.execution_run WHERE run_uid = $1",
+    )
+    .bind(fixture.run_uid)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO moa.execution_task \
+             (task_id, run_uid, tenant_id, node_id, item_key, plan_revision, status, attempt, \
+              generation, input, task_kind, retry_policy, estimate_cost_microusd, estimate_tokens, \
+              estimate_tasks, estimate_tool_calls, estimate_retrieved_bytes, \
+              reserved_cost_microusd, reserved_tokens, reserved_tasks, reserved_tool_calls, \
+              reserved_retrieved_bytes, actual_cost_microusd, actual_tokens, actual_tasks, \
+              actual_tool_calls, actual_retrieved_bytes, current_outcome, error, citations, \
+              created_at, started_at, completed_at, updated_at) \
+         VALUES ($1, $2, $3, 'lookup', 'invoice-42', 1, 'failed', 2, 3, '{}'::JSONB, \
+                 '{\"kind\":\"capability\", \
+                   \"reference\":{\"name\":\"docs.search\",\"version\":\"v2\"}}'::JSONB, \
+                 '{\"max_attempts\":2,\"initial_backoff_ms\":5,\"max_backoff_ms\":10}'::JSONB, \
+                 80, 120, 1, 2, 1024, 0, 0, 0, 0, 0, 75, 110, 1, 2, 900, \
+                 '{\"class\":\"invalid_output\"}'::JSONB, \
+                 '{\"class\":\"invalid_output\",\"message\":\"raw prose must not export\"}'::JSONB, \
+                 '[{\"source\":\"doc-1\"},{\"source\":\"doc-2\"}]'::JSONB, \
+                 $4, $4 + INTERVAL '150 milliseconds', \
+                 $4 + INTERVAL '950 milliseconds', $4 + INTERVAL '950 milliseconds')",
+    )
+    .bind(fixture.task_id)
+    .bind(fixture.run_uid)
+    .bind(tenant)
+    .bind(task_created_at)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE moa.execution_run \
+         SET status = 'completed', output = '{}'::JSONB, \
+             completion_check_results = \
+                 '[{\"check_id\":\"c1\"},{\"check_id\":\"c2\"}]'::JSONB, \
+             terminal_cause = '{\"kind\":\"completion\",\"limit_stop\":null}'::JSONB, \
+             terminal_reason = 'completed', terminal_satisfied_requirement_count = 2, \
+             terminal_requirement_count = 2, consumed_cost_microusd = 125, \
+             consumed_tokens = 456, consumed_tasks = 1, consumed_tool_calls = 3, \
+             consumed_retrieved_bytes = 4096, progress_completed_tasks = 1, \
+             completed_at = started_at + INTERVAL '2 seconds', \
+             updated_at = started_at + INTERVAL '2 seconds' \
+         WHERE run_uid = $1",
+    )
+    .bind(fixture.run_uid)
+    .execute(pool)
+    .await?;
+
+    Ok(fixture)
+}
+
+async fn seed_completed_execution_upgrade_state(
+    pool: &PgPool,
+    export_version_floor: DateTime<Utc>,
+) -> TestResult<()> {
+    sqlx::query(
+        "INSERT INTO analytics.clickhouse_schema_upgrade_state ( \
+             upgrade_key, stage, upgrade_version, export_version_floor, \
+             run_high_water_seq, run_high_water_id, task_high_water_seq, task_high_water_id, \
+             run_page_seq, run_page_id, task_page_seq, task_page_id, completed_at \
+         ) VALUES ( \
+             'execution_dimensions_v2', 'complete', $1, $1, \
+             0, $2, 0, $2, 0, $2, 0, $2, NOW() \
+         )",
+    )
+    .bind(export_version_floor)
+    .bind(Uuid::nil())
+    .execute(pool)
+    .await?;
+    for table in ["dim_execution_runs", "dim_execution_tasks"] {
+        sqlx::query(
+            "INSERT INTO analytics.clickhouse_export_state ( \
+                 table_name, cursor_ts, cursor_id, exported_at, cursor_seq \
+             ) VALUES ($1, $2, $3, $2, 0)",
+        )
+        .bind(table)
+        .bind(DateTime::<Utc>::UNIX_EPOCH)
+        .bind(Uuid::nil())
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ExecutionRunFact {
+    run_uid: Uuid,
+    tenant_id: Uuid,
+    contact_id: Option<Uuid>,
+    session_id: Uuid,
+    initial_plan_hash: String,
+    active_plan_hash: String,
+    plan_revision: i64,
+    route_mode: String,
+    route_reason: String,
+    source_kind: String,
+    skill_template_ref: Option<String>,
+    skill_template_revision_uid: Option<Uuid>,
+    status: String,
+    terminal_reason: Option<String>,
+    requirement_count: i64,
+    satisfied_requirement_count: i64,
+    completion_check_count: i64,
+    logical_task_count: i64,
+    queued_at: Option<DateTime<Utc>>,
+    started_at: Option<DateTime<Utc>>,
+    queue_to_start_ms: Option<f64>,
+    completed_at: Option<DateTime<Utc>>,
+    duration_ms: Option<f64>,
+    reserved_cost_microusd: i64,
+    actual_cost_microusd: i64,
+    reserved_tokens: i64,
+    actual_tokens: i64,
+    reserved_tasks: i64,
+    actual_tasks: i64,
+    reserved_tool_calls: i64,
+    actual_tool_calls: i64,
+    reserved_retrieved_bytes: i64,
+    actual_retrieved_bytes: i64,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ExecutionTaskFact {
+    task_id: Uuid,
+    run_uid: Uuid,
+    tenant_id: Uuid,
+    node_id: String,
+    item_key: String,
+    task_kind: String,
+    capability_name: Option<String>,
+    capability_version: Option<String>,
+    plan_revision: i64,
+    status: String,
+    failure_class: Option<String>,
+    attempt: i32,
+    generation: i64,
+    citation_count: i64,
+    queue_latency_ms: Option<f64>,
+    duration_ms: Option<f64>,
+    reserved_cost_microusd: i64,
+    actual_cost_microusd: i64,
+    reserved_tokens: i64,
+    actual_tokens: i64,
+    reserved_tasks: i64,
+    actual_tasks: i64,
+    reserved_tool_calls: i64,
+    actual_tool_calls: i64,
+    reserved_retrieved_bytes: i64,
+    actual_retrieved_bytes: i64,
+    started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+fn exact_u64(value: i64) -> u64 {
+    u64::try_from(value).expect("analytics facts are nonnegative")
+}
+
+fn assert_optional_f64_eq(actual: Option<f64>, expected: Option<f64>, field: &str) {
+    match (actual, expected) {
+        (Some(actual), Some(expected)) => assert!(
+            (actual - expected).abs() < 1e-9,
+            "{field} differs: actual={actual} expected={expected}"
+        ),
+        (actual, expected) => assert_eq!(actual, expected, "{field} nullability differs"),
+    }
+}
+
+fn assert_execution_run_parity(actual: &DimExecutionRunRow, expected: &ExecutionRunFact) {
+    assert_eq!(actual.run_uid, expected.run_uid);
+    assert_eq!(actual.tenant_id, expected.tenant_id);
+    assert_eq!(actual.contact_id, expected.contact_id);
+    assert_eq!(actual.session_id, expected.session_id);
+    assert_eq!(actual.initial_plan_hash, expected.initial_plan_hash);
+    assert_eq!(actual.active_plan_hash, expected.active_plan_hash);
+    assert_eq!(actual.plan_revision, exact_u64(expected.plan_revision));
+    assert_eq!(actual.route_mode, expected.route_mode);
+    assert_eq!(actual.route_reason, expected.route_reason);
+    assert_eq!(actual.source_kind, expected.source_kind);
+    assert_eq!(actual.skill_template_ref, expected.skill_template_ref);
+    assert_eq!(
+        actual.skill_template_revision_uid,
+        expected.skill_template_revision_uid
+    );
+    assert_eq!(actual.status, expected.status);
+    assert_eq!(actual.terminal_reason, expected.terminal_reason);
+    assert_eq!(
+        actual.requirement_count,
+        exact_u64(expected.requirement_count)
+    );
+    assert_eq!(
+        actual.satisfied_requirement_count,
+        exact_u64(expected.satisfied_requirement_count)
+    );
+    assert_eq!(
+        actual.completion_check_count,
+        exact_u64(expected.completion_check_count)
+    );
+    assert_eq!(
+        actual.logical_task_count,
+        exact_u64(expected.logical_task_count)
+    );
+    assert_eq!(actual.queued_at, expected.queued_at);
+    assert_eq!(actual.started_at, expected.started_at);
+    assert_optional_f64_eq(
+        actual.queue_to_start_ms,
+        expected.queue_to_start_ms,
+        "queue_to_start_ms",
+    );
+    assert_eq!(actual.completed_at, expected.completed_at);
+    assert_optional_f64_eq(actual.duration_ms, expected.duration_ms, "run duration_ms");
+    assert_eq!(
+        actual.reserved_cost_microusd,
+        exact_u64(expected.reserved_cost_microusd)
+    );
+    assert_eq!(
+        actual.actual_cost_microusd,
+        exact_u64(expected.actual_cost_microusd)
+    );
+    assert_eq!(actual.reserved_tokens, exact_u64(expected.reserved_tokens));
+    assert_eq!(actual.actual_tokens, exact_u64(expected.actual_tokens));
+    assert_eq!(actual.reserved_tasks, exact_u64(expected.reserved_tasks));
+    assert_eq!(actual.actual_tasks, exact_u64(expected.actual_tasks));
+    assert_eq!(
+        actual.reserved_tool_calls,
+        exact_u64(expected.reserved_tool_calls)
+    );
+    assert_eq!(
+        actual.actual_tool_calls,
+        exact_u64(expected.actual_tool_calls)
+    );
+    assert_eq!(
+        actual.reserved_retrieved_bytes,
+        exact_u64(expected.reserved_retrieved_bytes)
+    );
+    assert_eq!(
+        actual.actual_retrieved_bytes,
+        exact_u64(expected.actual_retrieved_bytes)
+    );
+    assert_eq!(actual.created_at, expected.created_at);
+    assert_eq!(actual.updated_at, expected.updated_at);
+}
+
+fn assert_execution_task_parity(actual: &DimExecutionTaskRow, expected: &ExecutionTaskFact) {
+    assert_eq!(actual.task_id, expected.task_id);
+    assert_eq!(actual.run_uid, expected.run_uid);
+    assert_eq!(actual.tenant_id, expected.tenant_id);
+    assert_eq!(actual.node_id, expected.node_id);
+    assert_eq!(actual.item_key, expected.item_key);
+    assert_eq!(actual.task_kind, expected.task_kind);
+    assert_eq!(actual.capability_name, expected.capability_name);
+    assert_eq!(actual.capability_version, expected.capability_version);
+    assert_eq!(actual.plan_revision, exact_u64(expected.plan_revision));
+    assert_eq!(actual.status, expected.status);
+    assert_eq!(actual.failure_class, expected.failure_class);
+    assert_eq!(
+        actual.attempt,
+        u32::try_from(expected.attempt).expect("attempt is nonnegative")
+    );
+    assert_eq!(actual.generation, exact_u64(expected.generation));
+    assert_eq!(actual.citation_count, exact_u64(expected.citation_count));
+    assert_optional_f64_eq(
+        actual.queue_latency_ms,
+        expected.queue_latency_ms,
+        "queue_latency_ms",
+    );
+    assert_optional_f64_eq(actual.duration_ms, expected.duration_ms, "task duration_ms");
+    assert_eq!(
+        actual.reserved_cost_microusd,
+        exact_u64(expected.reserved_cost_microusd)
+    );
+    assert_eq!(
+        actual.actual_cost_microusd,
+        exact_u64(expected.actual_cost_microusd)
+    );
+    assert_eq!(actual.reserved_tokens, exact_u64(expected.reserved_tokens));
+    assert_eq!(actual.actual_tokens, exact_u64(expected.actual_tokens));
+    assert_eq!(actual.reserved_tasks, exact_u64(expected.reserved_tasks));
+    assert_eq!(actual.actual_tasks, exact_u64(expected.actual_tasks));
+    assert_eq!(
+        actual.reserved_tool_calls,
+        exact_u64(expected.reserved_tool_calls)
+    );
+    assert_eq!(
+        actual.actual_tool_calls,
+        exact_u64(expected.actual_tool_calls)
+    );
+    assert_eq!(
+        actual.reserved_retrieved_bytes,
+        exact_u64(expected.reserved_retrieved_bytes)
+    );
+    assert_eq!(
+        actual.actual_retrieved_bytes,
+        exact_u64(expected.actual_retrieved_bytes)
+    );
+    assert_eq!(actual.started_at, expected.started_at);
+    assert_eq!(actual.completed_at, expected.completed_at);
+    assert_eq!(actual.created_at, expected.created_at);
+    assert_eq!(actual.updated_at, expected.updated_at);
 }
 
 #[tokio::test]
@@ -384,6 +766,189 @@ async fn analytics_export_dim_sessions_supersedes_on_update_db() -> TestResult<(
         second[0].export_version > first_version,
         "the re-export must carry a higher export_version to supersede the prior copy"
     );
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn execution_analytics_export_matches_postgres_facts_field_for_field_db() -> TestResult<()> {
+    // Pins: sequence-backed execution export emits every normalized V337 field
+    // exactly as the Postgres facts do, with page versions monotonic even when
+    // the durable floor is ahead of the database clock.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let tenant = Uuid::now_v7();
+    let session = Uuid::now_v7();
+    seed_session(&pool, tenant, session).await?;
+    let fixture = seed_execution_analytics_fixture(&pool, tenant, session).await?;
+
+    sqlx::query("REFRESH MATERIALIZED VIEW analytics.execution_run_fact")
+        .execute(&pool)
+        .await?;
+    sqlx::query("REFRESH MATERIALIZED VIEW analytics.execution_task_fact")
+        .execute(&pool)
+        .await?;
+    let run_fact: ExecutionRunFact = sqlx::query_as(
+        "SELECT run_uid, tenant_id, contact_id, session_id, initial_plan_hash, active_plan_hash, \
+                plan_revision, route_mode, route_reason, source_kind, skill_template_ref, \
+                skill_template_revision_uid, status, terminal_reason, requirement_count, \
+                satisfied_requirement_count, completion_check_count, logical_task_count, \
+                queued_at, started_at, queue_to_start_ms, completed_at, duration_ms, \
+                reserved_cost_microusd, actual_cost_microusd, reserved_tokens, actual_tokens, \
+                reserved_tasks, actual_tasks, reserved_tool_calls, actual_tool_calls, \
+                reserved_retrieved_bytes, actual_retrieved_bytes, created_at, updated_at \
+         FROM analytics.execution_run_fact WHERE run_uid = $1",
+    )
+    .bind(fixture.run_uid)
+    .fetch_one(&pool)
+    .await?;
+    let task_fact: ExecutionTaskFact = sqlx::query_as(
+        "SELECT task_id, run_uid, tenant_id, node_id, item_key, task_kind, capability_name, \
+                capability_version, plan_revision, status, failure_class, attempt, generation, \
+                citation_count, queue_latency_ms, duration_ms, reserved_cost_microusd, \
+                actual_cost_microusd, reserved_tokens, actual_tokens, reserved_tasks, \
+                actual_tasks, reserved_tool_calls, actual_tool_calls, reserved_retrieved_bytes, \
+                actual_retrieved_bytes, started_at, completed_at, created_at, updated_at \
+         FROM analytics.execution_task_fact WHERE task_id = $1",
+    )
+    .bind(fixture.task_id)
+    .fetch_one(&pool)
+    .await?;
+
+    let future_floor = Utc::now() + Duration::days(1);
+    seed_completed_execution_upgrade_state(&pool, future_floor).await?;
+    let mock = Mock::new();
+    let run_handler = mock.add(handlers::record::<DimExecutionRunRow>());
+    let task_handler = mock.add(handlers::record::<DimExecutionTaskRow>());
+    let exporter = exporter(pool.clone(), &mock);
+
+    exporter.export_execution_dimensions().await?;
+
+    let run_rows: Vec<DimExecutionRunRow> = run_handler.collect().await;
+    let task_rows: Vec<DimExecutionTaskRow> = task_handler.collect().await;
+    assert_eq!(run_rows.len(), 1);
+    assert_eq!(task_rows.len(), 1);
+    assert_execution_run_parity(&run_rows[0], &run_fact);
+    assert_execution_task_parity(&task_rows[0], &task_fact);
+    assert!(
+        run_rows[0].export_version > future_floor,
+        "run page must supersede a future-skewed existing version"
+    );
+    assert!(
+        task_rows[0].export_version > run_rows[0].export_version,
+        "each page claims a strictly monotonic export version"
+    );
+
+    for (table, expected_id) in [
+        ("dim_execution_runs", fixture.run_uid),
+        ("dim_execution_tasks", fixture.task_id),
+    ] {
+        let (cursor_seq, cursor_id, cursor_ts, exported_at, high_water_seq): (
+            i64,
+            Uuid,
+            DateTime<Utc>,
+            DateTime<Utc>,
+            Option<i64>,
+        ) = sqlx::query_as(
+            "SELECT cursor_seq, cursor_id, cursor_ts, exported_at, pass_high_water_seq \
+             FROM analytics.clickhouse_export_state WHERE table_name = $1",
+        )
+        .bind(table)
+        .fetch_one(&pool)
+        .await?;
+        assert!(cursor_seq > 0);
+        assert_eq!(cursor_id, expected_id);
+        assert_eq!(cursor_ts, exported_at);
+        assert!(cursor_ts > DateTime::<Utc>::UNIX_EPOCH);
+        assert_eq!(high_water_seq, None);
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn execution_export_completes_when_the_captured_high_water_row_moves_db() -> TestResult<()> {
+    // Pins: a row updated after a bounded high-water capture moves to a larger
+    // sequence without making the old tuple unreconstructable. The interrupted
+    // pass completes at its exact durable bound; the update lands next pass.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let tenant = Uuid::now_v7();
+    let session = Uuid::now_v7();
+    seed_session(&pool, tenant, session).await?;
+    let fixture = seed_execution_analytics_fixture(&pool, tenant, session).await?;
+    seed_completed_execution_upgrade_state(&pool, Utc::now()).await?;
+
+    let old_run_seq: i64 =
+        sqlx::query_scalar("SELECT analytics_change_seq FROM moa.execution_run WHERE run_uid = $1")
+            .bind(fixture.run_uid)
+            .fetch_one(&pool)
+            .await?;
+    let task_seq: i64 = sqlx::query_scalar(
+        "SELECT analytics_change_seq FROM moa.execution_task WHERE task_id = $1",
+    )
+    .bind(fixture.task_id)
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE analytics.clickhouse_export_state \
+         SET pass_high_water_seq = $1, pass_high_water_id = $2, pass_started_at = NOW() \
+         WHERE table_name = 'dim_execution_runs'",
+    )
+    .bind(old_run_seq)
+    .bind(fixture.run_uid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE analytics.clickhouse_export_state \
+         SET cursor_seq = $1, cursor_id = $2, cursor_ts = NOW(), exported_at = NOW() \
+         WHERE table_name = 'dim_execution_tasks'",
+    )
+    .bind(task_seq)
+    .bind(fixture.task_id)
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE moa.execution_run SET updated_at = updated_at + INTERVAL '1 second' \
+         WHERE run_uid = $1",
+    )
+    .bind(fixture.run_uid)
+    .execute(&pool)
+    .await?;
+    let moved_run_seq: i64 =
+        sqlx::query_scalar("SELECT analytics_change_seq FROM moa.execution_run WHERE run_uid = $1")
+            .bind(fixture.run_uid)
+            .fetch_one(&pool)
+            .await?;
+    assert!(moved_run_seq > old_run_seq);
+
+    let mock = Mock::new();
+    let exporter = exporter(pool.clone(), &mock);
+    exporter.export_execution_dimensions().await?;
+    let (first_cursor, first_id, first_high_water): (i64, Uuid, Option<i64>) = sqlx::query_as(
+        "SELECT cursor_seq, cursor_id, pass_high_water_seq \
+         FROM analytics.clickhouse_export_state WHERE table_name = 'dim_execution_runs'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!((first_cursor, first_id), (old_run_seq, fixture.run_uid));
+    assert_eq!(first_high_water, None);
+
+    let run_handler = mock.add(handlers::record::<DimExecutionRunRow>());
+    exporter.export_execution_dimensions().await?;
+    let rows: Vec<DimExecutionRunRow> = run_handler.collect().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].run_uid, fixture.run_uid);
+    let (second_cursor, second_id): (i64, Uuid) = sqlx::query_as(
+        "SELECT cursor_seq, cursor_id FROM analytics.clickhouse_export_state \
+         WHERE table_name = 'dim_execution_runs'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!((second_cursor, second_id), (moved_run_seq, fixture.run_uid));
 
     pool.close().await;
     Ok(())

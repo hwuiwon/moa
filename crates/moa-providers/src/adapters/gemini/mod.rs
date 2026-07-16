@@ -92,7 +92,12 @@ pub fn debug_build_gemini_request_body(
         request,
         &resolved_model,
         "medium",
-        enabled_native_tools(&capabilities, web_search_enabled),
+        enabled_native_tools(
+            &capabilities,
+            web_search_enabled
+                && request.native_web_search
+                    != moa_core::types::completion::NativeWebSearchPolicy::Disabled,
+        ),
     )
 }
 
@@ -245,7 +250,12 @@ impl LLMProvider for GeminiProvider {
                 .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
                 .min(model_capabilities.max_output),
         );
-        let native_tools = enabled_native_tools(&model_capabilities, self.web_search_enabled);
+        let native_tools = enabled_native_tools(
+            &model_capabilities,
+            self.web_search_enabled
+                && request.native_web_search
+                    != moa_core::types::completion::NativeWebSearchPolicy::Disabled,
+        );
         let span_recorder = LLMSpanRecorder::new(
             "google",
             resolved_model.clone(),

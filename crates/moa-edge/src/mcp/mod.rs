@@ -10,9 +10,9 @@ mod artifacts_learning;
 mod command;
 mod contract;
 mod evals;
+mod execution_runs;
 mod experiments;
 mod http;
-mod procedures;
 mod result;
 
 use axum::http::HeaderMap;
@@ -93,7 +93,7 @@ impl MoaMcpServer {
             Ok(request) => request,
             Err(result) => return result,
         };
-        let request = match tenant_request(identity.tenant_id, input) {
+        let request: Request = match tenant_request(identity.tenant_id, input) {
             Ok(request) => request,
             Err(result) => return result,
         };
@@ -123,6 +123,119 @@ impl MoaMcpServer {
         result::command_result(summary, command.call::<Input, Response>(path, input).await)
     }
 
+    async fn tenant_run_command<Input, Request, Response>(
+        &self,
+        context: RequestContext<RoleServer>,
+        input: &Input,
+        path: ServicePath,
+        summary: &'static str,
+    ) -> CallToolResult
+    where
+        Input: Serialize,
+        Request: Serialize + DeserializeOwned,
+        Response: Serialize + DeserializeOwned,
+    {
+        let (identity, headers) = match request_identity_and_headers(&context) {
+            Ok(request) => request,
+            Err(result) => return result,
+        };
+        let mut value = match serde_json::to_value(input) {
+            Ok(value) => value,
+            Err(error) => return result::execution_error(format!("invalid tool input: {error}")),
+        };
+        let Some(run) = value
+            .get_mut("run")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return result::execution_error("tool input must contain a run object");
+        };
+        run.insert(
+            "tenant_id".to_string(),
+            serde_json::json!(identity.tenant_id),
+        );
+        let request = match serde_json::from_value::<Request>(value) {
+            Ok(request) => request,
+            Err(error) => return result::execution_error(format!("invalid tool input: {error}")),
+        };
+        let command = McpCommandClient::new(self.state.proxy.as_ref(), &identity, &headers);
+        result::command_result(
+            summary,
+            command.call::<Request, Response>(path, &request).await,
+        )
+    }
+
+    async fn session_command<Input, Request, Response>(
+        &self,
+        context: RequestContext<RoleServer>,
+        input: &Input,
+        session_id: Uuid,
+        handler: &'static str,
+        summary: &'static str,
+    ) -> CallToolResult
+    where
+        Input: Serialize,
+        Request: Serialize + DeserializeOwned,
+        Response: Serialize + DeserializeOwned,
+    {
+        let (identity, headers) = match request_identity_and_headers(&context) {
+            Ok(request) => request,
+            Err(result) => return result,
+        };
+        let request: Request = match tenant_request(identity.tenant_id, input) {
+            Ok(request) => request,
+            Err(result) => return result,
+        };
+        let body = match serde_json::to_vec(&request) {
+            Ok(body) => body,
+            Err(error) => return result::execution_error(format!("invalid tool input: {error}")),
+        };
+        let service_path = format!("/Session/{session_id}/{handler}");
+        let ingress_path =
+            crate::ingress::call_path(&crate::ingress::IngressScope::Unscoped, &service_path);
+        let response = match self
+            .state
+            .proxy
+            .forward(
+                &identity,
+                reqwest::Method::POST,
+                &ingress_path,
+                body,
+                &headers,
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return result::execution_error(format!("orchestrator unavailable: {error}"));
+            }
+        };
+        let status = response.status();
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return result::execution_error(format!("orchestrator unavailable: {error}"));
+            }
+        };
+        if !status.is_success() {
+            let bounded = &bytes[..bytes.len().min(4 * 1024)];
+            let message = String::from_utf8_lossy(bounded).trim().to_string();
+            return result::execution_error(if message.is_empty() {
+                format!("service rejected command with status {}", status.as_u16())
+            } else {
+                message
+            });
+        }
+        let response = match serde_json::from_slice::<Response>(&bytes) {
+            Ok(response) => response,
+            Err(error) => {
+                return result::execution_error(format!(
+                    "service returned an invalid response: {error}"
+                ));
+            }
+        };
+        result::success(summary, &response)
+    }
+
     async fn command_empty<Response>(
         &self,
         context: RequestContext<RoleServer>,
@@ -145,7 +258,7 @@ fn all_tools() -> ToolRouter<MoaMcpServer> {
     let mut router = analytics_sessions::router()
         + artifacts_learning::router()
         + agents::router()
-        + procedures::router()
+        + execution_runs::router()
         + evals::router()
         + experiments::router();
     contract::enrich(&mut router);
@@ -205,7 +318,7 @@ impl ServerHandler for MoaMcpServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("moa-edge", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "MOA tenant operations. Tenant scope is always the authenticated tenant; never invent or supply a tenant ID. Each tool description states when to use it, side effects, its structured result, and the recommended next tool. Successful structuredContent is always {summary, data}; execution failures set isError and return {error}. Inspect before mutating, validate drafts before publishing, and poll accepted eval, experiment, simulation, or procedure runs by their returned ID.",
+                "MOA tenant operations. Tenant scope is always the authenticated tenant; never invent or supply a tenant ID. Each tool description states when to use it, side effects, its structured result, and the recommended next tool. Successful structuredContent is always {summary, data}; execution failures set isError and return {error}. Inspect before mutating, validate drafts before publishing, and poll accepted eval, experiment, simulation, or execution runs by their returned ID.",
             )
     }
 }
@@ -314,12 +427,12 @@ mod tests {
             "learning_candidate_reject",
             "learning_candidates_list",
             "lineage_explain",
-            "procedure_review_decide",
-            "procedure_run_cancel",
-            "procedure_run_start",
-            "procedure_run_status",
-            "procedure_runs_list",
-            "procedure_signal",
+            "execution_review_decide",
+            "execution_run_cancel",
+            "execution_run_start",
+            "execution_run_status",
+            "execution_runs_list",
+            "execution_signal",
             "session_events_list",
             "session_get",
             "sessions_list",
@@ -336,6 +449,51 @@ mod tests {
         );
         assert!(!actual.contains("execute_run"));
         assert!(!actual.contains("replay"));
+    }
+
+    #[test]
+    fn execution_run_mcp_contract() {
+        // Pins: external MCP admission exposes only the pinned-template projection, while
+        // legacy names and caller-supplied plan authority remain absent.
+        let router = all_tools();
+        let start = &router.map["execution_run_start"].attr.input_schema;
+        let properties = start["properties"]
+            .as_object()
+            .expect("execution_run_start properties must be an object")
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            properties,
+            [
+                "contact_id",
+                "idempotency_key",
+                "input",
+                "objective",
+                "session_id",
+                "template",
+            ]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+        );
+        let forbidden_names = [
+            "tenant_id".to_string(),
+            ["compiled", "plan", "id"].join("_"),
+            ["raw", "plan"].join("_"),
+            "plan".to_string(),
+            ["run", "procedure"].join("_"),
+            ["procedure", "status"].join("_"),
+        ];
+        for forbidden in forbidden_names {
+            assert!(
+                !properties.contains(forbidden.as_str()),
+                "execution_run_start unexpectedly accepts {forbidden}"
+            );
+            assert!(
+                !router.map.contains_key(forbidden.as_str()),
+                "legacy or internal lifecycle tool {forbidden} must not be advertised"
+            );
+        }
     }
 
     #[test]
@@ -495,10 +653,11 @@ mod tests {
             serde_json::json!(["draft", "published", "archived"])
         );
 
-        let review = &router.map["procedure_review_decide"].attr.input_schema;
+        let review = &router.map["execution_review_decide"].attr.input_schema;
         assert_eq!(
-            review["$defs"]["ProcedureReviewDecisionInput"]["enum"],
-            serde_json::json!(["approved", "rejected"])
+            review["$defs"]["ExecutionReviewDecisionInput"]["enum"],
+            serde_json::json!(["approved", "rejected"]),
+            "execution review decision schema drifted: {review:#?}"
         );
 
         let eval_run = &router.map["eval_run"].attr.input_schema;

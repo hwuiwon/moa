@@ -5,14 +5,14 @@ use restate_sdk::prelude::*;
 
 pub mod consolidate;
 pub(crate) mod errors;
+pub mod execution_node_actions;
+pub mod execution_run;
+pub mod execution_task;
 pub(crate) mod experiment_cancel;
 pub(crate) mod experiment_errors;
 pub mod experiment_run;
 pub mod experiment_trial_run;
 pub mod knowledge_sync_ingestion;
-pub mod procedure_execution;
-pub mod procedure_node_actions;
-pub(crate) mod procedure_target_wait;
 pub(crate) mod progress_delivery;
 pub mod skill_learning;
 pub mod tenant_purge;

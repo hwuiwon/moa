@@ -61,9 +61,7 @@ impl OrchestratorProxy {
             request = request.header(headers::H_ACTING_ON_BEHALF_OF, user_id.to_string());
         }
         // Inject the edge request span so the orchestrator continues one trace.
-        for (name, value) in moa_observability::current_trace_headers() {
-            request = request.header(name, value);
-        }
+        request = moa_observability::propagation::with_reqwest_trace_headers(request);
         if !body.is_empty() {
             request = request.body(body);
         }
@@ -91,9 +89,7 @@ impl OrchestratorProxy {
             request = request.header(name.clone(), value.clone());
         }
         // Inject the edge request span so the orchestrator continues one trace.
-        for (name, value) in moa_observability::current_trace_headers() {
-            request = request.header(name, value);
-        }
+        request = moa_observability::propagation::with_reqwest_trace_headers(request);
         if !body.is_empty() {
             request = request.body(body);
         }

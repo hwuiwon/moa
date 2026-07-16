@@ -1,0 +1,5 @@
+---
+source: crates/moa-analytics/tests/analytics_sql_offline.rs
+expression: compiled.sql
+---
+SELECT d.capability_name AS c0, d.capability_version AS c1, d.status AS c2, d.failure_class AS c3, COUNT(*)::BIGINT AS c4, COALESCE(SUM(d.actual_cost_microusd), 0)::BIGINT AS c5, COALESCE(SUM(d.citation_count), 0)::BIGINT AS c6, PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY d.queue_latency_ms)::DOUBLE PRECISION AS c7, PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY d.duration_ms)::DOUBLE PRECISION AS c8 FROM analytics.execution_task_fact AS d WHERE d.tenant_id = $1::UUID AND d.started_at BETWEEN $2::TIMESTAMPTZ AND $3::TIMESTAMPTZ GROUP BY 1, 2, 3, 4 ORDER BY c4 DESC LIMIT 50

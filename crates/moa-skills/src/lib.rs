@@ -11,8 +11,6 @@ pub mod improver;
 pub mod lessons;
 pub mod mining;
 pub mod package;
-/// Deterministic procedure graph execution for skill-backed procedures.
-pub mod procedure;
 pub mod proposals;
 pub mod recurrence;
 pub mod registry;

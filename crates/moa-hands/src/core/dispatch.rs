@@ -16,6 +16,7 @@ use tracing::Instrument;
 use crate::adapters::mcp::MCPClient;
 
 use super::lifecycle::hand_id;
+use super::policy::validate_tool_invocation;
 use super::telemetry::{
     record_tool_execution_result, record_tool_invocation_metadata, tool_execution_span,
 };
@@ -91,6 +92,7 @@ impl ToolRouter {
                 self.registry.tools.get(&invocation.name).ok_or_else(|| {
                     MoaError::ToolError(format!("unknown tool: {}", invocation.name))
                 })?;
+            validate_tool_invocation(&registered_tool.definition, invocation)?;
             record_tool_invocation_metadata(
                 &tool_span,
                 session,
@@ -306,7 +308,12 @@ impl ToolRouter {
                 HashMap::new()
             };
             let output = client
-                .call_tool(&invocation.name, invocation.input.clone(), extra_headers)
+                .call_tool(
+                    &invocation.name,
+                    invocation.input.clone(),
+                    invocation.id.as_deref(),
+                    extra_headers,
+                )
                 .await?;
             record_span.record(
                 "moa.mcp.latency_ms",

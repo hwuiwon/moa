@@ -1,26 +1,21 @@
 //! Deterministic model-loop planning helpers for turn workflows.
 
 use moa_core::config::SessionLimitsConfig;
-use moa_core::wire::turn::TurnComplexityClass;
+use moa_core::types::execution_planning::{
+    ExecutionMode, ExecutionRouteDecision, ExecutionRouteReason,
+};
 
 use crate::workflows::turn_responsiveness::{
-    ToolBudgetState, TurnResponsivenessInput, classify_turn_request, effective_tool_cap,
-    effective_turn_cap,
+    ToolBudgetState, effective_tool_cap, effective_turn_cap,
 };
 
 /// Inputs for planning one root session turn loop.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct RootLoopPlanRequest<'a> {
-    /// User text admitted for this root turn.
-    pub(crate) user_text: &'a str,
-    /// Number of attachments admitted with this turn.
-    pub(crate) attachment_count: usize,
+    /// Deterministic route selected for this root turn.
+    pub(crate) route: &'a ExecutionRouteDecision,
     /// Caller-supplied turn cap.
     pub(crate) request_max_turns: Option<u32>,
-    /// Whether persisted recent events point at a target.
-    pub(crate) has_recent_target: bool,
-    /// Number of available tool schemas before context compilation.
-    pub(crate) available_tool_count: usize,
 }
 
 /// Inputs for planning one worker turn loop.
@@ -35,8 +30,8 @@ pub(crate) struct WorkerLoopPlanRequest {
 /// Deterministic model-loop plan shared by workflow shells.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TurnLoopPlan {
-    /// Selected responsiveness class.
-    pub(crate) complexity_class: TurnComplexityClass,
+    /// Selected deterministic execution route.
+    pub(crate) route: ExecutionRouteDecision,
     /// Effective model-loop cap.
     pub(crate) max_turns: usize,
     /// Effective tool-call cap.
@@ -56,15 +51,11 @@ pub(crate) fn root_loop_plan(
     request: RootLoopPlanRequest<'_>,
     session_limits: &SessionLimitsConfig,
 ) -> TurnLoopPlan {
-    let complexity_class = classify_turn_request(TurnResponsivenessInput {
-        user_text: request.user_text,
-        attachment_count: request.attachment_count,
-        request_max_turns: request.request_max_turns,
-        has_recent_target: request.has_recent_target,
-        is_worker_context: false,
-        available_tool_count: request.available_tool_count,
-    });
-    loop_plan(request.request_max_turns, complexity_class, session_limits)
+    loop_plan(
+        request.request_max_turns,
+        request.route.clone(),
+        session_limits,
+    )
 }
 
 /// Builds a deterministic loop plan for a delegated worker turn.
@@ -72,28 +63,24 @@ pub(crate) fn worker_loop_plan(
     request: WorkerLoopPlanRequest,
     session_limits: &SessionLimitsConfig,
 ) -> TurnLoopPlan {
-    let complexity_class = classify_turn_request(TurnResponsivenessInput {
-        user_text: "",
-        attachment_count: 0,
-        request_max_turns: request.request_max_turns,
-        has_recent_target: true,
-        is_worker_context: true,
-        available_tool_count: 0,
-    });
+    let route = ExecutionRouteDecision::Routed {
+        mode: ExecutionMode::Act,
+        reason: ExecutionRouteReason::BoundedInteractiveWork,
+    };
     let default_cap = request.default_max_turns.min(u32::MAX as usize) as u32;
     let request_or_default_cap = request.request_max_turns.or(Some(default_cap));
-    loop_plan(request_or_default_cap, complexity_class, session_limits)
+    loop_plan(request_or_default_cap, route, session_limits)
 }
 
 fn loop_plan(
     request_max_turns: Option<u32>,
-    complexity_class: TurnComplexityClass,
+    route: ExecutionRouteDecision,
     session_limits: &SessionLimitsConfig,
 ) -> TurnLoopPlan {
-    let max_turns = effective_turn_cap(request_max_turns, complexity_class, session_limits);
-    let max_tool_calls = effective_tool_cap(complexity_class, session_limits);
+    let max_turns = effective_turn_cap(request_max_turns, &route, session_limits);
+    let max_tool_calls = effective_tool_cap(&route, session_limits);
     TurnLoopPlan {
-        complexity_class,
+        route,
         max_turns,
         max_tool_calls,
         loop_detection_threshold: session_limits.loop_detection_threshold,
@@ -103,7 +90,9 @@ fn loop_plan(
 #[cfg(test)]
 mod tests {
     use moa_core::config::SessionLimitsConfig;
-    use moa_core::wire::turn::TurnComplexityClass;
+    use moa_core::types::execution_planning::{
+        ExecutionMode, ExecutionRouteDecision, ExecutionRouteReason,
+    };
 
     use super::{RootLoopPlanRequest, WorkerLoopPlanRequest, root_loop_plan, worker_loop_plan};
 
@@ -113,15 +102,17 @@ mod tests {
         let limits = SessionLimitsConfig::default();
         let plan = root_loop_plan(
             RootLoopPlanRequest {
-                user_text: "do it",
-                attachment_count: 0,
+                route: &ExecutionRouteDecision::NeedsInput {
+                    reason: ExecutionRouteReason::PreflightInputMissing,
+                },
                 request_max_turns: None,
-                has_recent_target: false,
-                available_tool_count: 0,
             },
             &limits,
         );
-        assert_eq!(plan.complexity_class, TurnComplexityClass::Clarification);
+        assert!(matches!(
+            plan.route,
+            ExecutionRouteDecision::NeedsInput { .. }
+        ));
         assert_eq!(plan.max_turns, limits.simple_max_turns as usize);
         assert_eq!(plan.max_tool_calls, 0);
     }
@@ -137,7 +128,13 @@ mod tests {
             },
             &limits,
         );
-        assert_eq!(plan.complexity_class, TurnComplexityClass::Complex);
+        assert_eq!(
+            plan.route,
+            ExecutionRouteDecision::Routed {
+                mode: ExecutionMode::Act,
+                reason: ExecutionRouteReason::BoundedInteractiveWork,
+            }
+        );
         assert_eq!(plan.max_turns, 7);
         assert_eq!(plan.max_tool_calls, limits.max_tool_calls as usize);
     }

@@ -165,7 +165,8 @@ pub(super) async fn purge_relational(
         enqueue_agent_tuple_deletes(&mut tx, tenant_id, target, &agent_can_act_as_tuples).await?;
     }
 
-    let storage_partition_id = format!("tenant:{tenant_id}");
+    let storage_partition_id =
+        moa_core::types::identifiers::StoragePartitionId::for_tenant(tenant_id.into()).to_string();
     delete_tenant_rows(&mut tx, tenant_id, &storage_partition_id).await?;
     delete_tenant_record(&mut tx, tenant_id).await?;
     sqlx::query(
@@ -378,8 +379,10 @@ async fn delete_tenant_rows(
         "DELETE FROM moa.experiment_run_artifact_revision WHERE storage_partition_id = $1",
         "DELETE FROM moa.experiment_run WHERE storage_partition_id = $1",
         "DELETE FROM analytics.score_run WHERE storage_partition_id = $1",
-        "DELETE FROM moa.artifact_node_run WHERE storage_partition_id = $1",
-        "DELETE FROM moa.artifact_run WHERE storage_partition_id = $1",
+        "DELETE FROM moa.execution_template_admission WHERE tenant_id = $1::UUID",
+        "DELETE FROM moa.execution_action_review_outbox WHERE tenant_id = $1::UUID",
+        "DELETE FROM moa.execution_task WHERE tenant_id = $1::UUID",
+        "DELETE FROM moa.execution_run WHERE tenant_id = $1::UUID",
         "DELETE FROM moa.artifact_file WHERE storage_partition_id = $1",
         "UPDATE moa.artifact SET latest_revision_uid = NULL WHERE storage_partition_id = $1",
         "DELETE FROM moa.artifact_revision WHERE storage_partition_id = $1",

@@ -38,7 +38,9 @@ fn record(histogram: &mut Histogram<u64>, value: Duration) {
 /// One rotating measurement window.
 struct Window {
     latency_corrected: Histogram<u64>,
+    execution_admission_latency_corrected: Histogram<u64>,
     turns_completed: u64,
+    execution_admissions: u64,
     turn_errors: u64,
 }
 
@@ -49,6 +51,8 @@ pub(crate) struct LatencyRecorder {
     dispatch_delay: Histogram<u64>,
     ttft: Histogram<u64>,
     edge_observation_wait: Histogram<u64>,
+    admission_corrected: Histogram<u64>,
+    admission_uncorrected: Histogram<u64>,
     windows: Vec<Window>,
     window_len: Duration,
     warmup: Duration,
@@ -63,6 +67,8 @@ impl LatencyRecorder {
             dispatch_delay: new_histogram()?,
             ttft: new_histogram()?,
             edge_observation_wait: new_histogram()?,
+            admission_corrected: new_histogram()?,
+            admission_uncorrected: new_histogram()?,
             windows: Vec::new(),
             window_len: window_len.max(Duration::from_secs(1)),
             warmup,
@@ -74,7 +80,9 @@ impl LatencyRecorder {
         while self.windows.len() <= index {
             self.windows.push(Window {
                 latency_corrected: new_histogram()?,
+                execution_admission_latency_corrected: new_histogram()?,
                 turns_completed: 0,
+                execution_admissions: 0,
                 turn_errors: 0,
             });
         }
@@ -118,6 +126,25 @@ impl LatencyRecorder {
         Ok(())
     }
 
+    /// Records one successful detached execution admission without affecting answer histograms.
+    pub(crate) fn record_execution_admission(
+        &mut self,
+        intended: Duration,
+        dispatched: Duration,
+        completed: Duration,
+    ) -> Result<()> {
+        let corrected = completed.saturating_sub(intended);
+        let uncorrected = completed.saturating_sub(dispatched);
+        if completed >= self.warmup {
+            record(&mut self.admission_corrected, corrected);
+            record(&mut self.admission_uncorrected, uncorrected);
+        }
+        let window = self.window_at(completed)?;
+        record(&mut window.execution_admission_latency_corrected, corrected);
+        window.execution_admissions += 1;
+        Ok(())
+    }
+
     /// Summarizes the corrected-latency aggregate.
     pub(crate) fn corrected_summary(&self) -> PercentileSummary {
         histogram_summary(&self.corrected)
@@ -126,6 +153,16 @@ impl LatencyRecorder {
     /// Summarizes the uncorrected (service-time) aggregate.
     pub(crate) fn uncorrected_summary(&self) -> PercentileSummary {
         histogram_summary(&self.uncorrected)
+    }
+
+    /// Summarizes corrected execution-admission latency.
+    pub(crate) fn admission_corrected_summary(&self) -> PercentileSummary {
+        histogram_summary(&self.admission_corrected)
+    }
+
+    /// Summarizes uncorrected execution-admission latency.
+    pub(crate) fn admission_uncorrected_summary(&self) -> PercentileSummary {
+        histogram_summary(&self.admission_uncorrected)
     }
 
     /// Summarizes dispatch delay (intended arrival to actual dispatch).
@@ -156,8 +193,12 @@ impl LatencyRecorder {
                     end_ms: end * 1_000.0,
                     warmup: Duration::from_secs_f64(end) <= self.warmup,
                     turns_completed: window.turns_completed,
+                    execution_admissions: window.execution_admissions,
                     turn_errors: window.turn_errors,
                     latency_corrected_ms: histogram_summary(&window.latency_corrected),
+                    execution_admission_latency_corrected_ms: histogram_summary(
+                        &window.execution_admission_latency_corrected,
+                    ),
                 }
             })
             .collect()
@@ -190,6 +231,12 @@ pub struct SerializedHistograms {
     /// Edge observation lag samples.
     #[serde(default)]
     pub edge_observation_wait: String,
+    /// Corrected execution-admission latency.
+    #[serde(default)]
+    pub execution_admission_corrected: String,
+    /// Uncorrected execution-admission latency.
+    #[serde(default)]
+    pub execution_admission: String,
 }
 
 /// Serializes one histogram to base64 V2 wire format.
@@ -226,6 +273,8 @@ impl LatencyRecorder {
             dispatch_delay: serialize_histogram(&self.dispatch_delay)?,
             ttft: serialize_histogram(&self.ttft)?,
             edge_observation_wait: serialize_histogram(&self.edge_observation_wait)?,
+            execution_admission_corrected: serialize_histogram(&self.admission_corrected)?,
+            execution_admission: serialize_histogram(&self.admission_uncorrected)?,
         })
     }
 }
@@ -321,6 +370,40 @@ mod tests {
         assert_eq!(windows[0].turns_completed, 1);
         assert!(!windows[1].warmup);
         assert_eq!(windows[1].turns_completed, 1);
+    }
+
+    #[test]
+    fn execution_admission_window_accounting() {
+        // Pins: admission samples use their own corrected-latency histogram and window counter;
+        // warmup exclusion matches answer accounting without contaminating answer percentiles.
+        let mut recorder =
+            LatencyRecorder::new(Duration::from_secs(5), Duration::from_secs(5)).expect("recorder");
+        recorder
+            .record_execution_admission(
+                Duration::from_secs(1),
+                Duration::from_millis(1_500),
+                Duration::from_secs(2),
+            )
+            .expect("warmup admission");
+        recorder
+            .record_execution_admission(
+                Duration::from_secs(6),
+                Duration::from_millis(6_250),
+                Duration::from_secs(7),
+            )
+            .expect("measured admission");
+
+        assert_eq!(recorder.corrected_summary().max, 0.0);
+        assert!((recorder.admission_corrected_summary().p50 - 1_000.0).abs() < 5.0);
+        assert!((recorder.admission_uncorrected_summary().p50 - 750.0).abs() < 5.0);
+        let windows = recorder.window_reports();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].execution_admissions, 1);
+        assert_eq!(windows[1].execution_admissions, 1);
+        assert_eq!(windows[0].turns_completed, 0);
+        assert_eq!(windows[1].turns_completed, 0);
+        assert!(windows[0].warmup);
+        assert!(!windows[1].warmup);
     }
 
     #[test]

@@ -14,17 +14,30 @@ pub(super) struct Stack {
 
 impl Stack {
     pub(super) async fn up(
-        database_url: &str,
+        maintenance_url: &str,
         embedder: Arc<dyn EmbeddingProvider>,
     ) -> Result<Self> {
-        let schema_name = format!("perf_gate_{}", Uuid::now_v7().simple());
-        let store = PostgresSessionStore::new_in_schema(database_url, &schema_name)
+        let (database_url, schema_name) = provision_cloned_database_from(maintenance_url)
             .await
-            .map_err(|error| anyhow!("failed to initialize perf schema: {error}"))?;
+            .map_err(|error| anyhow!("failed to provision perf database: {error}"))?;
+        let store = match PostgresSessionStore::new_in_existing_schema(&database_url, &schema_name)
+            .await
+        {
+            Ok(store) => store,
+            Err(error) => {
+                if let Err(cleanup_error) = cleanup_test_schema(&database_url, &schema_name).await {
+                    tracing::warn!(
+                        %cleanup_error,
+                        "failed to clean up perf clone after store initialization failed"
+                    );
+                }
+                return Err(anyhow!("failed to initialize perf database: {error}"));
+            }
+        };
         let pool = store.pool().clone();
         drop(store);
         Ok(Self {
-            database_url: database_url.to_string(),
+            database_url,
             schema_name,
             pool,
             embedder,

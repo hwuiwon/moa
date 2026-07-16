@@ -23,14 +23,15 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 
 ## What MOA Provides
 
-- **Durable work:** sessions and workers survive process restarts because Restate owns orchestration and Postgres owns product data.
+- **Durable work:** sessions, conversational workers, and execution runs survive process restarts because Restate owns orchestration and Postgres owns product data.
 - **Task segmentation:** conversations are split into discrete task segments so one long session can contain many independently tracked outcomes.
 - **Outcome assessment:** MOA records whether each task segment resolved, partially resolved, failed, was abandoned, or remains unknown without requiring explicit user feedback.
 - **Per-tenant learning:** task outcomes become experience records, attributions, candidates, skill changes, and memory updates at tenant scope without requiring a fixed session intent taxonomy.
 - **Learning log:** every learned pattern, segment assessment, memory update, and skill change can be audited and invalidated by version or batch.
 - **Lineage and audit:** retrieval, context, generation, scores, DSAR exports, and optional compliance audit records are first-class operational artifacts.
 - **Tenant knowledge:** relational graph memory stores facts, decisions, lessons, sources, and provenance as Postgres nodes and edges, while sidecar indexes and the configured vector backend provide retrieval. Contact memory is contact-local and does not inherit tenant memory or another contact's memory.
-- **Skills:** recurring successful executions can be distilled into reusable Agent Skills, optionally carrying a deterministic procedure; ranking improves as segment outcomes accumulate.
+- **Dynamic execution:** each request takes the cheapest reliable shape: a direct `respond`, a bounded tool-using `act`, or a durable `run` over a validated typed DAG.
+- **Skills:** instruction-only Agent Skills remain first-class. A published skill may also carry a pinned reusable `execution_plan` template; one-off compiled plans remain immutable run snapshots and are never auto-published.
 - **Tenant ownership:** skills and policies are tenant-owned runtime data.
 - **Pluggable execution:** local hands, Docker, Daytona, E2B, and MCP servers are routed through one tool abstraction.
 - **Multiple interfaces:** REST/gateway, API automation, and messaging adapters all talk to the same session model.
@@ -51,6 +52,7 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 MOA's differentiators are architectural, not cosmetic:
 
 - **Restate-native agents:** sessions and workers map to virtual objects with single-writer semantics and durable waits.
+- **Reliable bulk execution:** `ExecutionRun` and `ExecutionTask` durably execute validated plans with atomic budgets, exact coverage, and automatic terminal delivery to the owning session.
 - **Experience-level analytics:** learning is derived from assessed task segments, not whole-session guesses.
 - **Resolution-weighted improvement:** skills and future retrieval decisions can use measured success rates.
 - **Candidate-gated adaptation:** reusable skills, memory proposals, policy proposals, and eval proposals start as learning candidates before promotion.

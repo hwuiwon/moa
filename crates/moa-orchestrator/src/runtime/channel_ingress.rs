@@ -355,7 +355,7 @@ mod tests {
         types::channel::SessionChannelBindingId,
         types::contact::ContactId,
         types::identifiers::TenantId,
-        wire::turn::{SessionSnapshot, TurnComplexityClass, TurnPhase, TurnProgress},
+        wire::turn::{SessionSnapshot, TurnPhase, TurnProgress},
     };
     use uuid::Uuid;
 
@@ -454,11 +454,12 @@ mod tests {
                     active_turn_id: Some("turn-1".to_string()),
                     pending_message_count: 0,
                     last_outcome: None,
+                    active_execution_run_uids: Vec::new(),
                 },
                 active_turn_progress: Some(TurnProgress {
                     turn_id: "turn-1".to_string(),
                     phase: TurnPhase::Tooling,
-                    complexity_class: TurnComplexityClass::Standard,
+                    execution_route: None,
                     iteration: 1,
                     max_turns: None,
                     tool_calls: 1,
@@ -468,6 +469,7 @@ mod tests {
                     cancel_requested: false,
                     cancel_reason: None,
                 }),
+                active_execution_progress: Vec::new(),
                 events: Vec::new(),
                 child_progress: Vec::new(),
             })

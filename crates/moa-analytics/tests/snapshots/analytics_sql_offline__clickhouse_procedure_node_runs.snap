@@ -1,5 +1,0 @@
----
-source: crates/moa-analytics/tests/analytics_sql_offline.rs
-expression: compiled.sql
----
-SELECT d.node_id AS c0, d.status AS c1, count() AS c2, quantileExactInclusive(0.95)(if(d.completed_at IS NULL, NULL, (toUnixTimestamp64Micro(d.completed_at) - toUnixTimestamp64Micro(d.started_at)) / 1000.0)) AS c3 FROM dim_artifact_node_run AS d FINAL INNER JOIN dim_artifact_run AS ar FINAL ON ar.run_uid = d.run_uid AND ar.tenant_id = d.tenant_id WHERE d.tenant_id = toUUID(?) AND d.started_at BETWEEN parseDateTime64BestEffort(?, 6, 'UTC') AND parseDateTime64BestEffort(?, 6, 'UTC') GROUP BY 1, 2 ORDER BY c2 DESC LIMIT 50

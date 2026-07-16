@@ -108,13 +108,14 @@ pub(super) async fn ensure_current_segment(
     meta: &SessionMeta,
     request: &mut CompletionRequest,
 ) -> Result<Option<ActiveSegment>, HandlerError> {
-    let active_segment = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .get_active_segment(Json(session_id))
-        .call()
-        .await?
-        .into_inner()
-        .map(|segment| segment.active_view());
+    let active_segment = crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .get_active_segment(Json(session_id)),
+    )
+    .call()
+    .await?
+    .into_inner()
+    .map(|segment| segment.active_view());
 
     let now = durable_utc_now(ctx, "workflow_utc_now").await?;
     let mut active_segment = active_segment;
@@ -139,20 +140,24 @@ pub(super) async fn ensure_current_segment(
         fallback,
     ) {
         if let Some(completed) = transition.completed.clone() {
-            ctx.service_client::<RestateSessionStoreClient>()
-                .complete_segment(Json(CompleteSegmentRequest {
-                    segment_id: completed.segment_id,
-                    update: completed.update.clone(),
-                }))
-                .send();
+            crate::restate_identity::replay_safe_request(
+                ctx.service_client::<RestateSessionStoreClient>()
+                    .complete_segment(Json(CompleteSegmentRequest {
+                        segment_id: completed.segment_id,
+                        update: completed.update.clone(),
+                    })),
+            )
+            .send();
             moa_core::coordination_counters::record_durable_append();
-            ctx.service_client::<RestateSessionStoreClient>()
-                .append_event(Json(AppendEventRequest {
-                    session_id,
-                    event: completed.clone().into_event(),
-                    dedupe_key: None,
-                }))
-                .send();
+            crate::restate_identity::replay_safe_request(
+                ctx.service_client::<RestateSessionStoreClient>()
+                    .append_event(Json(AppendEventRequest {
+                        session_id,
+                        event: completed.clone().into_event(),
+                        dedupe_key: None,
+                    })),
+            )
+            .send();
             assess_completed_segment_at_transition(
                 workflow,
                 ctx,
@@ -164,20 +169,24 @@ pub(super) async fn ensure_current_segment(
             .await?;
         }
 
-        ctx.service_client::<RestateSessionStoreClient>()
-            .create_segment(Json(CreateSegmentRequest {
-                segment: transition.task_segment.clone(),
-            }))
-            .call()
-            .await?;
+        crate::restate_identity::replay_safe_request(
+            ctx.service_client::<RestateSessionStoreClient>()
+                .create_segment(Json(CreateSegmentRequest {
+                    segment: transition.task_segment.clone(),
+                })),
+        )
+        .call()
+        .await?;
         moa_core::coordination_counters::record_durable_append();
-        ctx.service_client::<RestateSessionStoreClient>()
-            .append_event(Json(AppendEventRequest {
-                session_id,
-                event: transition.started.clone().into_event(),
-                dedupe_key: None,
-            }))
-            .send();
+        crate::restate_identity::replay_safe_request(
+            ctx.service_client::<RestateSessionStoreClient>()
+                .append_event(Json(AppendEventRequest {
+                    session_id,
+                    event: transition.started.clone().into_event(),
+                    dedupe_key: None,
+                })),
+        )
+        .send();
 
         active_segment = Some(transition.active_segment);
     }
@@ -376,14 +385,14 @@ pub(super) async fn capture_current_active_segment_assessment(
     }
 
     let meta = load_session_meta(ctx, workflow.session_store.clone(), session_id).await?;
-    let Some(segment) = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .get_active_segment(Json(session_id))
-        .call()
-        .await?
-        .into_inner()
-        .map(|segment| segment.active_view())
-    else {
+    let Some(segment) = crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .get_active_segment(Json(session_id)),
+    )
+    .call()
+    .await?
+    .into_inner()
+    .map(|segment| segment.active_view()) else {
         return Ok(None);
     };
     let assessed_at = durable_utc_now(ctx, "workflow_utc_now").await?;
@@ -519,13 +528,15 @@ async fn assess_and_persist_segment(
     let segment_id = input.target.segment_id();
     record_segment_assessment_learning(workflow, ctx, meta.tenant_id, segment_id, &assessment)
         .await?;
-    ctx.service_client::<RestateSessionStoreClient>()
-        .update_segment_assessment(Json(UpdateSegmentAssessmentRequest {
-            segment_id,
-            assessment: assessment.clone(),
-        }))
-        .call()
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .update_segment_assessment(Json(UpdateSegmentAssessmentRequest {
+                segment_id,
+                assessment: assessment.clone(),
+            })),
+    )
+    .call()
+    .await?;
     let task_segment = input.target.task_segment(meta, &assessment, input.events);
     emit_experience_for_assessment(
         workflow,

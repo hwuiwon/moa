@@ -35,11 +35,11 @@ flowchart TB
     subgraph Runtime["Runtime boundary"]
         Edge["moa-edge<br/>public HTTP edge"]
         Auth["moa-auth + OpenFGA<br/>authn / authz"]
-        Orchestrator["moa-orchestrator on Restate<br/>Session VO · TurnExecution ·<br/>detached workflows: SkillLearning,<br/>ProcedureExecution, experiments"]
+        Orchestrator["moa-orchestrator on Restate<br/>Session VO · TurnExecution ·<br/>detached ExecutionRun / ExecutionTask,<br/>SkillLearning, experiments"]
     end
 
     subgraph Brain["Brain boundary — moa-brain"]
-        Pipeline["Context pipeline<br/>instructions · graph-memory retrieval ·<br/>skill manifest · compaction"]
+        Pipeline["Context pipeline<br/>identity · instructions · tools · history ·<br/>skills · digest · memory · runtime context"]
         Providers["moa-providers<br/>LLM · embedding · rerank"]
         Assess["Segment assessment<br/>deterministic outcome scoring"]
     end
@@ -56,7 +56,7 @@ flowchart TB
     end
 
     subgraph Data["Data boundary"]
-        PG["Postgres / Neon<br/>sessions & events · graph memory + vectors ·<br/>task segments & experiences · skill/procedure artifacts ·<br/>learning candidates & log · lineage · analytics"]
+        PG["Postgres / Neon<br/>sessions & events · graph memory + vectors ·<br/>task segments & experiences · skill artifacts · execution runs/tasks ·<br/>learning candidates & log · lineage · analytics"]
         Audit["moa-ocsf audit<br/>signed events → S3"]
     end
 
@@ -178,7 +178,7 @@ services and virtual objects in `moa-orchestrator` (see sections 5–6 and
 | `HandProvider` | Provision, execute, pause, resume, destroy execution environments | local, Docker, Daytona, E2B |
 | `BuiltInTool` | In-process tools with policy and schema metadata | memory, file/search/read/write, shell helpers |
 | `ChannelAdapter` | Messaging normalization/rendering | Slack |
-| `ContextProcessor` | Ordered context-pipeline stage | identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, delegation planning, runtime context, compactor |
+| `ContextProcessor` | Ordered context-pipeline stage | identity, agent instructions, instructions, tools, query rewrite, history, skills, digest, memory, runtime context |
 | `CredentialVault` | Secret storage abstraction | environment-backed MCP vault, environment-backed delivery vault |
 | `AuthProvider` | Resolve API keys or bearer JWTs to MOA identities | local API keys, disabled local/test mode, optional Auth0/OIDC |
 | `TokenVaultProvider` | Retrieve third-party OAuth tokens for linked user connections | null provider, optional Auth0 Token Vault |
@@ -327,6 +327,20 @@ sequenceDiagram
 
 Replay is the recovery model. If the runtime restarts, durable state is rebuilt
 from Postgres events plus Restate journals.
+
+`TurnExecution` is the durable owner of one admitted session turn and selects
+exactly one of `respond`, `act`, or `run`. `act` keeps the explicit bounded
+conversational Worker tools and ordinary per-worker terminal lifecycle
+reporting. `run` compiles or instantiates an immutable plan, starts
+`ExecutionRun` detached, and executes stable logical work through
+`ExecutionTask`; run state and aggregate counters live in execution
+persistence rather than the `Session` VO.
+
+The context pipeline executes identity, agent instructions, instructions,
+tools, optional query rewrite, history, skills, optional digest, memory, and
+runtime context in that order. History owns replay and compaction, while the
+per-turn skill, digest, and memory sections follow it to preserve prompt-cache
+reuse.
 
 ---
 

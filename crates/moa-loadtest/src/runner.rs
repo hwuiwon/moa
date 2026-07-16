@@ -38,9 +38,22 @@ const ARRIVAL_STALENESS_BUDGET: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub(crate) struct TurnObservation {
+    pub(crate) kind: TurnObservationKind,
     pub(crate) ttft: Option<Duration>,
     pub(crate) edge_observation_wait: Option<Duration>,
     pub(crate) auto_denied_approvals: usize,
+}
+
+/// Closed successful turn classification used by load-test accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnObservationKind {
+    /// A normal assistant answer completed.
+    CompletedAnswer,
+    /// A detached execution run was durably admitted.
+    ExecutionAdmission {
+        /// Committed execution-run identifier.
+        run_uid: Uuid,
+    },
 }
 
 /// One session occupying a pool slot.
@@ -50,6 +63,7 @@ struct SessionSlot {
     plan: SessionPlan,
     next_turn: usize,
     last_seq: u64,
+    admitted_run_uids: Vec<Uuid>,
 }
 
 /// Messages funneled into the single-owner collector task.
@@ -67,6 +81,7 @@ enum CollectorMessage {
         tool_error_events: u64,
         auto_denied_approvals: usize,
         event_load_failed: bool,
+        kind: TurnObservationKind,
     },
     TurnFailed {
         completed: Duration,
@@ -83,7 +98,9 @@ struct CollectorState {
     recorder: LatencyRecorder,
     errors: ErrorTaxonomy,
     turns_completed: u64,
+    execution_admissions: u64,
     post_warmup_completions: u64,
+    post_warmup_admissions: u64,
     total_tool_calls: u64,
     auto_denied_approvals: usize,
     sessions_started: usize,
@@ -131,6 +148,7 @@ impl DispatchCtx {
                     plan,
                     next_turn: 0,
                     last_seq: 0,
+                    admitted_run_uids: Vec::new(),
                 })
             }
             Err(error) => {
@@ -147,16 +165,19 @@ impl DispatchCtx {
     async fn finalize_session(&self, slot: SessionSlot, failure: Option<String>, end_of_run: bool) {
         self.pool_size.fetch_sub(1, Ordering::Relaxed);
         let target = &self.targets[slot.target_index];
-        let completed_turns = slot.next_turn;
+        let completed_slots = slot.next_turn;
+        let execution_admissions = slot.admitted_run_uids.len();
+        let completed_turns = completed_slots.saturating_sub(execution_admissions);
         let report = match target.session_meta(slot.session_id).await {
             Ok(meta) => {
                 let status_failure = if end_of_run {
-                    end_of_run_status_failure(&meta.status)
+                    end_of_run_status_failure(&meta.status, execution_admissions)
                 } else {
                     session_status_failure_reason(
                         &meta.status,
-                        completed_turns,
+                        completed_slots,
                         slot.plan.turns.len(),
+                        execution_admissions,
                     )
                 };
                 let note = if failure.is_some() || status_failure.is_some() {
@@ -174,6 +195,7 @@ impl DispatchCtx {
                     status: meta.status.clone(),
                     planned_turns: slot.plan.turns.len(),
                     completed_turns,
+                    execution_admissions,
                     cache_hit_rate: meta.cache_hit_rate(),
                     total_cost_cents: meta.total_cost_cents as u64,
                     failure_reason: merge_failure_reason(failure, status_failure, note),
@@ -185,6 +207,7 @@ impl DispatchCtx {
                 status: SessionStatus::Failed,
                 planned_turns: slot.plan.turns.len(),
                 completed_turns,
+                execution_admissions,
                 cache_hit_rate: 0.0,
                 total_cost_cents: 0,
                 failure_reason: merge_failure_reason(
@@ -427,7 +450,11 @@ async fn run_one_turn(ctx: Arc<DispatchCtx>, mut slot: SessionSlot, intended: Du
                 tool_error_events,
                 auto_denied_approvals: observation.auto_denied_approvals,
                 event_load_failed,
+                kind: observation.kind,
             });
+            if let TurnObservationKind::ExecutionAdmission { run_uid } = observation.kind {
+                slot.admitted_run_uids.push(run_uid);
+            }
             slot.next_turn += 1;
             if slot.next_turn < slot.plan.turns.len() {
                 let think =
@@ -468,7 +495,9 @@ async fn run_collector(
         recorder,
         errors: ErrorTaxonomy::default(),
         turns_completed: 0,
+        execution_admissions: 0,
         post_warmup_completions: 0,
+        post_warmup_admissions: 0,
         total_tool_calls: 0,
         auto_denied_approvals: 0,
         sessions_started: 0,
@@ -490,10 +519,36 @@ async fn run_collector(
                 tool_error_events,
                 auto_denied_approvals,
                 event_load_failed,
+                kind,
             } => {
-                state.turns_completed += 1;
-                if completed >= warmup {
-                    state.post_warmup_completions += 1;
+                match kind {
+                    TurnObservationKind::CompletedAnswer => {
+                        state.turns_completed += 1;
+                        if completed >= warmup {
+                            state.post_warmup_completions += 1;
+                        }
+                        if let Err(error) = state.recorder.record_turn(
+                            intended,
+                            dispatched,
+                            completed,
+                            ttft,
+                            edge_observation_wait,
+                        ) {
+                            tracing::warn!(%error, "latency recording failed");
+                        }
+                    }
+                    TurnObservationKind::ExecutionAdmission { .. } => {
+                        state.execution_admissions += 1;
+                        if completed >= warmup {
+                            state.post_warmup_admissions += 1;
+                        }
+                        if let Err(error) = state
+                            .recorder
+                            .record_execution_admission(intended, dispatched, completed)
+                        {
+                            tracing::warn!(%error, "execution admission latency recording failed");
+                        }
+                    }
                 }
                 state.total_tool_calls += tool_calls;
                 state.errors.event_error_events += event_error_events;
@@ -501,15 +556,6 @@ async fn run_collector(
                 state.auto_denied_approvals += auto_denied_approvals;
                 if event_load_failed {
                     state.errors.event_load_failures += 1;
-                }
-                if let Err(error) = state.recorder.record_turn(
-                    intended,
-                    dispatched,
-                    completed,
-                    ttft,
-                    edge_observation_wait,
-                ) {
-                    tracing::warn!(%error, "latency recording failed");
                 }
             }
             CollectorMessage::ArrivalDropped { at } => {
@@ -576,6 +622,7 @@ fn build_report(
         .saturating_sub(warmup)
         .as_secs_f64()
         .max(f64::MIN_POSITIVE);
+    let successful_operations = state.turns_completed + state.execution_admissions;
 
     LoadTestReport {
         mode: options.mode,
@@ -583,11 +630,17 @@ fn build_report(
         profile: options.profile,
         requested_rate_qps: options.rate,
         achieved_rate_qps: state.post_warmup_completions as f64 / measure_window,
+        admission_rate_qps: state.post_warmup_admissions as f64 / measure_window,
+        successful_operation_rate_qps: (state.post_warmup_completions
+            + state.post_warmup_admissions) as f64
+            / measure_window,
         sessions_started: state.sessions_started,
         sessions_completed,
         sessions_failed,
         turns_scheduled: schedule.len() as u64,
         turns_completed: state.turns_completed,
+        execution_admissions: state.execution_admissions,
+        successful_operations,
         errors: state.errors,
         total_tool_calls: state.total_tool_calls as usize,
         auto_denied_approvals: state.auto_denied_approvals,
@@ -595,6 +648,8 @@ fn build_report(
         warmup_ms: warmup.as_secs_f64() * 1_000.0,
         turn_latency_corrected_ms: state.recorder.corrected_summary(),
         turn_latency_ms: state.recorder.uncorrected_summary(),
+        execution_admission_latency_corrected_ms: state.recorder.admission_corrected_summary(),
+        execution_admission_latency_ms: state.recorder.admission_uncorrected_summary(),
         dispatch_delay_ms: state.recorder.dispatch_delay_summary(),
         ttft_ms: state.recorder.ttft_summary(),
         edge_observation_wait_ms: state.recorder.edge_observation_wait_summary(),
@@ -629,10 +684,16 @@ fn sampled_think_time(mean: Duration, seed: u64, session_id: SessionId, turn: us
 }
 
 /// Failure classification for sessions cut short by the end of the schedule.
-fn end_of_run_status_failure(status: &SessionStatus) -> Option<String> {
+fn end_of_run_status_failure(
+    status: &SessionStatus,
+    execution_admissions: usize,
+) -> Option<String> {
     match status {
         SessionStatus::Failed | SessionStatus::Cancelled => {
             Some(format!("session ended in status {status:?}"))
+        }
+        SessionStatus::Running if execution_admissions == 0 => {
+            Some("session ended Running without an admitted execution run".to_string())
         }
         _ => None,
     }
@@ -642,6 +703,7 @@ fn session_status_failure_reason(
     status: &SessionStatus,
     completed_turns: usize,
     planned_turns: usize,
+    execution_admissions: usize,
 ) -> Option<String> {
     match status {
         SessionStatus::Failed | SessionStatus::Cancelled => {
@@ -649,6 +711,9 @@ fn session_status_failure_reason(
         }
         SessionStatus::Paused if completed_turns < planned_turns => {
             Some(format!("session ended in status {status:?}"))
+        }
+        SessionStatus::Running if execution_admissions == 0 => {
+            Some("session ended Running without an admitted execution run".to_string())
         }
         _ => None,
     }
@@ -696,11 +761,56 @@ pub(crate) fn merge_failure_reason(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn execution_admission_accounting() {
+        // Pins: Accepted increments only admission counters/histograms; an answer remains a
+        // separate successful operation and neither result contributes to the error taxonomy.
+        let recorder =
+            LatencyRecorder::new(Duration::from_secs(5), Duration::ZERO).expect("latency recorder");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let collector = tokio::spawn(run_collector(rx, recorder));
+        let message = |kind, completed| CollectorMessage::TurnCompleted {
+            intended: Duration::ZERO,
+            dispatched: Duration::from_millis(5),
+            completed,
+            ttft: None,
+            edge_observation_wait: None,
+            tool_calls: 0,
+            event_error_events: 0,
+            tool_error_events: 0,
+            auto_denied_approvals: 0,
+            event_load_failed: false,
+            kind,
+        };
+        tx.send(message(
+            TurnObservationKind::ExecutionAdmission {
+                run_uid: Uuid::now_v7(),
+            },
+            Duration::from_millis(20),
+        ))
+        .expect("send admission");
+        tx.send(message(
+            TurnObservationKind::CompletedAnswer,
+            Duration::from_millis(30),
+        ))
+        .expect("send answer");
+        drop(tx);
+
+        let state = collector.await.expect("collector task");
+        assert_eq!(state.execution_admissions, 1);
+        assert_eq!(state.turns_completed, 1);
+        assert_eq!(state.post_warmup_admissions, 1);
+        assert_eq!(state.post_warmup_completions, 1);
+        assert!((state.recorder.admission_corrected_summary().p50 - 20.0).abs() < 0.1);
+        assert!((state.recorder.corrected_summary().p50 - 30.0).abs() < 0.1);
+        assert_eq!(state.errors.failed_turns(), 0);
+    }
+
     #[test]
     fn paused_after_all_planned_turns_is_success_status() {
         // Pins: a Restate Session parked in Paused after all planned turns is a successful idle session.
         assert_eq!(
-            session_status_failure_reason(&SessionStatus::Paused, 5, 5),
+            session_status_failure_reason(&SessionStatus::Paused, 5, 5, 0),
             None
         );
     }
@@ -709,7 +819,7 @@ mod tests {
     fn paused_before_all_planned_turns_is_failure_status() {
         // Pins: Paused is still a failure when the remote turn loop stopped before the plan completed.
         assert_eq!(
-            session_status_failure_reason(&SessionStatus::Paused, 4, 5),
+            session_status_failure_reason(&SessionStatus::Paused, 4, 5, 0),
             Some("session ended in status Paused".to_string())
         );
     }
@@ -718,7 +828,7 @@ mod tests {
     fn failed_status_is_always_failure_status() {
         // Pins: failed remote sessions are never reclassified as success by completed-turn accounting.
         assert_eq!(
-            session_status_failure_reason(&SessionStatus::Failed, 5, 5),
+            session_status_failure_reason(&SessionStatus::Failed, 5, 5, 0),
             Some("session ended in status Failed".to_string())
         );
     }
@@ -727,7 +837,7 @@ mod tests {
     fn cancelled_status_is_failure_status_even_after_all_planned_turns() {
         // Pins: a remote session cancelled mid-load is a failure regardless of turn progress.
         assert_eq!(
-            session_status_failure_reason(&SessionStatus::Cancelled, 5, 5),
+            session_status_failure_reason(&SessionStatus::Cancelled, 5, 5, 0),
             Some("session ended in status Cancelled".to_string())
         );
     }
@@ -736,10 +846,30 @@ mod tests {
     fn end_of_run_drain_treats_incomplete_paused_sessions_as_healthy() {
         // Pins: sessions cut short because the schedule ended are not failures;
         // only Failed/Cancelled statuses count during pool drain.
-        assert_eq!(end_of_run_status_failure(&SessionStatus::Paused), None);
-        assert_eq!(end_of_run_status_failure(&SessionStatus::Running), None);
-        assert!(end_of_run_status_failure(&SessionStatus::Failed).is_some());
-        assert!(end_of_run_status_failure(&SessionStatus::Cancelled).is_some());
+        assert_eq!(end_of_run_status_failure(&SessionStatus::Paused, 0), None);
+        assert_eq!(end_of_run_status_failure(&SessionStatus::Running, 1), None);
+        assert!(end_of_run_status_failure(&SessionStatus::Running, 0).is_some());
+        assert!(end_of_run_status_failure(&SessionStatus::Failed, 0).is_some());
+        assert!(end_of_run_status_failure(&SessionStatus::Cancelled, 0).is_some());
+    }
+
+    #[test]
+    fn admitted_execution_session_finalizes_successfully() {
+        // Pins: Accepted leaves the remote Session Running while detached work continues; that is
+        // a successful finalized load-test operation only when at least one run UID was observed.
+        assert_eq!(
+            session_status_failure_reason(&SessionStatus::Running, 1, 1, 1),
+            None
+        );
+        assert_eq!(end_of_run_status_failure(&SessionStatus::Running, 1), None);
+        assert_eq!(
+            session_status_failure_reason(&SessionStatus::Running, 1, 1, 0),
+            Some("session ended Running without an admitted execution run".to_string())
+        );
+        assert_eq!(
+            end_of_run_status_failure(&SessionStatus::Running, 0),
+            Some("session ended Running without an admitted execution run".to_string())
+        );
     }
 
     #[test]

@@ -157,6 +157,10 @@ impl Default for ArtifactUi {
 /// Kind-specific artifact definition.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", content = "spec", rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the execution-plan contract requires SkillDefinition to own its optional plan"
+)]
 pub enum ArtifactDefinition {
     /// Tenant-configurable agent artifact body.
     Agent(Box<AgentDefinition>),
@@ -235,35 +239,10 @@ impl ArtifactDefinition {
                             })
                         }),
                 );
-                if let Some(procedure) = &definition.procedure {
-                    for (node_index, node) in procedure.nodes.iter().enumerate() {
-                        if let Some(artifact_ref) = &node.artifact_ref {
-                            refs.push((
-                                format!("definition.spec.procedure.nodes[{node_index}].ref"),
-                                artifact_ref.clone(),
-                            ));
-                        }
-                        refs.extend(node.skill_refs.iter().enumerate().map(
-                            |(ref_index, artifact_ref)| {
-                                (
-                                    format!(
-                                        "definition.spec.procedure.nodes[{node_index}].skill_refs[{ref_index}]"
-                                    ),
-                                    artifact_ref.clone(),
-                                )
-                            },
-                        ));
-                        refs.extend(node.tool_refs.iter().enumerate().map(
-                            |(ref_index, artifact_ref)| {
-                                (
-                                    format!(
-                                        "definition.spec.procedure.nodes[{node_index}].tool_refs[{ref_index}]"
-                                    ),
-                                    artifact_ref.clone(),
-                                )
-                            },
-                        ));
-                    }
+                if let Some(execution_plan) = &definition.execution_plan {
+                    refs.extend(
+                        execution_plan.skill_reference_paths("definition.spec.execution_plan"),
+                    );
                 }
                 refs
             }

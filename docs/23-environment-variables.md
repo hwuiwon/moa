@@ -63,6 +63,33 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_GENERAL_WEB_SEARCH_ENABLED` | `general.web_search_enabled` | true | Whether provider-native web search should be offered to supported models |
 | `MOA_GENERAL_WORKSPACE_INSTRUCTIONS` | `general.workspace_instructions` | _none_ | Optional repository-workspace instructions injected into the prompt |
 
+### `mcp_servers`
+
+| Variable | Config path | Default | Description |
+|---|---|---|---|
+| `MOA_MCP_SERVERS_JSON` | `mcp_servers` | [] | JSON array of complete MCP server objects; replaces file-backed server configuration. `trust_tool_annotations` defaults to `false` and must be enabled per server before a negotiated standard `idempotentHint` can permit retries. |
+
+### `execution`
+
+| Variable | Config path | Default | Description |
+|---|---|---|---|
+| `MOA_EXECUTION_AGENT_TURN_COST_MICROUSD` | `execution.agent_turn_cost_microusd` | 100000 | Worst-case integer micro-USD estimate for one agent turn |
+| `MOA_EXECUTION_AGENT_TURN_RETRIEVED_BYTES` | `execution.agent_turn_retrieved_bytes` | 10000000 | Worst-case retrieved-byte estimate for one agent turn |
+| `MOA_EXECUTION_AGENT_TURN_TOKENS` | `execution.agent_turn_tokens` | 8000 | Worst-case token estimate for one agent turn |
+| `MOA_EXECUTION_AGENT_TURN_TOOL_CALLS` | `execution.agent_turn_tool_calls` | 8 | Worst-case governed tool-call estimate for one agent turn |
+| `MOA_EXECUTION_MAX_COST_MICROUSD` | `execution.max_cost_microusd` | 100000000 | Default run cost limit in integer micro-USD |
+| `MOA_EXECUTION_MAX_RETRIEVED_BYTES` | `execution.max_retrieved_bytes` | 10000000000 | Default run retrieved-byte limit |
+| `MOA_EXECUTION_MAX_TASKS` | `execution.max_tasks` | 10000 | Default logical-task limit; this is not an active-worker cap |
+| `MOA_EXECUTION_MAX_TOKENS` | `execution.max_tokens` | 10000000 | Default run token limit |
+| `MOA_EXECUTION_MAX_TOOL_CALLS` | `execution.max_tool_calls` | 100000 | Default governed tool-call limit |
+| `MOA_EXECUTION_PLANNER_REPAIR_ATTEMPTS` | `execution.planner_repair_attempts` | 1 | Maximum repair attempts for an invalid initial planner response |
+| `MOA_EXECUTION_REPEATED_FAILURE_LIMIT` | `execution.repeated_failure_limit` | 3 | Repeated normalized failure count that stops replanning |
+| `MOA_EXECUTION_UNATTENDED_MAX_COST_MICROUSD` | `execution.unattended_max_cost_microusd` | 5000000 | Cost threshold above which a compiled run requires owning-user confirmation |
+| `MOA_EXECUTION_VERIFIER_TURN_COST_MICROUSD` | `execution.verifier_turn_cost_microusd` | 200000 | Worst-case integer micro-USD estimate for one completion-verifier turn |
+| `MOA_EXECUTION_VERIFIER_TURN_RETRIEVED_BYTES` | `execution.verifier_turn_retrieved_bytes` | 1000000 | Worst-case retrieved-byte estimate for one completion-verifier turn |
+| `MOA_EXECUTION_VERIFIER_TURN_TOKENS` | `execution.verifier_turn_tokens` | 16000 | Worst-case token estimate for one completion-verifier turn |
+| `MOA_EXECUTION_VERIFIER_TURN_TOOL_CALLS` | `execution.verifier_turn_tool_calls` | 4 | Worst-case governed tool-call estimate for one completion-verifier turn |
+
 ### `models`
 
 | Variable | Config path | Default | Description |
@@ -115,7 +142,7 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_DATABASE_NEON_POOLED` | `database.neon.pooled` | true | Whether pooled connection URIs should be requested for checkpoint branches |
 | `MOA_DATABASE_NEON_PROJECT_ID` | `database.neon.project_id` | _empty_ | Neon project identifier used for branch management |
 | `MOA_DATABASE_NEON_SUSPEND_TIMEOUT_SECONDS` | `database.neon.suspend_timeout_seconds` | 300 | Auto-suspend timeout in seconds for checkpoint endpoints |
-| `MOA_DATABASE_SCHEMA` | `database.schema` | _none_ | Optional Postgres schema name for isolated runtime stores |
+| `MOA_DATABASE_SCHEMA` | `database.schema` | _none_ | Optional already-provisioned Postgres schema to bind runtime queries; setting it disables automatic migrations |
 | `MOA_DATABASE_URL` | `database.url` | postgres://moa_owner:dev@localhost:10040/moa | Runtime Postgres connection URL |
 
 ### `memory`
@@ -563,6 +590,10 @@ descriptor level (`crates/moa-hands/src/core/policy.rs`): a tenant must approve
 an MCP tool action unless an operator action-policy rule (or config) grants it.
 Builtin hands keep their own per-tool defaults. Operator rules always override
 the descriptor default.
+MCP tool annotations are treated as untrusted hints by default. A tool becomes
+retry-safe only when its exact server config sets `trust_tool_annotations` to
+`true`, the negotiated protocol revision is `2025-03-26` or newer, and the
+discovered tool declares `idempotentHint=true`; server names never imply trust.
 
 ### Hardcoded tuning knobs
 

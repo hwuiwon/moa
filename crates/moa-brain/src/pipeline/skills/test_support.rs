@@ -5,6 +5,7 @@ use moa_core::{
     types::identifiers::TenantId, types::memory::SkillMetadata, types::model::ModelCapabilities,
     types::model::TokenPricing, types::model::ToolCallFormat, types::session::SessionMeta,
 };
+use uuid::Uuid;
 
 use super::tier1_metadata::ResolvedSkillBudget;
 
@@ -49,21 +50,21 @@ pub(super) fn resolved_budget(max_manifest_chars: usize) -> ResolvedSkillBudget 
 
 pub(super) fn test_skill(name: &str, description: &str) -> SkillMetadata {
     SkillMetadata {
-        artifact_revision_uid: None,
+        artifact_revision_uid: Some(Uuid::from_u128(1)),
         path: format!(".moa/skills/{name}/SKILL.md"),
         name: name.to_string(),
         description: description.to_string(),
         tags: vec!["ops".to_string(), "debug".to_string()],
         allowed_tools: vec!["bash".to_string()],
         actions: Vec::new(),
-        has_procedure: false,
+        has_execution_plan: false,
         estimated_tokens: 1_200,
     }
 }
 
-pub(super) fn test_skill_with_procedure(name: &str, description: &str) -> SkillMetadata {
+pub(super) fn test_skill_with_execution_plan(name: &str, description: &str) -> SkillMetadata {
     SkillMetadata {
-        has_procedure: true,
+        has_execution_plan: true,
         ..test_skill(name, description)
     }
 }

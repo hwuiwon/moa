@@ -18,6 +18,7 @@ use moa_core::{
     types::learning::LearningEntry,
 };
 use moa_db::ScopedConn;
+use moa_hands::ToolRouter;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_providers::ProviderRegistry;
 use moa_session::PostgresSessionStore;
@@ -71,6 +72,7 @@ pub struct LearningReviewImpl {
     pool: sqlx::PgPool,
     config: Arc<MoaConfig>,
     providers: Arc<ProviderRegistry>,
+    router: Arc<ToolRouter>,
 }
 
 impl LearningReviewImpl {
@@ -81,12 +83,14 @@ impl LearningReviewImpl {
         pool: sqlx::PgPool,
         config: Arc<MoaConfig>,
         providers: Arc<ProviderRegistry>,
+        router: Arc<ToolRouter>,
     ) -> Self {
         Self {
             store,
             pool,
             config,
             providers,
+            router,
         }
     }
 }
@@ -127,10 +131,11 @@ impl LearningReview for LearningReviewImpl {
         let pool = self.pool.clone();
         let config = self.config.clone();
         let providers = self.providers.clone();
+        let router = self.router.clone();
 
         let response = ctx
             .run(move || async move {
-                accept_skill_candidate_after_authz(store, pool, config, providers, request)
+                accept_skill_candidate_after_authz(store, pool, config, providers, router, request)
                     .await
                     .map(Json::from)
             })
@@ -191,11 +196,19 @@ impl LearningReview for LearningReviewImpl {
 #[derive(Clone)]
 struct SessionLearningReviewStore {
     store: Arc<PostgresSessionStore>,
+    expected_compile_operation_key: Option<String>,
 }
 
 impl SessionLearningReviewStore {
     fn new(store: Arc<PostgresSessionStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            expected_compile_operation_key: None,
+        }
+    }
+
+    fn expect_compile_operation_key(&mut self, operation_key: Option<String>) {
+        self.expected_compile_operation_key = operation_key;
     }
 }
 
@@ -215,9 +228,22 @@ impl LearningReviewStore for SessionLearningReviewStore {
         update: &LearningCandidateStatusUpdate,
         expected_status: LearningCandidateStatus,
     ) -> std::result::Result<bool, moa_core::error::MoaError> {
-        self.store
-            .update_learning_candidate_status_from(update, expected_status)
-            .await
+        if matches!(
+            update.status,
+            LearningCandidateStatus::Promoted | LearningCandidateStatus::Rejected
+        ) {
+            self.store
+                .finalize_learning_candidate_status_from(
+                    update,
+                    expected_status,
+                    self.expected_compile_operation_key.as_deref(),
+                )
+                .await
+        } else {
+            self.store
+                .update_learning_candidate_status_from(update, expected_status)
+                .await
+        }
     }
 
     async fn update_learning_candidate_status_from_in_tx(
@@ -226,9 +252,23 @@ impl LearningReviewStore for SessionLearningReviewStore {
         update: &LearningCandidateStatusUpdate,
         expected_status: LearningCandidateStatus,
     ) -> std::result::Result<bool, moa_core::error::MoaError> {
-        self.store
-            .update_learning_candidate_status_from_in_tx(conn, update, expected_status)
-            .await
+        if matches!(
+            update.status,
+            LearningCandidateStatus::Promoted | LearningCandidateStatus::Rejected
+        ) {
+            self.store
+                .finalize_learning_candidate_status_from_in_tx(
+                    conn,
+                    update,
+                    expected_status,
+                    self.expected_compile_operation_key.as_deref(),
+                )
+                .await
+        } else {
+            self.store
+                .update_learning_candidate_status_from_in_tx(conn, update, expected_status)
+                .await
+        }
     }
 
     async fn append_learning_in_tx(
@@ -264,11 +304,12 @@ pub async fn accept_skill_candidate_after_authz(
     pool: sqlx::PgPool,
     config: Arc<moa_core::config::MoaConfig>,
     providers: Arc<moa_providers::ProviderRegistry>,
+    router: Arc<ToolRouter>,
     request: LearningCandidateReviewRequest,
 ) -> Result<LearningCandidateReviewResponse, HandlerError> {
     ensure_requested_action(request.action, LearningCandidateReviewAction::Accept)?;
     let review_request = skill_review_request(&request, SkillReviewAction::Accept);
-    let review_store = SessionLearningReviewStore::new(store.clone());
+    let mut review_store = SessionLearningReviewStore::new(store.clone());
     let prepared = prepare_skill_acceptance(&review_store, pool.clone(), &review_request)
         .await
         .map_err(skill_review_error_to_handler_error)?;
@@ -276,9 +317,14 @@ pub async fn accept_skill_candidate_after_authz(
         config.as_ref().clone(),
         providers,
         SkillRegistry::new(pool.clone()),
+        store,
         prepared.scope,
         prepared.candidate.clone(),
-        prepared.draft_files.clone(),
+        crate::services::skill_regression::SkillRegressionCompileContext {
+            router,
+            draft: prepared.draft.clone(),
+            draft_files: prepared.draft_files.clone(),
+        },
     )
     .await
     {
@@ -303,6 +349,7 @@ pub async fn accept_skill_candidate_after_authz(
             return Err(moa_error_to_status_handler_error(error));
         }
     };
+    review_store.expect_compile_operation_key(regression_gate.compile_operation_key.clone());
     if !regression_gate.allow_promotion {
         let outcome = reject_claimed_skill_candidate(
             &review_store,
@@ -876,6 +923,7 @@ mod tests {
             rejection_reason: rejection_reason.map(ToString::to_string),
             execution,
             held_out_sources,
+            compile_operation_key: None,
         }
     }
 

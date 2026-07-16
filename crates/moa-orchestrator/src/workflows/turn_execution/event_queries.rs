@@ -237,12 +237,13 @@ pub(super) async fn load_segment_baseline(
     ctx: &WorkflowContext<'_>,
     tenant_id: moa_core::types::identifiers::TenantId,
 ) -> Result<Option<moa_core::types::segment_assessment::SegmentBaseline>, HandlerError> {
-    Ok(ctx
-        .service_client::<RestateSessionStoreClient>()
-        .get_segment_baseline(Json(GetSegmentBaselineRequest { tenant_id }))
-        .call()
-        .await?
-        .into_inner())
+    Ok(crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .get_segment_baseline(Json(GetSegmentBaselineRequest { tenant_id })),
+    )
+    .call()
+    .await?
+    .into_inner())
 }
 
 use std::sync::Arc;

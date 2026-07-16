@@ -50,68 +50,83 @@ async fn external_memory_moa_backend_uses_production_ingest_evidence_and_isolati
         "external_memory_moa_backend_uses_production_ingest_evidence_and_isolation requires \
          MOA_DATABASE_URL",
     );
-    let schema_name = format!("moa_external_memory_{}", uuid::Uuid::now_v7().simple());
-    let store = PostgresSessionStore::new_in_schema(&database_url, &schema_name).await?;
+    let (database_url, schema_name) =
+        moa_session::testing::provision_cloned_database_from(&database_url).await?;
+    let store =
+        match PostgresSessionStore::new_in_existing_schema(&database_url, &schema_name).await {
+            Ok(store) => store,
+            Err(error) => {
+                moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await?;
+                return Err(error.into());
+            }
+        };
     let pool = store.pool().clone();
-    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbedding::new(1_024));
-    let mut backend =
-        MoaMemoryBackend::new(pool.clone(), embedder, ConsolidationOptions::default())?;
+    let run_result: TestResult = async {
+        let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbedding::new(1_024));
+        let mut backend =
+            MoaMemoryBackend::new(pool.clone(), embedder, ConsolidationOptions::default())?;
 
-    let ada = validate_case(one_turn_case(
-        "fixture/question-ada",
-        "ada-source",
-        "deployment owner uses Ada",
-    ))?;
-    let evidence = run_retrieval_case(&mut backend, &ada, 256, 50).await?;
-    assert!(evidence.tokens_used <= 256);
-    assert!(!evidence.rendered_evidence.is_empty());
-    assert!(evidence.ranked_source_refs.len() <= 50);
-    assert!(evidence.ranked_source_refs.iter().any(|source| {
-        source.session_source_id == "ada-source-session"
-            && source.turn_source_id == "ada-source-turn"
-    }));
-    assert!(evidence.rendered_source_refs.iter().any(|source| {
-        source.session_source_id == "ada-source-session"
-            && source.turn_source_id == "ada-source-turn"
-            && !source.evidence.is_empty()
-    }));
+        let ada = validate_case(one_turn_case(
+            "fixture/question-ada",
+            "ada-source",
+            "deployment owner uses Ada",
+        ))?;
+        let evidence = run_retrieval_case(&mut backend, &ada, 256, 50).await?;
+        assert!(evidence.tokens_used <= 256);
+        assert!(!evidence.rendered_evidence.is_empty());
+        assert!(evidence.ranked_source_refs.len() <= 50);
+        assert!(evidence.ranked_source_refs.iter().any(|source| {
+            source.session_source_id == "ada-source-session"
+                && source.turn_source_id == "ada-source-turn"
+        }));
+        assert!(evidence.rendered_source_refs.iter().any(|source| {
+            source.session_source_id == "ada-source-session"
+                && source.turn_source_id == "ada-source-turn"
+                && !source.evidence.is_empty()
+        }));
 
-    backend.reset("fixture/question-lin").await?;
-    let leaked = backend
-        .retrieve("deployment owner uses Ada", 256, 50)
-        .await?;
-    assert!(
-        leaked.ranked_source_refs.is_empty() && leaked.rendered_source_refs.is_empty(),
-        "new isolation must start empty"
-    );
+        backend.reset("fixture/question-lin").await?;
+        let leaked = backend
+            .retrieve("deployment owner uses Ada", 256, 50)
+            .await?;
+        assert!(
+            leaked.ranked_source_refs.is_empty() && leaked.rendered_source_refs.is_empty(),
+            "new isolation must start empty"
+        );
 
-    let lin = validate_case(one_turn_case(
-        "fixture/question-lin",
-        "lin-source",
-        "deployment owner uses Lin",
-    ))?;
-    let lin_evidence = run_retrieval_case(&mut backend, &lin, 256, 50).await?;
-    assert!(lin_evidence.ranked_source_refs.iter().all(|source| {
-        source.session_source_id == "lin-source-session"
-            && source.turn_source_id == "lin-source-turn"
-    }));
-    assert!(lin_evidence.rendered_source_refs.iter().all(|source| {
-        source.session_source_id == "lin-source-session"
-            && source.turn_source_id == "lin-source-turn"
-    }));
+        let lin = validate_case(one_turn_case(
+            "fixture/question-lin",
+            "lin-source",
+            "deployment owner uses Lin",
+        ))?;
+        let lin_evidence = run_retrieval_case(&mut backend, &lin, 256, 50).await?;
+        assert!(lin_evidence.ranked_source_refs.iter().all(|source| {
+            source.session_source_id == "lin-source-session"
+                && source.turn_source_id == "lin-source-turn"
+        }));
+        assert!(lin_evidence.rendered_source_refs.iter().all(|source| {
+            source.session_source_id == "lin-source-session"
+                && source.turn_source_id == "lin-source-turn"
+        }));
 
-    backend.reset("fixture/question-lin").await?;
-    let after_reset = backend
-        .retrieve("deployment owner uses Lin", 256, 50)
-        .await?;
-    assert!(
-        after_reset.ranked_source_refs.is_empty() && after_reset.rendered_source_refs.is_empty(),
-        "reset must clear prior state"
-    );
+        backend.reset("fixture/question-lin").await?;
+        let after_reset = backend
+            .retrieve("deployment owner uses Lin", 256, 50)
+            .await?;
+        assert!(
+            after_reset.ranked_source_refs.is_empty()
+                && after_reset.rendered_source_refs.is_empty(),
+            "reset must clear prior state"
+        );
+        Ok(())
+    }
+    .await;
 
-    drop(backend);
     drop(store);
     pool.close().await;
-    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await?;
+    let cleanup_result =
+        moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await;
+    run_result?;
+    cleanup_result?;
     Ok(())
 }

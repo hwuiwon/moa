@@ -218,7 +218,12 @@ impl LLMProvider for OpenAIProvider {
             &request,
             &resolved_model,
             &self.default_reasoning_effort,
-            enabled_native_tools(&model_capabilities, self.web_search_enabled),
+            enabled_native_tools(
+                &model_capabilities,
+                self.web_search_enabled
+                    && request.native_web_search
+                        != moa_core::types::completion::NativeWebSearchPolicy::Disabled,
+            ),
         ) {
             Ok(request) => request,
             Err(error) => {
@@ -312,6 +317,21 @@ fn native_web_search_tools() -> Vec<ProviderNativeTool> {
         name: "web_search".to_string(),
         config: None,
     }]
+}
+
+#[cfg(test)]
+pub(super) fn debug_native_tools_for_request(
+    request: &CompletionRequest,
+    web_search_enabled: bool,
+) -> Vec<ProviderNativeTool> {
+    let capabilities = capabilities_for_model("gpt-5.4").expect("known OpenAI model");
+    enabled_native_tools(
+        &capabilities,
+        web_search_enabled
+            && request.native_web_search
+                != moa_core::types::completion::NativeWebSearchPolicy::Disabled,
+    )
+    .to_vec()
 }
 
 #[cfg(test)]

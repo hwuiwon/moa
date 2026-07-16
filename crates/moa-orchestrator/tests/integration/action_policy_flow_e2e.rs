@@ -6,12 +6,22 @@ use anyhow::{Context, Result};
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use moa_core::{
-    events::Event, types::action_policy::ActionPolicyEffect,
-    types::action_policy::ActionReviewDecision, types::action_policy::ActionReviewStatus,
-    types::completion::ToolInvocation, types::events_stream::EventRange,
-    types::events_stream::EventRecord, types::identifiers::SessionId, types::identifiers::TenantId,
-    types::identifiers::ToolCallId, types::identifiers::UserId, types::session::SessionStatus,
+    events::Event,
+    types::action_policy::ActionReviewDecision,
+    types::action_policy::ActionReviewStatus,
+    types::action_policy::ExecutionTaskOrigin,
+    types::action_policy::{ActionClass, ActionEnvelope, ActionPolicyEffect, RiskLevel},
+    types::completion::ToolInvocation,
+    types::contact::SessionActorRef,
+    types::events_stream::EventRange,
+    types::events_stream::EventRecord,
+    types::identifiers::SessionId,
+    types::identifiers::TenantId,
+    types::identifiers::ToolCallId,
+    types::identifiers::UserId,
+    types::session::SessionStatus,
     types::tools::ToolCallRequest,
+    types::tools::ToolOutput,
 };
 use moa_orchestrator::objects::tenant::TenantConfig;
 use moa_orchestrator::services::action_policy::{PrepareActionReviewRequest, PreparedActionReview};
@@ -19,6 +29,7 @@ use moa_orchestrator::services::action_reviews::{
     ActionReviewDecisionKind, ActionReviewSummary, DecideActionReviewRequest,
     ListActionReviewsRequest, RequestActionReview,
 };
+use moa_orchestrator::services::tool_executor::ExecutionTaskToolCallRequest;
 use moa_test_support::{IsolatedTest, OrchestratorTestFixture, TestApiClient};
 use serde::Serialize;
 use serde_json::json;
@@ -34,6 +45,297 @@ async fn action_policy_flow_covers_auto_review_decision_and_member_authz() -> Re
     tenant_admin_clear_executes_stored_review_action(&fixture).await?;
     tenant_admin_deny_does_not_execute_stored_review_action(&fixture).await?;
     tenant_member_cannot_decide_action_review(&fixture).await?;
+    execution_task_tool_executor_emits_zero_root_tool_events(&fixture).await?;
+    claimed_execution_review_exact_replay_resumes_and_conflict_rejects(&fixture).await?;
+    Ok(())
+}
+
+async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
+    fixture: &OrchestratorTestFixture,
+) -> Result<()> {
+    // Pins: after the clear claim commits, a crash before tool completion or
+    // outbox creation can replay the identical claim and finish with the same
+    // tool-call id; a different claimant cannot take over that journaled work.
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("execution-review-claim-replay").await?;
+    let session = test.client().get_session(session_id).await?;
+    fixture
+        .grant_default_tenant_admin(session.tenant_id)
+        .await
+        .context("grant admin before replaying execution review")?;
+    let deciding_user = match session.created_by {
+        Some(SessionActorRef::Identity { id }) => id.to_string(),
+        other => anyhow::bail!("fixture session has no deciding identity: {other:?}"),
+    };
+    let pool = sqlx::PgPool::connect(&fixture.postgres_url)
+        .await
+        .context("connect to fixture Postgres")?;
+    let originating_user_sequence_num = test
+        .client()
+        .append_event(
+            session_id,
+            Event::UserMessage {
+                text: "resume the claimed execution review".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await?;
+    let origin = insert_execution_review_task(
+        &pool,
+        session.tenant_id,
+        session_id,
+        originating_user_sequence_num,
+    )
+    .await?;
+    let command = format!("printf claimed-review-replay-{}", Uuid::now_v7());
+    let review_id = Uuid::now_v7();
+    let claimed_tool_call_id = Uuid::now_v7();
+    let tool_call_id = ToolCallId::new();
+    let tool_request = ToolCallRequest {
+        tool_call_id,
+        provider_tool_use_id: None,
+        tool_name: "bash".to_string(),
+        input: json!({"cmd": command.clone()}),
+        active_canary: None,
+        session_id: Some(session_id),
+        tenant_id: session.tenant_id,
+        user_id: UserId::new(deciding_user.clone()),
+        trusted_sandbox_manifest: None,
+        worker_id: None,
+    };
+    let envelope = ActionEnvelope {
+        review_id,
+        tenant_id: session.tenant_id,
+        requested_by: SessionActorRef::Anonymous,
+        session_id: Some(session_id),
+        worker_id: None,
+        tool_call_id,
+        tool_name: "bash".to_string(),
+        normalized_input: command.clone(),
+        input_summary: "claimed execution review replay".to_string(),
+        risk_level: RiskLevel::High,
+        action_class: ActionClass::CommandExecution,
+        origin_kind: None,
+        origin_id: None,
+        origin_step_id: None,
+        execution_origin: Some(origin),
+        idempotency_key: None,
+        created_at: chrono::Utc::now(),
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO tenant_action_reviews (
+            id, tenant_id, storage_partition_id, session_id, tool_call_id, tool_name,
+            action_class, risk_level, input_summary, normalized_input, envelope,
+            preview, tool_request, requested_by, status, created_at, expires_at,
+            decided_by, decided_at, execution_tool_call_id, execution_requested_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, 'bash', 'command_execution', 'high',
+            'claimed execution review replay', $6, $7,
+            '{"fields":[],"file_diffs":[]}'::JSONB, $8, 'anonymous', 'pending',
+            NOW(), NOW() + INTERVAL '1 day', 'conflicting-claimer', NOW(), $9, NOW()
+        )
+        "#,
+    )
+    .bind(review_id)
+    .bind(session.tenant_id.0)
+    .bind(
+        moa_core::types::identifiers::StoragePartitionId::for_tenant(session.tenant_id).to_string(),
+    )
+    .bind(session_id.0)
+    .bind(tool_call_id.0)
+    .bind(&command)
+    .bind(serde_json::to_value(envelope)?)
+    .bind(serde_json::to_value(tool_request)?)
+    .bind(claimed_tool_call_id)
+    .execute(&pool)
+    .await
+    .context("simulate crash after a conflicting durable claim")?;
+    let conflicting = decide_review(
+        test.client(),
+        session.tenant_id,
+        review_id,
+        ActionReviewDecisionKind::Cleared,
+        None,
+    )
+    .await;
+    assert!(
+        conflicting.is_err(),
+        "a different caller must not replay another claimant's execution"
+    );
+
+    sqlx::query("UPDATE tenant_action_reviews SET decided_by = $2 WHERE id = $1")
+        .bind(review_id)
+        .bind(&deciding_user)
+        .execute(&pool)
+        .await
+        .context("fixture should restore the identical durable claimant")?;
+    decide_review(
+        test.client(),
+        session.tenant_id,
+        review_id,
+        ActionReviewDecisionKind::Cleared,
+        None,
+    )
+    .await
+    .context("identical claimed clear should resume execution and finalization")?;
+
+    let (status, persisted_tool_call_id): (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT status, execution_tool_call_id FROM tenant_action_reviews WHERE id = $1",
+    )
+    .bind(review_id)
+    .fetch_one(&pool)
+    .await
+    .context("finalized review should remain queryable")?;
+    assert_eq!(status, "cleared");
+    assert_eq!(persisted_tool_call_id, Some(claimed_tool_call_id));
+    let resolution: serde_json::Value = sqlx::query_scalar(
+        "SELECT resolution FROM moa.execution_action_review_outbox WHERE review_uid = $1",
+    )
+    .bind(review_id)
+    .fetch_one(&pool)
+    .await
+    .context("finalization should atomically create the execution resolution outbox")?;
+    assert_eq!(
+        resolution.get("status").and_then(serde_json::Value::as_str),
+        Some("completed")
+    );
+    Ok(())
+}
+
+async fn insert_execution_review_task(
+    pool: &sqlx::PgPool,
+    tenant_id: TenantId,
+    session_id: SessionId,
+    originating_user_sequence_num: u64,
+) -> Result<ExecutionTaskOrigin> {
+    let run_uid = Uuid::new_v4();
+    let task_uid = Uuid::new_v4();
+    let planning_context_uid = Uuid::new_v4();
+    let hash = "0".repeat(64);
+    let originating_user_sequence_num = i64::try_from(originating_user_sequence_num)
+        .context("execution review origin sequence exceeds PostgreSQL BIGINT")?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.execution_planning_context (
+            planning_context_uid, tenant_id, session_id,
+            originating_user_sequence_num, originating_user_event_hash,
+            owner_user_id, planning_context_hash, snapshot
+        ) VALUES ($1, $2, $3, $4, $5, 'test-owner', $5, '{}'::JSONB)
+        "#,
+    )
+    .bind(planning_context_uid)
+    .bind(tenant_id.0)
+    .bind(session_id.0)
+    .bind(originating_user_sequence_num)
+    .bind(&hash)
+    .execute(pool)
+    .await
+    .context("insert execution review planning-context fixture")?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.execution_run (
+            run_uid, tenant_id, session_id, originating_user_sequence_num,
+            planning_context_uid, planning_context_hash, owner_user_id, goal_contract,
+            initial_plan, active_plan, initial_plan_hash, active_plan_hash,
+            capability_catalog, authorization_envelope, pinned_instruction_skills,
+            source_provenance, source_kind, route_mode, route_reason,
+            input, status, queued_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'test-owner',
+                  '{}'::JSONB, '{}'::JSONB, '{}'::JSONB, $6, $6,
+                  '{}'::JSONB, '{}'::JSONB, '[]'::JSONB,
+                  '{"kind":"generated_plan","route_reason":"approval_or_signal"}'::JSONB,
+                  'generated_plan', 'run', 'approval_or_signal',
+                  '{}'::JSONB, 'queued', NOW())
+        "#,
+    )
+    .bind(run_uid)
+    .bind(tenant_id.0)
+    .bind(session_id.0)
+    .bind(originating_user_sequence_num)
+    .bind(planning_context_uid)
+    .bind(hash)
+    .execute(pool)
+    .await
+    .context("insert execution review run fixture")?;
+    sqlx::query("UPDATE moa.execution_run SET status = 'running' WHERE run_uid = $1")
+        .bind(run_uid)
+        .execute(pool)
+        .await
+        .context("start execution review run fixture")?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.execution_task (
+            task_id, run_uid, tenant_id, node_id, item_key, plan_revision,
+            status, input, task_kind, retry_policy,
+            estimate_cost_microusd, estimate_tokens, estimate_tasks,
+            estimate_tool_calls, estimate_retrieved_bytes
+        ) VALUES ($1, $2, $3, 'review', 'replay', 1, 'running', '{}'::JSONB,
+                  '{}'::JSONB, '{}'::JSONB, 0, 0, 1, 0, 0)
+        "#,
+    )
+    .bind(task_uid)
+    .bind(run_uid)
+    .bind(tenant_id.0)
+    .execute(pool)
+    .await
+    .context("insert execution review task fixture")?;
+    Ok(ExecutionTaskOrigin {
+        run_uid,
+        task_uid,
+        generation: 1,
+    })
+}
+
+async fn execution_task_tool_executor_emits_zero_root_tool_events(
+    fixture: &OrchestratorTestFixture,
+) -> Result<()> {
+    // Pins: dynamic task execution uses the owning session context without replaying or appending root tool events.
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("execution-task-no-root-events").await?;
+    let session = test.client().get_session(session_id).await?;
+    let tool_call_id = ToolCallId::new();
+    let output: ToolOutput = test
+        .client()
+        .post_call(
+            "/ToolExecutor/execute_execution_task",
+            &ExecutionTaskToolCallRequest {
+                call: ToolCallRequest {
+                    tool_call_id,
+                    provider_tool_use_id: None,
+                    tool_name: "bash".to_string(),
+                    input: json!({"cmd": "printf execution-task-ok"}),
+                    active_canary: None,
+                    session_id: Some(session_id),
+                    tenant_id: session.tenant_id,
+                    user_id: UserId::new("execution-task-owner"),
+                    trusted_sandbox_manifest: None,
+                    worker_id: None,
+                },
+                origin: Some(ExecutionTaskOrigin {
+                    run_uid: Uuid::new_v4(),
+                    task_uid: Uuid::new_v4(),
+                    generation: 7,
+                }),
+            },
+        )
+        .await
+        .context("execute isolated execution-task tool call")?;
+    assert_eq!(output.to_text(), "execution-task-ok");
+
+    let events = test
+        .client()
+        .get_events(session_id, EventRange::all())
+        .await?;
+    assert!(
+        events.iter().all(|record| !matches!(
+            &record.event,
+            Event::ToolCall { tool_id, .. } | Event::ToolResult { tool_id, .. }
+                if *tool_id == tool_call_id
+        )),
+        "execution-task dispatch must emit zero root ToolCall/ToolResult events: {}",
+        event_summary(&events)
+    );
     Ok(())
 }
 
@@ -418,6 +720,7 @@ async fn run_scripted_turn(
                 model: None,
                 contact: None,
                 max_turns: None,
+                execution_template: None,
             },
             None,
         )
@@ -485,9 +788,8 @@ async fn create_pending_bash_review(
                 review_id,
                 tool_call_id,
                 worker_id: None,
-                origin_kind: None,
-                origin_id: None,
-                origin_step_id: None,
+                capability_provenance: Default::default(),
+                execution_origin: None,
                 idempotency_key: None,
             },
         )

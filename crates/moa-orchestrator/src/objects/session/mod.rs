@@ -7,7 +7,7 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use moa_core::config::SessionLimitsConfig;
 use moa_core::traits::SessionRepository;
-use moa_core::wire::session_store::{AppendEventRequest, UpdateStatusRequest};
+use moa_core::wire::session_store::{AppendEventRequest, GetEventsRequest, UpdateStatusRequest};
 use moa_core::wire::turn::{
     CancelResponse, PendingMessage, QueueMessageRequest, QueueMessageResponse, RunTurnRequest,
     SessionProgress, SessionProgressRequest, SessionSnapshot, StartTurnRequest, StartTurnResponse,
@@ -15,27 +15,33 @@ use moa_core::wire::turn::{
     TurnTrigger,
 };
 use moa_core::{
-    error::MoaError, error::Result as MoaResult, events::Event, types::contact::ContactRef,
+    error::MoaError, error::Result as MoaResult, events::Event, events::ExecutionInputRequired,
+    events::ExecutionProgress, events::ExecutionRunEvidenceRef,
+    events::ExecutionSynthesisRequested, types::contact::ContactRef,
     types::events_stream::ClaimCheck, types::events_stream::EventRange,
-    types::events_stream::EventRecord, types::identifiers::SessionId,
-    types::segments::ActiveSegment, types::session::CancelScope, types::session::SessionMeta,
-    types::session::SessionStatus, types::session::UserMessage,
+    types::events_stream::EventRecord, types::execution_planning::ExecutionRunStarted,
+    types::identifiers::SessionId, types::segments::ActiveSegment, types::session::CancelScope,
+    types::session::SessionMeta, types::session::SessionStatus, types::session::UserMessage,
     types::worker::commands::ConsumeWorkerChildResultInput,
     types::worker::commands::ConsumeWorkerChildResultOutput,
-    types::worker::commands::MarkWorkerChildTerminalInput, types::worker::state::ChildSignalKind,
+    types::worker::commands::MarkWorkerChildTerminalInput,
+    types::worker::commands::UserReplyDeliveryAck, types::worker::state::ChildSignalKind,
     types::worker::state::InputAudience, types::worker::state::ParentResumePolicy,
     types::worker::state::SignalSeverity, types::worker::state::UnreadChildSignal,
     types::worker::state::WorkerChildRef, types::worker::state::WorkerId,
-    types::worker::state::WorkerMessage, types::worker::state::WorkerProgressSummary,
-    types::worker::state::WorkerSignal, types::worker::state::WorkerTerminalResult,
+    types::worker::state::WorkerProgressSummary, types::worker::state::WorkerSignal,
+    types::worker::state::WorkerTerminalResult,
 };
 use moa_observability::record_turn_event_persist_duration;
+use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
 use crate::objects::durable_utc_now;
 use crate::objects::worker::WorkerClient;
+use crate::objects::worker::WorkerProvideInputRequest;
 use crate::restate_identity::with_identity_headers;
+use crate::services::execution::ExecutionClient;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::vo::{
     Tracked, VoReader, VoState, set_changed_opt, set_changed_scalar, set_changed_vec,
@@ -45,6 +51,7 @@ use crate::worker_dispatch::MAX_WORKER_FAN_OUT;
 use crate::workflows::turn_execution::TurnExecutionClient;
 use moa_observability::restate_observability::{annotate_restate_handler_span, event_persist_span};
 
+mod execution_runs;
 mod handlers;
 mod liveness;
 mod narration;
@@ -53,6 +60,11 @@ mod state;
 
 use crate::workflows::errors::moa_error_to_handler_error;
 use persistence::{parse_session_key, sync_status};
+pub use state::{
+    ActiveExecutionRunState, ExecutionProgressSignature, ExecutionSynthesisDedupe,
+    ExecutionTemplateAdmissionReplayState, ExecutionTemplateAdmissionResume,
+    PendingUserReplyTarget,
+};
 pub use state::{ChildLivenessState, ResumeBudget, ResumeTurnContext, SessionVoState};
 
 const K_PENDING_STATE: &str = "pending_state";
@@ -97,47 +109,6 @@ pub struct RemoveSessionTurnWaiterInput {
     pub awakeable_id: String,
 }
 
-/// Input for registering a deterministic auto-delegation run owned by the session.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RegisterAutoDelegationRunInput {
-    /// User-message sequence that caused the worker DAG to be scheduled.
-    pub user_sequence_num: u64,
-    /// Worker ids in deterministic scheduled order.
-    pub worker_ids: Vec<WorkerId>,
-}
-
-/// Input for polling deterministic auto-delegation fan-in from the root turn.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PollAutoDelegationFanInInput {
-    /// User-message sequence whose run the root turn is fanning in.
-    pub user_sequence_num: u64,
-    /// Active root turn id, claimed as the synthesis owner when the bundle is ready.
-    pub root_turn_id: String,
-    /// When true, fail out any worker still not terminal and complete the run now, rather than
-    /// reporting `Pending`. Set once the root fan-in wait bound for a stuck worker is exceeded.
-    #[serde(default)]
-    pub force_complete: bool,
-}
-
-/// Run-owned fan-in status reported to the root turn from the Session VO.
-///
-/// Computed from the run's own captured terminal snapshots, so a worker removed from the
-/// transient `children` registry (self-cleanup or `wait_worker` consume) cannot make a
-/// still-pending run look complete or a complete run look unavailable.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum AutoDelegationFanInStatus {
-    /// Every scheduled worker reported; the durable bundle is emitted and synthesis is
-    /// owned by the requesting root turn. The caller may proceed to synthesize.
-    Ready,
-    /// At least one scheduled worker has not reported; the caller should wait on it.
-    Pending {
-        /// First scheduled worker still missing a terminal result.
-        worker_id: WorkerId,
-    },
-    /// No active auto-delegation run matches the requested user sequence.
-    NotRunning,
-}
-
 /// Internal payload for a generation-guarded progress-narration tick self-call.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NarrationTickRequest {
@@ -158,6 +129,28 @@ pub struct CheckChildLivenessRequest {
     pub expected_generation: u64,
     /// When this check was scheduled to fire (journaled at schedule time, informational).
     pub scheduled_at: DateTime<Utc>,
+}
+
+/// Session delivery payload for one committed execution-run admission.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionRunStartedDelivery {
+    /// Exact durable session event payload from Task 7.
+    pub started: ExecutionRunStarted,
+    /// Exact approved run budget needed for confirmation replay.
+    pub approved_budget: moa_artifacts::execution_plan::ExecutionBudgetLimit,
+}
+
+/// Stable result of delivering one terminal execution into its linked synthesis turn.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionSynthesisDispatch {
+    /// Durable execution-run identifier.
+    pub run_uid: uuid::Uuid,
+    /// Exact persisted user event that originated the run.
+    pub originating_user_sequence_num: u64,
+    /// Stable linked synthesis workflow key.
+    pub turn_id: String,
 }
 
 /// Restate virtual object surface for one durable session key.
@@ -183,6 +176,29 @@ pub trait Session {
 
     /// Records the terminal outcome delivered by a `TurnExecution` workflow.
     async fn record_turn_outcome(outcome: Json<ExecutionTurnOutcome>) -> Result<(), HandlerError>;
+
+    /// Commits and activates one detached execution-run admission marker.
+    async fn execution_run_started(
+        delivery: Json<ExecutionRunStartedDelivery>,
+    ) -> Result<(), HandlerError>;
+
+    /// Admits one exact pinned execution template through this existing Session.
+    async fn admit_execution_template(
+        request: Json<moa_execution::wire::ExecutionTemplateAdmissionRequest>,
+    ) -> Result<Json<moa_execution::wire::ExecutionTemplateAdmissionResponse>, HandlerError>;
+
+    /// Publishes one cadence- and delta-gated aggregate execution progress event.
+    async fn execution_progress(progress: Json<ExecutionProgress>) -> Result<(), HandlerError>;
+
+    /// Publishes and activates one exact user-addressed execution input request.
+    async fn execution_input_required(
+        input: Json<ExecutionInputRequired>,
+    ) -> Result<(), HandlerError>;
+
+    /// Publishes terminal evidence and durably dispatches its one linked synthesis turn.
+    async fn execution_terminal(
+        delivery: Json<moa_execution::wire::ExecutionTerminalDelivery>,
+    ) -> Result<Json<ExecutionSynthesisDispatch>, HandlerError>;
 
     /// Registers a workflow awakeable that should resolve when the turn completes.
     async fn attach_turn_waiter(
@@ -214,20 +230,6 @@ pub trait Session {
 
     /// Registers a root-owned child worker for later turns and cancellation.
     async fn register_child(child: Json<WorkerChildRef>) -> Result<(), HandlerError>;
-
-    /// Registers the worker set for deterministic auto-delegation completion fan-in.
-    async fn register_auto_delegation_run(
-        input: Json<RegisterAutoDelegationRunInput>,
-    ) -> Result<(), HandlerError>;
-
-    /// Reports run-owned auto-delegation fan-in status to the active root turn.
-    ///
-    /// Emits the durable result bundle when the run is complete (idempotent) and claims
-    /// synthesis ownership for the requesting root turn, so the completion fallback does not
-    /// dispatch a duplicate synthesis turn.
-    async fn poll_auto_delegation_fan_in(
-        input: Json<PollAutoDelegationFanInInput>,
-    ) -> Result<Json<AutoDelegationFanInStatus>, HandlerError>;
 
     /// Removes a root-owned child worker from the active registry.
     async fn remove_child(worker_id: String) -> Result<(), HandlerError>;
@@ -267,6 +269,7 @@ pub trait Session {
 /// Concrete `Session` virtual object implementation.
 pub struct SessionImpl {
     session_store: Arc<dyn SessionRepository>,
+    session_store_backend: Arc<PostgresSessionStore>,
     session_limits: SessionLimitsConfig,
 }
 
@@ -274,11 +277,12 @@ impl SessionImpl {
     /// Creates a session object with its persistence and scheduling dependencies.
     #[must_use]
     pub fn new(
-        session_store: Arc<dyn SessionRepository>,
+        session_store: Arc<PostgresSessionStore>,
         session_limits: SessionLimitsConfig,
     ) -> Self {
         Self {
-            session_store,
+            session_store: session_store.clone(),
+            session_store_backend: session_store,
             session_limits,
         }
     }
@@ -369,14 +373,16 @@ async fn append_session_event_deduped(
     event: Event,
     dedupe_key: String,
 ) -> Result<(), HandlerError> {
-    ctx.service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event,
-            dedupe_key: Some(dedupe_key),
-        }))
-        .call()
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event,
+                dedupe_key: Some(dedupe_key),
+            })),
+    )
+    .call()
+    .await?;
     Ok(())
 }
 

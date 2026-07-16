@@ -162,6 +162,7 @@ impl Contacts for ContactsImpl {
         ctx: Context<'_>,
         request: Json<ContactTokenIssueRequest>,
     ) -> Result<Json<ContactTokenIssueResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Contacts", "issue_token");
         let request = request.into_inner();
         let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
@@ -233,6 +234,7 @@ impl Contacts for ContactsImpl {
         ctx: Context<'_>,
         request: Json<ContactVerificationStartRequest>,
     ) -> Result<Json<ContactVerificationStartResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Contacts", "start_verification");
         let request = request.into_inner();
         let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
@@ -301,6 +303,7 @@ impl Contacts for ContactsImpl {
         ctx: Context<'_>,
         request: Json<ContactVerificationCompleteRequest>,
     ) -> Result<Json<ContactVerificationCompleteResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Contacts", "complete_verification");
         let request = request.into_inner();
         let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
@@ -381,6 +384,7 @@ impl Contacts for ContactsImpl {
         ctx: Context<'_>,
         request: Json<ContactSessionInitRequest>,
     ) -> Result<Json<ContactSessionInitResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Contacts", "init_session");
         let request = request.into_inner();
         let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
@@ -522,10 +526,12 @@ impl Contacts for ContactsImpl {
             .name("contacts_create_session")
             .await?
             .into_inner();
-        ctx.object_client::<SessionClient>(session_id.to_string())
-            .set_meta(Json::from(meta_for_vo))
-            .call()
-            .await?;
+        crate::restate_identity::replay_safe_request(
+            ctx.object_client::<SessionClient>(session_id.to_string())
+                .set_meta(Json::from(meta_for_vo)),
+        )
+        .call()
+        .await?;
         annotate_contact_operation_span(&response_contact, Some(session_id));
 
         Ok(Json::from(ContactSessionInitResponse {
@@ -541,6 +547,7 @@ impl Contacts for ContactsImpl {
         ctx: Context<'_>,
         request: Json<ContactSessionChannelChangeRequest>,
     ) -> Result<Json<ContactSessionChannelChangeResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Contacts", "change_session_channel");
         let request = request.into_inner();
         let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
@@ -638,10 +645,12 @@ impl Contacts for ContactsImpl {
             .name("contacts_change_session_channel")
             .await?
             .into_inner();
-        ctx.object_client::<SessionClient>(session_id.to_string())
-            .set_meta(Json::from(meta))
-            .call()
-            .await?;
+        crate::restate_identity::replay_safe_request(
+            ctx.object_client::<SessionClient>(session_id.to_string())
+                .set_meta(Json::from(meta)),
+        )
+        .call()
+        .await?;
         annotate_contact_operation_span(&contact, Some(session_id));
 
         Ok(Json::from(ContactSessionChannelChangeResponse {
@@ -659,6 +668,7 @@ impl Contacts for ContactsImpl {
         ctx: Context<'_>,
         request: Json<ContactSessionMessageRequest>,
     ) -> Result<Json<ContactSessionMessageResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Contacts", "send_message");
         let request = request.into_inner();
         if let Err(message) = request.validate_admitted_payload() {
@@ -705,6 +715,7 @@ impl Contacts for ContactsImpl {
                     model: request.model,
                     contact: None,
                     max_turns: request.max_turns,
+                    execution_template: None,
                 })),
             &identity,
         )
@@ -727,6 +738,7 @@ impl Contacts for ContactsImpl {
         ctx: Context<'_>,
         request: Json<ContactSessionAuthorizationRequest>,
     ) -> Result<Json<ContactSessionAuthorizationResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Contacts", "authorize_session");
         let request = request.into_inner();
         let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
@@ -776,6 +788,7 @@ impl Contacts for ContactsImpl {
         ctx: Context<'_>,
         request: Json<ContactSessionProgressRequest>,
     ) -> Result<Json<SessionProgress>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Contacts", "progress");
         let request = request.into_inner();
         let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
@@ -832,6 +845,7 @@ impl Contacts for ContactsImpl {
         ctx: Context<'_>,
         request: Json<ContactSessionPromotionRequest>,
     ) -> Result<Json<ContactSessionPromotionResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Contacts", "promote_session");
         let request = request.into_inner();
         let claims = self.verify_contact_token(&request.contact_token, request.tenant_id)?;
@@ -895,10 +909,12 @@ impl Contacts for ContactsImpl {
             .into_inner();
         meta.contact = Some(contact.clone());
         meta.contact_promoted_from_id = promoted_from;
-        ctx.object_client::<SessionClient>(request.session_id.to_string())
-            .set_meta(Json::from(meta))
-            .call()
-            .await?;
+        crate::restate_identity::replay_safe_request(
+            ctx.object_client::<SessionClient>(request.session_id.to_string())
+                .set_meta(Json::from(meta)),
+        )
+        .call()
+        .await?;
         annotate_contact_operation_span(&contact, Some(request.session_id));
 
         Ok(Json::from(ContactSessionPromotionResponse {

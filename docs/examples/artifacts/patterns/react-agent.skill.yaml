@@ -2,7 +2,7 @@ api_version: moa.artifact/v1
 kind: skill
 metadata:
   name: react-agent
-  description: Skill whose procedure delegates one bounded open-ended turn to the agent loop.
+  description: Skill whose execution plan delegates one bounded open-ended task to an agent.
   tags:
     - pattern
     - react
@@ -13,49 +13,79 @@ definition:
   spec:
     instructions:
       path: SKILL.md
-    procedure:
-      nodes:
-        - id: start
-          kind: start
-          ui:
-            x: 80
-            y: 140
-        - id: retrieve_context
-          kind: memory_read
-          input:
-            query: "customer preferences relevant to this task"
-            limit: 6
-          ui:
-            x: 270
-            y: 140
-        - id: bounded_agent_turn
-          kind: agent
-          skill_refs:
-            - skill://support-triage
-          tool_refs:
-            - tool://orders.lookup
-            - tool://knowledge.search
-          max_turns: 4
-          input:
-            instruction: Use the retrieved context, reason with tools if needed, and return one final recommendation.
-          ui:
-            x: 500
-            y: 140
-        - id: done
-          kind: end
-          ui:
-            x: 760
-            y: 140
-      edges:
-        - id: start-retrieve-context
-          from: start
-          to: retrieve_context
-        - id: retrieve-context-bounded-agent-turn
-          from: retrieve_context
-          to: bounded_agent_turn
-        - id: bounded-agent-turn-done
-          from: bounded_agent_turn
-          to: done
-      ui:
-        layout: dagre
-        version: 1
+    execution_plan:
+      goal:
+        requirements:
+          - id: req_recommendation
+            description: Produce one recommendation grounded in retrieved context.
+        deliverables: []
+        coverage: []
+        constraints: []
+        completion_checks:
+          - id: check_output
+            description: Validate the recommendation output.
+            requirement_ids: [req_recommendation]
+            constraint_ids: []
+            kind:
+              kind: output_schema
+      plan:
+        schema_version: 1
+        input_schema:
+          type: object
+        output_schema:
+          type: object
+        nodes:
+          - id: retrieve_context
+            requirement_ids: [req_recommendation]
+            depends_on: []
+            input:
+              query: customer preferences relevant to this task
+              limit: 6
+            output_schema:
+              type: object
+            operation:
+              kind: capability
+              reference:
+                name: memory.read
+                version: v1
+            retry:
+              max_attempts: 2
+              initial_backoff_ms: 100
+              max_backoff_ms: 1000
+          - id: bounded_agent_turn
+            requirement_ids: [req_recommendation]
+            depends_on: [retrieve_context]
+            input:
+              context:
+                $ref: $.nodes.retrieve_context.output
+            output_schema:
+              type: object
+            operation:
+              kind: agent
+              instructions: Use the retrieved context, reason with capabilities if needed, and return one final recommendation.
+              skill_refs:
+                - skill://support-triage
+              capability_refs:
+                - name: orders.lookup
+                  version: v1
+                - name: knowledge.search
+                  version: v1
+              max_turns: 4
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0
+          - id: output
+            requirement_ids: [req_recommendation]
+            depends_on: [bounded_agent_turn]
+            input: {}
+            output_schema:
+              type: object
+            operation:
+              kind: output
+              value:
+                $ref: $.nodes.bounded_agent_turn.output
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0

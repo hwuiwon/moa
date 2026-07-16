@@ -1,76 +1,68 @@
 //! Shared cancellation fan-out for experiment run and trial workflows.
-//!
-//! Cancelling an experiment run must stop live work, not only update database
-//! projections. Both the parent [`ExperimentRun`](crate::workflows::experiment_run)
-//! workflow (for single-target runs) and each
-//! [`ExperimentTrialRun`](crate::workflows::experiment_trial_run) workflow drive a
-//! child target — a target session (agent-loop) or a durable procedure run. This
-//! module owns the replay-safe logic that maps a workflow's durable child links to
-//! the concrete cancellation surfaces, so both workflows forward cancellation the
-//! same way through the existing `Session` and `ProcedureExecution` `request_cancel`
-//! handlers. Cancelling the child makes the workflow's own durable wait resolve as
-//! `Cancelled`, so it stops promptly instead of waiting out the target timeout.
 
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::types::identifiers::SessionId;
+use moa_core::types::contact::ContactId;
+use moa_core::types::identifiers::{SessionId, TenantId};
+use moa_execution::wire::{ExecutionCancelRequest, ExecutionRunRequest};
 use restate_sdk::context::Request;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::objects::session::SessionClient;
-use crate::workflows::procedure_execution::ProcedureExecutionClient;
+use crate::services::execution::ExecutionClient;
 
-/// Durable state key holding the identity that created the experiment's child
-/// work, used to authorize the target-session cancellation forward.
+/// Durable state key holding the identity that created the experiment child work.
 pub(crate) const K_CANCEL_IDENTITY: &str = "cancel_identity";
+/// Durable state key holding the effective execution contact scope.
+pub(crate) const K_EXECUTION_CONTACT_ID: &str = "execution_contact_id";
+/// Durable state key holding the linked execution run.
+pub(crate) const K_EXECUTION_RUN_UID: &str = "execution_run_uid";
 
-/// Durable state key holding the trial/run's target session id, if any.
-///
-/// Matches the `"session_id"` key both workflows set when they attach a session.
 const K_SESSION_ID: &str = "session_id";
 
-/// Durable state key holding the trial/run's procedure run id, if any.
-///
-/// Matches the `"procedure_run_uid"` key both workflows set when they start a
-/// procedure target.
-const K_PROCEDURE_RUN_UID: &str = "procedure_run_uid";
-
-/// A child execution surface an experiment cancellation must stop.
+/// Child surface selected by an experiment cancellation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ChildCancelTarget {
-    /// An agent-loop target session, cancelled through `Session/request_cancel`.
+    /// Agent-loop Session cancellation.
     Session(SessionId),
-    /// A durable procedure run, cancelled through `ProcedureExecution/request_cancel`.
-    Procedure(Uuid),
+    /// Execution cancellation under its exact parent Session and scope.
+    Execution {
+        /// Owning tenant.
+        tenant_id: TenantId,
+        /// Optional owning contact.
+        contact_id: Option<ContactId>,
+        /// Parent Session.
+        session_id: SessionId,
+        /// Durable execution run.
+        run_uid: Uuid,
+    },
 }
 
-/// Returns the child execution surfaces to cancel for a workflow's durable links.
+/// Selects exactly one child cancellation surface.
 ///
-/// A workflow may have started a target session, a procedure run, both (never in
-/// current paths), or neither (nothing to cancel yet). The order is
-/// session-before-procedure so the transcript-bearing surface is signaled first.
-pub(crate) fn child_cancel_targets(
+/// An execution-template target owns both a Session link and an execution link,
+/// but cancellation must stop only the execution run. A Session-only link is an
+/// agent-loop target and continues through `Session/request_cancel`.
+#[must_use]
+pub(crate) fn child_cancel_target(
+    identity: Option<&Identity>,
+    contact_id: Option<ContactId>,
     session_id: Option<SessionId>,
-    procedure_run_uid: Option<Uuid>,
-) -> Vec<ChildCancelTarget> {
-    let mut targets = Vec::new();
-    if let Some(session_id) = session_id {
-        targets.push(ChildCancelTarget::Session(session_id));
+    execution_run_uid: Option<Uuid>,
+) -> Option<ChildCancelTarget> {
+    match (identity, session_id, execution_run_uid) {
+        (Some(identity), Some(session_id), Some(run_uid)) => Some(ChildCancelTarget::Execution {
+            tenant_id: identity.tenant_id,
+            contact_id,
+            session_id,
+            run_uid,
+        }),
+        (_, Some(session_id), None) => Some(ChildCancelTarget::Session(session_id)),
+        _ => None,
     }
-    if let Some(procedure_run_uid) = procedure_run_uid {
-        targets.push(ChildCancelTarget::Procedure(procedure_run_uid));
-    }
-    targets
 }
 
-/// Forwards cancellation from an experiment run/trial workflow to its live child
-/// target work.
-///
-/// Reads the workflow's durable child links and creator identity, then signals
-/// the existing `Session` / `ProcedureExecution` `request_cancel` handlers with a
-/// one-way send. Best-effort: unset links are skipped, and the target session
-/// cancel carries the creator identity headers because `Session/request_cancel`
-/// authorizes the caller as a session participant.
+/// Forwards cancellation from an experiment workflow to its live child.
 pub(crate) async fn forward_child_cancellation(
     ctx: &SharedWorkflowContext<'_>,
     reason: String,
@@ -79,40 +71,60 @@ pub(crate) async fn forward_child_cancellation(
         .get::<Json<SessionId>>(K_SESSION_ID)
         .await?
         .map(Json::into_inner);
-    let procedure_run_uid = ctx
-        .get::<Json<Uuid>>(K_PROCEDURE_RUN_UID)
+    let execution_run_uid = ctx
+        .get::<Json<Uuid>>(K_EXECUTION_RUN_UID)
+        .await?
+        .map(Json::into_inner);
+    let contact_id = ctx
+        .get::<Json<ContactId>>(K_EXECUTION_CONTACT_ID)
         .await?
         .map(Json::into_inner);
     let identity = ctx
         .get::<Json<Identity>>(K_CANCEL_IDENTITY)
         .await?
         .map(Json::into_inner);
-    for target in child_cancel_targets(session_id, procedure_run_uid) {
-        match target {
-            ChildCancelTarget::Session(session_id) => {
-                let request = ctx
-                    .object_client::<SessionClient>(session_id.to_string())
-                    .request_cancel(Json::from(reason.clone()));
-                match &identity {
-                    Some(identity) => {
-                        with_identity_headers(request, identity).send();
-                    }
-                    None => {
-                        request.send();
-                    }
-                }
-            }
-            ChildCancelTarget::Procedure(run_uid) => {
-                ctx.workflow_client::<ProcedureExecutionClient>(run_uid.to_string())
-                    .request_cancel(Json::from(reason.clone()))
-                    .send();
-            }
+    let Some(target) =
+        child_cancel_target(identity.as_ref(), contact_id, session_id, execution_run_uid)
+    else {
+        return Ok(());
+    };
+    match target {
+        ChildCancelTarget::Session(session_id) => {
+            let request = ctx
+                .object_client::<SessionClient>(session_id.to_string())
+                .request_cancel(Json::from(reason));
+            match identity.as_ref() {
+                Some(identity) => with_identity_headers(request, identity).send(),
+                None => crate::restate_identity::replay_safe_request(request).send(),
+            };
+        }
+        ChildCancelTarget::Execution {
+            tenant_id,
+            contact_id,
+            session_id,
+            run_uid,
+        } => {
+            let request = ctx.service_client::<ExecutionClient>().cancel(Json::from(
+                ExecutionCancelRequest {
+                    run: ExecutionRunRequest {
+                        tenant_id,
+                        contact_id,
+                        session_id,
+                        run_uid,
+                    },
+                    reason,
+                },
+            ));
+            if let Some(identity) = identity.as_ref() {
+                with_identity_headers(request, identity).send();
+            } else {
+                crate::restate_identity::replay_safe_request(request).send();
+            };
         }
     }
     Ok(())
 }
 
-/// Attaches the caller identity headers required by `Session/request_cancel`.
 fn with_identity_headers<'a, Req, Res>(
     request: Request<'a, Req, Res>,
     identity: &Identity,
@@ -152,43 +164,49 @@ fn identity_type_header(identity_type: IdentityType) -> &'static str {
 mod tests {
     use super::*;
 
-    #[test]
-    fn no_child_links_yield_no_cancellation_targets_offline() {
-        // Pins: a run/trial that has not started a child target has nothing to cancel.
-        assert!(child_cancel_targets(None, None).is_empty());
+    fn identity() -> Identity {
+        Identity {
+            identity_type: IdentityType::Operator,
+            id: Uuid::from_u128(1),
+            tenant_id: TenantId(Uuid::from_u128(2)),
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        }
     }
 
     #[test]
-    fn session_link_yields_session_cancellation_target_offline() {
-        // Pins: an agent-loop target session is cancelled through the Session surface.
-        let session_id = SessionId::new();
+    fn execution_link_selects_only_execution_cancellation_offline() {
+        // Pins: execution templates do not cancel their parent user/internal Session.
+        let identity = identity();
+        let session_id = SessionId(Uuid::from_u128(3));
+        let run_uid = Uuid::from_u128(4);
         assert_eq!(
-            child_cancel_targets(Some(session_id), None),
-            vec![ChildCancelTarget::Session(session_id)]
+            child_cancel_target(Some(&identity), None, Some(session_id), Some(run_uid)),
+            Some(ChildCancelTarget::Execution {
+                tenant_id: identity.tenant_id,
+                contact_id: None,
+                session_id,
+                run_uid,
+            })
         );
     }
 
     #[test]
-    fn procedure_link_yields_procedure_cancellation_target_offline() {
-        // Pins: a procedure target is cancelled through the ProcedureExecution surface.
-        let run_uid = Uuid::new_v4();
+    fn session_only_link_selects_agent_loop_cancellation_offline() {
+        // Pins: an agent-loop target retains Session cancellation.
+        let session_id = SessionId(Uuid::from_u128(3));
         assert_eq!(
-            child_cancel_targets(None, Some(run_uid)),
-            vec![ChildCancelTarget::Procedure(run_uid)]
+            child_cancel_target(None, None, Some(session_id), None),
+            Some(ChildCancelTarget::Session(session_id))
         );
     }
 
     #[test]
-    fn session_is_cancelled_before_procedure_offline() {
-        // Pins: the transcript-bearing session is signaled before the procedure run.
-        let session_id = SessionId::new();
-        let run_uid = Uuid::new_v4();
+    fn incomplete_execution_authority_yields_no_cancellation_offline() {
+        // Pins: an execution run is never cancelled with fabricated scope or parent authority.
         assert_eq!(
-            child_cancel_targets(Some(session_id), Some(run_uid)),
-            vec![
-                ChildCancelTarget::Session(session_id),
-                ChildCancelTarget::Procedure(run_uid),
-            ]
+            child_cancel_target(None, None, Some(SessionId::new()), Some(Uuid::new_v4())),
+            None
         );
     }
 }

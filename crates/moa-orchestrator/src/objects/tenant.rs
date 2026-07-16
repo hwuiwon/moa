@@ -169,6 +169,7 @@ impl TenantObject for TenantImpl {
         ctx: ObjectContext<'_>,
         config: Json<TenantConfig>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Tenant", "init");
         let config = config.into_inner();
         validate_tenant_key(ctx.key(), config.id)?;
@@ -189,6 +190,7 @@ impl TenantObject for TenantImpl {
         ctx: ObjectContext<'_>,
         _target_date: Json<chrono::NaiveDate>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Tenant", "mark_consolidation_started");
         let mut state = TenantVoState::load_from(&ctx).await?;
         state.mark_consolidation_started();
@@ -202,6 +204,7 @@ impl TenantObject for TenantImpl {
         ctx: ObjectContext<'_>,
         report: Json<ConsolidateReport>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Tenant", "consolidation_completed");
         let report = report.into_inner();
         validate_tenant_key(ctx.key(), report.tenant_id)?;
@@ -229,6 +232,7 @@ impl TenantObject for TenantImpl {
         &self,
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<TenantStatus>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Tenant", "status");
         let state = TenantVoState::load_from(&ctx).await?;
         let tenant_id = tenant_id_from_key(ctx.key())?;
@@ -275,13 +279,15 @@ async fn schedule_consolidation_inner(
     let workflow_id = consolidate_workflow_id(&tenant_id, next.date_naive());
 
     state.next_consolidation = Some(scheduled_at);
-    ctx.workflow_client::<ConsolidateClient>(workflow_id)
-        .run(Json(ConsolidateRequest {
-            tenant_id,
-            target_date: next.date_naive(),
-            observed_changelog_version: None,
-        }))
-        .send_after(delay);
+    crate::restate_identity::replay_safe_request(
+        ctx.workflow_client::<ConsolidateClient>(workflow_id)
+            .run(Json(ConsolidateRequest {
+                tenant_id,
+                target_date: next.date_naive(),
+                observed_changelog_version: None,
+            })),
+    )
+    .send_after(delay);
     tracing::info!(
         tenant_id = %tenant_id,
         scheduled_at = %scheduled_at,

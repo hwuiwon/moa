@@ -734,6 +734,7 @@ mod extraction_tests {
             origin_kind: None,
             origin_id: None,
             origin_step_id: None,
+            execution_origin: None,
             idempotency_key: None,
             created_at: Utc::now(),
         }

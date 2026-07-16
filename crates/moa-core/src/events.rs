@@ -9,13 +9,126 @@ use crate::types::{
     action_policy::ActionEnvelope, action_policy::ActionReviewDecision,
     action_policy::ActionReviewPreview, channel::Attachment, channel::Channel,
     channel::SessionChannelBindingId, contact::ContactId, contact::SessionActorRef,
-    guardrails::GuardrailDirection, guardrails::GuardrailMode, identifiers::AgentSignalId,
-    identifiers::ModelId, identifiers::SegmentId, identifiers::TenantId, identifiers::ToolCallId,
+    execution_planning::ExecutionRunStarted, guardrails::GuardrailDirection,
+    guardrails::GuardrailMode, identifiers::AgentSignalId, identifiers::ModelId,
+    identifiers::SegmentId, identifiers::TenantId, identifiers::ToolCallId,
     observability::CacheReport, provider::ModelTier, session::SessionStatus, tools::ToolOutput,
     worker::state::ChildSignalKind, worker::state::InputAudience, worker::state::NarrationSegment,
     worker::state::NarrationSource, worker::state::SignalSeverity, worker::state::WorkerId,
-    worker::state::WorkerState, worker::state::WorkerTerminalResult,
+    worker::state::WorkerState,
 };
+
+/// Durable reference to the complete task-result source for one execution run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionTaskResultsRef {
+    /// Results remain in the canonical execution-task table.
+    ExecutionTaskTable {
+        /// Run whose task rows contain the complete results.
+        run_uid: Uuid,
+    },
+}
+
+/// Compact aggregate progress for one detached execution run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionProgress {
+    /// Durable execution-run identifier.
+    pub run_uid: Uuid,
+    /// Exact persisted user event that originated the run.
+    pub originating_user_sequence_num: u64,
+    /// Current active plan revision.
+    pub plan_revision: u64,
+    /// Exhaustively mapped stable execution status.
+    pub status: String,
+    /// Number of materialized logical tasks.
+    pub total: u64,
+    /// Number of successfully completed logical tasks.
+    pub completed: u64,
+    /// Number of failed logical tasks.
+    pub failed: u64,
+    /// Number of cancelled logical tasks.
+    pub cancelled: u64,
+}
+
+/// Exact user-addressed input request for one waiting execution task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionInputRequired {
+    /// Durable execution-run identifier.
+    pub run_uid: Uuid,
+    /// Exact persisted user event that originated the run.
+    pub originating_user_sequence_num: u64,
+    /// Stable logical task identifier.
+    pub task_id: Uuid,
+    /// Current dispatch generation fence.
+    pub generation: u64,
+    /// Question that the owning user must answer.
+    pub question: String,
+}
+
+/// Compact bounded terminal evidence delivered to the owning session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionTerminalSummary {
+    /// Durable execution-run identifier.
+    pub run_uid: Uuid,
+    /// Exact persisted user event that originated the run.
+    pub originating_user_sequence_num: u64,
+    /// Canonical terminal output when it fits the inline bound.
+    pub output: Option<Value>,
+    /// BLAKE3 hash of the complete canonical output bytes.
+    pub output_hash: [u8; 32],
+    /// Sorted, deduplicated, bounded source identifiers.
+    pub citation_ids: Vec<String>,
+    /// Bounded terminal failure summaries.
+    pub failures: Vec<String>,
+    /// Bounded completion gaps.
+    pub gaps: Vec<String>,
+    /// Typed reference to the complete task result set.
+    pub task_results: ExecutionTaskResultsRef,
+}
+
+/// Immutable execution evidence loaded internally for synthesis only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionRunEvidenceRef {
+    /// Goal and completion evidence live on the canonical execution-run row.
+    ExecutionRun {
+        /// Run whose immutable evidence should be loaded.
+        run_uid: Uuid,
+    },
+}
+
+/// Guarded request for one linked terminal synthesis turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionSynthesisRequested {
+    /// Durable execution-run identifier.
+    pub run_uid: Uuid,
+    /// Exact persisted user event that originated the run.
+    pub originating_user_sequence_num: u64,
+    /// Stable linked synthesis turn identifier.
+    pub turn_id: String,
+    /// Compact terminal evidence safe for session persistence.
+    pub terminal: ExecutionTerminalSummary,
+    /// Typed reference resolved internally before synthesis.
+    pub run_evidence: ExecutionRunEvidenceRef,
+}
+
+/// Typed terminal disposition for failed execution delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionFailureDisposition {
+    /// Useful work exists but the goal contract is not fully satisfied.
+    Partial,
+    /// A live condition blocked required progress.
+    Blocked,
+    /// No supported serving path remained.
+    Unsupported,
+    /// Required work failed terminally.
+    Failed,
+}
 
 /// Append-only session event payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::EnumDiscriminants)]
@@ -131,6 +244,25 @@ pub enum Event {
         /// Queue timestamp.
         queued_at: DateTime<Utc>,
     },
+    /// Minimal durable evidence that a detached execution run was admitted.
+    ExecutionRunStarted(ExecutionRunStarted),
+    /// Cadence- and delta-gated aggregate execution progress.
+    ExecutionProgress(ExecutionProgress),
+    /// A specific execution task requires owning-user input.
+    ExecutionInputRequired(ExecutionInputRequired),
+    /// A detached execution run completed successfully.
+    ExecutionCompleted(ExecutionTerminalSummary),
+    /// A detached execution run ended without full success.
+    ExecutionFailed {
+        /// Typed terminal disposition.
+        disposition: ExecutionFailureDisposition,
+        /// Compact terminal evidence.
+        summary: ExecutionTerminalSummary,
+    },
+    /// A detached execution run was cancelled.
+    ExecutionCancelled(ExecutionTerminalSummary),
+    /// The session requested one guarded linked synthesis turn.
+    ExecutionSynthesisRequested(ExecutionSynthesisRequested),
     /// The brain emitted a short thinking summary.
     BrainThinking {
         /// Summary text.
@@ -326,22 +458,6 @@ pub enum Event {
         state: WorkerState,
         /// Short result or error summary.
         summary: String,
-    },
-    /// A root coordinator bundled completed auto-delegated worker results for synthesis.
-    WorkerResultBundle {
-        /// User-message sequence that triggered the auto-delegated workers.
-        user_sequence_num: u64,
-        /// Terminal worker results in the original scheduled order.
-        results: Vec<WorkerTerminalResult>,
-    },
-    /// A coordinator synthesis turn was requested for a completed worker result bundle.
-    WorkerResultSynthesisRequested {
-        /// User-message sequence whose worker bundle should be synthesized.
-        user_sequence_num: u64,
-        /// Coordinator turn id dispatched for synthesis.
-        turn_id: String,
-        /// System-visible instruction for the synthesis turn.
-        reason: String,
     },
     /// Per-turn coordination / replay / latency telemetry, appended at turn end when metrics
     /// persistence is enabled (`MOA_PERSIST_TURN_METRICS`). Purely informational: it is not shown
@@ -559,9 +675,7 @@ impl Event {
             // A guarded coordinator resume seeds its instruction via this control
             // event (not a fake user message), so a trailing resume must drive the loop.
             | Self::WorkerParentResumeRequested { .. }
-            // Completed deterministic auto-delegation seeds a synthesis turn via this
-            // control event, not another fake user message.
-            | Self::WorkerResultSynthesisRequested { .. } => ProcessingEffect::Trigger,
+            | Self::ExecutionSynthesisRequested(_) => ProcessingEffect::Trigger,
 
             // Terminals: the turn loop has concluded or is suspended awaiting an
             // out-of-band decision; the tail alone implies no pending model turn.
@@ -573,7 +687,8 @@ impl Event {
             // (which appends the follow-on tool result), not by the scheduler
             // re-reading the tail, so neither review event resumes the loop itself.
             | Self::ActionReviewRequested { .. }
-            | Self::ActionReviewDecided { .. } => ProcessingEffect::Terminal,
+            | Self::ActionReviewDecided { .. }
+            | Self::ExecutionInputRequired(_) => ProcessingEffect::Terminal,
 
             // Neutrals: passive telemetry, liveness, enrichment, and lifecycle
             // breadcrumbs. Several are appended asynchronously off the turn path
@@ -586,6 +701,11 @@ impl Event {
             | Self::SegmentStarted { .. }
             | Self::SegmentCompleted { .. }
             | Self::QueuedMessage { .. }
+            | Self::ExecutionRunStarted(_)
+            | Self::ExecutionProgress(_)
+            | Self::ExecutionCompleted(_)
+            | Self::ExecutionFailed { .. }
+            | Self::ExecutionCancelled(_)
             | Self::BrainThinking { .. }
             | Self::ProgressUpdate { .. }
             | Self::GuardrailCheck { .. }
@@ -593,7 +713,6 @@ impl Event {
             | Self::WorkerMessageSent { .. }
             | Self::WorkerStatusChanged { .. }
             | Self::WorkerNotificationDelivered { .. }
-            | Self::WorkerResultBundle { .. }
             | Self::TurnMetrics { .. }
             | Self::WorkerSignalReceived { .. }
             | Self::WorkerHeartbeatStale { .. }
@@ -759,6 +878,7 @@ mod tests {
             origin_kind: None,
             origin_id: None,
             origin_step_id: None,
+            execution_origin: None,
             idempotency_key: None,
             created_at: Utc::now(),
         }
@@ -802,6 +922,36 @@ mod tests {
         );
         let decoded: Event =
             serde_json::from_str(&json).expect("deserialize action review request");
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn action_policy_review_event_round_trips_separate_execution_origin() {
+        // Pins: review persistence never conflates capability provenance with run/task/generation.
+        let review_id = Uuid::from_u128(30);
+        let mut envelope = sample_action_envelope(
+            review_id,
+            "bash",
+            "printf reviewed",
+            crate::types::action_policy::RiskLevel::High,
+        );
+        envelope.origin_kind = Some("skill_action".to_string());
+        envelope.origin_id = Some("skill://research#fetch".to_string());
+        envelope.origin_step_id = Some("fetch".to_string());
+        envelope.execution_origin = Some(crate::types::action_policy::ExecutionTaskOrigin {
+            run_uid: Uuid::from_u128(40),
+            task_uid: Uuid::from_u128(41),
+            generation: 2,
+        });
+        let event = Event::ActionReviewRequested {
+            review_id,
+            envelope,
+            preview: sample_action_review_preview("printf reviewed"),
+        };
+
+        let encoded = serde_json::to_value(&event).expect("serialize review event");
+        let decoded: Event = serde_json::from_value(encoded).expect("deserialize review event");
+
         assert_eq!(decoded, event);
     }
 
@@ -961,33 +1111,6 @@ mod tests {
                 "WorkerNotificationDelivered",
             ),
             (
-                Event::WorkerResultBundle {
-                    user_sequence_num: 42,
-                    results: vec![crate::types::worker::state::WorkerTerminalResult {
-                        state: WorkerState::Completed,
-                        result: crate::types::worker::state::WorkerResult {
-                            worker_id: "child-1".to_string(),
-                            success: true,
-                            output: "done".to_string(),
-                            tokens_used: 17,
-                            tools_invoked: 2,
-                            error: None,
-                        },
-                    }],
-                },
-                EventType::WorkerResultBundle,
-                "WorkerResultBundle",
-            ),
-            (
-                Event::WorkerResultSynthesisRequested {
-                    user_sequence_num: 42,
-                    turn_id: "turn-1".to_string(),
-                    reason: "bundle complete".to_string(),
-                },
-                EventType::WorkerResultSynthesisRequested,
-                "WorkerResultSynthesisRequested",
-            ),
-            (
                 Event::WorkerSignalReceived {
                     signal_id: AgentSignalId::new(),
                     worker_id: "child-1".to_string(),
@@ -1136,11 +1259,6 @@ mod tests {
                 success: true,
                 duration_ms: 1,
             },
-            Event::WorkerResultSynthesisRequested {
-                user_sequence_num: 1,
-                turn_id: "turn-1".to_string(),
-                reason: "bundle ready".to_string(),
-            },
         ];
         for event in triggers {
             assert_eq!(
@@ -1249,5 +1367,149 @@ mod tests {
 
         let decoded: Event = serde_json::from_str(&json).expect("deserialize guardrail check");
         assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn execution_run_delivery_events_round_trip_with_exact_processing_effects() {
+        // Pins: compact execution delivery remains typed across session-event replay.
+        let run_uid = Uuid::from_u128(41);
+        let terminal = ExecutionTerminalSummary {
+            run_uid,
+            originating_user_sequence_num: 9,
+            output: Some(serde_json::json!({ "answer": 42 })),
+            output_hash: [7; 32],
+            citation_ids: vec!["source-a".to_string()],
+            failures: vec!["task failed".to_string()],
+            gaps: vec!["missing review".to_string()],
+            task_results: ExecutionTaskResultsRef::ExecutionTaskTable { run_uid },
+        };
+        let cases = [
+            (
+                Event::ExecutionProgress(ExecutionProgress {
+                    run_uid,
+                    originating_user_sequence_num: 9,
+                    plan_revision: 2,
+                    status: "running".to_string(),
+                    total: 4,
+                    completed: 2,
+                    failed: 1,
+                    cancelled: 0,
+                }),
+                ProcessingEffect::Neutral,
+            ),
+            (
+                Event::ExecutionInputRequired(ExecutionInputRequired {
+                    run_uid,
+                    originating_user_sequence_num: 9,
+                    task_id: Uuid::from_u128(42),
+                    generation: 3,
+                    question: "Which source?".to_string(),
+                }),
+                ProcessingEffect::Terminal,
+            ),
+            (
+                Event::ExecutionCompleted(terminal.clone()),
+                ProcessingEffect::Neutral,
+            ),
+            (
+                Event::ExecutionFailed {
+                    disposition: ExecutionFailureDisposition::Partial,
+                    summary: terminal.clone(),
+                },
+                ProcessingEffect::Neutral,
+            ),
+            (
+                Event::ExecutionCancelled(terminal.clone()),
+                ProcessingEffect::Neutral,
+            ),
+            (
+                Event::ExecutionSynthesisRequested(ExecutionSynthesisRequested {
+                    run_uid,
+                    originating_user_sequence_num: 9,
+                    turn_id: "execution-synthesis-41-9".to_string(),
+                    terminal,
+                    run_evidence: ExecutionRunEvidenceRef::ExecutionRun { run_uid },
+                }),
+                ProcessingEffect::Trigger,
+            ),
+        ];
+
+        for (event, effect) in cases {
+            let encoded = serde_json::to_value(&event).expect("serialize execution event");
+            let decoded =
+                serde_json::from_value::<Event>(encoded).expect("deserialize execution event");
+            assert_eq!(decoded, event);
+            assert_eq!(event.processing_effect(), effect);
+        }
+    }
+
+    #[test]
+    fn execution_synthesis_event_has_exact_golden_json_and_strict_required_fields() {
+        // Pins: replay/SSE consumers receive one stable compact synthesis envelope with required
+        // origin linkage and closed nested payloads; accidental additive producer fields reject.
+        let run_uid = Uuid::from_u128(51);
+        let event = Event::ExecutionSynthesisRequested(ExecutionSynthesisRequested {
+            run_uid,
+            originating_user_sequence_num: 11,
+            turn_id: "execution-synthesis-51-11".to_string(),
+            terminal: ExecutionTerminalSummary {
+                run_uid,
+                originating_user_sequence_num: 11,
+                output: Some(serde_json::json!({ "answer": 42 })),
+                output_hash: [7; 32],
+                citation_ids: vec!["source-a".to_string()],
+                failures: vec!["failure-a".to_string()],
+                gaps: vec!["gap-a".to_string()],
+                task_results: ExecutionTaskResultsRef::ExecutionTaskTable { run_uid },
+            },
+            run_evidence: ExecutionRunEvidenceRef::ExecutionRun { run_uid },
+        });
+        let expected = serde_json::json!({
+            "type": "ExecutionSynthesisRequested",
+            "data": {
+                "run_uid": run_uid,
+                "originating_user_sequence_num": 11,
+                "turn_id": "execution-synthesis-51-11",
+                "terminal": {
+                    "run_uid": run_uid,
+                    "originating_user_sequence_num": 11,
+                    "output": { "answer": 42 },
+                    "output_hash": vec![7; 32],
+                    "citation_ids": ["source-a"],
+                    "failures": ["failure-a"],
+                    "gaps": ["gap-a"],
+                    "task_results": {
+                        "execution_task_table": { "run_uid": run_uid }
+                    }
+                },
+                "run_evidence": {
+                    "execution_run": { "run_uid": run_uid }
+                }
+            }
+        });
+
+        assert_eq!(
+            serde_json::to_value(&event).expect("serialize synthesis golden event"),
+            expected
+        );
+        assert_eq!(
+            serde_json::from_value::<Event>(expected.clone())
+                .expect("deserialize synthesis golden event"),
+            event
+        );
+
+        let mut missing_origin = expected.clone();
+        missing_origin["data"]
+            .as_object_mut()
+            .expect("synthesis data object")
+            .remove("originating_user_sequence_num");
+        assert!(serde_json::from_value::<Event>(missing_origin).is_err());
+
+        let mut unknown_terminal_field = expected;
+        unknown_terminal_field["data"]["terminal"]
+            .as_object_mut()
+            .expect("terminal summary object")
+            .insert("task_rows".to_string(), serde_json::json!([]));
+        assert!(serde_json::from_value::<Event>(unknown_terminal_field).is_err());
     }
 }

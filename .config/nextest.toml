@@ -22,23 +22,31 @@ all()
   - binary(/(_db|_db_memory|_service_e2e|_provider_e2e|_live|_docker)$/)
   - test(/_db_memory$/)
   - binary(/^(golden_eval|long_conversation_foundation_eval|long_conversation_smoke_eval|scripted_user_mode_eval)$/)
-  - (package(moa-eval) & test(/::tests::.*_db_/))
-  - (package(moa-orchestrator) & test(/::tests::.*_db_/))
+  - (package(moa-eval) & kind(lib) & test(/::tests::.*_db(?:_|$)/))
+  - (package(moa-orchestrator) & kind(lib) & test(/::tests::.*_db(?:_|$)/))
 '''
 
 # test() predicates below are scoped to the binaries that actually contain
 # inline DB-named unit tests. An unscoped test() forces nextest to exec-list
 # every workspace test binary (255 binaries, minutes of overhead per run);
 # binary()/package()/kind() scoping lets it skip unmatched binaries without
-# exec. If a new binary gains inline `*_db_`/`*_db_memory` tests, add it here;
+# exec. If a new binary gains inline `*_db`/`*_db_*` tests, add it here;
 # the ci profile's all() filter remains the safety net.
 [profile.db-session]
 inherits = "default"
 test-threads = 8
+# moa-session keeps its physical-database clone and schema-binding checks inline
+# in the library. Select only those DB tests; all other moa-session lib tests
+# remain outside this lane.
 default-filter = '''
 binary(/_db$/)
-  | (package(moa-eval) & kind(lib) & test(/::tests::.*_db_/))
-  | (package(moa-orchestrator) & kind(lib) & test(/::tests::.*_db_/))
+  | (
+      package(moa-session)
+        & kind(lib)
+        & test(/^(store::tests::configured_schema_binds_without_running_migrations_db|testing::tests::cloned_databases_are_independent_and_use_public_schema_db)$/)
+    )
+  | (package(moa-eval) & kind(lib) & test(/::tests::.*_db(?:_|$)/))
+  | (package(moa-orchestrator) & kind(lib) & test(/::tests::.*_db(?:_|$)/))
 '''
 
 [profile.db-memory]
@@ -140,6 +148,12 @@ test-group = "service-e2e"
 threads-required = "num-test-threads"
 
 [[profile.default.overrides]]
+# The explicit 500-task fan-out and restart scenarios intentionally hold every
+# map effect before releasing a thundering herd through the debug orchestrator.
+filter = 'test(/bulk_500_map_exact_coverage_service_e2e|recovery_after_materialization_is_exactly_once_service_e2e|recovery_after_137_completions_is_exactly_once_service_e2e/)'
+slow-timeout = { period = "120s", terminate-after = 10 }
+
+[[profile.default.overrides]]
 # Chaos experiments recreate containers and run multi-minute steady/fault/
 # recovery windows; give them a long leash before nextest terminates them.
 filter = 'binary(/^chaos_docker$/)'
@@ -151,11 +165,11 @@ test-group = "live-external"
 threads-required = "num-test-threads"
 
 [[profile.default.overrides]]
-filter = 'package(moa-orchestrator) & test(/::tests::.*_db_/)'
+filter = 'package(moa-orchestrator) & kind(lib) & test(/::tests::.*_db(?:_|$)/)'
 test-group = "db-session"
 threads-required = "num-test-threads"
 
 [[profile.default.overrides]]
-filter = 'package(moa-eval) & test(/::tests::.*_db_/)'
+filter = 'package(moa-eval) & kind(lib) & test(/::tests::.*_db(?:_|$)/)'
 test-group = "db-session"
 threads-required = "num-test-threads"

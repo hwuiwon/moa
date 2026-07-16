@@ -62,8 +62,8 @@ session metadata and a required initial `ChannelRef` route. The
 client cannot set trusted caller identity or override the session contact per
 message. `Contacts/change_session_channel` can later switch the active route,
 closing the previous active binding, inserting the new binding, updating
-session metadata, and appending `SessionChannelChanged`. If a skill or its
-procedure needs higher assurance, it starts contact-point verification, completes the
+session metadata, and appending `SessionChannelChanged`. If a skill or execution
+run needs higher assurance, it starts contact-point verification, completes the
 OTP-style challenge through the contact service, receives a verified contact
 token, and calls `Contacts/promote_session`. Verification can deliver OTP codes
 only to email and phone contact points today. Email points use the
@@ -115,6 +115,7 @@ This avoids losing information when a client disconnects or a messaging process 
 - segment start/completion events
 - memory and checkpoint events
 - worker progress narration, attention signals, and stale notices
+- execution-run start, aggregate progress, exact input requests, and terminal status
 - status snapshots from the Restate-backed orchestrator
 
 Clients choose their own verbosity, but durable events are the source of truth.
@@ -129,6 +130,15 @@ generic `session_event` frames keyed by event sequence number, and finally a
 `done` frame. This lets the browser render the turn without holding a second
 live progress connection. `Session/progress` remains the compact
 history/recovery projection used by the stream and by reload flows.
+
+A detached `run` uses stable SSE names `execution_started`,
+`execution_progress`, `execution_input_request`, `execution_completed`, and
+`execution_failed`. Progress is cadence/delta limited and aggregate; the session
+event log does not receive one event per task heartbeat or every raw map output.
+When an execution task returns user-audience `NeedsInput`, the next matching
+reply resolves that exact run/task wait instead of starting an unrelated root
+turn. Terminal delivery requests at most one guarded synthesis turn linked to
+the originating user sequence and run ID.
 
 When a coordinator turn delegates to workers, the stream stays open across the
 **detached window**. `session_message_terminal_done` closes only when the started
@@ -147,11 +157,14 @@ interval, so the user never sees a frozen screen even when narration correctly
 skips a no-change period or is disabled. `child_progress` is built by bounded
 fan-in (active children only, capped) so the projection stays compact.
 
+This detached-worker window is specific to interactive delegation in `act`.
+Conversational `Worker` remains steerable and bounded, but it is not the bulk
+DAG primitive. `run` progress and completion come from `ExecutionRun` aggregate
+state and never fan in execution tasks through the `Session` virtual object.
+
 Each durable frame's SSE `id` is the event `sequence_num`, which clients use for
-their own ordering and dedupe. The endpoint does not honor an inbound
-`Last-Event-ID`: a fresh connection re-seeds the cursor to the current head rather
-than replaying history, so a client that wants missed narration replays it through
-a separate `Session/progress` read.
+their own ordering and dedupe. A reconnect carrying `Last-Event-ID` resumes after
+that sequence; a fresh connection seeds its cursor from the current event head.
 
 The same route accepts multipart contact messages with text, photo uploads, or
 both. Upload bytes are validated by the edge and stored through `object_store`
@@ -175,6 +188,13 @@ tool allowlist. Read tools use the same edge read-model functions as the REST
 dashboard; command tools use shared wire DTOs and the existing sanitized
 edge-to-ingress proxy. MCP clients discover capabilities with `tools/list`; the
 server does not mirror them as MCP resources or prompts.
+
+Execution controls use the common typed run APIs: list, start, status, cancel,
+review decision, signal delivery, and bounded task-result listing. A start
+request identifies a published skill's exact pinned `execution_plan` template
+revision plus objective and structured input, then enters the session-originated
+planning/admission path. Model-facing clients submit neither a compiled-plan
+identifier nor raw graph JSON.
 
 ### Edge-to-ingress forwarding
 

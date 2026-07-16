@@ -29,7 +29,6 @@ use moa_skills::registry::{NewSkill, SkillRegistry};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tempfile::tempdir;
-use uuid::Uuid;
 
 const SCENARIO_ROOT: &str = "scenarios/long_conversation";
 const EXPERIENCE_LEARNING_SCENARIO: &str = "experience_learning_task_conditioned_strategy_reuse";
@@ -149,8 +148,8 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
     if scenario_name == EXPERIENCE_LEARNING_SCENARIO {
         base_config.skill_budget.max_manifest_chars = Some(510);
         base_config.skill_budget.max_per_skill_chars = 128;
-        seed_experience_learning_skills(
-            &base_config.database.url,
+        configure_experience_learning_database(
+            &mut base_config,
             &eval_storage_partition_id_for_agent(&agent_config.name),
         )
         .await?;
@@ -492,8 +491,8 @@ async fn run_learning_matrix_case(
     base_config.skill_budget.max_per_skill_chars = MATRIX_MAX_PER_SKILL_CHARS;
 
     let agent_config = learning_matrix_agent_config(matrix_case);
-    seed_learning_matrix_skills(
-        &base_config.database.url,
+    configure_learning_matrix_database(
+        &mut base_config,
         &eval_storage_partition_id_for_agent(&agent_config.name),
         matrix_case,
     )
@@ -796,7 +795,6 @@ async fn seed_experience_learning_skills(
     database_url: &str,
     storage_partition_id: &str,
 ) -> TestResult {
-    ensure_skill_seed_schema(database_url).await?;
     let pool = sqlx::PgPool::connect(database_url).await?;
     let names = vec![
         "api-contract-repair".to_string(),
@@ -833,7 +831,6 @@ async fn seed_learning_matrix_skills(
     storage_partition_id: &str,
     matrix_case: &LearningMatrixCase,
 ) -> TestResult {
-    ensure_skill_seed_schema(database_url).await?;
     let pool = sqlx::PgPool::connect(database_url).await?;
     let category_decoy = format!("{}-general-playbook", matrix_case.category);
     let names = vec![
@@ -878,10 +875,52 @@ async fn seed_learning_matrix_skills(
     Ok(())
 }
 
-async fn ensure_skill_seed_schema(database_url: &str) -> TestResult {
-    let schema_name = format!("eval_skill_seed_{}", Uuid::now_v7().simple());
-    let _store =
-        moa_session::PostgresSessionStore::new_in_schema(database_url, &schema_name).await?;
+async fn configure_experience_learning_database(
+    base_config: &mut moa_core::config::MoaConfig,
+    storage_partition_id: &str,
+) -> TestResult {
+    let maintenance_url = base_config.database.url.clone();
+    let (database_url, schema_name) =
+        moa_session::testing::provision_cloned_database_from(&maintenance_url).await?;
+    if let Err(error) = seed_experience_learning_skills(&database_url, storage_partition_id).await {
+        if let Err(cleanup_error) =
+            moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+        {
+            tracing::warn!(
+                %cleanup_error,
+                "failed to clean up seeded long-conversation clone after seed failure"
+            );
+        }
+        return Err(error);
+    }
+    base_config.database.url = database_url;
+    base_config.database.schema = Some(schema_name);
+    Ok(())
+}
+
+async fn configure_learning_matrix_database(
+    base_config: &mut moa_core::config::MoaConfig,
+    storage_partition_id: &str,
+    matrix_case: &LearningMatrixCase,
+) -> TestResult {
+    let maintenance_url = base_config.database.url.clone();
+    let (database_url, schema_name) =
+        moa_session::testing::provision_cloned_database_from(&maintenance_url).await?;
+    if let Err(error) =
+        seed_learning_matrix_skills(&database_url, storage_partition_id, matrix_case).await
+    {
+        if let Err(cleanup_error) =
+            moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+        {
+            tracing::warn!(
+                %cleanup_error,
+                "failed to clean up seeded learning-matrix clone after seed failure"
+            );
+        }
+        return Err(error);
+    }
+    base_config.database.url = database_url;
+    base_config.database.schema = Some(schema_name);
     Ok(())
 }
 

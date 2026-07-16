@@ -3,9 +3,11 @@
 use chrono::{DateTime, Utc};
 use moa_core::{
     events::Event, types::action_policy::ActionClass, types::action_policy::ActionReviewDecision,
-    types::action_policy::ActionReviewStatus, types::identifiers::StoragePartitionId,
-    types::identifiers::ToolCallId, types::tools::ToolCallRequest,
+    types::action_policy::ActionReviewStatus, types::action_policy::ExecutionTaskOrigin,
+    types::identifiers::StoragePartitionId, types::identifiers::ToolCallId,
+    types::tools::ToolCallRequest,
 };
+use moa_observability::propagation::ValidatedTraceContext;
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use serde::{Deserialize, Serialize};
@@ -54,6 +56,9 @@ pub(crate) struct DecidedReview {
     pub(crate) newly_decided: bool,
     /// Stored tool request to invoke after a clear decision.
     pub(crate) tool_request: Option<ToolCallRequest>,
+    /// Execution task that owns a cleared dispatch, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) execution_origin: Option<ExecutionTaskOrigin>,
 }
 
 /// Screen and normalize a request before it is persisted.
@@ -77,8 +82,15 @@ pub(crate) async fn request_review(
     pool: sqlx::PgPool,
     request: RequestActionReview,
     review_timeout_secs: i64,
+    execution_task_trace_context: Option<ValidatedTraceContext>,
 ) -> Result<RequestedReview, HandlerError> {
-    let stored = store::insert_review(pool, request, review_timeout_secs).await?;
+    let stored = store::insert_review(
+        pool,
+        request,
+        review_timeout_secs,
+        execution_task_trace_context,
+    )
+    .await?;
     Ok(RequestedReview {
         record_requested_event: stored.requested_event_recorded_at.is_none(),
         newly_inserted: stored.newly_inserted,
@@ -99,7 +111,9 @@ pub(crate) async fn decide_review(
     pool: sqlx::PgPool,
     request: DecideActionReviewRequest,
     decided_by: String,
+    resolution_trace_context: Option<ValidatedTraceContext>,
 ) -> Result<DecidedReview, HandlerError> {
+    let requested_decider = decided_by;
     let decision = decision_from_request(&request);
     let desired_status = status_for_decision(&decision);
     let mut tx = pool
@@ -109,11 +123,66 @@ pub(crate) async fn decide_review(
     let storage_partition_id = storage_partition_id(request.tenant_id);
     let row =
         store::load_review_for_update(&mut tx, &storage_partition_id, request.review_id).await?;
+    if row.status == ActionReviewStatus::Pending && row.execution_requested_at.is_some() {
+        let exact_claim_replay = matches!(decision, ActionReviewDecision::Cleared)
+            && row.decided_by.as_deref() == Some(requested_decider.as_str());
+        if !exact_claim_replay {
+            return Err(TerminalError::new_with_code(
+                409,
+                "action review cleared execution is already claimed by another decision",
+            )
+            .into());
+        }
+    }
     let newly_decided = validate_review_transition(row.status, desired_status)?;
     let decided_at = row.decided_at.unwrap_or_else(Utc::now);
-    let decided_by = row.decided_by.clone().unwrap_or(decided_by);
+    let decided_by = row.decided_by.clone().unwrap_or(requested_decider);
     let deny_reason = deny_reason_for_decision(&decision, row.deny_reason.clone());
     let execution_tool_call_id = execution_tool_call_id_for_decision(&decision, &row);
+
+    if matches!(decision, ActionReviewDecision::Cleared)
+        && row.execution_origin.is_some()
+        && row.status == ActionReviewStatus::Pending
+    {
+        let execution_tool_call_id = execution_tool_call_id.ok_or_else(|| {
+            TerminalError::new("cleared execution review has no execution tool call id")
+        })?;
+        let replaying_claim = row.execution_requested_at.is_some();
+        if !replaying_claim {
+            store::claim_execution_review(
+                &mut tx,
+                &storage_partition_id,
+                request.review_id,
+                &decided_by,
+                decided_at,
+                execution_tool_call_id,
+            )
+            .await?;
+        }
+        tx.commit()
+            .await
+            .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+        let tool_request = if replaying_claim {
+            Some(execution_tool_request(&row, execution_tool_call_id))
+        } else {
+            execution_tool_request_for_decision(&decision, &row, Some(execution_tool_call_id))?
+        };
+        return Ok(DecidedReview {
+            review_id: request.review_id,
+            storage_partition_id,
+            session_id: row.session_id,
+            decision,
+            status: ActionReviewStatus::Pending,
+            action_class: row.action_class,
+            decided_by,
+            created_at: row.created_at,
+            decided_at,
+            record_decision_event: false,
+            newly_decided: false,
+            tool_request,
+            execution_origin: row.execution_origin,
+        });
+    }
 
     if newly_decided || row.execution_tool_call_id != execution_tool_call_id {
         store::update_review_decision(
@@ -129,6 +198,22 @@ pub(crate) async fn decide_review(
             },
         )
         .await?;
+        if let Some(origin) = row.execution_origin
+            && matches!(decision, ActionReviewDecision::Denied { .. })
+        {
+            store::insert_execution_review_resolution(
+                &mut tx,
+                request.tenant_id,
+                request.review_id,
+                origin,
+                &moa_execution::wire::ExecutionActionReviewResolution::Denied {
+                    reason: deny_reason_for_resolution(&decision),
+                },
+                resolution_trace_context.as_ref(),
+                row.execution_task_trace_context.as_ref(),
+            )
+            .await?;
+        }
     }
     tx.commit()
         .await
@@ -149,6 +234,89 @@ pub(crate) async fn decide_review(
         record_decision_event: row.decision_event_recorded_at.is_none(),
         newly_decided,
         tool_request,
+        execution_origin: row.execution_origin,
+    })
+}
+
+/// Atomically persists a cleared execution review and its typed delivery outbox row.
+pub(crate) async fn finalize_execution_review(
+    pool: sqlx::PgPool,
+    tenant_id: moa_core::types::identifiers::TenantId,
+    review_id: Uuid,
+    resolution: moa_execution::wire::ExecutionActionReviewResolution,
+    resolution_trace_context: Option<ValidatedTraceContext>,
+) -> Result<DecidedReview, HandlerError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
+    let storage_partition_id = storage_partition_id(tenant_id);
+    let row = store::load_review_for_update(&mut tx, &storage_partition_id, review_id).await?;
+    let origin = row.execution_origin.ok_or_else(|| {
+        TerminalError::new("cleared execution finalization requires execution origin")
+    })?;
+    if row.status != ActionReviewStatus::Pending && row.status != ActionReviewStatus::Cleared {
+        return Err(TerminalError::new_with_code(
+            409,
+            format!("action review already {}", row.status.as_str()),
+        )
+        .into());
+    }
+    if row.execution_requested_at.is_none() || row.execution_tool_call_id.is_none() {
+        return Err(TerminalError::new_with_code(
+            409,
+            "execution review was not claimed before finalization",
+        )
+        .into());
+    }
+    let newly_decided = row.status == ActionReviewStatus::Pending;
+    let decided_at = row.decided_at.unwrap_or_else(Utc::now);
+    let decided_by = row
+        .decided_by
+        .clone()
+        .ok_or_else(|| TerminalError::new("claimed execution review has no deciding user"))?;
+    if newly_decided {
+        store::update_review_decision(
+            &mut tx,
+            ReviewDecisionUpdate {
+                storage_partition_id: storage_partition_id.clone(),
+                review_id,
+                status: ActionReviewStatus::Cleared,
+                decided_by: decided_by.clone(),
+                deny_reason: None,
+                decided_at,
+                execution_tool_call_id: row.execution_tool_call_id,
+            },
+        )
+        .await?;
+    }
+    store::insert_execution_review_resolution(
+        &mut tx,
+        tenant_id,
+        review_id,
+        origin,
+        &resolution,
+        resolution_trace_context.as_ref(),
+        row.execution_task_trace_context.as_ref(),
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+    Ok(DecidedReview {
+        review_id,
+        storage_partition_id,
+        session_id: row.session_id,
+        decision: ActionReviewDecision::Cleared,
+        status: ActionReviewStatus::Cleared,
+        action_class: row.action_class,
+        decided_by,
+        created_at: row.created_at,
+        decided_at,
+        record_decision_event: row.decision_event_recorded_at.is_none(),
+        newly_decided,
+        tool_request: None,
+        execution_origin: Some(origin),
     })
 }
 
@@ -222,6 +390,15 @@ fn deny_reason_for_decision(
     }
 }
 
+fn deny_reason_for_resolution(decision: &ActionReviewDecision) -> String {
+    match decision {
+        ActionReviewDecision::Denied { reason } => reason
+            .clone()
+            .unwrap_or_else(|| "action denied by tenant administrator".to_string()),
+        ActionReviewDecision::Cleared => "action was not denied".to_string(),
+    }
+}
+
 fn execution_tool_call_id_for_decision(
     decision: &ActionReviewDecision,
     row: &ReviewDecisionRow,
@@ -245,11 +422,17 @@ fn execution_tool_request_for_decision(
     let execution_tool_call_id = execution_tool_call_id.ok_or_else(|| {
         TerminalError::new("cleared action review did not have an execution tool id")
     })?;
+    Ok(Some(execution_tool_request(row, execution_tool_call_id)))
+}
+
+fn execution_tool_request(
+    row: &ReviewDecisionRow,
+    execution_tool_call_id: Uuid,
+) -> ToolCallRequest {
     let mut tool_request = row.tool_request.clone();
     tool_request.tool_call_id = ToolCallId(execution_tool_call_id);
-    tool_request.provider_tool_use_id = None;
     tool_request.active_canary = None;
-    Ok(Some(tool_request))
+    tool_request
 }
 
 fn screen_review_tool_input(request: &ToolCallRequest) -> Result<(), TerminalError> {
@@ -311,8 +494,9 @@ mod tests {
     }
 
     #[test]
-    fn execution_tool_request_for_clear_uses_fresh_tool_id() {
-        // Pins: clearing a tenant action review executes a new provider-detached tool request.
+    fn execution_tool_request_refreshes_internal_id_and_preserves_provider_identity() {
+        // Pins: clearing a tenant action review refreshes MOA's internal execution id while
+        // preserving the provider invocation id that must reach the eventual MCP request.
         let original_tool_id = ToolCallId::new();
         let execution_tool_id = Uuid::now_v7();
         let row = ReviewDecisionRow {
@@ -332,6 +516,8 @@ mod tests {
                 trusted_sandbox_manifest: None,
                 worker_id: None,
             },
+            execution_origin: None,
+            execution_task_trace_context: None,
             decided_by: None,
             deny_reason: None,
             decided_at: Some(Utc::now()),
@@ -350,7 +536,10 @@ mod tests {
 
         assert_eq!(tool_request.tool_call_id, ToolCallId(execution_tool_id));
         assert_ne!(tool_request.tool_call_id, original_tool_id);
-        assert_eq!(tool_request.provider_tool_use_id, None);
+        assert_eq!(
+            tool_request.provider_tool_use_id.as_deref(),
+            Some("provider-tool-use")
+        );
         assert_eq!(tool_request.active_canary, None);
         assert_eq!(tool_request.tool_name, "bash");
         assert_eq!(tool_request.input, json!({"cmd": "printf ok"}));
@@ -376,6 +565,8 @@ mod tests {
                 trusted_sandbox_manifest: None,
                 worker_id: None,
             },
+            execution_origin: None,
+            execution_task_trace_context: None,
             decided_by: Some("admin".to_string()),
             deny_reason: None,
             decided_at: Some(Utc::now()),

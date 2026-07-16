@@ -433,6 +433,7 @@ fn pairwise_request(input: &JudgeInput, answer_a: &str, answer_b: &str) -> Compl
         max_output_tokens: Some(64),
         temperature: Some(0.0),
         response_format: Some(pairwise_response_format()),
+        native_web_search: Default::default(),
         metadata: Default::default(),
     }
 }

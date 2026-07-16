@@ -225,9 +225,11 @@ async fn reserve_and_start_child(
     let reservation = reserve_root_child(ctx, session_id, meta, request, idempotency_step).await?;
 
     moa_core::coordination_counters::record_vo_send();
-    ctx.object_client::<WorkerClient>(reservation.child_ref.id.clone())
-        .post_message(Json::from(reservation.initial_message.clone()))
-        .send();
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<WorkerClient>(reservation.child_ref.id.clone())
+            .post_message(Json::from(reservation.initial_message.clone())),
+    )
+    .send();
     append_child_spawned_event(ctx, parent, &reservation, task, budget_tokens).await?;
     Ok(reservation)
 }
@@ -312,14 +314,15 @@ async fn wait_child(
     let timeout_ms = clamp_wait_timeout_ms(input.timeout_ms);
     let (awakeable_id, terminal_future) = ctx.awakeable::<String>();
     moa_core::coordination_counters::record_worker_vo_call();
-    let attached = ctx
-        .object_client::<WorkerClient>(input.worker_id.clone())
-        .attach_result_waiter(Json::from(AttachWorkerResultWaiterInput {
-            awakeable_id: awakeable_id.clone(),
-        }))
-        .call()
-        .await?
-        .into_inner();
+    let attached = crate::restate_identity::replay_safe_request(
+        ctx.object_client::<WorkerClient>(input.worker_id.clone())
+            .attach_result_waiter(Json::from(AttachWorkerResultWaiterInput {
+                awakeable_id: awakeable_id.clone(),
+            })),
+    )
+    .call()
+    .await?
+    .into_inner();
     if let Some(terminal) = attached.terminal {
         let _ = consume_parent_cached_terminal(ctx, parent, &input.worker_id).await?;
         return Ok(wait_terminal_output(input.worker_id, terminal));
@@ -351,20 +354,23 @@ async fn wait_timed_out(
         return Ok(wait_terminal_output(input.worker_id, terminal));
     }
     moa_core::coordination_counters::record_worker_vo_call();
-    ctx.object_client::<WorkerClient>(input.worker_id.clone())
-        .remove_result_waiter(Json::from(RemoveWorkerResultWaiterInput { awakeable_id }))
-        .call()
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<WorkerClient>(input.worker_id.clone())
+            .remove_result_waiter(Json::from(RemoveWorkerResultWaiterInput { awakeable_id })),
+    )
+    .call()
+    .await?;
     if let Some(terminal) = consume_parent_cached_terminal(ctx, parent, &input.worker_id).await? {
         return Ok(wait_terminal_output(input.worker_id, terminal));
     }
     moa_core::coordination_counters::record_worker_vo_call();
-    let status = ctx
-        .object_client::<WorkerClient>(input.worker_id.clone())
-        .status()
-        .call()
-        .await?
-        .into_inner();
+    let status = crate::restate_identity::replay_safe_request(
+        ctx.object_client::<WorkerClient>(input.worker_id.clone())
+            .status(),
+    )
+    .call()
+    .await?
+    .into_inner();
     let progress = latest_child_progress(ctx, &input.worker_id).await;
     Ok(WaitWorkerOutput {
         worker_id: input.worker_id,
@@ -384,11 +390,12 @@ async fn latest_child_progress(
     worker_id: &str,
 ) -> Option<WorkerProgressSummary> {
     moa_core::coordination_counters::record_worker_vo_call();
-    match ctx
-        .object_client::<WorkerClient>(worker_id.to_string())
-        .progress_summary()
-        .call()
-        .await
+    match crate::restate_identity::replay_safe_request(
+        ctx.object_client::<WorkerClient>(worker_id.to_string())
+            .progress_summary(),
+    )
+    .call()
+    .await
     {
         Ok(summary) => Some(summary.into_inner()),
         Err(error) => {
@@ -420,11 +427,13 @@ async fn message_child(
 ) -> Result<(), HandlerError> {
     let worker_id = input.worker_id.clone();
     moa_core::coordination_counters::record_vo_send();
-    ctx.object_client::<WorkerClient>(worker_id.clone())
-        .post_message(Json::from(WorkerMessage::FollowUp {
-            text: input.text.clone(),
-        }))
-        .send();
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<WorkerClient>(worker_id.clone())
+            .post_message(Json::from(WorkerMessage::FollowUp {
+                text: input.text.clone(),
+            })),
+    )
+    .send();
     append_session_event(
         ctx,
         parent.session_id(),
@@ -450,12 +459,14 @@ async fn provide_input_child(
 ) -> Result<(), HandlerError> {
     let worker_id = input.worker_id.clone();
     moa_core::coordination_counters::record_vo_send();
-    ctx.object_client::<WorkerClient>(worker_id.clone())
-        .post_message(Json::from(WorkerMessage::ProvideInput {
-            input_request_id: input.input_request_id.clone(),
-            text: input.text.clone(),
-        }))
-        .send();
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<WorkerClient>(worker_id.clone())
+            .post_message(Json::from(WorkerMessage::ProvideInput {
+                input_request_id: input.input_request_id.clone(),
+                text: input.text.clone(),
+            })),
+    )
+    .send();
     append_session_event(
         ctx,
         parent.session_id(),
@@ -510,9 +521,11 @@ async fn collect_child_progress(
                 moa_core::coordination_counters::record_worker_vo_call();
                 fetch_plan_slots.push((plan_slot, child_id.clone()));
                 inflight.push(
-                    ctx.object_client::<WorkerClient>(child_id)
-                        .progress_summary()
-                        .call(),
+                    crate::restate_identity::replay_safe_request(
+                        ctx.object_client::<WorkerClient>(child_id)
+                            .progress_summary(),
+                    )
+                    .call(),
                 );
             }
         }
@@ -552,9 +565,11 @@ async fn cancel_child(
 ) -> Result<(), HandlerError> {
     let worker_id = input.worker_id.clone();
     moa_core::coordination_counters::record_vo_send();
-    ctx.object_client::<WorkerClient>(input.worker_id)
-        .cancel(input.reason)
-        .send();
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<WorkerClient>(input.worker_id)
+            .cancel(input.reason),
+    )
+    .send();
     append_session_event(
         ctx,
         parent.session_id(),
@@ -579,13 +594,14 @@ async fn consume_parent_cached_terminal(
     });
     let DelegationParent::RootSession { session_id, .. } = parent;
     moa_core::coordination_counters::record_session_vo_call();
-    let terminal = ctx
-        .object_client::<SessionClient>(session_id.to_string())
-        .consume_child_result(input)
-        .call()
-        .await?
-        .into_inner()
-        .terminal;
+    let terminal = crate::restate_identity::replay_safe_request(
+        ctx.object_client::<SessionClient>(session_id.to_string())
+            .consume_child_result(input),
+    )
+    .call()
+    .await?
+    .into_inner()
+    .terminal;
     Ok(terminal)
 }
 
@@ -623,12 +639,13 @@ async fn session_child_refs(
     session_id: SessionId,
 ) -> Result<Vec<WorkerChildRef>, HandlerError> {
     moa_core::coordination_counters::record_session_vo_call();
-    Ok(ctx
-        .object_client::<SessionClient>(session_id.to_string())
-        .child_refs()
-        .call()
-        .await?
-        .into_inner())
+    Ok(crate::restate_identity::replay_safe_request(
+        ctx.object_client::<SessionClient>(session_id.to_string())
+            .child_refs(),
+    )
+    .call()
+    .await?
+    .into_inner())
 }
 
 async fn register_session_child(
@@ -637,10 +654,12 @@ async fn register_session_child(
     child: WorkerChildRef,
 ) -> Result<(), HandlerError> {
     moa_core::coordination_counters::record_session_vo_call();
-    ctx.object_client::<SessionClient>(session_id.to_string())
-        .register_child(Json::from(child))
-        .call()
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<SessionClient>(session_id.to_string())
+            .register_child(Json::from(child)),
+    )
+    .call()
+    .await?;
     Ok(())
 }
 
@@ -672,18 +691,19 @@ async fn append_session_event(
 ) -> Result<u64, HandlerError> {
     let persist_span = moa_observability::restate_observability::event_persist_span(1);
     moa_core::coordination_counters::record_durable_append();
-    let sequence_num = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event,
-            dedupe_key: None,
-        }))
-        .call()
-        .instrument(persist_span)
-        .await?
-        .into_inner()
-        .sequence_num;
+    let sequence_num = crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event,
+                dedupe_key: None,
+            })),
+    )
+    .call()
+    .instrument(persist_span)
+    .await?
+    .into_inner()
+    .sequence_num;
     Ok(sequence_num)
 }
 

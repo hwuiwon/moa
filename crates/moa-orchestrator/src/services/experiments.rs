@@ -151,6 +151,7 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<ExperimentGeneratePlanRequest>,
     ) -> Result<Json<ExperimentGeneratePlanResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "generate_plan");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -173,6 +174,7 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<ExperimentRunRequest>,
     ) -> Result<Json<ExperimentRunResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "run");
         let request = request.into_inner();
         let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -193,9 +195,11 @@ impl Experiments for ExperimentsImpl {
             score_run_id: accepted.score_run_id,
             agent_revision_variants: accepted.agent_revision_variants,
         };
-        ctx.workflow_client::<ExperimentRunClient>(workflow_request.run_uid.to_string())
-            .run(Json::from(workflow_request))
-            .send();
+        crate::restate_identity::replay_safe_request(
+            ctx.workflow_client::<ExperimentRunClient>(workflow_request.run_uid.to_string())
+                .run(Json::from(workflow_request)),
+        )
+        .send();
         Ok(Json::from(accepted.response))
     }
 
@@ -205,15 +209,18 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<ExperimentRunStatusRequest>,
     ) -> Result<Json<ExperimentRunStatusResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "status");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
 
-        ctx.workflow_client::<ExperimentRunClient>(request.run_uid.to_string())
-            .status(Json::from(request))
-            .call()
-            .await
-            .map_err(HandlerError::from)
+        crate::restate_identity::replay_safe_request(
+            ctx.workflow_client::<ExperimentRunClient>(request.run_uid.to_string())
+                .status(Json::from(request)),
+        )
+        .call()
+        .await
+        .map_err(HandlerError::from)
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -222,6 +229,7 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<ExperimentListRequest>,
     ) -> Result<Json<ExperimentListResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "list");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -239,6 +247,7 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<ExperimentPlanListRequest>,
     ) -> Result<Json<ExperimentPlanListResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "list_plans");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -256,6 +265,7 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<ExperimentTrialsRequest>,
     ) -> Result<Json<ExperimentTrialsResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "trials");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -273,6 +283,7 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<ExperimentTrialStatusRequest>,
     ) -> Result<Json<ExperimentTrialStatusResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "trial_status");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -290,6 +301,7 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<ExperimentCancelRequest>,
     ) -> Result<Json<ExperimentCancelResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "cancel");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -307,9 +319,11 @@ impl Experiments for ExperimentsImpl {
         // active trial). Best-effort one-way; only meaningful once the run is
         // cancelled, so genuinely finished runs are not signaled.
         if response.status == ExperimentRunStatus::Cancelled.as_str() {
-            ctx.workflow_client::<ExperimentRunClient>(run_uid.to_string())
-                .request_cancel(Json::from(response.reason.clone()))
-                .send();
+            crate::restate_identity::replay_safe_request(
+                ctx.workflow_client::<ExperimentRunClient>(run_uid.to_string())
+                    .request_cancel(Json::from(response.reason.clone())),
+            )
+            .send();
         }
 
         Ok(Json::from(response))
@@ -321,6 +335,7 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<ExperimentProposeImprovementsRequest>,
     ) -> Result<Json<ExperimentProposeImprovementsResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "propose_improvements");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -343,6 +358,7 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<ExperimentScoresRequest>,
     ) -> Result<Json<ExperimentScoresResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "scores");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -360,6 +376,7 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<ExperimentCompareRequest>,
     ) -> Result<Json<ExperimentCompareResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "compare");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -377,6 +394,7 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<AgentRevisionSimulationRunRequest>,
     ) -> Result<Json<AgentRevisionSimulationRunResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "run_agent_revision_simulation");
         let request = request.into_inner();
         let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -391,9 +409,11 @@ impl Experiments for ExperimentsImpl {
             .name("experiments_run_agent_revision_simulation")
             .await?
             .into_inner();
-        ctx.workflow_client::<ExperimentRunClient>(accepted.run_uid.to_string())
-            .run(Json::from(accepted.workflow_request()))
-            .send();
+        crate::restate_identity::replay_safe_request(
+            ctx.workflow_client::<ExperimentRunClient>(accepted.run_uid.to_string())
+                .run(Json::from(accepted.workflow_request())),
+        )
+        .send();
         Ok(Json::from(accepted.response))
     }
 
@@ -403,6 +423,7 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<AgentRevisionSimulationCompareRequest>,
     ) -> Result<Json<AgentRevisionSimulationCompareResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "compare_agent_revision_simulation");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
@@ -424,6 +445,7 @@ impl Experiments for ExperimentsImpl {
         ctx: Context<'_>,
         request: Json<AgentRevisionCompareRequest>,
     ) -> Result<Json<AgentRevisionCompareResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "compare_agent_revisions");
         let request = request.into_inner();
         authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;

@@ -2,7 +2,7 @@ api_version: moa.artifact/v1
 kind: skill
 metadata:
   name: sequential-support-check
-  description: Skill whose procedure runs support checks in a fixed order.
+  description: Skill whose execution plan runs support checks in a fixed order.
   tags:
     - pattern
     - sequential
@@ -17,63 +17,94 @@ definition:
       properties:
         order_id:
           type: string
-    procedure:
-      input_schema:
-        type: object
-        properties:
-          order_id:
-            type: string
-      nodes:
-        - id: start
-          kind: start
-          ui:
-            x: 80
-            y: 140
-        - id: lookup_order
-          kind: tool
-          tool_refs:
-            - tool://orders.lookup
-          input:
-            order_id_path: input.order_id
-          ui:
-            x: 260
-            y: 140
-        - id: check_policy
-          kind: skill_action
-          ref: action://refund_policy.check
-          input:
-            mode: deterministic_check
-          ui:
-            x: 460
-            y: 140
-        - id: write_summary
-          kind: memory_write
-          input:
-            content: "Support procedure completed a sequential order check."
-            source_name: sequential-support-check
-          ui:
-            x: 660
-            y: 140
-        - id: done
-          kind: end
-          input:
-            status: checked
-          ui:
-            x: 860
-            y: 140
-      edges:
-        - id: start-lookup-order
-          from: start
-          to: lookup_order
-        - id: lookup-order-check-policy
-          from: lookup_order
-          to: check_policy
-        - id: check-policy-write-summary
-          from: check_policy
-          to: write_summary
-        - id: write-summary-done
-          from: write_summary
-          to: done
-      ui:
-        layout: dagre
-        version: 1
+    execution_plan:
+      goal:
+        requirements:
+          - id: req_support_check
+            description: Complete the support check in dependency order.
+        deliverables: []
+        coverage: []
+        constraints: []
+        completion_checks:
+          - id: check_output
+            description: Validate the persisted support summary output.
+            requirement_ids: [req_support_check]
+            constraint_ids: []
+            kind:
+              kind: output_schema
+      plan:
+        schema_version: 1
+        input_schema:
+          type: object
+          properties:
+            order_id:
+              type: string
+        output_schema:
+          type: object
+        nodes:
+          - id: lookup_order
+            requirement_ids: [req_support_check]
+            depends_on: []
+            input:
+              order_id:
+                $ref: $.input.order_id
+            output_schema:
+              type: object
+            operation:
+              kind: capability
+              reference:
+                name: orders.lookup
+                version: v1
+            retry:
+              max_attempts: 2
+              initial_backoff_ms: 100
+              max_backoff_ms: 1000
+          - id: check_policy
+            requirement_ids: [req_support_check]
+            depends_on: [lookup_order]
+            input:
+              order:
+                $ref: $.nodes.lookup_order.output
+            output_schema:
+              type: object
+            operation:
+              kind: capability
+              reference:
+                name: action://refund_policy.check
+                version: v1
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0
+          - id: write_summary
+            requirement_ids: [req_support_check]
+            depends_on: [check_policy]
+            input:
+              policy_result:
+                $ref: $.nodes.check_policy.output
+              source_name: sequential-support-check
+            output_schema:
+              type: object
+            operation:
+              kind: capability
+              reference:
+                name: memory.write
+                version: v1
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0
+          - id: output
+            requirement_ids: [req_support_check]
+            depends_on: [write_summary]
+            input: {}
+            output_schema:
+              type: object
+            operation:
+              kind: output
+              value:
+                $ref: $.nodes.write_summary.output
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0

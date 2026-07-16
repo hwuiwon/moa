@@ -17,6 +17,8 @@ Postgres stores:
 - task segments
 - learning log entries
 - live behavior experiment run metadata
+- execution run/task state, immutable plan snapshots, and completion results
+- normalized execution route, planner-call, and compiler audit records
 - graph changelog outbox rows and per-tenant changelog versions
 - large event payload claim-check blobs
 - durable hand leases for sandbox reuse and cleanup
@@ -24,7 +26,7 @@ Postgres stores:
 
 ## Core Tables
 
-The session schema baseline lives in `crates/moa-migrations/migrations/postgres/V000001__session_baseline.sql`. Production applies central refinery migrations once. Schema-isolated tests replay the session baseline through `moa_migrations::run_session_schema`. The important tables are:
+The session schema baseline lives in `crates/moa-migrations/migrations/postgres/V000001__session_baseline.sql`. Production and test-template staging databases use the same canonical `moa_migrations::run` refinery path. Session tests clone a fully migrated physical database with `CREATE DATABASE ... TEMPLATE` and use its `public` schema; they do not replay a curated migration subset into synthetic schemas. The important tables are:
 
 ```sql
 CREATE TABLE sessions (
@@ -182,11 +184,19 @@ updates the session to the verified contact and records the prior contact in
 | Action review | `ActionReviewRequested`, `ActionReviewDecided` |
 | Memory | `MemoryRead`, `MemoryWrite`, `MemoryIngest` |
 | Worker coordination | `WorkerSpawned`, `WorkerMessageSent`, `WorkerStatusChanged`, `WorkerNotificationDelivered`, `WorkerSignalReceived`, `WorkerParentResumeRequested`, `WorkerHeartbeatStale`, `ProgressNarrated` |
+| Execution runs | `ExecutionRunStarted`, `ExecutionProgress`, `ExecutionInputRequired`, `ExecutionCompleted`, `ExecutionFailed`, `ExecutionCancelled`, `ExecutionSynthesisRequested` |
 | Compaction | `Checkpoint` |
 | Diagnostics | `Error`, `Warning` |
 
 The serialized enum is `Event` (not `SessionEvent`); each variant uses
 `#[serde(tag = "type", content = "data")]` with snake_case field names.
+
+Execution planning evidence is not a session event. Route decisions, planner
+calls, and compiler outcomes are written directly to the normalized
+`moa.execution_route_audit`, `moa.execution_planner_call_audit`, and
+`moa.execution_compile_audit` tables. This keeps internal prompts, candidates,
+and compiler reports out of model-visible history, session search, compaction,
+contact progress, and public SSE by construction.
 
 `SegmentStarted` records segment ID, index, summary, and previous segment ID. `SegmentCompleted` records final counters and duration.
 
@@ -211,6 +221,36 @@ The durable main-agent/worker coordination feature adds four:
 progress is projection state surfaced through `TurnExecution/progress` and
 `Session/progress`; it is not appended as a per-tick event-log row. Heartbeats
 stay in `Worker` VO state and append an event only on the stale transition above.
+
+Execution events link the owning session to compact run state. Progress events
+are cadence/delta limited aggregates rather than task heartbeats. Terminal
+events carry the run ID, status, coverage summary, compact output/citations, and
+explicit gaps; full task results remain in execution persistence. A guarded
+`ExecutionSynthesisRequested` event causes at most one final synthesis turn for
+the originating user sequence and run ID.
+
+## Execution Run Tables
+
+`moa.execution_run` and `moa.execution_task` are the product source of truth for
+durable typed DAG work. They are separate from session events and protected by
+the same tenant/contact/admin scope rules.
+
+An execution-run row stores its immutable `ExecutionGoalContract`, canonical
+initial plan, active plan, plan revision and append-only amendment history,
+plan hashes, skill-template or compiled-plan provenance, input/output,
+completion-check evidence, terminal gaps, status, integer budget and usage,
+aggregate counters, owning session/tenant/user scope, idempotency key, and
+timestamps. It cannot be marked `completed` while a required deliverable,
+coverage item, schema check, citation requirement, or budget/deadline check is
+unsatisfied.
+
+An execution-task row stores one logical node or map-item instance, unique by
+`(run_uid, node_id, item_key)`. It records requirement IDs, plan revision,
+status, attempt, generation fence, input/output/error, reserved and actual
+usage, citations, and timestamps. Atomic SQL reserves every worst-case budget
+dimension before dispatch. Generation-fenced completion prevents a stale retry
+from overwriting current state; cancellation prevents new reservations while
+leaving completed results queryable.
 
 ## Idempotent Append
 
@@ -264,7 +304,7 @@ Learning log rows are append-only records with tenant ID, learning type, target,
 ## Live Behavior Experiment Tables
 
 Live behavior experiment runs are stored in a dedicated ledger instead of being
-encoded as session events, `analytics.scores`, or procedure runs.
+encoded as session events, `analytics.scores`, or execution runs.
 
 `analytics.score_run` is the FK-able parent for a scored run. It stores the
 score run UUID, tenant attribution for runtime scoring, source label, and
@@ -276,16 +316,16 @@ timestamps. Eval, experiment, and future scored run types can attach many
 - `run_uid` is the public experiment run identifier.
 - `tenant_id` is the runtime isolation key; creator actor fields record the
   admin/operator principal that admitted the run.
-- `target_kind` is `agent_loop` or `procedure`.
+- `target_kind` is `agent_loop` or `execution_run`.
 - `status` is `accepted`, `dispatched`, `running`,
   `completed`, `failed`, or `cancelled`.
 - `target`, `variant`, and `scorecard` are the accepted experiment payloads.
 - `score_run_id` references `analytics.score_run(run_id)` and is the join key
   for `analytics.scores`.
-- `session_id` references `sessions(id)` for agent-loop runs or procedure runs
-  associated with a session.
-- `procedure_run_uid` references `moa.artifact_run(run_uid)` for
-  procedure experiments.
+- `session_id` references `sessions(id)` for agent-loop or session-linked
+  execution runs.
+- `execution_run_uid` references `moa.execution_run(run_uid)` for execution
+  experiments.
 - `artifact_revision_uids` is the fast-read list of pinned artifact revisions.
 - `idempotency_key`, `created_by_identity`, `error`, and timestamps describe
   admission, ownership, and terminal state.
@@ -299,9 +339,9 @@ does not replace the FK table.
 run, carries the tenant and optional contact attribution, trial key, status,
 target kind, variant key, pinned plan revision, selected
 persona/profile/scenario/data-bundle IDs, simulator settings, session or
-procedure run link, score run ID, turn count, stop reason, error, trace ID, and
+execution-run link, score run ID, turn count, stop reason, error, trace ID, and
 timestamps. `ExperimentTrialRun` updates this row as simulator turns dispatch
-target sessions or procedure runs.
+target sessions or execution runs.
 
 The `Experiments` service exposes `generate_plan`, `run`, `status`, `list`,
 `trials`, `trial_status`, `cancel`, `propose_improvements`, `scores`, and

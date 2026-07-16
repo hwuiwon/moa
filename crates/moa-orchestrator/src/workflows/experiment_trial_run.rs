@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
-use moa_artifacts::registry::{ArtifactRegistry, ArtifactRunStatus};
+use moa_artifacts::registry::ArtifactRegistry;
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::turn::{QueueMessageRequest, TurnOutcome, TurnOutcomeKind};
@@ -30,8 +30,6 @@ use moa_observability::{
 };
 use moa_providers::ProviderRegistry;
 use moa_session::PostgresSessionStore;
-use moa_skills::procedure::runtime::{ProcedureRuntime, StartProcedureRun};
-use restate_sdk::context::Request;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -39,18 +37,18 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::objects::session::SessionClient;
+use crate::restate_identity::with_identity_headers;
 use crate::services::llm_gateway::{LLMGatewayImpl, compute_cost_cents};
 use crate::services::session_store::inner::{
     apply_agent_model_policy, create_session_for_identity, resolve_agent_context_for_session,
 };
-use crate::workflows::errors::{
-    bad_request, handler_error_message, moa_error_to_handler_error, procedure_handler_error,
+use crate::workflows::errors::{bad_request, handler_error_message, moa_error_to_handler_error};
+use crate::workflows::experiment_cancel::{
+    K_CANCEL_IDENTITY, K_EXECUTION_CONTACT_ID, K_EXECUTION_RUN_UID, forward_child_cancellation,
 };
-use crate::workflows::experiment_cancel::{K_CANCEL_IDENTITY, forward_child_cancellation};
 use crate::workflows::experiment_errors::{
     non_retryable_handler_error, plan_expansion_error_to_handler_error,
 };
-use crate::workflows::procedure_target_wait::{self, ProcedureWaitOutcome, TARGET_WAIT_TIMEOUT};
 
 mod status;
 mod target_execution;
@@ -61,7 +59,7 @@ use status::{
     persist_trial_status_by_key, status_response_from_record, trial_status_allows_child_start,
     trial_status_response,
 };
-use target_execution::{run_agent_loop_trial, run_procedure_trial};
+use target_execution::{run_agent_loop_trial, run_execution_template_trial};
 use trial_simulator::load_simulator_context;
 
 const K_RUN_UID: &str = "run_uid";
@@ -69,7 +67,6 @@ const K_TRIAL_UID: &str = "trial_uid";
 const K_TRIAL_KEY: &str = "trial_key";
 const K_STATUS: &str = "status";
 const K_SESSION_ID: &str = "session_id";
-const K_PROCEDURE_RUN_UID: &str = "procedure_run_uid";
 const SESSION_AUTHZ_PROPAGATION_DELAY: Duration = Duration::from_millis(750);
 
 /// Workflow input for one behavior-lab simulator trial.
@@ -120,8 +117,8 @@ pub struct ExperimentTrialRunStatusResponse {
     pub turn_count: i32,
     /// Linked target session.
     pub session_id: Option<SessionId>,
-    /// Linked artifact workflow run.
-    pub procedure_run_uid: Option<Uuid>,
+    /// Linked typed execution run.
+    pub execution_run_uid: Option<Uuid>,
     /// Score run identifier used for trial-level scores.
     pub score_run_id: Uuid,
     /// Terminal error for failed trials.
@@ -181,6 +178,7 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
         ctx: WorkflowContext<'_>,
         request: Json<ExperimentTrialRunWorkflowRequest>,
     ) -> Result<Json<ExperimentTrialRunStatusResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExperimentTrialRun", "run");
         let request = request.into_inner();
         let expected_key = trial_workflow_key(request.trial.run_uid, &request.trial.trial_key);
@@ -241,23 +239,34 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
         ctx: SharedWorkflowContext<'_>,
         request: Json<ExperimentTrialRunStatusRequest>,
     ) -> Result<Json<ExperimentTrialRunStatusResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExperimentTrialRun", "status");
         let request = request.into_inner();
+        let run_uid = ctx
+            .get::<Json<Uuid>>(K_RUN_UID)
+            .await?
+            .map(Json::into_inner)
+            .ok_or_else(|| TerminalError::new_with_code(404, "experiment trial not started"))?;
         let pool = self.pool.clone();
         Ok(ctx
-            .run(|| async move { trial_status_response(pool, request).await.map(Json::from) })
+            .run(|| async move {
+                trial_status_response(pool, request, run_uid)
+                    .await
+                    .map(Json::from)
+            })
             .name("experiment_trial_status")
             .await?)
     }
 
     #[tracing::instrument(skip(self, ctx, reason))]
-    // SAFETY: control-only cancellation forward; the child Session and
-    // ProcedureExecution request_cancel handlers enforce their own authorization.
+    // SAFETY: control-only cancellation forward; the typed Session or Execution
+    // cancellation handler enforces the child authority carried by this workflow.
     async fn request_cancel(
         &self,
         ctx: SharedWorkflowContext<'_>,
         reason: Json<String>,
     ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExperimentTrialRun", "request_cancel");
         forward_child_cancellation(&ctx, reason.into_inner()).await
     }
@@ -289,14 +298,14 @@ async fn run_trial(
     ctx.set(K_TRIAL_UID, Json(trial.trial_uid));
     ctx.set(K_STATUS, Json(trial.status));
     annotate_trial_record_span(&trial);
-    attach_current_trial_trace(ctx, request.tenant_id, trial.trial_uid, pool).await?;
+    attach_current_trial_trace(ctx, trial.scope, trial.trial_uid, pool).await?;
     if !trial_status_allows_child_start(trial.status) {
         return status_response_from_record(request.tenant_id, trial);
     }
 
     let trial = persist_trial_status(
         ctx,
-        request.tenant_id,
+        trial.scope,
         trial.trial_uid,
         ExperimentTrialStatus::Running,
         None,
@@ -321,7 +330,9 @@ async fn run_trial(
             )
             .await
         }
-        ExperimentTargetKind::Procedure => run_procedure_trial(ctx, request, trial, pool).await,
+        ExperimentTargetKind::ExecutionTemplate => {
+            run_execution_template_trial(ctx, request, trial, pool, session_store).await
+        }
     }
 }
 
@@ -361,45 +372,6 @@ fn session_actor_ref(identity: &Identity) -> Result<SessionActorRef, HandlerErro
         )
         .into()),
     }
-}
-
-fn with_identity_headers<'a, Req, Res>(
-    request: Request<'a, Req, Res>,
-    identity: &Identity,
-) -> Request<'a, Req, Res> {
-    let request = request
-        .header(
-            "x-moa-identity-type".to_string(),
-            identity_type_header(identity.identity_type).to_string(),
-        )
-        .header("x-moa-identity-id".to_string(), identity.id.to_string())
-        .header(
-            "x-moa-tenant-id".to_string(),
-            identity.tenant_id.to_string(),
-        );
-    let request = if let Some(api_key_id) = identity.api_key_id {
-        request.header("x-moa-api-key-id".to_string(), api_key_id.to_string())
-    } else {
-        request
-    };
-    if let Some(user_id) = identity.acting_on_behalf_of {
-        request.header("x-moa-acting-on-behalf-of".to_string(), user_id.to_string())
-    } else {
-        request
-    }
-}
-
-fn identity_type_header(identity_type: IdentityType) -> &'static str {
-    match identity_type {
-        IdentityType::Operator => "operator",
-        IdentityType::Agent => "agent",
-        IdentityType::Service => "service",
-        IdentityType::Contact => "contact",
-    }
-}
-
-fn workflow_runtime(pool: sqlx::PgPool) -> ProcedureRuntime {
-    ProcedureRuntime::new(ArtifactRegistry::new(pool))
 }
 
 fn annotate_trial_span(trial: &NewExperimentTrial, trial_uid: Option<Uuid>) {

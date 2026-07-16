@@ -205,11 +205,6 @@ impl TestSessionHandle<'_> {
     }
 
     /// Reads the current durable session lifecycle status.
-    ///
-    /// This is the authoritative "conversation settled" signal: it stays `Running` while an
-    /// auto-delegation run is still waiting for workers or a synthesis turn (even during
-    /// transient windows where `active_turn_id` is momentarily `None`), and flips to `Paused`
-    /// only when the whole user message is fully resolved.
     pub async fn status(&self) -> Result<SessionStatus> {
         self.client
             .post_empty_call(&format!("/Session/{}/status", self.session_id))

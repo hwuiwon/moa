@@ -143,6 +143,7 @@ impl Knowledge for KnowledgeImpl {
         ctx: Context<'_>,
         request: Json<KnowledgeCreateLinkTokenRequest>,
     ) -> Result<Json<KnowledgeCreateLinkTokenResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "create_link_token");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
@@ -165,6 +166,7 @@ impl Knowledge for KnowledgeImpl {
         ctx: Context<'_>,
         request: Json<KnowledgeExchangeTokenRequest>,
     ) -> Result<Json<KnowledgeExchangeTokenResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "exchange_public_token");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
@@ -197,6 +199,7 @@ impl Knowledge for KnowledgeImpl {
         ctx: Context<'_>,
         request: Json<KnowledgeSyncRequest>,
     ) -> Result<Json<KnowledgeSyncResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "sync_connection");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
@@ -224,6 +227,7 @@ impl Knowledge for KnowledgeImpl {
         ctx: Context<'_>,
         request: Json<KnowledgeSyncStatusRequest>,
     ) -> Result<Json<KnowledgeSyncStatusResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "sync_status");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
@@ -246,6 +250,7 @@ impl Knowledge for KnowledgeImpl {
         ctx: Context<'_>,
         request: Json<KnowledgeSyncEventsRequest>,
     ) -> Result<Json<KnowledgeSyncEventsResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "sync_events");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
@@ -268,6 +273,7 @@ impl Knowledge for KnowledgeImpl {
         ctx: Context<'_>,
         request: Json<KnowledgeConnectionListRequest>,
     ) -> Result<Json<KnowledgeConnectionListResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "list_connections");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
@@ -290,6 +296,7 @@ impl Knowledge for KnowledgeImpl {
         ctx: Context<'_>,
         request: Json<KnowledgeIntegrationListRequest>,
     ) -> Result<Json<KnowledgeIntegrationListResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "list_integrations");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
@@ -312,6 +319,7 @@ impl Knowledge for KnowledgeImpl {
         ctx: Context<'_>,
         request: Json<KnowledgeUpdateConnectionSourceSelectionRequest>,
     ) -> Result<Json<KnowledgeUpdateConnectionSourceSelectionResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "update_connection_source_selection");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
@@ -344,6 +352,7 @@ impl Knowledge for KnowledgeImpl {
         ctx: Context<'_>,
         request: Json<KnowledgeDisconnectConnectionRequest>,
     ) -> Result<Json<KnowledgeDisconnectConnectionResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "disconnect_connection");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
@@ -366,6 +375,7 @@ impl Knowledge for KnowledgeImpl {
         ctx: Context<'_>,
         request: Json<KnowledgeObjectListRequest>,
     ) -> Result<Json<KnowledgeObjectListResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "list_objects");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
@@ -388,6 +398,7 @@ impl Knowledge for KnowledgeImpl {
         ctx: Context<'_>,
         request: Json<KnowledgeObjectInspectRequest>,
     ) -> Result<Json<KnowledgeObjectInspectResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "inspect_object");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
@@ -410,6 +421,7 @@ impl Knowledge for KnowledgeImpl {
         ctx: Context<'_>,
         request: Json<KnowledgeQueryTraceRequest>,
     ) -> Result<Json<KnowledgeQueryTraceResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "query_trace");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
@@ -433,6 +445,7 @@ impl Knowledge for KnowledgeImpl {
         ctx: Context<'_>,
         request: Json<KnowledgeProviderWebhookRequest>,
     ) -> Result<Json<KnowledgeProviderWebhookResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "provider_webhook");
         let request = request.into_inner();
         let service = self.service.clone();
@@ -464,9 +477,11 @@ impl KnowledgeImpl {
     }
 
     fn dispatch_knowledge_sync_ingestion(ctx: &Context<'_>, sync_run_uid: Uuid) {
-        ctx.workflow_client::<KnowledgeSyncIngestionClient>(sync_run_uid.to_string())
-            .run(Json::from(KnowledgeSyncIngestionRequest { sync_run_uid }))
-            .send();
+        crate::restate_identity::replay_safe_request(
+            ctx.workflow_client::<KnowledgeSyncIngestionClient>(sync_run_uid.to_string())
+                .run(Json::from(KnowledgeSyncIngestionRequest { sync_run_uid })),
+        )
+        .send();
     }
 }
 

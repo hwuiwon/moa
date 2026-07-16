@@ -3,7 +3,7 @@
 use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::Identity;
-use moa_core::types::identifiers::TenantId;
+use moa_core::types::identifiers::{SessionId, TenantId};
 use restate_sdk::prelude::{HandlerError, TerminalError};
 
 use crate::ctx::{self, IdentityHeaderError, OrchestratorCtx, RequestHeaders};
@@ -48,6 +48,28 @@ pub async fn authorize_tenant(
     require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
         .await
         .map_err(translate_authz_error)?;
+    Ok(identity)
+}
+
+/// Authorize the caller as a participant of one parent session.
+///
+/// Execution handlers use this parent-object check before reading run data;
+/// delegated agent identities are admitted by the same delegation-aware helper.
+pub async fn authorize_session_participant(
+    ctx: &impl RequestHeaders,
+    session_id: SessionId,
+) -> Result<Identity, HandlerError> {
+    let identity = require_identity(ctx)?;
+    let fga = require_fga_client()?;
+    require_authz_with_delegation(
+        &fga,
+        &identity,
+        ObjectType::Session,
+        session_id,
+        Relation::Participant,
+    )
+    .await
+    .map_err(translate_authz_error)?;
     Ok(identity)
 }
 

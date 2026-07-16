@@ -28,6 +28,8 @@ pub(super) const K_LAST_HEARTBEAT_AT: &str = "last_heartbeat_at";
 pub(super) const K_CLEANUP_GENERATION: &str = "cleanup_generation";
 pub(super) const K_CLEANUP_RELEASE_ATTEMPTS: &str = "cleanup_release_attempts";
 pub(super) const K_PENDING_INPUT_REQUESTS: &str = "pending_input_requests";
+pub(super) const K_INPUT_DELIVERY_HISTORY: &str = "input_delivery_history";
+pub(super) const INPUT_DELIVERY_HISTORY_LIMIT: usize = 128;
 pub(super) const MAX_TURNS_PER_POST: usize = 50;
 /// Maximum consecutive failed hand-release attempts before self-clean force-clears the VO.
 ///
@@ -93,6 +95,17 @@ pub struct ClaimedHistoryEntry {
     pub preview: String,
     /// Approximate token count of the offloaded content.
     pub token_estimate: usize,
+}
+
+/// Durable idempotency record for one applied worker input reply.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkerInputDeliveryRecord {
+    /// Stable request identifier supplied by the blocked worker turn.
+    pub input_request_id: String,
+    /// BLAKE3 hash of the canonical `Value::String` reply bytes.
+    pub canonical_reply_hash: [u8; 32],
+    /// Original acknowledgement committed atomically with awakeable removal.
+    pub acknowledgement: UserReplyDeliveryAck,
 }
 
 /// Truncated, human-readable preview of a message's text content.
@@ -182,6 +195,8 @@ pub struct WorkerVoState {
     /// message (resolve) or `Worker/clear_input_request` (timeout). Kept tiny —
     /// at most a few concurrent requests per child.
     pub pending_input_requests: Vec<WorkerPendingInput>,
+    /// Ordered bounded replay history for applied input replies.
+    pub input_delivery_history: Vec<WorkerInputDeliveryRecord>,
 }
 
 impl WorkerVoState {
@@ -224,6 +239,7 @@ impl WorkerVoState {
         self.notification_delivered = false;
         self.result_waiters.clear();
         self.pending_input_requests.clear();
+        self.input_delivery_history.clear();
         Ok(())
     }
 
@@ -602,6 +618,10 @@ impl VoState for WorkerVoState {
                 .get_json(K_PENDING_INPUT_REQUESTS)
                 .await?
                 .unwrap_or_default(),
+            input_delivery_history: reader
+                .get_json(K_INPUT_DELIVERY_HISTORY)
+                .await?
+                .unwrap_or_default(),
         })
     }
 
@@ -646,6 +666,7 @@ impl VoState for WorkerVoState {
             0,
         );
         set_or_clear_vec(ctx, K_PENDING_INPUT_REQUESTS, &self.pending_input_requests);
+        set_or_clear_vec(ctx, K_INPUT_DELIVERY_HISTORY, &self.input_delivery_history);
     }
 
     fn persist_changes(&self, ctx: &ObjectContext<'_>, baseline: &Self) {
@@ -776,6 +797,12 @@ impl VoState for WorkerVoState {
             &self.pending_input_requests,
             &baseline.pending_input_requests,
         );
+        set_changed_vec(
+            ctx,
+            K_INPUT_DELIVERY_HISTORY,
+            &self.input_delivery_history,
+            &baseline.input_delivery_history,
+        );
     }
 }
 
@@ -862,6 +889,67 @@ impl WorkerVoState {
             .position(|entry| entry.input_request_id == input_request_id)?;
         Some(self.pending_input_requests.remove(index).awakeable_id)
     }
+
+    /// Applies one canonical user reply or returns its exact replay/conflict result.
+    pub(super) fn apply_input_reply(
+        &mut self,
+        input_request_id: &str,
+        reply: &serde_json::Value,
+    ) -> Result<(UserReplyDeliveryAck, Option<String>), HandlerError> {
+        let canonical_reply_hash = canonical_worker_reply_hash(reply)?;
+        if let Some(existing) = self
+            .input_delivery_history
+            .iter()
+            .find(|entry| entry.input_request_id == input_request_id)
+        {
+            let acknowledgement = if existing.canonical_reply_hash == canonical_reply_hash {
+                UserReplyDeliveryAck::Replayed
+            } else {
+                UserReplyDeliveryAck::Conflict
+            };
+            return Ok((acknowledgement, None));
+        }
+
+        let Some(index) = self
+            .pending_input_requests
+            .iter()
+            .position(|entry| entry.input_request_id == input_request_id)
+        else {
+            return Ok((UserReplyDeliveryAck::Conflict, None));
+        };
+        let awakeable_id = self.pending_input_requests.remove(index).awakeable_id;
+        self.input_delivery_history.push(WorkerInputDeliveryRecord {
+            input_request_id: input_request_id.to_string(),
+            canonical_reply_hash,
+            acknowledgement: UserReplyDeliveryAck::Applied,
+        });
+        if self.input_delivery_history.len() > INPUT_DELIVERY_HISTORY_LIMIT {
+            self.input_delivery_history.remove(0);
+        }
+        Ok((UserReplyDeliveryAck::Applied, Some(awakeable_id)))
+    }
+
+    /// Requires the loaded Worker to belong to the exact caller-authorized Session scope.
+    pub(super) fn ensure_parent_session_scope(
+        &self,
+        parent_session: SessionId,
+    ) -> Result<(), HandlerError> {
+        if self.parent_session == Some(parent_session) {
+            return Ok(());
+        }
+        Err(TerminalError::new_with_code(403, "worker parent session scope mismatch").into())
+    }
+}
+
+fn canonical_worker_reply_hash(reply: &serde_json::Value) -> Result<[u8; 32], HandlerError> {
+    if !reply.is_string() {
+        return Err(
+            TerminalError::new_with_code(422, "worker input reply must be a JSON string").into(),
+        );
+    }
+    let canonical = moa_artifacts::canonical::canonical_json_bytes(reply)
+        .map_err(|error| TerminalError::new_with_code(422, error.to_string()))?;
+    Ok(*blake3::hash(&canonical).as_bytes())
 }
 
 #[cfg(test)]
@@ -874,8 +962,10 @@ mod tests {
 
     use super::{
         ClaimedHistoryEntry, HISTORY_CLAIM_CHECK_THRESHOLD_BYTES, HISTORY_INLINE_TAIL,
-        WORKER_BUDGET_EXHAUSTED_MESSAGE, WorkerHistoryEntry, WorkerVoState, latest_assistant_text,
+        INPUT_DELIVERY_HISTORY_LIMIT, WORKER_BUDGET_EXHAUSTED_MESSAGE, WorkerHistoryEntry,
+        WorkerVoState, latest_assistant_text,
     };
+    use crate::objects::worker::UserReplyDeliveryAck;
     use moa_core::{
         types::context::ContextMessage, types::context::MessageRole,
         types::events_stream::ClaimCheck, types::worker::state::WorkerState,
@@ -1223,6 +1313,142 @@ mod tests {
             Some("awk-2".to_string())
         );
         assert!(state.pending_input_requests.is_empty());
+    }
+
+    #[test]
+    fn worker_input_delivery_distinguishes_apply_replay_conflict_and_unknown() {
+        // Pins: only the first exact pending reply applies; identical retries replay while a
+        // changed duplicate or unknown request conflicts without resolving another awakeable.
+        use moa_core::types::worker::state::WorkerPendingInput;
+
+        let mut state = WorkerVoState::default();
+        assert!(state.register_input_request(WorkerPendingInput {
+            input_request_id: "req-1".to_string(),
+            awakeable_id: "awake-1".to_string(),
+        }));
+        let reply = serde_json::Value::String("answer".to_string());
+        assert_eq!(
+            state
+                .apply_input_reply("req-1", &reply)
+                .expect("first exact reply should apply"),
+            (UserReplyDeliveryAck::Applied, Some("awake-1".to_string()))
+        );
+        assert_eq!(state.input_delivery_history.len(), 1);
+        assert_eq!(
+            state.input_delivery_history[0].acknowledgement,
+            UserReplyDeliveryAck::Applied
+        );
+        assert_eq!(
+            state
+                .apply_input_reply("req-1", &reply)
+                .expect("identical duplicate should replay"),
+            (UserReplyDeliveryAck::Replayed, None)
+        );
+        assert_eq!(
+            state
+                .apply_input_reply("req-1", &serde_json::Value::String("changed".to_string()),)
+                .expect("changed duplicate should return a typed conflict"),
+            (UserReplyDeliveryAck::Conflict, None)
+        );
+        assert_eq!(
+            state
+                .apply_input_reply("unknown", &serde_json::Value::String("answer".to_string()),)
+                .expect("unknown request should return a typed conflict"),
+            (UserReplyDeliveryAck::Conflict, None)
+        );
+        assert_eq!(state.input_delivery_history.len(), 1);
+    }
+
+    #[test]
+    fn worker_input_parent_scope_fails_closed_on_missing_or_mismatched_owner() {
+        // Pins: authorization of a caller-supplied Session is insufficient unless the loaded
+        // Worker state names that exact Session as its owning parent.
+        let owning_session = SessionId::new();
+        let different_session = SessionId::new();
+        let mut state = WorkerVoState {
+            parent_session: Some(owning_session),
+            ..WorkerVoState::default()
+        };
+
+        state
+            .ensure_parent_session_scope(owning_session)
+            .expect("exact owning Session should be accepted");
+        let mismatch = state
+            .ensure_parent_session_scope(different_session)
+            .expect_err("different authorized Session must fail closed");
+        let mismatch: &(dyn std::error::Error + Send + Sync) = mismatch.as_ref();
+        assert_eq!(
+            mismatch.to_string(),
+            "Terminal error [403]: worker parent session scope mismatch"
+        );
+
+        state.parent_session = None;
+        let missing = state
+            .ensure_parent_session_scope(owning_session)
+            .expect_err("uninitialized Worker scope must fail closed");
+        let missing: &(dyn std::error::Error + Send + Sync) = missing.as_ref();
+        assert_eq!(
+            missing.to_string(),
+            "Terminal error [403]: worker parent session scope mismatch"
+        );
+    }
+
+    #[test]
+    fn worker_input_delivery_history_evicts_oldest_after_128_entries() {
+        // Pins: replay state is bounded and ordered; the 129th applied reply evicts only the
+        // oldest request while the newest 128 remain exact-replayable.
+        use moa_core::types::worker::state::WorkerPendingInput;
+
+        let mut state = WorkerVoState::default();
+        for index in 0..=INPUT_DELIVERY_HISTORY_LIMIT {
+            let input_request_id = format!("req-{index:03}");
+            assert!(state.register_input_request(WorkerPendingInput {
+                input_request_id: input_request_id.clone(),
+                awakeable_id: format!("awake-{index:03}"),
+            }));
+            assert_eq!(
+                state
+                    .apply_input_reply(
+                        &input_request_id,
+                        &serde_json::Value::String(format!("reply-{index:03}")),
+                    )
+                    .expect("pending reply should apply")
+                    .0,
+                UserReplyDeliveryAck::Applied
+            );
+        }
+
+        assert_eq!(
+            state.input_delivery_history.len(),
+            INPUT_DELIVERY_HISTORY_LIMIT
+        );
+        assert_eq!(state.input_delivery_history[0].input_request_id, "req-001");
+        assert_eq!(
+            state
+                .input_delivery_history
+                .last()
+                .expect("bounded history should retain a newest entry")
+                .input_request_id,
+            "req-128"
+        );
+        assert_eq!(
+            state
+                .apply_input_reply(
+                    "req-000",
+                    &serde_json::Value::String("reply-000".to_string()),
+                )
+                .expect("evicted request should be unknown"),
+            (UserReplyDeliveryAck::Conflict, None)
+        );
+        assert_eq!(
+            state
+                .apply_input_reply(
+                    "req-128",
+                    &serde_json::Value::String("reply-128".to_string()),
+                )
+                .expect("newest request should remain replayable"),
+            (UserReplyDeliveryAck::Replayed, None)
+        );
     }
 
     #[test]

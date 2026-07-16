@@ -2,7 +2,7 @@ api_version: moa.artifact/v1
 kind: skill
 metadata:
   name: custom-logic-routing
-  description: Skill whose procedure uses explicit conditional routing and a bounded retry topology.
+  description: Skill whose execution plan uses explicit conditional routing and bounded retries.
   tags:
     - pattern
     - custom-logic
@@ -19,87 +19,95 @@ definition:
           type: string
         retry:
           type: boolean
-    procedure:
-      input_schema:
-        type: object
-        properties:
-          priority:
-            type: string
-          retry:
-            type: boolean
-      nodes:
-        - id: start
-          kind: start
-          ui:
-            x: 80
-            y: 180
-        - id: route_priority
-          kind: condition
-          ui:
-            x: 280
-            y: 180
-        - id: escalate
-          kind: worker
-          max_turns: 2
-          input:
-            task: Investigate the high-priority case and summarize blockers.
-            task_name: high-priority-escalation
-            tool_subset:
-              - orders.lookup
-              - knowledge.search
-            budget_tokens: 3000
-          ui:
-            x: 520
-            y: 90
-        - id: standard_response
-          kind: agent
-          max_turns: 1
-          input:
-            prompt: Produce a concise standard response.
-          ui:
-            x: 520
-            y: 270
-        - id: retry_gate
-          kind: condition
-          ui:
-            x: 760
-            y: 180
-        - id: done
-          kind: end
-          input:
-            status: routed
-          ui:
-            x: 980
-            y: 180
-      edges:
-        - id: start-route-priority
-          from: start
-          to: route_priority
-        - id: route-priority-escalate
-          from: route_priority
-          to: escalate
-          when:
-            type: equals
-            left: input.priority
-            right: high
-        - id: route-priority-standard-response
-          from: route_priority
-          to: standard_response
-        - id: escalate-retry-gate
-          from: escalate
-          to: retry_gate
-        - id: standard-response-retry-gate
-          from: standard_response
-          to: retry_gate
-        - id: retry-gate-route-priority
-          from: retry_gate
-          to: route_priority
-          when:
-            type: exists
-            path: input.retry
-        - id: retry-gate-done
-          from: retry_gate
-          to: done
-      ui:
-        layout: dagre
-        version: 1
+    execution_plan:
+      goal:
+        requirements:
+          - id: req_route
+            description: Route the case according to its declared priority.
+        deliverables: []
+        coverage: []
+        constraints: []
+        completion_checks:
+          - id: check_output
+            description: Validate the routed response output.
+            requirement_ids: [req_route]
+            constraint_ids: []
+            kind:
+              kind: output_schema
+      plan:
+        schema_version: 1
+        input_schema:
+          type: object
+          properties:
+            priority:
+              type: string
+            retry:
+              type: boolean
+        output_schema:
+          type: object
+        nodes:
+          - id: escalate
+            requirement_ids: [req_route]
+            depends_on: []
+            when:
+              kind: equals
+              reference:
+                $ref: $.input.priority
+              value: high
+            input:
+              retry_requested:
+                $ref: $.input.retry
+            output_schema:
+              type: object
+            operation:
+              kind: agent
+              instructions: Investigate the high-priority case and summarize blockers.
+              skill_refs: []
+              capability_refs:
+                - name: orders.lookup
+                  version: v1
+                - name: knowledge.search
+                  version: v1
+              max_turns: 2
+            retry:
+              max_attempts: 2
+              initial_backoff_ms: 100
+              max_backoff_ms: 1000
+          - id: standard_response
+            requirement_ids: [req_route]
+            depends_on: []
+            when:
+              kind: equals
+              reference:
+                $ref: $.input.priority
+              value: standard
+            input: {}
+            output_schema:
+              type: object
+            operation:
+              kind: agent
+              instructions: Produce a concise standard response.
+              skill_refs: []
+              capability_refs: []
+              max_turns: 1
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0
+          - id: output
+            requirement_ids: [req_route]
+            depends_on: [escalate, standard_response]
+            input: {}
+            output_schema:
+              type: object
+            operation:
+              kind: output
+              value:
+                escalation:
+                  $ref: $.nodes.escalate.output
+                standard_response:
+                  $ref: $.nodes.standard_response.output
+            retry:
+              max_attempts: 1
+              initial_backoff_ms: 0
+              max_backoff_ms: 0

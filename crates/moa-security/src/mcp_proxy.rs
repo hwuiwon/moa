@@ -344,6 +344,7 @@ mod tests {
             credentials: Some(McpCredentialConfig::Bearer {
                 token_env: name.clone(),
             }),
+            trust_tool_annotations: false,
             ..McpServerConfig::default()
         }]);
 
@@ -442,6 +443,7 @@ mod tests {
             credentials: Some(McpCredentialConfig::Bearer {
                 token_env: name.clone(),
             }),
+            trust_tool_annotations: false,
             ..McpServerConfig::default()
         }])
         .unwrap();

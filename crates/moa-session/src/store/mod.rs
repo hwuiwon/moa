@@ -157,29 +157,12 @@ impl PostgresSessionStore {
         .await
     }
 
-    /// Creates a session store that uses an explicit `PostgreSQL` schema.
-    ///
-    /// This is primarily intended for ignored integration tests so multiple runs can isolate
-    /// their tables without separate databases.
-    pub async fn new_in_schema(database_url: &str, schema_name: &str) -> Result<Self> {
-        Self::new_with_options_and_schema(
-            database_url,
-            1,
-            100,
-            60,
-            Some(schema_name),
-            isolated_test_backends()?,
-            true,
-        )
-        .await
-    }
-
     /// Creates a session store bound to a schema that is already migrated.
     ///
     /// This connects and configures the search path but skips migrations, so it
     /// is only safe when the target schema already contains the session tables —
     /// for example a per-test database cloned from a pre-migrated template by the
-    /// test harness. Use [`Self::new_in_schema`] when migrations must run.
+    /// test harness.
     pub async fn new_in_existing_schema(database_url: &str, schema_name: &str) -> Result<Self> {
         // Pool is capped well below the compose Postgres server limit
         // (max_connections = 100): several isolated test stores run
@@ -194,7 +177,6 @@ impl PostgresSessionStore {
             60,
             Some(schema_name),
             isolated_test_backends()?,
-            false,
         )
         .await
     }
@@ -386,8 +368,8 @@ impl PostgresSessionStore {
             "analytics.turn_fact",
             "analytics.tool_call_fact",
             "analytics.task_segment_fact",
-            "analytics.procedure_run_fact",
-            "analytics.procedure_node_run_fact",
+            "analytics.execution_run_fact",
+            "analytics.execution_task_fact",
             "analytics.learning_candidate_fact",
             "analytics.experiment_run_fact",
             "analytics.guardrail_hourly",
@@ -448,7 +430,6 @@ impl PostgresSessionStore {
         connect_timeout_secs: u64,
         schema_name: Option<&str>,
         backends: SessionStorageBackends,
-        run_migrations: bool,
     ) -> Result<Self> {
         let pool = Self::connect_with_retry(
             database_url,
@@ -459,9 +440,6 @@ impl PostgresSessionStore {
             schema_name,
         )
         .await?;
-        if run_migrations {
-            migrate_database(database_url, &pool, schema_name).await?;
-        }
         let store = Self {
             url: database_url.to_string(),
             pool,
@@ -491,7 +469,9 @@ impl PostgresSessionStore {
             schema_name,
         )
         .await?;
-        migrate_database(database_url, &pool, schema_name).await?;
+        if schema_name.is_none() {
+            migrate_database(database_url).await?;
+        }
         let blob_store = blob_store_from_config(config, pool.clone()).await?;
         let attachment_store = AttachmentObjectStore::from_config(config)?;
         let backends = SessionStorageBackends {
@@ -657,11 +637,7 @@ impl SessionAnalyticsStore for PostgresSessionStore {
 }
 
 /// Builds the in-memory blob store plus local attachment store used by
-/// schema-isolated test session stores.
-///
-/// Both [`PostgresSessionStore::new_in_schema`] and
-/// [`PostgresSessionStore::new_in_existing_schema`] share this so the migrating
-/// and template-cloned test paths configure identical storage backends.
+/// schema-bound test session stores.
 fn isolated_test_backends() -> Result<SessionStorageBackends> {
     let blob_dir = FileBlobStore::default_dir_for_database_path(Path::new(":memory:"))?;
     let blob_store: Arc<dyn BlobStore> = Arc::new(FileBlobStore::new(blob_dir));
@@ -673,19 +649,64 @@ fn isolated_test_backends() -> Result<SessionStorageBackends> {
     })
 }
 
-async fn migrate_database(
-    database_url: &str,
-    pool: &PgPool,
-    schema_name: Option<&str>,
-) -> Result<()> {
-    match schema_name {
-        Some(schema_name) => moa_migrations::run_session_schema(pool, schema_name)
+async fn migrate_database(database_url: &str) -> Result<()> {
+    moa_migrations::run(database_url)
+        .await
+        .map_err(|error| MoaError::StorageError(format!("postgres migration failed: {error:#}")))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Constructor-level database bootstrap tests.
+
+    use super::{PostgresSessionStore, local_rustfs_config};
+    use crate::testing::{cleanup_test_schema, provision_cloned_database};
+    use sqlx::postgres::PgPoolOptions;
+
+    #[tokio::test]
+    #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+    async fn configured_schema_binds_without_running_migrations_db() {
+        // Pins: database.schema is a bind-only contract. A deliberately
+        // divergent refinery checksum would make any migration attempt fail,
+        // while binding to the already-provisioned public schema still works.
+        let (database_url, schema_name) = provision_cloned_database()
             .await
-            .map_err(|error| {
-                MoaError::StorageError(format!("postgres migration failed: {error:#}"))
-            }),
-        None => moa_migrations::run(database_url).await.map_err(|error| {
-            MoaError::StorageError(format!("postgres migration failed: {error:#}"))
-        }),
+            .expect("provision migrated clone");
+
+        let outcome = async {
+            let mutation_pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&database_url)
+                .await?;
+            sqlx::query("UPDATE refinery_schema_history SET checksum = $1 WHERE version = 337")
+                .bind("0")
+                .execute(&mutation_pool)
+                .await?;
+            mutation_pool.close().await;
+
+            let mut config = local_rustfs_config();
+            config.database.url = database_url.clone();
+            config.database.admin_url = None;
+            config.database.schema = Some(schema_name.clone());
+            config.database.max_connections = 2;
+
+            let store = PostgresSessionStore::from_config(&config).await?;
+            let retained_checksum: String = sqlx::query_scalar(
+                "SELECT checksum FROM refinery_schema_history WHERE version = 337",
+            )
+            .fetch_one(store.pool())
+            .await?;
+            let bound_schema = store.schema_name().map(ToOwned::to_owned);
+            store.pool().close().await;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((bound_schema, retained_checksum))
+        }
+        .await;
+
+        let cleanup = cleanup_test_schema(&database_url, &schema_name).await;
+        let (bound_schema, retained_checksum) =
+            outcome.expect("configured schema must not invoke refinery");
+        cleanup.expect("cleanup cloned database");
+        assert_eq!(bound_schema.as_deref(), Some("public"));
+        assert_eq!(retained_checksum, "0");
     }
 }

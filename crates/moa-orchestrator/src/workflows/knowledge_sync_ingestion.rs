@@ -132,6 +132,7 @@ impl KnowledgeSyncIngestion for KnowledgeSyncIngestionImpl {
         ctx: WorkflowContext<'_>,
         request: Json<KnowledgeSyncIngestionRequest>,
     ) -> Result<Json<KnowledgeSyncIngestionReport>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("KnowledgeSyncIngestion", "run");
         let request = request.into_inner();
         let mut steps = RestateKnowledgeSyncIngestionSteps {

@@ -50,12 +50,13 @@ pub(super) async fn evaluate_input_guardrail(
         stage,
         user_message,
     );
-    let response = ctx
-        .service_client::<LLMGatewayClient>()
-        .complete(Json::from(guardrail_request))
-        .call()
-        .await?
-        .into_inner();
+    let response = crate::restate_identity::replay_safe_request(
+        ctx.service_client::<LLMGatewayClient>()
+            .complete(Json::from(guardrail_request)),
+    )
+    .call()
+    .await?
+    .into_inner();
     let evaluation = crate::guardrails::evaluate_guardrail_response(
         &agent_context.policy_hash,
         GuardrailDirection::Input,
@@ -135,12 +136,13 @@ pub(super) async fn visible_response_after_output_guardrail(
         stage,
         &response.text,
     );
-    let judge_response = ctx
-        .service_client::<LLMGatewayClient>()
-        .complete(Json::from(guardrail_request))
-        .call()
-        .await?
-        .into_inner();
+    let judge_response = crate::restate_identity::replay_safe_request(
+        ctx.service_client::<LLMGatewayClient>()
+            .complete(Json::from(guardrail_request)),
+    )
+    .call()
+    .await?
+    .into_inner();
     let evaluation = crate::guardrails::evaluate_guardrail_response(
         &agent_context.policy_hash,
         GuardrailDirection::Output,

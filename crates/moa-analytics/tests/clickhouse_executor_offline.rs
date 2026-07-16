@@ -5,7 +5,8 @@
 //! populated rows is unit-tested in `clickhouse_exec`. This test pins the
 //! executor's request/response plumbing: it builds the client, compiles and
 //! binds ClickHouse SQL, fetches, and assembles a response — here against an
-//! empty result — proving the wiring and the empty-result path end to end.
+//! empty result — proving the wiring and the empty-result path end to end. It
+//! also pins the exact exported-table set removed by tenant offboarding.
 
 use clickhouse::Client;
 use clickhouse::test::{Mock, handlers};
@@ -15,6 +16,7 @@ use moa_core::wire::analytics::{
     AnalyticsAggregation, AnalyticsCell, AnalyticsDimension, AnalyticsFilter,
     AnalyticsFilterOperator, AnalyticsMeasure, AnalyticsQueryRequest,
 };
+use uuid::Uuid;
 
 #[tokio::test]
 async fn clickhouse_executor_returns_empty_result_and_metadata_offline() {
@@ -62,4 +64,42 @@ async fn clickhouse_executor_returns_empty_result_and_metadata_offline() {
     assert_eq!(response.metadata.dataset, "sessions");
     assert_eq!(response.metadata.effective_tenant_id, Some(tenant));
     assert_eq!(response.columns.len(), 2, "channel dimension + p95 measure");
+}
+
+#[tokio::test]
+async fn clickhouse_tenant_purge_targets_execution_dimensions_offline() {
+    // Pins: tenant offboarding deletes every exported table, including the execution run/task
+    // dimensions, through the real ClickHouse request path in its canonical order.
+    let mock = Mock::new();
+    let requests = (0..10)
+        .map(|_| mock.add(handlers::record_ddl()))
+        .collect::<Vec<_>>();
+    let client = AnalyticsClickHouseClient::from_client(Client::default().with_url(mock.url()));
+    let tenant_id = Uuid::now_v7();
+
+    client
+        .purge_tenant(tenant_id)
+        .await
+        .expect("tenant purge should delete every exported table");
+
+    let expected_tables = [
+        "events_raw",
+        "dim_sessions",
+        "dim_session_agent_context",
+        "dim_task_segments",
+        "dim_execution_runs",
+        "dim_execution_tasks",
+        "dim_learning_candidates",
+        "dim_experiment_run",
+        "turn_fact",
+        "tool_call_fact",
+    ];
+    for (request, expected_table) in requests.into_iter().zip(expected_tables) {
+        let query = request.query().await;
+        assert_eq!(
+            query,
+            format!("DELETE FROM `{expected_table}` WHERE tenant_id = '{tenant_id}'"),
+            "purge request should target {expected_table} for tenant {tenant_id}"
+        );
+    }
 }

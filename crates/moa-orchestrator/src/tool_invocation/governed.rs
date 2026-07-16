@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
 use moa_core::{config::SessionLimitsConfig, traits::ChannelAdapter};
 use moa_core::{
-    events::Event, types::action_policy::ActionPolicyEffect, types::channel::Channel,
-    types::completion::ToolCallContent, types::completion::ToolInvocation,
-    types::identifiers::SessionId, types::identifiers::ToolCallId,
-    types::procedure_tools::ProcedureTool, types::procedure_tools::is_procedure_tool_name,
-    types::session::SessionMeta, types::tools::ToolCallRequest, types::tools::ToolOutput,
+    events::Event, types::action_policy::ActionPolicyEffect,
+    types::action_policy::CapabilityProvenance, types::action_policy::ExecutionTaskOrigin,
+    types::channel::Channel, types::completion::ToolCallContent, types::completion::ToolInvocation,
+    types::identifiers::SessionId, types::identifiers::ToolCallId, types::session::SessionMeta,
+    types::tools::ToolCallRequest, types::tools::ToolOutput,
     types::tools::TrustedSandboxFileManifestRef, types::worker::state::WorkerId,
     types::worker::tool_schema::is_delegation_tool_name,
 };
@@ -26,7 +26,7 @@ use crate::services::{
     action_policy::{ActionPolicyClient, PrepareActionReviewRequest, PreparedActionReview},
     action_reviews::{ActionReviewsClient, RequestActionReview},
     session_store::RestateSessionStoreClient,
-    tool_executor::ToolExecutorClient,
+    tool_executor::{ExecutionTaskToolCallRequest, ToolExecutorClient},
 };
 use crate::turn::util::{
     blocked_canary_tool_output, denied_tool_output, disallowed_tool_output, tool_input_leaks_canary,
@@ -45,6 +45,15 @@ pub(crate) enum GovernedInvocationOrigin<'a> {
         /// Worker turn id that produced the tool call.
         turn_id: &'a str,
     },
+    /// Tool call belongs to one persisted dynamic execution task.
+    ExecutionTask {
+        /// Owning execution run identifier.
+        run_uid: uuid::Uuid,
+        /// Owning persisted task identifier.
+        task_uid: uuid::Uuid,
+        /// Task generation fenced by the execution workflow.
+        generation: u64,
+    },
 }
 
 /// Request for coordinating one governed tool invocation.
@@ -60,15 +69,14 @@ pub(crate) struct GovernedInvocationRequest<'a> {
     pub(crate) tool_call: &'a ToolCallContent,
     /// Allowed tool names selected for this turn.
     pub(crate) allowed_tools: &'a BTreeSet<String>,
-    /// Normalized `skill://<name>` references of the procedure-capable skills selected
-    /// for this turn. A `run_procedure` call may only target a skill in this set.
-    pub(crate) selected_procedure_skills: &'a BTreeSet<String>,
     /// Active prompt-injection canary marker, when present.
     pub(crate) active_canary: Option<&'a str>,
     /// Trusted sandbox file manifest selected by the runtime that built this tool call.
     pub(crate) trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
     /// Root or worker origin metadata.
     pub(crate) origin: GovernedInvocationOrigin<'a>,
+    /// Capability-level provenance, independent of execution-task ownership.
+    pub(crate) capability_provenance: Option<&'a CapabilityProvenance>,
 }
 
 /// Completed governed tool invocation result.
@@ -173,31 +181,15 @@ pub(crate) async fn invoke_governed_tool(
         });
     }
 
-    // Procedure tools start/poll durable runs and, like delegation tools, must run
-    // on the workflow-owned path with the Restate context rather than through the
-    // stateless ToolExecutor. They are executed inline here so both the root and
-    // worker turn loops keep their existing `Completed` handling; the run's own
-    // node actions remain action-policy governed inside ProcedureExecution.
-    if is_procedure_tool_name(&invocation.name) {
-        return execute_procedure_tool(
-            ctx,
-            &request,
-            invocation,
-            session_limits,
-            session_store,
-            channel_adapters,
-        )
-        .await;
-    }
-
     append_tool_call_event(ctx, &request).await?;
 
-    let prepared_action = ctx
-        .service_client::<ActionPolicyClient>()
-        .prepare_action_review(Json(prepare_action_review_request(&request, &invocation)))
-        .call()
-        .await?
-        .into_inner();
+    let prepared_action = crate::restate_identity::replay_safe_request(
+        ctx.service_client::<ActionPolicyClient>()
+            .prepare_action_review(Json(prepare_action_review_request(&request, &invocation))),
+    )
+    .call()
+    .await?
+    .into_inner();
 
     if matches!(prepared_action.effect, ActionPolicyEffect::Deny) {
         let output = denied_action_output(&prepared_action, &invocation);
@@ -249,14 +241,16 @@ async fn request_action_review(
         )));
     }
 
-    ctx.service_client::<ActionReviewsClient>()
-        .request(Json::from(RequestActionReview {
-            envelope: prepared_action.envelope,
-            preview: prepared_action.preview,
-            tool_request,
-        }))
-        .call()
-        .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<ActionReviewsClient>()
+            .request(Json::from(RequestActionReview {
+                envelope: prepared_action.envelope,
+                preview: prepared_action.preview,
+                tool_request,
+            })),
+    )
+    .call()
+    .await?;
     let output = pending_review_output(&invocation, &prepared_action.input_summary);
     append_synthetic_tool_result(ctx, &request, &invocation, &output).await?;
     Ok(GovernedInvocationOutcome::Completed(Box::new(
@@ -278,23 +272,57 @@ async fn execute_allowed_tool(
     channel_adapters: &HashMap<Channel, Arc<dyn ChannelAdapter>>,
 ) -> Result<GovernedInvocationOutcome, HandlerError> {
     let span = tool_dispatch_span(&invocation.name);
-    turn_progress::maybe_emit(
-        ctx,
-        request.session_id,
-        turn_progress::running_tool_summary(&invocation.name),
-        session_limits,
-        session_store.clone(),
-        channel_adapters,
-    )
-    .await?;
+    if !matches!(
+        request.origin,
+        GovernedInvocationOrigin::ExecutionTask { .. }
+    ) {
+        turn_progress::maybe_emit(
+            ctx,
+            request.session_id,
+            turn_progress::running_tool_summary(&invocation.name),
+            session_limits,
+            session_store.clone(),
+            channel_adapters,
+        )
+        .await?;
+    }
     let dispatch_started = Instant::now();
-    let output = ctx
-        .service_client::<ToolExecutorClient>()
-        .execute(Json::from(tool_call_request(&request, &invocation)))
-        .call()
-        .instrument(span)
-        .await?
-        .into_inner();
+    let tool_request = tool_call_request(&request, &invocation);
+    let output = match request.origin {
+        GovernedInvocationOrigin::ExecutionTask {
+            run_uid,
+            task_uid,
+            generation,
+        } => span
+            .in_scope(|| {
+                crate::restate_identity::replay_safe_request(
+                    ctx.service_client::<ToolExecutorClient>()
+                        .execute_execution_task(Json::from(ExecutionTaskToolCallRequest {
+                            call: tool_request,
+                            origin: Some(ExecutionTaskOrigin {
+                                run_uid,
+                                task_uid,
+                                generation,
+                            }),
+                        })),
+                )
+            })
+            .call()
+            .instrument(span)
+            .await?
+            .into_inner(),
+        GovernedInvocationOrigin::RootTurn | GovernedInvocationOrigin::Worker { .. } => span
+            .in_scope(|| {
+                crate::restate_identity::replay_safe_request(
+                    ctx.service_client::<ToolExecutorClient>()
+                        .execute(Json::from(tool_request)),
+                )
+            })
+            .call()
+            .instrument(span)
+            .await?
+            .into_inner(),
+    };
     record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
 
     Ok(GovernedInvocationOutcome::Completed(Box::new(
@@ -308,125 +336,20 @@ async fn execute_allowed_tool(
     )))
 }
 
-/// Executes a procedure tool on the workflow-owned path and records its events.
-///
-/// The tool call event is appended here (procedure tools do not reach the
-/// delegation short-circuit that would otherwise own it), the invocation is gated
-/// by [`ActionPolicyClient::prepare_action_review`] exactly like a registered tool,
-/// and only an `Allow` effect starts or polls the run through
-/// [`crate::procedure_tools::execute_procedure_tool`]. The result event is appended
-/// before returning a `Completed` outcome so the caller turn loops treat it like any
-/// other executed tool.
-///
-/// `AdminReview` is turned into a terminal denial rather than a queued review: an
-/// approved review resumes by re-dispatching the tool through the stateless
-/// `ToolExecutor` (see `ActionReviews::decide`), which cannot run a workflow-owned
-/// procedure tool. Deferring these would enqueue a review that could never execute,
-/// so the model is told the action requires review it cannot obtain on this path.
-async fn execute_procedure_tool(
-    ctx: &WorkflowContext<'_>,
-    request: &GovernedInvocationRequest<'_>,
-    invocation: ToolInvocation,
-    session_limits: &SessionLimitsConfig,
-    session_store: Arc<PostgresSessionStore>,
-    channel_adapters: &HashMap<Channel, Arc<dyn ChannelAdapter>>,
-) -> Result<GovernedInvocationOutcome, HandlerError> {
-    append_tool_call_event(ctx, request).await?;
-
-    let prepared_action = ctx
-        .service_client::<ActionPolicyClient>()
-        .prepare_action_review(Json(prepare_action_review_request(request, &invocation)))
-        .call()
-        .await?
-        .into_inner();
-
-    if matches!(prepared_action.effect, ActionPolicyEffect::Deny) {
-        let output = denied_action_output(&prepared_action, &invocation);
-        append_procedure_tool_result(ctx, request, &invocation, &output).await?;
-        return Ok(GovernedInvocationOutcome::Completed(Box::new(
-            completed_result(
-                request.tool_id,
-                invocation,
-                output,
-                GovernedInvocationDisposition::Denied,
-            ),
-        )));
-    }
-
-    if matches!(prepared_action.effect, ActionPolicyEffect::AdminReview) {
-        let output = procedure_review_unsupported_output(&invocation);
-        append_procedure_tool_result(ctx, request, &invocation, &output).await?;
-        return Ok(GovernedInvocationOutcome::Completed(Box::new(
-            completed_result(
-                request.tool_id,
-                invocation,
-                output,
-                GovernedInvocationDisposition::Denied,
-            ),
-        )));
-    }
-
-    let span = tool_dispatch_span(&invocation.name);
-    turn_progress::maybe_emit(
-        ctx,
-        request.session_id,
-        turn_progress::running_tool_summary(&invocation.name),
-        session_limits,
-        session_store,
-        channel_adapters,
-    )
-    .await?;
-
-    let dispatch_started = Instant::now();
-    let output = match ProcedureTool::from_invocation(&invocation) {
-        Ok(Some(tool)) => {
-            crate::procedure_tools::execute_procedure_tool(
-                ctx,
-                request.session,
-                request.session_id,
-                tool,
-                request.selected_procedure_skills,
-            )
-            .instrument(span)
-            .await?
-        }
-        Ok(None) => ToolOutput::error(
-            format!("unsupported procedure tool {}", invocation.name),
-            Duration::ZERO,
-        ),
-        Err(error) => ToolOutput::error(
-            format!("invalid {} arguments: {error}", invocation.name),
-            Duration::ZERO,
-        ),
-    };
-    record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
-
-    append_procedure_tool_result(ctx, request, &invocation, &output).await?;
-
-    let success = !output.is_error;
-    Ok(GovernedInvocationOutcome::Completed(Box::new(
-        GovernedInvocationResult {
-            tool_id: request.tool_id,
-            invocation,
-            output,
-            disposition: GovernedInvocationDisposition::Executed,
-            event_plan: GovernedInvocationEventPlan::WorkflowSyntheticResult { success },
-        },
-    )))
-}
-
 /// Records a successful segment tool use through the session-store service.
 pub(crate) async fn record_segment_tool_use(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     tool_name: &str,
 ) -> Result<(), HandlerError> {
-    ctx.service_client::<RestateSessionStoreClient>()
-        .record_segment_tool_use(Json(RecordSegmentToolUseRequest {
-            session_id,
-            tool_name: tool_name.to_string(),
-        }))
-        .send();
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .record_segment_tool_use(Json(RecordSegmentToolUseRequest {
+                session_id,
+                tool_name: tool_name.to_string(),
+            })),
+    )
+    .send();
     Ok(())
 }
 
@@ -449,13 +372,29 @@ fn prepare_action_review_request(
     request: &GovernedInvocationRequest<'_>,
     invocation: &ToolInvocation,
 ) -> PrepareActionReviewRequest {
-    let (worker_id, origin_kind, origin_id, origin_step_id) = match request.origin {
-        GovernedInvocationOrigin::RootTurn => (None, None, None, None),
+    let (worker_id, default_provenance, execution_origin) = match request.origin {
+        GovernedInvocationOrigin::RootTurn => (None, CapabilityProvenance::default(), None),
         GovernedInvocationOrigin::Worker { worker_id, turn_id } => (
             Some(WorkerId::from(worker_id)),
-            Some("worker".to_string()),
-            Some(worker_id.to_string()),
-            Some(turn_id.to_string()),
+            CapabilityProvenance {
+                kind: Some("worker".to_string()),
+                id: Some(worker_id.to_string()),
+                step_id: Some(turn_id.to_string()),
+            },
+            None,
+        ),
+        GovernedInvocationOrigin::ExecutionTask {
+            run_uid,
+            task_uid,
+            generation,
+        } => (
+            None,
+            CapabilityProvenance::default(),
+            Some(ExecutionTaskOrigin {
+                run_uid,
+                task_uid,
+                generation,
+            }),
         ),
     };
 
@@ -465,9 +404,11 @@ fn prepare_action_review_request(
         review_id: request.tool_id.0,
         tool_call_id: request.tool_id,
         worker_id,
-        origin_kind,
-        origin_id,
-        origin_step_id,
+        capability_provenance: request
+            .capability_provenance
+            .cloned()
+            .unwrap_or(default_provenance),
+        execution_origin,
         idempotency_key: invocation.id.clone(),
     }
 }
@@ -489,6 +430,7 @@ fn tool_call_request(
         worker_id: match request.origin {
             GovernedInvocationOrigin::RootTurn => None,
             GovernedInvocationOrigin::Worker { worker_id, .. } => Some(worker_id.to_string()),
+            GovernedInvocationOrigin::ExecutionTask { .. } => None,
         },
     }
 }
@@ -517,25 +459,13 @@ fn pending_review_output(invocation: &ToolInvocation, input_summary: &str) -> To
     )
 }
 
-/// Terminal output for a procedure tool that tenant policy routed to admin review.
-///
-/// Procedure tools run on the workflow-owned path and cannot be resumed through the
-/// `ToolExecutor`-based review approval flow, so a review can never execute them.
-/// The call is denied with a message the model can act on rather than being queued.
-fn procedure_review_unsupported_output(invocation: &ToolInvocation) -> ToolOutput {
-    ToolOutput::error(
-        format!(
-            "Tool {} requires tenant admin review, which is not supported for procedure tools; the action was not started.",
-            invocation.name
-        ),
-        Duration::ZERO,
-    )
-}
-
 async fn append_tool_call_event(
     ctx: &WorkflowContext<'_>,
     request: &GovernedInvocationRequest<'_>,
 ) -> Result<(), HandlerError> {
+    if !owns_root_session_tool_events(request.origin) {
+        return Ok(());
+    }
     let invocation = request.tool_call.invocation.clone();
     append_session_event(
         ctx,
@@ -564,6 +494,9 @@ async fn append_synthetic_tool_result(
     invocation: &ToolInvocation,
     output: &ToolOutput,
 ) -> Result<(), HandlerError> {
+    if !owns_root_session_tool_events(request.origin) {
+        return Ok(());
+    }
     append_session_event(
         ctx,
         request.session_id,
@@ -611,26 +544,8 @@ pub(crate) async fn append_cached_tool_result(
     .map(|_| ())
 }
 
-async fn append_procedure_tool_result(
-    ctx: &WorkflowContext<'_>,
-    request: &GovernedInvocationRequest<'_>,
-    invocation: &ToolInvocation,
-    output: &ToolOutput,
-) -> Result<(), HandlerError> {
-    append_session_event(
-        ctx,
-        request.session_id,
-        Event::ToolResult {
-            tool_id: request.tool_id,
-            provider_tool_use_id: invocation.id.clone(),
-            output: output.clone(),
-            original_output_tokens: output.original_output_tokens,
-            success: !output.is_error,
-            duration_ms: 0,
-        },
-    )
-    .await
-    .map(|_| ())
+fn owns_root_session_tool_events(origin: GovernedInvocationOrigin<'_>) -> bool {
+    !matches!(origin, GovernedInvocationOrigin::ExecutionTask { .. })
 }
 
 async fn append_session_event(
@@ -640,13 +555,17 @@ async fn append_session_event(
 ) -> Result<u64, HandlerError> {
     let persist_span = event_persist_span(1);
     let persist_started = Instant::now();
-    let sequence_num = ctx
-        .service_client::<RestateSessionStoreClient>()
-        .append_event(Json(AppendEventRequest {
-            session_id,
-            event,
-            dedupe_key: None,
-        }))
+    let sequence_num = persist_span
+        .in_scope(|| {
+            crate::restate_identity::replay_safe_request(
+                ctx.service_client::<RestateSessionStoreClient>()
+                    .append_event(Json(AppendEventRequest {
+                        session_id,
+                        event,
+                        dedupe_key: None,
+                    })),
+            )
+        })
         .call()
         .instrument(persist_span)
         .await?
@@ -661,8 +580,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use moa_core::{
-        types::completion::ToolCallContent, types::completion::ToolInvocation,
-        types::contact::ContactId, types::contact::ContactRef,
+        types::action_policy::CapabilityProvenance, types::completion::ToolCallContent,
+        types::completion::ToolInvocation, types::contact::ContactId, types::contact::ContactRef,
         types::contact::ContactVerificationState, types::contact::SessionActorRef,
         types::identifiers::TenantId, types::identifiers::ToolCallId, types::identifiers::UserId,
         types::session::SessionMeta, types::tools::TrustedSandboxFileEntry,
@@ -674,8 +593,8 @@ mod tests {
 
     use super::{
         GovernedInvocationDisposition, GovernedInvocationEventPlan, GovernedInvocationOrigin,
-        GovernedInvocationRequest, completed_result, pending_review_output,
-        prepare_action_review_request, tool_call_request,
+        GovernedInvocationRequest, completed_result, owns_root_session_tool_events,
+        pending_review_output, prepare_action_review_request, tool_call_request,
     };
     use crate::delegation::storage_user_id;
 
@@ -704,7 +623,6 @@ mod tests {
         session: &'a SessionMeta,
         tool_call: &'a ToolCallContent,
         allowed_tools: &'a BTreeSet<String>,
-        selected_procedure_skills: &'a BTreeSet<String>,
         origin: GovernedInvocationOrigin<'a>,
     ) -> GovernedInvocationRequest<'a> {
         GovernedInvocationRequest {
@@ -713,25 +631,23 @@ mod tests {
             tool_id: ToolCallId(Uuid::from_u128(30)),
             tool_call,
             allowed_tools,
-            selected_procedure_skills,
             active_canary: Some("canary"),
             trusted_sandbox_manifest: None,
             origin,
+            capability_provenance: None,
         }
     }
 
     #[test]
-    fn root_policy_request_has_no_origin_and_uses_provider_idempotency_key() {
-        // Pins: root turns preserve the previous ActionPolicy request shape.
+    fn action_policy_root_request_has_no_origin_and_uses_provider_idempotency_key() {
+        // Pins: root turns omit execution provenance and use provider idempotency.
         let session = test_session_meta();
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
-        let no_procedures = BTreeSet::new();
         let request = request(
             &session,
             &tool_call,
             &allowed_tools,
-            &no_procedures,
             GovernedInvocationOrigin::RootTurn,
         );
 
@@ -742,9 +658,8 @@ mod tests {
         assert_eq!(policy_request.review_id, request.tool_id.0);
         assert_eq!(policy_request.tool_call_id, request.tool_id);
         assert_eq!(policy_request.worker_id, None);
-        assert_eq!(policy_request.origin_kind, None);
-        assert_eq!(policy_request.origin_id, None);
-        assert_eq!(policy_request.origin_step_id, None);
+        assert_eq!(policy_request.capability_provenance, Default::default());
+        assert_eq!(policy_request.execution_origin, None);
         assert_eq!(
             policy_request.idempotency_key.as_deref(),
             Some("provider-tool-1")
@@ -752,17 +667,15 @@ mod tests {
     }
 
     #[test]
-    fn worker_policy_request_sets_origin_fields() {
+    fn action_policy_worker_request_sets_origin_fields() {
         // Pins: worker review records remain traceable to the child turn.
         let session = test_session_meta();
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
-        let no_procedures = BTreeSet::new();
         let request = request(
             &session,
             &tool_call,
             &allowed_tools,
-            &no_procedures,
             GovernedInvocationOrigin::Worker {
                 worker_id: "worker-1",
                 turn_id: "child-turn-1",
@@ -772,12 +685,132 @@ mod tests {
         let policy_request = prepare_action_review_request(&request, &tool_call.invocation);
 
         assert_eq!(policy_request.worker_id.as_deref(), Some("worker-1"));
-        assert_eq!(policy_request.origin_kind.as_deref(), Some("worker"));
-        assert_eq!(policy_request.origin_id.as_deref(), Some("worker-1"));
         assert_eq!(
-            policy_request.origin_step_id.as_deref(),
+            policy_request.capability_provenance.kind.as_deref(),
+            Some("worker")
+        );
+        assert_eq!(
+            policy_request.capability_provenance.id.as_deref(),
+            Some("worker-1")
+        );
+        assert_eq!(
+            policy_request.capability_provenance.step_id.as_deref(),
             Some("child-turn-1")
         );
+        assert_eq!(policy_request.execution_origin, None);
+    }
+
+    #[test]
+    fn action_policy_execution_task_keeps_capability_and_execution_provenance_separate() {
+        // Pins: review envelopes preserve both provenance axes without overloading worker fields.
+        let session = test_session_meta();
+        let tool_call = tool_call();
+        let allowed_tools = BTreeSet::from(["file_read".to_string()]);
+        let capability = CapabilityProvenance {
+            kind: Some("skill_action".to_string()),
+            id: Some("skill://research#fetch".to_string()),
+            step_id: Some("fetch".to_string()),
+        };
+        let mut request = request(
+            &session,
+            &tool_call,
+            &allowed_tools,
+            GovernedInvocationOrigin::ExecutionTask {
+                run_uid: Uuid::from_u128(40),
+                task_uid: Uuid::from_u128(41),
+                generation: 2,
+            },
+        );
+        request.capability_provenance = Some(&capability);
+
+        let policy_request = prepare_action_review_request(&request, &tool_call.invocation);
+
+        assert_eq!(policy_request.session, session);
+        assert_eq!(policy_request.invocation, tool_call.invocation);
+        assert_eq!(policy_request.worker_id, None);
+        assert_eq!(policy_request.capability_provenance, capability);
+        assert_eq!(
+            policy_request.execution_origin,
+            Some(moa_core::types::action_policy::ExecutionTaskOrigin {
+                run_uid: Uuid::from_u128(40),
+                task_uid: Uuid::from_u128(41),
+                generation: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn action_policy_origin_variants_share_one_preparation_shape() {
+        // Pins: root, worker, and execution-task calls evaluate the same session/invocation contract.
+        let session = test_session_meta();
+        let tool_call = tool_call();
+        let allowed_tools = BTreeSet::from(["file_read".to_string()]);
+        let root = request(
+            &session,
+            &tool_call,
+            &allowed_tools,
+            GovernedInvocationOrigin::RootTurn,
+        );
+        let worker = request(
+            &session,
+            &tool_call,
+            &allowed_tools,
+            GovernedInvocationOrigin::Worker {
+                worker_id: "worker-1",
+                turn_id: "turn-1",
+            },
+        );
+        let execution = request(
+            &session,
+            &tool_call,
+            &allowed_tools,
+            GovernedInvocationOrigin::ExecutionTask {
+                run_uid: Uuid::from_u128(40),
+                task_uid: Uuid::from_u128(41),
+                generation: 2,
+            },
+        );
+
+        let prepared = [root, worker, execution]
+            .iter()
+            .map(|request| prepare_action_review_request(request, &tool_call.invocation))
+            .collect::<Vec<_>>();
+
+        assert!(prepared.iter().all(|request| request.session == session));
+        assert!(
+            prepared
+                .iter()
+                .all(|request| request.invocation == tool_call.invocation)
+        );
+        assert!(
+            prepared
+                .iter()
+                .all(|request| request.idempotency_key.as_deref() == Some("provider-tool-1"))
+        );
+        assert_eq!(prepared[0].execution_origin, None);
+        assert_eq!(prepared[1].execution_origin, None);
+        assert!(prepared[2].execution_origin.is_some());
+    }
+
+    #[test]
+    fn execution_task_origin_never_owns_root_session_tool_events() {
+        // Pins: all governed root event appenders share one execution-task exclusion guard.
+        assert!(owns_root_session_tool_events(
+            GovernedInvocationOrigin::RootTurn
+        ));
+        assert!(owns_root_session_tool_events(
+            GovernedInvocationOrigin::Worker {
+                worker_id: "worker-1",
+                turn_id: "turn-1",
+            }
+        ));
+        assert!(!owns_root_session_tool_events(
+            GovernedInvocationOrigin::ExecutionTask {
+                run_uid: Uuid::from_u128(40),
+                task_uid: Uuid::from_u128(41),
+                generation: 2,
+            }
+        ));
     }
 
     #[test]
@@ -788,12 +821,10 @@ mod tests {
         session.contact = Some(contact_ref(session.tenant_id, contact_id));
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
-        let no_procedures = BTreeSet::new();
         let request = request(
             &session,
             &tool_call,
             &allowed_tools,
-            &no_procedures,
             GovernedInvocationOrigin::RootTurn,
         );
 
@@ -820,12 +851,10 @@ mod tests {
         let session = test_session_meta();
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
-        let no_procedures = BTreeSet::new();
         let request = request(
             &session,
             &tool_call,
             &allowed_tools,
-            &no_procedures,
             GovernedInvocationOrigin::Worker {
                 worker_id: "worker-1",
                 turn_id: "child-turn-1",
@@ -843,12 +872,10 @@ mod tests {
         let session = test_session_meta();
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
-        let no_procedures = BTreeSet::new();
         let request = request(
             &session,
             &tool_call,
             &allowed_tools,
-            &no_procedures,
             GovernedInvocationOrigin::RootTurn,
         );
 
@@ -863,7 +890,6 @@ mod tests {
         let session = test_session_meta();
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
-        let no_procedures = BTreeSet::new();
         let manifest = TrustedSandboxFileManifestRef {
             blob_id: "blob-1".to_string(),
             size: 128,
@@ -879,7 +905,6 @@ mod tests {
             &session,
             &tool_call,
             &allowed_tools,
-            &no_procedures,
             GovernedInvocationOrigin::RootTurn,
         );
         request.trusted_sandbox_manifest = Some(&manifest);
@@ -904,52 +929,6 @@ mod tests {
                 "file read",
             ),
             GovernedInvocationDisposition::ReviewPending,
-        );
-
-        assert_eq!(
-            result.event_plan,
-            GovernedInvocationEventPlan::WorkflowSyntheticResult { success: false }
-        );
-        assert!(result.should_record_denied_worker_tool());
-        assert!(!result.should_record_segment_tool_use());
-    }
-
-    #[test]
-    fn procedure_admin_review_becomes_terminal_denial() {
-        // Pins: an AdminReview effect on a procedure tool is turned into a terminal
-        // denial the model can read, because a procedure tool cannot be resumed through
-        // the ToolExecutor-based review approval path.
-        let invocation = ToolInvocation {
-            id: None,
-            name: "run_procedure".to_string(),
-            input: json!({}),
-        };
-        let output = super::procedure_review_unsupported_output(&invocation);
-
-        assert!(output.is_error);
-        let text = output.to_text();
-        assert!(text.contains("run_procedure"), "names the tool: {text}");
-        assert!(
-            text.contains("review"),
-            "explains the review limitation: {text}"
-        );
-    }
-
-    #[test]
-    fn denied_procedure_result_is_workflow_owned_and_not_segment_success() {
-        // Pins: a denied procedure invocation is a workflow-synthetic result (the turn
-        // workflow owns appending both the tool-call and result events, not the
-        // ToolExecutor), counts as a denied worker tool, and is never segment success.
-        let invocation = ToolInvocation {
-            id: None,
-            name: "run_procedure".to_string(),
-            input: json!({}),
-        };
-        let result = completed_result(
-            ToolCallId(Uuid::from_u128(2)),
-            invocation.clone(),
-            super::procedure_review_unsupported_output(&invocation),
-            GovernedInvocationDisposition::Denied,
         );
 
         assert_eq!(

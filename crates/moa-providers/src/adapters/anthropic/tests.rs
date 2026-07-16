@@ -45,6 +45,7 @@ fn completion_request_serializes_to_anthropic_format() {
         max_output_tokens: Some(512),
         temperature: Some(0.2),
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     };
 
@@ -116,6 +117,7 @@ fn completion_request_keeps_late_system_messages_out_of_stable_system_prefix() {
         max_output_tokens: Some(512),
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     };
 
@@ -162,6 +164,7 @@ fn completion_request_enables_top_level_cache_control_for_large_prompt() {
         max_output_tokens: Some(512),
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     };
 
@@ -205,6 +208,7 @@ fn completion_request_marks_frozen_history_boundary_with_cache_control() {
             ContextMessage::user("active turn"),
         ],
         tools: Vec::new(),
+        native_web_search: Default::default(),
         max_output_tokens: Some(512),
         temperature: None,
         response_format: None,
@@ -245,6 +249,7 @@ fn completion_request_omits_top_level_cache_control_for_small_prompt() {
         max_output_tokens: Some(512),
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     };
 
@@ -276,6 +281,7 @@ fn completion_request_counts_tool_tokens_toward_automatic_cache_control() {
         max_output_tokens: Some(512),
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     };
 
@@ -320,6 +326,21 @@ fn completion_request_omits_native_web_search_when_disabled() {
     )
     .unwrap();
 
+    assert!(body.get("tools").is_none());
+}
+
+#[test]
+fn native_web_search_policy_disables_anthropic_native_tool_per_request() {
+    // Pins: request-scoped planning policy narrows globally enabled Anthropic web search.
+    let mut request = CompletionRequest::simple("Plan without web search.");
+    request.native_web_search = moa_core::types::completion::NativeWebSearchPolicy::Disabled;
+    let body = build_request_body(
+        &request,
+        &canonical_model_id(MODEL_SONNET_4_6).expect("model"),
+        &capabilities_for_model(MODEL_SONNET_4_6).expect("capabilities"),
+        true,
+    )
+    .expect("request");
     assert!(body.get("tools").is_none());
 }
 
@@ -420,6 +441,7 @@ fn completion_request_groups_adjacent_tool_exchange_for_anthropic_protocol() {
         max_output_tokens: Some(512),
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     };
 
@@ -480,6 +502,7 @@ fn completion_request_replays_non_adjacent_tool_history_as_text() {
         max_output_tokens: Some(512),
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: Default::default(),
     };
 

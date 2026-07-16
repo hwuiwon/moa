@@ -369,6 +369,7 @@ fn classify_message_error(message: &str, consecutive_timeouts: u32) -> ToolFailu
     if message_lower.contains("connection refused")
         || message_lower.contains("connection reset")
         || message_lower.contains("broken pipe")
+        || message_lower.contains("error sending request for url")
         || message_lower.contains("socket")
         || message_lower.contains("temporarily unavailable")
     {
@@ -435,7 +436,7 @@ mod tests {
 
     #[test]
     fn validation_error_is_non_fatal() {
-        assert!(!MoaError::ValidationError("compatibility: ...".into()).is_fatal());
+        assert!(!MoaError::ValidationError("invalid request".into()).is_fatal());
     }
 
     #[test]
@@ -486,6 +487,21 @@ mod tests {
             class,
             ToolFailureClass::ReProvision {
                 reason: "the sandbox became unresponsive after repeated execution timeouts: docker exec command timed out after 1s".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn classifies_http_transport_send_failure_as_retryable() {
+        let message =
+            "failed to call MCP server: error sending request for url (http://127.0.0.1:58810/)";
+        let class = classify_tool_error(&MoaError::ProviderError(message.to_string()), 0);
+
+        assert_eq!(
+            class,
+            ToolFailureClass::Retryable {
+                reason: message.to_string(),
+                backoff_hint: Duration::from_secs(1),
             }
         );
     }

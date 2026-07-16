@@ -208,6 +208,11 @@ schema = "analytics"
 owner = "moa-analytics"
 
 [[table]]
+name = "clickhouse_schema_upgrade_state"
+schema = "analytics"
+owner = "moa-analytics"
+
+[[table]]
 name = "compliance_storage_partition_state"
 schema = "analytics"
 owner = "moa-analytics"
@@ -307,6 +312,65 @@ owner = "moa-experiments"
 name = "experiment_trial"
 schema = "moa"
 owner = "moa-experiments"
+
+[[table]]
+name = "execution_planning_context"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator"]
+
+[[table]]
+name = "execution_run"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-edge", "moa-experiments", "moa-analytics"]
+
+[[table]]
+name = "execution_route_audit"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-analytics"]
+
+[[table]]
+name = "execution_planner_call_audit"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-analytics"]
+
+[[table]]
+name = "execution_compile_audit"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-experiments", "moa-skills", "moa-analytics"]
+
+[[table]]
+name = "execution_node_materialization"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-analytics"]
+
+[[table]]
+name = "execution_task"
+schema = "moa"
+owner = "moa-execution"
+readers = ["moa-orchestrator", "moa-edge", "moa-experiments", "moa-analytics"]
+
+[[table]]
+name = "execution_template_admission"
+schema = "moa"
+owner = "moa-orchestrator"
+readers = ["moa-execution"]
+
+[[table]]
+name = "execution_action_review_outbox"
+schema = "moa"
+owner = "moa-orchestrator"
+
+[[table]]
+name = "skill_embedding"
+schema = "moa"
+owner = "moa-artifacts"
+readers = ["moa-skills"]
 
 [[table]]
 name = "hand_leases"
@@ -433,11 +497,6 @@ owner = "moa-edge"
 name = "password_reset_tokens"
 schema = "public"
 owner = "moa-edge"
-
-[[table]]
-name = "pending_signals"
-schema = "public"
-owner = "moa-session"
 
 [[table]]
 name = "scim_group_members"

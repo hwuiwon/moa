@@ -8,11 +8,22 @@ use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gau
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 
 use moa_core::{
-    config::MetricsConfig, error::MoaError, error::Result, types::action_policy::ActionClass,
-    types::action_policy::ActionPolicyEffect, types::action_policy::ActionReviewStatus,
-    types::identifiers::ModelId, types::identifiers::TenantId,
-    types::observability::genai_operation_name, types::observability::genai_provider_name,
-    types::provider::ModelTier, types::session::SessionStatus,
+    config::MetricsConfig,
+    error::MoaError,
+    error::Result,
+    types::action_policy::ActionClass,
+    types::action_policy::ActionPolicyEffect,
+    types::action_policy::ActionReviewStatus,
+    types::execution_planning::{
+        ExecutionCompileOutcome, ExecutionCompileSource, ExecutionMode, ExecutionPlannerCallKind,
+        ExecutionPlannerOutcome, ExecutionRouteDecision, ExecutionRouteReason,
+    },
+    types::identifiers::ModelId,
+    types::identifiers::TenantId,
+    types::observability::genai_operation_name,
+    types::observability::genai_provider_name,
+    types::provider::ModelTier,
+    types::session::SessionStatus,
 };
 
 // Sub-10ms buckets exist because turn steps like snapshot_load and
@@ -33,11 +44,374 @@ const GENAI_CLIENT_TOKEN_USAGE_METRIC: &str = "gen_ai.client.token.usage";
 const GENAI_CLIENT_OPERATION_DURATION_METRIC: &str = "gen_ai.client.operation.duration";
 const GENAI_CLIENT_TIME_TO_FIRST_CHUNK_METRIC: &str = "gen_ai.client.operation.time_to_first_chunk";
 
+/// Exact duration buckets for execution latency histograms.
+pub const EXECUTION_DURATION_SECONDS_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+    1800.0, 3600.0,
+];
+/// Exact cardinality buckets for execution fan-out, task, and reducer histograms.
+pub const EXECUTION_CARDINALITY_BUCKETS: &[f64] = &[
+    0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1000.0, 2500.0, 5000.0, 10000.0,
+];
+/// Exact cost buckets for execution micro-US-dollar histograms.
+pub const EXECUTION_COST_MICROUSD_BUCKETS: &[f64] = &[
+    0.0,
+    100.0,
+    1000.0,
+    10000.0,
+    100000.0,
+    1000000.0,
+    10000000.0,
+    100000000.0,
+    1000000000.0,
+];
+/// Exact token buckets for execution token histograms.
+pub const EXECUTION_TOKEN_BUCKETS: &[f64] = &[
+    0.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0, 65536.0, 131072.0,
+    262144.0, 524288.0, 1048576.0,
+];
+/// Exact byte buckets for execution retrieved-byte histograms.
+pub const EXECUTION_BYTE_BUCKETS: &[f64] = &[
+    0.0,
+    1024.0,
+    4096.0,
+    16384.0,
+    65536.0,
+    262144.0,
+    1048576.0,
+    4194304.0,
+    16777216.0,
+    67108864.0,
+    268435456.0,
+    1073741824.0,
+];
+/// Exact completion-coverage ratio buckets.
+pub const EXECUTION_RATIO_BUCKETS: &[f64] =
+    &[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+
 /// Prometheus metric name for aggregate turn-step duration samples.
 pub const TURN_STEP_DURATION_METRIC: &str = "moa_turn_step_duration_seconds";
 
 /// Prometheus metric name for session event append transaction phase timings.
 pub const SESSION_EVENT_APPEND_PHASE_METRIC: &str = "moa_session_event_append_phase_seconds";
+
+/// Closed execution-run state labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMetricRunState {
+    /// Awaiting owning-user confirmation.
+    AwaitingConfirmation,
+    /// Accepted for scheduling.
+    Queued,
+    /// Actively executing.
+    Running,
+    /// Waiting for user input.
+    WaitingInput,
+    /// Waiting for tenant review.
+    WaitingReview,
+    /// Waiting for a compiler-validated replan.
+    WaitingReplan,
+    /// Completed all goal requirements.
+    Completed,
+    /// Produced useful but incomplete work.
+    Partial,
+    /// Blocked by a live external condition.
+    Blocked,
+    /// No supported serving path remained.
+    Unsupported,
+    /// Failed without a useful terminal result.
+    Failed,
+    /// Cancelled by an authorized caller.
+    Cancelled,
+}
+
+impl ExecutionMetricRunState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::AwaitingConfirmation => "awaiting_confirmation",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::WaitingInput => "waiting_input",
+            Self::WaitingReview => "waiting_review",
+            Self::WaitingReplan => "waiting_replan",
+            Self::Completed => "completed",
+            Self::Partial => "partial",
+            Self::Blocked => "blocked",
+            Self::Unsupported => "unsupported",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Closed execution-task state labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMetricTaskState {
+    /// Materialized and ready for reservation.
+    Pending,
+    /// Worst-case resources reserved.
+    Reserved,
+    /// Current generation is executing.
+    Running,
+    /// Waiting for declared-audience input.
+    WaitingInput,
+    /// Waiting for a compiler-validated replan.
+    WaitingReplan,
+    /// Completed successfully.
+    Completed,
+    /// Skipped without execution.
+    Skipped,
+    /// Ended in terminal failure.
+    Failed,
+    /// Cancelled.
+    Cancelled,
+}
+
+impl ExecutionMetricTaskState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Reserved => "reserved",
+            Self::Running => "running",
+            Self::WaitingInput => "waiting_input",
+            Self::WaitingReplan => "waiting_replan",
+            Self::Completed => "completed",
+            Self::Skipped => "skipped",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Closed execution-task kind labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMetricTaskKind {
+    /// Governed capability invocation.
+    Capability,
+    /// Bounded task-local agent.
+    Agent,
+    /// Tenant review wait.
+    Review,
+    /// Named signal wait.
+    WaitSignal,
+    /// Terminal output task.
+    Output,
+    /// Semantic completion verifier.
+    CompletionVerifier,
+}
+
+impl ExecutionMetricTaskKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Capability => "capability",
+            Self::Agent => "agent",
+            Self::Review => "review",
+            Self::WaitSignal => "wait_signal",
+            Self::Output => "output",
+            Self::CompletionVerifier => "completion_verifier",
+        }
+    }
+}
+
+/// Closed terminal execution-task outcome labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMetricTaskOutcome {
+    /// Completed successfully.
+    Completed,
+    /// Skipped without execution.
+    Skipped,
+    /// Failed.
+    Failed,
+    /// Cancelled.
+    Cancelled,
+}
+
+impl ExecutionMetricTaskOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Skipped => "skipped",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Closed execution failure-class labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMetricFailureClass {
+    /// Retryable transient failure.
+    Retryable,
+    /// Required dependency failed.
+    DependencyFailed,
+    /// Invalid task input.
+    InvalidInput,
+    /// Invalid task output.
+    InvalidOutput,
+    /// Authorization denied.
+    AuthorizationDenied,
+    /// Budget exhausted.
+    BudgetExceeded,
+    /// Deadline elapsed.
+    DeadlineExceeded,
+    /// Execution cancelled.
+    Cancelled,
+    /// Operation unsupported.
+    Unsupported,
+    /// Non-retryable terminal failure.
+    Terminal,
+}
+
+impl ExecutionMetricFailureClass {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Retryable => "retryable",
+            Self::DependencyFailed => "dependency_failed",
+            Self::InvalidInput => "invalid_input",
+            Self::InvalidOutput => "invalid_output",
+            Self::AuthorizationDenied => "authorization_denied",
+            Self::BudgetExceeded => "budget_exceeded",
+            Self::DeadlineExceeded => "deadline_exceeded",
+            Self::Cancelled => "cancelled",
+            Self::Unsupported => "unsupported",
+            Self::Terminal => "terminal",
+        }
+    }
+}
+
+/// Closed execution usage-series labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMetricUsage {
+    /// Outstanding post-commit reservation.
+    Reserved,
+    /// Reconciled actual consumption.
+    Actual,
+}
+
+impl ExecutionMetricUsage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reserved => "reserved",
+            Self::Actual => "actual",
+        }
+    }
+}
+
+/// Closed reducer implementation labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMetricReducerKind {
+    /// Capability reducer.
+    Capability,
+    /// Agent reducer.
+    Agent,
+}
+
+impl ExecutionMetricReducerKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Capability => "capability",
+            Self::Agent => "agent",
+        }
+    }
+}
+
+/// Closed terminal execution-run status labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMetricTerminalStatus {
+    /// Completed.
+    Completed,
+    /// Partial.
+    Partial,
+    /// Blocked.
+    Blocked,
+    /// Unsupported.
+    Unsupported,
+    /// Failed.
+    Failed,
+    /// Cancelled.
+    Cancelled,
+}
+
+impl ExecutionMetricTerminalStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Partial => "partial",
+            Self::Blocked => "blocked",
+            Self::Unsupported => "unsupported",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Closed terminal execution-run reason labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMetricTerminalReason {
+    /// Goal completed.
+    Completed,
+    /// Goal remained incomplete without a typed limit stop.
+    GoalIncomplete,
+    /// Approved budget was exceeded.
+    BudgetExceeded,
+    /// Approved deadline elapsed.
+    DeadlineExceeded,
+    /// Authorized cancellation.
+    Cancelled,
+    /// Scheduler or replan made no progress.
+    NoProgress,
+    /// Replan repeated a prior plan.
+    DuplicatePlan,
+    /// Replan repeated a prior amendment.
+    DuplicateAmendment,
+    /// Replan repeated the same failure.
+    RepeatedFailure,
+    /// Remaining budget could not admit the amendment.
+    BudgetExhausted,
+    /// A typed task failure ended the run.
+    TaskFailure,
+    /// No supported plan remained.
+    UnsupportedPlan,
+    /// Run remained blocked.
+    Blocked,
+    /// Internal execution infrastructure failed.
+    InternalFailure,
+}
+
+impl ExecutionMetricTerminalReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::GoalIncomplete => "goal_incomplete",
+            Self::BudgetExceeded => "budget_exceeded",
+            Self::DeadlineExceeded => "deadline_exceeded",
+            Self::Cancelled => "cancelled",
+            Self::NoProgress => "no_progress",
+            Self::DuplicatePlan => "duplicate_plan",
+            Self::DuplicateAmendment => "duplicate_amendment",
+            Self::RepeatedFailure => "repeated_failure",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::TaskFailure => "task_failure",
+            Self::UnsupportedPlan => "unsupported_plan",
+            Self::Blocked => "blocked",
+            Self::InternalFailure => "internal_failure",
+        }
+    }
+}
+
+/// Five-dimensional execution usage sample.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExecutionMetricUsageValues {
+    /// Cost in integer micro-US-dollars.
+    pub cost_microusd: u64,
+    /// Model tokens.
+    pub tokens: u64,
+    /// Terminal logical tasks.
+    pub tasks: u64,
+    /// Governed tool or capability calls.
+    pub tool_calls: u64,
+    /// Retrieved bytes.
+    pub retrieved_bytes: u64,
+}
 
 /// Turn steps reported by the loadtest step-latency view.
 pub const TURN_LATENCY_REPORT_STEPS: [TurnLatencyStep; 6] = [
@@ -219,6 +593,61 @@ pub fn init_metrics(config: &MetricsConfig) -> Result<()> {
             .set_buckets_for_metric(
                 Matcher::Full(GENAI_CLIENT_TOKEN_USAGE_METRIC.to_string()),
                 GENAI_CLIENT_TOKEN_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_compile_duration_seconds".to_string()),
+                EXECUTION_DURATION_SECONDS_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_queue_to_start_seconds".to_string()),
+                EXECUTION_DURATION_SECONDS_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_task_duration_seconds".to_string()),
+                EXECUTION_DURATION_SECONDS_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_map_fanout_items".to_string()),
+                EXECUTION_CARDINALITY_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_cost_microusd".to_string()),
+                EXECUTION_COST_MICROUSD_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_tokens".to_string()),
+                EXECUTION_TOKEN_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_tasks".to_string()),
+                EXECUTION_CARDINALITY_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_tool_calls".to_string()),
+                EXECUTION_CARDINALITY_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_retrieved_bytes".to_string()),
+                EXECUTION_BYTE_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_coverage_ratio".to_string()),
+                EXECUTION_RATIO_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_reducer_depth".to_string()),
+                EXECUTION_CARDINALITY_BUCKETS,
             )
             .map_err(|error| MoaError::ConfigError(error.to_string()))?;
 
@@ -529,6 +958,179 @@ pub fn record_session_event_append_phase_duration(
 /// Records the number of events returned by one session event load operation.
 pub fn record_session_event_load(event_count: u64) {
     counter!("moa_session_event_load_events_total").increment(event_count);
+}
+
+/// Records one durably applied execution route decision.
+pub fn record_execution_route(decision: &ExecutionRouteDecision) {
+    let (decision, mode, reason) = match decision {
+        ExecutionRouteDecision::NeedsInput { reason } => ("needs_input", "none", *reason),
+        ExecutionRouteDecision::Routed { mode, reason } => {
+            ("routed", execution_mode(*mode), *reason)
+        }
+    };
+    counter!(
+        "moa_execution_routes_total",
+        "decision" => decision,
+        "mode" => mode,
+        "reason" => execution_route_reason(reason)
+    )
+    .increment(1);
+}
+
+/// Records one durably applied planner-call audit.
+pub fn record_execution_planner_call(
+    call: ExecutionPlannerCallKind,
+    outcome: ExecutionPlannerOutcome,
+) {
+    counter!(
+        "moa_execution_planner_calls_total",
+        "call" => execution_planner_call(call),
+        "outcome" => execution_planner_outcome(outcome)
+    )
+    .increment(1);
+}
+
+/// Records one durably applied pure compiler-call audit.
+pub fn record_execution_compile_duration(
+    source: ExecutionCompileSource,
+    outcome: ExecutionCompileOutcome,
+    duration: Duration,
+) {
+    histogram!(
+        "moa_execution_compile_duration_seconds",
+        "source" => execution_compile_source(source),
+        "outcome" => execution_compile_outcome(outcome)
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Records one applied execution-run state transition.
+pub fn record_execution_run_state_transition(state: ExecutionMetricRunState) {
+    counter!(
+        "moa_execution_run_state_transitions_total",
+        "state" => state.as_str()
+    )
+    .increment(1);
+}
+
+/// Records one applied execution-task state transition.
+pub fn record_execution_task_state_transition(
+    state: ExecutionMetricTaskState,
+    kind: ExecutionMetricTaskKind,
+) {
+    counter!(
+        "moa_execution_task_state_transitions_total",
+        "state" => state.as_str(),
+        "kind" => kind.as_str()
+    )
+    .increment(1);
+}
+
+/// Records the sole first queue-to-start duration for one execution run.
+pub fn record_execution_run_queue_to_start(duration: Duration) {
+    histogram!("moa_execution_run_queue_to_start_seconds").record(duration.as_secs_f64());
+}
+
+/// Records one applied terminal task duration.
+pub fn record_execution_task_duration(
+    kind: ExecutionMetricTaskKind,
+    outcome: ExecutionMetricTaskOutcome,
+    duration: Duration,
+) {
+    histogram!(
+        "moa_execution_task_duration_seconds",
+        "kind" => kind.as_str(),
+        "outcome" => outcome.as_str()
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Records one accepted new retry generation.
+pub fn record_execution_task_retry(
+    kind: ExecutionMetricTaskKind,
+    failure_class: ExecutionMetricFailureClass,
+) {
+    counter!(
+        "moa_execution_task_retries_total",
+        "kind" => kind.as_str(),
+        "failure_class" => failure_class.as_str()
+    )
+    .increment(1);
+}
+
+/// Records one first-applied map-node fan-out marker.
+pub fn record_execution_map_fanout_items(items: u64) {
+    histogram!("moa_execution_map_fanout_items").record(items as f64);
+}
+
+/// Records one first-applied reducer-depth marker.
+pub fn record_execution_reducer_depth(kind: ExecutionMetricReducerKind, depth: u64) {
+    histogram!(
+        "moa_execution_reducer_depth",
+        "kind" => kind.as_str()
+    )
+    .record(depth as f64);
+}
+
+/// Records the five reserved or actual resource dimensions for one terminal run.
+pub fn record_execution_run_usage(usage: ExecutionMetricUsage, values: ExecutionMetricUsageValues) {
+    let usage = usage.as_str();
+    histogram!(
+        "moa_execution_run_cost_microusd",
+        "usage" => usage
+    )
+    .record(values.cost_microusd as f64);
+    histogram!(
+        "moa_execution_run_tokens",
+        "usage" => usage
+    )
+    .record(values.tokens as f64);
+    histogram!(
+        "moa_execution_run_tasks",
+        "usage" => usage
+    )
+    .record(values.tasks as f64);
+    histogram!(
+        "moa_execution_run_tool_calls",
+        "usage" => usage
+    )
+    .record(values.tool_calls as f64);
+    histogram!(
+        "moa_execution_run_retrieved_bytes",
+        "usage" => usage
+    )
+    .record(values.retrieved_bytes as f64);
+}
+
+/// Records terminal requirement coverage, defining zero requirements as fully covered.
+pub fn record_execution_run_coverage(
+    status: ExecutionMetricTerminalStatus,
+    satisfied_requirements: u64,
+    total_requirements: u64,
+) {
+    let ratio = if total_requirements == 0 {
+        1.0
+    } else {
+        satisfied_requirements as f64 / total_requirements as f64
+    };
+    histogram!(
+        "moa_execution_run_coverage_ratio",
+        "status" => status.as_str()
+    )
+    .record(ratio.clamp(0.0, 1.0));
+}
+
+/// Records one applied terminal execution-run transition.
+pub fn record_execution_run_terminal(
+    status: ExecutionMetricTerminalStatus,
+    reason: ExecutionMetricTerminalReason,
+) {
+    counter!(
+        "moa_execution_runs_terminal_total",
+        "status" => status.as_str(),
+        "reason" => reason.as_str()
+    )
+    .increment(1);
 }
 
 /// Records one tool idempotency scan and the number of prior events scanned.
@@ -1137,6 +1739,138 @@ fn register_metric_descriptions() {
         "moa_builtin_approval_wait_seconds",
         "Builtin approval wait from creation to decision in seconds."
     );
+    describe_counter!(
+        "moa_execution_routes_total",
+        "Durably accepted execution routing decisions."
+    );
+    describe_counter!(
+        "moa_execution_planner_calls_total",
+        "Durably accepted execution planner calls."
+    );
+    describe_histogram!(
+        "moa_execution_compile_duration_seconds",
+        "Duration of durably accepted pure execution compiler calls in seconds."
+    );
+    describe_counter!(
+        "moa_execution_run_state_transitions_total",
+        "Applied execution-run state transitions."
+    );
+    describe_counter!(
+        "moa_execution_task_state_transitions_total",
+        "Applied execution-task state transitions."
+    );
+    describe_histogram!(
+        "moa_execution_run_queue_to_start_seconds",
+        "First execution-run queued-to-running duration in seconds."
+    );
+    describe_histogram!(
+        "moa_execution_task_duration_seconds",
+        "Applied terminal execution-task duration in seconds."
+    );
+    describe_counter!(
+        "moa_execution_task_retries_total",
+        "Accepted new execution-task retry generations."
+    );
+    describe_histogram!(
+        "moa_execution_map_fanout_items",
+        "First-applied execution map-node fan-out item count."
+    );
+    describe_histogram!(
+        "moa_execution_run_cost_microusd",
+        "Terminal execution-run reserved and actual cost in micro-US-dollars."
+    );
+    describe_histogram!(
+        "moa_execution_run_tokens",
+        "Terminal execution-run reserved and actual model tokens."
+    );
+    describe_histogram!(
+        "moa_execution_run_tasks",
+        "Terminal execution-run reserved and actual logical task count."
+    );
+    describe_histogram!(
+        "moa_execution_run_tool_calls",
+        "Terminal execution-run reserved and actual governed tool-call count."
+    );
+    describe_histogram!(
+        "moa_execution_run_retrieved_bytes",
+        "Terminal execution-run reserved and actual retrieved bytes."
+    );
+    describe_histogram!(
+        "moa_execution_run_coverage_ratio",
+        "Terminal execution-run satisfied requirement ratio."
+    );
+    describe_histogram!(
+        "moa_execution_reducer_depth",
+        "First-applied execution reducer depth."
+    );
+    describe_counter!(
+        "moa_execution_runs_terminal_total",
+        "Applied terminal execution-run outcomes."
+    );
+}
+
+const fn execution_mode(mode: ExecutionMode) -> &'static str {
+    match mode {
+        ExecutionMode::Respond => "respond",
+        ExecutionMode::Act => "act",
+        ExecutionMode::Run => "run",
+    }
+}
+
+const fn execution_route_reason(reason: ExecutionRouteReason) -> &'static str {
+    match reason {
+        ExecutionRouteReason::SimpleResponse => "simple_response",
+        ExecutionRouteReason::BoundedInteractiveWork => "bounded_interactive_work",
+        ExecutionRouteReason::PreflightInputMissing => "preflight_input_missing",
+        ExecutionRouteReason::ExplicitRun => "explicit_run",
+        ExecutionRouteReason::BulkCollection => "bulk_collection",
+        ExecutionRouteReason::DurableOrResumable => "durable_or_resumable",
+        ExecutionRouteReason::HighFanout => "high_fanout",
+        ExecutionRouteReason::ApprovalOrSignal => "approval_or_signal",
+        ExecutionRouteReason::SelectedExecutionTemplate => "selected_execution_template",
+        ExecutionRouteReason::ActEscalation => "act_escalation",
+    }
+}
+
+const fn execution_planner_call(call: ExecutionPlannerCallKind) -> &'static str {
+    match call {
+        ExecutionPlannerCallKind::InitialPlan => "initial_plan",
+        ExecutionPlannerCallKind::InitialRepair => "initial_repair",
+        ExecutionPlannerCallKind::Amendment => "amendment",
+        ExecutionPlannerCallKind::AmendmentRepair => "amendment_repair",
+    }
+}
+
+const fn execution_planner_outcome(outcome: ExecutionPlannerOutcome) -> &'static str {
+    match outcome {
+        ExecutionPlannerOutcome::Accepted => "accepted",
+        ExecutionPlannerOutcome::NeedsInput => "needs_input",
+        ExecutionPlannerOutcome::Unsupported => "unsupported",
+        ExecutionPlannerOutcome::SchemaRejected => "schema_rejected",
+        ExecutionPlannerOutcome::ImmutableGoalChanged => "immutable_goal_changed",
+        ExecutionPlannerOutcome::CompilerRejected => "compiler_rejected",
+        ExecutionPlannerOutcome::Oversized => "oversized",
+        ExecutionPlannerOutcome::ProviderError => "provider_error",
+    }
+}
+
+const fn execution_compile_source(source: ExecutionCompileSource) -> &'static str {
+    match source {
+        ExecutionCompileSource::GeneratedPlan => "generated_plan",
+        ExecutionCompileSource::SkillTemplate => "skill_template",
+        ExecutionCompileSource::ExperimentTemplate => "experiment_template",
+        ExecutionCompileSource::Amendment => "amendment",
+        ExecutionCompileSource::SkillRegression => "skill_regression",
+    }
+}
+
+const fn execution_compile_outcome(outcome: ExecutionCompileOutcome) -> &'static str {
+    match outcome {
+        ExecutionCompileOutcome::Accepted => "accepted",
+        ExecutionCompileOutcome::NeedsInput => "needs_input",
+        ExecutionCompileOutcome::Unsupported => "unsupported",
+        ExecutionCompileOutcome::Rejected => "rejected",
+    }
 }
 
 fn session_status_label(status: &SessionStatus) -> &'static str {
@@ -1422,7 +2156,7 @@ mod tests {
             "run_uid",
             "trial_uid",
             "session_id",
-            "procedure_run_uid",
+            "execution_run_uid",
             "score_run_id",
             "trial_key",
             "artifact_revision",
@@ -1547,6 +2281,36 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             register_metric_descriptions();
             record_knowledge_sync_run("github", "succeeded");
+            // Ingestion families are emitted by `moa-knowledge`'s production
+            // step-observability helper; seed the same family and label shapes here.
+            counter!(
+                "moa_knowledge_records_total",
+                "provider" => "github",
+                "action" => "ingested"
+            )
+            .increment(1);
+            histogram!(
+                "moa_knowledge_ingestion_step_duration_seconds",
+                "provider" => "github",
+                "parser" => "pdf",
+                "stage" => "parse_completed",
+                "status" => "completed"
+            )
+            .record(Duration::from_millis(3).as_secs_f64());
+            counter!(
+                "moa_knowledge_parse_jobs_total",
+                "parser" => "pdf",
+                "status" => "completed"
+            )
+            .increment(1);
+            counter!("moa_knowledge_chunks_total", "action" => "created").increment(1);
+            counter!("moa_knowledge_embeddings_total", "status" => "created").increment(1);
+            counter!(
+                "moa_knowledge_graph_writes_total",
+                "kind" => "node",
+                "status" => "completed"
+            )
+            .increment(1);
             record_knowledge_retrieval_duration("vector", "ok", Duration::from_millis(2));
             record_knowledge_retrieval_hits("graph", "dense", 2);
         });
@@ -1569,7 +2333,16 @@ mod tests {
             !knowledge_series.is_empty(),
             "knowledge metric series should be exported:\n{rendered}"
         );
-        for required_label in ["provider=", "status=", "stage=", "source_tier=", "leg="] {
+        for required_label in [
+            "provider=",
+            "status=",
+            "action=",
+            "parser=",
+            "stage=",
+            "kind=",
+            "source_tier=",
+            "leg=",
+        ] {
             assert!(
                 knowledge_series.contains(required_label),
                 "knowledge series should include bounded label `{required_label}`:\n{knowledge_series}"
@@ -1594,5 +2367,268 @@ mod tests {
                 "knowledge series must not carry high-cardinality label `{forbidden}`:\n{knowledge_series}"
             );
         }
+    }
+
+    #[test]
+    fn execution_metrics_render_exact_families_buckets_and_bounded_labels() {
+        // Pins: Task 11's complete execution metric contract is registered and rendered with
+        // the exact bucket arrays and closed labels, without entity identifiers or prose.
+        let recorder = PrometheusBuilder::new()
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_compile_duration_seconds".to_string()),
+                EXECUTION_DURATION_SECONDS_BUCKETS,
+            )
+            .expect("compile buckets should configure")
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_queue_to_start_seconds".to_string()),
+                EXECUTION_DURATION_SECONDS_BUCKETS,
+            )
+            .expect("queue buckets should configure")
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_task_duration_seconds".to_string()),
+                EXECUTION_DURATION_SECONDS_BUCKETS,
+            )
+            .expect("task duration buckets should configure")
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_map_fanout_items".to_string()),
+                EXECUTION_CARDINALITY_BUCKETS,
+            )
+            .expect("fanout buckets should configure")
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_cost_microusd".to_string()),
+                EXECUTION_COST_MICROUSD_BUCKETS,
+            )
+            .expect("cost buckets should configure")
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_tokens".to_string()),
+                EXECUTION_TOKEN_BUCKETS,
+            )
+            .expect("token buckets should configure")
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_tasks".to_string()),
+                EXECUTION_CARDINALITY_BUCKETS,
+            )
+            .expect("task-count buckets should configure")
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_tool_calls".to_string()),
+                EXECUTION_CARDINALITY_BUCKETS,
+            )
+            .expect("tool-call buckets should configure")
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_retrieved_bytes".to_string()),
+                EXECUTION_BYTE_BUCKETS,
+            )
+            .expect("byte buckets should configure")
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_run_coverage_ratio".to_string()),
+                EXECUTION_RATIO_BUCKETS,
+            )
+            .expect("ratio buckets should configure")
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_reducer_depth".to_string()),
+                EXECUTION_CARDINALITY_BUCKETS,
+            )
+            .expect("reducer buckets should configure")
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            register_metric_descriptions();
+            record_execution_route(&ExecutionRouteDecision::Routed {
+                mode: ExecutionMode::Run,
+                reason: ExecutionRouteReason::ExplicitRun,
+            });
+            record_execution_planner_call(
+                ExecutionPlannerCallKind::InitialRepair,
+                ExecutionPlannerOutcome::CompilerRejected,
+            );
+            record_execution_compile_duration(
+                ExecutionCompileSource::GeneratedPlan,
+                ExecutionCompileOutcome::Rejected,
+                Duration::from_millis(25),
+            );
+            record_execution_run_state_transition(ExecutionMetricRunState::Running);
+            record_execution_task_state_transition(
+                ExecutionMetricTaskState::Completed,
+                ExecutionMetricTaskKind::Capability,
+            );
+            record_execution_run_queue_to_start(Duration::from_millis(10));
+            record_execution_task_duration(
+                ExecutionMetricTaskKind::Capability,
+                ExecutionMetricTaskOutcome::Completed,
+                Duration::from_secs(1),
+            );
+            record_execution_task_retry(
+                ExecutionMetricTaskKind::Capability,
+                ExecutionMetricFailureClass::Retryable,
+            );
+            record_execution_map_fanout_items(8);
+            let usage = ExecutionMetricUsageValues {
+                cost_microusd: 100,
+                tokens: 128,
+                tasks: 1,
+                tool_calls: 2,
+                retrieved_bytes: 1024,
+            };
+            record_execution_run_usage(ExecutionMetricUsage::Reserved, usage);
+            record_execution_run_usage(ExecutionMetricUsage::Actual, usage);
+            record_execution_run_coverage(ExecutionMetricTerminalStatus::Partial, 1, 2);
+            record_execution_reducer_depth(ExecutionMetricReducerKind::Agent, 2);
+            record_execution_run_terminal(
+                ExecutionMetricTerminalStatus::Partial,
+                ExecutionMetricTerminalReason::GoalIncomplete,
+            );
+        });
+        let rendered = handle.render();
+
+        let counters = [
+            "moa_execution_routes_total",
+            "moa_execution_planner_calls_total",
+            "moa_execution_run_state_transitions_total",
+            "moa_execution_task_state_transitions_total",
+            "moa_execution_task_retries_total",
+            "moa_execution_runs_terminal_total",
+        ];
+        let histograms = [
+            "moa_execution_compile_duration_seconds",
+            "moa_execution_run_queue_to_start_seconds",
+            "moa_execution_task_duration_seconds",
+            "moa_execution_map_fanout_items",
+            "moa_execution_run_cost_microusd",
+            "moa_execution_run_tokens",
+            "moa_execution_run_tasks",
+            "moa_execution_run_tool_calls",
+            "moa_execution_run_retrieved_bytes",
+            "moa_execution_run_coverage_ratio",
+            "moa_execution_reducer_depth",
+        ];
+        for metric in counters {
+            assert!(rendered.contains(&format!("# HELP {metric} ")));
+            assert!(rendered.contains(&format!("# TYPE {metric} counter")));
+        }
+        for metric in histograms {
+            assert!(rendered.contains(&format!("# HELP {metric} ")));
+            assert!(rendered.contains(&format!("# TYPE {metric} histogram")));
+        }
+
+        assert_metric_buckets(
+            &rendered,
+            "moa_execution_compile_duration_seconds",
+            EXECUTION_DURATION_SECONDS_BUCKETS,
+        );
+        assert_metric_buckets(
+            &rendered,
+            "moa_execution_run_queue_to_start_seconds",
+            EXECUTION_DURATION_SECONDS_BUCKETS,
+        );
+        assert_metric_buckets(
+            &rendered,
+            "moa_execution_task_duration_seconds",
+            EXECUTION_DURATION_SECONDS_BUCKETS,
+        );
+        assert_metric_buckets(
+            &rendered,
+            "moa_execution_map_fanout_items",
+            EXECUTION_CARDINALITY_BUCKETS,
+        );
+        assert_metric_buckets(
+            &rendered,
+            "moa_execution_run_cost_microusd",
+            EXECUTION_COST_MICROUSD_BUCKETS,
+        );
+        assert_metric_buckets(
+            &rendered,
+            "moa_execution_run_tokens",
+            EXECUTION_TOKEN_BUCKETS,
+        );
+        assert_metric_buckets(
+            &rendered,
+            "moa_execution_run_tasks",
+            EXECUTION_CARDINALITY_BUCKETS,
+        );
+        assert_metric_buckets(
+            &rendered,
+            "moa_execution_run_tool_calls",
+            EXECUTION_CARDINALITY_BUCKETS,
+        );
+        assert_metric_buckets(
+            &rendered,
+            "moa_execution_run_retrieved_bytes",
+            EXECUTION_BYTE_BUCKETS,
+        );
+        assert_metric_buckets(
+            &rendered,
+            "moa_execution_run_coverage_ratio",
+            EXECUTION_RATIO_BUCKETS,
+        );
+        assert_metric_buckets(
+            &rendered,
+            "moa_execution_reducer_depth",
+            EXECUTION_CARDINALITY_BUCKETS,
+        );
+
+        let execution_series = rendered
+            .lines()
+            .filter(|line| line.starts_with("moa_execution_"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for label in [
+            "decision=",
+            "mode=",
+            "reason=",
+            "call=",
+            "outcome=",
+            "source=",
+            "state=",
+            "kind=",
+            "failure_class=",
+            "usage=",
+            "status=",
+        ] {
+            assert!(
+                execution_series.contains(label),
+                "missing bounded label {label}:\n{execution_series}"
+            );
+        }
+        for forbidden in [
+            "tenant_id=",
+            "contact_id=",
+            "session_id=",
+            "run_uid=",
+            "task_id=",
+            "turn_id=",
+            "plan_hash=",
+            "artifact=",
+            "skill=",
+            "capability=",
+            "prompt=",
+            "user_text=",
+            "gap=",
+            "error=",
+        ] {
+            assert!(
+                !execution_series.contains(forbidden),
+                "execution metrics must not contain high-cardinality label {forbidden}:\n{execution_series}"
+            );
+        }
+    }
+
+    fn assert_metric_buckets(rendered: &str, metric: &str, expected: &[f64]) {
+        let prefix = format!("{metric}_bucket");
+        let observed = rendered
+            .lines()
+            .filter(|line| line.starts_with(&prefix))
+            .filter_map(|line| {
+                let start = line.find("le=\"")? + 4;
+                let rest = &line[start..];
+                let end = rest.find('"')?;
+                Some(rest[..end].to_string())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut expected = expected
+            .iter()
+            .map(ToString::to_string)
+            .collect::<std::collections::BTreeSet<_>>();
+        expected.insert("+Inf".to_string());
+        assert_eq!(observed, expected, "wrong buckets for {metric}");
     }
 }

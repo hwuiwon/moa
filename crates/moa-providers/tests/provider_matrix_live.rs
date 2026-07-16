@@ -235,6 +235,7 @@ async fn live_openai_structured_output_returns_direct_response() {
                 "required": ["answer"]
             }),
         )),
+        native_web_search: Default::default(),
         metadata,
     };
 
@@ -281,6 +282,7 @@ async fn live_providers_emit_tool_calls_across_available_keys() {
                 max_output_tokens: Some(256),
                 temperature: None,
                 response_format: None,
+                native_web_search: Default::default(),
                 metadata,
             })
             .await
@@ -385,6 +387,7 @@ async fn live_providers_obey_system_prompt_across_available_keys() {
                 max_output_tokens: Some(64),
                 temperature: None,
                 response_format: None,
+                native_web_search: Default::default(),
                 metadata: HashMap::new(),
             },
             3,
@@ -503,6 +506,7 @@ async fn live_providers_truncate_at_max_output_tokens_across_available_keys() {
                 max_output_tokens: Some(16),
                 temperature: None,
                 response_format: None,
+                native_web_search: Default::default(),
                 metadata: HashMap::new(),
             })
             .await
@@ -541,6 +545,7 @@ async fn live_providers_preserve_unicode_across_available_keys() {
                 max_output_tokens: Some(64),
                 temperature: None,
                 response_format: None,
+                native_web_search: Default::default(),
                 metadata: HashMap::new(),
             },
             3,

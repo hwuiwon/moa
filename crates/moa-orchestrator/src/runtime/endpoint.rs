@@ -37,6 +37,7 @@ use crate::{
         authz_admin::{Authz, AuthzImpl},
         authz_challenges::{AuthzChallenges, AuthzChallengesImpl},
         contacts::{Contacts, ContactsImpl},
+        execution::{Execution, ExecutionImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         knowledge::{Knowledge, KnowledgeImpl, KnowledgeService},
         learning_review::{LearningReview, LearningReviewImpl},
@@ -51,8 +52,9 @@ use crate::{
     },
     workflows::{
         consolidate::{Consolidate, ConsolidateImpl},
+        execution_run::{ExecutionRun, ExecutionRunImpl},
+        execution_task::{ExecutionTask, ExecutionTaskImpl},
         knowledge_sync_ingestion::{KnowledgeSyncIngestion, KnowledgeSyncIngestionImpl},
-        procedure_execution::{ProcedureExecution, ProcedureExecutionImpl},
         turn_execution::{TurnExecution, implementation::TurnExecutionImpl},
         worker_turn_execution::{WorkerTurnExecution, WorkerTurnExecutionImpl},
     },
@@ -76,6 +78,7 @@ const CORE_BODY_SERVICE_NAMES: &[&str] = &[
     "IngestionVO",
     "ToolExecutor",
     "ActionPolicy",
+    "Execution",
     "GraphMemoryMaint",
     "Knowledge",
     "LearningReview",
@@ -88,7 +91,8 @@ const CORE_BODY_SERVICE_NAMES: &[&str] = &[
     "Worker",
     "Tenants",
     "Tenant",
-    "ProcedureExecution",
+    "ExecutionRun",
+    "ExecutionTask",
     "KnowledgeSyncIngestion",
     "Consolidate",
     "TenantPurge",
@@ -183,6 +187,15 @@ pub fn build_endpoint(
                 .serve(),
         )
         .bind(ActionPolicyImpl::new(tool_router.clone(), session_store.clone()).serve())
+        .bind(
+            ExecutionImpl::new(
+                pool.clone(),
+                tool_router.clone(),
+                config.execution.clone(),
+                session_store.clone(),
+            )
+            .serve(),
+        )
         .bind(GraphMemoryMaintImpl::new(pool.clone(), config.clone()).serve())
         .bind(
             KnowledgeImpl::new(KnowledgeService::from_config(pool.clone(), config.as_ref()))
@@ -194,6 +207,7 @@ pub fn build_endpoint(
                 pool.clone(),
                 config.clone(),
                 providers.clone(),
+                tool_router.clone(),
             )
             .serve(),
         )
@@ -216,8 +230,29 @@ pub fn build_endpoint(
         .bind(TenantImpl::new(pool.clone()).serve())
         .bind(TenantPurgeImpl::new(pool.clone(), fga_client.clone(), config.as_ref()).serve())
         .bind(
-            ProcedureExecutionImpl::new(ArtifactRegistry::new(pool.clone()), session_store.clone())
-                .serve(),
+            ExecutionRunImpl::new(
+                pool.clone(),
+                config.execution.clone(),
+                moa_core::types::identifiers::ModelId::new(
+                    config
+                        .models
+                        .auxiliary
+                        .clone()
+                        .unwrap_or_else(|| config.models.main.clone()),
+                ),
+                tool_router.clone(),
+            )
+            .serve(),
+        )
+        .bind(
+            ExecutionTaskImpl::new(
+                pool.clone(),
+                tool_router.clone(),
+                session_store.clone(),
+                session_limits.clone(),
+                channel_adapters.clone(),
+            )
+            .serve(),
         )
         .bind(KnowledgeSyncIngestionImpl::new(pool.clone(), config.clone()).serve())
         .bind(
@@ -362,8 +397,12 @@ mod tests {
             1
         );
         assert!(
-            names.contains(&"ProcedureExecution"),
-            "product readiness should include ProcedureExecution"
+            names.contains(&"ExecutionRun") && names.contains(&"ExecutionTask"),
+            "product readiness should include both durable execution workflows"
+        );
+        assert!(
+            names.contains(&"Execution"),
+            "product readiness should include the canonical execution service"
         );
         assert!(
             names.contains(&"TenantPurge"),

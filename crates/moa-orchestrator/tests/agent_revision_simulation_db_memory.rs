@@ -302,7 +302,7 @@ fn new_experiment(
             model: Some(ModelId::new("gpt-5.1")),
             artifact_revision_uids: vec![plan_revision_uid],
             skill_refs: Vec::new(),
-            procedure_ref: None,
+            execution_template: None,
             metadata: json!({ "agent_revision_variants": variants }),
         },
         scorecard: ExperimentScorecard {
@@ -311,7 +311,7 @@ fn new_experiment(
         },
         score_run_id: Uuid::now_v7(),
         session_id: None,
-        procedure_run_uid: None,
+        execution_run_uid: None,
         artifact_revision_uids: vec![plan_revision_uid],
         idempotency_key: None,
         created_by_identity: identity_json(),

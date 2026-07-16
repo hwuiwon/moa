@@ -7,13 +7,19 @@ use moa_core::config::MoaConfig;
 
 /// Loads the orchestrator's shared MOA runtime configuration from environment variables.
 pub fn load_moa_config_from_env() -> Result<MoaConfig> {
-    let mut config = MoaConfig::load_from_env().context("load MOA config from environment")?;
-    config.observability.service_name = "moa-orchestrator".to_string();
+    let config = MoaConfig::load_from_env().context("load MOA config from environment")?;
+    Ok(apply_orchestrator_defaults(config))
+}
+
+fn apply_orchestrator_defaults(mut config: MoaConfig) -> MoaConfig {
+    if config.observability.service_name == "moa" {
+        config.observability.service_name = "moa-orchestrator".to_string();
+    }
     config
         .observability
         .release
         .get_or_insert_with(|| env!("CARGO_PKG_VERSION").to_string());
-    Ok(config)
+    config
 }
 
 /// Returns whether OpenFGA-backed authz should be skipped for local runs.
@@ -128,7 +134,28 @@ fn is_prod_value(value: Option<&str>) -> bool {
 mod tests {
     use moa_core::config::MoaConfig;
 
-    use super::{ProvidersOverride, env_flag_from_reader, restate_admin_url, restate_ingress_url};
+    use super::{
+        ProvidersOverride, apply_orchestrator_defaults, env_flag_from_reader, restate_admin_url,
+        restate_ingress_url,
+    };
+
+    #[test]
+    fn orchestrator_defaults_replace_only_the_generic_service_name() {
+        // Pins: the binary supplies its service name only when no explicit value was configured.
+        let defaulted = apply_orchestrator_defaults(MoaConfig::default());
+        assert_eq!(
+            defaulted.observability.service_name.as_str(),
+            "moa-orchestrator"
+        );
+
+        let mut configured = MoaConfig::default();
+        configured.observability.service_name = "fixture-orchestrator".to_string();
+        let configured = apply_orchestrator_defaults(configured);
+        assert_eq!(
+            configured.observability.service_name.as_str(),
+            "fixture-orchestrator"
+        );
+    }
 
     #[test]
     fn restate_urls_resolve_from_moa_config() {

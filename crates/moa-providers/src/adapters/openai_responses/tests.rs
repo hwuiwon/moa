@@ -12,6 +12,7 @@ use moa_core::{
 };
 use serde_json::json;
 
+use super::provider::debug_native_tools_for_request;
 use super::{
     build_responses_request, is_ignorable_openai_stream_error, metadata_as_strings,
     token_usage_from_openai_usage,
@@ -85,6 +86,7 @@ fn build_responses_request_sets_prompt_cache_key_and_retention() {
         max_output_tokens: Some(128),
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: HashMap::new(),
     };
 
@@ -113,6 +115,7 @@ fn build_responses_request_omits_temperature_for_reasoning_models() {
         max_output_tokens: Some(128),
         temperature: Some(0.0),
         response_format: None,
+        native_web_search: Default::default(),
         metadata: HashMap::new(),
     };
 
@@ -278,6 +281,15 @@ fn build_responses_request_omits_native_tools_for_structured_output() {
 }
 
 #[test]
+fn native_web_search_policy_disables_openai_native_tool_per_request() {
+    // Pins: request-scoped planning policy narrows globally enabled OpenAI web search.
+    let mut request = CompletionRequest::new("Plan without web search.");
+    assert!(!debug_native_tools_for_request(&request, true).is_empty());
+    request.native_web_search = moa_core::types::completion::NativeWebSearchPolicy::Disabled;
+    assert!(debug_native_tools_for_request(&request, true).is_empty());
+}
+
+#[test]
 fn build_responses_request_keeps_late_system_messages_in_input_items() {
     // Pins: only leading system messages become OpenAI instructions.
     let request = CompletionRequest {
@@ -292,6 +304,7 @@ fn build_responses_request_keeps_late_system_messages_in_input_items() {
         max_output_tokens: Some(128),
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: HashMap::new(),
     };
 
@@ -322,6 +335,7 @@ fn prompt_cache_key_ignores_dynamic_tail_messages() {
         max_output_tokens: Some(128),
         temperature: None,
         response_format: None,
+        native_web_search: Default::default(),
         metadata: HashMap::new(),
     };
     let mut second = first.clone();

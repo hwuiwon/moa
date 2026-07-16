@@ -252,6 +252,7 @@ fn compaction_request(
         max_output_tokens: Some(700),
         temperature: Some(0.0_f32),
         response_format: None,
+        native_web_search: Default::default(),
         metadata: std::collections::HashMap::new(),
     }
 }
@@ -262,6 +263,60 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
             "#{} user: {}",
             record.sequence_num,
             crate::text::truncate_chars(text, 240)
+        )),
+        // Planning audit evidence is intentionally never copied into model-facing summaries.
+        Event::ExecutionRunStarted(started) => Some(format!(
+            "#{} execution_run_started run={} status={:?}",
+            record.sequence_num, started.run_uid, started.status
+        )),
+        Event::ExecutionProgress(progress) => Some(format!(
+            "#{} execution_progress run={} status={} completed={}/{} failed={} cancelled={} revision={}",
+            record.sequence_num,
+            progress.run_uid,
+            progress.status,
+            progress.completed,
+            progress.total,
+            progress.failed,
+            progress.cancelled,
+            progress.plan_revision
+        )),
+        Event::ExecutionInputRequired(required) => Some(format!(
+            "#{} execution_input_required run={} task={} generation={}",
+            record.sequence_num, required.run_uid, required.task_id, required.generation
+        )),
+        Event::ExecutionCompleted(summary) => Some(format!(
+            "#{} execution_completed run={} citations={} failures={} gaps={} task_results=execution_task_table",
+            record.sequence_num,
+            summary.run_uid,
+            summary.citation_ids.len(),
+            summary.failures.len(),
+            summary.gaps.len()
+        )),
+        Event::ExecutionFailed {
+            disposition,
+            summary,
+        } => Some(format!(
+            "#{} execution_failed run={} disposition={disposition:?} citations={} failures={} gaps={} task_results=execution_task_table",
+            record.sequence_num,
+            summary.run_uid,
+            summary.citation_ids.len(),
+            summary.failures.len(),
+            summary.gaps.len()
+        )),
+        Event::ExecutionCancelled(summary) => Some(format!(
+            "#{} execution_cancelled run={} citations={} failures={} gaps={} task_results=execution_task_table",
+            record.sequence_num,
+            summary.run_uid,
+            summary.citation_ids.len(),
+            summary.failures.len(),
+            summary.gaps.len()
+        )),
+        Event::ExecutionSynthesisRequested(requested) => Some(format!(
+            "#{} execution_synthesis_requested run={} origin={} turn={} task_results=execution_task_table",
+            record.sequence_num,
+            requested.run_uid,
+            requested.originating_user_sequence_num,
+            requested.turn_id
         )),
         Event::BrainResponse { text, .. } => Some(format!(
             "#{} assistant: {}",
@@ -350,23 +405,6 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
             "#{} worker_notification {worker_id} state={state:?}: {}",
             record.sequence_num,
             crate::text::truncate_chars(summary, 240)
-        )),
-        Event::WorkerResultBundle {
-            results,
-            user_sequence_num,
-        } => Some(format!(
-            "#{} worker_result_bundle user_sequence_num={user_sequence_num} count={}",
-            record.sequence_num,
-            results.len()
-        )),
-        Event::WorkerResultSynthesisRequested {
-            user_sequence_num,
-            reason,
-            ..
-        } => Some(format!(
-            "#{} worker_result_synthesis user_sequence_num={user_sequence_num}: {}",
-            record.sequence_num,
-            crate::text::truncate_chars(reason, 240)
         )),
         Event::WorkerSignalReceived {
             worker_id,
@@ -630,6 +668,61 @@ mod tests {
             &refs,
             1,
         ));
+    }
+
+    #[test]
+    fn compaction_keeps_only_compact_execution_counts_and_references() {
+        // Pins: checkpoint input can retain run continuity without copying terminal output,
+        // citation identifiers, failure/gap bodies, or any execution-task rows.
+        use moa_core::events::{
+            ExecutionRunEvidenceRef, ExecutionSynthesisRequested, ExecutionTaskResultsRef,
+            ExecutionTerminalSummary,
+        };
+
+        let run_uid = Uuid::from_u128(101);
+        let terminal = ExecutionTerminalSummary {
+            run_uid,
+            originating_user_sequence_num: 14,
+            output: Some(serde_json::json!({ "secret": "aggregate-output-sentinel" })),
+            output_hash: [9; 32],
+            citation_ids: vec!["citation-id-sentinel".to_string()],
+            failures: vec!["failure-body-sentinel".to_string()],
+            gaps: vec!["gap-body-sentinel".to_string()],
+            task_results: ExecutionTaskResultsRef::ExecutionTaskTable { run_uid },
+        };
+        let records = [
+            record(1, Event::ExecutionCompleted(terminal.clone())),
+            record(
+                2,
+                Event::ExecutionSynthesisRequested(ExecutionSynthesisRequested {
+                    run_uid,
+                    originating_user_sequence_num: 14,
+                    turn_id: "execution-synthesis-101-14".to_string(),
+                    terminal,
+                    run_evidence: ExecutionRunEvidenceRef::ExecutionRun { run_uid },
+                }),
+            ),
+        ];
+        let refs = records.iter().collect::<Vec<_>>();
+
+        let request = compaction_request(None, &refs);
+        let compact_input = &request.messages[1].content;
+
+        assert!(compact_input.contains("execution_completed"));
+        assert!(compact_input.contains("citations=1 failures=1 gaps=1"));
+        assert!(compact_input.contains("task_results=execution_task_table"));
+        assert!(compact_input.contains("execution_synthesis_requested"));
+        for forbidden in [
+            "aggregate-output-sentinel",
+            "citation-id-sentinel",
+            "failure-body-sentinel",
+            "gap-body-sentinel",
+        ] {
+            assert!(
+                !compact_input.contains(forbidden),
+                "compaction must not copy {forbidden}"
+            );
+        }
     }
 
     fn record(sequence_num: u64, event: Event) -> EventRecord {

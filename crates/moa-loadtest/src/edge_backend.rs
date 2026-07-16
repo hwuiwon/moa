@@ -147,6 +147,20 @@ impl SessionTarget for EdgeTarget {
                     ttft = Some(started.elapsed());
                     edge_observation_wait = response_frame_observation_wait(&frame.data);
                 }
+                "execution_started" => {
+                    let run_uid =
+                        execution_started_run_uid(&frame.data).ok_or_else(|| TurnFailure {
+                            kind: TurnFailureKind::Transport,
+                            message: "execution_started frame did not contain a typed run UID"
+                                .to_string(),
+                        })?;
+                    return Ok(TurnObservation {
+                        kind: TurnObservationKind::ExecutionAdmission { run_uid },
+                        ttft: None,
+                        edge_observation_wait: response_frame_observation_wait(&frame.data),
+                        auto_denied_approvals: 0,
+                    });
+                }
                 "done" => {
                     let status = serde_json::from_str::<serde_json::Value>(&frame.data)
                         .ok()
@@ -161,6 +175,7 @@ impl SessionTarget for EdgeTarget {
                         // `idle` means the queued message resolved without a
                         // fresh turn; the work still finished.
                         "completed" | "idle" => Ok(TurnObservation {
+                            kind: TurnObservationKind::CompletedAnswer,
                             ttft,
                             edge_observation_wait,
                             auto_denied_approvals: 0,
@@ -201,6 +216,25 @@ impl SessionTarget for EdgeTarget {
     async fn recent_events(&self, session_id: SessionId) -> Result<Vec<EventRecord>> {
         self.reads.recent_events(session_id).await
     }
+}
+
+fn execution_started_run_uid(data: &str) -> Option<Uuid> {
+    if let Ok(record) = serde_json::from_str::<EventRecord>(data)
+        && let Event::ExecutionRunStarted(started) = record.event
+    {
+        return Some(started.run_uid);
+    }
+    let value = serde_json::from_str::<serde_json::Value>(data).ok()?;
+    value
+        .get("run_uid")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .or_else(|| {
+            value
+                .pointer("/event/data/run_uid")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+        })
 }
 
 fn response_frame_observation_wait(data: &str) -> Option<Duration> {
@@ -314,6 +348,7 @@ pub(crate) async fn build_edge_backend_pool(
 #[cfg(test)]
 mod tests {
     use chrono::Duration as ChronoDuration;
+    use moa_core::types::execution_planning::{ExecutionRunAdmissionStatus, ExecutionRunStarted};
     use moa_core::{events::EventType, types::identifiers::SessionId};
 
     use super::*;
@@ -354,5 +389,33 @@ mod tests {
             wait >= Duration::from_millis(200),
             "wait should reflect event timestamp age: {wait:?}"
         );
+    }
+
+    #[test]
+    fn accepted_execution_run_edge_backend_is_successful_admission() {
+        // Pins: the named edge frame carries the same durable run identifier used by direct
+        // admission accounting; an ordinary JSON envelope cannot be mistaken for success.
+        let run_uid = Uuid::now_v7();
+        let record = EventRecord {
+            id: Uuid::now_v7(),
+            session_id: SessionId(Uuid::now_v7()),
+            sequence_num: 7,
+            event_type: EventType::ExecutionRunStarted,
+            event: Event::ExecutionRunStarted(ExecutionRunStarted {
+                run_uid,
+                originating_user_sequence_num: 6,
+                plan_revision: 1,
+                status: ExecutionRunAdmissionStatus::Queued,
+                confirmation: None,
+            }),
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        };
+        let data = serde_json::to_string(&record).expect("serialize execution-start record");
+
+        assert_eq!(execution_started_run_uid(&data), Some(run_uid));
+        assert_eq!(execution_started_run_uid(r#"{"status":"accepted"}"#), None);
     }
 }

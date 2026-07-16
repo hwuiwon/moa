@@ -15,8 +15,8 @@ Use a live behavior experiment when the question is "what happens when this
 variant uses real MOA execution paths?" Live experiments live in
 `moa-experiments` and the hosted `Experiments` service. They store run metadata
 in `moa.experiment_run`, then admit the target through existing production
-paths: `Session`/`TurnExecution` for agent loops and the procedure runtime for
-skill procedure runs.
+paths: `Session`/`TurnExecution` for dynamically routed agent loops and
+`ExecutionRun` for durable typed plans.
 
 Do not use live experiments as a shortcut for regression coverage. If a live
 experiment reveals a repeatable failure, turn the finding into a regression
@@ -33,13 +33,14 @@ object, and queues the prompt through `Session/queue_message`. Tool routing,
 skills, memory, approvals, event logging, and learning emission are the same
 production path used by user sessions.
 
-`procedure` targets reference a published skill's procedure through a
-`procedure_ref`, plus input JSON, an optional session ID, and an optional
-idempotency key. Starting a procedure run first validates the input JSON against
-the skill's input schema; a run with missing required inputs is rejected with a
-structured missing-inputs error instead of being created. The experiment then
-starts the procedure through the procedure runtime and stores the linked
-`moa.artifact_run.run_uid`.
+`execution_run` targets identify either a published skill's pinned
+`execution_plan` template or a compiled plan ID, plus input JSON, an optional
+session ID, and an idempotency key. Raw plan JSON is not accepted. Starting a
+run validates its input, immutable goal contract, current capability catalog,
+and worst-case budget before any task is created. Missing input or unsupported
+capability returns a typed result. The experiment starts the common execution
+runtime and stores `execution_run_uid`; skill-template and compiled-plan
+provenance remain distinguishable on that run.
 
 ## Artifact Revisions
 
@@ -101,15 +102,16 @@ Do not document `/v1/experiments/run` as public; the public admission route is
 
 Live behavior experiments use the normal action-policy engine. Agent-loop
 experiments do not enter a blocking review status; an admin-review decision
-records a tenant action review and the target session continues. Procedure
-experiment status mirrors the linked procedure run when a procedure run
-has been attached.
+records a tenant action review and the target session continues. Execution-run
+experiment status mirrors the linked run. A `Review` node waits for its exact
+tenant decision, while a task-local `NeedsInput` waits for its declared
+audience; neither creates an unrelated session turn.
 
 ## Learning Boundary
 
 Experiment-derived improvements must go through `learning_candidates`; they
 must never auto-promote skills. Experiment execution records run
-metadata and links to sessions, procedure runs, artifact revisions, and score
+metadata and links to sessions, execution runs, artifact revisions, and score
 runs. The explicit `Experiments/propose_improvements` operation may create a
 candidate from completed experiment evidence, but review, evaluation, and
 promotion remain separate explicit steps.

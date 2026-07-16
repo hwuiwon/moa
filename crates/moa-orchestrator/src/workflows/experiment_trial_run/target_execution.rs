@@ -1,11 +1,48 @@
 //! Target execution paths for behavior-lab trial workflows.
 
 use super::status::{
-    attach_trial_procedure_run, attach_trial_session, increment_trial_turn, stop_trial,
+    attach_trial_execution_run, attach_trial_session, increment_trial_turn, stop_trial,
 };
 use super::trial_simulator::{SimulatorContext, simulator_done, simulator_next_user_message};
 use super::*;
 use crate::objects::session::{AttachSessionTurnWaiterInput, RemoveSessionTurnWaiterInput};
+use crate::services::execution::ExecutionClient;
+use crate::services::session_store::RestateSessionStoreClient;
+use crate::{ctx::OrchestratorCtx, workflows::durable_utc_now};
+use moa_artifacts::{
+    canonical::canonical_json_bytes as artifact_canonical_json_bytes,
+    execution_plan::{ExecutionGoalContract, GeneratedExecutionCandidate},
+    reference::ArtifactRef,
+};
+use moa_core::types::{
+    agent::AgentContext,
+    contact::{ContactId, ContactRef, ContactVerificationState},
+    execution_planning::{
+        ExecutionAuditViolationV1, ExecutionCompileOutcome, ExecutionCompileSource,
+        ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1, ExecutionRouteReason,
+        ExecutionSourceProvenanceV1, PinnedExecutionTemplateRef, bounded_audit_report,
+        canonical_json_bytes, execution_planning_hash,
+    },
+};
+use moa_core::wire::session_store::AppendEventRequest;
+use moa_execution::{
+    CompileExecutionOutcome, CompileExecutionRequest, ExecutionValidationReport,
+    ExecutionValidationSeverity, compile,
+    repository::{CompileAuditWriteOutcome, ExecutionRepository, ExecutionScope},
+    schema::validate_instance,
+    state::ExecutionRunStatus,
+    wire::{
+        ExecutionCancelRequest, ExecutionPlanningContextRequest, ExecutionRunRequest,
+        ExecutionStartRequest, ExecutionStatusResponse,
+    },
+};
+use std::{str::FromStr, time::Instant};
+
+const EXECUTION_TARGET_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
+const EXECUTION_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const EXPERIMENT_EXECUTION_SESSION_NAMESPACE: Uuid =
+    Uuid::from_u128(0xc2a6_731c_2d80_5d4a_9d10_2d20_1283_c6ec);
+const EXPERIMENT_EXECUTION_SESSION_DOMAIN: &str = "moa.experiment.execution-session.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TargetObservation {
@@ -26,20 +63,17 @@ struct WorkflowTrialStop {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct StartedWorkflowRun {
-    run_uid: Uuid,
-    stop: Option<WorkflowTrialStop>,
-    error: Option<String>,
+struct EffectiveExecutionSession {
+    session_id: SessionId,
+    contact_id: Option<ContactId>,
+    target_session_supplied: bool,
 }
 
-#[derive(Debug, Clone)]
-struct WorkflowTrialStart {
-    scope: ActionRuleScope,
-    trial_uid: Uuid,
-    procedure_ref: String,
-    input: Value,
-    session_id: Option<SessionId>,
-    idempotency_key: Option<String>,
+struct CompiledExperimentTemplate {
+    compiled: Option<moa_execution::CompiledExecution>,
+    run_input: Value,
+    audit: ExecutionPlanningAuditEnvelopeV1,
+    source_provenance: ExecutionSourceProvenanceV1,
 }
 
 pub(super) async fn run_agent_loop_trial(
@@ -76,7 +110,7 @@ pub(super) async fn run_agent_loop_trial(
         if let Some(stop) = stop_for_session_status(&observation.status) {
             return stop_trial(
                 ctx,
-                request.tenant_id,
+                trial.scope,
                 trial.trial_uid,
                 stop.0,
                 stop.1,
@@ -104,7 +138,7 @@ pub(super) async fn run_agent_loop_trial(
         if simulator_done(&simulator_message) {
             return stop_trial(
                 ctx,
-                request.tenant_id,
+                trial.scope,
                 trial.trial_uid,
                 ExperimentTrialStatus::Completed,
                 ExperimentTrialStopReason::SimulatorDone,
@@ -122,6 +156,7 @@ pub(super) async fn run_agent_loop_trial(
                     model: target_model.as_ref().map(ToString::to_string),
                     contact: None,
                     max_turns: None,
+                    execution_template: None,
                 })),
             &request.identity,
         )
@@ -134,7 +169,7 @@ pub(super) async fn run_agent_loop_trial(
             )
             .into());
         };
-        increment_trial_turn(ctx, request.tenant_id, trial.trial_uid, pool).await?;
+        increment_trial_turn(ctx, trial.scope, trial.trial_uid, pool).await?;
         transcript.push(ContextMessage::user(simulator_message));
 
         let status =
@@ -144,7 +179,7 @@ pub(super) async fn run_agent_loop_trial(
         if let Some(stop) = stop_for_session_status(&status) {
             return stop_trial(
                 ctx,
-                request.tenant_id,
+                trial.scope,
                 trial.trial_uid,
                 stop.0,
                 stop.1,
@@ -157,7 +192,7 @@ pub(super) async fn run_agent_loop_trial(
 
     stop_trial(
         ctx,
-        request.tenant_id,
+        trial.scope,
         trial.trial_uid,
         ExperimentTrialStatus::Completed,
         ExperimentTrialStopReason::MaxTurns,
@@ -189,7 +224,7 @@ async fn ensure_agent_loop_session(
             trial.target_model.clone().or(variant.model).or(Some(model)),
             attachments.is_empty(),
         ),
-        ExperimentTarget::Procedure { .. } => {
+        ExperimentTarget::ExecutionTemplate { .. } => {
             return Err(bad_request(
                 "agent-loop trial received a workflow experiment target",
             ));
@@ -201,7 +236,7 @@ async fn ensure_agent_loop_session(
         ));
     }
 
-    let scope = tenant_scope(request.tenant_id);
+    let scope = trial.scope;
     let session_id = match trial.session_id.or(target_session_id) {
         Some(session_id) => session_id,
         None => {
@@ -236,88 +271,168 @@ async fn ensure_agent_loop_session(
     Ok((session_id, target_model))
 }
 
-/// Executes one procedure-backed behavior-lab trial and durably waits for the
-/// procedure to reach a terminal state before returning.
-///
-/// The trial starts the durable procedure run row, then invokes the
-/// [`ProcedureExecution`](crate::workflows::procedure_execution::ProcedureExecution)
-/// `run` handler with a durable request-response `.call()` raced against
-/// [`TARGET_WAIT_TIMEOUT`] via `restate_sdk::select!`. This mirrors the agent-loop
-/// turn wait in [`wait_for_target_after_turn`] so the trial only resolves its
-/// parent's completion awakeable once the procedure has actually finished — the
-/// prior fire-and-forget `.send()` let the parent fan-in proceed while the
-/// procedure was still executing.
-///
-/// The procedure `run` handler blocks internally while a run is paused on a
-/// `Review` or `WaitSignal` node, so a procedure awaiting human review never
-/// resolves the call and the trial times out instead. That is intentional for
-/// behavior-lab semantics: an experiment procedure that needs human review times
-/// the trial out (recorded as `Failed`/`Error`, matching an agent-loop turn
-/// timeout) rather than reporting a premature terminal status.
-pub(super) async fn run_procedure_trial(
+/// Executes one pinned execution-template trial through typed Execution services.
+pub(super) async fn run_execution_template_trial(
     ctx: &WorkflowContext<'_>,
     request: ExperimentTrialRunWorkflowRequest,
     trial: ExperimentTrialRecord,
     pool: &sqlx::PgPool,
+    session_store: &Arc<PostgresSessionStore>,
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
-    let target = parse_payload::<ExperimentTarget>("target", request.target)?;
-    let ExperimentTarget::Procedure {
-        procedure_ref,
+    let target = parse_payload::<ExperimentTarget>("target", request.target.clone())?;
+    let variant = parse_payload::<ExperimentVariant>("variant", request.variant.clone())?;
+    let ExperimentTarget::ExecutionTemplate {
+        template,
+        objective,
         input,
-        session_id,
+        session_id: target_session_id,
         idempotency_key,
     } = target
     else {
         return Err(bad_request(
-            "workflow trial received an agent-loop experiment target",
+            "execution-template trial received an agent-loop experiment target",
         ));
     };
+    if objective.trim().is_empty() {
+        return Err(bad_request(
+            "execution-template trial objective must not be empty",
+        ));
+    }
+    if variant.execution_template.as_ref() != Some(&template) {
+        return Err(TerminalError::new_with_code(
+            409,
+            "execution-template target and variant do not pin the same revision",
+        )
+        .into());
+    }
+    if trial.scope.tenant_id() != request.tenant_id {
+        return Err(TerminalError::new_with_code(
+            409,
+            "experiment trial scope does not match the workflow tenant",
+        )
+        .into());
+    }
 
-    let scope = tenant_scope(request.tenant_id);
-    let run = start_and_attach_workflow_run(
+    let effective = ensure_execution_session(
         ctx,
-        WorkflowTrialStart {
-            scope,
-            trial_uid: trial.trial_uid,
-            procedure_ref,
-            input,
-            session_id,
-            idempotency_key: idempotency_key.or_else(|| Some(trial.trial_key.clone())),
-        },
+        &request,
+        &trial,
+        &variant,
+        target_session_id,
+        pool,
+        session_store,
+    )
+    .await?;
+    ctx.set(K_SESSION_ID, Json(effective.session_id));
+    if let Some(contact_id) = effective.contact_id {
+        ctx.set(K_EXECUTION_CONTACT_ID, Json(contact_id));
+    }
+    tracing::Span::current().set_attribute(
+        "moa.experiment.session_id",
+        effective.session_id.to_string(),
+    );
+    attach_trial_session(
+        ctx,
+        trial.scope,
+        trial.trial_uid,
+        effective.session_id,
         pool,
     )
     .await?;
-    ctx.set(K_PROCEDURE_RUN_UID, Json(run.run_uid));
-    tracing::Span::current()
-        .set_attribute("moa.experiment.procedure_run_uid", run.run_uid.to_string());
 
-    // Idempotent replay where the procedure was already terminal at start time
-    // (for example a completed run matched by idempotency key): stop immediately
-    // without re-invoking the executor.
-    if let Some(stop) = run.stop {
-        return stop_trial(
-            ctx,
-            request.tenant_id,
-            trial.trial_uid,
-            stop.status,
-            stop.stop_reason,
-            run.error,
-            pool,
-        )
-        .await;
-    }
-
-    let (stop, error) = wait_for_procedure_outcome(
+    let origin = append_experiment_objective(
         ctx,
+        effective.session_id,
+        &objective,
+        trial.run_uid,
+        trial.score_run_id,
+        trial.trial_uid,
+    )
+    .await?;
+    let planning_call = ctx
+        .service_client::<ExecutionClient>()
+        .planning_context(Json::from(ExecutionPlanningContextRequest {
+            tenant_id: request.tenant_id,
+            contact_id: effective.contact_id,
+            session_id: effective.session_id,
+            originating_user_sequence_num: origin.sequence_num,
+            requested_template: Some(template.clone()),
+        }));
+    let planning_context = with_identity_headers(planning_call, &request.identity)
+        .call()
+        .await?
+        .into_inner();
+    let operation_key =
+        experiment_trial_operation_key(trial.run_uid, trial.score_run_id, trial.trial_uid);
+    let now = durable_utc_now(ctx, "experiment_trial_execution_compile_now").await?;
+    let compiled = compile_experiment_template(ExperimentTemplateCompileRequest {
+        context: &planning_context.snapshot,
+        requested: &template,
+        objective,
+        input,
+        experiment_run_uid: trial.run_uid,
+        score_run_id: trial.score_run_id,
+        trial_uid: trial.trial_uid,
+        operation_key,
+        now,
+    })?;
+    persist_compile_audit(ctx, trial.scope, compiled.audit, pool).await?;
+    let compiled_plan = compiled.compiled.ok_or_else(|| {
+        TerminalError::new_with_code(422, "experiment execution template was rejected")
+    })?;
+
+    let start_call =
+        ctx.service_client::<ExecutionClient>()
+            .start(Json::from(ExecutionStartRequest {
+                tenant_id: request.tenant_id,
+                contact_id: effective.contact_id,
+                session_id: effective.session_id,
+                originating_user_sequence_num: origin.sequence_num,
+                planning_context_uid: planning_context.planning_context_uid,
+                planning_context_hash: planning_context.planning_context_hash,
+                idempotency_key: idempotency_key.or_else(|| {
+                    Some(format!(
+                        "experiment-trial:{}:{}:{}",
+                        trial.run_uid, trial.score_run_id, trial.trial_uid
+                    ))
+                }),
+                compiled: compiled_plan,
+                run_input: compiled.run_input,
+                source_provenance: compiled.source_provenance,
+            }));
+    let started = with_identity_headers(start_call, &request.identity)
+        .call()
+        .await?
+        .into_inner();
+    let execution_run_uid = started.run.run_uid;
+    let attach_pool = pool.clone();
+    let scope = trial.scope;
+    let trial_uid = trial.trial_uid;
+    ctx.run(|| async move {
+        attach_trial_execution_run(attach_pool, scope, trial_uid, execution_run_uid)
+            .await
+            .map(Json::from)
+    })
+    .name("experiment_trial_attach_execution_run")
+    .await?;
+    ctx.set(K_EXECUTION_RUN_UID, Json(execution_run_uid));
+    tracing::Span::current().set_attribute(
+        "moa.experiment.execution_run_uid",
+        execution_run_uid.to_string(),
+    );
+
+    let (stop, error) = wait_for_execution_outcome(
+        ctx,
+        &request.identity,
         request.tenant_id,
-        request.identity.clone(),
-        run.run_uid,
-        session_id,
+        effective.contact_id,
+        effective.session_id,
+        execution_run_uid,
     )
     .await?;
     stop_trial(
         ctx,
-        request.tenant_id,
+        trial.scope,
         trial.trial_uid,
         stop.status,
         stop.stop_reason,
@@ -327,59 +442,544 @@ pub(super) async fn run_procedure_trial(
     .await
 }
 
-/// Durably waits for a procedure run to reach a terminal state and maps the
-/// outcome into a trial stop.
-///
-/// Delegates the replay-safe race to
-/// [`procedure_target_wait::wait_for_procedure_outcome`], which bounds the wait
-/// by [`TARGET_WAIT_TIMEOUT`] exactly like the awakeable-vs-timer race in
-/// [`wait_for_target_after_turn`]. A timeout, or an unexpected non-terminal
-/// outcome, records the trial as `Failed`/`Error`, mirroring an agent-loop turn
-/// timeout. On timeout the abandoned call keeps the child procedure invocation
-/// running.
-async fn wait_for_procedure_outcome(
+async fn ensure_execution_session(
     ctx: &WorkflowContext<'_>,
-    tenant_id: TenantId,
-    identity: Identity,
-    run_uid: Uuid,
-    session_id: Option<SessionId>,
-) -> Result<(WorkflowTrialStop, Option<String>), HandlerError> {
-    match procedure_target_wait::wait_for_procedure_outcome(
-        ctx, tenant_id, identity, run_uid, session_id,
-    )
-    .await?
-    {
-        ProcedureWaitOutcome::Terminal(status, outcome) => {
-            match trial_stop_for_workflow_status(&status) {
-                Some((status, stop_reason)) => Ok((
-                    WorkflowTrialStop {
-                        status,
-                        stop_reason,
-                    },
-                    outcome.error,
-                )),
-                None => Ok((
-                    procedure_failure_stop(),
-                    Some(format!(
-                        "procedure run {run_uid} returned non-terminal status {}",
-                        outcome.status
-                    )),
-                )),
-            }
+    request: &ExperimentTrialRunWorkflowRequest,
+    trial: &ExperimentTrialRecord,
+    variant: &ExperimentVariant,
+    target_session_id: Option<SessionId>,
+    pool: &sqlx::PgPool,
+    session_store: &Arc<PostgresSessionStore>,
+) -> Result<EffectiveExecutionSession, HandlerError> {
+    if let Some(session_id) = target_session_id {
+        with_identity_headers(
+            ctx.object_client::<SessionClient>(session_id.to_string())
+                .status(),
+            &request.identity,
+        )
+        .call()
+        .await?;
+        let store = session_store.clone();
+        let meta = ctx
+            .run(|| async move {
+                store
+                    .get_session(session_id)
+                    .await
+                    .map(Json::from)
+                    .map_err(moa_error_to_handler_error)
+            })
+            .name("experiment_trial_load_execution_session")
+            .await?
+            .into_inner();
+        let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
+        if meta.tenant_id != request.tenant_id || contact_id != trial.scope.contact_id() {
+            return Err(TerminalError::new_with_code(
+                409,
+                "execution-template target Session does not match experiment scope",
+            )
+            .into());
         }
-        ProcedureWaitOutcome::NonTerminal(outcome) => Ok((
-            procedure_failure_stop(),
-            Some(format!(
-                "procedure run {run_uid} returned non-terminal status {}",
-                outcome.status
-            )),
-        )),
-        ProcedureWaitOutcome::TimedOut => Ok((
-            procedure_failure_stop(),
-            Some(format!(
-                "timed out waiting for procedure run {run_uid} to reach a terminal state"
-            )),
-        )),
+        return Ok(EffectiveExecutionSession {
+            session_id,
+            contact_id,
+            target_session_supplied: true,
+        });
+    }
+
+    let session_id = experiment_execution_session_id(
+        request.tenant_id,
+        trial.run_uid,
+        trial.score_run_id,
+        Some(trial.trial_uid),
+    )?;
+    let config = OrchestratorCtx::current_config();
+    let model = trial
+        .target_model
+        .clone()
+        .or_else(|| variant.model.clone())
+        .unwrap_or_else(|| ModelId::new(config.models.main.clone()));
+    let now = durable_utc_now(ctx, "experiment_trial_internal_session_now").await?;
+    let meta =
+        internal_execution_session_meta(session_id, trial.scope, model, now, &request.identity)?;
+    let store = session_store.clone();
+    let init_pool = pool.clone();
+    let init_meta = meta.clone();
+    let identity = request.identity.clone();
+    let initialized = ctx
+        .run(|| async move {
+            crate::services::session_store::inner::initialize_internal_execution_session_atomic(
+                store.as_ref(),
+                &init_pool,
+                init_meta,
+                identity,
+            )
+            .await
+            .map(Json::from)
+        })
+        .name("experiment_trial_initialize_internal_execution_session")
+        .await?
+        .into_inner();
+    if initialized != session_id {
+        return Err(TerminalError::new_with_code(
+            409,
+            "internal experiment Session initialization returned a different key",
+        )
+        .into());
+    }
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<SessionClient>(session_id.to_string())
+            .set_meta(Json::from(meta)),
+    )
+    .call()
+    .await?;
+    Ok(EffectiveExecutionSession {
+        session_id,
+        contact_id: trial.scope.contact_id(),
+        target_session_supplied: false,
+    })
+}
+
+fn internal_execution_session_meta(
+    session_id: SessionId,
+    scope: ActionRuleScope,
+    model: ModelId,
+    now: chrono::DateTime<Utc>,
+    identity: &Identity,
+) -> Result<SessionMeta, HandlerError> {
+    let contact = scope.contact_id().map(|contact_id| ContactRef {
+        contact_id,
+        tenant_id: scope.tenant_id(),
+        state: ContactVerificationState::Unverified,
+        canonical_contact_id: None,
+        linked_contact_ids: Vec::new(),
+        scopes: Vec::new(),
+        permissions: Value::Null,
+        agent_ids: Vec::new(),
+        session_ids: Vec::new(),
+        verified_contact_point_ids: Vec::new(),
+    });
+    Ok(SessionMeta {
+        id: session_id,
+        tenant_id: scope.tenant_id(),
+        title: Some("Experiment execution-template trial".to_string()),
+        status: SessionStatus::Created,
+        channel: Channel::Chat,
+        model,
+        created_at: now,
+        updated_at: now,
+        created_by: Some(session_actor_ref(identity)?),
+        contact,
+        agent_context: Some(AgentContext::system_default()),
+        ..SessionMeta::default()
+    })
+}
+
+fn experiment_execution_session_id(
+    tenant_id: TenantId,
+    experiment_run_uid: Uuid,
+    score_run_id: Uuid,
+    trial_uid: Option<Uuid>,
+) -> Result<SessionId, HandlerError> {
+    let mut name = EXPERIMENT_EXECUTION_SESSION_DOMAIN.as_bytes().to_vec();
+    append_nullable_frame(&mut name, Some(tenant_id.to_string().as_bytes()))?;
+    append_nullable_frame(&mut name, Some(experiment_run_uid.to_string().as_bytes()))?;
+    append_nullable_frame(&mut name, Some(score_run_id.to_string().as_bytes()))?;
+    let trial_uid = trial_uid.map(|value| value.to_string());
+    append_nullable_frame(&mut name, trial_uid.as_deref().map(str::as_bytes))?;
+    Ok(SessionId(Uuid::new_v5(
+        &EXPERIMENT_EXECUTION_SESSION_NAMESPACE,
+        &name,
+    )))
+}
+
+fn append_nullable_frame(output: &mut Vec<u8>, value: Option<&[u8]>) -> Result<(), HandlerError> {
+    let Some(value) = value else {
+        output.push(0);
+        return Ok(());
+    };
+    output.push(1);
+    let length = u32::try_from(value.len()).map_err(|_| {
+        TerminalError::new("experiment execution Session identity field exceeds framing")
+    })?;
+    output.extend_from_slice(&length.to_be_bytes());
+    output.extend_from_slice(value);
+    Ok(())
+}
+
+async fn append_experiment_objective(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    objective: &str,
+    experiment_run_uid: Uuid,
+    score_run_id: Uuid,
+    trial_uid: Uuid,
+) -> Result<EventRecord, HandlerError> {
+    let event = Event::UserMessage {
+        text: objective.to_string(),
+        attachments: Vec::new(),
+    };
+    let persisted = crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event: event.clone(),
+                dedupe_key: Some(format!(
+                    "experiment-objective:{experiment_run_uid}:{score_run_id}:{trial_uid}"
+                )),
+            })),
+    )
+    .call()
+    .await?
+    .into_inner();
+    if persisted.event != event {
+        return Err(TerminalError::new_with_code(
+            409,
+            "experiment objective replay conflicts with the first persisted event",
+        )
+        .into());
+    }
+    Ok(persisted)
+}
+
+fn experiment_trial_operation_key(
+    experiment_run_uid: Uuid,
+    score_run_id: Uuid,
+    trial_uid: Uuid,
+) -> String {
+    format!("experiment:{experiment_run_uid}:{score_run_id}:{trial_uid}")
+}
+
+#[derive(Serialize)]
+struct ExperimentCompileCandidate<'a> {
+    kind: &'static str,
+    schema_version: u8,
+    source: ExecutionCompileSource,
+    goal: &'a ExecutionGoalContract,
+    plan: &'a moa_artifacts::execution_plan::ExecutionPlanDefinition,
+    run_input: &'a Value,
+}
+
+#[derive(Clone, Copy)]
+enum ExperimentCompileClassification {
+    Accepted,
+    NeedsInput,
+    Unsupported,
+    Rejected,
+}
+
+struct ExperimentTemplateCompileRequest<'a> {
+    context: &'a moa_execution::wire::ExecutionPlanningContextSnapshotV1,
+    requested: &'a PinnedExecutionTemplateRef,
+    objective: String,
+    input: Value,
+    experiment_run_uid: Uuid,
+    score_run_id: Uuid,
+    trial_uid: Uuid,
+    operation_key: String,
+    now: chrono::DateTime<Utc>,
+}
+
+fn compile_experiment_template(
+    request: ExperimentTemplateCompileRequest<'_>,
+) -> Result<CompiledExperimentTemplate, HandlerError> {
+    let ExperimentTemplateCompileRequest {
+        context,
+        requested,
+        objective,
+        input,
+        experiment_run_uid,
+        score_run_id,
+        trial_uid,
+        operation_key,
+        now,
+    } = request;
+    let parsed = ArtifactRef::from_str(&requested.skill_ref)
+        .map_err(|error| bad_request(format!("invalid execution template ref: {error}")))?;
+    if parsed
+        .canonical_string()
+        .map_err(|error| bad_request(format!("invalid execution template ref: {error}")))?
+        != requested.skill_ref
+    {
+        return Err(bad_request("execution template ref must be canonical"));
+    }
+    let mut matching = context.execution_templates.iter().filter(|template| {
+        template.skill_ref == parsed && template.revision_uid == requested.revision_uid
+    });
+    let template = matching.next().ok_or_else(|| {
+        TerminalError::new_with_code(
+            422,
+            "requested execution template is not pinned in the planning context",
+        )
+    })?;
+    if matching.next().is_some() {
+        return Err(TerminalError::new_with_code(
+            409,
+            "requested execution template is duplicated in the planning context",
+        )
+        .into());
+    }
+    validate_instance(&template.skill_input_schema, &input, "skill_input_schema")
+        .map_err(|error| TerminalError::new_with_code(422, error.to_string()))?;
+
+    let candidate = GeneratedExecutionCandidate {
+        goal: template.execution_plan.instantiate_goal(objective),
+        plan: template.execution_plan.plan.clone(),
+        run_input: input,
+    };
+    let candidate_preimage = ExperimentCompileCandidate {
+        kind: "initial",
+        schema_version: 1,
+        source: ExecutionCompileSource::ExperimentTemplate,
+        goal: &candidate.goal,
+        plan: &candidate.plan,
+        run_input: &candidate.run_input,
+    };
+    let candidate_bytes = artifact_canonical_json_bytes(&candidate_preimage)
+        .map_err(|error| TerminalError::new(error.to_string()))?;
+    let candidate_hash =
+        execution_planning_hash("moa.execution.compile-candidate.v1", &candidate_bytes);
+    let config = OrchestratorCtx::current_config();
+    let started_at = Instant::now();
+    let outcome = compile(CompileExecutionRequest {
+        goal: candidate.goal,
+        plan: candidate.plan,
+        run_input: candidate.run_input.clone(),
+        catalog: context.catalog.clone(),
+        authorization: context.authorization.clone(),
+        approved_budget: context.budget.clone(),
+        config: config.execution.clone(),
+        now,
+    });
+    let duration_micros = u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let classification = classify_experiment_compile(&outcome);
+    let report = compiler_audit_report(&outcome.report)?;
+    let report_bytes =
+        canonical_json_bytes(&report).map_err(|error| TerminalError::new(error.to_string()))?;
+    let validation_report =
+        String::from_utf8(report_bytes).map_err(|error| TerminalError::new(error.to_string()))?;
+    let compile_outcome = match classification {
+        ExperimentCompileClassification::Accepted => ExecutionCompileOutcome::Accepted,
+        ExperimentCompileClassification::NeedsInput => ExecutionCompileOutcome::NeedsInput,
+        ExperimentCompileClassification::Unsupported => ExecutionCompileOutcome::Unsupported,
+        ExperimentCompileClassification::Rejected => ExecutionCompileOutcome::Rejected,
+    };
+    let final_plan_hash = outcome
+        .compiled
+        .as_ref()
+        .map(|compiled| compiled.plan.plan_hash.to_string());
+    let canonical_ref = template
+        .skill_ref
+        .canonical_string()
+        .map_err(|error| TerminalError::new(error.to_string()))?;
+    Ok(CompiledExperimentTemplate {
+        compiled: outcome.compiled,
+        run_input: candidate.run_input,
+        audit: ExecutionPlanningAuditEnvelopeV1 {
+            schema_version: 1,
+            tenant_id: context.tenant_id,
+            contact_id: context.contact_id,
+            session_id: Some(context.session_id),
+            originating_sequence: Some(context.originating_user_sequence_num),
+            payload: ExecutionPlanningAuditPayloadV1::Compile {
+                source: ExecutionCompileSource::ExperimentTemplate,
+                operation_key,
+                run_uid: None,
+                plan_revision: None,
+                outcome: compile_outcome,
+                candidate_hash,
+                final_plan_hash,
+                validation_report,
+                duration_micros,
+                created_at: now,
+            },
+        },
+        source_provenance: experiment_template_source_provenance(
+            canonical_ref,
+            template.revision_uid,
+            experiment_run_uid,
+            score_run_id,
+            trial_uid,
+        ),
+    })
+}
+
+fn experiment_template_source_provenance(
+    skill_template_ref: String,
+    skill_template_revision_uid: Uuid,
+    experiment_run_uid: Uuid,
+    score_run_id: Uuid,
+    trial_uid: Uuid,
+) -> ExecutionSourceProvenanceV1 {
+    ExecutionSourceProvenanceV1::ExperimentTemplate {
+        route_reason: ExecutionRouteReason::ExplicitRun,
+        skill_template_ref,
+        skill_template_revision_uid,
+        experiment_run_uid,
+        score_run_id,
+        trial_uid: Some(trial_uid),
+    }
+}
+
+fn classify_experiment_compile(
+    outcome: &CompileExecutionOutcome,
+) -> ExperimentCompileClassification {
+    if outcome.compiled.is_some() && !outcome.report.has_errors() {
+        return ExperimentCompileClassification::Accepted;
+    }
+    let error_codes = outcome
+        .report
+        .issues
+        .iter()
+        .filter(|issue| issue.severity == ExecutionValidationSeverity::Error)
+        .map(|issue| issue.code.as_str())
+        .collect::<Vec<_>>();
+    if error_codes.iter().any(|code| {
+        matches!(
+            *code,
+            "invalid_run_input" | "empty_objective" | "goal_structure"
+        )
+    }) {
+        ExperimentCompileClassification::NeedsInput
+    } else if error_codes.iter().any(|code| {
+        code.contains("authorization")
+            || code.contains("capability")
+            || code.contains("budget")
+            || code.contains("deadline")
+            || code.starts_with("unsupported_")
+            || *code == "skill_not_authorized"
+            || *code == "objective_mismatch"
+    }) {
+        ExperimentCompileClassification::Unsupported
+    } else {
+        ExperimentCompileClassification::Rejected
+    }
+}
+
+fn compiler_audit_report(
+    report: &ExecutionValidationReport,
+) -> Result<moa_core::types::execution_planning::ExecutionAuditReportV1, HandlerError> {
+    let violations = report
+        .issues
+        .iter()
+        .map(|issue| ExecutionAuditViolationV1 {
+            code: issue.code.clone(),
+            path: issue.path.clone(),
+            message: issue.message.clone(),
+        })
+        .collect();
+    bounded_audit_report(true, violations)
+        .map_err(|error| TerminalError::new_with_code(422, error.to_string()).into())
+}
+
+async fn persist_compile_audit(
+    ctx: &WorkflowContext<'_>,
+    scope: ActionRuleScope,
+    audit: ExecutionPlanningAuditEnvelopeV1,
+    pool: &sqlx::PgPool,
+) -> Result<(), HandlerError> {
+    let execution_scope = match scope {
+        ActionRuleScope::Tenant { tenant_id } => ExecutionScope::Tenant { tenant_id },
+        ActionRuleScope::Contact {
+            tenant_id,
+            contact_id,
+        } => ExecutionScope::Contact {
+            tenant_id,
+            contact_id,
+        },
+    };
+    let audit_pool = pool.clone();
+    let outcome = ctx
+        .run(|| async move {
+            ExecutionRepository::new(audit_pool)
+                .write_compile_audit(execution_scope, &audit)
+                .await
+                .map(Json::from)
+                .map_err(|error| {
+                    TerminalError::new(format!(
+                        "experiment trial compile audit persistence failed: {error}"
+                    ))
+                    .into()
+                })
+        })
+        .name("experiment_trial_write_compile_audit")
+        .await?
+        .into_inner();
+    moa_brain::execution_planning::request::record_applied_planning_audit(&outcome);
+    if matches!(outcome, CompileAuditWriteOutcome::Conflict { .. }) {
+        return Err(TerminalError::new_with_code(
+            409,
+            "experiment trial compile audit conflicts with first persisted evidence",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn wait_for_execution_outcome(
+    ctx: &WorkflowContext<'_>,
+    identity: &Identity,
+    tenant_id: TenantId,
+    contact_id: Option<ContactId>,
+    session_id: SessionId,
+    run_uid: Uuid,
+) -> Result<(WorkflowTrialStop, Option<String>), HandlerError> {
+    let run = ExecutionRunRequest {
+        tenant_id,
+        contact_id,
+        session_id,
+        run_uid,
+    };
+    let poll_count =
+        EXECUTION_TARGET_WAIT_TIMEOUT.as_secs() / EXECUTION_STATUS_POLL_INTERVAL.as_secs();
+    for _ in 0..poll_count {
+        let status = with_identity_headers(
+            ctx.service_client::<ExecutionClient>()
+                .status(Json::from(run.clone())),
+            identity,
+        )
+        .call()
+        .await?
+        .into_inner();
+        if let Some(terminal) = trial_stop_for_execution_status(&status) {
+            return Ok(terminal);
+        }
+        ctx.sleep(EXECUTION_STATUS_POLL_INTERVAL).await?;
+    }
+    let reason = format!(
+        "experiment trial timed out waiting {EXECUTION_TARGET_WAIT_TIMEOUT:?} for execution run {run_uid}"
+    );
+    with_identity_headers(
+        ctx.service_client::<ExecutionClient>()
+            .cancel(Json::from(ExecutionCancelRequest {
+                run,
+                reason: reason.clone(),
+            })),
+        identity,
+    )
+    .call()
+    .await?;
+    Ok((execution_failure_stop(), Some(reason)))
+}
+
+fn trial_stop_for_execution_status(
+    response: &ExecutionStatusResponse,
+) -> Option<(WorkflowTrialStop, Option<String>)> {
+    let stop = trial_stop_for_execution_run_status(response.run.status)?;
+    let error = matches!(stop.status, ExperimentTrialStatus::Failed).then(|| {
+        format!(
+            "execution run {} ended with status {} and gaps {:?}",
+            response.run.run_uid,
+            response.run.status.as_str(),
+            response.gaps
+        )
+    });
+    Some((stop, error))
+}
+
+fn execution_failure_stop() -> WorkflowTrialStop {
+    WorkflowTrialStop {
+        status: ExperimentTrialStatus::Failed,
+        stop_reason: ExperimentTrialStopReason::Error,
     }
 }
 
@@ -481,15 +1081,15 @@ async fn wait_for_target_after_turn(
     .await?
     .into_inner();
     if let Some(outcome) = attached.outcome {
-        return Ok(status_for_turn_outcome(&outcome));
+        return status_for_turn_outcome(&outcome);
     }
 
     restate_sdk::select! {
         outcome = completion => {
             let outcome = parse_turn_outcome(&outcome?)?;
-            Ok(status_for_turn_outcome(&outcome))
+            status_for_turn_outcome(&outcome)
         },
-        _ = ctx.sleep(TARGET_WAIT_TIMEOUT) => {
+        _ = ctx.sleep(EXECUTION_TARGET_WAIT_TIMEOUT) => {
             with_identity_headers(
                 ctx.object_client::<SessionClient>(session_id.to_string())
                     .remove_turn_waiter(Json::from(RemoveSessionTurnWaiterInput {
@@ -586,55 +1186,17 @@ fn parse_turn_outcome(raw: &str) -> Result<TurnOutcome, HandlerError> {
     })
 }
 
-fn status_for_turn_outcome(outcome: &TurnOutcome) -> SessionStatus {
-    match outcome.kind {
+fn status_for_turn_outcome(outcome: &TurnOutcome) -> Result<SessionStatus, HandlerError> {
+    Ok(match outcome.kind {
         TurnOutcomeKind::Completed => SessionStatus::Paused,
         TurnOutcomeKind::Cancelled => SessionStatus::Cancelled,
         TurnOutcomeKind::Failed => SessionStatus::Failed,
-    }
-}
-
-/// Creates the durable procedure run row and links it to the trial.
-///
-/// This only writes durable state; the executor is invoked later by
-/// [`wait_for_procedure_outcome`] so the trial can durably await the terminal
-/// outcome instead of returning while the procedure runs.
-async fn start_and_attach_workflow_run(
-    ctx: &WorkflowContext<'_>,
-    start: WorkflowTrialStart,
-    pool: &sqlx::PgPool,
-) -> Result<StartedWorkflowRun, HandlerError> {
-    let pool = pool.clone();
-    Ok(ctx
-        .run(|| async move {
-            let run = workflow_runtime(pool.clone())
-                .start(
-                    &start.scope,
-                    StartProcedureRun {
-                        procedure_ref: start.procedure_ref,
-                        input: start.input,
-                        session_id: start.session_id,
-                        idempotency_key: start.idempotency_key,
-                    },
-                )
-                .await
-                .map_err(procedure_handler_error)?;
-            attach_trial_procedure_run(pool, start.scope, start.trial_uid, run.run_uid).await?;
-            let stop = trial_stop_for_workflow_status(&run.status).map(|(status, stop_reason)| {
-                WorkflowTrialStop {
-                    status,
-                    stop_reason,
-                }
-            });
-            Ok::<_, HandlerError>(Json::from(StartedWorkflowRun {
-                run_uid: run.run_uid,
-                stop,
-                error: run.error,
-            }))
-        })
-        .name("experiment_trial_start_workflow_run")
-        .await?
-        .into_inner())
+        TurnOutcomeKind::Accepted { .. } => {
+            return Err(
+                TerminalError::new_with_code(409, "run_requires_user_message_origin").into(),
+            );
+        }
+    })
 }
 
 fn latest_brain_response(events: &[EventRecord]) -> Option<String> {
@@ -664,35 +1226,26 @@ pub(super) fn stop_for_session_status(
     }
 }
 
-fn trial_stop_for_workflow_status(
-    status: &ArtifactRunStatus,
-) -> Option<(ExperimentTrialStatus, ExperimentTrialStopReason)> {
+fn trial_stop_for_execution_run_status(status: ExecutionRunStatus) -> Option<WorkflowTrialStop> {
     match status {
-        ArtifactRunStatus::Queued
-        | ArtifactRunStatus::Running
-        | ArtifactRunStatus::PendingReview => None,
-        ArtifactRunStatus::Completed => Some((
-            ExperimentTrialStatus::Completed,
-            ExperimentTrialStopReason::TargetTerminal,
-        )),
-        ArtifactRunStatus::Failed => Some((
-            ExperimentTrialStatus::Failed,
-            ExperimentTrialStopReason::Error,
-        )),
-        ArtifactRunStatus::Cancelled => Some((
-            ExperimentTrialStatus::Cancelled,
-            ExperimentTrialStopReason::Cancelled,
-        )),
-    }
-}
-
-/// Trial stop recorded when a procedure trial fails to reach a terminal state in
-/// time (timeout) or reports an unexpected non-terminal status. Mirrors the
-/// agent-loop turn-timeout disposition (`Failed` / `Error`).
-fn procedure_failure_stop() -> WorkflowTrialStop {
-    WorkflowTrialStop {
-        status: ExperimentTrialStatus::Failed,
-        stop_reason: ExperimentTrialStopReason::Error,
+        ExecutionRunStatus::Completed => Some(WorkflowTrialStop {
+            status: ExperimentTrialStatus::Completed,
+            stop_reason: ExperimentTrialStopReason::TargetTerminal,
+        }),
+        ExecutionRunStatus::Cancelled => Some(WorkflowTrialStop {
+            status: ExperimentTrialStatus::Cancelled,
+            stop_reason: ExperimentTrialStopReason::Cancelled,
+        }),
+        ExecutionRunStatus::Partial
+        | ExecutionRunStatus::Blocked
+        | ExecutionRunStatus::Unsupported
+        | ExecutionRunStatus::Failed => Some(execution_failure_stop()),
+        ExecutionRunStatus::AwaitingConfirmation
+        | ExecutionRunStatus::Queued
+        | ExecutionRunStatus::Running
+        | ExecutionRunStatus::WaitingInput
+        | ExecutionRunStatus::WaitingReview
+        | ExecutionRunStatus::WaitingReplan => None,
     }
 }
 
@@ -749,52 +1302,122 @@ mod tests {
     }
 
     #[test]
-    fn workflow_status_stops_trials_only_after_terminal_states_offline() {
-        // Pins: workflow-backed trials do not report success while target work is still active.
+    fn execution_status_stops_trial_only_for_terminal_states_offline() {
+        // Pins: typed Execution/status polling never finalizes an active or waiting run.
+        for status in [
+            ExecutionRunStatus::AwaitingConfirmation,
+            ExecutionRunStatus::Queued,
+            ExecutionRunStatus::Running,
+            ExecutionRunStatus::WaitingInput,
+            ExecutionRunStatus::WaitingReview,
+            ExecutionRunStatus::WaitingReplan,
+        ] {
+            assert_eq!(trial_stop_for_execution_run_status(status), None);
+        }
         assert_eq!(
-            trial_stop_for_workflow_status(&ArtifactRunStatus::Queued),
-            None
+            trial_stop_for_execution_run_status(ExecutionRunStatus::Completed),
+            Some(WorkflowTrialStop {
+                status: ExperimentTrialStatus::Completed,
+                stop_reason: ExperimentTrialStopReason::TargetTerminal,
+            })
         );
         assert_eq!(
-            trial_stop_for_workflow_status(&ArtifactRunStatus::Running),
-            None
+            trial_stop_for_execution_run_status(ExecutionRunStatus::Cancelled),
+            Some(WorkflowTrialStop {
+                status: ExperimentTrialStatus::Cancelled,
+                stop_reason: ExperimentTrialStopReason::Cancelled,
+            })
+        );
+        for status in [
+            ExecutionRunStatus::Partial,
+            ExecutionRunStatus::Blocked,
+            ExecutionRunStatus::Unsupported,
+            ExecutionRunStatus::Failed,
+        ] {
+            assert_eq!(
+                trial_stop_for_execution_run_status(status),
+                Some(WorkflowTrialStop {
+                    status: ExperimentTrialStatus::Failed,
+                    stop_reason: ExperimentTrialStopReason::Error,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn experiment_execution_session_id_is_replay_stable_and_trial_specific_offline() {
+        // Pins: target-session-null trials use the exact deterministic authority key and never
+        // collide with the parent run target or another trial.
+        let tenant_id = TenantId(Uuid::from_u128(1));
+        let run_uid = Uuid::from_u128(2);
+        let score_run_id = Uuid::from_u128(3);
+        let trial_uid = Uuid::from_u128(4);
+        let first =
+            experiment_execution_session_id(tenant_id, run_uid, score_run_id, Some(trial_uid))
+                .expect("deterministic trial Session id");
+        assert_eq!(
+            first,
+            SessionId(
+                Uuid::parse_str("919cd404-071e-5b08-a14a-66246a19e048")
+                    .expect("Task 9 golden Session id")
+            )
         );
         assert_eq!(
-            trial_stop_for_workflow_status(&ArtifactRunStatus::PendingReview),
-            None
+            first,
+            experiment_execution_session_id(tenant_id, run_uid, score_run_id, Some(trial_uid),)
+                .expect("replayed deterministic trial Session id")
         );
-        assert_eq!(
-            trial_stop_for_workflow_status(&ArtifactRunStatus::Completed),
-            Some((
-                ExperimentTrialStatus::Completed,
-                ExperimentTrialStopReason::TargetTerminal,
-            ))
+        assert_ne!(
+            first,
+            experiment_execution_session_id(tenant_id, run_uid, score_run_id, None)
+                .expect("run-target deterministic Session id")
         );
-        assert_eq!(
-            trial_stop_for_workflow_status(&ArtifactRunStatus::Failed),
-            Some((
-                ExperimentTrialStatus::Failed,
-                ExperimentTrialStopReason::Error,
-            ))
-        );
-        assert_eq!(
-            trial_stop_for_workflow_status(&ArtifactRunStatus::Cancelled),
-            Some((
-                ExperimentTrialStatus::Cancelled,
-                ExperimentTrialStopReason::Cancelled,
-            ))
+        assert_ne!(
+            first,
+            experiment_execution_session_id(
+                tenant_id,
+                run_uid,
+                score_run_id,
+                Some(Uuid::from_u128(5)),
+            )
+            .expect("second trial deterministic Session id")
         );
     }
 
     #[test]
-    fn procedure_timeout_records_failed_error_stop_offline() {
-        // Pins: a procedure trial that times out (for example blocked on human review) records
-        // the same Failed/Error disposition as an agent-loop turn timeout.
+    fn experiment_trial_operation_key_is_exact_offline() {
+        // Pins: trial-owned compiler audit replay uses the Task 9 permanent operation key.
         assert_eq!(
-            procedure_failure_stop(),
-            WorkflowTrialStop {
-                status: ExperimentTrialStatus::Failed,
-                stop_reason: ExperimentTrialStopReason::Error,
+            experiment_trial_operation_key(
+                Uuid::from_u128(1),
+                Uuid::from_u128(2),
+                Uuid::from_u128(3),
+            ),
+            "experiment:00000000-0000-0000-0000-000000000001:\
+             00000000-0000-0000-0000-000000000002:\
+             00000000-0000-0000-0000-000000000003"
+        );
+    }
+
+    #[test]
+    fn trial_template_constructor_uses_exact_experiment_provenance_offline() {
+        // Pins: the trial-target constructor writes explicit-run experiment identity and the
+        // exact non-null trial UID without replacing effective Session authority.
+        assert_eq!(
+            experiment_template_source_provenance(
+                "skill://durable-report".to_string(),
+                Uuid::from_u128(1),
+                Uuid::from_u128(2),
+                Uuid::from_u128(3),
+                Uuid::from_u128(4),
+            ),
+            ExecutionSourceProvenanceV1::ExperimentTemplate {
+                route_reason: ExecutionRouteReason::ExplicitRun,
+                skill_template_ref: "skill://durable-report".to_string(),
+                skill_template_revision_uid: Uuid::from_u128(1),
+                experiment_run_uid: Uuid::from_u128(2),
+                score_run_id: Uuid::from_u128(3),
+                trial_uid: Some(Uuid::from_u128(4)),
             }
         );
     }
@@ -818,8 +1441,24 @@ mod tests {
             parse_turn_outcome(&raw).expect("turn outcome parses"),
             completed
         );
-        assert_eq!(status_for_turn_outcome(&completed), SessionStatus::Paused);
-        assert_eq!(status_for_turn_outcome(&failed), SessionStatus::Failed);
+        assert_eq!(
+            status_for_turn_outcome(&completed).expect("completed"),
+            SessionStatus::Paused
+        );
+        assert_eq!(
+            status_for_turn_outcome(&failed).expect("failed"),
+            SessionStatus::Failed
+        );
+        let accepted = TurnOutcome {
+            turn_id: "turn-3".to_string(),
+            kind: TurnOutcomeKind::Accepted {
+                execution_run_uid: Uuid::new_v4(),
+            },
+            message: "accepted".to_string(),
+        };
+        let error = status_for_turn_outcome(&accepted)
+            .expect_err("legacy experiment AgentLoop cannot admit an execution run");
+        assert!(format!("{error:?}").contains("run_requires_user_message_origin"));
     }
 
     fn event_record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {

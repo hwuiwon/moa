@@ -64,13 +64,93 @@ pub(super) struct OrchestratorSpawnConfig<'a> {
     pub(super) ingress_url: &'a str,
     pub(super) redis_url: &'a str,
     pub(super) script_path: &'a Path,
+    pub(super) journal_path: Option<&'a Path>,
     pub(super) fga_config: &'a FgaConfig,
     pub(super) extra_env: &'a [(String, String)],
+    pub(super) otlp_endpoint: &'a str,
+    pub(super) observability_service_name: &'a str,
 }
 
-pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<Child> {
+pub(super) struct OrchestratorRestartConfig {
+    pub(super) binary: PathBuf,
+    pub(super) port: u16,
+    pub(super) health_port: u16,
+    pub(super) scim_port: u16,
+    pub(super) postgres_url: String,
+    pub(super) admin_url: String,
+    pub(super) ingress_url: String,
+    pub(super) redis_url: String,
+    pub(super) script_path: PathBuf,
+    pub(super) journal_path: PathBuf,
+    pub(super) fga_config: FgaConfig,
+    pub(super) extra_env: Vec<(String, String)>,
+    pub(super) otlp_endpoint: String,
+    pub(super) observability_service_name: String,
+}
+
+impl OrchestratorRestartConfig {
+    pub(super) fn spawn(&self) -> Result<ChildGuard> {
+        spawn_orchestrator(OrchestratorSpawnConfig {
+            binary: &self.binary,
+            port: self.port,
+            health_port: self.health_port,
+            scim_port: self.scim_port,
+            postgres_url: &self.postgres_url,
+            admin_url: &self.admin_url,
+            ingress_url: &self.ingress_url,
+            redis_url: &self.redis_url,
+            script_path: &self.script_path,
+            journal_path: Some(&self.journal_path),
+            fga_config: &self.fga_config,
+            extra_env: &self.extra_env,
+            otlp_endpoint: &self.otlp_endpoint,
+            observability_service_name: &self.observability_service_name,
+        })
+    }
+
+    pub(super) fn deployment_uri(&self) -> String {
+        format!("http://host.docker.internal:{}", self.port)
+    }
+}
+
+pub(super) struct ChildGuard {
+    child: Option<Child>,
+}
+
+impl ChildGuard {
+    pub(super) fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    pub(super) fn child_mut(&mut self) -> Option<&mut Child> {
+        self.child.as_mut()
+    }
+
+    pub(super) fn disarm(mut self) -> Option<Child> {
+        self.child.take()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.take() {
+            terminate_child(child);
+        }
+    }
+}
+
+pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<ChildGuard> {
     let mut command = Command::new(config.binary);
     command
+        .env_remove("MOA_MCP_SERVERS_JSON")
+        .env_remove("MOA_SCRIPTED_PROVIDER_REQUEST_LOG")
+        .env_remove("MOA_OBSERVABILITY_ENABLED")
+        .env_remove("MOA_OBSERVABILITY_SERVICE_NAME")
+        .env_remove("MOA_OBSERVABILITY_OTLP_ENDPOINT")
+        .env_remove("MOA_OBSERVABILITY_OTLP_PROTOCOL")
+        .env_remove("MOA_OBSERVABILITY_SAMPLE_RATE")
+        .env_remove("MOA_OBSERVABILITY_ENVIRONMENT")
+        .env_remove("MOA_OBSERVABILITY_RELEASE")
         .arg("--port")
         .arg(config.port.to_string())
         .arg("--health-port")
@@ -93,16 +173,35 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         )
         .env("MOA_AUTHZ_OPENFGA_STORE_ID", &config.fga_config.store_id)
         .env("MOA_AUTHZ_OPENFGA_MODEL_ID", &config.fga_config.model_id)
-        .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env("MOA_LINEAGE_SINK", "null")
         .env("RUST_LOG", "warn");
+    if let Some(journal_path) = config.journal_path {
+        command.env("MOA_SCRIPTED_PROVIDER_REQUEST_LOG", journal_path);
+    }
     for (key, value) in config.extra_env {
         command.env(key, value);
     }
     command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .env("MOA_OBSERVABILITY_ENABLED", "true")
+        .env(
+            "MOA_OBSERVABILITY_SERVICE_NAME",
+            config.observability_service_name,
+        )
+        .env("MOA_OBSERVABILITY_OTLP_ENDPOINT", config.otlp_endpoint)
+        .env("MOA_OBSERVABILITY_OTLP_PROTOCOL", "http")
+        .env("MOA_OBSERVABILITY_SAMPLE_RATE", "1")
+        .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
+        .env(
+            "MOA_OBSERVABILITY_RELEASE",
+            config.observability_service_name,
+        );
+    command
+        // The long-lived child must never write into an undrained pipe. Nextest already
+        // captures inherited test output, including startup failures and runtime warnings.
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .spawn()
+        .map(ChildGuard::new)
         .with_context(|| format!("spawn orchestrator binary {}", config.binary.display()))
 }
 
@@ -136,7 +235,7 @@ pub(super) async fn wait_for_orchestrator_health(
     }
 }
 
-fn read_child_logs(child: &mut Child) -> String {
+pub(super) fn read_child_logs(child: &mut Child) -> String {
     let mut output = String::new();
     if let Some(mut stdout) = child.stdout.take() {
         let mut stdout_text = String::new();
@@ -188,4 +287,106 @@ pub(super) fn terminate_child(mut child: Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn long_running_child() -> Child {
+        Command::new("sleep")
+            .arg("60")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn long-running child for guard test")
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: u32) -> bool {
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        kill(Pid::from_raw(pid as i32), None).is_ok()
+    }
+
+    #[cfg(unix)]
+    fn cleanup_mutation_orphan(pid: u32) {
+        use nix::sys::signal::{Signal, kill};
+        use nix::sys::wait::waitpid;
+        use nix::unistd::Pid;
+
+        let pid = Pid::from_raw(pid as i32);
+        let _ = kill(pid, Signal::SIGKILL);
+        let _ = waitpid(pid, None);
+    }
+
+    #[cfg(unix)]
+    fn assert_terminated_or_cleanup(pid: u32) {
+        let terminated = !process_exists(pid);
+        if !terminated {
+            cleanup_mutation_orphan(pid);
+        }
+        assert!(
+            terminated,
+            "dropping an armed child guard must terminate and reap its child"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_guard_drop_terminates_but_disarm_transfers_live_child() {
+        // Pins: cancellation drops an armed guard and kills its child, while successful fixture
+        // installation disarms the guard and transfers exactly one still-live child.
+        let child = long_running_child();
+        let guarded_pid = child.id();
+        let guard = ChildGuard::new(child);
+        assert!(process_exists(guarded_pid));
+
+        drop(guard);
+
+        assert_terminated_or_cleanup(guarded_pid);
+
+        let child = long_running_child();
+        let transferred_pid = child.id();
+        let guard = ChildGuard::new(child);
+        let mut transferred = guard
+            .disarm()
+            .expect("an armed child guard should transfer its child");
+        assert!(process_exists(transferred_pid));
+        assert!(
+            transferred
+                .try_wait()
+                .expect("poll transferred child")
+                .is_none()
+        );
+        terminate_child(transferred);
+        assert!(!process_exists(transferred_pid));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_future_with_armed_child_guard_terminates_child() {
+        // Pins: dropping a construction/restart future at any await drops its armed child guard.
+        let child = long_running_child();
+        let pid = child.id();
+        let guard = ChildGuard::new(child);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            let _ = ready_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        ready_rx
+            .await
+            .expect("guard-owning future should reach its cancellation point");
+
+        task.abort();
+        let error = task
+            .await
+            .expect_err("aborting guard-owning future should cancel it");
+        assert!(error.is_cancelled());
+        assert_terminated_or_cleanup(pid);
+    }
 }

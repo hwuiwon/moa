@@ -407,6 +407,33 @@ fn redacted_event_summary(event: &Event) -> String {
         Event::QueuedMessage { attachments, .. } => {
             format!("queued user message with {} attachments", attachments.len())
         }
+        Event::ExecutionRunStarted(started) => {
+            format!("execution run {} started", started.run_uid)
+        }
+        Event::ExecutionProgress(progress) => format!(
+            "execution run {} progress {}/{} status={}",
+            progress.run_uid, progress.completed, progress.total, progress.status
+        ),
+        Event::ExecutionInputRequired(required) => {
+            format!("execution run {} requires user input", required.run_uid)
+        }
+        Event::ExecutionCompleted(summary) => {
+            format!("execution run {} completed", summary.run_uid)
+        }
+        Event::ExecutionFailed {
+            disposition,
+            summary,
+        } => format!(
+            "execution run {} failed disposition={disposition:?}",
+            summary.run_uid
+        ),
+        Event::ExecutionCancelled(summary) => {
+            format!("execution run {} cancelled", summary.run_uid)
+        }
+        Event::ExecutionSynthesisRequested(requested) => format!(
+            "execution run {} synthesis requested for turn {}",
+            requested.run_uid, requested.turn_id
+        ),
         Event::BrainThinking { token_count, .. } => {
             format!("assistant thinking summary used {token_count} tokens")
         }
@@ -464,12 +491,6 @@ fn redacted_event_summary(event: &Event) -> String {
         Event::WorkerNotificationDelivered {
             worker_id, state, ..
         } => format!("worker {worker_id} terminal notification delivered: {state:?}"),
-        Event::WorkerResultBundle { results, .. } => {
-            format!("worker result bundle with {} results", results.len())
-        }
-        Event::WorkerResultSynthesisRequested { turn_id, .. } => {
-            format!("worker result synthesis requested for turn {turn_id}")
-        }
         Event::TurnMetrics {
             turn_id,
             durable_appends,
@@ -507,5 +528,44 @@ fn redacted_event_summary(event: &Event) -> String {
         Event::CacheReport { .. } => "cache report recorded".to_string(),
         Event::Error { recoverable, .. } => format!("error recorded recoverable={recoverable}"),
         Event::Warning { .. } => "warning recorded".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use moa_core::events::{Event, ExecutionTaskResultsRef, ExecutionTerminalSummary};
+    use uuid::Uuid;
+
+    use super::redacted_event_summary;
+
+    #[test]
+    fn execution_dashboard_summary_never_copies_terminal_evidence() {
+        // Pins: operator summaries identify the run/status while keeping aggregate output,
+        // citations, failure/gap bodies, and the task table out of dashboard rows.
+        let run_uid = Uuid::from_u128(111);
+        let summary =
+            redacted_event_summary(&Event::ExecutionCompleted(ExecutionTerminalSummary {
+                run_uid,
+                originating_user_sequence_num: 8,
+                output: Some(serde_json::json!({
+                    "private": "aggregate-output-sentinel"
+                })),
+                output_hash: [8; 32],
+                citation_ids: vec!["citation-sentinel".to_string()],
+                failures: vec!["failure-sentinel".to_string()],
+                gaps: vec!["gap-sentinel".to_string()],
+                task_results: ExecutionTaskResultsRef::ExecutionTaskTable { run_uid },
+            }));
+
+        assert_eq!(summary, format!("execution run {run_uid} completed"));
+        for forbidden in [
+            "aggregate-output-sentinel",
+            "citation-sentinel",
+            "failure-sentinel",
+            "gap-sentinel",
+            "execution_task_table",
+        ] {
+            assert!(!summary.contains(forbidden));
+        }
     }
 }

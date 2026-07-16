@@ -126,6 +126,7 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
             max_output_tokens: Some(64),
             temperature: None,
             response_format: None,
+            native_web_search: Default::default(),
             metadata,
         };
 

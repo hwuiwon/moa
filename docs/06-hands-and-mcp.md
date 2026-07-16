@@ -6,9 +6,9 @@ _Hand providers, tool routing, MCP, sandbox lifecycle, and recovery._
 
 Hands are temporary execution environments. They are provisioned on first use
 and destroyed when their owning scope reaches a terminal state. The root
-coordinator runs sandbox-free; each worker owns its own hand, so a hand is
-released when that worker self-cleans and any remaining hands are released at
-session teardown (see Per-Worker Sandbox Model below). The brain never talks
+coordinator runs sandbox-free; each conversational worker or sandbox-using
+execution task owns an isolated hand, released when that scope becomes terminal.
+Any remaining hands are released at session or run teardown. The brain never talks
 to hands directly; it asks the `ToolRouter` to execute a named tool with
 structured input.
 
@@ -68,7 +68,7 @@ provider first until the hand scope is reclaimed.
 `ActionEnvelope` is the durable policy-facing record for one tool invocation.
 It includes the review id, tenant, user, session or worker origin, tool
 call id, tool name, normalized input, input summary, risk level, action class,
-optional procedure/artifact origin metadata, idempotency key, and creation time.
+optional execution-run/task and artifact origin metadata, idempotency key, and creation time.
 The envelope is persisted only when action policy returns
 `ActionPolicyEffect::AdminReview`; normal allowed actions proceed directly.
 
@@ -107,11 +107,27 @@ class, default action-policy effect, and output budget. The context pipeline
 injects only the currently active subset to protect prompt budget and cache
 stability.
 
+The execution capability catalog is the planner/compiler source of truth over
+these governed operations. Each entry has a stable reference and version,
+description, input/output schemas, action/risk and idempotency classes,
+execution class (`data`, `compute`, `model`, or `external`), source provenance,
+authorization metadata, and optional integer cost estimate. It includes typed
+built-ins, actions, skill actions/code, memory operations, connected MCP tools
+whose schemas and policies are stable, and datasource reads only when a typed
+query operation exists. A connection identifier alone is not executable.
+
+`Capability` and bounded `Agent` execution resolve through the same action
+policy and `ToolExecutor`/typed-service owners as root tool calls. The graph
+interpreter never calls a hand, MCP server, datasource, or memory store directly.
+Capability availability and authorization restrict what may run; resource
+budgets restrict only how much may run.
+
 ## Lifecycle
 
-Active hands are keyed by session, worker, and provider. The authoritative
-binding lives in Postgres `moa.hand_leases` with primary key `(session_id,
-worker_id, provider)`; `ToolRouter` process maps are reconnect caches only. A
+Active hands are keyed by owning session/run scope and provider. Conversational
+worker leases use `(session_id, worker_id, provider)`; execution-task leases use
+the stable run/task origin and generation. The authoritative binding lives in
+Postgres; `ToolRouter` process maps are reconnect caches only. A
 first tool call claims a durable lease before provisioning the hand. Later tool
 calls on any Kubernetes replica load the lease, reconnect or resume the provider
 handle when healthy, or mark it stale and reprovision with a new generation. On
@@ -120,7 +136,7 @@ orchestrator calls `reclaim_hands(session_id, None)`, which lists durable
 leases for every worker scope rather than only handles cached in the current
 process.
 
-### Per-Worker Sandbox Model
+### Isolated Sandbox Ownership
 
 Worker compute is keyed by `worker_id`, not by the parent session, so each
 worker owns exactly one sandbox and siblings never share one:
@@ -151,6 +167,14 @@ worker owns exactly one sandbox and siblings never share one:
   `generation`, provisioning a fresh hand, and replaying the hash-validated
   `trusted_sandbox_manifest` to reinstall the prior files. No agent work product
   may live only in a sandbox.
+
+This Worker model remains for conversational delegation in `act`; Worker is not
+an execution-plan node or bulk DAG primitive. A sandbox-using `ExecutionTask`
+gets the same isolation and generation-fenced recovery under its task identity.
+Dynamic map execution has no application hand/worker fan-out cap: every stable
+logical item is submitted after atomic budget reservation, while Restate
+concurrency and provider pacing determine how many physical sandboxes run at
+once.
 
 Before the LLM call for a turn, the context pipeline selects relevant skills.
 The selected trusted sandbox file references are copied into `ToolCallRequest`.

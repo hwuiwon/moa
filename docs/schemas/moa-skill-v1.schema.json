@@ -38,7 +38,567 @@
         }
       }
     },
-    "procedure": { "$ref": "https://moa.dev/schemas/moa-procedure-v1.schema.json" },
+    "execution_plan": { "$ref": "#/$defs/ExecutionPlanTemplate" },
     "ui": { "type": "object" }
+  },
+  "$defs": {
+    "ExecutionPlanTemplate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goal", "plan"],
+      "properties": {
+        "goal": { "$ref": "#/$defs/ExecutionGoalTemplate" },
+        "plan": { "$ref": "#/$defs/ExecutionPlanDefinition" }
+      }
+    },
+    "ExecutionGoalTemplate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirements",
+        "deliverables",
+        "coverage",
+        "constraints",
+        "completion_checks"
+      ],
+      "properties": {
+        "requirements": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ExecutionRequirement" }
+        },
+        "deliverables": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ExecutionDeliverable" }
+        },
+        "coverage": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CoverageRequirement" }
+        },
+        "constraints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ExecutionConstraint" }
+        },
+        "completion_checks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CompletionCheck" }
+        }
+      }
+    },
+    "ExecutionRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description"],
+      "properties": {
+        "id": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "ExecutionDeliverable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description", "output_pointer", "schema"],
+      "properties": {
+        "id": { "type": "string" },
+        "description": { "type": "string" },
+        "output_pointer": { "type": "string" },
+        "schema": {}
+      }
+    },
+    "CoverageRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "map_node_id",
+        "expected_items",
+        "require_all"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "description": { "type": "string" },
+        "map_node_id": { "type": "string" },
+        "expected_items": {},
+        "require_all": { "type": "boolean" }
+      }
+    },
+    "ExecutionConstraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description"],
+      "properties": {
+        "id": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "CompletionCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "requirement_ids",
+        "constraint_ids",
+        "kind"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "description": { "type": "string" },
+        "requirement_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "constraint_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "kind": { "$ref": "#/$defs/CompletionCheckKind" }
+      }
+    },
+    "CompletionCheckKind": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "const": "output_schema" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "node_ids"],
+          "properties": {
+            "kind": { "const": "required_nodes" },
+            "node_ids": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "map_node_id"],
+          "properties": {
+            "kind": { "const": "map_coverage" },
+            "map_node_id": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "node_ids", "min_per_task"],
+          "properties": {
+            "kind": { "const": "citations" },
+            "node_ids": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "min_per_task": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "instructions", "max_turns"],
+          "properties": {
+            "kind": { "const": "agent_verifier" },
+            "instructions": { "type": "string" },
+            "max_turns": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    },
+    "ExecutionPlanDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "input_schema",
+        "output_schema",
+        "nodes"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "input_schema": {},
+        "output_schema": {},
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ExecutionNode" }
+        }
+      }
+    },
+    "ExecutionNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "requirement_ids",
+        "depends_on",
+        "input",
+        "output_schema",
+        "operation",
+        "retry"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "requirement_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "when": {
+          "anyOf": [
+            { "$ref": "#/$defs/ExecutionCondition" },
+            { "type": "null" }
+          ]
+        },
+        "input": {},
+        "output_schema": {},
+        "operation": { "$ref": "#/$defs/ExecutionOperation" },
+        "retry": { "$ref": "#/$defs/RetryPolicy" },
+        "budget": {
+          "anyOf": [
+            { "$ref": "#/$defs/ExecutionBudgetLimit" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "ExecutionCondition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reference"],
+          "properties": {
+            "kind": { "const": "exists" },
+            "reference": { "$ref": "#/$defs/ExecutionReference" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reference", "value"],
+          "properties": {
+            "kind": { "const": "equals" },
+            "reference": { "$ref": "#/$defs/ExecutionReference" },
+            "value": {}
+          }
+        }
+      ]
+    },
+    "ExecutionReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$ref"],
+      "properties": {
+        "$ref": { "type": "string" }
+      }
+    },
+    "ExecutionOperation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reference"],
+          "properties": {
+            "kind": { "const": "capability" },
+            "reference": { "$ref": "#/$defs/CapabilityReference" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "instructions",
+            "skill_refs",
+            "capability_refs",
+            "max_turns"
+          ],
+          "properties": {
+            "kind": { "const": "agent" },
+            "instructions": { "type": "string" },
+            "skill_refs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/ArtifactRef" }
+            },
+            "capability_refs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/CapabilityReference" }
+            },
+            "max_turns": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "items",
+            "item_key",
+            "max_items",
+            "item_output_schema",
+            "task"
+          ],
+          "properties": {
+            "kind": { "const": "map" },
+            "items": {},
+            "item_key": { "type": "string" },
+            "max_items": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "item_output_schema": {},
+            "task": { "$ref": "#/$defs/MapTask" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "items",
+            "max_items",
+            "reducer",
+            "batch_size"
+          ],
+          "properties": {
+            "kind": { "const": "reduce" },
+            "items": {},
+            "max_items": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "reducer": { "$ref": "#/$defs/ExecutionReducer" },
+            "batch_size": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "prompt"],
+          "properties": {
+            "kind": { "const": "review" },
+            "prompt": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "signal_name"],
+          "properties": {
+            "kind": { "const": "wait_signal" },
+            "signal_name": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "output" },
+            "value": {}
+          }
+        }
+      ]
+    },
+    "CapabilityReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "ArtifactRef": {
+      "type": "string",
+      "oneOf": [
+        {
+          "pattern": "^(?:agent|skill|connector|experiment_plan|tool)://(?!.*://)[A-Za-z0-9](?:[A-Za-z0-9_.~:/@#-]{0,510}[A-Za-z0-9])?$",
+          "maxLength": 530
+        },
+        {
+          "pattern": "^action://(?!.*://)[A-Za-z0-9](?:[A-Za-z0-9_~:/@#-]{0,510}[A-Za-z0-9])?$",
+          "maxLength": 521
+        },
+        {
+          "pattern": "^action://(?!.*://)(?=.{1,512}$)[A-Za-z0-9](?:[A-Za-z0-9_~:/@#-]{0,510}[A-Za-z0-9])?\\.[A-Za-z0-9](?:[A-Za-z0-9_.~:/@#-]{0,510}[A-Za-z0-9])?$",
+          "maxLength": 521
+        }
+      ]
+    },
+    "MapTask": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reference"],
+          "properties": {
+            "kind": { "const": "capability" },
+            "reference": { "$ref": "#/$defs/CapabilityReference" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "instructions",
+            "skill_refs",
+            "capability_refs",
+            "max_turns"
+          ],
+          "properties": {
+            "kind": { "const": "agent" },
+            "instructions": { "type": "string" },
+            "skill_refs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/ArtifactRef" }
+            },
+            "capability_refs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/CapabilityReference" }
+            },
+            "max_turns": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    },
+    "ExecutionReducer": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reference"],
+          "properties": {
+            "kind": { "const": "capability" },
+            "reference": { "$ref": "#/$defs/CapabilityReference" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "instructions",
+            "skill_refs",
+            "capability_refs",
+            "max_turns"
+          ],
+          "properties": {
+            "kind": { "const": "agent" },
+            "instructions": { "type": "string" },
+            "skill_refs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/ArtifactRef" }
+            },
+            "capability_refs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/CapabilityReference" }
+            },
+            "max_turns": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    },
+    "RetryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_attempts",
+        "initial_backoff_ms",
+        "max_backoff_ms"
+      ],
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "initial_backoff_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_backoff_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "ExecutionBudgetLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_cost_microusd": {
+          "type": ["integer", "null"],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_tokens": {
+          "type": ["integer", "null"],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_tasks": {
+          "type": ["integer", "null"],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_tool_calls": {
+          "type": ["integer", "null"],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_retrieved_bytes": {
+          "type": ["integer", "null"],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "deadline_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      }
+    }
   }
 }

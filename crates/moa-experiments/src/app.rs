@@ -2,6 +2,7 @@
 
 use chrono::Utc;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactStatus};
+use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifactRevision};
 use moa_artifacts::simulation::experiment_plan_response_schema;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
@@ -32,6 +33,7 @@ use moa_scoring::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -222,7 +224,7 @@ pub async fn admit_run(
             NewExperimentRun {
                 name: request.name,
                 session_id: session_id_from_target(&run_inputs.target),
-                procedure_run_uid: None,
+                execution_run_uid: None,
                 artifact_revision_uids: run_inputs.artifact_revision_uids.clone(),
                 score_run_id,
                 target: run_inputs.target,
@@ -681,13 +683,58 @@ fn single_target_run_inputs(
         variant.ok_or_else(|| bad_request("experiment variant is required without a plan"))?,
     )?;
     let scorecard = parse_payload::<ExperimentScorecard>("scorecard", scorecard)?;
+    let mut artifact_revision_uids = variant.artifact_revision_uids.clone();
+    validate_target_variant(&target, &variant, &mut artifact_revision_uids)?;
     Ok(ExperimentRunInputs {
-        artifact_revision_uids: variant.artifact_revision_uids.clone(),
+        artifact_revision_uids,
         target,
         variant,
         scorecard,
         plan_revision_uid: None,
     })
+}
+
+fn validate_target_variant(
+    target: &ExperimentTarget,
+    variant: &ExperimentVariant,
+    artifact_revision_uids: &mut Vec<Uuid>,
+) -> Result<()> {
+    match target {
+        ExperimentTarget::AgentLoop { .. } => {
+            if variant.execution_template.is_some() {
+                return Err(bad_request(
+                    "agent-loop experiment variants cannot pin an execution template",
+                ));
+            }
+        }
+        ExperimentTarget::ExecutionTemplate {
+            template,
+            objective,
+            ..
+        } => {
+            if objective.trim().is_empty() {
+                return Err(bad_request(
+                    "execution-template experiment objective must not be empty",
+                ));
+            }
+            let parsed = ArtifactRef::from_str(&template.skill_ref).map_err(bad_request_from)?;
+            let canonical = parsed.canonical_string().map_err(bad_request_from)?;
+            if canonical != template.skill_ref {
+                return Err(bad_request(
+                    "execution-template experiment skill_ref must be canonical",
+                ));
+            }
+            if variant.execution_template.as_ref() != Some(template) {
+                return Err(bad_request(
+                    "execution-template target and variant must pin the same exact revision",
+                ));
+            }
+            artifact_revision_uids.push(template.revision_uid);
+            artifact_revision_uids.sort_unstable();
+            artifact_revision_uids.dedup();
+        }
+    }
+    Ok(())
 }
 
 async fn plan_run_inputs(
@@ -873,13 +920,13 @@ fn experiment_learning_candidate_payload(
             "target_kind": run.target_kind.as_str(),
             "run_score_run_id": run.score_run_id,
             "session_id": run.session_id,
-            "procedure_run_uid": run.procedure_run_uid,
+            "execution_run_uid": run.execution_run_uid,
             "artifact_revision_uids": run.artifact_revision_uids,
             "variant": {
                 "name": run.variant.name,
                 "artifact_revision_uids": run.variant.artifact_revision_uids,
                 "skill_refs": run.variant.skill_refs,
-                "procedure_ref": run.variant.procedure_ref,
+                "execution_template": run.variant.execution_template,
                 "metadata": run.variant.metadata,
             },
         },
@@ -890,7 +937,7 @@ fn experiment_learning_candidate_payload(
             "trial_uids": evidence.completed_trials.iter().map(|trial| trial.trial_uid).collect::<Vec<_>>(),
             "trial_score_run_ids": evidence.completed_trials.iter().map(|trial| trial.score_run_id).collect::<Vec<_>>(),
             "session_ids": evidence.completed_trials.iter().filter_map(|trial| trial.session_id).collect::<Vec<_>>(),
-            "procedure_run_uids": evidence.completed_trials.iter().filter_map(|trial| trial.procedure_run_uid).collect::<Vec<_>>(),
+            "execution_run_uids": evidence.completed_trials.iter().filter_map(|trial| trial.execution_run_uid).collect::<Vec<_>>(),
             "artifact_revision_refs": artifact_revision_refs(run, evidence.completed_trials, evidence.plan_revision_uid, evidence.draft_artifact_revision_uids),
         },
         "trials": evidence.completed_trials.iter().map(trial_evidence_payload).collect::<Vec<_>>(),
@@ -939,7 +986,7 @@ fn trial_evidence_payload(trial: &ExperimentTrialRecord) -> Value {
         "data_bundle_ids": trial.data_bundle_ids.clone(),
         "artifact_revision_uids": trial.artifact_revision_uids.clone(),
         "session_id": trial.session_id,
-        "procedure_run_uid": trial.procedure_run_uid,
+        "execution_run_uid": trial.execution_run_uid,
         "score_run_id": trial.score_run_id,
         "turn_count": trial.turn_count,
         "stop_reason": trial.stop_reason.map(|reason| reason.as_str()),
@@ -1078,7 +1125,7 @@ fn session_id_from_target(
 ) -> Option<moa_core::types::identifiers::SessionId> {
     match target {
         ExperimentTarget::AgentLoop { session_id, .. }
-        | ExperimentTarget::Procedure { session_id, .. } => *session_id,
+        | ExperimentTarget::ExecutionTemplate { session_id, .. } => *session_id,
     }
 }
 
@@ -1097,7 +1144,7 @@ fn run_response_from_record(
         status: run.status.as_str().to_string(),
         score_run_id: run.score_run_id,
         session_id: run.session_id,
-        procedure_run_uid: run.procedure_run_uid,
+        execution_run_uid: run.execution_run_uid,
     }
 }
 
@@ -1115,7 +1162,7 @@ fn trial_status_response_from_summary(
         scenario_id: summary.scenario_id,
         score_run_id: summary.score_run_id,
         session_id: summary.session_id,
-        procedure_run_uid: summary.procedure_run_uid,
+        execution_run_uid: summary.execution_run_uid,
         trace_id: summary.trace_id,
         stop_reason: summary.stop_reason,
         error: summary.error,
@@ -1138,7 +1185,7 @@ fn trial_summary_from_record(
         scenario_id: trial.scenario_id.clone(),
         score_run_id: trial.score_run_id,
         session_id: trial.session_id,
-        procedure_run_uid: trial.procedure_run_uid,
+        execution_run_uid: trial.execution_run_uid,
         trace_id: trial.trace_id.clone(),
         stop_reason: trial.stop_reason.map(|reason| reason.as_str().to_string()),
         error: trial.error.clone(),
@@ -1313,6 +1360,40 @@ mod tests {
     }
 
     #[test]
+    fn direct_execution_template_target_rejects_blank_objective() {
+        // Pins: direct behavior-lab admission cannot bypass the explicit-objective contract.
+        let template = moa_core::types::execution_planning::PinnedExecutionTemplateRef {
+            skill_ref: "skill://damaged-food-order".to_string(),
+            revision_uid: fixture_uuid(77),
+        };
+        let target = ExperimentTarget::ExecutionTemplate {
+            template: template.clone(),
+            objective: " \t\n".to_string(),
+            input: json!({"order_id": "order-123"}),
+            session_id: None,
+            idempotency_key: None,
+        };
+        let variant = ExperimentVariant {
+            name: "template".to_string(),
+            model: None,
+            artifact_revision_uids: vec![template.revision_uid],
+            skill_refs: Vec::new(),
+            execution_template: Some(template),
+            metadata: json!({}),
+        };
+        let mut artifact_revision_uids = Vec::new();
+
+        let error = validate_target_variant(&target, &variant, &mut artifact_revision_uids)
+            .expect_err("blank execution-template objective should reject direct admission");
+
+        assert!(matches!(
+            error,
+            ExperimentAppError::BadRequest(message)
+                if message == "execution-template experiment objective must not be empty"
+        ));
+    }
+
+    #[test]
     fn experiment_proposal_candidate_stays_review_only() {
         // Pins: experiment-derived improvements create proposed candidates without active artifacts.
         let tenant_id = tenant_id_from_str("tenant-a");
@@ -1399,7 +1480,7 @@ mod tests {
                 model: Some(ModelId::new("gpt-fixture")),
                 artifact_revision_uids: vec![fixture_uuid(3)],
                 skill_refs: vec!["skill://support".to_string()],
-                procedure_ref: Some("skill://support".to_string()),
+                execution_template: None,
                 metadata: json!({"plan_revision_uid": fixture_uuid(20)}),
             },
             scorecard: ExperimentScorecard {
@@ -1408,7 +1489,7 @@ mod tests {
             },
             score_run_id: fixture_uuid(4),
             session_id: Some(SessionId(fixture_uuid(2))),
-            procedure_run_uid: Some(fixture_uuid(5)),
+            execution_run_uid: Some(fixture_uuid(5)),
             artifact_revision_uids: vec![fixture_uuid(20)],
             idempotency_key: Some("run-key".to_string()),
             created_by_identity: json!({"subject": "user:creator"}),
@@ -1447,7 +1528,7 @@ mod tests {
             target_model: Some(ModelId::new("gpt-fixture")),
             seed: Some("seed-a".to_string()),
             session_id: Some(SessionId(fixture_uuid(31))),
-            procedure_run_uid: Some(fixture_uuid(32)),
+            execution_run_uid: Some(fixture_uuid(32)),
             score_run_id: fixture_uuid(33),
             turn_count: 3,
             stop_reason: Some(ExperimentTrialStopReason::Success),

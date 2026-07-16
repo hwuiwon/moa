@@ -32,8 +32,6 @@ fn build_no_memory_test_pipeline_with_tools(
     ];
     stages.extend([
         history,
-        Box::new(moa_brain::pipeline::delegation_planning::DelegationPlanningProcessor::new())
-            as Box<dyn moa_core::traits::ContextProcessor>,
         Box::new(moa_brain::pipeline::runtime_context::RuntimeContextProcessor::default())
             as Box<dyn moa_core::traits::ContextProcessor>,
     ]);

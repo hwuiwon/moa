@@ -24,9 +24,10 @@ below plus forward migrations (`V000302__...` onward). Key entry points:
 - New DDL goes through this crate.
 - Do not add crate-local or service-local `migrations/` directories.
 - Keep table ownership in `migration-ownership.toml`.
-- Use `moa_migrations::run` for full database setup.
-- Use `moa_migrations::run_session_schema`, `run_auth_schema`,
-  `run_orchestrator_schema`, and `run_ocsf_schema` for schema-isolated tests.
+- Use `moa_migrations::run` as the only full-database setup path, including
+  physical staging databases used by test templates.
+- Use `run_auth_schema`, `run_orchestrator_schema`, and `run_ocsf_schema` only
+  for their focused schema-isolated test surfaces.
 - Run `cargo run -p xtask -- check-migrations` to enforce centralization and
   duplicate table ownership checks.
 

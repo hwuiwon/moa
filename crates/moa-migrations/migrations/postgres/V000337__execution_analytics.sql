@@ -1,0 +1,2098 @@
+-- Task 11 execution observability, normalized audit, analytics, and export state.
+--
+-- V000336 is the only predecessor this migration assumes. Runtime writers in
+-- other Task 11 slices must adopt the normalized columns and audit tables after
+-- this transaction commits; this migration does not recreate procedure-era
+-- compatibility surfaces.
+
+LOCK TABLE events IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE moa.experiment_run IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE moa.experiment_trial IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE learning_candidates IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE moa.execution_planning_context IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE moa.execution_run IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE moa.execution_task IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE moa.execution_template_admission IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE moa.execution_action_review_outbox IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE tenant_action_reviews IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE analytics.clickhouse_export_state IN ACCESS EXCLUSIVE MODE;
+
+CREATE OR REPLACE FUNCTION moa.execution_json_object_has_exact_keys(
+    candidate JSONB,
+    expected TEXT[]
+) RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT jsonb_typeof(candidate) = 'object'
+       AND COALESCE(
+               (SELECT array_agg(key ORDER BY key COLLATE "C")
+                FROM jsonb_object_keys(candidate) key),
+               ARRAY[]::TEXT[]
+           ) = COALESCE(
+               (SELECT array_agg(value ORDER BY value COLLATE "C")
+                FROM unnest(expected) value),
+               ARRAY[]::TEXT[]
+           )
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_canonical_json(candidate JSONB)
+RETURNS TEXT
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    rendered TEXT;
+BEGIN
+    CASE jsonb_typeof(candidate)
+        WHEN 'object' THEN
+            SELECT '{' || COALESCE(string_agg(
+                       to_json(key)::TEXT || ':' || moa.execution_canonical_json(value),
+                       ',' ORDER BY key COLLATE "C"
+                   ), '') || '}'
+            INTO rendered
+            FROM jsonb_each(candidate);
+        WHEN 'array' THEN
+            SELECT '[' || COALESCE(string_agg(
+                       moa.execution_canonical_json(value),
+                       ',' ORDER BY ordinal
+                   ), '') || ']'
+            INTO rendered
+            FROM jsonb_array_elements(candidate) WITH ORDINALITY item(value, ordinal);
+        WHEN 'string' THEN
+            rendered := to_json(candidate #>> '{}')::TEXT;
+        WHEN 'number' THEN
+            rendered := trim_scale((candidate #>> '{}')::NUMERIC)::TEXT;
+            IF rendered = '-0' THEN
+                rendered := '0';
+            END IF;
+        WHEN 'boolean' THEN
+            rendered := candidate::TEXT;
+        WHEN 'null' THEN
+            rendered := 'null';
+        ELSE
+            RAISE EXCEPTION 'unsupported JSON kind';
+    END CASE;
+    RETURN rendered;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_json_text_is_canonical(candidate TEXT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    parsed JSON;
+BEGIN
+    parsed := candidate::JSON;
+    RETURN parsed::TEXT = moa.execution_canonical_json(parsed::JSONB);
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN FALSE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_audit_report_is_valid(
+    candidate TEXT,
+    allow_oversized BOOLEAN
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    report JSONB;
+    report_kind TEXT;
+    violation JSONB;
+    previous_code TEXT;
+    previous_path TEXT;
+    previous_message TEXT;
+    current_code TEXT;
+    current_path TEXT;
+    current_message TEXT;
+BEGIN
+    IF octet_length(candidate) > 262144
+       OR NOT moa.execution_json_text_is_canonical(candidate) THEN
+        RETURN FALSE;
+    END IF;
+    report := candidate::JSONB;
+    report_kind := report ->> 'kind';
+    IF report_kind IN ('schema', 'compiler') THEN
+        IF NOT moa.execution_json_object_has_exact_keys(
+            report,
+            ARRAY['kind','violations','omitted_violations','full_report_hash']
+        )
+           OR jsonb_typeof(report -> 'violations') <> 'array'
+           OR jsonb_array_length(report -> 'violations') > 256
+           OR jsonb_typeof(report -> 'omitted_violations') <> 'number'
+           OR (report ->> 'omitted_violations') !~ '^[0-9]+$'
+           OR (report ->> 'omitted_violations')::NUMERIC > 4294967295
+           OR COALESCE(report ->> 'full_report_hash', '') !~ '^[0-9a-f]{64}$' THEN
+            RETURN FALSE;
+        END IF;
+        FOR violation IN
+            SELECT value
+            FROM jsonb_array_elements(report -> 'violations') item(value)
+        LOOP
+            IF NOT moa.execution_json_object_has_exact_keys(
+                violation, ARRAY['code','path','message']
+            )
+               OR jsonb_typeof(violation -> 'code') <> 'string'
+               OR jsonb_typeof(violation -> 'path') <> 'string'
+               OR jsonb_typeof(violation -> 'message') <> 'string'
+               OR octet_length(violation ->> 'code') > 64
+               OR octet_length(violation ->> 'path') > 512
+               OR octet_length(violation ->> 'message') > 512 THEN
+                RETURN FALSE;
+            END IF;
+            current_code := violation ->> 'code';
+            current_path := violation ->> 'path';
+            current_message := violation ->> 'message';
+            IF previous_code IS NOT NULL
+               AND ROW(
+                   current_code COLLATE "C",
+                   current_path COLLATE "C",
+                   current_message COLLATE "C"
+               ) < ROW(
+                   previous_code COLLATE "C",
+                   previous_path COLLATE "C",
+                   previous_message COLLATE "C"
+               ) THEN
+                RETURN FALSE;
+            END IF;
+            previous_code := current_code;
+            previous_path := current_path;
+            previous_message := current_message;
+        END LOOP;
+        RETURN TRUE;
+    END IF;
+    IF report_kind = 'oversized' THEN
+        RETURN allow_oversized
+           AND moa.execution_json_object_has_exact_keys(
+               report,
+               ARRAY['kind','field','limit_bytes','observed_bytes','content_hash']
+           )
+           AND report ->> 'field' = 'candidate'
+           AND jsonb_typeof(report -> 'limit_bytes') = 'number'
+           AND jsonb_typeof(report -> 'observed_bytes') = 'number'
+           AND (report ->> 'limit_bytes') ~ '^[0-9]+$'
+           AND (report ->> 'observed_bytes') ~ '^[0-9]+$'
+           AND (report ->> 'limit_bytes')::NUMERIC = 1048576
+           AND (report ->> 'observed_bytes')::NUMERIC > 1048576
+           AND COALESCE(report ->> 'content_hash', '') ~ '^[0-9a-f]{64}$';
+    END IF;
+    RETURN FALSE;
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN FALSE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_traceparent_is_valid(candidate TEXT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    flags INTEGER;
+BEGIN
+    IF octet_length(candidate) <> 55
+       OR candidate !~ '^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$'
+       OR substring(candidate FROM 4 FOR 32) = repeat('0', 32)
+       OR substring(candidate FROM 37 FOR 16) = repeat('0', 16) THEN
+        RETURN FALSE;
+    END IF;
+    flags := get_byte(decode(substring(candidate FROM 54 FOR 2), 'hex'), 0);
+    RETURN (flags & 252) = 0;
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN FALSE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_tracestate_is_valid(candidate TEXT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    members TEXT[];
+    member TEXT;
+    trimmed TEXT;
+    key_text TEXT;
+    value_text TEXT;
+    equals_at INTEGER;
+    byte_value INTEGER;
+    byte_index INTEGER;
+    seen_keys TEXT[] := ARRAY[]::TEXT[];
+BEGIN
+    IF octet_length(candidate) > 512
+       OR candidate <> convert_from(convert_to(candidate, 'UTF8'), 'UTF8') THEN
+        RETURN FALSE;
+    END IF;
+    members := string_to_array(candidate, ',');
+    IF cardinality(members) > 32 THEN
+        RETURN FALSE;
+    END IF;
+    FOREACH member IN ARRAY members LOOP
+        trimmed := regexp_replace(
+            regexp_replace(member, '^[ \t]+', ''),
+            '[ \t]+$', ''
+        );
+        IF trimmed = '' THEN
+            CONTINUE;
+        END IF;
+        equals_at := strpos(trimmed, '=');
+        IF equals_at <= 1 OR strpos(substring(trimmed FROM equals_at + 1), '=') > 0 THEN
+            RETURN FALSE;
+        END IF;
+        key_text := substring(trimmed FROM 1 FOR equals_at - 1);
+        value_text := substring(trimmed FROM equals_at + 1);
+        IF octet_length(key_text) NOT BETWEEN 1 AND 256
+           OR key_text !~ '^[a-z0-9][a-z0-9_\-*/@]*$'
+           OR key_text = ANY(seen_keys)
+           OR octet_length(value_text) NOT BETWEEN 1 AND 256 THEN
+            RETURN FALSE;
+        END IF;
+        FOR byte_index IN 0..octet_length(value_text) - 1 LOOP
+            byte_value := get_byte(convert_to(value_text, 'UTF8'), byte_index);
+            IF byte_value < 32 OR byte_value > 126 OR byte_value IN (44, 61) THEN
+                RETURN FALSE;
+            END IF;
+        END LOOP;
+        IF get_byte(convert_to(value_text, 'UTF8'), octet_length(value_text) - 1) = 32 THEN
+            RETURN FALSE;
+        END IF;
+        seen_keys := array_append(seen_keys, key_text);
+    END LOOP;
+    RETURN TRUE;
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN FALSE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_tracestate_is_normalized(candidate TEXT)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+STRICT
+AS $$
+    SELECT moa.execution_tracestate_is_valid(candidate)
+       AND EXISTS (
+           SELECT 1
+           FROM unnest(string_to_array(candidate, ',')) member
+           WHERE btrim(member, E' \t') <> ''
+       )
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_uuid_v5(namespace UUID, name BYTEA)
+RETURNS UUID
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    bytes BYTEA;
+    hex TEXT;
+BEGIN
+    bytes := public.digest(uuid_send(namespace) || name, 'sha1');
+    bytes := set_byte(bytes, 6, (get_byte(bytes, 6) & 15) | 80);
+    bytes := set_byte(bytes, 8, (get_byte(bytes, 8) & 63) | 128);
+    hex := encode(substring(bytes FROM 1 FOR 16), 'hex');
+    RETURN (
+        substring(hex, 1, 8) || '-' ||
+        substring(hex, 9, 4) || '-' ||
+        substring(hex, 13, 4) || '-' ||
+        substring(hex, 17, 4) || '-' ||
+        substring(hex, 21, 12)
+    )::UUID;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_audit_preimage(
+    domain_name TEXT,
+    fields TEXT[]
+) RETURNS BYTEA
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    field_value TEXT;
+    bytes BYTEA := convert_to(domain_name, 'UTF8');
+    encoded BYTEA;
+BEGIN
+    FOREACH field_value IN ARRAY fields LOOP
+        IF field_value IS NULL THEN
+            bytes := bytes || decode('00', 'hex');
+        ELSE
+            encoded := convert_to(field_value, 'UTF8');
+            bytes := bytes || decode('01', 'hex') ||
+                int4send(octet_length(encoded)) || encoded;
+        END IF;
+    END LOOP;
+    RETURN bytes;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_route_audit_uid(
+    tenant_id UUID,
+    contact_id UUID,
+    session_id UUID,
+    originating_sequence BIGINT,
+    stage TEXT
+) RETURNS UUID
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT moa.execution_uuid_v5(
+        '7b83c5c2-5cf7-5fa0-8eb6-2d7c6e0f1d11'::UUID,
+        moa.execution_audit_preimage(
+            'moa.execution.route-audit.v1',
+            ARRAY[
+                lower(tenant_id::TEXT),
+                lower(contact_id::TEXT),
+                lower(session_id::TEXT),
+                originating_sequence::TEXT,
+                stage
+            ]
+        )
+    )
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_planner_audit_uid(
+    tenant_id UUID,
+    contact_id UUID,
+    session_id UUID,
+    originating_sequence BIGINT,
+    run_uid UUID,
+    plan_revision BIGINT,
+    call_kind TEXT,
+    call_ordinal SMALLINT
+) RETURNS UUID
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT moa.execution_uuid_v5(
+        '7b83c5c2-5cf7-5fa0-8eb6-2d7c6e0f1d11'::UUID,
+        moa.execution_audit_preimage(
+            'moa.execution.planner-audit.v1',
+            ARRAY[
+                lower(tenant_id::TEXT),
+                lower(contact_id::TEXT),
+                lower(session_id::TEXT),
+                originating_sequence::TEXT,
+                lower(run_uid::TEXT),
+                plan_revision::TEXT,
+                call_kind,
+                call_ordinal::TEXT
+            ]
+        )
+    )
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_compile_audit_uid(
+    tenant_id UUID,
+    contact_id UUID,
+    source TEXT,
+    operation_key TEXT
+) RETURNS UUID
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT moa.execution_uuid_v5(
+        '7b83c5c2-5cf7-5fa0-8eb6-2d7c6e0f1d11'::UUID,
+        moa.execution_audit_preimage(
+            'moa.execution.compile-audit.v1',
+            ARRAY[
+                lower(tenant_id::TEXT),
+                lower(contact_id::TEXT),
+                source,
+                operation_key
+            ]
+        )
+    )
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_planning_audit_envelope_is_valid(
+    envelope JSONB
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+AS $$
+DECLARE
+    payload JSONB;
+    payload_kind TEXT;
+    source_kind TEXT;
+    outcome TEXT;
+    call_kind TEXT;
+    ordinal BIGINT;
+    run_uid_text TEXT;
+    revision_text TEXT;
+    session_text TEXT;
+    origin_text TEXT;
+    candidate_text TEXT;
+    report_text TEXT;
+    operation_key TEXT;
+BEGIN
+    IF NOT moa.execution_json_object_has_exact_keys(
+        envelope,
+        ARRAY[
+            'schema_version','tenant_id','contact_id','session_id',
+            'originating_sequence','payload'
+        ]
+    )
+       OR envelope ->> 'schema_version' <> '1'
+       OR COALESCE(envelope ->> 'tenant_id', '') !~
+          '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+       OR envelope ->> 'tenant_id' = '00000000-0000-0000-0000-000000000000'
+       OR (
+           envelope -> 'contact_id' <> 'null'::JSONB
+           AND (
+               COALESCE(envelope ->> 'contact_id', '') !~
+               '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+               OR envelope ->> 'contact_id' =
+                  '00000000-0000-0000-0000-000000000000'
+           )
+       )
+       OR jsonb_typeof(envelope -> 'payload') <> 'object' THEN
+        RETURN FALSE;
+    END IF;
+    session_text := envelope ->> 'session_id';
+    origin_text := envelope ->> 'originating_sequence';
+    IF (session_text IS NULL) <> (origin_text IS NULL)
+       OR (
+           session_text IS NOT NULL
+           AND session_text !~
+               '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+       )
+       OR (
+           origin_text IS NOT NULL
+           AND (
+               jsonb_typeof(envelope -> 'originating_sequence') <> 'number'
+               OR origin_text !~ '^[0-9]+$'
+               OR origin_text::NUMERIC > 9223372036854775807
+           )
+       ) THEN
+        RETURN FALSE;
+    END IF;
+    payload := envelope -> 'payload';
+    payload_kind := payload ->> 'kind';
+    IF payload_kind = 'route' THEN
+        IF session_text IS NULL
+           OR NOT moa.execution_json_object_has_exact_keys(
+               payload,
+               ARRAY['kind','stage','decision','mode','reason','accepted_at']
+           )
+           OR payload ->> 'stage' NOT IN ('initial','act_escalation')
+           OR payload ->> 'decision' NOT IN ('needs_input','routed')
+           OR payload ->> 'reason' NOT IN (
+               'preflight_input_missing','simple_response','bounded_interactive_work',
+               'explicit_run','bulk_collection','durable_or_resumable','high_fanout',
+               'approval_or_signal','selected_execution_template','act_escalation'
+           )
+           OR jsonb_typeof(payload -> 'accepted_at') <> 'string' THEN
+            RETURN FALSE;
+        END IF;
+        PERFORM (payload ->> 'accepted_at')::TIMESTAMPTZ;
+        RETURN CASE
+            WHEN payload ->> 'stage' = 'initial'
+             AND payload ->> 'decision' = 'needs_input'
+                THEN payload -> 'mode' = 'null'::JSONB
+                 AND payload ->> 'reason' = 'preflight_input_missing'
+            WHEN payload ->> 'stage' = 'initial'
+             AND payload ->> 'decision' = 'routed'
+             AND payload ->> 'mode' = 'respond'
+                THEN payload ->> 'reason' = 'simple_response'
+            WHEN payload ->> 'stage' = 'initial'
+             AND payload ->> 'decision' = 'routed'
+             AND payload ->> 'mode' = 'act'
+                THEN payload ->> 'reason' = 'bounded_interactive_work'
+            WHEN payload ->> 'stage' = 'initial'
+             AND payload ->> 'decision' = 'routed'
+             AND payload ->> 'mode' = 'run'
+                THEN payload ->> 'reason' IN (
+                    'explicit_run','bulk_collection','durable_or_resumable',
+                    'high_fanout','approval_or_signal','selected_execution_template'
+                )
+            WHEN payload ->> 'stage' = 'act_escalation'
+             AND payload ->> 'decision' = 'routed'
+             AND payload ->> 'mode' = 'run'
+                THEN payload ->> 'reason' = 'act_escalation'
+            ELSE FALSE
+        END;
+    END IF;
+    IF payload_kind = 'planner_call' THEN
+        IF session_text IS NULL
+           OR NOT moa.execution_json_object_has_exact_keys(
+               payload,
+               ARRAY[
+                   'kind','call_kind','call_ordinal','run_uid','plan_revision',
+                   'outcome','provider_model','prompt_version','candidate_hash',
+                   'candidate_json','compiler_report','duration_micros','created_at'
+               ]
+           ) THEN
+            RETURN FALSE;
+        END IF;
+        call_kind := payload ->> 'call_kind';
+        outcome := payload ->> 'outcome';
+        ordinal := (payload ->> 'call_ordinal')::BIGINT;
+        run_uid_text := payload ->> 'run_uid';
+        revision_text := payload ->> 'plan_revision';
+        candidate_text := payload ->> 'candidate_json';
+        report_text := payload ->> 'compiler_report';
+        IF call_kind NOT IN (
+               'initial_plan','initial_repair','amendment','amendment_repair'
+           )
+           OR outcome NOT IN (
+               'accepted','needs_input','unsupported','schema_rejected',
+               'immutable_goal_changed','compiler_rejected','oversized','provider_error'
+           )
+           OR jsonb_typeof(payload -> 'call_ordinal') <> 'number'
+           OR (payload ->> 'call_ordinal') !~ '^[0-9]+$'
+           OR ordinal NOT IN (0, 1)
+           OR (
+               (call_kind IN ('initial_plan','amendment') AND ordinal <> 0)
+               OR (call_kind IN ('initial_repair','amendment_repair') AND ordinal <> 1)
+           )
+           OR (
+               call_kind IN ('initial_plan','initial_repair')
+               AND (run_uid_text IS NOT NULL OR revision_text IS NOT NULL)
+           )
+           OR (
+               call_kind IN ('amendment','amendment_repair')
+               AND (
+                   run_uid_text !~
+                       '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                   OR revision_text !~ '^[0-9]+$'
+                   OR revision_text::NUMERIC > 9223372036854775807
+               )
+           )
+           OR jsonb_typeof(payload -> 'provider_model') <> 'string'
+           OR octet_length(payload ->> 'provider_model') NOT BETWEEN 1 AND 128
+           OR jsonb_typeof(payload -> 'prompt_version') <> 'string'
+           OR octet_length(payload ->> 'prompt_version') NOT BETWEEN 1 AND 64
+           OR jsonb_typeof(payload -> 'duration_micros') <> 'number'
+           OR (payload ->> 'duration_micros') !~ '^[0-9]+$'
+           OR (payload ->> 'duration_micros')::NUMERIC > 9223372036854775807
+           OR jsonb_typeof(payload -> 'created_at') <> 'string' THEN
+            RETURN FALSE;
+        END IF;
+        PERFORM (payload ->> 'created_at')::TIMESTAMPTZ;
+        IF outcome = 'provider_error' THEN
+            RETURN payload -> 'candidate_hash' = 'null'::JSONB
+               AND payload -> 'candidate_json' = 'null'::JSONB
+               AND payload -> 'compiler_report' = 'null'::JSONB;
+        END IF;
+        IF COALESCE(payload ->> 'candidate_hash', '') !~ '^[0-9a-f]{64}$'
+           OR report_text IS NULL
+           OR jsonb_typeof(payload -> 'compiler_report') <> 'string' THEN
+            RETURN FALSE;
+        END IF;
+        IF outcome = 'oversized' THEN
+            RETURN payload -> 'candidate_json' = 'null'::JSONB
+               AND moa.execution_audit_report_is_valid(report_text, TRUE)
+               AND (report_text::JSONB ->> 'kind') = 'oversized';
+        END IF;
+        IF outcome = 'schema_rejected' THEN
+            RETURN payload -> 'candidate_json' = 'null'::JSONB
+               AND moa.execution_audit_report_is_valid(report_text, FALSE)
+               AND (report_text::JSONB ->> 'kind') = 'schema';
+        END IF;
+        IF candidate_text IS NULL
+           OR jsonb_typeof(payload -> 'candidate_json') <> 'string'
+           OR octet_length(candidate_text) > 1048576
+           OR NOT moa.execution_json_text_is_canonical(candidate_text)
+           OR NOT moa.execution_audit_report_is_valid(report_text, FALSE) THEN
+            RETURN FALSE;
+        END IF;
+        IF outcome = 'immutable_goal_changed' THEN
+            RETURN call_kind = 'initial_repair'
+               AND report_text::JSONB ->> 'kind' = 'schema'
+               AND report_text::JSONB ->> 'omitted_violations' = '0'
+               AND report_text::JSONB -> 'violations' = jsonb_build_array(
+                   jsonb_build_object(
+                       'code', 'immutable_goal_changed',
+                       'path', '/goal',
+                       'message',
+                           'repair must preserve the complete immutable goal contract'
+                   )
+               );
+        END IF;
+        RETURN outcome IN ('accepted','needs_input','unsupported','compiler_rejected')
+           AND report_text::JSONB ->> 'kind' = 'compiler';
+    END IF;
+    IF payload_kind = 'compile' THEN
+        IF NOT moa.execution_json_object_has_exact_keys(
+               payload,
+               ARRAY[
+                   'kind','source','operation_key','run_uid','plan_revision',
+                   'outcome','candidate_hash','final_plan_hash','validation_report',
+                   'duration_micros','created_at'
+               ]
+           ) THEN
+            RETURN FALSE;
+        END IF;
+        source_kind := payload ->> 'source';
+        outcome := payload ->> 'outcome';
+        operation_key := payload ->> 'operation_key';
+        run_uid_text := payload ->> 'run_uid';
+        revision_text := payload ->> 'plan_revision';
+        report_text := payload ->> 'validation_report';
+        IF source_kind NOT IN (
+               'generated_plan','skill_template','experiment_template',
+               'amendment','skill_regression'
+           )
+           OR outcome NOT IN ('accepted','needs_input','unsupported','rejected')
+           OR jsonb_typeof(payload -> 'operation_key') <> 'string'
+           OR octet_length(operation_key) NOT BETWEEN 1 AND 512
+           OR COALESCE(payload ->> 'candidate_hash', '') !~ '^[0-9a-f]{64}$'
+           OR (
+               (outcome = 'accepted')
+               <> (payload ->> 'final_plan_hash' IS NOT NULL)
+           )
+           OR (
+               payload ->> 'final_plan_hash' IS NOT NULL
+               AND payload ->> 'final_plan_hash' !~ '^[0-9a-f]{64}$'
+           )
+           OR jsonb_typeof(payload -> 'validation_report') <> 'string'
+           OR NOT moa.execution_audit_report_is_valid(report_text, FALSE)
+           OR report_text::JSONB ->> 'kind' <> 'compiler'
+           OR jsonb_typeof(payload -> 'duration_micros') <> 'number'
+           OR (payload ->> 'duration_micros') !~ '^[0-9]+$'
+           OR (payload ->> 'duration_micros')::NUMERIC > 9223372036854775807
+           OR jsonb_typeof(payload -> 'created_at') <> 'string' THEN
+            RETURN FALSE;
+        END IF;
+        PERFORM (payload ->> 'created_at')::TIMESTAMPTZ;
+        IF source_kind IN ('generated_plan','skill_template') THEN
+            IF session_text IS NULL OR run_uid_text IS NOT NULL OR revision_text IS NOT NULL THEN
+                RETURN FALSE;
+            END IF;
+        ELSIF source_kind = 'experiment_template' THEN
+            IF session_text IS NULL
+               OR run_uid_text IS NOT NULL
+               OR revision_text IS NOT NULL THEN
+                RETURN FALSE;
+            END IF;
+        ELSIF source_kind = 'amendment' THEN
+            IF session_text IS NULL
+               OR run_uid_text !~
+                   '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+               OR revision_text !~ '^[0-9]+$'
+               OR revision_text::NUMERIC > 9223372036854775807 THEN
+                RETURN FALSE;
+            END IF;
+        ELSE
+            IF session_text IS NOT NULL OR run_uid_text IS NOT NULL OR revision_text IS NOT NULL THEN
+                RETURN FALSE;
+            END IF;
+        END IF;
+        RETURN CASE source_kind
+            WHEN 'generated_plan' THEN
+                operation_key ~ (
+                    '^session:' || session_text || ':' || origin_text ||
+                    ':generated:[01]$'
+                )
+            WHEN 'skill_template' THEN
+                operation_key ~ (
+                    '^session:' || session_text || ':' || origin_text ||
+                    ':skill:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                )
+            WHEN 'experiment_template' THEN
+                operation_key ~
+                    '^experiment:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(none|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$'
+            WHEN 'amendment' THEN
+                operation_key = (
+                    'run:' || run_uid_text || ':' || revision_text ||
+                    ':amendment:' || (payload ->> 'candidate_hash')
+                )
+            WHEN 'skill_regression' THEN
+                operation_key ~
+                    '^skill_regression:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{64}$'
+            ELSE FALSE
+        END;
+    END IF;
+    RETURN FALSE;
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN FALSE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_skill_ref_is_canonical(candidate TEXT)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+STRICT
+AS $$
+    SELECT octet_length(candidate) BETWEEN 9 AND 520
+       AND candidate ~ '^skill://[A-Za-z0-9][A-Za-z0-9_.~:/@#-]*$'
+       AND substring(candidate FROM 9) NOT LIKE '%://%'
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_source_provenance_is_valid(
+    provenance JSONB,
+    expected_tenant UUID,
+    expected_contact UUID,
+    expected_run UUID,
+    expected_active_plan_hash TEXT
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+    kind TEXT;
+    planner JSONB;
+BEGIN
+    IF jsonb_typeof(provenance) <> 'object' THEN
+        RETURN FALSE;
+    END IF;
+    kind := provenance ->> 'kind';
+    IF kind = 'generated_plan' THEN
+        IF NOT moa.execution_json_object_has_exact_keys(
+               provenance, ARRAY['kind','route_reason','planner']
+           )
+           OR provenance ->> 'route_reason' NOT IN (
+               'explicit_run','bulk_collection','durable_or_resumable',
+               'high_fanout','approval_or_signal','act_escalation'
+           )
+           OR jsonb_typeof(provenance -> 'planner') <> 'object' THEN
+            RETURN FALSE;
+        END IF;
+        planner := provenance -> 'planner';
+        RETURN moa.execution_json_object_has_exact_keys(
+                   planner,
+                   ARRAY[
+                       'model','prompt_version','candidate_hash',
+                       'compiler_report_hash','final_plan_hash','repair_attempts'
+                   ]
+               )
+           AND jsonb_typeof(planner -> 'model') = 'string'
+           AND octet_length(planner ->> 'model') BETWEEN 1 AND 128
+           AND jsonb_typeof(planner -> 'prompt_version') = 'string'
+           AND octet_length(planner ->> 'prompt_version') BETWEEN 1 AND 64
+           AND jsonb_typeof(planner -> 'candidate_hash') = 'string'
+           AND planner ->> 'candidate_hash' ~ '^[0-9a-f]{64}$'
+           AND jsonb_typeof(planner -> 'compiler_report_hash') = 'string'
+           AND planner ->> 'compiler_report_hash' ~ '^[0-9a-f]{64}$'
+           AND jsonb_typeof(planner -> 'final_plan_hash') = 'string'
+           AND planner ->> 'final_plan_hash' ~ '^[0-9a-f]{64}$'
+           AND planner ->> 'final_plan_hash' = expected_active_plan_hash
+           AND jsonb_typeof(planner -> 'repair_attempts') = 'number'
+           AND planner ->> 'repair_attempts' IN ('0','1');
+    END IF;
+    IF kind = 'skill_template' THEN
+        RETURN moa.execution_json_object_has_exact_keys(
+                   provenance,
+                   ARRAY[
+                       'kind','route_reason','skill_template_ref',
+                       'skill_template_revision_uid'
+                   ]
+               )
+           AND provenance ->> 'route_reason' = 'selected_execution_template'
+           AND moa.execution_skill_ref_is_canonical(
+               provenance ->> 'skill_template_ref'
+           )
+           AND provenance ->> 'skill_template_revision_uid' ~
+               '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+    END IF;
+    IF kind = 'experiment_template' THEN
+        RETURN moa.execution_json_object_has_exact_keys(
+                   provenance,
+                   ARRAY[
+                       'kind','route_reason','skill_template_ref',
+                       'skill_template_revision_uid','experiment_run_uid',
+                       'score_run_id','trial_uid'
+                   ]
+               )
+           AND provenance ->> 'route_reason' = 'explicit_run'
+           AND moa.execution_skill_ref_is_canonical(
+               provenance ->> 'skill_template_ref'
+           )
+           AND provenance ->> 'skill_template_revision_uid' ~
+               '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+           AND provenance ->> 'experiment_run_uid' ~
+               '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+           AND provenance ->> 'score_run_id' ~
+               '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+           AND (
+               provenance -> 'trial_uid' = 'null'::JSONB
+               OR provenance ->> 'trial_uid' ~
+                  '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+           )
+           AND provenance ->> 'experiment_run_uid'
+               <> provenance ->> 'score_run_id'
+           AND provenance ->> 'skill_template_revision_uid'
+               NOT IN (
+                   provenance ->> 'experiment_run_uid',
+                   provenance ->> 'score_run_id'
+               )
+           AND (
+               provenance -> 'trial_uid' = 'null'::JSONB
+               OR (
+                   provenance ->> 'trial_uid'
+                       <> provenance ->> 'experiment_run_uid'
+                   AND provenance ->> 'trial_uid'
+                       <> provenance ->> 'score_run_id'
+                   AND provenance ->> 'trial_uid'
+                       <> provenance ->> 'skill_template_revision_uid'
+               )
+           );
+    END IF;
+    RETURN FALSE;
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN FALSE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_terminal_reason_for(
+    status_value TEXT,
+    terminal_cause JSONB,
+    source_kind_value TEXT
+) RETURNS TEXT
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+    cause_kind TEXT := terminal_cause ->> 'kind';
+    cause_reason TEXT := terminal_cause ->> 'reason';
+    failure_class TEXT := terminal_cause ->> 'class';
+    limit_stop TEXT := terminal_cause ->> 'limit_stop';
+BEGIN
+    IF status_value NOT IN (
+        'completed','partial','blocked','unsupported','failed','cancelled'
+    ) OR terminal_cause IS NULL
+       OR jsonb_typeof(terminal_cause) <> 'object' THEN
+        RETURN NULL;
+    END IF;
+    IF NOT (CASE cause_kind
+        WHEN 'completion' THEN
+            moa.execution_json_object_has_exact_keys(
+                terminal_cause, ARRAY['kind','limit_stop']
+            )
+            AND (
+                terminal_cause -> 'limit_stop' = 'null'::JSONB
+                OR (
+                    jsonb_typeof(terminal_cause -> 'limit_stop') = 'string'
+                    AND limit_stop IN (
+                        'deadline_exceeded','budget_exceeded'
+                    )
+                )
+            )
+        WHEN 'task_failure' THEN
+            moa.execution_json_object_has_exact_keys(
+                terminal_cause, ARRAY['kind','class']
+            )
+            AND jsonb_typeof(terminal_cause -> 'class') = 'string'
+        WHEN 'limit_stop' THEN
+            moa.execution_json_object_has_exact_keys(
+                terminal_cause, ARRAY['kind','reason']
+            )
+            AND jsonb_typeof(terminal_cause -> 'reason') = 'string'
+        WHEN 'scheduler_no_progress' THEN
+            terminal_cause = '{"kind":"scheduler_no_progress"}'::JSONB
+        WHEN 'replan_stop' THEN
+            moa.execution_json_object_has_exact_keys(
+                terminal_cause, ARRAY['kind','reason']
+            )
+            AND jsonb_typeof(terminal_cause -> 'reason') = 'string'
+        WHEN 'cancellation' THEN
+            terminal_cause = '{"kind":"cancellation"}'::JSONB
+        WHEN 'internal_failure' THEN
+            terminal_cause = '{"kind":"internal_failure"}'::JSONB
+        ELSE FALSE
+    END) THEN
+        RETURN NULL;
+    END IF;
+    IF source_kind_value NOT IN (
+        'generated_plan','skill_template','experiment_template'
+    ) THEN
+        RETURN NULL;
+    END IF;
+    CASE cause_kind
+        WHEN 'cancellation' THEN
+            RETURN CASE WHEN status_value = 'cancelled' THEN 'cancelled' END;
+        WHEN 'internal_failure' THEN
+            RETURN CASE WHEN status_value = 'failed' THEN 'internal_failure' END;
+        WHEN 'replan_stop' THEN
+            IF status_value NOT IN ('partial','blocked') THEN
+                RETURN NULL;
+            END IF;
+            RETURN CASE cause_reason
+                WHEN 'duplicate_plan' THEN 'duplicate_plan'
+                WHEN 'duplicate_amendment' THEN 'duplicate_amendment'
+                WHEN 'repeated_failure' THEN 'repeated_failure'
+                WHEN 'no_progress' THEN 'no_progress'
+                WHEN 'deadline_exceeded' THEN 'deadline_exceeded'
+                WHEN 'budget_exhausted' THEN 'budget_exhausted'
+                ELSE NULL
+            END;
+        WHEN 'limit_stop' THEN
+            IF status_value NOT IN ('partial','failed') THEN
+                RETURN NULL;
+            END IF;
+            RETURN CASE cause_reason
+                WHEN 'deadline_exceeded' THEN 'deadline_exceeded'
+                WHEN 'budget_exceeded' THEN 'budget_exceeded'
+                ELSE NULL
+            END;
+        WHEN 'scheduler_no_progress' THEN
+            RETURN CASE status_value
+                WHEN 'unsupported' THEN 'unsupported_plan'
+                WHEN 'partial' THEN 'no_progress'
+                WHEN 'blocked' THEN 'no_progress'
+                WHEN 'failed' THEN 'no_progress'
+                ELSE NULL
+            END;
+        WHEN 'task_failure' THEN
+            IF failure_class NOT IN (
+                'retryable','dependency_failed','invalid_input','invalid_output',
+                'authorization_denied','budget_exceeded','deadline_exceeded',
+                'cancelled','unsupported','terminal'
+            ) THEN
+                RETURN NULL;
+            END IF;
+            RETURN CASE status_value
+                WHEN 'unsupported' THEN 'unsupported_plan'
+                WHEN 'blocked' THEN 'blocked'
+                WHEN 'partial' THEN CASE failure_class
+                    WHEN 'deadline_exceeded' THEN 'deadline_exceeded'
+                    WHEN 'budget_exceeded' THEN 'budget_exceeded'
+                    ELSE 'goal_incomplete'
+                END
+                WHEN 'failed' THEN CASE failure_class
+                    WHEN 'deadline_exceeded' THEN 'deadline_exceeded'
+                    WHEN 'budget_exceeded' THEN 'budget_exceeded'
+                    ELSE 'task_failure'
+                END
+                ELSE NULL
+            END;
+        WHEN 'completion' THEN
+            RETURN CASE status_value
+                WHEN 'completed' THEN
+                    CASE WHEN terminal_cause -> 'limit_stop' = 'null'::JSONB
+                         THEN 'completed' END
+                WHEN 'blocked' THEN
+                    CASE WHEN terminal_cause -> 'limit_stop' = 'null'::JSONB
+                         THEN 'blocked' END
+                WHEN 'unsupported' THEN
+                    CASE WHEN terminal_cause -> 'limit_stop' = 'null'::JSONB
+                         THEN 'unsupported_plan' END
+                WHEN 'partial' THEN CASE limit_stop
+                    WHEN 'deadline_exceeded' THEN 'deadline_exceeded'
+                    WHEN 'budget_exceeded' THEN 'budget_exceeded'
+                    ELSE 'goal_incomplete'
+                END
+                WHEN 'failed' THEN CASE limit_stop
+                    WHEN 'deadline_exceeded' THEN 'deadline_exceeded'
+                    WHEN 'budget_exceeded' THEN 'budget_exceeded'
+                    ELSE 'goal_incomplete'
+                END
+                ELSE NULL
+            END;
+        ELSE
+            RETURN NULL;
+    END CASE;
+END;
+$$;
+
+DO $$
+DECLARE
+    offenders JSONB;
+BEGIN
+    SELECT jsonb_agg(lower(run_uid::TEXT) ORDER BY run_uid)
+    INTO offenders
+    FROM moa.execution_run
+    WHERE NOT moa.execution_source_provenance_is_valid(
+              source_provenance, tenant_id, contact_id, run_uid, active_plan_hash
+          )
+       OR contact_id = '00000000-0000-0000-0000-000000000000'::UUID
+       OR (
+           status IN ('completed','partial','blocked','unsupported','failed','cancelled')
+           AND moa.execution_terminal_reason_for(
+               status, terminal_cause, source_provenance ->> 'kind'
+           ) IS NULL
+       )
+       OR (
+           status NOT IN ('completed','partial','blocked','unsupported','failed','cancelled')
+           AND terminal_cause IS NOT NULL
+       );
+    IF offenders IS NOT NULL THEN
+        RAISE EXCEPTION 'V000337 execution-run preflight failed for run_uids: %', offenders
+            USING ERRCODE = 'P0001';
+    END IF;
+END $$;
+
+DO $$
+DECLARE
+    offenders JSONB;
+BEGIN
+    WITH rejected AS (
+        SELECT
+            'moa.execution_planning_context'::TEXT AS location,
+            lower(planning_context_uid::TEXT) AS row_id
+        FROM moa.execution_planning_context
+        WHERE contact_id =
+            '00000000-0000-0000-0000-000000000000'::UUID
+        UNION ALL
+        SELECT
+            'moa.execution_template_admission',
+            lower(operation_uid::TEXT)
+        FROM moa.execution_template_admission
+        WHERE contact_id =
+            '00000000-0000-0000-0000-000000000000'::UUID
+    )
+    SELECT jsonb_agg(
+               jsonb_build_object(
+                   'location', location,
+                   'row_id', row_id
+               )
+               ORDER BY location, row_id
+           )
+    INTO offenders
+    FROM rejected;
+    IF offenders IS NOT NULL THEN
+        RAISE EXCEPTION
+            'V000337 normalized contact-scope preflight failed: %',
+            offenders
+            USING ERRCODE = 'P0001';
+    END IF;
+END $$;
+
+DROP MATERIALIZED VIEW analytics.execution_task_fact;
+DROP MATERIALIZED VIEW analytics.execution_run_fact;
+
+ALTER TABLE moa.execution_action_review_outbox
+    DROP CONSTRAINT execution_action_review_outbox_task_fkey;
+ALTER TABLE moa.execution_template_admission
+    DROP CONSTRAINT execution_template_admission_run_scope_fkey;
+ALTER TABLE moa.execution_task
+    DROP CONSTRAINT execution_task_run_scope_fkey,
+    DROP CONSTRAINT execution_task_scope_key;
+ALTER TABLE moa.execution_run
+    DROP CONSTRAINT execution_run_planning_context_fkey,
+    DROP CONSTRAINT execution_run_scope_key;
+ALTER TABLE moa.execution_planning_context
+    DROP CONSTRAINT execution_planning_context_scope_key;
+
+ALTER TABLE moa.execution_planning_context
+    ADD COLUMN contact_scope_id UUID GENERATED ALWAYS AS (
+        COALESCE(
+            contact_id,
+            '00000000-0000-0000-0000-000000000000'::UUID
+        )
+    ) STORED,
+    ADD CONSTRAINT execution_planning_context_contact_not_nil CHECK (
+        contact_id IS NULL
+        OR contact_id <>
+            '00000000-0000-0000-0000-000000000000'::UUID
+    ),
+    ADD CONSTRAINT execution_planning_context_normalized_scope_key
+        UNIQUE (
+            planning_context_uid,
+            tenant_id,
+            contact_scope_id
+        );
+
+ALTER TABLE moa.execution_run
+    ADD COLUMN contact_scope_id UUID GENERATED ALWAYS AS (
+        COALESCE(
+            contact_id,
+            '00000000-0000-0000-0000-000000000000'::UUID
+        )
+    ) STORED,
+    ADD COLUMN source_kind TEXT,
+    ADD COLUMN route_mode TEXT,
+    ADD COLUMN route_reason TEXT,
+    ADD COLUMN skill_template_ref TEXT,
+    ADD COLUMN skill_template_revision_uid UUID,
+    ADD COLUMN terminal_reason TEXT;
+
+ALTER TABLE moa.execution_task
+    ADD COLUMN contact_scope_id UUID GENERATED ALWAYS AS (
+        COALESCE(
+            contact_id,
+            '00000000-0000-0000-0000-000000000000'::UUID
+        )
+    ) STORED;
+
+ALTER TABLE moa.execution_action_review_outbox
+    ADD COLUMN contact_scope_id UUID GENERATED ALWAYS AS (
+        COALESCE(
+            contact_id,
+            '00000000-0000-0000-0000-000000000000'::UUID
+        )
+    ) STORED;
+
+ALTER TABLE moa.execution_template_admission
+    ADD COLUMN contact_scope_id UUID GENERATED ALWAYS AS (
+        COALESCE(
+            contact_id,
+            '00000000-0000-0000-0000-000000000000'::UUID
+        )
+    ) STORED;
+
+UPDATE moa.execution_run
+SET source_kind = source_provenance ->> 'kind',
+    route_mode = 'run',
+    route_reason = source_provenance ->> 'route_reason',
+    skill_template_ref = CASE
+        WHEN source_provenance ->> 'kind' IN (
+            'skill_template','experiment_template'
+        ) THEN source_provenance ->> 'skill_template_ref'
+        ELSE NULL
+    END,
+    skill_template_revision_uid = CASE
+        WHEN source_provenance ->> 'kind' IN (
+            'skill_template','experiment_template'
+        ) THEN (source_provenance ->> 'skill_template_revision_uid')::UUID
+        ELSE NULL
+    END,
+    terminal_reason = CASE
+        WHEN status IN (
+            'completed','partial','blocked','unsupported','failed','cancelled'
+        ) THEN moa.execution_terminal_reason_for(
+            status, terminal_cause, source_provenance ->> 'kind'
+        )
+        ELSE NULL
+    END;
+
+ALTER TABLE moa.execution_run
+    ALTER COLUMN source_kind SET NOT NULL,
+    ALTER COLUMN route_mode SET NOT NULL,
+    ALTER COLUMN route_reason SET NOT NULL,
+    ADD CONSTRAINT execution_run_normalized_scope_key
+        UNIQUE (run_uid, tenant_id, contact_scope_id),
+    ADD CONSTRAINT execution_run_source_kind_check CHECK (
+        source_kind IN (
+            'generated_plan','skill_template','experiment_template'
+        )
+    ),
+    ADD CONSTRAINT execution_run_route_mode_check CHECK (route_mode = 'run'),
+    ADD CONSTRAINT execution_run_route_reason_check CHECK (
+        route_reason IN (
+            'preflight_input_missing','simple_response','bounded_interactive_work',
+            'explicit_run','bulk_collection','durable_or_resumable','high_fanout',
+            'approval_or_signal','selected_execution_template','act_escalation'
+        )
+    ),
+    ADD CONSTRAINT execution_run_source_route_template_check CHECK (
+        CASE source_kind
+            WHEN 'generated_plan' THEN
+                route_reason IN (
+                    'explicit_run','bulk_collection','durable_or_resumable',
+                    'high_fanout','approval_or_signal','act_escalation'
+                )
+                AND skill_template_ref IS NULL
+                AND skill_template_revision_uid IS NULL
+            WHEN 'skill_template' THEN
+                route_reason = 'selected_execution_template'
+                AND skill_template_ref IS NOT NULL
+                AND skill_template_revision_uid IS NOT NULL
+                AND moa.execution_skill_ref_is_canonical(skill_template_ref)
+            WHEN 'experiment_template' THEN
+                route_reason = 'explicit_run'
+                AND skill_template_ref IS NOT NULL
+                AND skill_template_revision_uid IS NOT NULL
+                AND moa.execution_skill_ref_is_canonical(skill_template_ref)
+            ELSE FALSE
+        END
+    ),
+    ADD CONSTRAINT execution_run_terminal_reason_check CHECK (
+        CASE
+            WHEN status IN (
+                'completed','partial','blocked','unsupported','failed','cancelled'
+            ) THEN terminal_reason IS NOT NULL
+                 AND terminal_reason = moa.execution_terminal_reason_for(
+                     status, terminal_cause, source_kind
+                 )
+            ELSE terminal_reason IS NULL
+        END
+    ),
+    ADD CONSTRAINT execution_run_terminal_reservations_released CHECK (
+        status NOT IN (
+            'completed','partial','blocked','unsupported','failed','cancelled'
+        )
+        OR (
+            reserved_cost_microusd = 0
+            AND reserved_tokens = 0
+            AND reserved_tasks = 0
+            AND reserved_tool_calls = 0
+            AND reserved_retrieved_bytes = 0
+        )
+    ),
+    ADD CONSTRAINT execution_run_planning_context_normalized_scope_fkey
+        FOREIGN KEY (
+            planning_context_uid,
+            tenant_id,
+            contact_scope_id
+        )
+        REFERENCES moa.execution_planning_context (
+            planning_context_uid,
+            tenant_id,
+            contact_scope_id
+        );
+
+ALTER TABLE moa.execution_task
+    ADD CONSTRAINT execution_task_normalized_scope_key
+        UNIQUE (task_id, run_uid, tenant_id, contact_scope_id),
+    ADD CONSTRAINT execution_task_run_normalized_scope_fkey
+        FOREIGN KEY (run_uid, tenant_id, contact_scope_id)
+        REFERENCES moa.execution_run (
+            run_uid, tenant_id, contact_scope_id
+        )
+        ON DELETE CASCADE;
+
+ALTER TABLE moa.execution_action_review_outbox
+    ADD CONSTRAINT execution_action_review_outbox_task_normalized_scope_fkey
+        FOREIGN KEY (task_id, run_uid, tenant_id, contact_scope_id)
+        REFERENCES moa.execution_task (
+            task_id, run_uid, tenant_id, contact_scope_id
+        )
+        ON DELETE CASCADE;
+
+ALTER TABLE moa.execution_template_admission
+    ADD CONSTRAINT execution_template_admission_run_normalized_scope_fkey
+        FOREIGN KEY (execution_run_uid, tenant_id, contact_scope_id)
+        REFERENCES moa.execution_run (
+            run_uid, tenant_id, contact_scope_id
+        );
+
+CREATE OR REPLACE FUNCTION moa.enforce_execution_run_normalized_update()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.source_kind IS DISTINCT FROM OLD.source_kind
+       OR NEW.route_mode IS DISTINCT FROM OLD.route_mode
+       OR NEW.route_reason IS DISTINCT FROM OLD.route_reason
+       OR NEW.skill_template_ref IS DISTINCT FROM OLD.skill_template_ref
+       OR NEW.skill_template_revision_uid IS DISTINCT FROM OLD.skill_template_revision_uid THEN
+        RAISE EXCEPTION 'execution run normalized source fields are immutable';
+    END IF;
+    IF OLD.terminal_reason IS NOT NULL
+       AND NEW.terminal_reason IS DISTINCT FROM OLD.terminal_reason THEN
+        RAISE EXCEPTION 'execution run terminal reason is immutable';
+    END IF;
+    IF OLD.terminal_reason IS NULL AND NEW.terminal_reason IS NOT NULL
+       AND NOT (
+           OLD.status NOT IN (
+               'completed','partial','blocked','unsupported','failed','cancelled'
+           )
+           AND NEW.status IN (
+               'completed','partial','blocked','unsupported','failed','cancelled'
+           )
+           AND NEW.terminal_reason = moa.execution_terminal_reason_for(
+               NEW.status, NEW.terminal_cause, NEW.source_kind
+           )
+       ) THEN
+        RAISE EXCEPTION 'execution run terminal reason requires its matching terminal transition';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER execution_run_normalized_update_guard
+BEFORE UPDATE ON moa.execution_run
+FOR EACH ROW EXECUTE FUNCTION moa.enforce_execution_run_normalized_update();
+
+CREATE OR REPLACE FUNCTION moa.execution_route_audit_row_is_valid(
+    stage TEXT,
+    decision TEXT,
+    mode TEXT,
+    reason TEXT
+) RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT CASE
+        WHEN stage = 'initial' AND decision = 'needs_input' THEN
+            mode IS NULL AND reason = 'preflight_input_missing'
+        WHEN stage = 'initial' AND decision = 'routed' AND mode = 'respond' THEN
+            reason = 'simple_response'
+        WHEN stage = 'initial' AND decision = 'routed' AND mode = 'act' THEN
+            reason = 'bounded_interactive_work'
+        WHEN stage = 'initial' AND decision = 'routed' AND mode = 'run' THEN
+            reason IN (
+                'explicit_run','bulk_collection','durable_or_resumable',
+                'high_fanout','approval_or_signal','selected_execution_template'
+            )
+        WHEN stage = 'act_escalation' AND decision = 'routed' AND mode = 'run' THEN
+            reason = 'act_escalation'
+        ELSE FALSE
+    END
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_planner_audit_row_is_valid(
+    call_kind TEXT,
+    call_ordinal SMALLINT,
+    run_uid UUID,
+    plan_revision BIGINT,
+    outcome TEXT,
+    provider_model TEXT,
+    prompt_version TEXT,
+    candidate_hash TEXT,
+    candidate_json JSON,
+    compiler_report JSON,
+    duration_micros BIGINT
+) RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT moa.execution_planning_audit_envelope_is_valid(jsonb_build_object(
+        'schema_version', 1,
+        'tenant_id', '00000000-0000-0000-0000-000000000001',
+        'contact_id', NULL,
+        'session_id', '00000000-0000-0000-0000-000000000002',
+        'originating_sequence', 0,
+        'payload', jsonb_build_object(
+            'kind', 'planner_call',
+            'call_kind', call_kind,
+            'call_ordinal', call_ordinal,
+            'run_uid', run_uid,
+            'plan_revision', plan_revision,
+            'outcome', outcome,
+            'provider_model', provider_model,
+            'prompt_version', prompt_version,
+            'candidate_hash', candidate_hash,
+            'candidate_json', candidate_json::TEXT,
+            'compiler_report', compiler_report::TEXT,
+            'duration_micros', duration_micros,
+            'created_at', '2026-01-01T00:00:00.000000Z'
+        )
+    ))
+$$;
+
+CREATE OR REPLACE FUNCTION moa.execution_compile_audit_row_is_valid(
+    session_id UUID,
+    originating_sequence BIGINT,
+    run_uid UUID,
+    plan_revision BIGINT,
+    source TEXT,
+    operation_key TEXT,
+    outcome TEXT,
+    candidate_hash TEXT,
+    final_plan_hash TEXT,
+    validation_report JSON,
+    duration_micros BIGINT
+) RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT moa.execution_planning_audit_envelope_is_valid(jsonb_build_object(
+        'schema_version', 1,
+        'tenant_id', '00000000-0000-0000-0000-000000000001',
+        'contact_id', NULL,
+        'session_id', session_id,
+        'originating_sequence', originating_sequence,
+        'payload', jsonb_build_object(
+            'kind', 'compile',
+            'source', source,
+            'operation_key', operation_key,
+            'run_uid', run_uid,
+            'plan_revision', plan_revision,
+            'outcome', outcome,
+            'candidate_hash', candidate_hash,
+            'final_plan_hash', final_plan_hash,
+            'validation_report', validation_report::TEXT,
+            'duration_micros', duration_micros,
+            'created_at', '2026-01-01T00:00:00.000000Z'
+        )
+    ))
+$$;
+
+CREATE TABLE moa.execution_route_audit (
+    audit_uid UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    contact_id UUID,
+    contact_scope_id UUID GENERATED ALWAYS AS (
+        COALESCE(
+            contact_id,
+            '00000000-0000-0000-0000-000000000000'::UUID
+        )
+    ) STORED,
+    session_id UUID NOT NULL,
+    originating_sequence BIGINT NOT NULL CHECK (originating_sequence >= 0),
+    stage TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    mode TEXT,
+    reason TEXT NOT NULL,
+    accepted_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT execution_route_audit_contact_not_nil CHECK (
+        contact_id IS NULL
+        OR contact_id <> '00000000-0000-0000-0000-000000000000'::UUID
+    ),
+    CONSTRAINT execution_route_audit_uid_check CHECK (
+        audit_uid = moa.execution_route_audit_uid(
+            tenant_id, contact_id, session_id, originating_sequence, stage
+        )
+    ),
+    CONSTRAINT execution_route_audit_matrix_check CHECK (
+        moa.execution_route_audit_row_is_valid(stage, decision, mode, reason)
+    ),
+    CONSTRAINT execution_route_audit_created_at_check CHECK (
+        created_at = accepted_at
+    ),
+    CONSTRAINT execution_route_audit_logical_key UNIQUE NULLS NOT DISTINCT (
+        tenant_id, contact_id, session_id, originating_sequence, stage
+    )
+);
+
+CREATE TABLE moa.execution_planner_call_audit (
+    audit_uid UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    contact_id UUID,
+    contact_scope_id UUID GENERATED ALWAYS AS (
+        COALESCE(
+            contact_id,
+            '00000000-0000-0000-0000-000000000000'::UUID
+        )
+    ) STORED,
+    session_id UUID NOT NULL,
+    originating_sequence BIGINT NOT NULL CHECK (originating_sequence >= 0),
+    run_uid UUID,
+    plan_revision BIGINT,
+    call_kind TEXT NOT NULL,
+    call_ordinal SMALLINT NOT NULL,
+    outcome TEXT NOT NULL,
+    provider_model VARCHAR(128) NOT NULL,
+    prompt_version VARCHAR(64) NOT NULL,
+    candidate_hash TEXT,
+    candidate_json JSON,
+    compiler_report JSON,
+    duration_micros BIGINT NOT NULL CHECK (duration_micros >= 0),
+    created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT execution_planner_call_audit_contact_not_nil CHECK (
+        contact_id IS NULL
+        OR contact_id <> '00000000-0000-0000-0000-000000000000'::UUID
+    ),
+    CONSTRAINT execution_planner_call_audit_uid_check CHECK (
+        audit_uid = moa.execution_planner_audit_uid(
+            tenant_id, contact_id, session_id, originating_sequence,
+            run_uid, plan_revision, call_kind, call_ordinal
+        )
+    ),
+    CONSTRAINT execution_planner_call_audit_candidate_bytes CHECK (
+        candidate_json IS NULL
+        OR octet_length(candidate_json::TEXT) <= 1048576
+    ),
+    CONSTRAINT execution_planner_call_audit_report_bytes CHECK (
+        compiler_report IS NULL
+        OR octet_length(compiler_report::TEXT) <= 262144
+    ),
+    CONSTRAINT execution_planner_call_audit_row_check CHECK (
+        moa.execution_planner_audit_row_is_valid(
+            call_kind, call_ordinal, run_uid, plan_revision, outcome,
+            provider_model, prompt_version, candidate_hash, candidate_json,
+            compiler_report, duration_micros
+        )
+    ),
+    CONSTRAINT execution_planner_call_audit_run_fkey
+        FOREIGN KEY (run_uid, tenant_id, contact_scope_id)
+        REFERENCES moa.execution_run (
+            run_uid, tenant_id, contact_scope_id
+        ),
+    CONSTRAINT execution_planner_call_audit_logical_key
+        UNIQUE NULLS NOT DISTINCT (
+            tenant_id, contact_id, session_id, originating_sequence,
+            run_uid, plan_revision, call_kind, call_ordinal
+        )
+);
+
+CREATE TABLE moa.execution_compile_audit (
+    audit_uid UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL,
+    contact_id UUID,
+    contact_scope_id UUID GENERATED ALWAYS AS (
+        COALESCE(
+            contact_id,
+            '00000000-0000-0000-0000-000000000000'::UUID
+        )
+    ) STORED,
+    session_id UUID,
+    originating_sequence BIGINT,
+    run_uid UUID,
+    plan_revision BIGINT,
+    source TEXT NOT NULL,
+    operation_key VARCHAR(512) NOT NULL,
+    outcome TEXT NOT NULL,
+    candidate_hash TEXT NOT NULL,
+    final_plan_hash TEXT,
+    validation_report JSON NOT NULL,
+    duration_micros BIGINT NOT NULL CHECK (duration_micros >= 0),
+    created_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT execution_compile_audit_contact_not_nil CHECK (
+        contact_id IS NULL
+        OR contact_id <> '00000000-0000-0000-0000-000000000000'::UUID
+    ),
+    CONSTRAINT execution_compile_audit_uid_check CHECK (
+        audit_uid = moa.execution_compile_audit_uid(
+            tenant_id, contact_id, source, operation_key
+        )
+    ),
+    CONSTRAINT execution_compile_audit_report_bytes CHECK (
+        octet_length(validation_report::TEXT) <= 262144
+    ),
+    CONSTRAINT execution_compile_audit_row_check CHECK (
+        moa.execution_compile_audit_row_is_valid(
+            session_id, originating_sequence, run_uid, plan_revision,
+            source, operation_key, outcome, candidate_hash, final_plan_hash,
+            validation_report, duration_micros
+        )
+    ),
+    CONSTRAINT execution_compile_audit_run_fkey
+        FOREIGN KEY (run_uid, tenant_id, contact_scope_id)
+        REFERENCES moa.execution_run (
+            run_uid, tenant_id, contact_scope_id
+        ),
+    CONSTRAINT execution_compile_audit_logical_key
+        UNIQUE NULLS NOT DISTINCT (
+            tenant_id, contact_id, source, operation_key
+        )
+);
+
+CREATE TABLE moa.execution_node_materialization (
+    run_uid UUID NOT NULL,
+    plan_revision BIGINT NOT NULL CHECK (plan_revision >= 1),
+    node_id TEXT NOT NULL,
+    tenant_id UUID NOT NULL,
+    contact_id UUID,
+    contact_scope_id UUID GENERATED ALWAYS AS (
+        COALESCE(
+            contact_id,
+            '00000000-0000-0000-0000-000000000000'::UUID
+        )
+    ) STORED,
+    kind TEXT NOT NULL CHECK (kind IN ('map','reduce')),
+    fanout_items BIGINT,
+    reducer_depth BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT execution_node_materialization_pkey
+        PRIMARY KEY (run_uid, plan_revision, node_id),
+    CONSTRAINT execution_node_materialization_contact_not_nil CHECK (
+        contact_id IS NULL
+        OR contact_id <> '00000000-0000-0000-0000-000000000000'::UUID
+    ),
+    CONSTRAINT execution_node_materialization_payload_check CHECK (
+        CASE kind
+            WHEN 'map' THEN
+                fanout_items IS NOT NULL
+                AND fanout_items >= 0
+                AND reducer_depth IS NULL
+            WHEN 'reduce' THEN
+                fanout_items IS NULL
+                AND reducer_depth IS NOT NULL
+                AND reducer_depth >= 0
+            ELSE FALSE
+        END
+    ),
+    CONSTRAINT execution_node_materialization_run_fkey
+        FOREIGN KEY (run_uid, tenant_id, contact_scope_id)
+        REFERENCES moa.execution_run (
+            run_uid, tenant_id, contact_scope_id
+        )
+        ON DELETE CASCADE
+);
+
+CREATE INDEX execution_route_audit_scope_created_idx
+    ON moa.execution_route_audit (
+        tenant_id, contact_scope_id, created_at, audit_uid
+    );
+CREATE INDEX execution_planner_call_audit_scope_created_idx
+    ON moa.execution_planner_call_audit (
+        tenant_id, contact_scope_id, created_at, audit_uid
+    );
+CREATE INDEX execution_compile_audit_scope_created_idx
+    ON moa.execution_compile_audit (
+        tenant_id, contact_scope_id, created_at, audit_uid
+    );
+CREATE INDEX execution_node_materialization_scope_idx
+    ON moa.execution_node_materialization (
+        tenant_id, contact_scope_id, run_uid, plan_revision, node_id
+    );
+
+CREATE OR REPLACE FUNCTION moa.reject_execution_immutable_payload()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION '% is immutable and append-only', TG_TABLE_NAME;
+END;
+$$;
+
+CREATE TRIGGER execution_route_audit_immutable_guard
+BEFORE UPDATE OR DELETE ON moa.execution_route_audit
+FOR EACH ROW EXECUTE FUNCTION moa.reject_execution_immutable_payload();
+CREATE TRIGGER execution_planner_call_audit_immutable_guard
+BEFORE UPDATE OR DELETE ON moa.execution_planner_call_audit
+FOR EACH ROW EXECUTE FUNCTION moa.reject_execution_immutable_payload();
+CREATE TRIGGER execution_compile_audit_immutable_guard
+BEFORE UPDATE OR DELETE ON moa.execution_compile_audit
+FOR EACH ROW EXECUTE FUNCTION moa.reject_execution_immutable_payload();
+CREATE TRIGGER execution_node_materialization_immutable_guard
+BEFORE UPDATE OR DELETE ON moa.execution_node_materialization
+FOR EACH ROW EXECUTE FUNCTION moa.reject_execution_immutable_payload();
+
+SELECT moa.apply_contact_rls('moa.execution_route_audit'::REGCLASS);
+SELECT moa.apply_contact_rls('moa.execution_planner_call_audit'::REGCLASS);
+SELECT moa.apply_contact_rls('moa.execution_compile_audit'::REGCLASS);
+SELECT moa.apply_contact_rls('moa.execution_node_materialization'::REGCLASS);
+
+ALTER TABLE tenant_action_reviews
+    ADD COLUMN execution_task_traceparent TEXT,
+    ADD COLUMN execution_task_tracestate TEXT,
+    ADD CONSTRAINT tenant_action_reviews_execution_task_trace_check CHECK (
+        (
+            execution_task_traceparent IS NULL
+            AND execution_task_tracestate IS NULL
+        )
+        OR (
+            moa.execution_traceparent_is_valid(execution_task_traceparent)
+            AND (
+                execution_task_tracestate IS NULL
+                OR moa.execution_tracestate_is_normalized(
+                    execution_task_tracestate
+                )
+            )
+        )
+    );
+
+ALTER TABLE moa.execution_action_review_outbox
+    ADD COLUMN traceparent TEXT,
+    ADD COLUMN tracestate TEXT,
+    ADD COLUMN task_traceparent TEXT,
+    ADD COLUMN task_tracestate TEXT,
+    ADD CONSTRAINT execution_action_review_outbox_resolution_trace_check CHECK (
+        (
+            traceparent IS NULL
+            AND tracestate IS NULL
+        )
+        OR (
+            moa.execution_traceparent_is_valid(traceparent)
+            AND (
+                tracestate IS NULL
+                OR moa.execution_tracestate_is_normalized(tracestate)
+            )
+        )
+    ),
+    ADD CONSTRAINT execution_action_review_outbox_task_trace_check CHECK (
+        (
+            task_traceparent IS NULL
+            AND task_tracestate IS NULL
+        )
+        OR (
+            moa.execution_traceparent_is_valid(task_traceparent)
+            AND (
+                task_tracestate IS NULL
+                OR moa.execution_tracestate_is_normalized(task_tracestate)
+            )
+        )
+    );
+
+CREATE OR REPLACE FUNCTION moa.enforce_action_review_trace_immutability()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF TG_TABLE_NAME = 'tenant_action_reviews' THEN
+        IF NEW.execution_task_traceparent IS DISTINCT FROM
+               OLD.execution_task_traceparent
+           OR NEW.execution_task_tracestate IS DISTINCT FROM
+               OLD.execution_task_tracestate THEN
+            RAISE EXCEPTION
+                'tenant action review execution-task trace context is immutable';
+        END IF;
+    ELSIF NEW.traceparent IS DISTINCT FROM OLD.traceparent
+       OR NEW.tracestate IS DISTINCT FROM OLD.tracestate
+       OR NEW.task_traceparent IS DISTINCT FROM OLD.task_traceparent
+       OR NEW.task_tracestate IS DISTINCT FROM OLD.task_tracestate THEN
+        RAISE EXCEPTION
+            'execution action review outbox trace contexts are immutable';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER tenant_action_reviews_execution_task_trace_immutable_guard
+BEFORE UPDATE ON tenant_action_reviews
+FOR EACH ROW EXECUTE FUNCTION moa.enforce_action_review_trace_immutability();
+
+CREATE TRIGGER execution_action_review_outbox_trace_immutable_guard
+BEFORE UPDATE ON moa.execution_action_review_outbox
+FOR EACH ROW EXECUTE FUNCTION moa.enforce_action_review_trace_immutability();
+
+CREATE SEQUENCE moa.execution_analytics_change_seq
+    AS BIGINT
+    MINVALUE 1
+    NO CYCLE;
+
+GRANT USAGE, SELECT ON SEQUENCE moa.execution_analytics_change_seq
+    TO moa_app, moa_promoter;
+
+ALTER TABLE moa.execution_run
+    ADD COLUMN analytics_change_seq BIGINT;
+ALTER TABLE moa.execution_task
+    ADD COLUMN analytics_change_seq BIGINT;
+
+SELECT pg_advisory_xact_lock_shared(1297047877, 337);
+
+UPDATE moa.execution_run
+SET analytics_change_seq = nextval('moa.execution_analytics_change_seq');
+UPDATE moa.execution_task
+SET analytics_change_seq = nextval('moa.execution_analytics_change_seq');
+
+ALTER TABLE moa.execution_run
+    ALTER COLUMN analytics_change_seq SET NOT NULL,
+    ADD CONSTRAINT execution_run_analytics_change_seq_check
+        CHECK (analytics_change_seq > 0);
+ALTER TABLE moa.execution_task
+    ALTER COLUMN analytics_change_seq SET NOT NULL,
+    ADD CONSTRAINT execution_task_analytics_change_seq_check
+        CHECK (analytics_change_seq > 0);
+
+CREATE INDEX execution_run_analytics_change_idx
+    ON moa.execution_run (analytics_change_seq, run_uid);
+CREATE INDEX execution_task_analytics_change_idx
+    ON moa.execution_task (analytics_change_seq, task_id);
+
+CREATE OR REPLACE FUNCTION moa.assign_execution_analytics_change_seq()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock_shared(1297047877, 337);
+    NEW.analytics_change_seq :=
+        nextval('moa.execution_analytics_change_seq');
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER execution_run_analytics_change_guard
+BEFORE INSERT OR UPDATE ON moa.execution_run
+FOR EACH ROW EXECUTE FUNCTION moa.assign_execution_analytics_change_seq();
+
+CREATE TRIGGER execution_task_analytics_change_guard
+BEFORE INSERT OR UPDATE ON moa.execution_task
+FOR EACH ROW EXECUTE FUNCTION moa.assign_execution_analytics_change_seq();
+
+CREATE MATERIALIZED VIEW analytics.execution_run_fact AS
+SELECT
+    r.run_uid,
+    r.tenant_id,
+    r.contact_id,
+    r.session_id,
+    sac.agent_id,
+    r.initial_plan_hash,
+    r.active_plan_hash,
+    r.plan_revision,
+    r.route_mode,
+    r.route_reason,
+    r.source_kind,
+    r.skill_template_ref,
+    r.skill_template_revision_uid,
+    r.status,
+    r.terminal_reason,
+    COALESCE(
+        r.terminal_requirement_count,
+        CASE
+            WHEN jsonb_typeof(r.goal_contract -> 'requirements') = 'array'
+            THEN jsonb_array_length(r.goal_contract -> 'requirements')::BIGINT
+            ELSE 0
+        END
+    ) AS requirement_count,
+    COALESCE(
+        r.terminal_satisfied_requirement_count,
+        0
+    ) AS satisfied_requirement_count,
+    CASE
+        WHEN jsonb_typeof(r.goal_contract -> 'completion_checks') = 'array'
+        THEN jsonb_array_length(r.goal_contract -> 'completion_checks')::BIGINT
+        ELSE 0
+    END AS completion_check_count,
+    r.progress_total_tasks AS logical_task_count,
+    r.queued_at,
+    r.started_at,
+    CASE
+        WHEN r.queued_at IS NULL OR r.started_at IS NULL THEN NULL::DOUBLE PRECISION
+        ELSE GREATEST(
+            EXTRACT(EPOCH FROM (r.started_at - r.queued_at)) * 1000.0,
+            0.0
+        )
+    END AS queue_to_start_ms,
+    r.completed_at,
+    CASE
+        WHEN r.started_at IS NULL OR r.completed_at IS NULL
+            THEN NULL::DOUBLE PRECISION
+        ELSE GREATEST(
+            EXTRACT(EPOCH FROM (r.completed_at - r.started_at)) * 1000.0,
+            0.0
+        )
+    END AS duration_ms,
+    r.reserved_cost_microusd,
+    r.consumed_cost_microusd AS actual_cost_microusd,
+    r.reserved_tokens,
+    r.consumed_tokens AS actual_tokens,
+    r.reserved_tasks,
+    r.consumed_tasks AS actual_tasks,
+    r.reserved_tool_calls,
+    r.consumed_tool_calls AS actual_tool_calls,
+    r.reserved_retrieved_bytes,
+    r.consumed_retrieved_bytes AS actual_retrieved_bytes,
+    r.created_at,
+    r.updated_at
+FROM moa.execution_run r
+LEFT JOIN session_agent_context sac
+    ON sac.session_id = r.session_id;
+
+CREATE UNIQUE INDEX analytics_execution_run_fact_run_uidx
+    ON analytics.execution_run_fact (run_uid);
+CREATE INDEX analytics_execution_run_fact_tenant_started_idx
+    ON analytics.execution_run_fact (tenant_id, started_at DESC, run_uid);
+CREATE INDEX analytics_execution_run_fact_tenant_plan_idx
+    ON analytics.execution_run_fact (
+        tenant_id, active_plan_hash, started_at DESC, run_uid
+    );
+CREATE INDEX analytics_execution_run_fact_tenant_template_idx
+    ON analytics.execution_run_fact (
+        tenant_id, skill_template_revision_uid, started_at DESC, run_uid
+    )
+    WHERE skill_template_revision_uid IS NOT NULL;
+
+CREATE MATERIALIZED VIEW analytics.execution_task_fact AS
+SELECT
+    t.task_id AS task_id,
+    t.run_uid,
+    t.tenant_id,
+    t.node_id,
+    t.item_key,
+    t.task_kind ->> 'kind' AS task_kind,
+    CASE
+        WHEN t.task_kind ->> 'kind' = 'capability'
+        THEN t.task_kind #>> '{reference,name}'
+        ELSE NULL
+    END AS capability_name,
+    CASE
+        WHEN t.task_kind ->> 'kind' = 'capability'
+        THEN t.task_kind #>> '{reference,version}'
+        ELSE NULL
+    END AS capability_version,
+    t.plan_revision,
+    t.status,
+    CASE
+        WHEN t.status = 'failed'
+        THEN COALESCE(
+            t.current_outcome ->> 'class',
+            t.error ->> 'class'
+        )
+        ELSE NULL
+    END AS failure_class,
+    t.attempt,
+    t.generation,
+    jsonb_array_length(t.citations)::BIGINT AS citation_count,
+    CASE
+        WHEN t.started_at IS NULL THEN NULL::DOUBLE PRECISION
+        ELSE GREATEST(
+            EXTRACT(EPOCH FROM (t.started_at - t.created_at)) * 1000.0,
+            0.0
+        )
+    END AS queue_latency_ms,
+    CASE
+        WHEN t.completed_at IS NULL THEN NULL::DOUBLE PRECISION
+        ELSE GREATEST(
+            EXTRACT(
+                EPOCH FROM (
+                    t.completed_at - COALESCE(t.started_at, t.created_at)
+                )
+            ) * 1000.0,
+            0.0
+        )
+    END AS duration_ms,
+    t.reserved_cost_microusd,
+    t.actual_cost_microusd,
+    t.reserved_tokens,
+    t.actual_tokens,
+    t.reserved_tasks,
+    t.actual_tasks,
+    t.reserved_tool_calls,
+    t.actual_tool_calls,
+    t.reserved_retrieved_bytes,
+    t.actual_retrieved_bytes,
+    t.started_at,
+    t.completed_at,
+    t.created_at,
+    t.updated_at
+FROM moa.execution_task t;
+
+CREATE UNIQUE INDEX analytics_execution_task_fact_task_id_uidx
+    ON analytics.execution_task_fact (task_id);
+CREATE INDEX analytics_execution_task_fact_tenant_started_idx
+    ON analytics.execution_task_fact (
+        tenant_id, started_at DESC, task_id
+    );
+CREATE INDEX analytics_execution_task_fact_tenant_capability_idx
+    ON analytics.execution_task_fact (
+        tenant_id, capability_name, capability_version, started_at DESC, task_id
+    )
+    WHERE capability_name IS NOT NULL;
+
+ALTER TABLE analytics.clickhouse_export_state
+    ADD COLUMN cursor_seq BIGINT,
+    ADD COLUMN pass_high_water_seq BIGINT,
+    ADD COLUMN pass_high_water_id UUID,
+    ADD COLUMN pass_started_at TIMESTAMPTZ,
+    ADD CONSTRAINT clickhouse_export_state_cursor_sequence_check CHECK (
+        cursor_seq IS NULL
+        OR (
+            cursor_seq >= 0
+            AND cursor_id IS NOT NULL
+        )
+    ),
+    ADD CONSTRAINT clickhouse_export_state_pass_high_water_check CHECK (
+        (
+            pass_high_water_seq IS NULL
+            AND pass_high_water_id IS NULL
+            AND pass_started_at IS NULL
+        )
+        OR (
+            cursor_seq IS NOT NULL
+            AND cursor_id IS NOT NULL
+            AND pass_high_water_seq IS NOT NULL
+            AND pass_high_water_seq >= 0
+            AND pass_high_water_id IS NOT NULL
+            AND pass_started_at IS NOT NULL
+            AND ROW(pass_high_water_seq, pass_high_water_id)
+                >= ROW(cursor_seq, cursor_id)
+        )
+    );
+
+CREATE TABLE analytics.clickhouse_schema_upgrade_state (
+    upgrade_key TEXT PRIMARY KEY,
+    stage TEXT NOT NULL DEFAULT 'pending',
+    upgrade_version TIMESTAMPTZ NOT NULL,
+    export_version_floor TIMESTAMPTZ NOT NULL,
+    run_high_water_seq BIGINT NOT NULL,
+    run_high_water_id UUID NOT NULL,
+    task_high_water_seq BIGINT NOT NULL,
+    task_high_water_id UUID NOT NULL,
+    run_page_seq BIGINT NOT NULL,
+    run_page_id UUID NOT NULL,
+    task_page_seq BIGINT NOT NULL,
+    task_page_id UUID NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    CONSTRAINT clickhouse_schema_upgrade_key_check CHECK (
+        upgrade_key = 'execution_dimensions_v2'
+    ),
+    CONSTRAINT clickhouse_schema_upgrade_stage_check CHECK (
+        stage IN (
+            'pending','schema_upgraded','cursors_reset',
+            'runs_exported','tasks_exported','complete'
+        )
+    ),
+    CONSTRAINT clickhouse_schema_upgrade_versions_check CHECK (
+        export_version_floor >= upgrade_version
+    ),
+    CONSTRAINT clickhouse_schema_upgrade_run_positions_check CHECK (
+        run_high_water_seq >= 0
+        AND run_page_seq >= 0
+        AND ROW(run_page_seq, run_page_id)
+            <= ROW(run_high_water_seq, run_high_water_id)
+    ),
+    CONSTRAINT clickhouse_schema_upgrade_task_positions_check CHECK (
+        task_high_water_seq >= 0
+        AND task_page_seq >= 0
+        AND ROW(task_page_seq, task_page_id)
+            <= ROW(task_high_water_seq, task_high_water_id)
+    ),
+    CONSTRAINT clickhouse_schema_upgrade_completion_check CHECK (
+        (stage = 'complete') = (completed_at IS NOT NULL)
+    ),
+    CONSTRAINT clickhouse_schema_upgrade_timestamps_check CHECK (
+        updated_at >= created_at
+        AND (
+            completed_at IS NULL
+            OR completed_at >= created_at
+        )
+    )
+);
+
+CREATE OR REPLACE FUNCTION analytics.execution_upgrade_stage_rank(
+    stage_value TEXT
+) RETURNS SMALLINT
+LANGUAGE sql
+IMMUTABLE
+STRICT
+AS $$
+    SELECT CASE stage_value
+        WHEN 'pending' THEN 0
+        WHEN 'schema_upgraded' THEN 1
+        WHEN 'cursors_reset' THEN 2
+        WHEN 'runs_exported' THEN 3
+        WHEN 'tasks_exported' THEN 4
+        WHEN 'complete' THEN 5
+    END::SMALLINT
+$$;
+
+CREATE OR REPLACE FUNCTION analytics.enforce_execution_upgrade_monotonicity()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    old_rank SMALLINT :=
+        analytics.execution_upgrade_stage_rank(OLD.stage);
+    new_rank SMALLINT :=
+        analytics.execution_upgrade_stage_rank(NEW.stage);
+BEGIN
+    IF NEW.upgrade_key IS DISTINCT FROM OLD.upgrade_key
+       OR NEW.upgrade_version IS DISTINCT FROM OLD.upgrade_version
+       OR NEW.run_high_water_seq IS DISTINCT FROM OLD.run_high_water_seq
+       OR NEW.run_high_water_id IS DISTINCT FROM OLD.run_high_water_id
+       OR NEW.task_high_water_seq IS DISTINCT FROM OLD.task_high_water_seq
+       OR NEW.task_high_water_id IS DISTINCT FROM OLD.task_high_water_id
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+        RAISE EXCEPTION
+            'execution analytics upgrade identity and high waters are immutable';
+    END IF;
+    IF new_rank < old_rank OR new_rank > old_rank + 1 THEN
+        RAISE EXCEPTION
+            'execution analytics upgrade stages must advance one step at a time';
+    END IF;
+    IF NEW.export_version_floor < OLD.export_version_floor THEN
+        RAISE EXCEPTION
+            'execution analytics export version floor cannot decrease';
+    END IF;
+    IF ROW(NEW.run_page_seq, NEW.run_page_id)
+           < ROW(OLD.run_page_seq, OLD.run_page_id)
+       OR ROW(NEW.task_page_seq, NEW.task_page_id)
+           < ROW(OLD.task_page_seq, OLD.task_page_id) THEN
+        RAISE EXCEPTION
+            'execution analytics upgrade page cursors cannot move backwards';
+    END IF;
+    IF NEW.updated_at < OLD.updated_at THEN
+        RAISE EXCEPTION
+            'execution analytics upgrade updated_at cannot move backwards';
+    END IF;
+    IF OLD.completed_at IS NOT NULL
+       AND NEW.completed_at IS DISTINCT FROM OLD.completed_at THEN
+        RAISE EXCEPTION
+            'execution analytics upgrade completion timestamp is immutable';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER clickhouse_schema_upgrade_state_monotonic_guard
+BEFORE UPDATE ON analytics.clickhouse_schema_upgrade_state
+FOR EACH ROW
+EXECUTE FUNCTION analytics.enforce_execution_upgrade_monotonicity();

@@ -1,6 +1,7 @@
 //! Context compilation, retrieval, and turn helpers for MOA.
 
 pub mod compaction;
+pub mod execution_planning;
 #[cfg(feature = "eval-harness")]
 pub mod harness;
 pub mod learning;

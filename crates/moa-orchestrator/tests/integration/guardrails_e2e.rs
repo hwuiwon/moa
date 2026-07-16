@@ -274,6 +274,7 @@ async fn run_turn(
                 model: None,
                 contact: None,
                 max_turns: None,
+                execution_template: None,
             },
             None,
         )

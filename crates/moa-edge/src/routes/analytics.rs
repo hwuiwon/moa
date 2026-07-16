@@ -138,10 +138,13 @@ pub(crate) async fn query(
 /// across all exported tables. `None` when the exporter has not run yet (or
 /// the cursor table is missing) — absence of freshness data must not fail the
 /// query.
+const CLICKHOUSE_READ_MODEL_FRESHNESS_SQL: &str = "SELECT MIN(CASE WHEN cursor_seq IS NULL THEN cursor_ts ELSE exported_at END) \
+     FROM analytics.clickhouse_export_state";
+
 async fn clickhouse_read_model_updated_at(
     pool: &sqlx::PgPool,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
-    sqlx::query_scalar("SELECT MIN(cursor_ts) FROM analytics.clickhouse_export_state")
+    sqlx::query_scalar(CLICKHOUSE_READ_MODEL_FRESHNESS_SQL)
         .fetch_one(pool)
         .await
         .ok()
@@ -271,9 +274,76 @@ pub(super) fn translate(
 mod tests {
     use axum::body::Bytes;
     use axum::http::{Method, Uri};
+    use chrono::{DateTime, Duration, Utc};
 
     use crate::routes::RouteTranslation;
     use crate::routes::test_support::{test_tenant_json, translate};
+
+    use super::CLICKHOUSE_READ_MODEL_FRESHNESS_SQL;
+
+    fn sequence_aware_freshness(
+        cursors: &[(Option<i64>, DateTime<Utc>, DateTime<Utc>)],
+    ) -> Option<DateTime<Utc>> {
+        cursors
+            .iter()
+            .map(|(cursor_seq, cursor_ts, exported_at)| {
+                if cursor_seq.is_none() {
+                    *cursor_ts
+                } else {
+                    *exported_at
+                }
+            })
+            .min()
+    }
+
+    #[test]
+    fn execution_sequence_cursor_freshness_uses_only_durable_caught_up_time() {
+        // Pins: timestamp datasets use their source watermark, while sequence
+        // datasets use exported_at so reset and active partial passes cannot
+        // report freshness ahead of their durable regular cursor.
+        assert_eq!(
+            CLICKHOUSE_READ_MODEL_FRESHNESS_SQL,
+            "SELECT MIN(CASE WHEN cursor_seq IS NULL THEN cursor_ts ELSE exported_at END) \
+             FROM analytics.clickhouse_export_state"
+        );
+
+        let epoch = DateTime::<Utc>::UNIX_EPOCH;
+        let base = epoch + Duration::days(10);
+        let timestamp_dataset = (
+            None,
+            base + Duration::minutes(5),
+            base + Duration::minutes(8),
+        );
+        let reset_execution = (Some(0), base + Duration::minutes(20), epoch);
+        assert_eq!(
+            sequence_aware_freshness(&[timestamp_dataset, reset_execution]),
+            Some(epoch),
+            "a reset sequence cursor remains stale"
+        );
+
+        let active_partial = (Some(8), base + Duration::minutes(30), base);
+        assert_eq!(
+            sequence_aware_freshness(&[timestamp_dataset, active_partial]),
+            Some(base),
+            "an active pass retains its prior durable freshness"
+        );
+
+        let empty_completed = (
+            Some(8),
+            base + Duration::minutes(40),
+            base + Duration::minutes(40),
+        );
+        let completed_execution = (
+            Some(12),
+            base + Duration::minutes(45),
+            base + Duration::minutes(45),
+        );
+        assert_eq!(
+            sequence_aware_freshness(&[timestamp_dataset, empty_completed, completed_execution]),
+            Some(base + Duration::minutes(5)),
+            "completed sequence passes participate with exported_at"
+        );
+    }
 
     #[test]
     fn analytics_public_routes_do_not_translate_to_restate_handlers() {

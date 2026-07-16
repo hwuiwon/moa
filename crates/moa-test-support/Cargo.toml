@@ -8,9 +8,13 @@ publish = false
 [features]
 integration = ["orchestrator-fixture"]
 orchestrator-fixture = [
+    "dep:axum",
     "dep:moa-authz",
     "dep:moa-authz-schema",
+    "dep:moa-execution",
     "dep:nix",
+    "dep:opentelemetry-proto",
+    "dep:prost",
     "dep:reqwest",
     "dep:testcontainers",
     "dep:url",
@@ -18,13 +22,17 @@ orchestrator-fixture = [
 
 [dependencies]
 anyhow.workspace = true
+axum = { workspace = true, optional = true }
 chrono.workspace = true
 moa-authz = { workspace = true, optional = true }
 moa-authz-schema = { workspace = true, optional = true }
 moa-core = { workspace = true }
+moa-execution = { workspace = true, optional = true }
 moa-security = { workspace = true }
 moa-session = { workspace = true }
 nix = { version = "0.29", features = ["signal", "process"], optional = true }
+opentelemetry-proto = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true

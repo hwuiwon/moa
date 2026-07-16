@@ -114,4 +114,7 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     /// Optional credential injection configuration.
     pub credentials: Option<McpCredentialConfig>,
+    /// Whether standard MCP tool annotations from this server may affect retry safety.
+    #[serde(default)]
+    pub trust_tool_annotations: bool,
 }
