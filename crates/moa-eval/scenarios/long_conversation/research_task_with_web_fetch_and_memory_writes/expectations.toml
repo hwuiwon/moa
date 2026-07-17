@@ -1,5 +1,5 @@
 [functional]
-task_completed = true
+response_produced_without_error = true
 facts_planted = [
   "web_search_emitted_in_first_5_turns",
   "web_fetch_called_at_least_3_times",

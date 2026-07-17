@@ -1266,7 +1266,10 @@ async fn build_score_card(
         timestamp,
         provider: provider.to_string(),
         functional: FunctionalScores {
-            task_completed: task_completed_signal(&execution.response, error_count),
+            response_produced_without_error: response_produced_without_error_signal(
+                &execution.response,
+                error_count,
+            ),
             turn_count,
             error_count,
             errors_preserved: errors_preserved_strict,
@@ -1333,12 +1336,11 @@ async fn build_score_card(
     }
 }
 
-/// Positive task-completion signal from the durable log.
+/// Reports whether the run produced a non-empty response and recorded no errors.
 ///
-/// A run is complete only when it produced a non-empty final response AND recorded
-/// no error events. Error-absence alone is insufficient: a run that died before
-/// producing a final answer (no response) has not completed its task.
-fn task_completed_signal(response: &Option<String>, error_count: u32) -> bool {
+/// This is intentionally only a delivery-health signal. Execution correctness
+/// and completion are evaluated from typed run state by the execution eval.
+fn response_produced_without_error_signal(response: &Option<String>, error_count: u32) -> bool {
     error_count == 0
         && response
             .as_deref()
@@ -1853,21 +1855,24 @@ mod tests {
     }
 
     #[test]
-    fn task_completed_requires_response_and_no_errors() {
-        // Pins (F15): completion needs a positive final-response signal AND zero errors;
-        // error-absence alone (no response) is not completion.
-        assert!(task_completed_signal(&Some("final answer".to_string()), 0));
+    fn response_produced_without_error_requires_response_and_no_errors() {
+        // Pins (F15): delivery health needs a positive response signal AND zero errors;
+        // error absence alone does not prove that a response was delivered.
+        assert!(response_produced_without_error_signal(
+            &Some("final answer".to_string()),
+            0
+        ));
         assert!(
-            !task_completed_signal(&None, 0),
-            "no final response is not completion even with zero errors"
+            !response_produced_without_error_signal(&None, 0),
+            "no final response is not successful delivery even with zero errors"
         );
         assert!(
-            !task_completed_signal(&Some("final answer".to_string()), 1),
-            "a run with errors is not complete"
+            !response_produced_without_error_signal(&Some("final answer".to_string()), 1),
+            "a response accompanied by an error is not healthy delivery"
         );
         assert!(
-            !task_completed_signal(&Some("   ".to_string()), 0),
-            "a blank final response is not completion"
+            !response_produced_without_error_signal(&Some("   ".to_string()), 0),
+            "a blank final response is not successful delivery"
         );
     }
 

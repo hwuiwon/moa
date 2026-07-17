@@ -121,8 +121,10 @@ pub struct MetricRow {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FunctionalScores {
-    /// Whether the scenario task completed.
-    pub task_completed: bool,
+    /// Whether a nonblank response was produced and no error event was observed.
+    ///
+    /// This is a delivery-health signal, not proof that requested work completed.
+    pub response_produced_without_error: bool,
     /// Number of user turns driven through the scenario.
     pub turn_count: usize,
     /// Number of error events observed.
@@ -134,7 +136,7 @@ pub struct FunctionalScores {
 impl Default for FunctionalScores {
     fn default() -> Self {
         Self {
-            task_completed: false,
+            response_produced_without_error: false,
             turn_count: 0,
             error_count: 0,
             errors_preserved: true,
@@ -329,8 +331,8 @@ fn push_row(rows: &mut Vec<MetricRow>, name: impl Into<String>, value: Value) {
 fn push_functional_rows(rows: &mut Vec<MetricRow>, scores: &FunctionalScores) {
     push_row(
         rows,
-        "functional.task_completed",
-        Value::Bool(scores.task_completed),
+        "functional.response_produced_without_error",
+        Value::Bool(scores.response_produced_without_error),
     );
     push_row(
         rows,

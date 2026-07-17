@@ -12,8 +12,10 @@ use moa_core::{
     types::execution_planning::{
         ExecutionCompileOutcome, ExecutionCompileSource, ExecutionMode, ExecutionPlannerCallKind,
         ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
-        ExecutionRouteDecisionKind, ExecutionRouteReason, ExecutionRouteStage,
-        ExecutionSourceProvenanceV1, validate_planning_audit_envelope,
+        ExecutionRouteClassifierOutcome, ExecutionRouteDecisionKind, ExecutionRouteProvenanceV1,
+        ExecutionRouteReason, ExecutionRouteSource, ExecutionRouteStage, ExecutionRouteUsageV1,
+        ExecutionSourceProvenanceV1, route_provenance_semantically_equal,
+        validate_planning_audit_envelope,
     },
     types::identifiers::{SessionId, TenantId, UserId},
 };
@@ -334,7 +336,7 @@ pub enum PlanningContextWriteOutcome {
 }
 
 /// Persisted low-cardinality evidence for one route-audit insertion.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RouteAuditEvidence {
     /// Deterministic UUIDv5 audit identifier.
     pub audit_uid: Uuid,
@@ -344,12 +346,14 @@ pub struct RouteAuditEvidence {
     pub mode: Option<ExecutionMode>,
     /// Exact closed route reason.
     pub reason: ExecutionRouteReason,
+    /// Redacted trusted-bypass or classifier provenance.
+    pub provenance: ExecutionRouteProvenanceV1,
     /// First durable acceptance timestamp.
     pub accepted_at: DateTime<Utc>,
 }
 
 /// Durable result of inserting one normalized route audit.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum RouteAuditWriteOutcome {
     /// This transaction inserted the first route row.
     Applied(RouteAuditEvidence),
@@ -1156,6 +1160,7 @@ impl ExecutionRepository {
                 decision,
                 mode,
                 reason,
+                provenance,
                 accepted_at,
             },
             Some(session_id),
@@ -1170,7 +1175,6 @@ impl ExecutionRepository {
                 message: "route audit requires a session-bound route payload".to_string(),
             });
         };
-        validate_route_audit_matrix(*stage, *decision, *mode, *reason)?;
         let audit_uid = route_audit_uid(
             envelope.tenant_id,
             envelope.contact_id,
@@ -1179,6 +1183,14 @@ impl ExecutionRepository {
             *stage,
         )?;
         let originating_sequence_db = to_i64(originating_sequence, "originating sequence")?;
+        let confidence_bps = provenance
+            .confidence_bps
+            .map(i16::try_from)
+            .transpose()
+            .map_err(|_| Error::InvalidRepositoryInput {
+                message: "route confidence exceeds SMALLINT".to_string(),
+            })?;
+        let missing_input_count = i16::from(provenance.missing_input_count);
         let mut conn = scope.begin(&self.pool).await?;
         let inserted = sqlx::query(INSERT_ROUTE_AUDIT_SQL)
             .bind(audit_uid)
@@ -1190,6 +1202,34 @@ impl ExecutionRepository {
             .bind(route_decision_label(*decision))
             .bind(mode.map(execution_mode_label))
             .bind(execution_route_reason_label(*reason))
+            .bind(route_source_label(provenance.source))
+            .bind(route_classifier_outcome_label(
+                provenance.classifier_outcome,
+            ))
+            .bind(provenance.provider_model.as_deref())
+            .bind(provenance.prompt_version.as_deref())
+            .bind(provenance.objective_hash.as_str())
+            .bind(provenance.response_hash.as_deref())
+            .bind(confidence_bps)
+            .bind(missing_input_count)
+            .bind(to_i64(
+                provenance.usage.input_tokens_uncached,
+                "route uncached input tokens",
+            )?)
+            .bind(to_i64(
+                provenance.usage.input_tokens_cache_write,
+                "route cache-write input tokens",
+            )?)
+            .bind(to_i64(
+                provenance.usage.input_tokens_cache_read,
+                "route cache-read input tokens",
+            )?)
+            .bind(to_i64(
+                provenance.usage.output_tokens,
+                "route output tokens",
+            )?)
+            .bind(to_i64(provenance.cost_microusd, "route cost")?)
+            .bind(to_i64(provenance.duration_micros, "route duration")?)
             .bind(*accepted_at)
             .fetch_optional(conn.as_mut())
             .await
@@ -1216,6 +1256,7 @@ impl ExecutionRepository {
                 && persisted.evidence.decision == *decision
                 && persisted.evidence.mode == *mode
                 && persisted.evidence.reason == *reason
+                && route_provenance_semantically_equal(&persisted.evidence.provenance, provenance)
             {
                 RouteAuditWriteOutcome::Replayed(persisted.evidence)
             } else {
@@ -1988,12 +2029,7 @@ impl ExecutionRepository {
             ResumeKind::Input => "input_resume",
             ResumeKind::Retry => "retry",
         };
-        if redispatch_rejection_is_exact_replay(
-            &task,
-            history_kind,
-            generation,
-            resume_input.as_ref(),
-        ) {
+        if redispatch_is_exact_replay(&task, history_kind, generation, resume_input.as_ref()) {
             conn.commit().await.map_err(storage_error)?;
             return Ok(TransitionOutcome::AlreadyApplied(task));
         }
@@ -4004,35 +4040,19 @@ async fn terminalize_reservation_rejection(
     })
 }
 
-fn redispatch_rejection_is_exact_replay(
+fn redispatch_is_exact_replay(
     task: &ExecutionTaskRecord,
     history_kind: &str,
     requested_generation: u64,
     resume_input: Option<&Value>,
 ) -> bool {
-    if task.status != ExecutionTaskStatus::Failed
-        || !matches!(
-            task.current_outcome.as_ref().map(|outcome| &outcome.result),
-            Some(ExecutionTaskResult::Failed {
-                class: moa_artifacts::execution_plan::ExecutionFailureClass::BudgetExceeded
-                    | moa_artifacts::execution_plan::ExecutionFailureClass::DeadlineExceeded,
-                ..
-            })
-        )
-    {
-        return false;
-    }
     let Some(history) = task.generation_history.last() else {
         return false;
     };
     let matches_generation = history.get("kind").and_then(Value::as_str) == Some(history_kind)
         && history.get("requested_generation").and_then(Value::as_u64)
             == Some(requested_generation)
-        && history.get("generation").and_then(Value::as_u64) == Some(task.generation)
-        && history
-            .get("admission_rejection")
-            .and_then(Value::as_str)
-            .is_some();
+        && history.get("generation").and_then(Value::as_u64) == Some(task.generation);
     if !matches_generation {
         return false;
     }
@@ -4765,6 +4785,58 @@ fn execution_route_reason_from_str(value: &str) -> Result<ExecutionRouteReason> 
     }
 }
 
+const fn route_source_label(source: ExecutionRouteSource) -> &'static str {
+    match source {
+        ExecutionRouteSource::Classifier => "classifier",
+        ExecutionRouteSource::BlankObjective => "blank_objective",
+        ExecutionRouteSource::SelectedExecutionTemplate => "selected_execution_template",
+        ExecutionRouteSource::ActEscalation => "act_escalation",
+    }
+}
+
+fn route_source_from_str(value: &str) -> Result<ExecutionRouteSource> {
+    match value {
+        "classifier" => Ok(ExecutionRouteSource::Classifier),
+        "blank_objective" => Ok(ExecutionRouteSource::BlankObjective),
+        "selected_execution_template" => Ok(ExecutionRouteSource::SelectedExecutionTemplate),
+        "act_escalation" => Ok(ExecutionRouteSource::ActEscalation),
+        _ => Err(Error::InvalidRepositoryData {
+            message: format!("unknown execution route source `{value}`"),
+        }),
+    }
+}
+
+const fn route_classifier_outcome_label(outcome: ExecutionRouteClassifierOutcome) -> &'static str {
+    match outcome {
+        ExecutionRouteClassifierOutcome::NotCalled => "not_called",
+        ExecutionRouteClassifierOutcome::Accepted => "accepted",
+        ExecutionRouteClassifierOutcome::ProviderError => "provider_error",
+        ExecutionRouteClassifierOutcome::StreamError => "stream_error",
+        ExecutionRouteClassifierOutcome::Oversized => "oversized",
+        ExecutionRouteClassifierOutcome::SchemaRejected => "schema_rejected",
+        ExecutionRouteClassifierOutcome::InvalidDecision => "invalid_decision",
+        ExecutionRouteClassifierOutcome::LowConfidence => "low_confidence",
+        ExecutionRouteClassifierOutcome::ContextForcedAct => "context_forced_act",
+    }
+}
+
+fn route_classifier_outcome_from_str(value: &str) -> Result<ExecutionRouteClassifierOutcome> {
+    match value {
+        "not_called" => Ok(ExecutionRouteClassifierOutcome::NotCalled),
+        "accepted" => Ok(ExecutionRouteClassifierOutcome::Accepted),
+        "provider_error" => Ok(ExecutionRouteClassifierOutcome::ProviderError),
+        "stream_error" => Ok(ExecutionRouteClassifierOutcome::StreamError),
+        "oversized" => Ok(ExecutionRouteClassifierOutcome::Oversized),
+        "schema_rejected" => Ok(ExecutionRouteClassifierOutcome::SchemaRejected),
+        "invalid_decision" => Ok(ExecutionRouteClassifierOutcome::InvalidDecision),
+        "low_confidence" => Ok(ExecutionRouteClassifierOutcome::LowConfidence),
+        "context_forced_act" => Ok(ExecutionRouteClassifierOutcome::ContextForcedAct),
+        _ => Err(Error::InvalidRepositoryData {
+            message: format!("unknown execution route classifier outcome `{value}`"),
+        }),
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PersistedRouteAudit {
     audit_uid: Uuid,
@@ -4886,55 +4958,6 @@ fn validate_audit_scope(
     Ok(())
 }
 
-fn validate_route_audit_matrix(
-    stage: ExecutionRouteStage,
-    decision: ExecutionRouteDecisionKind,
-    mode: Option<ExecutionMode>,
-    reason: ExecutionRouteReason,
-) -> Result<()> {
-    let valid = matches!(
-        (stage, decision, mode, reason),
-        (
-            ExecutionRouteStage::Initial,
-            ExecutionRouteDecisionKind::NeedsInput,
-            None,
-            ExecutionRouteReason::PreflightInputMissing
-        ) | (
-            ExecutionRouteStage::Initial,
-            ExecutionRouteDecisionKind::Routed,
-            Some(ExecutionMode::Respond),
-            ExecutionRouteReason::SimpleResponse
-        ) | (
-            ExecutionRouteStage::Initial,
-            ExecutionRouteDecisionKind::Routed,
-            Some(ExecutionMode::Act),
-            ExecutionRouteReason::BoundedInteractiveWork
-        ) | (
-            ExecutionRouteStage::Initial,
-            ExecutionRouteDecisionKind::Routed,
-            Some(ExecutionMode::Run),
-            ExecutionRouteReason::ExplicitRun
-                | ExecutionRouteReason::BulkCollection
-                | ExecutionRouteReason::DurableOrResumable
-                | ExecutionRouteReason::HighFanout
-                | ExecutionRouteReason::ApprovalOrSignal
-                | ExecutionRouteReason::SelectedExecutionTemplate
-        ) | (
-            ExecutionRouteStage::ActEscalation,
-            ExecutionRouteDecisionKind::Routed,
-            Some(ExecutionMode::Run),
-            ExecutionRouteReason::ActEscalation
-        )
-    );
-    if valid {
-        Ok(())
-    } else {
-        Err(Error::InvalidRepositoryInput {
-            message: "route audit stage, decision, mode, and reason are inconsistent".to_string(),
-        })
-    }
-}
-
 fn route_audit_uid(
     tenant_id: TenantId,
     contact_id: Option<ContactId>,
@@ -5025,6 +5048,21 @@ fn route_audit_from_row(row: &PgRow) -> Result<PersistedRouteAudit> {
         .transpose()?;
     let reason =
         execution_route_reason_from_str(&row.try_get::<String, _>("reason").map_err(row_error)?)?;
+    let confidence_bps = row
+        .try_get::<Option<i16>, _>("confidence_bps")
+        .map_err(row_error)?
+        .map(u16::try_from)
+        .transpose()
+        .map_err(|_| Error::InvalidRepositoryData {
+            message: "route confidence is outside u16".to_string(),
+        })?;
+    let missing_input_count = u8::try_from(
+        row.try_get::<i16, _>("missing_input_count")
+            .map_err(row_error)?,
+    )
+    .map_err(|_| Error::InvalidRepositoryData {
+        message: "route missing-input count is outside u8".to_string(),
+    })?;
     Ok(PersistedRouteAudit {
         audit_uid,
         stage: route_stage_from_str(&row.try_get::<String, _>("stage").map_err(row_error)?)?,
@@ -5033,6 +5071,29 @@ fn route_audit_from_row(row: &PgRow) -> Result<PersistedRouteAudit> {
             decision,
             mode,
             reason,
+            provenance: ExecutionRouteProvenanceV1 {
+                source: route_source_from_str(
+                    &row.try_get::<String, _>("source").map_err(row_error)?,
+                )?,
+                classifier_outcome: route_classifier_outcome_from_str(
+                    &row.try_get::<String, _>("classifier_outcome")
+                        .map_err(row_error)?,
+                )?,
+                provider_model: row.try_get("provider_model").map_err(row_error)?,
+                prompt_version: row.try_get("prompt_version").map_err(row_error)?,
+                objective_hash: row.try_get("objective_hash").map_err(row_error)?,
+                response_hash: row.try_get("response_hash").map_err(row_error)?,
+                confidence_bps,
+                missing_input_count,
+                usage: ExecutionRouteUsageV1 {
+                    input_tokens_uncached: required_u64(row, "input_tokens_uncached")?,
+                    input_tokens_cache_write: required_u64(row, "input_tokens_cache_write")?,
+                    input_tokens_cache_read: required_u64(row, "input_tokens_cache_read")?,
+                    output_tokens: required_u64(row, "output_tokens")?,
+                },
+                cost_microusd: required_u64(row, "cost_microusd")?,
+                duration_micros: required_u64(row, "duration_micros")?,
+            },
             accepted_at: row.try_get("accepted_at").map_err(row_error)?,
         },
     })
@@ -5310,15 +5371,32 @@ fn row_error(error: sqlx::Error) -> Error {
 const INSERT_ROUTE_AUDIT_SQL: &str = r#"
     INSERT INTO moa.execution_route_audit (
         audit_uid, tenant_id, contact_id, session_id, originating_sequence,
-        stage, decision, mode, reason, accepted_at, created_at
+        stage, decision, mode, reason, source, classifier_outcome,
+        provider_model, prompt_version, objective_hash, response_hash,
+        confidence_bps, missing_input_count, input_tokens_uncached,
+        input_tokens_cache_write, input_tokens_cache_read, output_tokens,
+        cost_microusd, duration_micros, accepted_at, created_at
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+    VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $24
+    )
     ON CONFLICT DO NOTHING
-    RETURNING audit_uid, stage, decision, mode, reason, accepted_at
+    RETURNING
+        audit_uid, stage, decision, mode, reason, source, classifier_outcome,
+        provider_model, prompt_version, objective_hash, response_hash,
+        confidence_bps, missing_input_count, input_tokens_uncached,
+        input_tokens_cache_write, input_tokens_cache_read, output_tokens,
+        cost_microusd, duration_micros, accepted_at
 "#;
 
 const LOAD_ROUTE_AUDIT_SQL: &str = r#"
-    SELECT audit_uid, stage, decision, mode, reason, accepted_at
+    SELECT
+        audit_uid, stage, decision, mode, reason, source, classifier_outcome,
+        provider_model, prompt_version, objective_hash, response_hash,
+        confidence_bps, missing_input_count, input_tokens_uncached,
+        input_tokens_cache_write, input_tokens_cache_read, output_tokens,
+        cost_microusd, duration_micros, accepted_at
     FROM moa.execution_route_audit
     WHERE tenant_id = $1
       AND contact_id IS NOT DISTINCT FROM $2

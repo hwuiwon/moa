@@ -1,5 +1,5 @@
 [functional]
-task_completed = true
+response_produced_without_error = true
 facts_planted = [
   "crash_at_turn_7_drops_pending_in_memory_state",
   "wake_replays_exactly_the_pre_crash_event_log",

@@ -61,7 +61,9 @@ run; no skill is required to define a plan.
 
 `TurnExecution` chooses exactly one execution mode:
 
-- `respond`: one model response, no tools, and no plan-generation call.
+- `respond`: one user-facing model response, no tools, and no plan-generation
+  call. An ordinary user turn may first make one separate bounded auxiliary
+  classifier call to select this mode.
 - `act`: the bounded root model/tool loop, including repeat and tool-call
   limits. It may use visible skills and conversational `Worker` delegation.
 - `run`: instantiate or compile an immutable plan, start a detached durable
@@ -72,6 +74,15 @@ run; no skill is required to define a plan.
 long-running, or review-bearing work. Difficulty alone does not select `run`.
 `Worker` remains available for interactive delegation in `act`; it is not the
 bulk DAG primitive.
+
+Ordinary language routing is one strict-schema auxiliary-model classification,
+not phrase matching. The classifier has no tools, retrieval, or web search and
+cannot retry or invoke the planner. Provider, stream, size, schema, matrix, or
+confidence failures conservatively select `act`. Blank objectives, exact pinned
+templates, typed Act escalation, and internal execution synthesis use trusted
+zero-classifier-call routes. The normalized route audit persists only the final
+decision and bounded provenance (source/outcome, model/prompt, hashes,
+confidence, usage, cost, and duration), never raw objective or classifier text.
 
 Agents, skills, connectors, actions, and behavior-lab experiment plans are
 canonical artifacts. `moa-artifacts` owns their persisted document model,
@@ -90,6 +101,7 @@ authoring and import/export format. Optional `ui` metadata is non-semantic.
 
 | Boundary | Owner | Contract |
 |---|---|---|
+| `ExecutionRouter` | `moa-brain` | Uses trusted typed bypasses or at most one bounded auxiliary-model call to select `respond`, `act`, `run`, or concrete missing input; uncertainty falls back to `act`. |
 | `ExecutionPlanner` | `moa-brain` | Chooses a pinned skill template or asks the auxiliary model for a strict candidate plan and immutable goal contract. |
 | `ExecutionCompiler` | `moa-execution` | Validates, canonicalizes, estimates, and hashes initial plans and amendments against the capability catalog and remaining budget. |
 | `ExecutionProjection` | `moa-execution` | Supplies ordered node/task state to the pure scheduler; it contains no repository or provider handle. |
@@ -542,7 +554,9 @@ separate surfaces:
   admins in the OpenFGA model. The detached `Eval/execute_run` worker entrypoint
   is not caller-authorized directly; it must carry the dispatch token created
   by the authorized `Eval/run` admission path before it can return or mutate run
-  data.
+  data. Durable execution honesty is evaluated from the runtime's own typed
+  projection and task rows as documented in
+  [Execution Honesty Evaluation](eval/execution-honesty.md).
 - Live behavior experiments: `moa-experiments` owns the typed domain model and
   storage repository; the `Experiments` service accepts and tracks runs against
   production execution paths. Agent-loop targets create or reuse `Session`

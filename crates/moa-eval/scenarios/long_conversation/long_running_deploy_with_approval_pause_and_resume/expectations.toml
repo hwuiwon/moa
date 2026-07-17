@@ -1,5 +1,5 @@
 [functional]
-task_completed = true
+response_produced_without_error = true
 facts_planted = [
   "auto_mode_executes_bash_deploy",
   "session_continues_without_waiting_state",

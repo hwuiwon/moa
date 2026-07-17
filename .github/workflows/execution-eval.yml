@@ -1,0 +1,185 @@
+name: execution honesty eval
+
+on:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
+
+jobs:
+  offline:
+    name: offline contract, routing, and property gates
+    runs-on: ubuntu-latest-16-core
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Run execution property tests
+        run: |
+          cargo test -p moa-execution --test compiler --locked property_
+          cargo test -p moa-execution --test interpreter --locked property_
+          cargo test -p moa-execution --test completion --locked property_
+          cargo test -p moa-execution --test budget --locked property_
+
+      - name: Run execution routing and offline eval tests
+        run: |
+          cargo test -p moa-brain --lib --locked execution_routing --no-fail-fast
+          cargo test -p moa-eval --test eval_offline --locked execution_ --no-fail-fast
+
+      - name: Generate and gate the offline report
+        run: |
+          cargo run -p xtask --locked --features eval-tools -- execution-eval run-offline \
+            --manifest crates/moa-eval/scenarios/execution/manifest.toml \
+            --output target/execution-eval/offline.json
+          cargo run -p xtask --locked --features eval-tools -- execution-eval check \
+            --report target/execution-eval/offline.json \
+            --max-execution-false-completion-rate 0 \
+            --max-respond-on-run-rate 0
+
+      - name: Upload offline report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-eval-offline-${{ github.run_id }}
+          path: target/execution-eval/offline.json
+          if-no-files-found: error
+
+  deterministic-service:
+    name: deterministic execution service matrix
+    needs: offline
+    runs-on: ubuntu-latest-16-core
+    timeout-minutes: 180
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Build exact orchestrator fixture binary
+        run: |
+          cargo build -p moa-orchestrator --bin moa-orchestrator-bin \
+            --features provider-overrides,integration,execution-planning-failpoints \
+            --locked
+
+      - name: Run bounded PR service matrix
+        if: github.event_name == 'pull_request'
+        env:
+          MOA_ORCHESTRATOR_BIN: ${{ github.workspace }}/target/debug/moa-orchestrator-bin
+          MOA_CLOUD_HANDS_ALLOW_LOCAL: "true"
+        run: |
+          cargo nextest run -p moa-orchestrator --locked \
+            --features provider-overrides,integration,execution-planning-failpoints \
+            --profile execution-eval-pr \
+            --run-ignored ignored-only --no-tests fail
+
+      - name: Run complete scheduled service matrix
+        if: github.event_name != 'pull_request'
+        env:
+          MOA_ORCHESTRATOR_BIN: ${{ github.workspace }}/target/debug/moa-orchestrator-bin
+          MOA_CLOUD_HANDS_ALLOW_LOCAL: "true"
+        run: |
+          cargo nextest run -p moa-orchestrator --locked \
+            --features provider-overrides,integration,execution-planning-failpoints \
+            --profile execution-eval-nightly \
+            --run-ignored ignored-only --no-tests fail
+
+      - name: Upload service matrix report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-eval-service-${{ github.run_id }}
+          path: target/nextest/execution-eval-*/junit.xml
+          if-no-files-found: error
+
+  live-trend:
+    name: optional paid live trend
+    if: github.event_name != 'pull_request' && vars.MOA_ENABLE_LIVE_EXECUTION_EVALS == '1'
+    runs-on: ubuntu-latest-16-core
+    timeout-minutes: 360
+    env:
+      MOA_ANTHROPIC_API_KEY: ${{ secrets.MOA_ANTHROPIC_API_KEY }}
+      MOA_OPENAI_API_KEY: ${{ secrets.MOA_OPENAI_API_KEY }}
+      MOA_GOOGLE_API_KEY: ${{ secrets.MOA_GOOGLE_API_KEY }}
+      MOA_EXECUTION_EVAL_BUDGET_USD: ${{ vars.MOA_EXECUTION_EVAL_BUDGET_USD }}
+    steps:
+      - name: Check live authorization inputs
+        id: authorization
+        shell: bash
+        run: |
+          if [[ -n "${MOA_EXECUTION_EVAL_BUDGET_USD}" ]] \
+            && [[ -n "${MOA_ANTHROPIC_API_KEY}" || -n "${MOA_OPENAI_API_KEY}" || -n "${MOA_GOOGLE_API_KEY}" ]]; then
+            echo "enabled=true" >>"${GITHUB_OUTPUT}"
+          else
+            echo "enabled=false" >>"${GITHUB_OUTPUT}"
+            echo "Paid live execution eval skipped: explicit budget and provider credential are both required."
+          fi
+
+      - name: Check out repository
+        if: steps.authorization.outputs.enabled == 'true'
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        if: steps.authorization.outputs.enabled == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up sccache
+        if: steps.authorization.outputs.enabled == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        if: steps.authorization.outputs.enabled == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Build live orchestrator fixture binary
+        if: steps.authorization.outputs.enabled == 'true'
+        run: cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features integration --locked
+
+      - name: Run sampled live execution eval
+        if: steps.authorization.outputs.enabled == 'true'
+        env:
+          MOA_RUN_LIVE_EXECUTION_EVALS: "1"
+          MOA_ORCHESTRATOR_BIN: ${{ github.workspace }}/target/debug/moa-orchestrator-bin
+        run: |
+          cargo test -p moa-orchestrator --test execution_eval_provider_e2e \
+            --features integration --locked -- --ignored --test-threads=1 --nocapture
+
+      - name: Upload live report
+        if: always() && steps.authorization.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-eval-live-${{ github.run_id }}
+          path: target/execution-eval/live.json
+          if-no-files-found: error

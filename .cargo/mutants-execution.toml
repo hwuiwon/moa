@@ -1,0 +1,15 @@
+# Target selection stays explicit in scripts/run-execution-mutation-eval.sh so
+# reviewers can audit the exact files and functions before the expensive run.
+test_tool = "nextest"
+test_package = ["moa-execution", "moa-brain"]
+additional_cargo_test_args = [
+  "-E",
+  "package(moa-execution) | (package(moa-brain) & test(execution_routing))",
+  "--no-tests=fail",
+]
+minimum_test_timeout = 120.0
+timeout_multiplier = 3.0
+build_timeout_multiplier = 3.0
+cap_lints = true
+gitignore = true
+copy_vcs = false

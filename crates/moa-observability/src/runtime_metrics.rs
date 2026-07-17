@@ -16,7 +16,8 @@ use moa_core::{
     types::action_policy::ActionReviewStatus,
     types::execution_planning::{
         ExecutionCompileOutcome, ExecutionCompileSource, ExecutionMode, ExecutionPlannerCallKind,
-        ExecutionPlannerOutcome, ExecutionRouteDecision, ExecutionRouteReason,
+        ExecutionPlannerOutcome, ExecutionRouteClassifierOutcome, ExecutionRouteDecisionKind,
+        ExecutionRouteReason, ExecutionRouteSource,
     },
     types::identifiers::ModelId,
     types::identifiers::TenantId,
@@ -601,6 +602,11 @@ pub fn init_metrics(config: &MetricsConfig) -> Result<()> {
             )
             .map_err(|error| MoaError::ConfigError(error.to_string()))?
             .set_buckets_for_metric(
+                Matcher::Full("moa_execution_route_classifier_duration_seconds".to_string()),
+                EXECUTION_DURATION_SECONDS_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
                 Matcher::Full("moa_execution_run_queue_to_start_seconds".to_string()),
                 EXECUTION_DURATION_SECONDS_BUCKETS,
             )
@@ -960,21 +966,31 @@ pub fn record_session_event_load(event_count: u64) {
     counter!("moa_session_event_load_events_total").increment(event_count);
 }
 
-/// Records one durably applied execution route decision.
-pub fn record_execution_route(decision: &ExecutionRouteDecision) {
-    let (decision, mode, reason) = match decision {
-        ExecutionRouteDecision::NeedsInput { reason } => ("needs_input", "none", *reason),
-        ExecutionRouteDecision::Routed { mode, reason } => {
-            ("routed", execution_mode(*mode), *reason)
-        }
-    };
+/// Records one durably applied execution route and its bounded classifier outcome.
+pub fn record_execution_route(
+    decision: ExecutionRouteDecisionKind,
+    mode: Option<ExecutionMode>,
+    reason: ExecutionRouteReason,
+    source: ExecutionRouteSource,
+    outcome: ExecutionRouteClassifierOutcome,
+    duration_micros: u64,
+) {
     counter!(
         "moa_execution_routes_total",
-        "decision" => decision,
-        "mode" => mode,
-        "reason" => execution_route_reason(reason)
+        "decision" => execution_route_decision(decision),
+        "mode" => mode.map_or("none", execution_mode),
+        "reason" => execution_route_reason(reason),
+        "source" => execution_route_source(source),
+        "classifier_outcome" => execution_route_classifier_outcome(outcome)
     )
     .increment(1);
+    if source == ExecutionRouteSource::Classifier {
+        histogram!(
+            "moa_execution_route_classifier_duration_seconds",
+            "outcome" => execution_route_classifier_outcome(outcome)
+        )
+        .record(Duration::from_micros(duration_micros).as_secs_f64());
+    }
 }
 
 /// Records one durably applied planner-call audit.
@@ -1741,7 +1757,11 @@ fn register_metric_descriptions() {
     );
     describe_counter!(
         "moa_execution_routes_total",
-        "Durably accepted execution routing decisions."
+        "Durably accepted execution routing decisions and classifier outcomes."
+    );
+    describe_histogram!(
+        "moa_execution_route_classifier_duration_seconds",
+        "Duration of durably accepted execution classifier attempts in seconds."
     );
     describe_counter!(
         "moa_execution_planner_calls_total",
@@ -1814,6 +1834,38 @@ const fn execution_mode(mode: ExecutionMode) -> &'static str {
         ExecutionMode::Respond => "respond",
         ExecutionMode::Act => "act",
         ExecutionMode::Run => "run",
+    }
+}
+
+const fn execution_route_decision(decision: ExecutionRouteDecisionKind) -> &'static str {
+    match decision {
+        ExecutionRouteDecisionKind::NeedsInput => "needs_input",
+        ExecutionRouteDecisionKind::Routed => "routed",
+    }
+}
+
+const fn execution_route_source(source: ExecutionRouteSource) -> &'static str {
+    match source {
+        ExecutionRouteSource::Classifier => "classifier",
+        ExecutionRouteSource::BlankObjective => "blank_objective",
+        ExecutionRouteSource::SelectedExecutionTemplate => "selected_execution_template",
+        ExecutionRouteSource::ActEscalation => "act_escalation",
+    }
+}
+
+const fn execution_route_classifier_outcome(
+    outcome: ExecutionRouteClassifierOutcome,
+) -> &'static str {
+    match outcome {
+        ExecutionRouteClassifierOutcome::NotCalled => "not_called",
+        ExecutionRouteClassifierOutcome::Accepted => "accepted",
+        ExecutionRouteClassifierOutcome::ProviderError => "provider_error",
+        ExecutionRouteClassifierOutcome::StreamError => "stream_error",
+        ExecutionRouteClassifierOutcome::Oversized => "oversized",
+        ExecutionRouteClassifierOutcome::SchemaRejected => "schema_rejected",
+        ExecutionRouteClassifierOutcome::InvalidDecision => "invalid_decision",
+        ExecutionRouteClassifierOutcome::LowConfidence => "low_confidence",
+        ExecutionRouteClassifierOutcome::ContextForcedAct => "context_forced_act",
     }
 }
 
@@ -2370,7 +2422,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_metrics_render_exact_families_buckets_and_bounded_labels() {
+    fn execution_route_and_metrics_render_exact_families_buckets_and_bounded_labels() {
         // Pins: Task 11's complete execution metric contract is registered and rendered with
         // the exact bucket arrays and closed labels, without entity identifiers or prose.
         let recorder = PrometheusBuilder::new()
@@ -2379,6 +2431,11 @@ mod tests {
                 EXECUTION_DURATION_SECONDS_BUCKETS,
             )
             .expect("compile buckets should configure")
+            .set_buckets_for_metric(
+                Matcher::Full("moa_execution_route_classifier_duration_seconds".to_string()),
+                EXECUTION_DURATION_SECONDS_BUCKETS,
+            )
+            .expect("route classifier buckets should configure")
             .set_buckets_for_metric(
                 Matcher::Full("moa_execution_run_queue_to_start_seconds".to_string()),
                 EXECUTION_DURATION_SECONDS_BUCKETS,
@@ -2433,10 +2490,14 @@ mod tests {
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             register_metric_descriptions();
-            record_execution_route(&ExecutionRouteDecision::Routed {
-                mode: ExecutionMode::Run,
-                reason: ExecutionRouteReason::ExplicitRun,
-            });
+            record_execution_route(
+                ExecutionRouteDecisionKind::Routed,
+                Some(ExecutionMode::Run),
+                ExecutionRouteReason::ExplicitRun,
+                ExecutionRouteSource::Classifier,
+                ExecutionRouteClassifierOutcome::Accepted,
+                5_000,
+            );
             record_execution_planner_call(
                 ExecutionPlannerCallKind::InitialRepair,
                 ExecutionPlannerOutcome::CompilerRejected,
@@ -2489,6 +2550,7 @@ mod tests {
             "moa_execution_runs_terminal_total",
         ];
         let histograms = [
+            "moa_execution_route_classifier_duration_seconds",
             "moa_execution_compile_duration_seconds",
             "moa_execution_run_queue_to_start_seconds",
             "moa_execution_task_duration_seconds",
@@ -2510,6 +2572,11 @@ mod tests {
             assert!(rendered.contains(&format!("# TYPE {metric} histogram")));
         }
 
+        assert_metric_buckets(
+            &rendered,
+            "moa_execution_route_classifier_duration_seconds",
+            EXECUTION_DURATION_SECONDS_BUCKETS,
+        );
         assert_metric_buckets(
             &rendered,
             "moa_execution_compile_duration_seconds",
@@ -2577,6 +2644,7 @@ mod tests {
             "reason=",
             "call=",
             "outcome=",
+            "classifier_outcome=",
             "source=",
             "state=",
             "kind=",

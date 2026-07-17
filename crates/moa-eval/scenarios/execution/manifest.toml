@@ -1,0 +1,16 @@
+schema_version = 1
+
+[routing]
+path = "routing-v1.jsonl"
+sha256 = "31fe4606d214d91c2cdb409fb5951c90a3719be0ea6c15d54ca95f7bbab40997"
+count = 320
+
+[contract]
+path = "contract-recorded-v1.jsonl"
+sha256 = "8b13618517ef66b33ab612fd9fe0e2028ad039e5b84cf222e39e8946a0589e1d"
+count = 80
+
+[task_quality]
+path = "task-quality-v1.jsonl"
+sha256 = "f6cc1c7a84ae17c83ca769e3b2118338f924946bfc1bc6f1eb3ee22c2f79254c"
+count = 20

@@ -530,6 +530,7 @@ RUN_SAFE_ID="$(printf '%s' "${RUN_ID}" | tr -c 'A-Za-z0-9_' '_')"
 RUN_SHORT_ID="$(printf '%s' "${RUN_SAFE_ID}" | cut -c1-20)"
 ORCH_FEATURES="provider-overrides"
 ORCH_E2E_FEATURES="${ORCH_FEATURES},integration"
+EXECUTION_EVAL_FEATURES="${ORCH_E2E_FEATURES},execution-planning-failpoints"
 TMP_PARENT="${MOA_CLEAN_E2E_TMPDIR:-/tmp}"
 TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/me2e.XXXXXX")"
 RESTATE_DIR="${TMP_ROOT}/restate"
@@ -640,9 +641,9 @@ export MOA_RUNTIME_CACHE_BACKEND="redis"
 export MOA_RUNTIME_CACHE_REDIS_URL="redis://127.0.0.1:10051/0"
 
 CLEAN_E2E_TEST_THREADS="${MOA_CLEAN_E2E_TEST_THREADS:-4}"
-run cargo nextest run -p moa-orchestrator --locked --profile fast-pr --test-threads "${CLEAN_E2E_TEST_THREADS}"
-run cargo nextest run -p moa-orchestrator --locked --profile db-session
-run cargo nextest run -p moa-orchestrator --locked --profile db-memory
+run cargo nextest run -p moa-orchestrator --locked --profile fast-pr --test-threads "${CLEAN_E2E_TEST_THREADS}" --no-tests fail
+run cargo nextest run -p moa-orchestrator --locked --profile db-session --no-tests fail
+run cargo nextest run -p moa-orchestrator --locked --profile db-memory --no-tests fail
 run cargo test -p moa-orchestrator --lib --locked --features "${ORCH_FEATURES}" runtime::endpoint::tests::skill_learning_feature_adds_skill_learning_workflow
 run cargo test -p moa-orchestrator --test skill_learning_review_db --locked --features "${ORCH_FEATURES}" -- --test-threads="${CLEAN_E2E_TEST_THREADS}"
 run cargo test -p moa-orchestrator --test skill_learning_workflow --locked --features "${ORCH_FEATURES}" -- --test-threads="${CLEAN_E2E_TEST_THREADS}"
@@ -653,9 +654,9 @@ if [[ "${LIVE}" -eq 1 ]]; then
   # Live local E2Es spawn host-local hands; production defaults keep this disabled.
   export MOA_CLOUD_HANDS_ALLOW_LOCAL=true
 
-  run cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile restate-service-e2e --run-ignored ignored-only
+  run cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile restate-service-e2e --run-ignored ignored-only --no-tests fail
 
-  run cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features "${ORCH_FEATURES}" --locked
+  run cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features "${EXECUTION_EVAL_FEATURES}" --locked
   MOA_ORCHESTRATOR_BIN="$(orchestrator_binary_path)"
   if [[ ! -f "${MOA_ORCHESTRATOR_BIN}" ]]; then
     echo "expected orchestrator binary was not built: ${MOA_ORCHESTRATOR_BIN}" >&2
@@ -663,7 +664,9 @@ if [[ "${LIVE}" -eq 1 ]]; then
   fi
   export MOA_ORCHESTRATOR_BIN
 
-  run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile fixture-service-e2e --run-ignored ignored-only
+  run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile fixture-service-e2e --run-ignored ignored-only --no-tests fail
+
+  run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${EXECUTION_EVAL_FEATURES}" --profile execution-eval-pr --run-ignored ignored-only --no-tests fail
 
   ORCH_PORT="${MOA_CLEAN_E2E_ORCH_PORT:-19180}"
   ORCH_HEALTH_PORT="${MOA_CLEAN_E2E_ORCH_HEALTH_PORT:-19181}"
@@ -694,19 +697,20 @@ if [[ "${LIVE}" -eq 1 ]]; then
     -H "content-type: application/json" \
     --data "{\"uri\":\"http://127.0.0.1:${ORCH_PORT}\"}"
 
-  run_without_provider_keys cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile orchestrator-service-e2e --run-ignored ignored-only
+  run_without_provider_keys cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile orchestrator-service-e2e --run-ignored ignored-only --no-tests fail
 
   if [[ "${RUN_PROVIDERS}" -eq 1 ]]; then
     if ! truthy "${MOA_RUN_LIVE_PROVIDER_TESTS:-}"; then
       echo "refusing provider live checks without MOA_RUN_LIVE_PROVIDER_TESTS=1" >&2
       exit 2
     fi
-    run cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile provider-e2e --run-ignored ignored-only
-    run cargo nextest run -p moa-providers --locked --profile provider-e2e --run-ignored ignored-only
-    run cargo nextest run -p moa-brain --locked --profile provider-e2e --run-ignored ignored-only
+    run cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile provider-e2e --run-ignored ignored-only --no-tests fail
+    run cargo nextest run -p moa-providers --locked --profile provider-e2e --run-ignored ignored-only --no-tests fail
+    run cargo nextest run -p moa-brain --locked --profile provider-e2e --run-ignored ignored-only --no-tests fail
   fi
 
   if [[ "${RUN_LONG_EVAL}" -eq 1 ]]; then
+    run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${EXECUTION_EVAL_FEATURES}" --profile execution-eval-nightly --run-ignored ignored-only --no-tests fail
     run cargo test -p moa-eval --test long_conversation_smoke_eval --locked -- --ignored --test-threads=1 --nocapture
   fi
 fi

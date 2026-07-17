@@ -146,6 +146,21 @@ Duplicate Restate sends are therefore safe only through the typed repository
 contract. They are not permission to make an external non-idempotent tool call
 twice.
 
+### Execution Incident Regression Policy
+
+Every production execution incident that affects routing, contract fidelity,
+coverage, recovery, authorization, budget accounting, or terminal honesty must
+add a stable execution-eval scenario or corpus case. Key the fixture by the
+persisted failure fingerprint when one exists; otherwise key it by the minimum
+run/task/audit evidence that reproduces the failure. Assert the typed state
+predicate that would have prevented or honestly reported the incident.
+
+The regression corpus grows monotonically. Fixing an incident does not remove
+its case, and old cases are never deleted or weakened to improve aggregate
+scores. A superseding case may replace one only when it exercises the same
+production path and strictly contains the old failure condition; record that
+relationship in the scenario comment.
+
 ## Graph Changelog Replication
 
 `moa.graph_changelog` is the immutable outbox for graph-memory mutations.

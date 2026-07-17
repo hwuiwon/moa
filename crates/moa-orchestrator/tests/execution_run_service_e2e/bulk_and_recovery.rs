@@ -15,6 +15,7 @@ use moa_core::types::action_policy::{ActionClass, ActionPolicyEffect, RiskLevel}
 use moa_core::types::session::SessionStatus;
 use moa_core::types::tools::{IdempotencyClass, ToolDiffStrategy, ToolInputShape, ToolPolicySpec};
 use moa_core::wire::turn::TurnOutcomeKind;
+use moa_eval::execution::ExecutionInvariantSpecV1;
 use moa_execution::bindings::extract_map_key;
 use moa_execution::capability::{ExecutionEstimate, capability_version};
 use moa_execution::state::{ExecutionTaskId, ExecutionTaskProjection, ExecutionTaskStatus};
@@ -31,6 +32,7 @@ use sqlx::postgres::PgListener;
 use sqlx::{Connection, PgConnection, PgPool};
 use tokio::time::Instant;
 
+use crate::evaluation::assert_execution_eval_case;
 use crate::execution_execution_support::assertions::{
     JournalRequestRole, assert_completed_terminal, assert_generated_plan_audits,
     assert_initial_route, final_brain_response, journal_requests, journal_roles, planning_audits,
@@ -38,7 +40,7 @@ use crate::execution_execution_support::assertions::{
 use crate::execution_execution_support::fixtures::{
     POLL_INTERVAL, await_execution_terminal_with_timeout, await_run_started_event,
     await_session_settled, await_turn_outcome, execution_run_request, raw_events,
-    seed_allow_policy, start_turn_in_session,
+    route_classifier_completion, seed_allow_policy, start_turn_in_session,
 };
 use moa_core::types::execution_planning::{
     ExecutionMode, ExecutionPlanningAuditPayloadV1, ExecutionRouteReason,
@@ -159,6 +161,10 @@ async fn bulk_fixture() -> Result<OrchestratorTestFixture> {
         json!({
             "default": text_completion("unexpected scripted-provider fallback"),
             "keyed": [
+                route_classifier_completion(
+                    ExecutionMode::Run,
+                    ExecutionRouteReason::ExplicitRun,
+                ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion(FINAL_RESPONSE)),
                 keyed_completion(
                     PLANNER_MATCH,
@@ -318,6 +324,7 @@ async fn run_bulk_scenario(
     assert_eq!(
         journal_roles(&requests),
         vec![
+            JournalRequestRole::Normal,
             JournalRequestRole::InitialPlanner,
             JournalRequestRole::Synthesis
         ],
@@ -333,6 +340,54 @@ async fn run_bulk_scenario(
         .filter(|attempt| attempt.capability == REDUCE_TOOL_NAME)
         .count();
     assert_transport_attempts(&attempts);
+
+    let expected_keys = companies()
+        .iter()
+        .map(|company| extract_map_key(company, "/company"))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_execution_eval_case(
+        fixture,
+        test.client(),
+        &run_request,
+        Some(controller),
+        label,
+        &[
+            ExecutionInvariantSpecV1::TerminalStatusIn {
+                statuses: vec![moa_execution::state::ExecutionRunStatus::Completed],
+            },
+            ExecutionInvariantSpecV1::TaskCount {
+                node_id: MAP_NODE_ID.to_string(),
+                exact: COMPANY_COUNT as u64,
+            },
+            ExecutionInvariantSpecV1::TaskCount {
+                node_id: REDUCE_NODE_ID.to_string(),
+                exact: 1,
+            },
+            ExecutionInvariantSpecV1::MapCoverage {
+                node_id: MAP_NODE_ID.to_string(),
+                expected_keys,
+                require_all_when_completed: true,
+            },
+            ExecutionInvariantSpecV1::CompletionCheckPassed {
+                check_id: "coverage_complete".to_string(),
+            },
+            ExecutionInvariantSpecV1::BudgetWithinApproved,
+            ExecutionInvariantSpecV1::ProgressMatchesTasks,
+            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpecV1::AllowedCapabilitiesOnly {
+                references: vec![
+                    fixture_capability_reference(&map_tool())?,
+                    fixture_capability_reference(&reducer_tool())?,
+                ],
+            },
+            ExecutionInvariantSpecV1::SessionEventCountAtMost {
+                event_kind: "progress".to_string(),
+                max: 20,
+            },
+            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+        ],
+    )
+    .await?;
 
     Ok(BulkObservation {
         canonical_final: load_canonical_final_projection(&pool, execution_run_uid).await?,

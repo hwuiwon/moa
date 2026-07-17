@@ -1,5 +1,5 @@
 [functional]
-task_completed = true
+response_produced_without_error = true
 facts_planted = [
   "local_observer_received_all_events_in_session",
   "daemon_observer_received_all_events_in_session",

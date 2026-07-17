@@ -30,11 +30,76 @@ use moa_execution::{
         task_status_from_outcome, validate_outcome_generation,
     },
 };
+use proptest::{
+    prelude::*,
+    test_runner::{Config as ProptestConfig, FileFailurePersistence},
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 fn schedule(request: ScheduleRequest) -> Result<ScheduleDecision, moa_execution::Error> {
     schedule_outcome(request).map(|outcome| outcome.decision)
+}
+
+proptest! {
+    #![proptest_config(property_config())]
+
+    #[test]
+    fn property_scheduler_is_idempotent_for_unchanged_projection(
+        item_count in 0_u64..=12,
+        completed_seed in 0_u64..=12,
+        run_seed in 1_u128..=u128::MAX,
+    ) {
+        // Pins: replaying an unchanged durable projection yields the exact same decision and projection.
+        let completed_count = completed_seed.min(item_count);
+        let items = (0..item_count).map(|item| json!(item)).collect::<Vec<_>>();
+        let map = node(
+            "inspect",
+            &[],
+            ExecutionOperation::Map {
+                items: Value::Array(items),
+                item_key: "".to_string(),
+                max_items: item_count,
+                item_output_schema: json!({ "type": "object" }),
+                task: MapTask::Capability {
+                    reference: capability(),
+                },
+            },
+        );
+        let plan = canonical(vec![map, output_node("inspect")]);
+        let run_uid = Uuid::from_u128(run_seed);
+        let statuses = if completed_count == 0 {
+            BTreeMap::new()
+        } else {
+            BTreeMap::from([("inspect".to_string(), ExecutionNodeStatus::Running)])
+        };
+        let tasks = (0..completed_count)
+            .map(|item| {
+                completed_item_task(
+                    run_uid,
+                    "inspect",
+                    &format!("number:{item}"),
+                    json!({ "item": item }),
+                    json!({ "ok": true }),
+                )
+            })
+            .collect::<Vec<_>>();
+        let request = request(run_uid, plan, statuses, tasks);
+
+        let first = schedule_outcome(request.clone()).expect("generated projection schedules");
+        let second = schedule_outcome(request).expect("unchanged generated projection schedules");
+        prop_assert_eq!(first, second);
+    }
+}
+
+fn property_config() -> ProptestConfig {
+    ProptestConfig {
+        cases: 256,
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "proptest-regressions/properties.txt",
+        ))),
+        ..ProptestConfig::default()
+    }
 }
 
 #[test]
@@ -719,6 +784,50 @@ fn task_transition_helpers_pin_retry_resume_generation_and_replan_supersession()
         Some(ExecutionTaskResult::Cancelled { reason })
             if reason == "superseded_by_plan_revision"
     ));
+}
+
+#[test]
+fn scheduler_ignores_cancelled_tasks_from_superseded_plan_revisions() {
+    // Pins: amendment history keeps cancelled task rows whose nodes are absent from the active
+    // plan, while the scheduler advances only the replacement branch.
+    let run_uid = Uuid::from_u128(20);
+    let replacement = node(
+        "replacement",
+        &[],
+        ExecutionOperation::Capability {
+            reference: capability(),
+        },
+    );
+    let plan = canonical(vec![replacement, output_node("replacement")]);
+    let superseded = ExecutionTaskProjection {
+        task_id: ExecutionTaskId::derive(run_uid, "superseded", "").expect("task id"),
+        node_id: "superseded".to_string(),
+        item_key: String::new(),
+        status: ExecutionTaskStatus::Cancelled,
+        attempt: 1,
+        generation: 1,
+        input: json!({}),
+        outcome: Some(ExecutionTaskOutcome {
+            schema_version: 1,
+            usage: ExecutionUsage {
+                cost_microusd: 0,
+                tokens: 0,
+                tool_calls: 0,
+                retrieved_bytes: 0,
+            },
+            result: ExecutionTaskResult::Cancelled {
+                reason: "superseded_by_plan_revision".to_string(),
+            },
+        }),
+    };
+
+    let decision = schedule(request(run_uid, plan, BTreeMap::new(), vec![superseded]))
+        .expect("cancelled superseded history must not invalidate the active plan");
+    let ScheduleDecision::Ready(tasks) = decision else {
+        panic!("expected replacement task, got {decision:?}");
+    };
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].node_id, "replacement");
 }
 
 fn request(

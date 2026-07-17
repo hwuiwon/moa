@@ -1,5 +1,7 @@
 //! Deterministic service coverage for task admission, retry, cancellation, input, and review.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 use moa_artifacts::execution_plan::{
     CompletionCheck, CompletionCheckKind, ExecutionBudgetLimit, ExecutionFailureClass,
@@ -17,6 +19,7 @@ use moa_core::{
         identifiers::{SessionId, TenantId},
     },
 };
+use moa_eval::execution::ExecutionInvariantSpecV1;
 use moa_execution::{
     capability::{ExecutionCapability, ExecutionEstimate},
     compiler::{CompileExecutionRequest, CompiledExecution, compile},
@@ -42,6 +45,7 @@ use moa_orchestrator::services::{
         ActionReviewDecisionKind, ActionReviewSummary, DecideActionReviewRequest,
         ListActionReviewsRequest,
     },
+    action_reviews_reaper::ActionReviewReaper,
 };
 use moa_test_support::{
     FixtureCapabilityController, FixtureCapabilityOptions, FixtureCapabilityOutcome,
@@ -51,8 +55,9 @@ use serde_json::{Value, json};
 use tokio::time::Instant;
 use uuid::Uuid;
 
+use crate::evaluation::{assert_execution_eval_case, assert_repository_execution_eval_case};
 use crate::execution_execution_support::fixtures::{
-    POLL_INTERVAL, SERVICE_TIMEOUT, await_execution_terminal,
+    POLL_INTERVAL, SERVICE_TIMEOUT, await_execution_terminal, list_execution_tasks,
 };
 
 const CAPABILITY_NODE_ID: &str = "capability";
@@ -64,7 +69,7 @@ const REQUIREMENT_ID: &str = "result";
 async fn reservation_budget_rejection_dispatches_zero_service_e2e() -> Result<()> {
     // Pins: an atomic reservation rejection consumes no logical task unit and starts no MCP call.
     let tool_name = "lifecycle_budget_probe";
-    let fixture = execution_fixture(tool_name, success_outcomes(), Vec::new()).await?;
+    let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
     let prepared = prepare_capability_run(
         &fixture,
         "reservation-budget-rejection",
@@ -79,7 +84,7 @@ async fn reservation_budget_rejection_dispatches_zero_service_e2e() -> Result<()
     };
     let run = create_direct_run(&prepared, runtime_budget, None).await?;
 
-    drive_task_workflow(&fixture, &run, 1).await?;
+    let terminal = drive_run_workflow(&fixture, &run).await?;
     let controller = fixture_capability(&fixture)?;
     assert!(controller.calls().is_empty());
     assert!(controller.transport_attempts().is_empty());
@@ -89,12 +94,11 @@ async fn reservation_budget_rejection_dispatches_zero_service_e2e() -> Result<()
     assert_eq!(task.actual_tasks, 0);
     assert_eq!(task.actual, zero_usage());
     assert_eq!(task.reserved, ExecutionEstimate::default());
-    let preterminal = load_run(&run).await?;
-    assert_eq!(preterminal.consumed, ExecutionEstimate::default());
-    assert_eq!(preterminal.reserved, ExecutionEstimate::default());
-    assert_eq!(preterminal.progress_failed_tasks, 1);
+    let terminal_run = load_run(&run).await?;
+    assert_eq!(terminal_run.consumed, ExecutionEstimate::default());
+    assert_eq!(terminal_run.reserved, ExecutionEstimate::default());
+    assert_eq!(terminal_run.progress_failed_tasks, 1);
 
-    let terminal = drive_run_workflow(&fixture, &run).await?;
     assert_terminal(
         &terminal,
         ExecutionRunStatus::Failed,
@@ -120,6 +124,27 @@ async fn reservation_budget_rejection_dispatches_zero_service_e2e() -> Result<()
         "terminal gaps omitted the exact budget rejection: {:?}",
         terminal.gaps
     );
+    assert_repository_execution_eval_case(
+        &fixture,
+        &run.repository,
+        run.scope,
+        &run.request,
+        "reservation-budget-rejection-zero-dispatch",
+        &[
+            ExecutionInvariantSpecV1::MustNotComplete,
+            ExecutionInvariantSpecV1::TerminalStatusIn {
+                statuses: vec![ExecutionRunStatus::Failed],
+            },
+            ExecutionInvariantSpecV1::TerminalGapContains {
+                text: "execution task reservation rejected: BudgetExceeded".to_string(),
+            },
+            ExecutionInvariantSpecV1::BudgetWithinApproved,
+            ExecutionInvariantSpecV1::ProgressMatchesTasks,
+            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+        ],
+    )
+    .await?;
     Ok(())
 }
 
@@ -128,7 +153,7 @@ async fn reservation_budget_rejection_dispatches_zero_service_e2e() -> Result<()
 async fn elapsed_deadline_dispatches_zero_service_e2e() -> Result<()> {
     // Pins: deadline admission has precedence, persists typed evidence, and dispatches no MCP call.
     let tool_name = "lifecycle_deadline_probe";
-    let fixture = execution_fixture(tool_name, success_outcomes(), Vec::new()).await?;
+    let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
     let prepared = prepare_capability_run(
         &fixture,
         "elapsed-deadline",
@@ -148,7 +173,7 @@ async fn elapsed_deadline_dispatches_zero_service_e2e() -> Result<()> {
     };
     let run = create_direct_run(&prepared, runtime_budget, None).await?;
 
-    drive_task_workflow(&fixture, &run, 1).await?;
+    let terminal = drive_run_workflow(&fixture, &run).await?;
     let controller = fixture_capability(&fixture)?;
     assert!(controller.calls().is_empty());
     assert!(controller.transport_attempts().is_empty());
@@ -159,7 +184,6 @@ async fn elapsed_deadline_dispatches_zero_service_e2e() -> Result<()> {
     assert_eq!(task.actual, zero_usage());
     assert_eq!(task.reserved, ExecutionEstimate::default());
 
-    let terminal = drive_run_workflow(&fixture, &run).await?;
     assert_terminal(
         &terminal,
         ExecutionRunStatus::Failed,
@@ -185,19 +209,42 @@ async fn elapsed_deadline_dispatches_zero_service_e2e() -> Result<()> {
         "terminal gaps omitted the exact deadline rejection: {:?}",
         terminal.gaps
     );
+    assert_repository_execution_eval_case(
+        &fixture,
+        &run.repository,
+        run.scope,
+        &run.request,
+        "elapsed-deadline-zero-dispatch",
+        &[
+            ExecutionInvariantSpecV1::MustNotComplete,
+            ExecutionInvariantSpecV1::TerminalStatusIn {
+                statuses: vec![ExecutionRunStatus::Failed],
+            },
+            ExecutionInvariantSpecV1::TerminalGapContains {
+                text: "execution task reservation rejected: DeadlineElapsed".to_string(),
+            },
+            ExecutionInvariantSpecV1::BudgetWithinApproved,
+            ExecutionInvariantSpecV1::ProgressMatchesTasks,
+            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+        ],
+    )
+    .await?;
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn retryable_failure_reuses_task_identity_service_e2e() -> Result<()> {
-    // Pins: one idempotent transient failure retries under a new generation of the same task ID.
+async fn execution_eval_rate_limit_reuses_task_identity_service_e2e() -> Result<()> {
+    // Pins: one 429 with Retry-After retries under a new generation of the same task ID.
     let tool_name = "lifecycle_retry_probe";
     let fixture = execution_fixture(
         tool_name,
         vec![
-            FixtureCapabilityOutcome::RetryableFailure {
-                message: "transient fixture failure".to_string(),
+            FixtureCapabilityOutcome::HttpFailure {
+                status: 429,
+                retry_after_ms: Some(1),
+                message: "fixture rate limit".to_string(),
             },
             FixtureCapabilityOutcome::Success {
                 output: json!({"result": "retried"}),
@@ -248,7 +295,22 @@ async fn retryable_failure_reuses_task_identity_service_e2e() -> Result<()> {
     assert_eq!(terminal.run.budget_ledger.consumed.tasks, 2);
     assert_eq!(terminal.run.budget_ledger.consumed.tool_calls, 2);
     assert_eq!(controller.calls().len(), 2);
-    assert_eq!(controller.transport_attempts().len(), 2);
+    let transport_attempts = controller.transport_attempts();
+    assert_eq!(transport_attempts.len(), 4);
+    assert_eq!(
+        transport_attempts
+            .iter()
+            .filter(|attempt| attempt.is_replay)
+            .count(),
+        2,
+        "the governed MCP retry loop must replay one logical generation"
+    );
+    assert!(
+        transport_attempts[..3]
+            .iter()
+            .all(|attempt| attempt.invocation_id == first[0].invocation_id)
+    );
+    assert_eq!(transport_attempts[3].invocation_id, second[1].invocation_id);
     assert_eq!(
         controller
             .calls()
@@ -258,6 +320,100 @@ async fn retryable_failure_reuses_task_identity_service_e2e() -> Result<()> {
             .len(),
         2
     );
+    assert_execution_eval_case(
+        &fixture,
+        &fixture.client,
+        &run.request,
+        Some(controller),
+        "rate-limit-reuses-task-identity",
+        &[
+            ExecutionInvariantSpecV1::TerminalStatusIn {
+                statuses: vec![ExecutionRunStatus::Completed],
+            },
+            ExecutionInvariantSpecV1::BudgetWithinApproved,
+            ExecutionInvariantSpecV1::ProgressMatchesTasks,
+            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
+async fn execution_eval_wrong_schema_is_invalid_output_service_e2e() -> Result<()> {
+    // Pins: a successful capability transport with malformed structured output is terminalized as
+    // InvalidOutput and cannot flow into the dependent output node.
+    let tool_name = "lifecycle_wrong_schema_probe";
+    let fixture = execution_fixture(
+        tool_name,
+        vec![FixtureCapabilityOutcome::Success {
+            output: json!("not-an-object"),
+        }],
+        Vec::new(),
+    )
+    .await?;
+    let prepared = prepare_capability_run(
+        &fixture,
+        "wrong-schema",
+        tool_name,
+        no_retry(),
+        ActionPolicyEffect::Allow,
+    )
+    .await?;
+    let prepared = recompile_with_node_output_schema(
+        prepared,
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["result"],
+            "properties": {"result": {"type": "string"}}
+        }),
+    )?;
+    let run = start_service_run(&fixture, &prepared).await?;
+    let controller = fixture_capability(&fixture)?;
+    controller.wait_for_calls(1, SERVICE_TIMEOUT).await?;
+    controller.release(1);
+
+    let terminal = await_execution_terminal(&fixture.client, &run.request).await?;
+    assert_terminal(
+        &terminal,
+        ExecutionRunStatus::Failed,
+        ExecutionTerminalCause::TaskFailure {
+            class: ExecutionFailureClass::InvalidOutput,
+        },
+        0,
+        1,
+    );
+    let task = load_task(&run).await?;
+    assert_failed_task(&task, ExecutionFailureClass::InvalidOutput);
+    let tasks = list_execution_tasks(&fixture.client, run.request.clone()).await?;
+    assert_eq!(
+        tasks.tasks.len(),
+        1,
+        "dependent output must not materialize"
+    );
+    assert_eq!(tasks.tasks[0].node_id, CAPABILITY_NODE_ID);
+    assert_eq!(controller.calls().len(), 1);
+    assert_execution_eval_case(
+        &fixture,
+        &fixture.client,
+        &run.request,
+        Some(controller),
+        "wrong-schema-is-invalid-output",
+        &[
+            ExecutionInvariantSpecV1::MustNotComplete,
+            ExecutionInvariantSpecV1::TerminalStatusIn {
+                statuses: vec![ExecutionRunStatus::Failed],
+            },
+            ExecutionInvariantSpecV1::BudgetWithinApproved,
+            ExecutionInvariantSpecV1::ProgressMatchesTasks,
+            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+        ],
+    )
+    .await?;
     Ok(())
 }
 
@@ -316,7 +472,7 @@ async fn terminal_failure_does_not_retry_service_e2e() -> Result<()> {
 async fn cancellation_releases_reservations_and_prevents_dispatch_service_e2e() -> Result<()> {
     // Pins: service cancellation releases every reserved dimension before a late task delivery.
     let tool_name = "lifecycle_cancel_probe";
-    let fixture = execution_fixture(tool_name, success_outcomes(), Vec::new()).await?;
+    let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
     let prepared = prepare_capability_run(
         &fixture,
         "cancellation-release",
@@ -380,12 +536,15 @@ async fn cancellation_releases_reservations_and_prevents_dispatch_service_e2e() 
     );
     assert_eq!(
         terminal.run.budget_ledger.consumed,
-        ExecutionEstimate::default()
+        ExecutionEstimate {
+            tasks: 1,
+            ..ExecutionEstimate::default()
+        }
     );
     let task = load_task(&run).await?;
     assert_eq!(task.status, ExecutionTaskStatus::Cancelled);
     assert_eq!(task.reserved, ExecutionEstimate::default());
-    assert_eq!(task.actual_tasks, 0);
+    assert_eq!(task.actual_tasks, 1);
 
     let controller = fixture_capability(&fixture)?;
     let calls_before = controller.calls().len();
@@ -410,9 +569,10 @@ async fn cancellation_releases_reservations_and_prevents_dispatch_service_e2e() 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn input_resume_preserves_attempt_and_history_service_e2e() -> Result<()> {
-    // Pins: exact input replay preserves attempt one and one append-only payload at generation two.
+    // Pins: exact input replay preserves attempt one and one append-only payload at generation two,
+    // then dispatches that generation exactly once.
     let tool_name = "lifecycle_input_probe";
-    let fixture = execution_fixture(tool_name, success_outcomes(), Vec::new()).await?;
+    let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
     let prepared = prepare_capability_run(
         &fixture,
         "input-resume",
@@ -457,7 +617,7 @@ async fn input_resume_preserves_attempt_and_history_service_e2e() -> Result<()> 
     let resumed = load_task(&run).await?;
     assert_eq!(resumed.attempt, 1);
     assert_eq!(resumed.generation, 2);
-    assert_eq!(resumed.status, ExecutionTaskStatus::Pending);
+    assert_eq!(resumed.status, ExecutionTaskStatus::Running);
     assert_eq!(resumed.resume_input_history, vec![input.clone()]);
     assert_eq!(resumed.generation_history.len(), 2);
 
@@ -475,7 +635,32 @@ async fn input_resume_preserves_attempt_and_history_service_e2e() -> Result<()> 
     assert_eq!(after_replay.resume_input_history, vec![input]);
     assert_eq!(after_replay.generation_history, resumed.generation_history);
     assert_eq!(after_replay.outcome_audit, resumed.outcome_audit);
-    assert!(fixture_capability(&fixture)?.calls().is_empty());
+    let controller = fixture_capability(&fixture)?;
+    assert!(controller.calls().is_empty());
+
+    let client = fixture.client.clone();
+    let task_path = format!("/ExecutionTask/{}/run", run.task_id);
+    let task_request = ExecutionTaskWorkflowRequest {
+        run_uid: run.run_uid,
+        task_id: run.task_id,
+        generation: 2,
+        tenant_id: run.tenant_id,
+        contact_id: None,
+        session_id: run.session_id,
+    };
+    let driver = tokio::spawn(async move { client.post_void(&task_path, &task_request).await });
+    let calls = controller.wait_for_calls(1, SERVICE_TIMEOUT).await?;
+    assert_eq!(calls.len(), 1);
+    controller.release(1);
+    tokio::time::timeout(SERVICE_TIMEOUT, driver)
+        .await
+        .context("resumed execution task did not finish")???;
+    assert_eq!(
+        load_task(&run).await?.status,
+        ExecutionTaskStatus::Completed
+    );
+    assert_eq!(controller.calls().len(), 1);
+    assert_eq!(controller.transport_attempts().len(), 1);
     Ok(())
 }
 
@@ -489,6 +674,8 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
         .await
         .context("connect to action-review fixture Postgres")?;
     let controller = fixture_capability(&fixture)?;
+    let reaper =
+        ActionReviewReaper::with_restate_ingress(pool.clone(), fixture.ingress_url.clone());
 
     let cleared = prepare_capability_run(
         &fixture,
@@ -524,7 +711,13 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
     tokio::time::timeout(SERVICE_TIMEOUT, clear)
         .await
         .context("cleared action-review decision timed out")???;
-    let cleared_terminal = await_execution_terminal(&fixture.client, &cleared_run.request).await?;
+    assert_eq!(
+        reaper.dispatch_execution_review_resolutions().await?,
+        1,
+        "the cleared review resolution must be dispatched through the production outbox"
+    );
+    let cleared_terminal =
+        await_review_terminal("cleared", &fixture, &cleared_run, Duration::from_secs(15)).await?;
     assert_terminal(
         &cleared_terminal,
         ExecutionRunStatus::Completed,
@@ -560,10 +753,16 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
             },
         )
         .await?;
-    let denied_terminal = await_execution_terminal(&fixture.client, &denied_run.request).await?;
+    assert_eq!(
+        reaper.dispatch_execution_review_resolutions().await?,
+        1,
+        "the denied review resolution must be dispatched through the production outbox"
+    );
+    let denied_terminal =
+        await_review_terminal("denied", &fixture, &denied_run, Duration::from_secs(15)).await?;
     assert_terminal(
         &denied_terminal,
-        ExecutionRunStatus::Failed,
+        ExecutionRunStatus::Blocked,
         ExecutionTerminalCause::TaskFailure {
             class: ExecutionFailureClass::AuthorizationDenied,
         },
@@ -594,8 +793,32 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
     .execute(&pool)
     .await
     .context("expire execution action review deterministically")?;
-    let timed_out_terminal =
-        await_execution_terminal(&fixture.client, &timed_out_run.request).await?;
+    assert_eq!(
+        reaper.sweep().await?,
+        1,
+        "the production timeout sweep must claim the exact expired review"
+    );
+    let timeout_delivery: (i32, Option<chrono::DateTime<chrono::Utc>>, Option<String>) =
+        sqlx::query_as(
+            "SELECT attempt_count, delivered_at, last_error \
+             FROM moa.execution_action_review_outbox WHERE review_uid = $1",
+        )
+        .bind(timed_out_review.id)
+        .fetch_one(&pool)
+        .await?;
+    assert!(
+        timeout_delivery.1.is_some(),
+        "timeout resolution was not delivered: attempts={}, last_error={:?}",
+        timeout_delivery.0,
+        timeout_delivery.2
+    );
+    let timed_out_terminal = await_review_terminal(
+        "timed-out",
+        &fixture,
+        &timed_out_run,
+        Duration::from_secs(15),
+    )
+    .await?;
     assert_terminal(
         &timed_out_terminal,
         ExecutionRunStatus::Failed,
@@ -620,6 +843,11 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
     .execute(&pool)
     .await
     .context("requeue exact delivered action-review resolution")?;
+    assert_eq!(
+        reaper.dispatch_execution_review_resolutions().await?,
+        1,
+        "the exact requeued resolution must be claimed once"
+    );
     let replayed_outbox = await_outbox_delivered(&pool, cleared_review.id, 2).await?;
     assert_eq!(replayed_outbox.resolution_status, "completed");
     assert!(replayed_outbox.attempt_count >= 2);
@@ -633,7 +861,7 @@ async fn action_review_terminal_states_deliver_once_service_e2e() -> Result<()> 
 async fn stale_generation_is_audit_only_service_e2e() -> Result<()> {
     // Pins: a stale completion appends one rejected audit without changing projection or usage.
     let tool_name = "lifecycle_stale_probe";
-    let fixture = execution_fixture(tool_name, success_outcomes(), Vec::new()).await?;
+    let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
     let prepared = prepare_capability_run(
         &fixture,
         "stale-generation",
@@ -693,13 +921,29 @@ async fn stale_generation_is_audit_only_service_e2e() -> Result<()> {
         .last()
         .context("stale completion omitted its audit record")?;
     assert_eq!(stale_audit.get("accepted"), Some(&json!(false)));
-    assert_eq!(stale_audit.get("generation"), Some(&json!(1)));
+    assert_eq!(stale_audit.get("received_generation"), Some(&json!(1)));
+    assert_eq!(stale_audit.get("received_attempt"), Some(&json!(1)));
     assert_eq!(
         stale_audit.get("rejection"),
         Some(&json!("stale_generation"))
     );
     assert_eq!(load_run(&run).await?, run_before);
-    assert!(fixture_capability(&fixture)?.calls().is_empty());
+    let controller = fixture_capability(&fixture)?;
+    assert!(controller.calls().is_empty());
+    assert_repository_execution_eval_case(
+        &fixture,
+        &run.repository,
+        run.scope,
+        &run.request,
+        "stale-generation-write-is-fenced",
+        &[
+            ExecutionInvariantSpecV1::BudgetWithinApproved,
+            ExecutionInvariantSpecV1::ProgressMatchesTasks,
+            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+        ],
+    )
+    .await?;
     Ok(())
 }
 
@@ -708,7 +952,7 @@ async fn stale_generation_is_audit_only_service_e2e() -> Result<()> {
 async fn duplicate_completion_does_not_double_account_service_e2e() -> Result<()> {
     // Pins: exact task completion replay is byte-identical and consumes one logical task once.
     let tool_name = "lifecycle_duplicate_probe";
-    let fixture = execution_fixture(tool_name, success_outcomes(), Vec::new()).await?;
+    let fixture = direct_execution_fixture(tool_name, success_outcomes()).await?;
     let prepared = prepare_capability_run(
         &fixture,
         "duplicate-completion",
@@ -769,7 +1013,25 @@ async fn duplicate_completion_does_not_double_account_service_e2e() -> Result<()
     assert_eq!(terminal.run.budget_ledger.consumed.tasks, 2);
     assert_eq!(terminal.run.budget_ledger.consumed.tool_calls, 1);
     assert_eq!(terminal.run.completed_tasks, 2);
-    assert!(fixture_capability(&fixture)?.calls().is_empty());
+    let controller = fixture_capability(&fixture)?;
+    assert!(controller.calls().is_empty());
+    assert_repository_execution_eval_case(
+        &fixture,
+        &run.repository,
+        run.scope,
+        &run.request,
+        "duplicate-completion-is-idempotent",
+        &[
+            ExecutionInvariantSpecV1::TerminalStatusIn {
+                statuses: vec![ExecutionRunStatus::Completed],
+            },
+            ExecutionInvariantSpecV1::BudgetWithinApproved,
+            ExecutionInvariantSpecV1::ProgressMatchesTasks,
+            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+        ],
+    )
+    .await?;
     Ok(())
 }
 
@@ -823,6 +1085,21 @@ async fn execution_fixture(
             }],
             orchestrator_env,
         },
+    )
+    .await
+}
+
+async fn direct_execution_fixture(
+    tool_name: &str,
+    outcomes: Vec<FixtureCapabilityOutcome>,
+) -> Result<OrchestratorTestFixture> {
+    execution_fixture(
+        tool_name,
+        outcomes,
+        vec![(
+            "MOA_EXECUTION_TEST_SKIP_SESSION_DELIVERY".to_string(),
+            "true".to_string(),
+        )],
     )
     .await
 }
@@ -917,6 +1194,34 @@ async fn prepare_capability_run(
         },
         retry,
     })
+}
+
+fn recompile_with_node_output_schema(
+    mut prepared: PreparedCapabilityRun,
+    output_schema: Value,
+) -> Result<PreparedCapabilityRun> {
+    let objective = prepared.compiled.goal.objective.clone();
+    let outcome = compile(CompileExecutionRequest {
+        goal: lifecycle_goal(objective),
+        plan: lifecycle_plan_with_output_schema(
+            &prepared.capability,
+            prepared.retry.clone(),
+            output_schema,
+        ),
+        run_input: json!({}),
+        catalog: prepared.planning.snapshot.catalog.clone(),
+        authorization: prepared.planning.snapshot.authorization.clone(),
+        approved_budget: prepared.planning.snapshot.budget.clone(),
+        config: moa_core::config::ExecutionConfig::default(),
+        now: chrono::Utc::now(),
+    });
+    prepared.compiled = outcome.compiled.with_context(|| {
+        format!(
+            "compile lifecycle plan with strict node output schema: {:?}",
+            outcome.report.issues
+        )
+    })?;
+    Ok(prepared)
 }
 
 async fn start_service_run(
@@ -1055,10 +1360,18 @@ fn lifecycle_goal(objective: String) -> ExecutionGoalContract {
 }
 
 fn lifecycle_plan(capability: &ExecutionCapability, retry: RetryPolicy) -> ExecutionPlanDefinition {
+    lifecycle_plan_with_output_schema(capability, retry, capability.output_schema.clone())
+}
+
+fn lifecycle_plan_with_output_schema(
+    capability: &ExecutionCapability,
+    retry: RetryPolicy,
+    output_schema: Value,
+) -> ExecutionPlanDefinition {
     ExecutionPlanDefinition {
         schema_version: 1,
         input_schema: json!({"type": "object", "additionalProperties": false}),
-        output_schema: capability.output_schema.clone(),
+        output_schema: output_schema.clone(),
         nodes: vec![
             ExecutionNode {
                 id: CAPABILITY_NODE_ID.to_string(),
@@ -1066,7 +1379,7 @@ fn lifecycle_plan(capability: &ExecutionCapability, retry: RetryPolicy) -> Execu
                 depends_on: Vec::new(),
                 when: None,
                 input: json!({"case": "task-lifecycle"}),
-                output_schema: capability.output_schema.clone(),
+                output_schema: output_schema.clone(),
                 operation: ExecutionOperation::Capability {
                     reference: capability.reference.clone(),
                 },
@@ -1079,7 +1392,7 @@ fn lifecycle_plan(capability: &ExecutionCapability, retry: RetryPolicy) -> Execu
                 depends_on: vec![CAPABILITY_NODE_ID.to_string()],
                 when: None,
                 input: json!({}),
-                output_schema: capability.output_schema.clone(),
+                output_schema,
                 operation: ExecutionOperation::Output {
                     value: json!({"$ref": "$.nodes.capability.output"}),
                 },
@@ -1182,9 +1495,34 @@ async fn drive_run_workflow(
     fixture: &OrchestratorTestFixture,
     run: &RunningCapabilityRun,
 ) -> Result<ExecutionStatusResponse> {
-    tokio::time::timeout(
-        SERVICE_TIMEOUT,
-        fixture.client.post_void(
+    fixture
+        .client
+        .post_send(
+            &format!("/ExecutionTask/{}/run", run.task_id),
+            &ExecutionTaskWorkflowRequest {
+                run_uid: run.run_uid,
+                task_id: run.task_id,
+                generation: 1,
+                tenant_id: run.tenant_id,
+                contact_id: None,
+                session_id: run.session_id,
+            },
+        )
+        .await
+        .context("send deterministic root ExecutionTask workflow")?;
+    let deadline = Instant::now() + SERVICE_TIMEOUT;
+    loop {
+        if load_task(run).await?.status.is_terminal() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            bail!("direct execution task did not terminalize before run drive");
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    fixture
+        .client
+        .post_send(
             &format!("/ExecutionRun/{}/run", run.run_uid),
             &ExecutionRunWorkflowRequest {
                 run_uid: run.run_uid,
@@ -1192,10 +1530,9 @@ async fn drive_run_workflow(
                 contact_id: None,
                 session_id: run.session_id,
             },
-        ),
-    )
-    .await
-    .context("ExecutionRun workflow exceeded the bounded service timeout")??;
+        )
+        .await
+        .context("send deterministic ExecutionRun workflow")?;
     await_execution_terminal(&fixture.client, &run.request).await
 }
 
@@ -1211,6 +1548,29 @@ async fn load_task(run: &RunningCapabilityRun) -> Result<ExecutionTaskRecord> {
         .load_task(run.scope, run.run_uid, run.task_id)
         .await?
         .context("lifecycle task disappeared")
+}
+
+async fn await_review_terminal(
+    label: &str,
+    fixture: &OrchestratorTestFixture,
+    running: &RunningCapabilityRun,
+    timeout: Duration,
+) -> Result<ExecutionStatusResponse> {
+    match tokio::time::timeout(
+        timeout,
+        await_execution_terminal(&fixture.client, &running.request),
+    )
+    .await
+    {
+        Ok(terminal) => terminal,
+        Err(_) => {
+            let task = load_task(running).await?;
+            let run = load_run(running).await?;
+            bail!(
+                "{label} review did not terminalize within {timeout:?}; run={run:#?}; task={task:#?}"
+            );
+        }
+    }
 }
 
 fn fixture_capability(fixture: &OrchestratorTestFixture) -> Result<&FixtureCapabilityController> {

@@ -242,32 +242,57 @@ async fn execution_planning_second_invalid_amendment_stops_without_third_call() 
 }
 
 #[tokio::test]
-async fn execution_planning_respond_act_and_pinned_template_skip_provider() {
-    // Pins: deterministic non-Run routes and exact pinned templates do not call the planner.
-    let provider = ScriptedProvider::new(MockLlmProvider.capabilities());
-    for (objective, expected_mode) in [
+async fn execution_routing_respond_act_use_classifier_while_pinned_template_skips_planner() {
+    // Pins: ordinary routes use one strict classifier response while a pinned template remains a
+    // zero-planner-call deterministic admission path.
+    for (objective, label, reason, expected_mode) in [
         (
             "What is a DAG?",
+            moa_brain::execution_planning::ExecutionRouteClassifierLabelV1::Respond,
+            moa_core::types::execution_planning::ExecutionRouteReason::SimpleResponse,
             moa_core::types::execution_planning::ExecutionMode::Respond,
         ),
         (
             "Investigate the unusual failure and explain it",
+            moa_brain::execution_planning::ExecutionRouteClassifierLabelV1::Act,
+            moa_core::types::execution_planning::ExecutionRouteReason::BoundedInteractiveWork,
             moa_core::types::execution_planning::ExecutionMode::Act,
         ),
     ] {
+        let provider = ScriptedProvider::new(MockLlmProvider.capabilities()).push_text(
+            serde_json::to_string(
+                &moa_brain::execution_planning::ExecutionRouteClassifierOutputV1 {
+                    label,
+                    reason,
+                    confidence_bps: 9_500,
+                    missing_inputs: Vec::new(),
+                },
+            )
+            .expect("classifier fixture should serialize"),
+        );
+        let route_model = moa_core::types::identifiers::ModelId::new("route-model");
+        let routed = moa_brain::execution_planning::route_execution(
+            &provider,
+            moa_brain::execution_planning::ExecutionRoutingInput {
+                objective,
+                execution_template: None,
+                escalation: None,
+                attachment_count: 0,
+                has_recent_target: false,
+                route_model: &route_model,
+            },
+        )
+        .await
+        .expect("ordinary route should classify");
         assert!(matches!(
-            moa_brain::execution_planning::route_execution(
-                moa_brain::execution_planning::ExecutionRoutingInput {
-                    objective,
-                    execution_template: None,
-                    escalation: None,
-                }
-            ),
+            routed.decision,
             moa_core::types::execution_planning::ExecutionRouteDecision::Routed { mode, .. }
                 if mode == expected_mode
         ));
+        assert_eq!(provider.recorded_requests().len(), 1);
     }
 
+    let provider = ScriptedProvider::new(MockLlmProvider.capabilities());
     let objective = "Prepare the pinned durable report";
     let revision_uid = uuid::Uuid::new_v4();
     let skill_ref = "skill://durable-report"
@@ -638,6 +663,21 @@ fn assert_accepted_planner_report_matches_compile(
     audits.iter().for_each(|audit| {
         moa_core::types::execution_planning::validate_planning_audit_envelope(audit)
             .expect("amendment audits should satisfy the strict core envelope");
+        if let moa_core::types::execution_planning::ExecutionPlanningAuditPayloadV1::Compile {
+            source: moa_core::types::execution_planning::ExecutionCompileSource::Amendment,
+            operation_key,
+            run_uid: Some(run_uid),
+            plan_revision: Some(plan_revision),
+            candidate_hash,
+            ..
+        } = &audit.payload
+        {
+            assert_eq!(
+                operation_key,
+                &format!("run:{run_uid}:{plan_revision}:amendment:{candidate_hash}"),
+                "amendment compile identity must use the persisted compile candidate hash"
+            );
+        }
     });
 }
 

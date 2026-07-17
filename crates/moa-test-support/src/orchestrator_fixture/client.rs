@@ -151,6 +151,23 @@ impl TestApiClient {
         ensure_success(response).await
     }
 
+    /// Sends an authenticated fire-and-forget JSON invocation through Restate ingress.
+    pub async fn post_send<Req>(&self, path: &str, body: &Req) -> Result<()>
+    where
+        Req: serde::Serialize + ?Sized,
+    {
+        let response = self
+            .authed(
+                self.http
+                    .post(format!("{}/restate/send{path}", self.endpoint))
+                    .json(body),
+            )
+            .send()
+            .await
+            .context("send asynchronous orchestrator request")?;
+        ensure_success(response).await
+    }
+
     fn authed(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let Some(identity) = &self.identity else {
             return request;

@@ -1224,7 +1224,7 @@ struct ScenarioExpectations {
 impl ScenarioExpectations {
     fn to_budgets(&self) -> Budgets {
         Budgets {
-            task_completed: self.functional.task_completed,
+            response_produced_without_error: self.functional.response_produced_without_error,
             latency_p95_ms_max: self.budgets.latency_p95_ms_max,
             cost_cents_max: self.budgets.cost_cents_max,
             cache_input_cached_ratio_min: self.budgets.cache_input_cached_ratio_min,
@@ -1306,7 +1306,7 @@ impl ScenarioExpectations {
 
 #[derive(Debug, Deserialize)]
 struct FunctionalExpectations {
-    task_completed: bool,
+    response_produced_without_error: bool,
     facts_planted: Vec<String>,
 }
 

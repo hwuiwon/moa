@@ -1,5 +1,5 @@
 [functional]
-task_completed = true
+response_produced_without_error = true
 # The planted fact must still be present in the durable session log at the horizon.
 facts_planted = ["the staging deploy window is every Tuesday at 14:00 UTC"]
 

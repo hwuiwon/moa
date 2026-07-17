@@ -379,9 +379,17 @@ pub fn catalog_hash(
     )
 }
 
-/// Computes the canonical hash of exactly one execution-plan definition.
+/// Computes the canonical hash of one execution-plan DAG.
+///
+/// Node declaration order is not execution semantics, so hashes sort nodes by stable ID before
+/// canonical JSON encoding. This lets loop detection recognize an equivalent amended DAG even
+/// when remove/add operations changed array position.
 pub fn plan_hash(plan: &ExecutionPlanDefinition) -> Result<ExecutionHash> {
-    hash_serializable(PLAN_HASH_DOMAIN, plan)
+    let mut canonical = plan.clone();
+    canonical
+        .nodes
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    hash_serializable(PLAN_HASH_DOMAIN, &canonical)
 }
 
 /// Computes the canonical hash of exactly one plan amendment.

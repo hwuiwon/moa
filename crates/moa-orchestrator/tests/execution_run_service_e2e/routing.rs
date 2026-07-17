@@ -19,9 +19,10 @@ use moa_core::types::execution_planning::{
 };
 use moa_core::types::session::SessionStatus;
 use moa_core::wire::turn::TurnOutcomeKind;
+use moa_eval::execution::ExecutionInvariantSpecV1;
 use moa_execution::{
     repository::{ExecutionRepository, ExecutionScope},
-    state::ExecutionTaskStatus,
+    state::{ExecutionRunStatus, ExecutionTaskStatus},
 };
 use moa_test_support::{
     FixtureCapabilityOptions, FixtureCapabilityOutcome, FixtureCapabilityTool,
@@ -29,6 +30,7 @@ use moa_test_support::{
 };
 use serde_json::{Value, json};
 
+use crate::evaluation::{assert_execution_eval_case, assert_non_run_eval};
 use crate::execution_execution_support::assertions::{
     JournalRequestRole, assert_completed_terminal, assert_generated_plan_audits,
     assert_initial_route, assert_no_execution_lifecycle_events, assert_no_planner_or_compile,
@@ -38,8 +40,8 @@ use crate::execution_execution_support::assertions::{
 use crate::execution_execution_support::fixtures::{
     SERVICE_TIMEOUT, await_active_execution_progress, await_execution_terminal,
     await_run_started_event, await_session_settled, await_turn_outcome, execution_run_request,
-    list_execution_tasks, publish_skill, raw_events, seed_allow_policy, start_turn,
-    start_turn_in_session,
+    list_execution_tasks, publish_skill, raw_events, route_classifier_completion,
+    seed_allow_policy, start_turn, start_turn_in_session,
 };
 
 const RESPOND_OBJECTIVE: &str = "What is a DAG?";
@@ -64,7 +66,13 @@ const PLANNER_MATCH: &str = "<frozen_planning_context>";
 async fn respond_simple_question_uses_no_tools_planner_or_run_service_e2e() -> Result<()> {
     // Pins: a deterministic Respond route performs one no-tools model call and admits no run.
     let fixture = OrchestratorTestFixture::with_execution_fixture(
-        json!({"default": text_completion(RESPOND_FINAL)}),
+        json!({
+            "default": text_completion(RESPOND_FINAL),
+            "keyed": [route_classifier_completion(
+                ExecutionMode::Respond,
+                ExecutionRouteReason::SimpleResponse,
+            )]
+        }),
         FixtureCapabilityOptions::default(),
     )
     .await?;
@@ -96,12 +104,28 @@ async fn respond_simple_question_uses_no_tools_planner_or_run_service_e2e() -> R
         0
     );
     assert_no_execution_lifecycle_events(&events);
+    assert_non_run_eval(
+        &audits,
+        &events,
+        ExecutionMode::Respond,
+        ExecutionRouteReason::SimpleResponse,
+    );
     assert_eq!(final_brain_response(&events)?, RESPOND_FINAL);
 
     let requests = journal_requests(fixture.scripted_requests()?)?;
-    assert_eq!(journal_roles(&requests), vec![JournalRequestRole::Normal]);
-    assert!(requests[0].tools.is_empty());
-    assert!(requests[0].response_format.is_none());
+    assert_eq!(
+        journal_roles(&requests),
+        vec![JournalRequestRole::Normal, JournalRequestRole::Normal]
+    );
+    assert_eq!(
+        requests[0]
+            .response_format
+            .as_ref()
+            .map(|format| format.name.as_str()),
+        Some("execution_route_classifier_v1")
+    );
+    assert!(requests.iter().all(|request| request.tools.is_empty()));
+    assert!(requests[1].response_format.is_none());
     Ok(())
 }
 
@@ -113,6 +137,10 @@ async fn act_executes_bounded_tool_loop_without_run_service_e2e() -> Result<()> 
         json!({
             "default": text_completion("unexpected scripted fallback"),
             "keyed": [
+                route_classifier_completion(
+                    ExecutionMode::Act,
+                    ExecutionRouteReason::BoundedInteractiveWork,
+                ),
                 keyed_completion(ACT_TOOL_RESULT, text_completion(ACT_FINAL)),
                 keyed_completion(
                     ACT_OBJECTIVE,
@@ -203,15 +231,32 @@ async fn act_executes_bounded_tool_loop_without_run_service_e2e() -> Result<()> 
             if tool_name == ACT_TOOL_NAME && input == &json!({"query": "unusual failure"})
     )));
     assert_no_execution_lifecycle_events(&events);
+    assert_non_run_eval(
+        &audits,
+        &events,
+        ExecutionMode::Act,
+        ExecutionRouteReason::BoundedInteractiveWork,
+    );
     assert_eq!(final_brain_response(&events)?, ACT_FINAL);
 
     let requests = journal_requests(fixture.scripted_requests()?)?;
     assert_eq!(
         journal_roles(&requests),
-        vec![JournalRequestRole::Normal, JournalRequestRole::Normal]
+        vec![
+            JournalRequestRole::Normal,
+            JournalRequestRole::Normal,
+            JournalRequestRole::Normal,
+        ]
+    );
+    assert_eq!(
+        requests[0]
+            .response_format
+            .as_ref()
+            .map(|format| format.name.as_str()),
+        Some("execution_route_classifier_v1")
     );
     assert!(
-        requests
+        requests[1..]
             .iter()
             .all(|request| request.response_format.is_none())
     );
@@ -289,7 +334,7 @@ async fn published_skill_template_starts_without_plan_generation_service_e2e() -
         &published.skill_ref,
         published.revision_uid,
     )?;
-    let tasks = list_execution_tasks(test.client(), run_request).await?;
+    let tasks = list_execution_tasks(test.client(), run_request.clone()).await?;
     assert!(tasks.next_cursor.is_none());
     assert_eq!(tasks.tasks.len(), 1);
     assert_eq!(tasks.tasks[0].node_id, "output");
@@ -347,6 +392,10 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
         json!({
             "default": text_completion("unexpected scripted fallback"),
             "keyed": [
+                route_classifier_completion(
+                    ExecutionMode::Run,
+                    ExecutionRouteReason::ExplicitRun,
+                ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion(RESEARCH_FINAL)),
                 keyed_completion(
                     RESEARCH_AGENT_SENTINEL,
@@ -388,7 +437,7 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
     );
     assert_eq!(terminal.run.total_tasks, 2);
     assert_eq!(terminal.run.completed_tasks, 2);
-    let tasks = list_execution_tasks(test.client(), run_request).await?;
+    let tasks = list_execution_tasks(test.client(), run_request.clone()).await?;
     assert_eq!(tasks.tasks.len(), 2);
     assert_eq!(
         tasks
@@ -416,11 +465,32 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
     assert_generated_plan_audits(&audits);
     assert_eq!(final_brain_response(&events)?, RESEARCH_FINAL);
     assert_generated_execution_event_order(&events);
+    assert_execution_eval_case(
+        &fixture,
+        test.client(),
+        &run_request,
+        None,
+        "generated-run-executes-and-synthesizes",
+        &[
+            ExecutionInvariantSpecV1::TerminalStatusIn {
+                statuses: vec![ExecutionRunStatus::Completed],
+            },
+            ExecutionInvariantSpecV1::TaskCount {
+                node_id: "research".to_string(),
+                exact: 1,
+            },
+            ExecutionInvariantSpecV1::BudgetWithinApproved,
+            ExecutionInvariantSpecV1::ProgressMatchesTasks,
+            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+        ],
+    )
+    .await?;
 
     let requests = journal_requests(fixture.scripted_requests()?)?;
     assert_eq!(
         journal_roles(&requests),
         vec![
+            JournalRequestRole::Normal,
             JournalRequestRole::InitialPlanner,
             JournalRequestRole::AgentTask,
             JournalRequestRole::Synthesis,
@@ -428,7 +498,7 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
     );
     assert!(requests[0].tools.is_empty());
     assert_eq!(
-        requests[0]
+        requests[1]
             .response_format
             .as_ref()
             .map(|format| format.name.as_str()),
@@ -453,6 +523,10 @@ async fn instruction_only_skill_is_available_inside_agent_task_service_e2e() -> 
         json!({
             "default": text_completion("unexpected scripted fallback"),
             "keyed": [
+                route_classifier_completion(
+                    ExecutionMode::Run,
+                    ExecutionRouteReason::ExplicitRun,
+                ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion(INSTRUCTION_FINAL)),
                 keyed_completion(
                     INSTRUCTION_SKILL_SENTINEL,
@@ -521,6 +595,7 @@ async fn instruction_only_skill_is_available_inside_agent_task_service_e2e() -> 
     assert_eq!(
         journal_roles(&requests),
         vec![
+            JournalRequestRole::Normal,
             JournalRequestRole::InitialPlanner,
             JournalRequestRole::AgentTask,
             JournalRequestRole::Synthesis,

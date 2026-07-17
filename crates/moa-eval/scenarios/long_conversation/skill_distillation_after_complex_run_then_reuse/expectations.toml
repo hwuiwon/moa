@@ -1,5 +1,5 @@
 [functional]
-task_completed = true
+response_produced_without_error = true
 facts_planted = [
   "phase_1_completes_with_at_least_5_tool_calls",
   "distillation_emits_new_skill_event_in_phase_1_postlude",

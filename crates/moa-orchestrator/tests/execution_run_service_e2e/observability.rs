@@ -22,6 +22,9 @@ use serde_json::json;
 use crate::execution_execution_support::fixtures::{
     SERVICE_TIMEOUT, await_execution_terminal, list_execution_tasks,
 };
+use crate::execution_execution_support::{
+    assertions::planning_audits, evaluation::collect_execution_eval_snapshot, fixtures::raw_events,
+};
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
@@ -186,6 +189,68 @@ async fn execution_observability_exports_stable_identity_and_replay_safe_service
         .await?
         .context("observable execution task should remain persisted")?;
     assert_eq!(persisted_task.node_id, listed_task.node_id);
+
+    let eval_snapshot = collect_execution_eval_snapshot(
+        &repository,
+        scope,
+        &fixture.postgres_url,
+        test.client(),
+        &run_request,
+        None,
+    )
+    .await?;
+    assert_eq!(eval_snapshot.run.run_uid, persisted_run.run_uid);
+    assert_eq!(eval_snapshot.run.status, persisted_run.status);
+    assert_eq!(eval_snapshot.run.terminal_output, persisted_run.output);
+    assert_eq!(eval_snapshot.run.terminal_gaps, persisted_run.terminal_gaps);
+    assert_eq!(
+        eval_snapshot.run.budget_ledger.limit,
+        persisted_run.approved_budget
+    );
+    assert_eq!(
+        eval_snapshot.run.budget_ledger.reserved,
+        persisted_run.reserved
+    );
+    assert_eq!(
+        eval_snapshot.run.budget_ledger.consumed,
+        persisted_run.consumed
+    );
+    assert_eq!(eval_snapshot.run.progress.total_tasks, 1);
+    assert_eq!(eval_snapshot.run.progress.completed_tasks, 1);
+    assert_eq!(eval_snapshot.tasks.len(), 1);
+    assert_eq!(eval_snapshot.tasks[0].task_id, persisted_task.task_id);
+    assert_eq!(eval_snapshot.tasks[0].status, persisted_task.status);
+    assert_eq!(
+        eval_snapshot.planning_audits.len(),
+        planning_audits(&fixture.postgres_url, session_id)
+            .await?
+            .len()
+    );
+    let events = raw_events(test.client(), session_id).await?;
+    assert_eq!(
+        eval_snapshot.harness.session_events.run_started,
+        events
+            .iter()
+            .filter(|record| matches!(record.event, Event::ExecutionRunStarted(_)))
+            .count() as u64
+    );
+    assert_eq!(
+        eval_snapshot.harness.session_events.progress,
+        events
+            .iter()
+            .filter(|record| matches!(record.event, Event::ExecutionProgress(_)))
+            .count() as u64
+    );
+    assert_eq!(eval_snapshot.harness.session_events.terminal, 1);
+    assert_eq!(eval_snapshot.harness.session_events.raw_task_output, 0);
+    let serialized = serde_json::to_value(&eval_snapshot)?;
+    let task = serialized["tasks"][0]
+        .as_object()
+        .context("serialized eval task must be an object")?;
+    assert!(!task.contains_key("input"));
+    assert!(!task.contains_key("output"));
+    assert!(!task.contains_key("error"));
+    assert!(!task.contains_key("citations"));
 
     let run_uid = persisted_run.run_uid.to_string();
     let task_id = persisted_task.task_id.to_string();

@@ -59,7 +59,7 @@ pub enum ExecutionRouteReason {
     ActEscalation,
 }
 
-/// Deterministic execution-routing outcome, including preflight clarification.
+/// Final execution-routing outcome, including preflight clarification.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionRouteDecision {
@@ -67,6 +67,8 @@ pub enum ExecutionRouteDecision {
     NeedsInput {
         /// Stable reason for the input request.
         reason: ExecutionRouteReason,
+        /// Bounded concrete inputs the caller must supply.
+        missing_inputs: Vec<String>,
     },
     /// The turn was assigned one execution mode.
     Routed {
@@ -75,6 +77,107 @@ pub enum ExecutionRouteDecision {
         /// Stable primary routing reason.
         reason: ExecutionRouteReason,
     },
+}
+
+/// Trusted or model-assisted source of one execution route.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionRouteSource {
+    /// One strict auxiliary-model classification.
+    Classifier,
+    /// Deterministic preflight for an empty objective.
+    BlankObjective,
+    /// Exact trusted execution-template invocation.
+    SelectedExecutionTemplate,
+    /// Validated typed escalation from an Act turn.
+    ActEscalation,
+}
+
+/// Closed outcome of the optional execution-route classifier call.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionRouteClassifierOutcome {
+    /// No classifier call was needed for a trusted route.
+    NotCalled,
+    /// A strict classifier response was accepted.
+    Accepted,
+    /// The provider rejected the request before a stream was available.
+    ProviderError,
+    /// The provider stream failed before a complete response was available.
+    StreamError,
+    /// The collected classifier response exceeded its byte cap.
+    Oversized,
+    /// The collected response did not match the strict response schema.
+    SchemaRejected,
+    /// The response label, reason, or missing-input fields were inconsistent.
+    InvalidDecision,
+    /// A risky classifier decision did not meet its confidence threshold.
+    LowConfidence,
+    /// Existing attachments or a recent target required bounded Act context.
+    ContextForcedAct,
+}
+
+/// Normalized token usage retained for one execution-route classifier call.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionRouteUsageV1 {
+    /// Uncached provider input tokens.
+    pub input_tokens_uncached: u64,
+    /// Provider input tokens used to populate a prompt cache.
+    pub input_tokens_cache_write: u64,
+    /// Provider input tokens served from a prompt cache.
+    pub input_tokens_cache_read: u64,
+    /// Provider output tokens.
+    pub output_tokens: u64,
+}
+
+impl ExecutionRouteUsageV1 {
+    /// Returns whether every normalized usage counter is zero.
+    #[must_use]
+    pub const fn is_zero(self) -> bool {
+        self.input_tokens_uncached == 0
+            && self.input_tokens_cache_write == 0
+            && self.input_tokens_cache_read == 0
+            && self.output_tokens == 0
+    }
+}
+
+/// Redacted provenance for one final execution-routing decision.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionRouteProvenanceV1 {
+    /// Trusted bypass or classifier source.
+    pub source: ExecutionRouteSource,
+    /// Closed outcome of the optional classifier call.
+    pub classifier_outcome: ExecutionRouteClassifierOutcome,
+    /// Requested or actual provider model for an attempted classifier call.
+    pub provider_model: Option<String>,
+    /// Stable classifier prompt version, when a classifier call was attempted.
+    pub prompt_version: Option<String>,
+    /// Domain-separated hash of the exact objective.
+    pub objective_hash: String,
+    /// Domain-separated hash of collected classifier text, when available.
+    pub response_hash: Option<String>,
+    /// Model-reported confidence in basis points, when strict parsing succeeded.
+    pub confidence_bps: Option<u16>,
+    /// Number of bounded missing-input entries returned to the caller.
+    pub missing_input_count: u8,
+    /// Normalized provider token usage.
+    pub usage: ExecutionRouteUsageV1,
+    /// Classifier cost in micro-US-dollars, computed at the provider-owning boundary.
+    pub cost_microusd: u64,
+    /// Measured classifier call duration.
+    pub duration_micros: u64,
+}
+
+/// Final execution route plus its redacted provenance.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionRoutingResultV1 {
+    /// Selected route or bounded clarification.
+    pub decision: ExecutionRouteDecision,
+    /// Redacted route provenance and optional classifier measurements.
+    pub provenance: ExecutionRouteProvenanceV1,
 }
 
 /// Bounded evidence gathered by an Act turn before escalation.
@@ -271,7 +374,7 @@ pub struct ExecutionPlanningAuditEnvelopeV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionPlanningAuditPayloadV1 {
-    /// One deterministic routing decision.
+    /// One trusted or model-assisted routing decision.
     Route {
         /// Initial or Act-escalation route stage.
         stage: ExecutionRouteStage,
@@ -281,6 +384,8 @@ pub enum ExecutionPlanningAuditPayloadV1 {
         mode: Option<ExecutionMode>,
         /// Stable primary route reason.
         reason: ExecutionRouteReason,
+        /// Redacted trusted-bypass or classifier provenance.
+        provenance: ExecutionRouteProvenanceV1,
         /// Durable acceptance timestamp.
         accepted_at: DateTime<Utc>,
     },
@@ -783,6 +888,7 @@ pub fn planning_audit_semantically_equal(
                 decision: left_decision,
                 mode: left_mode,
                 reason: left_reason,
+                provenance: left_provenance,
                 ..
             },
             ExecutionPlanningAuditPayloadV1::Route {
@@ -790,11 +896,13 @@ pub fn planning_audit_semantically_equal(
                 decision: right_decision,
                 mode: right_mode,
                 reason: right_reason,
+                provenance: right_provenance,
                 ..
             },
         ) => {
             (left_stage, left_decision, left_mode, left_reason)
                 == (right_stage, right_decision, right_mode, right_reason)
+                && route_provenance_semantically_equal(left_provenance, right_provenance)
         }
         (
             ExecutionPlanningAuditPayloadV1::PlannerCall {
@@ -915,9 +1023,11 @@ pub fn validate_planning_audit_envelope(
     }
     match &envelope.payload {
         ExecutionPlanningAuditPayloadV1::Route {
+            stage,
             decision,
             mode,
             reason,
+            provenance,
             ..
         } => {
             if !session_bound {
@@ -926,20 +1036,7 @@ pub fn validate_planning_audit_envelope(
                     message: "route records must be session-bound".to_string(),
                 });
             }
-            match (decision, mode, reason) {
-                (
-                    ExecutionRouteDecisionKind::NeedsInput,
-                    None,
-                    ExecutionRouteReason::PreflightInputMissing,
-                )
-                | (ExecutionRouteDecisionKind::Routed, Some(_), _) => {}
-                _ => {
-                    return Err(ExecutionPlanningContractError::InvalidField {
-                        field: "payload".to_string(),
-                        message: "route decision, mode, and reason are inconsistent".to_string(),
-                    });
-                }
-            }
+            validate_route_audit(*stage, *decision, *mode, *reason, provenance)?;
         }
         ExecutionPlanningAuditPayloadV1::PlannerCall {
             call_kind,
@@ -1113,6 +1210,18 @@ pub fn validate_planning_audit_envelope(
                 validate_hash("payload.final_plan_hash", hash)?;
             }
             ensure_nonempty_bytes("payload.operation_key", operation_key, 512)?;
+            if let (ExecutionCompileSource::Amendment, Some(run_uid), Some(plan_revision)) =
+                (source, run_uid, plan_revision)
+            {
+                let expected = format!("run:{run_uid}:{plan_revision}:amendment:{candidate_hash}");
+                if operation_key != &expected {
+                    return Err(ExecutionPlanningContractError::InvalidField {
+                        field: "payload.operation_key".to_string(),
+                        message: "amendment operation key must bind the run, revision, and compile candidate hash"
+                            .to_string(),
+                    });
+                }
+            }
             ensure_bytes(
                 "payload.validation_report",
                 validation_report,
@@ -1136,6 +1245,221 @@ pub fn validate_planning_audit_envelope(
             field: "envelope".to_string(),
             limit: EXECUTION_AUDIT_ENVELOPE_MAX_BYTES,
             observed: encoded.len(),
+        });
+    }
+    Ok(())
+}
+
+/// Returns whether two route-provenance records carry the same replay semantics.
+///
+/// Measured duration is deliberately excluded because replay can reproduce the
+/// same provider result through a different local timing path.
+#[must_use]
+pub fn route_provenance_semantically_equal(
+    left: &ExecutionRouteProvenanceV1,
+    right: &ExecutionRouteProvenanceV1,
+) -> bool {
+    left.source == right.source
+        && left.classifier_outcome == right.classifier_outcome
+        && left.provider_model == right.provider_model
+        && left.prompt_version == right.prompt_version
+        && left.objective_hash == right.objective_hash
+        && left.response_hash == right.response_hash
+        && left.confidence_bps == right.confidence_bps
+        && left.missing_input_count == right.missing_input_count
+        && left.usage == right.usage
+        && left.cost_microusd == right.cost_microusd
+}
+
+fn validate_route_audit(
+    stage: ExecutionRouteStage,
+    decision: ExecutionRouteDecisionKind,
+    mode: Option<ExecutionMode>,
+    reason: ExecutionRouteReason,
+    provenance: &ExecutionRouteProvenanceV1,
+) -> Result<(), ExecutionPlanningContractError> {
+    let route_matches_source = match provenance.source {
+        ExecutionRouteSource::Classifier => {
+            stage == ExecutionRouteStage::Initial
+                && matches!(
+                    (decision, mode, reason),
+                    (
+                        ExecutionRouteDecisionKind::NeedsInput,
+                        None,
+                        ExecutionRouteReason::PreflightInputMissing
+                    ) | (
+                        ExecutionRouteDecisionKind::Routed,
+                        Some(ExecutionMode::Respond),
+                        ExecutionRouteReason::SimpleResponse
+                    ) | (
+                        ExecutionRouteDecisionKind::Routed,
+                        Some(ExecutionMode::Act),
+                        ExecutionRouteReason::BoundedInteractiveWork
+                    ) | (
+                        ExecutionRouteDecisionKind::Routed,
+                        Some(ExecutionMode::Run),
+                        ExecutionRouteReason::ExplicitRun
+                            | ExecutionRouteReason::BulkCollection
+                            | ExecutionRouteReason::DurableOrResumable
+                            | ExecutionRouteReason::HighFanout
+                            | ExecutionRouteReason::ApprovalOrSignal
+                    )
+                )
+        }
+        ExecutionRouteSource::BlankObjective => {
+            matches!(
+                (stage, decision, mode, reason),
+                (
+                    ExecutionRouteStage::Initial,
+                    ExecutionRouteDecisionKind::NeedsInput,
+                    None,
+                    ExecutionRouteReason::PreflightInputMissing
+                )
+            )
+        }
+        ExecutionRouteSource::SelectedExecutionTemplate => {
+            matches!(
+                (stage, decision, mode, reason),
+                (
+                    ExecutionRouteStage::Initial,
+                    ExecutionRouteDecisionKind::Routed,
+                    Some(ExecutionMode::Run),
+                    ExecutionRouteReason::SelectedExecutionTemplate
+                )
+            )
+        }
+        ExecutionRouteSource::ActEscalation => {
+            matches!(
+                (stage, decision, mode, reason),
+                (
+                    ExecutionRouteStage::ActEscalation,
+                    ExecutionRouteDecisionKind::Routed,
+                    Some(ExecutionMode::Run),
+                    ExecutionRouteReason::ActEscalation
+                )
+            )
+        }
+    };
+    if !route_matches_source {
+        return Err(ExecutionPlanningContractError::InvalidField {
+            field: "payload".to_string(),
+            message: "route stage, decision, mode, reason, and source are inconsistent".to_string(),
+        });
+    }
+
+    validate_hash(
+        "payload.provenance.objective_hash",
+        &provenance.objective_hash,
+    )?;
+    if let Some(hash) = provenance.response_hash.as_deref() {
+        validate_hash("payload.provenance.response_hash", hash)?;
+    }
+    if provenance
+        .confidence_bps
+        .is_some_and(|value| value > 10_000)
+    {
+        return Err(ExecutionPlanningContractError::InvalidField {
+            field: "payload.provenance.confidence_bps".to_string(),
+            message: "must be within 0..=10000".to_string(),
+        });
+    }
+    let needs_input = decision == ExecutionRouteDecisionKind::NeedsInput;
+    if needs_input != (1..=8).contains(&provenance.missing_input_count) {
+        return Err(ExecutionPlanningContractError::InvalidField {
+            field: "payload.provenance.missing_input_count".to_string(),
+            message: "must contain 1..=8 only for needs-input decisions".to_string(),
+        });
+    }
+
+    if provenance.source != ExecutionRouteSource::Classifier {
+        if provenance.classifier_outcome != ExecutionRouteClassifierOutcome::NotCalled
+            || provenance.provider_model.is_some()
+            || provenance.prompt_version.is_some()
+            || provenance.response_hash.is_some()
+            || provenance.confidence_bps.is_some()
+            || !provenance.usage.is_zero()
+            || provenance.cost_microusd != 0
+            || provenance.duration_micros != 0
+        {
+            return Err(ExecutionPlanningContractError::InvalidField {
+                field: "payload.provenance".to_string(),
+                message: "trusted routes cannot carry classifier evidence".to_string(),
+            });
+        }
+        return Ok(());
+    }
+
+    if provenance.classifier_outcome == ExecutionRouteClassifierOutcome::NotCalled {
+        return Err(ExecutionPlanningContractError::InvalidField {
+            field: "payload.provenance.classifier_outcome".to_string(),
+            message: "classifier routes require an attempted-call outcome".to_string(),
+        });
+    }
+    let provider_model = provenance.provider_model.as_deref().ok_or_else(|| {
+        ExecutionPlanningContractError::InvalidField {
+            field: "payload.provenance.provider_model".to_string(),
+            message: "classifier routes require a provider model".to_string(),
+        }
+    })?;
+    let prompt_version = provenance.prompt_version.as_deref().ok_or_else(|| {
+        ExecutionPlanningContractError::InvalidField {
+            field: "payload.provenance.prompt_version".to_string(),
+            message: "classifier routes require a prompt version".to_string(),
+        }
+    })?;
+    ensure_nonempty_bytes("payload.provenance.provider_model", provider_model, 128)?;
+    ensure_nonempty_bytes("payload.provenance.prompt_version", prompt_version, 64)?;
+
+    let collected = matches!(
+        provenance.classifier_outcome,
+        ExecutionRouteClassifierOutcome::Accepted
+            | ExecutionRouteClassifierOutcome::Oversized
+            | ExecutionRouteClassifierOutcome::SchemaRejected
+            | ExecutionRouteClassifierOutcome::InvalidDecision
+            | ExecutionRouteClassifierOutcome::LowConfidence
+            | ExecutionRouteClassifierOutcome::ContextForcedAct
+    );
+    if collected != provenance.response_hash.is_some() {
+        return Err(ExecutionPlanningContractError::InvalidField {
+            field: "payload.provenance.response_hash".to_string(),
+            message: "response hash nullability does not match classifier outcome".to_string(),
+        });
+    }
+    if !collected && (!provenance.usage.is_zero() || provenance.cost_microusd != 0) {
+        return Err(ExecutionPlanningContractError::InvalidField {
+            field: "payload.provenance.usage".to_string(),
+            message: "calls without a collected response cannot carry usage or cost".to_string(),
+        });
+    }
+    let parsed = matches!(
+        provenance.classifier_outcome,
+        ExecutionRouteClassifierOutcome::Accepted
+            | ExecutionRouteClassifierOutcome::LowConfidence
+            | ExecutionRouteClassifierOutcome::ContextForcedAct
+    );
+    if parsed != provenance.confidence_bps.is_some()
+        || (provenance.classifier_outcome == ExecutionRouteClassifierOutcome::InvalidDecision
+            && provenance.confidence_bps.is_some())
+    {
+        return Err(ExecutionPlanningContractError::InvalidField {
+            field: "payload.provenance.confidence_bps".to_string(),
+            message: "confidence nullability does not match classifier outcome".to_string(),
+        });
+    }
+    if provenance.classifier_outcome != ExecutionRouteClassifierOutcome::Accepted
+        && !matches!(
+            (decision, mode, reason),
+            (
+                ExecutionRouteDecisionKind::Routed,
+                Some(ExecutionMode::Act),
+                ExecutionRouteReason::BoundedInteractiveWork
+            )
+        )
+    {
+        return Err(ExecutionPlanningContractError::InvalidField {
+            field: "payload.provenance.classifier_outcome".to_string(),
+            message: "non-accepted classifier outcomes must conservatively route to Act"
+                .to_string(),
         });
     }
     Ok(())
@@ -1287,6 +1611,22 @@ fn validate_canonical_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn accepted_classifier_provenance() -> ExecutionRouteProvenanceV1 {
+        ExecutionRouteProvenanceV1 {
+            source: ExecutionRouteSource::Classifier,
+            classifier_outcome: ExecutionRouteClassifierOutcome::Accepted,
+            provider_model: Some("route-model".to_string()),
+            prompt_version: Some("execution-router-v1".to_string()),
+            objective_hash: "a".repeat(64),
+            response_hash: Some("b".repeat(64)),
+            confidence_bps: Some(9_500),
+            missing_input_count: 0,
+            usage: ExecutionRouteUsageV1::default(),
+            cost_microusd: 0,
+            duration_micros: 1,
+        }
+    }
 
     fn planner_call_envelope(
         outcome: ExecutionPlannerOutcome,
@@ -1670,10 +2010,37 @@ mod tests {
             Err(ExecutionPlanningContractError::InvalidField { field, .. })
                 if field == "session_id"
         ));
+
+        let mut amendment = compile_envelope(ExecutionCompileSource::Amendment, true);
+        if let ExecutionPlanningAuditPayloadV1::Compile {
+            operation_key,
+            run_uid,
+            plan_revision,
+            candidate_hash,
+            ..
+        } = &mut amendment.payload
+        {
+            let uid = Uuid::from_u128(7);
+            *run_uid = Some(uid);
+            *plan_revision = Some(8);
+            *operation_key = format!("run:{uid}:8:amendment:{candidate_hash}");
+        }
+        assert_eq!(validate_planning_audit_envelope(&amendment), Ok(()));
+
+        if let ExecutionPlanningAuditPayloadV1::Compile { operation_key, .. } =
+            &mut amendment.payload
+        {
+            *operation_key = "run:wrong:8:amendment:hash".to_string();
+        }
+        assert!(matches!(
+            validate_planning_audit_envelope(&amendment),
+            Err(ExecutionPlanningContractError::InvalidField { field, .. })
+                if field == "payload.operation_key"
+        ));
     }
 
     #[test]
-    fn execution_planning_audit_semantic_replay_ignores_only_measurements() {
+    fn execution_route_and_planning_audit_semantic_replay_ignores_only_measurements() {
         // Pins: commit-before-result replay preserves the first timestamp and duration only.
         let tenant_id = TenantId::from(Uuid::nil());
         let mut first = ExecutionPlanningAuditEnvelopeV1 {
@@ -1687,12 +2054,16 @@ mod tests {
                 decision: ExecutionRouteDecisionKind::Routed,
                 mode: Some(ExecutionMode::Respond),
                 reason: ExecutionRouteReason::SimpleResponse,
+                provenance: accepted_classifier_provenance(),
                 accepted_at: Utc::now(),
             },
         };
         let mut replay = first.clone();
         if let ExecutionPlanningAuditPayloadV1::Route { accepted_at, .. } = &mut replay.payload {
             *accepted_at += chrono::Duration::seconds(1);
+        }
+        if let ExecutionPlanningAuditPayloadV1::Route { provenance, .. } = &mut replay.payload {
+            provenance.duration_micros += 1;
         }
         assert!(planning_audit_semantically_equal(&first, &replay));
         if let ExecutionPlanningAuditPayloadV1::Route { reason, .. } = &mut first.payload {
@@ -1790,6 +2161,7 @@ mod tests {
                 decision: ExecutionRouteDecisionKind::Routed,
                 mode: Some(ExecutionMode::Respond),
                 reason: ExecutionRouteReason::SimpleResponse,
+                provenance: accepted_classifier_provenance(),
                 accepted_at: Utc::now(),
             },
         };

@@ -1,5 +1,5 @@
 [functional]
-task_completed = true
+response_produced_without_error = true
 facts_planted = [
   "both_sessions_completed_successfully",
   "session_a_writes_at_least_3_memory_pages",

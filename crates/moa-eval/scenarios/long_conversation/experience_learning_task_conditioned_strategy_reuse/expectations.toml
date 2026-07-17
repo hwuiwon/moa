@@ -1,5 +1,5 @@
 [functional]
-task_completed = true
+response_produced_without_error = true
 facts_planted = [
   "phase_1_materializes_experience_record",
   "phase_1_proposes_learning_candidates",

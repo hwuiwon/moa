@@ -18,6 +18,8 @@ mod check_eval_budgets;
 mod compare_eval_reports;
 #[cfg(feature = "eval-tools")]
 mod compute_memory_quality_scores;
+#[cfg(feature = "eval-tools")]
+mod execution_eval;
 mod execution_trace_manifest;
 #[cfg(feature = "eval-tools")]
 mod fetch_memory_benchmark;
@@ -39,6 +41,7 @@ const EVAL_TOOL_COMMANDS: &[&str] = &[
     "calibrate-external-memory-judge",
     "compare-eval-reports",
     "compute-memory-quality-scores",
+    "execution-eval",
     "fetch-memory-benchmark",
     "generate-memory-eval-corpus",
     "record-memory-extractions",
@@ -92,6 +95,8 @@ fn main() -> Result<()> {
         Some("compare-eval-reports") => compare_eval_reports::run(args),
         #[cfg(feature = "eval-tools")]
         Some("compute-memory-quality-scores") => compute_memory_quality_scores::run(args),
+        #[cfg(feature = "eval-tools")]
+        Some("execution-eval") => execution_eval::run(args),
         #[cfg(feature = "eval-tools")]
         Some("fetch-memory-benchmark") => fetch_memory_benchmark::run(args),
         #[cfg(feature = "eval-tools")]

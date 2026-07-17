@@ -14,8 +14,10 @@ use moa_core::types::{
     execution_planning::{
         ExecutionAuditReportV1, ExecutionCompileOutcome, ExecutionCompileSource, ExecutionMode,
         ExecutionPlannerCallKind, ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1,
-        ExecutionPlanningAuditPayloadV1, ExecutionRouteDecisionKind, ExecutionRouteReason,
-        ExecutionRouteStage, ExecutionSourceProvenanceV1, canonical_json_bytes,
+        ExecutionPlanningAuditPayloadV1, ExecutionRouteClassifierOutcome,
+        ExecutionRouteDecisionKind, ExecutionRouteProvenanceV1, ExecutionRouteReason,
+        ExecutionRouteSource, ExecutionRouteStage, ExecutionRouteUsageV1,
+        ExecutionSourceProvenanceV1, canonical_json_bytes,
     },
     identifiers::{SessionId, TenantId, UserId},
 };
@@ -172,6 +174,24 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
             decision: ExecutionRouteDecisionKind::Routed,
             mode: Some(ExecutionMode::Run),
             reason: ExecutionRouteReason::ExplicitRun,
+            provenance: ExecutionRouteProvenanceV1 {
+                source: ExecutionRouteSource::Classifier,
+                classifier_outcome: ExecutionRouteClassifierOutcome::Accepted,
+                provider_model: Some("route-model".to_string()),
+                prompt_version: Some("execution-router-v1".to_string()),
+                objective_hash: "a".repeat(64),
+                response_hash: Some("b".repeat(64)),
+                confidence_bps: Some(9_500),
+                missing_input_count: 0,
+                usage: ExecutionRouteUsageV1 {
+                    input_tokens_uncached: 11,
+                    input_tokens_cache_write: 2,
+                    input_tokens_cache_read: 3,
+                    output_tokens: 5,
+                },
+                cost_microusd: 7,
+                duration_micros: 9,
+            },
             accepted_at: first_at,
         },
     };
@@ -181,14 +201,19 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
         panic!("first route audit must apply");
     };
     let mut route_retry = route.clone();
-    let ExecutionPlanningAuditPayloadV1::Route { accepted_at, .. } = &mut route_retry.payload
+    let ExecutionPlanningAuditPayloadV1::Route {
+        accepted_at,
+        provenance,
+        ..
+    } = &mut route_retry.payload
     else {
         unreachable!("route fixture must remain a route");
     };
     *accepted_at += Duration::seconds(1);
+    provenance.duration_micros += 1;
     assert_eq!(
         repository.write_route_audit(scope, &route_retry).await?,
-        RouteAuditWriteOutcome::Replayed(route_evidence)
+        RouteAuditWriteOutcome::Replayed(route_evidence.clone())
     );
     let mut route_conflict = route;
     let ExecutionPlanningAuditPayloadV1::Route { reason, .. } = &mut route_conflict.payload else {
@@ -2415,12 +2440,34 @@ async fn exact_external_wait_outcome_replay_recovers_committed_handoff_db() -> T
     ));
 
     let replay = repository
-        .complete_external_wait(scope, run.run_uid, task.task_id, task.generation, outcome)
+        .complete_external_wait(
+            scope,
+            run.run_uid,
+            task.task_id,
+            task.generation,
+            outcome.clone(),
+        )
         .await?;
     assert!(
         matches!(replay, TaskOutcomeWrite::Replayed { .. }),
         "exact post-commit replay must recover the accepted handoff, got {replay:?}"
     );
+    let wrong_generation = repository
+        .record_task_outcome(
+            scope,
+            run.run_uid,
+            task.task_id,
+            task.generation + 1,
+            outcome,
+        )
+        .await?;
+    assert!(matches!(
+        wrong_generation,
+        TaskOutcomeWrite::Rejected {
+            reason: TaskOutcomeRejection::TerminalTask,
+            ..
+        }
+    ));
     Ok(())
 }
 
@@ -2972,6 +3019,34 @@ async fn stale_and_terminal_outcomes_are_audited_without_projection_mutation_db(
         vec![json!({"answer": "approved"})],
         "resume payload history is exact and append-only"
     );
+    assert_eq!(
+        repository
+            .resume_task_with_input(
+                scope,
+                run.run_uid,
+                task.task_id,
+                1,
+                json!({"answer": "approved"}),
+            )
+            .await?,
+        TransitionOutcome::AlreadyApplied(resumed.clone()),
+        "an exact accepted input redispatch must replay without advancing generation"
+    );
+    assert_eq!(
+        repository
+            .resume_task_with_input(
+                scope,
+                run.run_uid,
+                task.task_id,
+                1,
+                json!({"answer": "different"}),
+            )
+            .await?,
+        TransitionOutcome::Rejected(
+            moa_execution::repository::TransitionRejection::GenerationMismatch
+        ),
+        "a changed payload must retain the generation fence"
+    );
 
     let stale = repository
         .record_task_outcome(scope, run.run_uid, task.task_id, 1, completed(2))
@@ -3016,6 +3091,93 @@ async fn stale_and_terminal_outcomes_are_audited_without_projection_mutation_db(
     assert_eq!(run.consumed.tokens, 2);
     assert_eq!(run.consumed.tasks, 1);
     assert_eq!(run.progress_completed_tasks, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_outcomes_update_review_state_and_failure_accounting_exactly_db() -> TestResult {
+    // Pins: review completion resumes the run, other waits remain parked, and only failures increment the failure counter.
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let repository = ExecutionRepository::new(test_db.store().pool().clone());
+    let tenant_id = TenantId::new();
+    let scope = ExecutionScope::Tenant { tenant_id };
+    let cases = [
+        (
+            "review-completed",
+            ExecutionRunStatus::WaitingReview,
+            completed(1),
+            ExecutionRunStatus::Running,
+            ExecutionTaskStatus::Completed,
+            0,
+        ),
+        (
+            "input-failed",
+            ExecutionRunStatus::WaitingInput,
+            ExecutionTaskOutcome {
+                schema_version: 1,
+                usage: usage(1),
+                result: ExecutionTaskResult::Failed {
+                    class: moa_artifacts::execution_plan::ExecutionFailureClass::Terminal,
+                    message: "terminal failure".to_string(),
+                },
+            },
+            ExecutionRunStatus::WaitingInput,
+            ExecutionTaskStatus::Failed,
+            1,
+        ),
+    ];
+
+    for (key, waiting_status, outcome, expected_run_status, expected_task_status, failed_tasks) in
+        cases
+    {
+        let run = create_run(
+            &repository,
+            scope,
+            new_run(tenant_id, None, key, ExecutionRunStatus::Queued, budget(1)),
+        )
+        .await?;
+        assert!(matches!(
+            repository
+                .transition_run_wait(
+                    scope,
+                    run.run_uid,
+                    ExecutionRunStatus::Queued,
+                    ExecutionRunStatus::Running,
+                )
+                .await?,
+            TransitionOutcome::RunApplied(_)
+        ));
+        let task = logical_task(run.run_uid, "outcome", key, estimate(1));
+        repository
+            .materialize_tasks(scope, run.run_uid, 1, vec![task.clone()])
+            .await?;
+        reserve_and_start(&repository, scope, run.run_uid, task.task_id).await?;
+        assert!(matches!(
+            repository
+                .transition_run_wait(
+                    scope,
+                    run.run_uid,
+                    ExecutionRunStatus::Running,
+                    waiting_status,
+                )
+                .await?,
+            TransitionOutcome::RunApplied(_)
+        ));
+
+        let TaskOutcomeWrite::Applied {
+            run: persisted_run,
+            task: persisted_task,
+            ..
+        } = repository
+            .record_task_outcome(scope, run.run_uid, task.task_id, task.generation, outcome)
+            .await?
+        else {
+            panic!("{key} outcome must apply");
+        };
+        assert_eq!(persisted_run.status, expected_run_status, "{key}");
+        assert_eq!(persisted_task.status, expected_task_status, "{key}");
+        assert_eq!(persisted_run.progress_failed_tasks, failed_tasks, "{key}");
+    }
     Ok(())
 }
 

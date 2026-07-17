@@ -1,5 +1,5 @@
 [functional]
-task_completed = true
+response_produced_without_error = true
 facts_planted = [
   "compaction_event_emitted_at_least_once",
   "tokens_at_first_compaction_trigger_above_documented_threshold",

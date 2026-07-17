@@ -328,6 +328,9 @@ fn validate_projection(request: &ScheduleRequest) -> Result<()> {
             if task.node_id.starts_with("@check/") {
                 continue;
             }
+            if task.status == ExecutionTaskStatus::Cancelled {
+                continue;
+            }
             return Err(Error::InvalidProjection {
                 message: format!("task {} references an unknown plan node", task.task_id),
             });

@@ -10,6 +10,7 @@ use moa_artifacts::reference::ArtifactRef;
 use moa_core::events::Event;
 use moa_core::types::action_policy::{ActionPolicyEffect, ActionRuleScope};
 use moa_core::types::events_stream::{EventRange, EventRecord};
+use moa_core::types::execution_planning::{ExecutionMode, ExecutionRouteReason};
 use moa_core::types::execution_planning::{ExecutionRunStarted, ExecutionTemplateInvocation};
 use moa_core::types::identifiers::{SessionId, TenantId};
 use moa_core::types::session::SessionStatus;
@@ -26,13 +27,59 @@ use moa_execution::wire::{
 };
 use moa_orchestrator::services::action_policy::UpsertActionPolicyRuleRequest;
 use moa_test_support::{IsolatedTest, OrchestratorTestFixture, TestApiClient};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::time::Instant;
 
 /// Maximum wait for one local service scenario transition.
 pub(crate) const SERVICE_TIMEOUT: Duration = Duration::from_secs(90);
 /// Poll interval for local service state that has no push notification.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Stable system-prompt fragment used to target the pre-mode classifier request.
+pub(crate) const ROUTE_CLASSIFIER_MATCH: &str =
+    "You classify one user turn into MOA's execution mode.";
+
+/// Builds one strict scripted response for the production route classifier.
+pub(crate) fn route_classifier_completion(
+    mode: ExecutionMode,
+    reason: ExecutionRouteReason,
+) -> Value {
+    let label = match mode {
+        ExecutionMode::Respond => "respond",
+        ExecutionMode::Act => "act",
+        ExecutionMode::Run => "run",
+    };
+    json!({
+        "match": ROUTE_CLASSIFIER_MATCH,
+        "completion": {
+            "content": json!({
+                "label": label,
+                "reason": reason,
+                "confidence_bps": 10_000,
+                "missing_inputs": []
+            }).to_string(),
+            "tool_calls": []
+        }
+    })
+}
+
+/// Builds one strict scripted clarification response for the production route classifier.
+pub(crate) fn route_classifier_needs_input_completion(
+    reason: ExecutionRouteReason,
+    missing_inputs: &[&str],
+) -> Value {
+    json!({
+        "match": ROUTE_CLASSIFIER_MATCH,
+        "completion": {
+            "content": json!({
+                "label": "needs_input",
+                "reason": reason,
+                "confidence_bps": 10_000,
+                "missing_inputs": missing_inputs
+            }).to_string(),
+            "tool_calls": []
+        }
+    })
+}
 
 /// One newly created session and its immediately started root turn.
 pub(crate) struct StartedTurn {

@@ -1,0 +1,481 @@
+//! Budgeted repeated-run contracts for the sampled live execution-eval lane.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use moa_core::types::execution_planning::{
+    ExecutionMode, ExecutionRouteClassifierOutcome, ExecutionRouteProvenanceV1,
+    ExecutionRouteSource,
+};
+use moa_eval_core::{EvalError, Result};
+use moa_execution::state::ExecutionRunStatus;
+use serde::{Deserialize, Serialize};
+
+use crate::kernel::CostLedger;
+
+use super::{
+    report::{
+        ExecutionEvalCaseResultV1, ExecutionEvalLaneV1, ExecutionEvalProviderV1,
+        ExecutionEvalReportV1, ExecutionJudgeCalibrationStatusV1,
+    },
+    routing::ExecutionRoutingLabelV1,
+};
+
+/// Required number of logical cases in the initial live execution corpus.
+pub const EXECUTION_LIVE_CASE_COUNT: usize = 20;
+/// Required number of independent provider outcomes per live case.
+pub const EXECUTION_LIVE_REPETITIONS: u32 = 5;
+
+/// One strict live routing, planner, and task-quality case.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionTaskQualityCaseV1 {
+    /// Case schema version, fixed at `1`.
+    pub schema_version: u8,
+    /// Stable logical case identifier.
+    pub case_id: String,
+    /// Exact user objective sent to an independent session.
+    pub objective: String,
+    /// Human-adjudicated route required before planner/task scoring.
+    pub expected_route: ExecutionRoutingLabelV1,
+    /// Allowed durable terminal statuses; empty for non-Run cases.
+    pub allowed_terminal_statuses: Vec<ExecutionRunStatus>,
+    /// Inclusive minimum persisted logical-task count.
+    pub min_task_count: u64,
+    /// Inclusive maximum persisted logical-task count.
+    pub max_task_count: u64,
+    /// Human reference-plan task count used only for efficiency reporting.
+    pub reference_task_count: u64,
+    /// Optional recorded contract case whose gold expectations apply to the generated candidate.
+    pub contract_case_id: Option<String>,
+    /// Human-readable rubric reserved for a calibrated semantic judge.
+    pub final_message_rubric: String,
+    /// Provider-neutral input-token forecast per independent run.
+    pub estimated_input_tokens_per_run: u64,
+    /// Provider-neutral output-token forecast per independent run.
+    pub estimated_output_tokens_per_run: u64,
+    /// Fixed corpus seed retained in reports.
+    pub seed: u64,
+    /// Stable coverage labels.
+    pub tags: Vec<String>,
+}
+
+/// Provider-neutral forecast authorized before any live dispatch.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionLiveCostForecastV1 {
+    /// Number of logical corpus cases.
+    pub case_count: u64,
+    /// Number of independent runs per logical case.
+    pub repetitions: u32,
+    /// Total provider calls represented by the forecast.
+    pub run_count: u64,
+    /// Existing shared eval-cost ledger after all calls are forecast.
+    pub ledger: CostLedger,
+}
+
+/// One persisted independent live outcome ready for report aggregation.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionLiveRunOutcomeV1 {
+    /// Logical task-quality case identifier.
+    pub case_id: String,
+    /// One-based independent repetition number.
+    pub repetition: u32,
+    /// Observed final routing label, including NeedsInput.
+    pub observed_route: ExecutionRoutingLabelV1,
+    /// Common redacted execution-eval case result.
+    pub result: ExecutionEvalCaseResultV1,
+}
+
+/// Validates one task-quality case independently of corpus-level cardinality.
+pub(crate) fn validate_task_quality_case(case: &ExecutionTaskQualityCaseV1) -> Result<()> {
+    if case.schema_version != 1
+        || case.case_id.trim().is_empty()
+        || case.objective.trim().is_empty()
+        || case.final_message_rubric.trim().is_empty()
+        || case.tags.is_empty()
+        || case.estimated_input_tokens_per_run == 0
+        || case.estimated_output_tokens_per_run == 0
+        || case.min_task_count > case.max_task_count
+    {
+        return Err(invalid_config(format!(
+            "execution task-quality case `{}` has an invalid required field or task bound",
+            case.case_id
+        )));
+    }
+    if case
+        .allowed_terminal_statuses
+        .iter()
+        .enumerate()
+        .any(|(index, status)| case.allowed_terminal_statuses[..index].contains(status))
+    {
+        return Err(invalid_config(format!(
+            "execution task-quality case `{}` repeats a terminal status",
+            case.case_id
+        )));
+    }
+    match case.expected_route {
+        ExecutionRoutingLabelV1::Run => {
+            if case.allowed_terminal_statuses.is_empty()
+                || case.reference_task_count == 0
+                || case.max_task_count == 0
+            {
+                return Err(invalid_config(format!(
+                    "Run task-quality case `{}` requires statuses and positive task references",
+                    case.case_id
+                )));
+            }
+        }
+        ExecutionRoutingLabelV1::Respond
+        | ExecutionRoutingLabelV1::Act
+        | ExecutionRoutingLabelV1::NeedsInput => {
+            if !case.allowed_terminal_statuses.is_empty()
+                || case.min_task_count != 0
+                || case.max_task_count != 0
+                || case.reference_task_count != 0
+                || case.contract_case_id.is_some()
+            {
+                return Err(invalid_config(format!(
+                    "non-Run task-quality case `{}` cannot declare run-only expectations",
+                    case.case_id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validates the exact initial task-quality corpus and its required cohorts.
+pub(crate) fn validate_task_quality_corpus(cases: &[ExecutionTaskQualityCaseV1]) -> Result<()> {
+    if cases.len() != EXECUTION_LIVE_CASE_COUNT {
+        return Err(invalid_config(format!(
+            "execution task-quality corpus must contain exactly {EXECUTION_LIVE_CASE_COUNT} cases"
+        )));
+    }
+    let mut ids = BTreeSet::new();
+    let mut seeds = BTreeSet::new();
+    let mut tags = BTreeSet::new();
+    for case in cases {
+        validate_task_quality_case(case)?;
+        if !ids.insert(case.case_id.as_str()) || !seeds.insert(case.seed) {
+            return Err(invalid_config(
+                "execution task-quality case IDs and seeds must be unique".to_string(),
+            ));
+        }
+        tags.extend(case.tags.iter().map(String::as_str));
+    }
+    for required in [
+        "respond",
+        "near-boundary-act",
+        "durable-run",
+        "bulk-coverage",
+        "evidence-citations",
+        "exclusions",
+        "honest-partial",
+        "sp500-ai-five-year-screen",
+    ] {
+        if !tags.contains(required) {
+            return Err(invalid_config(format!(
+                "execution task-quality corpus is missing required `{required}` coverage"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Forecasts all repeated provider work and rejects over-budget runs before dispatch.
+pub fn forecast_live_execution_cost(
+    cases: &[ExecutionTaskQualityCaseV1],
+    repetitions: u32,
+    budget_usd: f64,
+) -> Result<ExecutionLiveCostForecastV1> {
+    validate_task_quality_corpus(cases)?;
+    if repetitions == 0 || !budget_usd.is_finite() || budget_usd <= 0.0 {
+        return Err(invalid_config(
+            "live execution repetitions and budget-usd must be positive and finite".to_string(),
+        ));
+    }
+    let repetitions_u64 = u64::from(repetitions);
+    let mut ledger = CostLedger::new(budget_usd);
+    for case in cases {
+        let input = case
+            .estimated_input_tokens_per_run
+            .checked_mul(repetitions_u64)
+            .ok_or_else(|| {
+                invalid_config("live input-token forecast overflowed u64".to_string())
+            })?;
+        let output = case
+            .estimated_output_tokens_per_run
+            .checked_mul(repetitions_u64)
+            .ok_or_else(|| {
+                invalid_config("live output-token forecast overflowed u64".to_string())
+            })?;
+        ledger.record_chat(input, output);
+    }
+    ledger.check_budget()?;
+    let case_count = u64::try_from(cases.len())
+        .map_err(|_| invalid_config("live case count exceeds u64".to_string()))?;
+    let run_count = case_count
+        .checked_mul(repetitions_u64)
+        .ok_or_else(|| invalid_config("live run count overflowed u64".to_string()))?;
+    Ok(ExecutionLiveCostForecastV1 {
+        case_count,
+        repetitions,
+        run_count,
+        ledger,
+    })
+}
+
+/// Aggregates exactly `k` independent outcomes per logical live case into one strict report.
+pub fn aggregate_live_execution_outcomes(
+    cases: &[ExecutionTaskQualityCaseV1],
+    outcomes: &[ExecutionLiveRunOutcomeV1],
+    repetitions: u32,
+    corpus_hashes: BTreeMap<String, String>,
+    calibration_status: ExecutionJudgeCalibrationStatusV1,
+    provider: ExecutionEvalProviderV1,
+) -> Result<ExecutionEvalReportV1> {
+    validate_task_quality_corpus(cases)?;
+    if repetitions != EXECUTION_LIVE_REPETITIONS {
+        return Err(invalid_config(format!(
+            "live execution aggregation requires exactly {EXECUTION_LIVE_REPETITIONS} repetitions"
+        )));
+    }
+    let expected_count = cases
+        .len()
+        .checked_mul(repetitions as usize)
+        .ok_or_else(|| invalid_config("live outcome count overflowed usize".to_string()))?;
+    if outcomes.len() != expected_count {
+        return Err(invalid_config(format!(
+            "live execution aggregation expected {expected_count} outcomes, got {}",
+            outcomes.len()
+        )));
+    }
+    let case_by_id = cases
+        .iter()
+        .map(|case| (case.case_id.as_str(), case))
+        .collect::<BTreeMap<_, _>>();
+    let mut identities = BTreeSet::new();
+    let mut report_cases = Vec::with_capacity(outcomes.len());
+    let mut all_pass_by_case = cases
+        .iter()
+        .map(|case| (case.case_id.as_str(), true))
+        .collect::<BTreeMap<_, _>>();
+    let mut routing_cost = 0_u64;
+    let mut routing_denominator = 0_u64;
+    let mut true_run = 0_u64;
+    let mut respond_on_run = 0_u64;
+    let mut near_boundary_act = 0_u64;
+    let mut near_boundary_act_correct = 0_u64;
+    let mut classifier_attempts = 0_u64;
+    let mut classifier_fallbacks = 0_u64;
+    let mut fallback_counts = BTreeMap::<String, u64>::new();
+    let mut classifier_tokens = 0_u64;
+    let mut classifier_cost = 0_u64;
+    let mut classifier_duration_micros = 0_u64;
+    let mut total_cost = 0_u64;
+    let mut successful = 0_u64;
+    let mut task_count = 0_u64;
+    let mut reference_task_count = 0_u64;
+
+    for outcome in outcomes {
+        let case = case_by_id.get(outcome.case_id.as_str()).ok_or_else(|| {
+            invalid_config(format!(
+                "live outcome references unknown case `{}`",
+                outcome.case_id
+            ))
+        })?;
+        if outcome.repetition == 0
+            || outcome.repetition > repetitions
+            || !identities.insert((outcome.case_id.as_str(), outcome.repetition))
+        {
+            return Err(invalid_config(format!(
+                "live outcome `{}` has an invalid or duplicate repetition {}",
+                outcome.case_id, outcome.repetition
+            )));
+        }
+        let expected_result_id = format!("{}#run={}", outcome.case_id, outcome.repetition);
+        if outcome.result.case_id != expected_result_id {
+            return Err(invalid_config(format!(
+                "live outcome case result must use identity `{expected_result_id}`"
+            )));
+        }
+        let observed_mode = label_mode(outcome.observed_route);
+        if outcome.result.observed_route != observed_mode {
+            return Err(invalid_config(format!(
+                "live outcome `{expected_result_id}` route label and common result disagree"
+            )));
+        }
+        let route_passed = outcome.observed_route == case.expected_route;
+        let status_passed = match case.expected_route {
+            ExecutionRoutingLabelV1::Run => outcome
+                .result
+                .observed_run_status
+                .is_some_and(|status| case.allowed_terminal_statuses.contains(&status)),
+            _ => outcome.result.observed_run_status.is_none(),
+        };
+        let task_passed = outcome.result.task_count >= case.min_task_count
+            && outcome.result.task_count <= case.max_task_count;
+        let structurally_passed = route_passed
+            && status_passed
+            && task_passed
+            && !outcome.result.execution_false_completion
+            && outcome.result.contract_omission != Some(true)
+            && outcome.result.invariants.iter().all(|result| result.passed);
+        if outcome.result.passed != structurally_passed {
+            return Err(invalid_config(format!(
+                "live outcome `{expected_result_id}` pass bit disagrees with structured expectations"
+            )));
+        }
+        if !outcome.result.passed
+            && let Some(all_pass) = all_pass_by_case.get_mut(outcome.case_id.as_str())
+        {
+            *all_pass = false;
+        }
+        successful = successful.saturating_add(u64::from(outcome.result.passed));
+        total_cost = total_cost
+            .checked_add(outcome.result.cost_microusd)
+            .ok_or_else(|| invalid_config("live cost aggregate overflowed u64".to_string()))?;
+        task_count = task_count
+            .checked_add(outcome.result.task_count)
+            .ok_or_else(|| invalid_config("live task aggregate overflowed u64".to_string()))?;
+        reference_task_count = reference_task_count
+            .checked_add(case.reference_task_count)
+            .ok_or_else(|| {
+                invalid_config("live reference-task aggregate overflowed u64".to_string())
+            })?;
+        if let Some(cost) = mode_cost(case.expected_route, outcome.observed_route) {
+            routing_cost = routing_cost
+                .checked_add(cost)
+                .ok_or_else(|| invalid_config("live routing cost overflowed u64".to_string()))?;
+            routing_denominator = routing_denominator.saturating_add(1);
+        }
+        if case.expected_route == ExecutionRoutingLabelV1::Run {
+            true_run = true_run.saturating_add(1);
+            respond_on_run = respond_on_run.saturating_add(u64::from(
+                outcome.observed_route == ExecutionRoutingLabelV1::Respond,
+            ));
+        }
+        if case.tags.iter().any(|tag| tag == "near-boundary-act") {
+            near_boundary_act = near_boundary_act.saturating_add(1);
+            near_boundary_act_correct = near_boundary_act_correct.saturating_add(u64::from(
+                outcome.observed_route == ExecutionRoutingLabelV1::Act,
+            ));
+        }
+        if let Some(provenance) = &outcome.result.route_provenance
+            && provenance.source == ExecutionRouteSource::Classifier
+        {
+            classifier_attempts = classifier_attempts.saturating_add(1);
+            classifier_tokens = classifier_tokens
+                .checked_add(route_token_total(provenance)?)
+                .ok_or_else(|| {
+                    invalid_config("live classifier token overflowed u64".to_string())
+                })?;
+            classifier_cost = classifier_cost
+                .checked_add(provenance.cost_microusd)
+                .ok_or_else(|| invalid_config("live classifier cost overflowed u64".to_string()))?;
+            classifier_duration_micros = classifier_duration_micros
+                .checked_add(provenance.duration_micros)
+                .ok_or_else(|| {
+                    invalid_config("live classifier duration overflowed u64".to_string())
+                })?;
+            if provenance.classifier_outcome != ExecutionRouteClassifierOutcome::Accepted {
+                classifier_fallbacks = classifier_fallbacks.saturating_add(1);
+                *fallback_counts
+                    .entry(classifier_outcome_label(provenance.classifier_outcome).to_string())
+                    .or_default() += 1;
+            }
+        }
+        report_cases.push(outcome.result.clone());
+    }
+
+    let seeds = cases.iter().map(|case| case.seed).collect::<Vec<_>>();
+    let mut report = ExecutionEvalReportV1::new(
+        ExecutionEvalLaneV1::NightlyLive,
+        corpus_hashes,
+        seeds,
+        repetitions,
+        calibration_status,
+        Some(provider),
+        report_cases,
+    )?;
+    let total = report.metrics.total_cases;
+    let pass_rate = ratio(successful, total).unwrap_or_default();
+    report.metrics.pass_at_1 = Some(pass_rate);
+    report.metrics.pass_all_k = ratio(
+        all_pass_by_case.values().filter(|passed| **passed).count() as u64,
+        cases.len() as u64,
+    );
+    report.metrics.pass_variance = Some(pass_rate * (1.0 - pass_rate));
+    report.metrics.cost_per_success_microusd = ratio(total_cost, successful);
+    report.metrics.task_count_ratio_vs_reference = ratio(task_count, reference_task_count);
+    report.metrics.weighted_routing_cost = ratio(routing_cost, routing_denominator);
+    report.metrics.respond_on_run_rate = ratio(respond_on_run, true_run);
+    report.metrics.near_boundary_act_recall = ratio(near_boundary_act_correct, near_boundary_act);
+    report.metrics.classifier_fallback_rate = ratio(classifier_fallbacks, classifier_attempts);
+    report.metrics.classifier_fallback_counts =
+        (!fallback_counts.is_empty()).then_some(fallback_counts);
+    report.metrics.classifier_tokens_per_routed_turn =
+        ratio(classifier_tokens, classifier_attempts);
+    report.metrics.classifier_cost_microusd_per_routed_turn =
+        ratio(classifier_cost, classifier_attempts);
+    report.metrics.classifier_latency_ms_per_routed_turn =
+        ratio(classifier_duration_micros, classifier_attempts).map(|value| value / 1_000.0);
+    report.validate()?;
+    Ok(report)
+}
+
+fn label_mode(label: ExecutionRoutingLabelV1) -> Option<ExecutionMode> {
+    match label {
+        ExecutionRoutingLabelV1::Respond => Some(ExecutionMode::Respond),
+        ExecutionRoutingLabelV1::Act => Some(ExecutionMode::Act),
+        ExecutionRoutingLabelV1::Run => Some(ExecutionMode::Run),
+        ExecutionRoutingLabelV1::NeedsInput => None,
+    }
+}
+
+fn mode_cost(expected: ExecutionRoutingLabelV1, observed: ExecutionRoutingLabelV1) -> Option<u64> {
+    use ExecutionRoutingLabelV1::{Act, Respond, Run};
+    Some(match (observed, expected) {
+        (Respond, Respond) | (Act, Act) | (Run, Run) => 0,
+        (Respond, Act) => 3,
+        (Respond, Run) => 50,
+        (Act, Respond) => 1,
+        (Act, Run) => 8,
+        (Run, Respond) => 6,
+        (Run, Act) => 4,
+        _ => return None,
+    })
+}
+
+fn route_token_total(provenance: &ExecutionRouteProvenanceV1) -> Result<u64> {
+    let usage = provenance.usage;
+    usage
+        .input_tokens_uncached
+        .checked_add(usage.input_tokens_cache_write)
+        .and_then(|value| value.checked_add(usage.input_tokens_cache_read))
+        .and_then(|value| value.checked_add(usage.output_tokens))
+        .ok_or_else(|| invalid_config("live route token total overflowed u64".to_string()))
+}
+
+const fn classifier_outcome_label(outcome: ExecutionRouteClassifierOutcome) -> &'static str {
+    match outcome {
+        ExecutionRouteClassifierOutcome::NotCalled => "not_called",
+        ExecutionRouteClassifierOutcome::Accepted => "accepted",
+        ExecutionRouteClassifierOutcome::ProviderError => "provider_error",
+        ExecutionRouteClassifierOutcome::StreamError => "stream_error",
+        ExecutionRouteClassifierOutcome::Oversized => "oversized",
+        ExecutionRouteClassifierOutcome::SchemaRejected => "schema_rejected",
+        ExecutionRouteClassifierOutcome::InvalidDecision => "invalid_decision",
+        ExecutionRouteClassifierOutcome::LowConfidence => "low_confidence",
+        ExecutionRouteClassifierOutcome::ContextForcedAct => "context_forced_act",
+    }
+}
+
+fn ratio(numerator: u64, denominator: u64) -> Option<f64> {
+    (denominator != 0).then_some(numerator as f64 / denominator as f64)
+}
+
+fn invalid_config(message: String) -> EvalError {
+    EvalError::InvalidConfig(message)
+}

@@ -2,7 +2,7 @@
 
 use super::*;
 
-const ORCHESTRATOR_FIXTURE_FEATURES: &str = "provider-overrides";
+const ORCHESTRATOR_FIXTURE_FEATURES: &str = "provider-overrides,integration";
 
 pub(super) async fn locate_orchestrator_binary(repo_root: &Path) -> Result<PathBuf> {
     if let Ok(path) = std::env::var("MOA_ORCHESTRATOR_BIN") {
@@ -63,7 +63,7 @@ pub(super) struct OrchestratorSpawnConfig<'a> {
     pub(super) admin_url: &'a str,
     pub(super) ingress_url: &'a str,
     pub(super) redis_url: &'a str,
-    pub(super) script_path: &'a Path,
+    pub(super) script_path: Option<&'a Path>,
     pub(super) journal_path: Option<&'a Path>,
     pub(super) fga_config: &'a FgaConfig,
     pub(super) extra_env: &'a [(String, String)],
@@ -99,7 +99,7 @@ impl OrchestratorRestartConfig {
             admin_url: &self.admin_url,
             ingress_url: &self.ingress_url,
             redis_url: &self.redis_url,
-            script_path: &self.script_path,
+            script_path: Some(&self.script_path),
             journal_path: Some(&self.journal_path),
             fga_config: &self.fga_config,
             extra_env: &self.extra_env,
@@ -143,6 +143,7 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
     let mut command = Command::new(config.binary);
     command
         .env_remove("MOA_MCP_SERVERS_JSON")
+        .env_remove("MOA_PROVIDERS_OVERRIDE")
         .env_remove("MOA_SCRIPTED_PROVIDER_REQUEST_LOG")
         .env_remove("MOA_OBSERVABILITY_ENABLED")
         .env_remove("MOA_OBSERVABILITY_SERVICE_NAME")
@@ -162,10 +163,7 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         .env("MOA_RESTATE_INGRESS_URL", config.ingress_url)
         .env("MOA_RUNTIME_CACHE_BACKEND", "redis")
         .env("MOA_RUNTIME_CACHE_REDIS_URL", config.redis_url)
-        .env(
-            "MOA_PROVIDERS_OVERRIDE",
-            format!("scripted:{}", config.script_path.display()),
-        )
+        .env("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true")
         .env("MOA_AUTHZ_OPENFGA_URL", &config.fga_config.url)
         .env(
             "MOA_AUTHZ_OPENFGA_PRESHARED_KEY",
@@ -175,6 +173,12 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         .env("MOA_AUTHZ_OPENFGA_MODEL_ID", &config.fga_config.model_id)
         .env("MOA_LINEAGE_SINK", "null")
         .env("RUST_LOG", "warn");
+    if let Some(script_path) = config.script_path {
+        command.env(
+            "MOA_PROVIDERS_OVERRIDE",
+            format!("scripted:{}", script_path.display()),
+        );
+    }
     if let Some(journal_path) = config.journal_path {
         command.env("MOA_SCRIPTED_PROVIDER_REQUEST_LOG", journal_path);
     }

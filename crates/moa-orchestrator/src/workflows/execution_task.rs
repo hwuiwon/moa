@@ -637,15 +637,21 @@ async fn execute_capability(
             .saturating_add(serialized_len(&output.structured));
     }
     let outcome = capability_invocation_outcome(capability.idempotency_class, invocation, usage)?;
+    let output_usage = outcome.usage.clone();
     let ExecutionTaskResult::Completed { output: value, .. } = &outcome.result else {
         return Ok(outcome);
     };
-    validate_instance(
+    if let Err(error) = validate_instance(
         &capability.output_schema,
         value,
         "execution_task.capability_output",
-    )
-    .map_err(execution_error)?;
+    ) {
+        return Ok(failed_outcome(
+            ExecutionFailureClass::InvalidOutput,
+            error.to_string(),
+            output_usage,
+        ));
+    }
     Ok(outcome)
 }
 

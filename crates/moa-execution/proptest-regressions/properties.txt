@@ -1,0 +1,3 @@
+# Seeds for execution compiler, scheduler, completion, and budget property regressions.
+# Proptest appends minimal failing cases here so they remain deterministic in future runs.
+cc 62d093f15da482eda2c68ab049f059ea292c21d4a9e04743f38098abb20e9a3e # shrinks to expected_count = 1, retained_seed = 0

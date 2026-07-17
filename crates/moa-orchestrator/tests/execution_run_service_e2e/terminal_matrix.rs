@@ -70,7 +70,8 @@ use crate::execution_execution_support::assertions::{
 };
 use crate::execution_execution_support::fixtures::{
     SERVICE_TIMEOUT, await_execution_terminal, await_session_settled, await_turn_outcome,
-    execution_run_request, raw_events, seed_allow_policy, start_turn, start_turn_in_session,
+    execution_run_request, raw_events, route_classifier_completion,
+    route_classifier_needs_input_completion, seed_allow_policy, start_turn, start_turn_in_session,
 };
 
 const PLANNER_MATCH: &str = "<frozen_planning_context>";
@@ -78,17 +79,25 @@ const AMENDMENT_MATCH: &str = "<frozen_amendment_context>";
 const SYNTHESIS_MATCH: &str = "Synthesize the final user response for execution run";
 const ESCALATION_OBJECTIVE: &str = "Investigate the unusual failure and explain it";
 const ESCALATION_TOOL: &str = "discover_fixture_execution_shape";
+const REPLAN_SEED_AGENT_SENTINEL: &str = "TERMINAL_MATRIX_REPLAN_SEED_AGENT_V1";
 const REPLAN_AGENT_SENTINEL: &str = "TERMINAL_MATRIX_REPLAN_AGENT_V1";
+const REPAIRED_AGENT_SENTINEL: &str = "TERMINAL_MATRIX_REPAIRED_AGENT_V1";
 const REQ_USEFUL: &str = "useful";
 const REQ_REMAINING: &str = "remaining";
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
 async fn no_run_needs_input_persists_strict_route_audit_service_e2e() -> Result<()> {
-    // Pins: unresolved preflight input records one typed NeedsInput route and
-    // performs no provider, planner, compiler, tool, or execution-run operation.
+    // Pins: the small classifier can request concrete missing input without
+    // invoking the planner, compiler, tools, or execution runtime.
     let fixture = OrchestratorTestFixture::with_execution_fixture(
-        json!({"default": text_completion("unexpected provider call")}),
+        json!({
+            "default": text_completion("unexpected provider call"),
+            "keyed": [route_classifier_needs_input_completion(
+                ExecutionRouteReason::PreflightInputMissing,
+                &["target"]
+            )]
+        }),
         FixtureCapabilityOptions::default(),
     )
     .await?;
@@ -125,7 +134,8 @@ async fn no_run_needs_input_persists_strict_route_audit_service_e2e() -> Result<
             .count(),
         0
     );
-    assert!(fixture.scripted_requests()?.is_empty());
+    let requests = fixture.scripted_requests()?;
+    assert_eq!(requests.len(), 1, "only the route classifier may run");
     Ok(())
 }
 
@@ -139,6 +149,10 @@ async fn act_escalation_persists_strict_route_and_compile_history_service_e2e() 
         json!({
             "default": text_completion("unexpected scripted fallback"),
             "keyed": [
+                route_classifier_completion(
+                    ExecutionMode::Act,
+                    ExecutionRouteReason::BoundedInteractiveWork
+                ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion("escalated run complete")),
                 keyed_completion(
                     PLANNER_MATCH,
@@ -236,6 +250,10 @@ async fn rejected_initial_candidate_and_sole_repair_persist_strict_audits_servic
                 text_completion(serde_json::to_string(&accepted)?)
             ],
             "keyed": [
+                route_classifier_completion(
+                    ExecutionMode::Run,
+                    ExecutionRouteReason::ExplicitRun
+                ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion("repair run complete"))
             ]
         }),
@@ -294,7 +312,11 @@ async fn oversized_initial_candidate_is_terminal_without_repair_service_e2e() ->
     let fixture = OrchestratorTestFixture::with_execution_fixture(
         json!({
             "default": text_completion("unexpected scripted fallback"),
-            "responses": [text_completion(oversized)]
+            "responses": [text_completion(oversized)],
+            "keyed": [route_classifier_completion(
+                ExecutionMode::Run,
+                ExecutionRouteReason::ExplicitRun
+            )]
         }),
         FixtureCapabilityOptions::default(),
     )
@@ -344,7 +366,7 @@ async fn oversized_initial_candidate_is_terminal_without_repair_service_e2e() ->
         planning_audits(&fixture.postgres_url, started.session_id).await?,
         audits
     );
-    assert_eq!(fixture.scripted_requests()?.len(), 1);
+    assert_eq!(fixture.scripted_requests()?.len(), 2);
     Ok(())
 }
 
@@ -360,6 +382,10 @@ async fn amendment_planning_persists_revision_fenced_strict_audits_service_e2e()
         json!({
             "default": text_completion("unexpected scripted fallback"),
             "keyed": [
+                route_classifier_completion(
+                    ExecutionMode::Run,
+                    ExecutionRouteReason::ExplicitRun
+                ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion("amended run complete")),
                 keyed_completion(
                     AMENDMENT_MATCH,
@@ -371,6 +397,14 @@ async fn amendment_planning_persists_revision_fenced_strict_audits_service_e2e()
                         reason: "the initial research shape is unsupported".to_string(),
                         evidence: json!({"shape": "unsupported"}),
                     })?)
+                ),
+                keyed_completion(
+                    REPLAN_SEED_AGENT_SENTINEL,
+                    text_completion(serde_json::to_string(&json!({"answer": "seed"}))?)
+                ),
+                keyed_completion(
+                    REPAIRED_AGENT_SENTINEL,
+                    text_completion(serde_json::to_string(&json!({"answer": "repaired"}))?)
                 ),
                 keyed_completion(
                     PLANNER_MATCH,
@@ -387,12 +421,35 @@ async fn amendment_planning_persists_revision_fenced_strict_audits_service_e2e()
     let TurnOutcomeKind::Accepted { execution_run_uid } = outcome.kind else {
         bail!("replan fixture did not admit a run: {outcome:?}");
     };
-    let status = await_execution_terminal(
-        test.client(),
-        &execution_run_request(&started, execution_run_uid),
+    let run_request = execution_run_request(&started, execution_run_uid);
+    let status = match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        await_execution_terminal(test.client(), &run_request),
     )
-    .await?;
-    assert_completed_terminal(&status, 1, 1);
+    .await
+    {
+        Ok(status) => status?,
+        Err(_) => {
+            let current: ExecutionStatusResponse = test
+                .client()
+                .post_call("/Execution/status", &run_request)
+                .await?;
+            let audits = planning_audits(&fixture.postgres_url, started.session_id).await?;
+            let requests = journal_requests(fixture.scripted_requests()?)?;
+            let response_formats = requests
+                .iter()
+                .filter_map(|request| request.response_format.as_ref())
+                .map(|format| format.name.as_str())
+                .collect::<Vec<_>>();
+            bail!(
+                "automatic amendment did not finish in 15s; status={current:#?}; audits={audits:#?}; response_formats={response_formats:?}"
+            );
+        }
+    };
+    if status.run.status != ExecutionRunStatus::Completed {
+        bail!("accepted amendment did not complete: {status:#?}");
+    }
+    assert_completed_terminal(&status, 2, 2);
     assert_eq!(
         await_session_settled(test.client(), started.session_id).await?,
         SessionStatus::Paused
@@ -418,6 +475,7 @@ async fn amendment_planning_persists_revision_fenced_strict_audits_service_e2e()
     assert_eq!(
         response_formats,
         vec![
+            "execution_route_classifier_v1",
             "generated_execution_candidate_v1",
             "generated_amendment_candidate_v1"
         ]
@@ -755,14 +813,23 @@ async fn assert_repository_terminal_case(
         "{} accepted conflicting requirement counts",
         case.label
     );
-    let mut cause_conflict = request;
-    cause_conflict.terminal_evidence.cause = alternate_terminal_cause(&case.cause);
-    assert_eq!(
-        repository.finalize_run(scope, cause_conflict).await?,
-        FinalizationOutcome::Conflict,
-        "{} accepted a conflicting typed cause",
-        case.label
-    );
+    if let Some(alternate_cause) =
+        alternate_terminal_cause(&case.cause, &request.terminal_projection)
+    {
+        let mut cause_conflict = request;
+        cause_conflict.terminal_evidence.cause = alternate_cause;
+        cause_conflict.terminal_reason = execution_terminal_reason(
+            &cause_conflict.terminal_evidence.cause,
+            &cause_conflict.terminal_projection,
+            &cause_conflict.completion_evaluation,
+        )?;
+        assert_eq!(
+            repository.finalize_run(scope, cause_conflict).await?,
+            FinalizationOutcome::Conflict,
+            "{} accepted a conflicting typed cause",
+            case.label
+        );
+    }
 
     assert_status_projection(
         client,
@@ -920,6 +987,11 @@ async fn assert_replan_terminal_case(
     cause_conflict.terminal_evidence.cause = ExecutionTerminalCause::ReplanStop {
         reason: alternate_replan_reason(reason),
     };
+    cause_conflict.terminal_reason = execution_terminal_reason(
+        &cause_conflict.terminal_evidence.cause,
+        &cause_conflict.terminal_projection,
+        &cause_conflict.completion_evaluation,
+    )?;
     assert_eq!(
         repository
             .finalize_replan_stop(scope, cause_conflict)
@@ -1332,17 +1404,30 @@ fn conflicting_satisfied_count(evidence: &ExecutionTerminalEvidence) -> u64 {
     }
 }
 
-fn alternate_terminal_cause(cause: &ExecutionTerminalCause) -> ExecutionTerminalCause {
-    // Intentionally total: adding a terminal-cause variant must update this
-    // matrix before the service-E2E target can compile.
-    match cause {
-        ExecutionTerminalCause::Completion { .. }
-        | ExecutionTerminalCause::TaskFailure { .. }
-        | ExecutionTerminalCause::LimitStop { .. }
-        | ExecutionTerminalCause::SchedulerNoProgress
-        | ExecutionTerminalCause::ReplanStop { .. }
-        | ExecutionTerminalCause::Cancellation => ExecutionTerminalCause::InternalFailure,
-        ExecutionTerminalCause::InternalFailure => ExecutionTerminalCause::SchedulerNoProgress,
+fn alternate_terminal_cause(
+    cause: &ExecutionTerminalCause,
+    projection: &TerminalProjection,
+) -> Option<ExecutionTerminalCause> {
+    match projection {
+        TerminalProjection::Completed { .. } | TerminalProjection::Cancelled { .. } => None,
+        TerminalProjection::Failed { .. } => {
+            Some(if *cause == ExecutionTerminalCause::InternalFailure {
+                ExecutionTerminalCause::SchedulerNoProgress
+            } else {
+                ExecutionTerminalCause::InternalFailure
+            })
+        }
+        TerminalProjection::Partial { .. }
+        | TerminalProjection::Blocked { .. }
+        | TerminalProjection::Unsupported { .. } => {
+            Some(if *cause == ExecutionTerminalCause::SchedulerNoProgress {
+                ExecutionTerminalCause::TaskFailure {
+                    class: ExecutionFailureClass::Terminal,
+                }
+            } else {
+                ExecutionTerminalCause::SchedulerNoProgress
+            })
+        }
     }
 }
 
@@ -1407,16 +1492,32 @@ fn output_candidate(
 fn replan_candidate(objective: &str) -> GeneratedExecutionCandidate {
     let schema = answer_schema();
     GeneratedExecutionCandidate {
-        goal: single_requirement_goal(objective),
+        goal: replan_goal(objective),
         plan: ExecutionPlanDefinition {
             schema_version: 1,
             input_schema: empty_object_schema(),
             output_schema: schema.clone(),
             nodes: vec![
                 ExecutionNode {
+                    id: "seed".to_string(),
+                    requirement_ids: vec!["setup".to_string()],
+                    depends_on: Vec::new(),
+                    when: None,
+                    input: json!({}),
+                    output_schema: schema.clone(),
+                    operation: ExecutionOperation::Agent {
+                        instructions: REPLAN_SEED_AGENT_SENTINEL.to_string(),
+                        skill_refs: Vec::new(),
+                        capability_refs: Vec::new(),
+                        max_turns: 1,
+                    },
+                    retry: no_retry(),
+                    budget: None,
+                },
+                ExecutionNode {
                     id: "research".to_string(),
                     requirement_ids: vec!["result".to_string()],
-                    depends_on: Vec::new(),
+                    depends_on: vec!["seed".to_string()],
                     when: None,
                     input: json!({}),
                     output_schema: schema.clone(),
@@ -1464,12 +1565,15 @@ fn useful_amendment_candidate(base_plan_revision: u64) -> GeneratedAmendmentCand
                     node: ExecutionNode {
                         id: "research_v2".to_string(),
                         requirement_ids: vec!["result".to_string()],
-                        depends_on: Vec::new(),
+                        depends_on: vec!["seed".to_string()],
                         when: None,
                         input: json!({}),
                         output_schema: schema.clone(),
-                        operation: ExecutionOperation::Output {
-                            value: json!({"answer": "repaired"}),
+                        operation: ExecutionOperation::Agent {
+                            instructions: REPAIRED_AGENT_SENTINEL.to_string(),
+                            skill_refs: Vec::new(),
+                            capability_refs: Vec::new(),
+                            max_turns: 1,
                         },
                         retry: no_retry(),
                         budget: None,
@@ -1514,6 +1618,18 @@ fn single_requirement_goal(objective: &str) -> ExecutionGoalContract {
             kind: CompletionCheckKind::OutputSchema,
         }],
     }
+}
+
+fn replan_goal(objective: &str) -> ExecutionGoalContract {
+    let mut goal = single_requirement_goal(objective);
+    goal.requirements.insert(
+        0,
+        ExecutionRequirement {
+            id: "setup".to_string(),
+            description: "establish one completed dependency before replanning".to_string(),
+        },
+    );
+    goal
 }
 
 fn answer_schema() -> Value {

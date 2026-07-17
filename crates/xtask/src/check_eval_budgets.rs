@@ -269,9 +269,9 @@ impl Expectations {
         let mut violations = Vec::new();
         check_bool(
             &mut violations,
-            "functional.task_completed",
-            self.functional.task_completed,
-            score.functional.task_completed,
+            "functional.response_produced_without_error",
+            self.functional.response_produced_without_error,
+            score.functional.response_produced_without_error,
         );
         if let Some(max) = self.budgets.latency_p95_ms_max {
             check_max_u64_measured(
@@ -415,7 +415,7 @@ impl Expectations {
 
 #[derive(Debug, Deserialize)]
 struct FunctionalExpectations {
-    task_completed: bool,
+    response_produced_without_error: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -490,8 +490,8 @@ impl ScoreCard {
     fn metric_map(&self) -> BTreeMap<String, MetricValue> {
         let mut metrics = BTreeMap::from([
             (
-                "functional.task_completed".to_string(),
-                MetricValue::Bool(self.functional.task_completed),
+                "functional.response_produced_without_error".to_string(),
+                MetricValue::Bool(self.functional.response_produced_without_error),
             ),
             (
                 "functional.turn_count".to_string(),
@@ -590,7 +590,7 @@ impl ScoreCard {
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(default)]
 struct FunctionalScores {
-    task_completed: bool,
+    response_produced_without_error: bool,
     turn_count: usize,
     error_count: u32,
 }
@@ -740,7 +740,8 @@ impl Baselines {
 impl ScoreCard {
     fn from_metric_map(metrics: &BTreeMap<String, MetricValue>) -> Self {
         let mut score = Self::default();
-        score.functional.task_completed = metric_bool(metrics, "functional.task_completed");
+        score.functional.response_produced_without_error =
+            metric_bool(metrics, "functional.response_produced_without_error");
         score.functional.turn_count = metric_number(metrics, "functional.turn_count") as usize;
         score.functional.error_count = metric_number(metrics, "functional.error_count") as u32;
         score.latency_ms.completion_p95_ms =
@@ -958,7 +959,7 @@ enum Direction {
 fn regression_direction(metric: &str) -> Direction {
     match metric {
         "cache.input_cached_ratio"
-        | "functional.task_completed"
+        | "functional.response_produced_without_error"
         | "cache.prefix_stable"
         | "context.errors_preserved_strict"
         | "memory.planted_fact_recall"
@@ -1115,7 +1116,7 @@ mod tests {
         ScoreCard {
             schema_version: None,
             functional: FunctionalScores {
-                task_completed: true,
+                response_produced_without_error: true,
                 turn_count: 3,
                 error_count: 0,
             },
@@ -1158,7 +1159,7 @@ mod tests {
     fn gating_expectations() -> Expectations {
         Expectations {
             functional: FunctionalExpectations {
-                task_completed: true,
+                response_produced_without_error: true,
             },
             budgets: BudgetExpectations {
                 latency_p95_ms_max: Some(5_000),
@@ -1255,7 +1256,11 @@ mod tests {
             "moa-xtask-scorecard-legacy-{}.json",
             std::process::id()
         ));
-        fs::write(&path, br#"{"functional": {"task_completed": true}}"#).expect("write score card");
+        fs::write(
+            &path,
+            br#"{"functional": {"response_produced_without_error": true}}"#,
+        )
+        .expect("write score card");
         let result = ScoreCard::load(&path);
         let _ = fs::remove_file(&path);
 

@@ -104,6 +104,7 @@ mod tests {
             RootLoopPlanRequest {
                 route: &ExecutionRouteDecision::NeedsInput {
                     reason: ExecutionRouteReason::PreflightInputMissing,
+                    missing_inputs: vec!["target".to_string()],
                 },
                 request_max_turns: None,
             },

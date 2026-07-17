@@ -286,15 +286,30 @@ async fn start_external_template_execution(
         template: request.template.clone(),
         input: request.input.clone(),
     };
-    let route = route_execution(ExecutionRoutingInput {
-        objective: &request.objective,
-        execution_template: Some(&invocation),
-        escalation: None,
-    });
+    let config = OrchestratorCtx::current_config();
+    let route_model = ModelId::new(
+        config
+            .models
+            .auxiliary
+            .clone()
+            .unwrap_or_else(|| config.models.main.clone()),
+    );
+    let route = route_execution(
+        &TemplateAdmissionPlanner,
+        ExecutionRoutingInput {
+            objective: &request.objective,
+            execution_template: Some(&invocation),
+            escalation: None,
+            attachment_count: 0,
+            has_recent_target: false,
+            route_model: &route_model,
+        },
+    )
+    .await?;
     let ExecutionRouteDecision::Routed {
         mode: ExecutionMode::Run,
         reason: ExecutionRouteReason::SelectedExecutionTemplate,
-    } = route
+    } = route.decision
     else {
         return Err(TerminalError::new_with_code(
             422,
@@ -317,6 +332,7 @@ async fn start_external_template_execution(
                 decision: ExecutionRouteDecisionKind::Routed,
                 mode: Some(ExecutionMode::Run),
                 reason: ExecutionRouteReason::SelectedExecutionTemplate,
+                provenance: route.provenance,
                 accepted_at,
             },
         },
@@ -339,7 +355,6 @@ async fn start_external_template_execution(
         .await?
         .into_inner();
 
-    let config = OrchestratorCtx::current_config();
     let planner_model = config
         .models
         .auxiliary

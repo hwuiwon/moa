@@ -3,6 +3,7 @@
 
 pub mod collector;
 pub mod engine;
+pub mod execution;
 pub mod external_memory;
 pub mod golden;
 pub mod kernel;

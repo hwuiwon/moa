@@ -67,7 +67,7 @@ fn score_card() -> ScoreCard {
         timestamp: chrono::Utc::now(),
         provider: "recorded".to_string(),
         functional: FunctionalScores {
-            task_completed: true,
+            response_produced_without_error: true,
             turn_count: 2,
             error_count: 0,
             errors_preserved: true,
@@ -233,7 +233,10 @@ fn score_card_serializes_to_flat_metric_rows_for_analytics_scores() {
     // `score_card()` fixture sets, mapped through `number`/`float_number`/`Value::Bool`.
     let expected: std::collections::HashMap<&str, serde_json::Value> =
         std::collections::HashMap::from([
-            ("functional.task_completed", serde_json::json!(true)),
+            (
+                "functional.response_produced_without_error",
+                serde_json::json!(true),
+            ),
             ("functional.turn_count", serde_json::json!(2)),
             ("functional.error_count", serde_json::json!(0)),
             ("functional.errors_preserved", serde_json::json!(true)),

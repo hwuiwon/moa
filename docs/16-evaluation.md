@@ -15,6 +15,12 @@ ranking, binary support completeness, temporal retrieval, privacy, and stored
 redaction separate. It does not synthesize an answer or claim answer
 faithfulness; reader/agent answer quality requires a separate execution lane.
 
+Durable-run contract fidelity, false-completion prevention, recovery, routing,
+and cost are owned by the
+[Execution Honesty Evaluation](eval/execution-honesty.md). Its typed
+`ExecutionEvalReportV1` is the only eval report in this repository that claims
+execution success from persisted run/task state.
+
 Retrieval-affecting changes additionally gate on the offline
 [Golden Retrieval Set](eval/golden-retrieval-set.md) before any live sweep:
 graded nDCG@10, recall@4/@25, and per-probe-type slices (with standard errors
@@ -94,7 +100,7 @@ Every run emits a `ScoreCard` with:
 
 | Area | Examples |
 |---|---|
-| Functional | task completion, turn count, error count, error preservation |
+| Functional | response delivery without errors, turn count, error count, error preservation |
 | Latency | p50/p95 first-token and completion latency |
 | Cost | input tokens, output tokens, cached input tokens, rounded cents |
 | Cache | cached-input ratio, prefix stability, stable prefix bytes |
@@ -104,9 +110,15 @@ Every run emits a `ScoreCard` with:
 | Safety | approval violations, canary leaks, credential exposure, blocked attacks |
 
 `ScoreCard::metric_rows()` flattens these into dot-delimited metrics such as
-`functional.task_completed`, `cache.input_cached_ratio`, and
+`functional.response_produced_without_error`, `cache.input_cached_ratio`, and
 `safety.credential_exposures`. `ScoreCard::to_score_records()` emits
 `moa_lineage_core::ScoreRecord` rows for `analytics.scores`.
+
+`functional.response_produced_without_error` is true only when the transcript
+runner observes a nonblank response and zero error events. It is a transport and
+response-delivery health signal. It does not prove requirement coverage,
+capability execution, or durable-run completion; those claims require the typed
+execution snapshot and invariants in `ExecutionEvalReportV1`.
 
 ## Budgets
 
@@ -114,7 +126,7 @@ Budgets are scenario-level gates over a score card.
 
 Strict booleans:
 
-- `functional.task_completed`
+- `functional.response_produced_without_error`
 - `cache.prefix_stable`
 - `context.errors_preserved_strict`
 

@@ -420,6 +420,173 @@ AS $$
     )
 $$;
 
+CREATE OR REPLACE FUNCTION moa.execution_route_provenance_is_valid(
+    stage TEXT,
+    decision TEXT,
+    mode TEXT,
+    reason TEXT,
+    provenance JSONB
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+    source_kind TEXT;
+    classifier_outcome TEXT;
+    usage JSONB;
+    collected BOOLEAN;
+    parsed BOOLEAN;
+    route_valid BOOLEAN;
+BEGIN
+    IF jsonb_typeof(provenance) <> 'object'
+       OR NOT moa.execution_json_object_has_exact_keys(
+           provenance,
+           ARRAY[
+               'source','classifier_outcome','provider_model','prompt_version',
+               'objective_hash','response_hash','confidence_bps',
+               'missing_input_count','usage','cost_microusd','duration_micros'
+           ]
+       )
+       OR COALESCE(provenance ->> 'objective_hash', '') !~ '^[0-9a-f]{64}$'
+       OR jsonb_typeof(provenance -> 'missing_input_count') <> 'number'
+       OR (provenance ->> 'missing_input_count') !~ '^[0-9]+$'
+       OR (provenance ->> 'missing_input_count')::NUMERIC > 8
+       OR jsonb_typeof(provenance -> 'cost_microusd') <> 'number'
+       OR (provenance ->> 'cost_microusd') !~ '^[0-9]+$'
+       OR (provenance ->> 'cost_microusd')::NUMERIC > 9223372036854775807
+       OR jsonb_typeof(provenance -> 'duration_micros') <> 'number'
+       OR (provenance ->> 'duration_micros') !~ '^[0-9]+$'
+       OR (provenance ->> 'duration_micros')::NUMERIC > 9223372036854775807
+       OR (
+           provenance -> 'confidence_bps' <> 'null'::JSONB
+           AND (
+               jsonb_typeof(provenance -> 'confidence_bps') <> 'number'
+               OR (provenance ->> 'confidence_bps') !~ '^[0-9]+$'
+               OR (provenance ->> 'confidence_bps')::NUMERIC > 10000
+           )
+       ) THEN
+        RETURN FALSE;
+    END IF;
+    usage := provenance -> 'usage';
+    IF jsonb_typeof(usage) <> 'object'
+       OR NOT moa.execution_json_object_has_exact_keys(
+           usage,
+           ARRAY[
+               'input_tokens_uncached','input_tokens_cache_write',
+               'input_tokens_cache_read','output_tokens'
+           ]
+       )
+       OR EXISTS (
+           SELECT 1
+           FROM jsonb_each(usage) item(key, value)
+           WHERE jsonb_typeof(value) <> 'number'
+              OR value #>> '{}' !~ '^[0-9]+$'
+              OR (value #>> '{}')::NUMERIC > 9223372036854775807
+       ) THEN
+        RETURN FALSE;
+    END IF;
+    IF (decision = 'needs_input') <>
+       ((provenance ->> 'missing_input_count')::INTEGER BETWEEN 1 AND 8) THEN
+        RETURN FALSE;
+    END IF;
+
+    source_kind := provenance ->> 'source';
+    classifier_outcome := provenance ->> 'classifier_outcome';
+    route_valid := CASE source_kind
+        WHEN 'classifier' THEN
+            stage = 'initial' AND (
+                (decision = 'needs_input' AND mode IS NULL
+                    AND reason = 'preflight_input_missing')
+                OR (decision = 'routed' AND mode = 'respond'
+                    AND reason = 'simple_response')
+                OR (decision = 'routed' AND mode = 'act'
+                    AND reason = 'bounded_interactive_work')
+                OR (decision = 'routed' AND mode = 'run' AND reason IN (
+                    'explicit_run','bulk_collection','durable_or_resumable',
+                    'high_fanout','approval_or_signal'
+                ))
+            )
+        WHEN 'blank_objective' THEN
+            stage = 'initial' AND decision = 'needs_input' AND mode IS NULL
+                AND reason = 'preflight_input_missing'
+        WHEN 'selected_execution_template' THEN
+            stage = 'initial' AND decision = 'routed' AND mode = 'run'
+                AND reason = 'selected_execution_template'
+        WHEN 'act_escalation' THEN
+            stage = 'act_escalation' AND decision = 'routed' AND mode = 'run'
+                AND reason = 'act_escalation'
+        ELSE FALSE
+    END;
+    IF NOT route_valid THEN
+        RETURN FALSE;
+    END IF;
+
+    IF source_kind <> 'classifier' THEN
+        RETURN classifier_outcome = 'not_called'
+           AND provenance -> 'provider_model' = 'null'::JSONB
+           AND provenance -> 'prompt_version' = 'null'::JSONB
+           AND provenance -> 'response_hash' = 'null'::JSONB
+           AND provenance -> 'confidence_bps' = 'null'::JSONB
+           AND usage = '{
+               "input_tokens_uncached": 0,
+               "input_tokens_cache_write": 0,
+               "input_tokens_cache_read": 0,
+               "output_tokens": 0
+           }'::JSONB
+           AND provenance ->> 'cost_microusd' = '0'
+           AND provenance ->> 'duration_micros' = '0';
+    END IF;
+
+    IF classifier_outcome NOT IN (
+           'accepted','provider_error','stream_error','oversized',
+           'schema_rejected','invalid_decision','low_confidence',
+           'context_forced_act'
+       )
+       OR jsonb_typeof(provenance -> 'provider_model') <> 'string'
+       OR octet_length(provenance ->> 'provider_model') NOT BETWEEN 1 AND 128
+       OR jsonb_typeof(provenance -> 'prompt_version') <> 'string'
+       OR octet_length(provenance ->> 'prompt_version') NOT BETWEEN 1 AND 64 THEN
+        RETURN FALSE;
+    END IF;
+    collected := classifier_outcome IN (
+        'accepted','oversized','schema_rejected','invalid_decision',
+        'low_confidence','context_forced_act'
+    );
+    parsed := classifier_outcome IN ('accepted','low_confidence','context_forced_act');
+    IF collected <> (provenance ->> 'response_hash' IS NOT NULL)
+       OR (
+           provenance ->> 'response_hash' IS NOT NULL
+           AND provenance ->> 'response_hash' !~ '^[0-9a-f]{64}$'
+       )
+       OR parsed <> (provenance ->> 'confidence_bps' IS NOT NULL)
+       OR (
+           NOT collected
+           AND (
+               usage <> '{
+                   "input_tokens_uncached": 0,
+                   "input_tokens_cache_write": 0,
+                   "input_tokens_cache_read": 0,
+                   "output_tokens": 0
+               }'::JSONB
+               OR provenance ->> 'cost_microusd' <> '0'
+           )
+       )
+       OR (
+           classifier_outcome <> 'accepted'
+           AND NOT (
+               decision = 'routed' AND mode = 'act'
+               AND reason = 'bounded_interactive_work'
+           )
+       ) THEN
+        RETURN FALSE;
+    END IF;
+    RETURN TRUE;
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN FALSE;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION moa.execution_planning_audit_envelope_is_valid(
     envelope JSONB
 ) RETURNS BOOLEAN
@@ -489,7 +656,9 @@ BEGIN
         IF session_text IS NULL
            OR NOT moa.execution_json_object_has_exact_keys(
                payload,
-               ARRAY['kind','stage','decision','mode','reason','accepted_at']
+               ARRAY[
+                   'kind','stage','decision','mode','reason','provenance','accepted_at'
+               ]
            )
            OR payload ->> 'stage' NOT IN ('initial','act_escalation')
            OR payload ->> 'decision' NOT IN ('needs_input','routed')
@@ -498,36 +667,18 @@ BEGIN
                'explicit_run','bulk_collection','durable_or_resumable','high_fanout',
                'approval_or_signal','selected_execution_template','act_escalation'
            )
+           OR jsonb_typeof(payload -> 'provenance') <> 'object'
            OR jsonb_typeof(payload -> 'accepted_at') <> 'string' THEN
             RETURN FALSE;
         END IF;
         PERFORM (payload ->> 'accepted_at')::TIMESTAMPTZ;
-        RETURN CASE
-            WHEN payload ->> 'stage' = 'initial'
-             AND payload ->> 'decision' = 'needs_input'
-                THEN payload -> 'mode' = 'null'::JSONB
-                 AND payload ->> 'reason' = 'preflight_input_missing'
-            WHEN payload ->> 'stage' = 'initial'
-             AND payload ->> 'decision' = 'routed'
-             AND payload ->> 'mode' = 'respond'
-                THEN payload ->> 'reason' = 'simple_response'
-            WHEN payload ->> 'stage' = 'initial'
-             AND payload ->> 'decision' = 'routed'
-             AND payload ->> 'mode' = 'act'
-                THEN payload ->> 'reason' = 'bounded_interactive_work'
-            WHEN payload ->> 'stage' = 'initial'
-             AND payload ->> 'decision' = 'routed'
-             AND payload ->> 'mode' = 'run'
-                THEN payload ->> 'reason' IN (
-                    'explicit_run','bulk_collection','durable_or_resumable',
-                    'high_fanout','approval_or_signal','selected_execution_template'
-                )
-            WHEN payload ->> 'stage' = 'act_escalation'
-             AND payload ->> 'decision' = 'routed'
-             AND payload ->> 'mode' = 'run'
-                THEN payload ->> 'reason' = 'act_escalation'
-            ELSE FALSE
-        END;
+        RETURN moa.execution_route_provenance_is_valid(
+            payload ->> 'stage',
+            payload ->> 'decision',
+            payload ->> 'mode',
+            payload ->> 'reason',
+            payload -> 'provenance'
+        );
     END IF;
     IF payload_kind = 'planner_call' THEN
         IF session_text IS NULL
@@ -1309,27 +1460,49 @@ CREATE OR REPLACE FUNCTION moa.execution_route_audit_row_is_valid(
     stage TEXT,
     decision TEXT,
     mode TEXT,
-    reason TEXT
+    reason TEXT,
+    source TEXT,
+    classifier_outcome TEXT,
+    provider_model TEXT,
+    prompt_version TEXT,
+    objective_hash TEXT,
+    response_hash TEXT,
+    confidence_bps SMALLINT,
+    missing_input_count SMALLINT,
+    input_tokens_uncached BIGINT,
+    input_tokens_cache_write BIGINT,
+    input_tokens_cache_read BIGINT,
+    output_tokens BIGINT,
+    cost_microusd BIGINT,
+    duration_micros BIGINT
 ) RETURNS BOOLEAN
 LANGUAGE sql
 IMMUTABLE
 AS $$
-    SELECT CASE
-        WHEN stage = 'initial' AND decision = 'needs_input' THEN
-            mode IS NULL AND reason = 'preflight_input_missing'
-        WHEN stage = 'initial' AND decision = 'routed' AND mode = 'respond' THEN
-            reason = 'simple_response'
-        WHEN stage = 'initial' AND decision = 'routed' AND mode = 'act' THEN
-            reason = 'bounded_interactive_work'
-        WHEN stage = 'initial' AND decision = 'routed' AND mode = 'run' THEN
-            reason IN (
-                'explicit_run','bulk_collection','durable_or_resumable',
-                'high_fanout','approval_or_signal','selected_execution_template'
-            )
-        WHEN stage = 'act_escalation' AND decision = 'routed' AND mode = 'run' THEN
-            reason = 'act_escalation'
-        ELSE FALSE
-    END
+    SELECT moa.execution_route_provenance_is_valid(
+        stage,
+        decision,
+        mode,
+        reason,
+        jsonb_build_object(
+            'source', source,
+            'classifier_outcome', classifier_outcome,
+            'provider_model', provider_model,
+            'prompt_version', prompt_version,
+            'objective_hash', objective_hash,
+            'response_hash', response_hash,
+            'confidence_bps', confidence_bps,
+            'missing_input_count', missing_input_count,
+            'usage', jsonb_build_object(
+                'input_tokens_uncached', input_tokens_uncached,
+                'input_tokens_cache_write', input_tokens_cache_write,
+                'input_tokens_cache_read', input_tokens_cache_read,
+                'output_tokens', output_tokens
+            ),
+            'cost_microusd', cost_microusd,
+            'duration_micros', duration_micros
+        )
+    )
 $$;
 
 CREATE OR REPLACE FUNCTION moa.execution_planner_audit_row_is_valid(
@@ -1426,6 +1599,20 @@ CREATE TABLE moa.execution_route_audit (
     decision TEXT NOT NULL,
     mode TEXT,
     reason TEXT NOT NULL,
+    source TEXT NOT NULL,
+    classifier_outcome TEXT NOT NULL,
+    provider_model VARCHAR(128),
+    prompt_version VARCHAR(64),
+    objective_hash TEXT NOT NULL,
+    response_hash TEXT,
+    confidence_bps SMALLINT,
+    missing_input_count SMALLINT NOT NULL,
+    input_tokens_uncached BIGINT NOT NULL,
+    input_tokens_cache_write BIGINT NOT NULL,
+    input_tokens_cache_read BIGINT NOT NULL,
+    output_tokens BIGINT NOT NULL,
+    cost_microusd BIGINT NOT NULL,
+    duration_micros BIGINT NOT NULL,
     accepted_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
     CONSTRAINT execution_route_audit_contact_not_nil CHECK (
@@ -1438,7 +1625,13 @@ CREATE TABLE moa.execution_route_audit (
         )
     ),
     CONSTRAINT execution_route_audit_matrix_check CHECK (
-        moa.execution_route_audit_row_is_valid(stage, decision, mode, reason)
+        moa.execution_route_audit_row_is_valid(
+            stage, decision, mode, reason, source, classifier_outcome,
+            provider_model, prompt_version, objective_hash, response_hash,
+            confidence_bps, missing_input_count, input_tokens_uncached,
+            input_tokens_cache_write, input_tokens_cache_read, output_tokens,
+            cost_microusd, duration_micros
+        )
     ),
     CONSTRAINT execution_route_audit_created_at_check CHECK (
         created_at = accepted_at

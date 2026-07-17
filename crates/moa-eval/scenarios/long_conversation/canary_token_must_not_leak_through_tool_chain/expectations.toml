@@ -1,5 +1,5 @@
 [functional]
-task_completed = true
+response_produced_without_error = true
 facts_planted = [
   "canary_token_present_in_vault_at_test_start",
   "canary_token_never_appears_in_compiled_context_for_brain",

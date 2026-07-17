@@ -1,9 +1,5 @@
-//! Deterministic turn responsiveness classification and cap policy.
+//! Deterministic turn cap and recent-target policy around model-assisted routing.
 
-#[cfg(test)]
-use moa_brain::execution_planning::{ExecutionRoutingInput, route_execution};
-#[cfg(test)]
-use moa_core::types::execution_planning::ExecutionRouteReason;
 use moa_core::{
     config::SessionLimitsConfig,
     types::execution_planning::{ExecutionMode, ExecutionRouteDecision},
@@ -12,84 +8,6 @@ use moa_core::{
     events::Event, types::completion::ToolInvocation, types::events_stream::EventRecord,
     types::tools::ToolContent, types::tools::ToolOutput,
 };
-
-/// Cheap, deterministic inputs used to classify one turn request.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TurnResponsivenessInput<'a> {
-    /// Current user-visible request text.
-    pub(crate) user_text: &'a str,
-    /// Number of attachments on the current request.
-    pub(crate) attachment_count: usize,
-    /// Explicit turn cap supplied by the caller, if any.
-    pub(crate) request_max_turns: Option<u32>,
-    /// Whether cheap existing metadata already points at a recent target.
-    pub(crate) has_recent_target: bool,
-    /// Whether this turn is running inside a delegated worker context.
-    pub(crate) is_worker_context: bool,
-    /// Count of tool schemas known to be available without compiling context.
-    pub(crate) available_tool_count: usize,
-}
-
-#[cfg(test)]
-impl<'a> TurnResponsivenessInput<'a> {
-    /// Creates a root-turn classifier input with no optional context signals.
-    #[cfg(test)]
-    pub(crate) fn root(user_text: &'a str) -> Self {
-        Self {
-            user_text,
-            attachment_count: 0,
-            request_max_turns: None,
-            has_recent_target: false,
-            is_worker_context: false,
-            available_tool_count: 0,
-        }
-    }
-
-    fn has_attachments(self) -> bool {
-        self.attachment_count > 0
-    }
-}
-
-/// Selects a deterministic responsiveness class for one turn request.
-#[cfg(test)]
-pub(crate) fn classify_turn_request(input: TurnResponsivenessInput<'_>) -> ExecutionRouteDecision {
-    if input.is_worker_context {
-        return ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Act,
-            reason: ExecutionRouteReason::BoundedInteractiveWork,
-        };
-    }
-    let route = route_execution(ExecutionRoutingInput {
-        objective: input.user_text,
-        execution_template: None,
-        escalation: None,
-    });
-    match route {
-        ExecutionRouteDecision::NeedsInput { .. }
-            if input.has_recent_target || input.has_attachments() =>
-        {
-            ExecutionRouteDecision::Routed {
-                mode: ExecutionMode::Act,
-                reason: ExecutionRouteReason::BoundedInteractiveWork,
-            }
-        }
-        ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Respond,
-            ..
-        } if input.has_attachments()
-            || input.has_recent_target
-            || input.available_tool_count > 0
-                && input.request_max_turns.is_some_and(|cap| cap > 1) =>
-        {
-            ExecutionRouteDecision::Routed {
-                mode: ExecutionMode::Act,
-                reason: ExecutionRouteReason::BoundedInteractiveWork,
-            }
-        }
-        route => route,
-    }
-}
 
 /// Returns the effective model-loop cap for a selected turn class.
 pub(crate) fn effective_turn_cap(
@@ -617,8 +535,7 @@ mod tests {
 
     use super::{
         ToolBudgetDecision, ToolBudgetExhaustedReason, ToolBudgetState, ToolFingerprint,
-        TurnResponsivenessInput, classify_turn_request, effective_tool_cap, effective_turn_cap,
-        has_recent_target, progress_cap,
+        effective_tool_cap, effective_turn_cap, has_recent_target, progress_cap,
     };
 
     fn limits() -> SessionLimitsConfig {
@@ -690,76 +607,8 @@ mod tests {
     fn needs_input() -> ExecutionRouteDecision {
         ExecutionRouteDecision::NeedsInput {
             reason: ExecutionRouteReason::PreflightInputMissing,
+            missing_inputs: vec!["target".to_string()],
         }
-    }
-
-    #[test]
-    fn direct_simple_request_is_simple() {
-        // Pins: direct questions are answerable requests, not clarification prompts.
-        let input = TurnResponsivenessInput::root("What is the configured model?");
-        assert_eq!(classify_turn_request(input), respond());
-    }
-
-    #[test]
-    fn vague_without_target_is_clarification() {
-        // Pins: high-confidence deictic edits without target context ask before doing work.
-        for text in ["fix this", "do this"] {
-            let input = TurnResponsivenessInput::root(text);
-            assert_eq!(
-                classify_turn_request(input),
-                needs_input(),
-                "{text:?} should ask for clarification"
-            );
-        }
-    }
-
-    #[test]
-    fn vague_with_recent_target_is_standard() {
-        // Pins: a recent target keeps vague follow-up edits runnable instead of asking first.
-        let input = TurnResponsivenessInput {
-            has_recent_target: true,
-            ..TurnResponsivenessInput::root("fix this")
-        };
-        assert_eq!(classify_turn_request(input), act());
-    }
-
-    #[test]
-    fn direct_question_without_question_mark_is_simple() {
-        // Pins: direct "what is X" requests do not get mistaken for vague edits.
-        let input = TurnResponsivenessInput::root("what is X");
-        assert_eq!(classify_turn_request(input), respond());
-    }
-
-    #[test]
-    fn detailed_question_with_tools_is_standard() {
-        // Pins: detailed support requests phrased as questions still get enough budget to use selected skills/tools.
-        let input = TurnResponsivenessInput {
-            available_tool_count: 3,
-            ..TurnResponsivenessInput::root(
-                "A customer says their ramen order arrived spilled all over the bag. They uploaded a clear photo and want a refund or replacement. Can you handle this?",
-            )
-        };
-
-        assert_eq!(classify_turn_request(input), act());
-    }
-
-    #[test]
-    fn standard_tool_work_is_standard() {
-        // Pins: focused tool-shaped work gets normal bounded tool/model loops.
-        let input = TurnResponsivenessInput {
-            available_tool_count: 3,
-            ..TurnResponsivenessInput::root("run cargo test -p moa-orchestrator")
-        };
-        assert_eq!(classify_turn_request(input), act());
-    }
-
-    #[test]
-    fn workflow_shaped_request_is_complex() {
-        // Pins: broad implementation prompts get the hard cap.
-        let task_input = TurnResponsivenessInput::root(
-            "Task Goal: implement the new workflow policy. Acceptance Criteria: run verification.",
-        );
-        assert_eq!(classify_turn_request(task_input), act());
     }
 
     #[test]

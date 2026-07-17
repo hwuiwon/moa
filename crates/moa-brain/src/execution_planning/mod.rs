@@ -1,4 +1,4 @@
-//! Deterministic routing plus strict model-assisted execution-plan generation.
+//! Bounded model-assisted routing plus strict execution-plan generation.
 
 use std::{str::FromStr, time::Instant};
 
@@ -39,7 +39,13 @@ pub use response::{
     AdmittedExecutionPlan, ExecutionAmendmentPlanningResult, ExecutionAmendmentPlanningResultKind,
     ExecutionPlanningResult, ExecutionPlanningResultKind,
 };
-pub use routing::{ExecutionRoutingInput, route_execution};
+pub use routing::{
+    EXECUTION_ROUTER_HIGH_RISK_CONFIDENCE_BPS, EXECUTION_ROUTER_MAX_OUTPUT_TOKENS,
+    EXECUTION_ROUTER_PROMPT_VERSION, EXECUTION_ROUTER_RESPONSE_MAX_BYTES,
+    EXECUTION_ROUTER_RUN_CONFIDENCE_BPS, ExecutionRouteClassifierLabelV1,
+    ExecutionRouteClassifierOutputV1, ExecutionRoutingInput, record_applied_route_audit,
+    route_execution,
+};
 
 /// Raw planner candidate bytes are capped before parse or compilation.
 pub const EXECUTION_PLANNER_CANDIDATE_MAX_BYTES: usize =
@@ -936,11 +942,7 @@ pub async fn plan_amendment(
     };
     let first = compile_amendment_candidate(&request, &candidate)?;
     replace_amendment_planner_audit_after_compile(&mut audits[0], &first, &candidate_json)?;
-    audits.push(amendment_compile_audit(
-        &request,
-        &first,
-        candidate_hash.clone(),
-    ));
+    audits.push(amendment_compile_audit(&request, &first));
     if first.classification == ClassifiedCompileOutcome::Accepted {
         return admitted_amendment(candidate, candidate_hash, first, audits);
     }
@@ -977,11 +979,7 @@ pub async fn plan_amendment(
         MoaError::ValidationError("amendment repair audit was not recorded".to_string())
     })?;
     replace_amendment_planner_audit_after_compile(repair_audit, &second, &repaired_json)?;
-    audits.push(amendment_compile_audit(
-        &request,
-        &second,
-        repaired_hash.clone(),
-    ));
+    audits.push(amendment_compile_audit(&request, &second));
     if second.classification == ClassifiedCompileOutcome::Accepted {
         admitted_amendment(repaired, repaired_hash, second, audits)
     } else {
@@ -1278,7 +1276,6 @@ fn planner_outcome(classification: ClassifiedCompileOutcome) -> ExecutionPlanner
 fn amendment_compile_audit(
     request: &ExecutionAmendmentPlanningRequest,
     compiled: &AmendmentCompile,
-    planner_candidate_hash: String,
 ) -> ExecutionPlanningAuditEnvelopeV1 {
     ExecutionPlanningAuditEnvelopeV1 {
         schema_version: 1,
@@ -1290,7 +1287,7 @@ fn amendment_compile_audit(
             source: ExecutionCompileSource::Amendment,
             operation_key: format!(
                 "run:{}:{}:amendment:{}",
-                request.run_uid, request.base_plan_revision, planner_candidate_hash
+                request.run_uid, request.base_plan_revision, compiled.compile_candidate_hash
             ),
             run_uid: Some(request.run_uid),
             plan_revision: Some(request.base_plan_revision),

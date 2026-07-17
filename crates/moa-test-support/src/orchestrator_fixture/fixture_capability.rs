@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header::RETRY_AFTER};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -32,8 +32,12 @@ pub enum FixtureCapabilityOutcome {
         /// Object fields merged over the received input object.
         output: Value,
     },
-    /// Return a retryable HTTP 503 transport failure.
-    RetryableFailure {
+    /// Return one explicit non-success HTTP transport response.
+    HttpFailure {
+        /// HTTP status in the supported 400-599 fixture range.
+        status: u16,
+        /// Optional retry delay exposed as a rounded-up `Retry-After` seconds header.
+        retry_after_ms: Option<u64>,
         /// Stable diagnostic body returned by the fixture server.
         message: String,
     },
@@ -316,6 +320,25 @@ impl FixtureCapabilityState {
                         tool.name
                     );
                 }
+                if let FixtureCapabilityOutcome::HttpFailure {
+                    status,
+                    retry_after_ms: _,
+                    message,
+                } = outcome
+                {
+                    if !(400..=599).contains(status) {
+                        bail!(
+                            "fixture capability `{}` HTTP failure status must be in 400..=599",
+                            tool.name
+                        );
+                    }
+                    if message.trim().is_empty() {
+                        bail!(
+                            "fixture capability `{}` HTTP failure message must be non-empty",
+                            tool.name
+                        );
+                    }
+                }
             }
             let name = tool.name.clone();
             if indexed.insert(name.clone(), tool).is_some() {
@@ -578,8 +601,20 @@ async fn handle_tool_call(
             merged.extend(output);
             successful_tool_response(id, Value::Object(merged))
         }
-        EffectResolution::Outcome(FixtureCapabilityOutcome::RetryableFailure { message }) => {
-            (StatusCode::SERVICE_UNAVAILABLE, message).into_response()
+        EffectResolution::Outcome(FixtureCapabilityOutcome::HttpFailure {
+            status,
+            retry_after_ms,
+            message,
+        }) => {
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let mut response = (status, message).into_response();
+            if let Some(retry_after_ms) = retry_after_ms {
+                let retry_after_seconds = retry_after_ms.div_ceil(1_000).max(1);
+                if let Ok(value) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
+                    response.headers_mut().insert(RETRY_AFTER, value);
+                }
+            }
+            response
         }
         EffectResolution::Outcome(FixtureCapabilityOutcome::TerminalFailure { message }) => {
             json_rpc_result(
@@ -878,7 +913,9 @@ mod tests {
         // next scripted success intended for a new execution-task generation.
         let mut retry_tool = tool();
         retry_tool.outcomes = vec![
-            FixtureCapabilityOutcome::RetryableFailure {
+            FixtureCapabilityOutcome::HttpFailure {
+                status: 503,
+                retry_after_ms: None,
                 message: "try again".to_string(),
             },
             FixtureCapabilityOutcome::SuccessWithInput {
@@ -960,6 +997,87 @@ mod tests {
         );
         assert_eq!(runtime.controller().calls().len(), 2);
         assert_eq!(runtime.controller().transport_attempts().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn http_failure_emits_exact_status_body_and_retry_after() {
+        // Pins: adversarial service scenarios can model a bounded 429 response with an explicit
+        // retry delay instead of collapsing every transport failure into one fixed fixture case.
+        let mut rate_limited_tool = tool();
+        rate_limited_tool.outcomes = vec![FixtureCapabilityOutcome::HttpFailure {
+            status: 429,
+            retry_after_ms: Some(1_500),
+            message: "fixture rate limit".to_string(),
+        }];
+        let runtime = FixtureCapabilityRuntime::start(FixtureCapabilityOptions {
+            tools: vec![rate_limited_tool],
+            orchestrator_env: Vec::new(),
+        })
+        .await
+        .expect("start rate-limit fixture capability server");
+        let client = reqwest::Client::new();
+        let call = request(
+            1,
+            "tools/call",
+            json!({
+                "name": "fixture_map",
+                "arguments": { "company": "NVDA" },
+                "_meta": { "moa/toolInvocationId": "rate-limited" }
+            }),
+        );
+        let response = tokio::spawn({
+            let endpoint = runtime.endpoint().to_string();
+            async move { client.post(endpoint).json(&call).send().await }
+        });
+        runtime
+            .controller()
+            .wait_for_calls(1, Duration::from_secs(2))
+            .await
+            .expect("wait for rate-limited invocation");
+        runtime.controller().release(1);
+
+        let response = response
+            .await
+            .expect("join rate-limit transport")
+            .expect("rate-limit response");
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("2")
+        );
+        assert_eq!(
+            response.text().await.expect("read response body"),
+            "fixture rate limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_http_failure_status_is_rejected_before_server_start() {
+        // Pins: fixture scripts cannot accidentally model a successful HTTP response as a failure.
+        let mut invalid_tool = tool();
+        invalid_tool.outcomes = vec![FixtureCapabilityOutcome::HttpFailure {
+            status: 200,
+            retry_after_ms: None,
+            message: "invalid fixture status".to_string(),
+        }];
+
+        let result = FixtureCapabilityRuntime::start(FixtureCapabilityOptions {
+            tools: vec![invalid_tool],
+            orchestrator_env: Vec::new(),
+        })
+        .await;
+        let Err(error) = result else {
+            panic!("successful HTTP status must be rejected");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("HTTP failure status must be in 400..=599"),
+            "unexpected validation error: {error:#}"
+        );
     }
 
     #[tokio::test]

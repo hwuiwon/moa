@@ -44,13 +44,13 @@ use moa_core::{
     session_replay::scope_turn_replay_counters,
     traits::LLMProvider,
     types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY,
-    types::completion::{CompletionRequest, CompletionResponse, CompletionStream},
+    types::completion::{CompletionRequest, CompletionResponse, CompletionStream, TokenUsage},
     types::context::ContextMessage,
     types::events_stream::EventRecord,
     types::execution_planning::{
         ExecutionMode, ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
         ExecutionRouteDecision, ExecutionRouteDecisionKind, ExecutionRouteStage,
-        execution_planning_dedupe_key,
+        ExecutionRouteUsageV1, ExecutionRoutingResultV1, execution_planning_dedupe_key,
     },
     types::identifiers::{ModelId, SessionId},
     types::model::ModelCapabilities,
@@ -130,12 +130,12 @@ struct RunOnceContext<'a> {
     execution_synthesis_instruction: Option<&'a str>,
 }
 
-struct RestatePlannerProvider<'a> {
+struct RestateExecutionModelProvider<'a> {
     ctx: &'a WorkflowContext<'a>,
 }
 
 #[async_trait]
-impl LLMProvider for RestatePlannerProvider<'_> {
+impl LLMProvider for RestateExecutionModelProvider<'_> {
     fn name(&self) -> &'static str {
         "restate-llm-gateway"
     }
@@ -261,34 +261,45 @@ async fn execute_turn_inside_workflow(
         load_recent_target_events(ctx, workflow.session_store.clone(), session_id).await?;
     let has_recent_target = recent_events_have_target(&recent_target_events, user_sequence_num);
     let execution_synthesis_turn = is_execution_synthesis_turn(request);
-    let mut route = if execution_synthesis_turn {
+    let route_model = ModelId::new(
+        workflow
+            .config
+            .models
+            .auxiliary
+            .clone()
+            .unwrap_or_else(|| workflow.config.models.main.clone()),
+    );
+    let route_provider = RestateExecutionModelProvider { ctx };
+    let route_result = if execution_synthesis_turn {
+        None
+    } else {
+        let mut result = route_execution(
+            &route_provider,
+            ExecutionRoutingInput {
+                objective: &request.user_message,
+                execution_template: request.execution_template.as_ref(),
+                escalation: None,
+                attachment_count: request.attachments.len(),
+                has_recent_target,
+                route_model: &route_model,
+            },
+        )
+        .await?;
+        apply_route_cost(&mut result)?;
+        Some(result)
+    };
+    let route = if execution_synthesis_turn {
         ExecutionRouteDecision::Routed {
             mode: ExecutionMode::Respond,
             reason: moa_core::types::execution_planning::ExecutionRouteReason::SimpleResponse,
         }
     } else {
-        route_execution(ExecutionRoutingInput {
-            objective: &request.user_message,
-            execution_template: request.execution_template.as_ref(),
-            escalation: None,
-        })
+        route_result
+            .as_ref()
+            .ok_or_else(|| TerminalError::new("execution route result is missing"))?
+            .decision
+            .clone()
     };
-    let should_force_act = (matches!(route, ExecutionRouteDecision::NeedsInput { .. })
-        && (has_recent_target || !request.attachments.is_empty()))
-        || (matches!(
-            route,
-            ExecutionRouteDecision::Routed {
-                mode: ExecutionMode::Respond,
-                ..
-            }
-        ) && !request.attachments.is_empty());
-    if should_force_act {
-        route = ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Act,
-            reason:
-                moa_core::types::execution_planning::ExecutionRouteReason::BoundedInteractiveWork,
-        };
-    }
     if !has_user_message_origin(request, user_sequence_num)
         && (request.execution_template.is_some()
             || matches!(
@@ -307,7 +318,9 @@ async fn execute_turn_inside_workflow(
             &meta,
             session_id,
             user_sequence_num,
-            &route,
+            route_result
+                .as_ref()
+                .ok_or_else(|| TerminalError::new("user route evidence is missing"))?,
             ExecutionRouteStage::Initial,
         )
         .await?;
@@ -329,8 +342,8 @@ async fn execute_turn_inside_workflow(
         loop_plan.max_turns,
         loop_plan.max_tool_calls,
     );
-    if matches!(route, ExecutionRouteDecision::NeedsInput { .. }) {
-        let message = append_clarification_response(ctx, session_id, &meta).await?;
+    if let ExecutionRouteDecision::NeedsInput { missing_inputs, .. } = &route {
+        let message = append_clarification_response(ctx, session_id, &meta, missing_inputs).await?;
         return Ok(BodyOutcome {
             kind: TurnOutcomeKind::Completed,
             message,
@@ -456,11 +469,19 @@ async fn execute_turn_inside_workflow(
                     )
                     .into());
                 }
-                let escalation_route = route_execution(ExecutionRoutingInput {
-                    objective: &request.user_message,
-                    execution_template: None,
-                    escalation: Some(&signal),
-                });
+                let mut escalation_route = route_execution(
+                    &route_provider,
+                    ExecutionRoutingInput {
+                        objective: &request.user_message,
+                        execution_template: None,
+                        escalation: Some(&signal),
+                        attachment_count: request.attachments.len(),
+                        has_recent_target,
+                        route_model: &route_model,
+                    },
+                )
+                .await?;
+                apply_route_cost(&mut escalation_route)?;
                 let route_audit = route_audit_envelope(
                     ctx,
                     &meta,
@@ -474,7 +495,7 @@ async fn execute_turn_inside_workflow(
                 let ExecutionRouteDecision::Routed {
                     mode: ExecutionMode::Run,
                     reason,
-                } = escalation_route
+                } = escalation_route.decision
                 else {
                     return Err(TerminalError::new(
                         "Act escalation did not produce a terminal Run route",
@@ -596,17 +617,47 @@ async fn execute_turn_inside_workflow(
     })
 }
 
+fn apply_route_cost(result: &mut ExecutionRoutingResultV1) -> Result<(), HandlerError> {
+    let Some(model) = result.provenance.provider_model.as_deref() else {
+        return Ok(());
+    };
+    let usage = token_usage_from_route(result.provenance.usage)?;
+    result.provenance.cost_microusd =
+        crate::services::llm_gateway::compute_cost_micros(model, usage);
+    Ok(())
+}
+
+fn token_usage_from_route(usage: ExecutionRouteUsageV1) -> Result<TokenUsage, HandlerError> {
+    let convert = |value, field| {
+        usize::try_from(value).map_err(|_| {
+            HandlerError::from(TerminalError::new_with_code(
+                422,
+                format!("route {field} exceeds usize"),
+            ))
+        })
+    };
+    Ok(TokenUsage {
+        input_tokens_uncached: convert(usage.input_tokens_uncached, "uncached input usage")?,
+        input_tokens_cache_write: convert(
+            usage.input_tokens_cache_write,
+            "cache-write input usage",
+        )?,
+        input_tokens_cache_read: convert(usage.input_tokens_cache_read, "cache-read input usage")?,
+        output_tokens: convert(usage.output_tokens, "output usage")?,
+    })
+}
+
 async fn route_audit_envelope(
     ctx: &WorkflowContext<'_>,
     meta: &SessionMeta,
     session_id: SessionId,
     originating_sequence: u64,
-    route: &ExecutionRouteDecision,
+    route: &ExecutionRoutingResultV1,
     stage: ExecutionRouteStage,
 ) -> Result<ExecutionPlanningAuditEnvelopeV1, HandlerError> {
     let accepted_at = durable_utc_now(ctx, "execution_route_accepted_at").await?;
-    let (decision, mode, reason) = match route {
-        ExecutionRouteDecision::NeedsInput { reason } => {
+    let (decision, mode, reason) = match &route.decision {
+        ExecutionRouteDecision::NeedsInput { reason, .. } => {
             (ExecutionRouteDecisionKind::NeedsInput, None, *reason)
         }
         ExecutionRouteDecision::Routed { mode, reason } => {
@@ -624,6 +675,7 @@ async fn route_audit_envelope(
             decision,
             mode,
             reason,
+            provenance: route.provenance.clone(),
             accepted_at,
         },
     })
@@ -763,7 +815,7 @@ async fn execute_run_admission(
         .clone()
         .unwrap_or_else(|| workflow.config.models.main.clone());
     let planning_now = durable_utc_now(ctx, "execution_planning_now").await?;
-    let provider = RestatePlannerProvider { ctx };
+    let provider = RestateExecutionModelProvider { ctx };
     let planned = plan_execution(
         &provider,
         ExecutionPlanningRequest {
@@ -843,8 +895,20 @@ async fn append_clarification_response(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     meta: &SessionMeta,
+    missing_inputs: &[String],
 ) -> Result<String, HandlerError> {
-    let text = "What should I change? Point me at the file, message, object, or output and the specific fix you want.".to_string();
+    let text = match missing_inputs {
+        [] => "What information should I use to continue?".to_string(),
+        [field] => format!("I need {field} before I can continue. Please provide it."),
+        fields => {
+            let fields = fields
+                .iter()
+                .map(|field| format!("- {field}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("I need the following information before I can continue:\n\n{fields}")
+        }
+    };
     append_zero_cost_assistant_response(ctx, session_id, meta, text).await
 }
 

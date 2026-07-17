@@ -1,0 +1,53 @@
+name: execution mutation eval
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  targeted-execution-mutants:
+    runs-on: ubuntu-latest-16-core
+    timeout-minutes: 360
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants --version 27.0.0
+
+      - name: Run targeted execution mutation eval
+        run: scripts/run-execution-mutation-eval.sh
+
+      - name: Upload mutation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-mutants
+          if-no-files-found: error
+          path: |
+            target/execution-mutants/outcomes.json
+            target/execution-mutants/missed.txt
+            target/execution-mutants/report.json
+            target/execution-mutants/selected-mutants.txt
+
+      - name: Stop compose stack
+        if: always()
+        run: docker compose down

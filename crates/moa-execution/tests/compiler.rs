@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str::FromStr,
+};
 
 use chrono::{TimeZone, Utc};
 use moa_artifacts::execution_plan::{
@@ -30,8 +33,153 @@ use moa_execution::{
         ExecutionTaskStatus,
     },
 };
+use proptest::{
+    prelude::*,
+    test_runner::{Config as ProptestConfig, FileFailurePersistence},
+};
 use serde_json::json;
 use uuid::Uuid;
+
+proptest! {
+    #![proptest_config(property_config())]
+
+    #[test]
+    fn property_compiled_plans_are_acyclic_with_one_reachable_output(
+        capability_node_count in 1_usize..=8,
+        inject_cycle in any::<bool>(),
+    ) {
+        // Pins: every accepted generated plan is a DAG with one reachable terminal output.
+        let mut request = valid_request();
+        let reference = request.catalog.capabilities[0].reference.clone();
+        let mut nodes = Vec::with_capacity(capability_node_count + 1);
+        for index in 0..capability_node_count {
+            let id = format!("work_{index}");
+            let depends_on = index
+                .checked_sub(1)
+                .map(|dependency| vec![format!("work_{dependency}")])
+                .unwrap_or_default();
+            nodes.push(ExecutionNode {
+                id,
+                requirement_ids: vec!["req_one".to_string()],
+                depends_on,
+                when: None,
+                input: json!({ "order_id": { "$ref": "$.input.order_id" } }),
+                output_schema: json!({ "type": "object" }),
+                operation: ExecutionOperation::Capability {
+                    reference: reference.clone(),
+                },
+                retry: retry(1),
+                budget: None,
+            });
+        }
+        let last_work = format!("work_{}", capability_node_count - 1);
+        nodes.push(ExecutionNode {
+            id: "output".to_string(),
+            requirement_ids: vec!["req_one".to_string()],
+            depends_on: vec![last_work.clone()],
+            when: None,
+            input: json!({}),
+            output_schema: json!({ "type": "object" }),
+            operation: ExecutionOperation::Output {
+                value: json!({ "$ref": format!("$.nodes.{last_work}.output") }),
+            },
+            retry: retry(1),
+            budget: None,
+        });
+        if inject_cycle {
+            nodes[0].depends_on = vec!["output".to_string()];
+        }
+        request.plan.nodes = nodes;
+
+        let outcome = compile(request);
+        match outcome.compiled {
+            Some(compiled) => {
+                prop_assert!(!inject_cycle, "compiler accepted an injected cycle");
+                let compiled_nodes = &compiled.plan.definition.nodes;
+                prop_assert!(is_acyclic(compiled_nodes));
+                let output_ids = compiled_nodes
+                    .iter()
+                    .filter(|node| matches!(node.operation, ExecutionOperation::Output { .. }))
+                    .map(|node| node.id.as_str())
+                    .collect::<Vec<_>>();
+                prop_assert_eq!(output_ids.len(), 1);
+                let reachable = reachable_node_ids(compiled_nodes);
+                prop_assert!(reachable.contains(output_ids[0]));
+            }
+            None => {
+                prop_assert!(
+                    inject_cycle,
+                    "compiler rejected an acyclic generated plan: {:?}",
+                    outcome.report.issues
+                );
+            }
+        }
+    }
+}
+
+fn property_config() -> ProptestConfig {
+    ProptestConfig {
+        cases: 256,
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "proptest-regressions/properties.txt",
+        ))),
+        ..ProptestConfig::default()
+    }
+}
+
+fn is_acyclic(nodes: &[ExecutionNode]) -> bool {
+    let mut remaining = nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.depends_on.len()))
+        .collect::<BTreeMap<_, _>>();
+    let mut completed = BTreeSet::new();
+    loop {
+        let ready = remaining
+            .iter()
+            .filter(|(_, count)| **count == 0)
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        if ready.is_empty() {
+            break;
+        }
+        for id in ready {
+            remaining.remove(id);
+            completed.insert(id);
+            for node in nodes
+                .iter()
+                .filter(|node| node.depends_on.iter().any(|dep| dep == id))
+            {
+                if let Some(count) = remaining.get_mut(node.id.as_str()) {
+                    *count -= 1;
+                }
+            }
+        }
+    }
+    completed.len() == nodes.len()
+}
+
+fn reachable_node_ids(nodes: &[ExecutionNode]) -> BTreeSet<&str> {
+    let mut reachable = nodes
+        .iter()
+        .filter(|node| node.depends_on.is_empty())
+        .map(|node| node.id.as_str())
+        .collect::<BTreeSet<_>>();
+    loop {
+        let before = reachable.len();
+        for node in nodes {
+            if node
+                .depends_on
+                .iter()
+                .all(|dependency| reachable.contains(dependency.as_str()))
+            {
+                reachable.insert(node.id.as_str());
+            }
+        }
+        if reachable.len() == before {
+            return reachable;
+        }
+    }
+}
 
 #[test]
 fn compile_returns_canonical_hashes_and_exact_retry_estimate() {
@@ -58,6 +206,20 @@ fn compile_returns_canonical_hashes_and_exact_retry_estimate() {
             retrieved_bytes: 26,
             tasks: 2,
         }
+    );
+}
+
+#[test]
+fn plan_hash_treats_node_declaration_order_as_nonsemantic() {
+    // Pins: an amended DAG that returns to the same nodes cannot evade duplicate-plan detection
+    // merely because remove/add operations changed node array order.
+    let request = valid_request();
+    let mut reordered = request.plan.clone();
+    reordered.nodes.reverse();
+
+    assert_eq!(
+        plan_hash(&request.plan).expect("hash original plan"),
+        plan_hash(&reordered).expect("hash reordered plan")
     );
 }
 
@@ -131,6 +293,58 @@ fn compile_rejects_malformed_deliverable_schema() {
             })
             .count(),
         1
+    );
+}
+
+#[test]
+fn compile_rejects_every_reference_outside_catalog_or_authorization() {
+    // Pins: catalog and authorization envelopes are independent compiler admission gates.
+    let mut outside_catalog = valid_request();
+    outside_catalog.catalog.capabilities.clear();
+    outside_catalog.catalog.catalog_hash =
+        catalog_hash(1, &[]).expect("hash empty capability catalog");
+    let outcome = compile(outside_catalog);
+    assert!(outcome.compiled.is_none());
+    assert!(
+        outcome
+            .report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "capability_not_in_catalog")
+    );
+
+    let mut unauthorized_capability = valid_request();
+    unauthorized_capability
+        .authorization
+        .capability_refs
+        .clear();
+    let outcome = compile(unauthorized_capability);
+    assert!(outcome.compiled.is_none());
+    assert!(
+        outcome
+            .report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "capability_not_authorized")
+    );
+
+    let mut unauthorized_skill = valid_request();
+    let skill_ref =
+        ArtifactRef::from_str("skill://restricted").expect("parse restricted skill reference");
+    unauthorized_skill.plan.nodes[0].operation = ExecutionOperation::Agent {
+        instructions: "Use the restricted skill".to_string(),
+        skill_refs: vec![skill_ref],
+        capability_refs: vec![],
+        max_turns: 1,
+    };
+    let outcome = compile(unauthorized_skill);
+    assert!(outcome.compiled.is_none());
+    assert!(
+        outcome
+            .report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "skill_not_authorized")
     );
 }
 

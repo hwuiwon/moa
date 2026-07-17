@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::{TimeZone, Utc};
+use chrono::{Duration, TimeZone, Utc};
 use moa_artifacts::execution_plan::{
     CapabilityReference, CompletionCheck, CompletionCheckKind, CoverageRequirement,
     ExecutionBudgetLimit, ExecutionCitation, ExecutionDeliverable, ExecutionGoalContract,
@@ -17,8 +17,73 @@ use moa_execution::{
         ExecutionTaskStatus,
     },
 };
+use proptest::{
+    prelude::*,
+    test_runner::{Config as ProptestConfig, FileFailurePersistence},
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+proptest! {
+    #![proptest_config(property_config())]
+
+    #[test]
+    fn property_strict_subset_coverage_never_completes(
+        expected_count in 1_usize..=24,
+        retained_seed in 0_usize..24,
+    ) {
+        // Pins: any strict subset of declared map coverage must fail the completion gate.
+        let retained_count = retained_seed.min(expected_count - 1);
+        let expected = (0..expected_count)
+            .map(|index| Value::String(format!("item-{index}")))
+            .collect::<Vec<_>>();
+        let (mut goal, mut plan, mut projection) = map_fixture();
+        goal.requirements.clear();
+        goal.completion_checks
+            .retain(|check| matches!(check.kind, CompletionCheckKind::OutputSchema));
+        goal.coverage[0].expected_items = Value::Array(expected.clone());
+        goal.coverage[0].require_all = true;
+        for node in &mut plan.definition.nodes {
+            node.requirement_ids.clear();
+        }
+        let ExecutionOperation::Map { items, max_items, .. } =
+            &mut plan.definition.nodes[0].operation
+        else {
+            unreachable!("map fixture must contain a map node");
+        };
+        *items = Value::Array(expected);
+        *max_items = expected_count as u64;
+        projection.tasks.retain(|task| task.node_id == "output");
+        for index in 0..retained_count {
+            projection.tasks.push(task(
+                Uuid::from_u128(10_000 + index as u128),
+                "inspect",
+                &format!("string:\"item-{index}\""),
+                completed(json!({ "ok": true }), vec![]),
+            ));
+        }
+
+        let evaluation = evaluate_completion(request(
+            goal,
+            plan,
+            projection,
+            json!({ "ok": true }),
+        ))
+        .expect("strict-subset coverage evaluation");
+        prop_assert_ne!(evaluation.status, CompletionStatus::Completed);
+        prop_assert!(evaluation.gaps.iter().any(|gap| gap == "coverage expected failed"));
+    }
+}
+
+fn property_config() -> ProptestConfig {
+    ProptestConfig {
+        cases: 256,
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "proptest-regressions/properties.txt",
+        ))),
+        ..ProptestConfig::default()
+    }
+}
 
 #[test]
 fn completion_refuses_missing_citations_and_invalid_deliverables() {
@@ -84,6 +149,46 @@ fn map_coverage_rejects_unexpected_extra_keys_even_when_require_all_is_false() {
 }
 
 #[test]
+fn multiple_coverage_contracts_for_one_map_all_gate_the_requirement() {
+    // Pins: one passing coverage contract cannot hide another failed contract for the same map.
+    let (mut goal, plan, mut projection) = map_fixture();
+    projection
+        .tasks
+        .retain(|task| task.item_key != "string:\"extra\"");
+    goal.coverage.push(CoverageRequirement {
+        id: "missing".to_string(),
+        description: "Missing item coverage".to_string(),
+        map_node_id: "inspect".to_string(),
+        expected_items: json!(["missing"]),
+        require_all: true,
+    });
+
+    let evaluation = evaluate_completion(request(goal, plan, projection, json!({ "ok": true })))
+        .expect("evaluate combined coverage contracts");
+    assert!(evaluation.satisfied_requirement_ids.is_empty());
+    assert_eq!(evaluation.unsatisfied_requirement_ids, ["req_one"]);
+    assert!(
+        evaluation
+            .gaps
+            .contains(&"coverage missing failed".to_string())
+    );
+}
+
+#[test]
+fn optional_empty_coverage_universe_passes_without_map_tasks() {
+    // Pins: an optional empty universe is complete without inventing a task or observed item.
+    let (mut goal, plan, mut projection) = map_fixture();
+    goal.coverage[0].expected_items = json!([]);
+    projection.tasks.retain(|task| task.node_id != "inspect");
+
+    let evaluation = evaluate_completion(request(goal, plan, projection, json!({ "ok": true })))
+        .expect("evaluate empty optional coverage");
+    assert_eq!(evaluation.status, CompletionStatus::Completed);
+    assert_eq!(evaluation.satisfied_requirement_ids, ["req_one"]);
+    assert!(evaluation.unsatisfied_requirement_ids.is_empty());
+}
+
+#[test]
 fn completion_always_validates_terminal_schemas_without_an_explicit_schema_check() {
     // Pins: terminal plan/output-node schemas gate Completed independently of CompletionCheckKind::OutputSchema.
     let (mut goal, mut plan, projection) = ordinary_fixture();
@@ -104,6 +209,56 @@ fn completion_always_validates_terminal_schemas_without_an_explicit_schema_check
         evaluation
             .gaps
             .contains(&"terminal output is missing or violates its declared schemas".to_string())
+    );
+}
+
+#[test]
+fn terminal_plan_and_output_node_schemas_must_both_pass() {
+    // Pins: a terminal-node schema cannot mask an incompatible plan-level schema.
+    let (mut goal, mut plan, projection) = ordinary_fixture();
+    goal.completion_checks
+        .retain(|check| !matches!(check.kind, CompletionCheckKind::OutputSchema));
+    plan.definition.output_schema = json!({
+        "type": "object",
+        "required": ["result"],
+        "properties": { "result": { "type": "integer" } }
+    });
+    plan.definition.nodes[1].output_schema = json!({ "type": "object" });
+
+    let evaluation =
+        evaluate_completion(request(goal, plan, projection, json!({ "result": "ok" })))
+            .expect("evaluate independent terminal schemas");
+    assert_eq!(evaluation.status, CompletionStatus::Partial);
+    assert!(
+        evaluation
+            .gaps
+            .contains(&"terminal output is missing or violates its declared schemas".to_string())
+    );
+}
+
+#[test]
+fn deadline_is_exceeded_only_after_the_exact_instant() {
+    // Pins: equality remains admissible while any instant after the deadline degrades honestly.
+    let (goal, plan, projection) = ordinary_fixture();
+    let mut at_deadline = request(
+        goal.clone(),
+        plan.clone(),
+        projection.clone(),
+        json!({ "result": "ok" }),
+    );
+    at_deadline.budget_ledger.limit.deadline_at = Some(at_deadline.now);
+    let evaluation = evaluate_completion(at_deadline).expect("evaluate exact deadline instant");
+    assert_eq!(evaluation.status, CompletionStatus::Completed);
+
+    let mut after_deadline = request(goal, plan, projection, json!({ "result": "ok" }));
+    after_deadline.budget_ledger.limit.deadline_at =
+        Some(after_deadline.now - Duration::milliseconds(1));
+    let evaluation = evaluate_completion(after_deadline).expect("evaluate elapsed deadline");
+    assert_eq!(evaluation.status, CompletionStatus::Partial);
+    assert!(
+        evaluation
+            .gaps
+            .contains(&"execution deadline exceeded".to_string())
     );
 }
 

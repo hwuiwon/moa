@@ -142,7 +142,7 @@ impl OrchestratorTestFixture {
         if let Ok(ingress_url) = std::env::var("MOA_RESTATE_INGRESS_URL") {
             return Self::external(ingress_url);
         }
-        Self::internal(None, Vec::new(), None).await
+        Self::internal(None, Vec::new(), None, true).await
     }
 
     /// Starts a dedicated fixture with a scripted provider fixture loaded at startup.
@@ -150,7 +150,7 @@ impl OrchestratorTestFixture {
         if std::env::var("MOA_RESTATE_INGRESS_URL").is_ok() {
             bail!("dedicated scripted fixtures cannot use an external orchestrator");
         }
-        Self::internal(Some(script), Vec::new(), None).await
+        Self::internal(Some(script), Vec::new(), None, true).await
     }
 
     /// Starts a dedicated scripted fixture with extra orchestrator process environment.
@@ -161,7 +161,7 @@ impl OrchestratorTestFixture {
         if std::env::var("MOA_RESTATE_INGRESS_URL").is_ok() {
             bail!("dedicated scripted fixtures cannot use an external orchestrator");
         }
-        Self::internal(Some(script), extra_env, None).await
+        Self::internal(Some(script), extra_env, None, true).await
     }
 
     /// Starts a restartable dedicated fixture with a scripted provider and fake MCP capabilities.
@@ -174,7 +174,34 @@ impl OrchestratorTestFixture {
         }
         validate_execution_fixture_env(&options.orchestrator_env)?;
         let extra_env = options.orchestrator_env.clone();
-        Self::internal(Some(script), extra_env, Some(options)).await
+        Self::internal(Some(script), extra_env, Some(options), true).await
+    }
+
+    /// Starts a dedicated fixture backed by a configured real LLM provider.
+    ///
+    /// This paid path has no scripted-provider override and is gated separately
+    /// from all deterministic service fixtures.
+    pub async fn with_live_execution_fixture() -> Result<Self> {
+        if std::env::var("MOA_RESTATE_INGRESS_URL").is_ok() {
+            bail!("dedicated live execution fixtures cannot use an external orchestrator");
+        }
+        if std::env::var("MOA_RUN_LIVE_EXECUTION_EVALS").as_deref() != Ok("1") {
+            bail!("live execution fixture requires MOA_RUN_LIVE_EXECUTION_EVALS=1");
+        }
+        let credential_names = [
+            "MOA_ANTHROPIC_API_KEY",
+            "MOA_OPENAI_API_KEY",
+            "MOA_GOOGLE_API_KEY",
+        ];
+        if !credential_names
+            .iter()
+            .any(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
+        {
+            bail!(
+                "MOA_RUN_LIVE_EXECUTION_EVALS=1 requires MOA_ANTHROPIC_API_KEY, MOA_OPENAI_API_KEY, or MOA_GOOGLE_API_KEY"
+            );
+        }
+        Self::internal(None, Vec::new(), None, false).await
     }
 
     fn external(raw_ingress_url: String) -> Result<Self> {
@@ -213,7 +240,11 @@ impl OrchestratorTestFixture {
         script: Option<serde_json::Value>,
         mut extra_env: Vec<(String, String)>,
         capability_options: Option<FixtureCapabilityOptions>,
+        use_provider_override: bool,
     ) -> Result<Self> {
+        if capability_options.is_some() && !use_provider_override {
+            bail!("fixture capabilities require the scripted-provider override");
+        }
         let repo_root = repo_root();
         ensure_postgres_image(&repo_root).await?;
         let postgres = start_postgres_container().await?;
@@ -269,24 +300,33 @@ impl OrchestratorTestFixture {
             }
         };
 
-        let script_dir = tempfile::Builder::new()
-            .prefix("moa-scripted-provider-")
-            .tempdir()
-            .context("create scripted-provider tempdir")?;
-        let script_path = script_dir.path().join("default-script.json");
-        let script_body = match script {
-            Some(script) => {
-                serde_json::to_vec(&script).context("serialize scripted provider fixture")?
-            }
-            None => default_script(),
+        let (script_dir, script_path) = if use_provider_override {
+            let script_dir = tempfile::Builder::new()
+                .prefix("moa-scripted-provider-")
+                .tempdir()
+                .context("create scripted-provider tempdir")?;
+            let script_path = script_dir.path().join("default-script.json");
+            let script_body = match script {
+                Some(script) => {
+                    serde_json::to_vec(&script).context("serialize scripted provider fixture")?
+                }
+                None => default_script(),
+            };
+            std::fs::write(&script_path, script_body).with_context(|| {
+                format!("write scripted provider fixture {}", script_path.display())
+            })?;
+            (Some(script_dir), Some(script_path))
+        } else {
+            (None, None)
         };
-        std::fs::write(&script_path, script_body).with_context(|| {
-            format!("write scripted provider fixture {}", script_path.display())
-        })?;
 
-        let journal_path = capability_options
-            .as_ref()
-            .map(|_| script_dir.path().join("scripted-requests.jsonl"));
+        let journal_path = match (&capability_options, &script_dir) {
+            (Some(_), Some(script_dir)) => Some(script_dir.path().join("scripted-requests.jsonl")),
+            (None, _) => None,
+            (Some(_), None) => {
+                bail!("fixture capability journal requires a scripted-provider directory")
+            }
+        };
         if let Some(path) = &journal_path {
             std::fs::write(path, []).with_context(|| {
                 format!(
@@ -324,24 +364,26 @@ impl OrchestratorTestFixture {
         let orchestrator_port = pick_free_port()?;
         let health_port = pick_free_port()?;
         let scim_port = pick_free_port()?;
-        let restart_config = journal_path
-            .as_ref()
-            .map(|journal_path| OrchestratorRestartConfig {
-                binary: orchestrator_bin.clone(),
-                port: orchestrator_port,
-                health_port,
-                scim_port,
-                postgres_url: postgres_url.clone(),
-                admin_url: admin_url.clone(),
-                ingress_url: ingress_url.clone(),
-                redis_url: redis_url.clone(),
-                script_path: script_path.clone(),
-                journal_path: journal_path.clone(),
-                fga_config: fga_config.clone(),
-                extra_env: extra_env.clone(),
-                otlp_endpoint: otlp_capture.endpoint().to_string(),
-                observability_service_name: otlp_capture.resource_name().to_string(),
-            });
+        let restart_config =
+            journal_path
+                .as_ref()
+                .zip(script_path.as_ref())
+                .map(|(journal_path, script_path)| OrchestratorRestartConfig {
+                    binary: orchestrator_bin.clone(),
+                    port: orchestrator_port,
+                    health_port,
+                    scim_port,
+                    postgres_url: postgres_url.clone(),
+                    admin_url: admin_url.clone(),
+                    ingress_url: ingress_url.clone(),
+                    redis_url: redis_url.clone(),
+                    script_path: script_path.clone(),
+                    journal_path: journal_path.clone(),
+                    fga_config: fga_config.clone(),
+                    extra_env: extra_env.clone(),
+                    otlp_endpoint: otlp_capture.endpoint().to_string(),
+                    observability_service_name: otlp_capture.resource_name().to_string(),
+                });
         let mut orchestrator_guard = match &restart_config {
             Some(config) => config.spawn()?,
             None => spawn_orchestrator(OrchestratorSpawnConfig {
@@ -353,7 +395,7 @@ impl OrchestratorTestFixture {
                 admin_url: &admin_url,
                 ingress_url: &ingress_url,
                 redis_url: &redis_url,
-                script_path: &script_path,
+                script_path: script_path.as_deref(),
                 journal_path: None,
                 fga_config: &fga_config,
                 extra_env: &extra_env,
@@ -385,7 +427,7 @@ impl OrchestratorTestFixture {
             postgres_url,
             fga_client: Some(fga_client),
             test_prefix: format!("fixture-{}", Uuid::now_v7().simple()),
-            _script_dir: Some(script_dir),
+            _script_dir: script_dir,
             _postgres: Some(postgres),
             _restate: Some(restate),
             _openfga: openfga_container,
@@ -470,7 +512,7 @@ impl OrchestratorTestFixture {
             admin_url: &config.admin_url,
             ingress_url: &config.ingress_url,
             redis_url: &config.redis_url,
-            script_path: &config.script_path,
+            script_path: Some(&config.script_path),
             journal_path: Some(&config.journal_path),
             fga_config: &config.fga_config,
             extra_env: &child_env,
@@ -778,6 +820,16 @@ impl IsolatedTest<'_> {
 
     /// Creates, persists, and initializes a real session for Session VO tests.
     pub async fn create_session(&self, suffix: &str) -> Result<SessionId> {
+        self.create_session_with_model(suffix, ModelId::new("scripted-loadtest"))
+            .await
+    }
+
+    /// Creates, persists, and initializes a real session with an explicit model.
+    pub async fn create_session_with_model(
+        &self,
+        suffix: &str,
+        model: ModelId,
+    ) -> Result<SessionId> {
         let session_id = SessionId::new();
         let now = Utc::now();
         let identity = self
@@ -796,7 +848,7 @@ impl IsolatedTest<'_> {
             status: SessionStatus::Created,
             channel: Channel::Chat,
             active_channel_binding_id: None,
-            model: ModelId::new("scripted-loadtest"),
+            model: model.clone(),
             created_at: now,
             updated_at: now,
             completed_at: None,
@@ -828,7 +880,7 @@ impl IsolatedTest<'_> {
                     tenant_id: identity.tenant_id,
                     contact_id: None,
                     created_by: Some(SessionActorRef::Identity { id: identity.id }),
-                    model: ModelId::new("scripted-loadtest"),
+                    model,
                     channel: Channel::Chat,
                 },
             )

@@ -87,7 +87,16 @@ long-running LLM/tool loop lives in `TurnExecution`, so concurrent `snapshot`,
 There is no previous session-local turn runner; `TurnExecution` owns the durable
 turn loop.
 
-`TurnExecution` first selects one mode, then owns its turn mechanics:
+`TurnExecution` first selects one mode, then owns its turn mechanics. Ordinary
+user language is classified by at most one strict, no-tools auxiliary-model
+call before mode execution. Therefore `respond` means one user-facing response
+call after at most one classifier call, not one total provider call. Trusted
+template invocation, typed Act escalation, blank-objective preflight, and
+internal synthesis bypass the classifier. Any uncertain or malformed
+classifier result selects `act` without retry or planner fallback.
+
+- `needs_input` appends one deterministic clarification carrying the bounded
+  missing fields returned by routing.
 
 - `respond` makes one model call with no tools and no planning call.
 - `act` runs the existing bounded root model/tool loop and may use
@@ -102,7 +111,9 @@ signal.
 
 1. Build a `CompletionRequest` from session events and the context pipeline.
 2. Ensure a task segment exists or roll to a new segment when query rewrite marks `is_new_task`.
-3. Select `respond`, `act`, or `run`; invoke `LLMGateway` only as that mode requires.
+3. Select `respond`, `act`, `run`, or `needs_input` through trusted control facts
+   or one bounded auxiliary classifier call; persist the redacted normalized
+   route audit before mode execution.
 4. Persist assistant output and tool calls.
 5. Build an `ActionEnvelope`, evaluate action policy, and route allowed tool execution through `ToolExecutor`.
 6. Record tool usage, skill activation, token usage, and turn counts on the active segment.
@@ -354,6 +365,12 @@ requirement and completion check passes. Terminal state emits compact aggregate
 output, citations, failures, and gaps to the owning session. The session starts
 at most one deduplicated synthesis turn for the originating user sequence; it
 does not ingest every raw map output or poll the run through the root model.
+
+The deterministic and sampled validation of these claims is defined in
+[Execution Honesty Evaluation](eval/execution-honesty.md). Those checks consume
+the same persisted projection, task rows, planning audits, and bounded session
+event evidence as runtime inspection; they do not reconstruct success from a
+prose transcript.
 
 Reusable scheduled work is anchored by the `CronJob` virtual object. Each job
 key stores its cron expression, timezone, target service handler, and a version

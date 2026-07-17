@@ -7,8 +7,8 @@ use super::score_card::ScoreCard;
 /// Long-conversation pass/fail budgets.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Budgets {
-    /// Required task-completion value.
-    pub task_completed: bool,
+    /// Whether a nonblank response must be produced without observed errors.
+    pub response_produced_without_error: bool,
     /// Maximum allowed p95 completion latency.
     pub latency_p95_ms_max: Option<u64>,
     /// Maximum allowed rounded cost in cents.
@@ -44,7 +44,7 @@ pub struct Budgets {
 impl Default for Budgets {
     fn default() -> Self {
         Self {
-            task_completed: true,
+            response_produced_without_error: true,
             latency_p95_ms_max: None,
             cost_cents_max: None,
             cache_input_cached_ratio_min: None,
@@ -70,9 +70,9 @@ impl Budgets {
         let mut violations = Vec::new();
         check_bool(
             &mut violations,
-            "functional.task_completed",
-            self.task_completed,
-            score.functional.task_completed,
+            "functional.response_produced_without_error",
+            self.response_produced_without_error,
+            score.functional.response_produced_without_error,
         );
         if let Some(max) = self.latency_p95_ms_max {
             check_max_measured(

@@ -7,6 +7,8 @@ mod execution_execution_support;
 mod admission_replay;
 #[path = "execution_run_service_e2e/bulk_and_recovery.rs"]
 mod bulk_and_recovery;
+#[path = "execution_run_service_e2e/evaluation.rs"]
+mod evaluation;
 #[path = "execution_run_service_e2e/observability.rs"]
 mod observability;
 #[path = "execution_run_service_e2e/replan_and_completion.rs"]
@@ -29,7 +31,9 @@ use moa_core::{
     config::ExecutionConfig,
     events::Event,
     types::execution_planning::{
-        ExecutionRouteReason, ExecutionSourceProvenanceV1, GeneratedPlanPlannerProvenanceV1,
+        ExecutionAdmissionEstimateV1, ExecutionConfirmationEvidenceV1,
+        ExecutionEstimateMethodologyV1, ExecutionRouteReason, ExecutionRunAdmissionStatus,
+        ExecutionRunStarted, ExecutionSourceProvenanceV1, GeneratedPlanPlannerProvenanceV1,
     },
     types::{
         contact::SessionActorRef,
@@ -54,11 +58,12 @@ use moa_execution::{
     wire::{
         ExecutionCancelRequest, ExecutionConfirmRequest, ExecutionMutationResponse,
         ExecutionPlanningContextRequest, ExecutionPlanningContextResponse,
-        ExecutionPlanningContextSnapshotV1, ExecutionRunRequest, ExecutionRunWorkflowRequest,
-        ExecutionStartRequest, ExecutionStartResponse, ExecutionStatusResponse,
-        ExecutionTaskWorkflowRequest, planning_context_hash,
+        ExecutionPlanningContextSnapshotV1, ExecutionRunRequest, ExecutionStartRequest,
+        ExecutionStartResponse, ExecutionStatusResponse, ExecutionTaskWorkflowRequest,
+        planning_context_hash,
     },
 };
+use moa_orchestrator::objects::session::ExecutionRunStartedDelivery;
 use moa_test_support::OrchestratorTestFixture;
 use serde_json::json;
 
@@ -558,6 +563,16 @@ async fn run_wake_handoff_case(mode: &str) -> Result<()> {
         .create_session(&format!("execution-wake-handoff-{mode}"))
         .await?;
     let session = test.client().get_session(session_id).await?;
+    let originating_user_sequence_num = test
+        .client()
+        .append_event(
+            session_id,
+            Event::UserMessage {
+                text: "complete after a wake handoff".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await?;
     let owner_user_id = match session.created_by {
         Some(SessionActorRef::Identity { id }) => UserId::new(id.to_string()),
         other => anyhow::bail!("fixture session has no identity owner: {other:?}"),
@@ -634,7 +649,7 @@ async fn run_wake_handoff_case(mode: &str) -> Result<()> {
         scope,
         session.tenant_id,
         session_id,
-        1,
+        originating_user_sequence_num,
         owner_user_id.clone(),
         catalog.clone(),
         authorization.clone(),
@@ -649,7 +664,7 @@ async fn run_wake_handoff_case(mode: &str) -> Result<()> {
                 tenant_id: session.tenant_id,
                 contact_id: None,
                 session_id,
-                originating_user_sequence_num: 1,
+                originating_user_sequence_num,
                 planning_context_uid,
                 planning_context_hash,
                 owner_user_id,
@@ -668,19 +683,32 @@ async fn run_wake_handoff_case(mode: &str) -> Result<()> {
         .await?;
     assert!(run.queued_at.is_none());
     let initial_epoch = run.wake_epoch;
-    let client = test.client().clone();
-    let workflow_request = ExecutionRunWorkflowRequest {
-        run_uid: run.run_uid,
-        tenant_id: session.tenant_id,
-        contact_id: None,
-        session_id,
-    };
-    let run_uid = run.run_uid;
-    let driver = tokio::spawn(async move {
-        client
-            .post_void(&format!("/ExecutionRun/{run_uid}/run"), &workflow_request)
-            .await
-    });
+    test.client()
+        .post_void(
+            &format!("/Session/{session_id}/execution_run_started"),
+            &ExecutionRunStartedDelivery {
+                started: ExecutionRunStarted {
+                    run_uid: run.run_uid,
+                    originating_user_sequence_num,
+                    plan_revision: run.plan_revision,
+                    status: ExecutionRunAdmissionStatus::AwaitingConfirmation,
+                    confirmation: Some(ExecutionConfirmationEvidenceV1 {
+                        active_plan_hash: run.active_plan_hash.to_string(),
+                        estimate: ExecutionAdmissionEstimateV1 {
+                            cost_microusd: run.active_plan.estimate.cost_microusd,
+                            tokens: run.active_plan.estimate.tokens,
+                            tasks: run.active_plan.estimate.tasks,
+                            tool_calls: run.active_plan.estimate.tool_calls,
+                            retrieved_bytes: run.active_plan.estimate.retrieved_bytes,
+                        },
+                        methodology: ExecutionEstimateMethodologyV1::ConservativeWorstCaseV1,
+                    }),
+                },
+                approved_budget: run.approved_budget.clone(),
+            },
+        )
+        .await
+        .context("activate the wake-handoff run through Session")?;
 
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -733,13 +761,20 @@ async fn run_wake_handoff_case(mode: &str) -> Result<()> {
             if run.run_uid == confirmed.run_uid && run.queued_at == Some(queued_at)
     ));
 
-    tokio::time::timeout(Duration::from_secs(30), driver)
-        .await
-        .context("wake was lost across the handoff checkpoint")???;
-    let terminal = repository
-        .load_run(scope, run.run_uid)
-        .await?
-        .context("completed wake handoff run disappeared")?;
+    let terminal = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let current = repository
+                .load_run(scope, run.run_uid)
+                .await?
+                .context("completed wake handoff run disappeared")?;
+            if current.status.is_terminal() {
+                return Ok::<_, anyhow::Error>(current);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .context("wake was lost across the handoff checkpoint")??;
     assert_eq!(terminal.status, ExecutionRunStatus::Completed);
     assert_eq!(terminal.output, Some(json!({"handoff": "completed"})));
     Ok(())
@@ -755,6 +790,16 @@ async fn waiting_replan_with_exhausted_budget_finalizes_without_amendment() -> R
     let test = fixture.isolated().await;
     let session_id = test.create_session("execution-replan-budget-stop").await?;
     let session = test.client().get_session(session_id).await?;
+    let originating_user_sequence_num = test
+        .client()
+        .append_event(
+            session_id,
+            Event::UserMessage {
+                text: "stop an exhausted replan wait".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await?;
     let owner_user_id = match session.created_by {
         Some(SessionActorRef::Identity { id }) => UserId::new(id.to_string()),
         other => anyhow::bail!("fixture session has no identity owner: {other:?}"),
@@ -833,7 +878,7 @@ async fn waiting_replan_with_exhausted_budget_finalizes_without_amendment() -> R
         scope,
         session.tenant_id,
         session_id,
-        1,
+        originating_user_sequence_num,
         owner_user_id.clone(),
         catalog.clone(),
         authorization.clone(),
@@ -848,7 +893,7 @@ async fn waiting_replan_with_exhausted_budget_finalizes_without_amendment() -> R
                 tenant_id: session.tenant_id,
                 contact_id: None,
                 session_id,
-                originating_user_sequence_num: 1,
+                originating_user_sequence_num,
                 planning_context_uid,
                 planning_context_hash,
                 owner_user_id,
@@ -994,24 +1039,36 @@ async fn waiting_replan_with_exhausted_budget_finalizes_without_amendment() -> R
         }
     ));
 
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        test.client().post_void(
-            &format!("/ExecutionRun/{}/run", run.run_uid),
-            &ExecutionRunWorkflowRequest {
-                run_uid: run.run_uid,
-                tenant_id: session.tenant_id,
-                contact_id: None,
-                session_id,
+    test.client()
+        .post_void(
+            &format!("/Session/{session_id}/execution_run_started"),
+            &ExecutionRunStartedDelivery {
+                started: ExecutionRunStarted {
+                    run_uid: run.run_uid,
+                    originating_user_sequence_num,
+                    plan_revision: run.plan_revision,
+                    status: ExecutionRunAdmissionStatus::Queued,
+                    confirmation: None,
+                },
+                approved_budget: run.approved_budget.clone(),
             },
-        ),
-    )
+        )
+        .await
+        .context("activate the exhausted replan run through Session")?;
+    let finalized = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let current = repository
+                .load_run(scope, run.run_uid)
+                .await?
+                .context("finalized run should remain queryable")?;
+            if current.status.is_terminal() {
+                return Ok::<_, anyhow::Error>(current);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
     .await
     .context("ExecutionRun parked instead of finalizing exhausted replan")??;
-    let finalized = repository
-        .load_run(scope, run.run_uid)
-        .await?
-        .context("finalized run should remain queryable")?;
     assert_eq!(finalized.status, ExecutionRunStatus::Blocked);
     assert!(finalized.completed_at.is_some());
     assert!(matches!(
@@ -1081,6 +1138,16 @@ async fn elapsed_reservation_persists_typed_failure_and_run_finalizes() -> Resul
         .create_session("execution-reservation-deadline")
         .await?;
     let session = test.client().get_session(session_id).await?;
+    let originating_user_sequence_num = test
+        .client()
+        .append_event(
+            session_id,
+            Event::UserMessage {
+                text: "record an elapsed reservation".to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await?;
     let owner_user_id = match session.created_by {
         Some(SessionActorRef::Identity { id }) => UserId::new(id.to_string()),
         other => anyhow::bail!("fixture session has no identity owner: {other:?}"),
@@ -1158,7 +1225,7 @@ async fn elapsed_reservation_persists_typed_failure_and_run_finalizes() -> Resul
         scope,
         session.tenant_id,
         session_id,
-        1,
+        originating_user_sequence_num,
         owner_user_id.clone(),
         catalog.clone(),
         authorization.clone(),
@@ -1173,7 +1240,7 @@ async fn elapsed_reservation_persists_typed_failure_and_run_finalizes() -> Resul
                 tenant_id: session.tenant_id,
                 contact_id: None,
                 session_id,
-                originating_user_sequence_num: 1,
+                originating_user_sequence_num,
                 planning_context_uid,
                 planning_context_hash,
                 owner_user_id,
@@ -1236,6 +1303,35 @@ async fn elapsed_reservation_persists_typed_failure_and_run_finalizes() -> Resul
         )
         .await
         .context("reservation rejection should complete the task workflow")?;
+    test.client()
+        .post_void(
+            &format!("/Session/{session_id}/execution_run_started"),
+            &ExecutionRunStartedDelivery {
+                started: ExecutionRunStarted {
+                    run_uid: run.run_uid,
+                    originating_user_sequence_num,
+                    plan_revision: run.plan_revision,
+                    status: ExecutionRunAdmissionStatus::Queued,
+                    confirmation: None,
+                },
+                approved_budget: run.approved_budget.clone(),
+            },
+        )
+        .await
+        .context("activate the directly persisted run through Session")?;
+    let mut finalized = None;
+    for _ in 0..200 {
+        let current = repository
+            .load_run(scope, run.run_uid)
+            .await?
+            .context("elapsed reservation run should remain queryable")?;
+        if current.status.is_terminal() {
+            finalized = Some(current);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let finalized = finalized.context("typed reservation outcome should finalize the run")?;
     let failed_task = repository
         .load_task(scope, run.run_uid, task_id)
         .await?
@@ -1248,22 +1344,6 @@ async fn elapsed_reservation_persists_typed_failure_and_run_finalizes() -> Resul
             ..
         })
     ));
-    test.client()
-        .post_void(
-            &format!("/ExecutionRun/{}/run", run.run_uid),
-            &ExecutionRunWorkflowRequest {
-                run_uid: run.run_uid,
-                tenant_id: session.tenant_id,
-                contact_id: None,
-                session_id,
-            },
-        )
-        .await
-        .context("typed reservation outcome should finalize the run")?;
-    let finalized = repository
-        .load_run(scope, run.run_uid)
-        .await?
-        .context("finalized run should remain queryable")?;
     assert!(finalized.status.is_terminal());
     assert!(finalized.completed_at.is_some());
     Ok(())

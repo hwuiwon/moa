@@ -26,11 +26,11 @@
       "targets": [
         {
           "format": "time_series",
-          "rawSql": "SELECT ts AS time, replace(model_or_evaluator, 'long_conversation:', '') AS metric, CASE WHEN value_boolean THEN 1.0 ELSE 0.0 END AS value FROM analytics.scores WHERE $__timeFilter(ts) AND name = 'functional.task_completed' AND model_or_evaluator LIKE 'long_conversation:%' AND ('$scenario' = 'all' OR replace(model_or_evaluator, 'long_conversation:', '') = '$scenario') ORDER BY 1",
+          "rawSql": "SELECT ts AS time, replace(model_or_evaluator, 'long_conversation:', '') AS metric, CASE WHEN value_boolean THEN 1.0 ELSE 0.0 END AS value FROM analytics.scores WHERE $__timeFilter(ts) AND name = 'functional.response_produced_without_error' AND model_or_evaluator LIKE 'long_conversation:%' AND ('$scenario' = 'all' OR replace(model_or_evaluator, 'long_conversation:', '') = '$scenario') ORDER BY 1",
           "refId": "A"
         }
       ],
-      "title": "Per-scenario success rate",
+      "title": "Response delivery health",
       "type": "timeseries"
     },
     {

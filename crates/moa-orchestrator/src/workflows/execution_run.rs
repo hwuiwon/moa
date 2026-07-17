@@ -150,6 +150,10 @@ impl ExecutionRun for ExecutionRunImpl {
             match step {
                 RunDriveStep::Continue => continue,
                 RunDriveStep::PlanAmendment { plan_revision } => {
+                    if pause_automatic_amendment_planner() {
+                        ctx.sleep(std::time::Duration::from_millis(25)).await?;
+                        continue;
+                    }
                     let available_tool_names = self
                         .router
                         .capability_registrations()
@@ -293,6 +297,16 @@ impl ExecutionRun for ExecutionRunImpl {
 }
 
 #[cfg(feature = "integration")]
+fn pause_automatic_amendment_planner() -> bool {
+    std::env::var("MOA_EXECUTION_TEST_PAUSE_AMENDMENT_PLANNER").as_deref() == Ok("true")
+}
+
+#[cfg(not(feature = "integration"))]
+const fn pause_automatic_amendment_planner() -> bool {
+    false
+}
+
+#[cfg(feature = "integration")]
 async fn test_wake_handoff_checkpoint(ctx: &WorkflowContext<'_>) -> Result<(), HandlerError> {
     let Ok(mode) = std::env::var("MOA_EXECUTION_TEST_WAKE_HANDOFF") else {
         return Ok(());
@@ -349,6 +363,11 @@ async fn deliver_session_projection(
     include_terminal: bool,
     step_index: u64,
 ) -> Result<(), HandlerError> {
+    #[cfg(feature = "integration")]
+    if std::env::var("MOA_EXECUTION_TEST_SKIP_SESSION_DELIVERY").as_deref() == Ok("true") {
+        return Ok(());
+    }
+
     let delivery_request = request.clone();
     let delivery = ctx
         .run(|| async move {
@@ -1385,9 +1404,24 @@ async fn finalize(
     repository: &ExecutionRepository,
     scope: ExecutionScope,
     snapshot: moa_execution::repository::ExecutionSchedulingSnapshot,
-    terminal: TerminalProjection,
+    mut terminal: TerminalProjection,
     cause: ExecutionTerminalCause,
 ) -> Result<RunDriveStep, HandlerError> {
+    let task_failure_gaps = snapshot
+        .projection
+        .tasks
+        .iter()
+        .filter_map(|task| {
+            task.outcome
+                .as_ref()
+                .and_then(|outcome| match &outcome.result {
+                    moa_artifacts::execution_plan::ExecutionTaskResult::Failed {
+                        message, ..
+                    } => Some(message.clone()),
+                    _ => None,
+                })
+        })
+        .collect::<Vec<_>>();
     let terminal_output = match &terminal {
         TerminalProjection::Completed { output } => Some(output.clone()),
         TerminalProjection::Partial { output, .. } | TerminalProjection::Blocked { output, .. } => {
@@ -1403,17 +1437,23 @@ async fn finalize(
         .iter()
         .map(|task| task.task_id)
         .collect::<Vec<_>>();
-    let terminal_reason = format!("execution run reached terminal projection {terminal:?}");
-    let evaluation = evaluate_completion(CompletionEvaluationRequest {
+    let mut evaluation = evaluate_completion(CompletionEvaluationRequest {
         goal: snapshot.run.goal.clone(),
         plan: snapshot.run.active_plan.clone(),
         run_input: snapshot.run.input.clone(),
         projection: snapshot.projection,
-        terminal_output,
+        terminal_output: terminal_output.clone(),
         budget_ledger: snapshot.budget_ledger,
         now: chrono::Utc::now(),
     })
     .map_err(execution_error)?;
+    evaluation.gaps.extend(task_failure_gaps);
+    evaluation.gaps.sort();
+    evaluation.gaps.dedup();
+    if !terminal_projection_matches_evaluation(&terminal, evaluation.status) {
+        terminal = terminal_projection_from_evaluation(&evaluation, terminal_output, None);
+    }
+    let terminal_reason = format!("execution run reached terminal projection {terminal:?}");
     let terminal_evidence =
         terminal_evidence_from_evaluation(cause, &evaluation).map_err(execution_error)?;
     let selected_terminal_reason =
@@ -1451,6 +1491,29 @@ async fn finalize(
             Err(TerminalError::new_with_code(404, "execution run not found").into())
         }
     }
+}
+
+fn terminal_projection_matches_evaluation(
+    terminal: &TerminalProjection,
+    status: CompletionStatus,
+) -> bool {
+    matches!(
+        (terminal, status),
+        (
+            TerminalProjection::Completed { .. },
+            CompletionStatus::Completed
+        ) | (
+            TerminalProjection::Partial { .. },
+            CompletionStatus::Partial
+        ) | (
+            TerminalProjection::Blocked { .. },
+            CompletionStatus::Blocked
+        ) | (
+            TerminalProjection::Unsupported { .. },
+            CompletionStatus::Unsupported
+        ) | (TerminalProjection::Failed { .. }, CompletionStatus::Failed)
+            | (TerminalProjection::Cancelled { .. }, _)
+    )
 }
 
 fn terminal_step(

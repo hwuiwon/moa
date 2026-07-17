@@ -1,5 +1,5 @@
 [functional]
-task_completed = true
+response_produced_without_error = true
 facts_planted = [
   "uses_str_replace",
   "recovers_from_zero_matches_error",

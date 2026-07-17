@@ -1,5 +1,118 @@
 use moa_artifacts::execution_plan::{ExecutionBudgetLimit, ExecutionUsage};
 use moa_execution::{budget::BudgetLedger, capability::ExecutionEstimate};
+use proptest::{
+    prelude::*,
+    test_runner::{Config as ProptestConfig, FileFailurePersistence},
+};
+
+proptest! {
+    #![proptest_config(property_config())]
+
+    #[test]
+    fn property_budget_reservations_and_reconciliation_preserve_limits(
+        approved in 1_u64..=10_000,
+        operations in proptest::collection::vec((0_u64..=20_000, 0_u64..=20_000), 1..=64),
+    ) {
+        // Pins: rejected reservations are atomic and successful accounting cannot escape approval.
+        let task_limit = operations.len() as u64;
+        let mut ledger = BudgetLedger::new(all_limits(approved, task_limit));
+        for (reserved, actual) in operations {
+            let reservation = all_estimate(reserved);
+            let before = ledger.clone();
+            match ledger.try_reserve(reservation) {
+                Ok(()) => {
+                    prop_assert!(within_limits(&ledger));
+                    let explicit_actual_overrun = actual > reserved;
+                    let result = ledger.reconcile(reservation, &all_usage(actual));
+                    if explicit_actual_overrun {
+                        prop_assert!(result.is_err());
+                        prop_assert!(ledger.overrun);
+                    } else {
+                        prop_assert!(result.is_ok());
+                        prop_assert!(!ledger.overrun);
+                        prop_assert!(within_limits(&ledger));
+                    }
+                }
+                Err(_) => {
+                    prop_assert_eq!(&ledger, &before);
+                }
+            }
+            if ledger.overrun {
+                let overrun = ledger.clone();
+                prop_assert!(ledger.try_reserve(all_estimate(0)).is_err());
+                prop_assert_eq!(ledger, overrun);
+                break;
+            }
+        }
+    }
+}
+
+fn property_config() -> ProptestConfig {
+    ProptestConfig {
+        cases: 256,
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "proptest-regressions/properties.txt",
+        ))),
+        ..ProptestConfig::default()
+    }
+}
+
+fn all_limits(value: u64, tasks: u64) -> ExecutionBudgetLimit {
+    ExecutionBudgetLimit {
+        max_cost_microusd: Some(value),
+        max_tokens: Some(value),
+        max_tasks: Some(tasks),
+        max_tool_calls: Some(value),
+        max_retrieved_bytes: Some(value),
+        deadline_at: None,
+    }
+}
+
+fn all_estimate(value: u64) -> ExecutionEstimate {
+    ExecutionEstimate {
+        cost_microusd: value,
+        tokens: value,
+        tool_calls: value,
+        retrieved_bytes: value,
+        tasks: 1,
+    }
+}
+
+fn all_usage(value: u64) -> ExecutionUsage {
+    ExecutionUsage {
+        cost_microusd: value,
+        tokens: value,
+        tool_calls: value,
+        retrieved_bytes: value,
+    }
+}
+
+fn within_limits(ledger: &BudgetLedger) -> bool {
+    let within = |consumed: u64, reserved: u64, limit: Option<u64>| {
+        limit.is_none_or(|limit| consumed.saturating_add(reserved) <= limit)
+    };
+    within(
+        ledger.consumed.cost_microusd,
+        ledger.reserved.cost_microusd,
+        ledger.limit.max_cost_microusd,
+    ) && within(
+        ledger.consumed.tokens,
+        ledger.reserved.tokens,
+        ledger.limit.max_tokens,
+    ) && within(
+        ledger.consumed.tasks,
+        ledger.reserved.tasks,
+        ledger.limit.max_tasks,
+    ) && within(
+        ledger.consumed.tool_calls,
+        ledger.reserved.tool_calls,
+        ledger.limit.max_tool_calls,
+    ) && within(
+        ledger.consumed.retrieved_bytes,
+        ledger.reserved.retrieved_bytes,
+        ledger.limit.max_retrieved_bytes,
+    )
+}
 
 #[test]
 fn reservation_rejects_request_that_exceeds_remaining_budget() {

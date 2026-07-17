@@ -44,6 +44,9 @@ fn execution_analytics_source_contract_is_exact_offline() {
     for contract in [
         "7b83c5c2-5cf7-5fa0-8eb6-2d7c6e0f1d11",
         "moa.execution.route-audit.v1",
+        "'source','classifier_outcome','provider_model','prompt_version'",
+        "'objective_hash','response_hash','confidence_bps'",
+        "'missing_input_count','usage','cost_microusd','duration_micros'",
         "moa.execution.planner-audit.v1",
         "moa.execution.compile-audit.v1",
         "octet_length(candidate_json::TEXT) <= 1048576",
@@ -318,19 +321,29 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
             SELECT COUNT(*)
             FROM (
                 VALUES
-                ('initial','needs_input',NULL,'preflight_input_missing'),
-                ('initial','routed','respond','simple_response'),
-                ('initial','routed','act','bounded_interactive_work'),
-                ('initial','routed','run','explicit_run'),
-                ('initial','routed','run','bulk_collection'),
-                ('initial','routed','run','durable_or_resumable'),
-                ('initial','routed','run','high_fanout'),
-                ('initial','routed','run','approval_or_signal'),
-                ('initial','routed','run','selected_execution_template'),
-                ('act_escalation','routed','run','act_escalation')
-            ) cell(stage,decision,mode,reason)
+                ('initial','needs_input',NULL,'preflight_input_missing','blank_objective'),
+                ('initial','routed','respond','simple_response','classifier'),
+                ('initial','routed','act','bounded_interactive_work','classifier'),
+                ('initial','routed','run','explicit_run','classifier'),
+                ('initial','routed','run','bulk_collection','classifier'),
+                ('initial','routed','run','durable_or_resumable','classifier'),
+                ('initial','routed','run','high_fanout','classifier'),
+                ('initial','routed','run','approval_or_signal','classifier'),
+                ('initial','routed','run','selected_execution_template','selected_execution_template'),
+                ('act_escalation','routed','run','act_escalation','act_escalation')
+            ) cell(stage,decision,mode,reason,source)
             WHERE moa.execution_route_audit_row_is_valid(
-                stage,decision,mode,reason
+                stage,decision,mode,reason,source,
+                CASE WHEN source = 'classifier' THEN 'accepted' ELSE 'not_called' END,
+                CASE WHEN source = 'classifier' THEN 'route-model' END,
+                CASE WHEN source = 'classifier' THEN 'execution-router-v1' END,
+                repeat('a', 64),
+                CASE WHEN source = 'classifier' THEN repeat('b', 64) END,
+                (CASE WHEN source = 'classifier' THEN 9500 END)::SMALLINT,
+                (CASE WHEN decision = 'needs_input' THEN 1 ELSE 0 END)::SMALLINT,
+                (CASE WHEN source = 'classifier' THEN 1 ELSE 0 END)::BIGINT,
+                0::BIGINT,0::BIGINT,0::BIGINT,0::BIGINT,
+                (CASE WHEN source = 'classifier' THEN 1 ELSE 0 END)::BIGINT
             )
             "#,
         )
@@ -338,7 +351,29 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
         .await?;
         let invalid_route_cell: bool = sqlx::query_scalar(
             "SELECT moa.execution_route_audit_row_is_valid(\
-             'act_escalation','routed','act','act_escalation')",
+             'act_escalation','routed','act','act_escalation','act_escalation',\
+             'not_called',NULL,NULL,repeat('a',64),NULL,NULL::SMALLINT,\
+             0::SMALLINT,0::BIGINT,0::BIGINT,0::BIGINT,0::BIGINT,0::BIGINT,0::BIGINT)",
+        )
+        .fetch_one(&target)
+        .await?;
+        let old_route_envelope_valid: bool = sqlx::query_scalar(
+            r#"
+            SELECT moa.execution_planning_audit_envelope_is_valid(
+                jsonb_build_object(
+                    'schema_version',1,
+                    'tenant_id','00000000-0000-0000-0000-000000337001',
+                    'contact_id',NULL,
+                    'session_id','00000000-0000-0000-0000-000000337002',
+                    'originating_sequence',1,
+                    'payload',jsonb_build_object(
+                        'kind','route','stage','initial','decision','routed',
+                        'mode','run','reason','explicit_run',
+                        'accepted_at','2026-01-01T00:00:00Z'
+                    )
+                )
+            )
+            "#,
         )
         .fetch_one(&target)
         .await?;
@@ -894,6 +929,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
             audit_counts,
             valid_route_cells,
             invalid_route_cell,
+            old_route_envelope_valid,
             valid_terminal_cells,
             invalid_terminal_cells,
             provenance_matrix,
@@ -926,6 +962,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
         audit_counts,
         valid_route_cells,
         invalid_route_cell,
+        old_route_envelope_valid,
         valid_terminal_cells,
         invalid_terminal_cells,
         provenance_matrix,
@@ -958,6 +995,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
     assert_eq!(audit_counts, (0, 0, 0));
     assert_eq!(valid_route_cells, 10);
     assert!(!invalid_route_cell);
+    assert!(!old_route_envelope_valid);
     assert_eq!(valid_terminal_cells, 71);
     assert_eq!(invalid_terminal_cells, 7);
     assert_eq!(provenance_matrix, (true, true, true, false, false, false));

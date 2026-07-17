@@ -111,6 +111,39 @@ inherits = "default"
 test-threads = 2
 default-filter = 'binary(/^(golden_eval|long_conversation_foundation_eval|long_conversation_smoke_eval|scripted_user_mode_eval)$/)'
 
+[profile.execution-eval-pr]
+inherits = "default"
+test-threads = 1
+junit.path = "target/nextest/execution-eval-pr/junit.xml"
+# Bounded merge-gating coverage: representative routing, completion, replan,
+# budget/deadline, generation-fence, and adversarial honesty scenarios. The
+# 500-item silent-incompleteness case remains in the complete nightly lane.
+default-filter = '''
+binary(/^execution_run_service_e2e$/)
+  & (
+      test(/respond_simple_question_uses_no_tools_planner_or_run_service_e2e/)
+      | test(/act_executes_bounded_tool_loop_without_run_service_e2e/)
+      | test(/no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e/)
+      | test(/completion_gate_missing_company_service_e2e/)
+      | test(/duplicate_plan_stops_replan_service_e2e/)
+      | test(/duplicate_amendment_stops_replan_service_e2e/)
+      | test(/repeated_failure_stops_replan_service_e2e/)
+      | test(/remove_only_amendment_is_no_progress_service_e2e/)
+      | test(/useful_amendment_preserves_completed_work_service_e2e/)
+      | test(/reservation_budget_rejection_dispatches_zero_service_e2e/)
+      | test(/elapsed_deadline_dispatches_zero_service_e2e/)
+      | test(/stale_generation_is_audit_only_service_e2e/)
+      | test(/duplicate_completion_does_not_double_account_service_e2e/)
+      | (test(/execution_eval_/) - test(/execution_eval_silent_incomplete_500_item_universe/))
+    )
+'''
+
+[profile.execution-eval-nightly]
+inherits = "default"
+test-threads = 1
+junit.path = "target/nextest/execution-eval-nightly/junit.xml"
+default-filter = 'binary(/^execution_run_service_e2e$/)'
+
 [test-groups]
 db-session = { max-threads = 4 }
 # db-memory tests use per-test databases cloned from the migration template
