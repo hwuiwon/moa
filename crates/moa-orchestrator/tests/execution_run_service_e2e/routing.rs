@@ -97,12 +97,7 @@ async fn respond_simple_question_uses_no_tools_planner_or_run_service_e2e() -> R
 
     let events = raw_events(test.client(), started.session_id).await?;
     let audits = planning_audits(&fixture.postgres_url, started.session_id).await?;
-    assert_initial_route(
-        &audits,
-        ExecutionRouteKind::Respond,
-        None,
-        RouteFixture::Respond,
-    );
+    assert_initial_route(&audits, ExecutionRouteKind::Respond, None);
     assert_no_planner_or_compile(&audits);
     assert_eq!(
         event_count(&events, |event| matches!(event, Event::ToolCall { .. })),
@@ -113,13 +108,7 @@ async fn respond_simple_question_uses_no_tools_planner_or_run_service_e2e() -> R
         0
     );
     assert_no_execution_lifecycle_events(&events);
-    assert_non_durable_eval(
-        &audits,
-        &events,
-        ExecutionRouteKind::Respond,
-        None,
-        RouteFixture::Respond,
-    );
+    assert_non_durable_eval(&audits, &events, ExecutionRouteKind::Respond, None);
     assert_eq!(final_brain_response(&events)?, RESPOND_FINAL);
 
     let requests = journal_requests(fixture.scripted_requests()?)?;
@@ -222,7 +211,6 @@ async fn execute_inline_runs_bounded_tool_loop_without_durable_run_service_e2e()
         &audits,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Inline),
-        RouteFixture::Inline,
     );
     assert_no_planner_or_compile(&audits);
     assert_eq!(
@@ -247,7 +235,6 @@ async fn execute_inline_runs_bounded_tool_loop_without_durable_run_service_e2e()
         &events,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Inline),
-        RouteFixture::Inline,
     );
     assert_eq!(final_brain_response(&events)?, INLINE_FINAL);
 
@@ -350,7 +337,6 @@ async fn execute_inline_uses_instruction_only_skill_without_durable_run_service_
         &audits,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Inline),
-        RouteFixture::Inline,
     );
     assert_no_planner_or_compile(&audits);
     assert_eq!(
@@ -375,7 +361,6 @@ async fn execute_inline_uses_instruction_only_skill_without_durable_run_service_
         &events,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Inline),
-        RouteFixture::Inline,
     );
     assert_eq!(final_brain_response(&events)?, INLINE_INSTRUCTION_FINAL);
 
@@ -509,7 +494,6 @@ async fn published_skill_template_starts_without_plan_generation_service_e2e() -
         &audits,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Durable),
-        RouteFixture::Template,
     );
     assert_skill_template_audits(&audits);
     assert_eq!(
@@ -621,7 +605,6 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
         &audits,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Durable),
-        RouteFixture::Durable,
     );
     assert_generated_plan_audits(&audits);
     assert_eq!(final_brain_response(&events)?, RESEARCH_FINAL);
@@ -749,7 +732,6 @@ async fn instruction_only_skill_is_available_inside_agent_task_service_e2e() -> 
         &audits,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Durable),
-        RouteFixture::Durable,
     );
     assert_generated_plan_audits(&audits);
     assert_eq!(final_brain_response(&events)?, INSTRUCTION_FINAL);
@@ -1182,17 +1164,12 @@ fn assert_persisted_skill_template_provenance(
     expected_revision_uid: uuid::Uuid,
 ) -> Result<()> {
     let ExecutionSourceProvenance::SkillTemplate {
-        route_rationale,
         skill_template_ref,
         skill_template_revision_uid,
     } = actual
     else {
         anyhow::bail!("persisted execution source is not a skill template: {actual:?}");
     };
-    anyhow::ensure!(
-        route_rationale == RouteFixture::Template.rationale(),
-        "persisted skill-template route rationale mismatch: {route_rationale:?}"
-    );
     anyhow::ensure!(
         skill_template_ref == expected_skill_ref,
         "persisted canonical skill ref mismatch; expected {expected_skill_ref:?}, actual {skill_template_ref:?}"
@@ -1247,9 +1224,8 @@ mod tests {
     use moa_core::types::execution_planning::ExecutionSourceProvenance;
 
     use super::{
-        INSTRUCTION_SKILL_NAME, RouteFixture, TEMPLATE_SKILL_NAME,
-        assert_persisted_skill_template_provenance, instruction_skill_source,
-        template_skill_source,
+        INSTRUCTION_SKILL_NAME, TEMPLATE_SKILL_NAME, assert_persisted_skill_template_provenance,
+        instruction_skill_source, template_skill_source,
     };
 
     #[test]
@@ -1274,7 +1250,6 @@ mod tests {
         let revision_uid = uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
             .expect("parse deterministic template revision");
         let provenance = ExecutionSourceProvenance::SkillTemplate {
-            route_rationale: RouteFixture::Template.rationale().to_string(),
             skill_template_ref: "skill://service-template-report".to_string(),
             skill_template_revision_uid: revision_uid,
         };

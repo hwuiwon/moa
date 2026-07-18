@@ -160,10 +160,11 @@ Execution routing happens after context compilation and is not retrieval or
 skill routing. `TurnExecution` selects exactly one public route: Respond,
 Execute, or NeedsInput. Execute carries its internal strategy from an explicit
 classifier or trusted-route field: Inline for bounded interactive
-work and Durable when the work must persist independently. Each route also
-carries one trimmed, single-line, free-form rationale of at most 240 UTF-8
-bytes. The rationale is persisted for explanation but never interpreted to
-select a strategy. Classifier uncertainty falls back to Execute/Inline.
+work and Durable when the work must persist independently. A classifier may
+also return one trimmed, single-line, free-form rationale of at most 240 UTF-8
+bytes. That explanation remains local to the active turn, is not persisted, and
+is never interpreted to select a strategy. Classifier uncertainty falls back
+to Execute/Inline.
 
 Respond and Execute/Inline make no execution-planning call. For
 Execute/Durable, a selected high-confidence skill template is instantiated
@@ -179,12 +180,15 @@ or unsupported result rather than a silent direct answer.
 `ExecutionCompiler` validates capability/schema references, dependencies,
 non-recursive maps, reducer bounds, authorization metadata, data bindings,
 worst-case resources, completion coverage, and amendments. Planner provenance,
-candidate JSON, compiler report, route rationale, and final canonical hash are
-persisted. One-off compiled snapshots are not skills and are never
-auto-published.
+candidate JSON, compiler report, typed route source, and final canonical hash
+are persisted. Classifier rationale is not. One-off compiled snapshots are not
+skills and are never auto-published.
 
 Only an initial root Execute/Inline turn may make one evidence-preserving,
-one-way upgrade to Durable; it does not classify again and cannot downgrade.
+one-way upgrade to Durable through the workflow-owned
+`request_durable_execution` control tool. That tool is available only to the
+eligible turn, must be called alone, and cannot be synthesized from an ordinary
+tool result. The transition does not classify again and cannot downgrade.
 Conversational `Worker` remains an interactive Inline delegation tool, not a
 bulk graph scheduler. `ExecutionRun` materializes map items as stable
 `ExecutionTask` rows and submits all ready work without an application fan-out

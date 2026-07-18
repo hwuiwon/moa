@@ -152,8 +152,9 @@ async fn planning_context_snapshot_is_immutable_and_exactly_replayed_db() -> Tes
 
 #[tokio::test]
 async fn normalized_planning_audits_return_first_measurements_and_conflict_db() -> TestResult {
-    // Pins: V337 audit rows are the durable mutation evidence; commit-before-result retries
-    // replay the first timing, while changed semantic payloads conflict without a second row.
+    // Pins: V337 audit rows retain only normalized routing evidence; the shared DB reader
+    // reconstructs that typed payload without persisting classifier rationale, exact retries
+    // replay the first timing, and changed semantic payloads conflict without a second row.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
     let repository = ExecutionRepository::new(pool.clone());
@@ -200,9 +201,24 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
     };
     assert_eq!(route_evidence.decision, ExecutionRouteKind::Execute);
     assert_eq!(route_evidence.strategy, Some(ExecutionStrategy::Durable));
-    assert_eq!(
-        route_evidence.rationale,
-        "The workflow requires durable execution."
+    let reconstructed = moa_test_support::execution_audits::load_execution_planning_audits(
+        test_db.database_url(),
+        session_id,
+    )
+    .await?;
+    let mut expected_reconstructed = route.clone();
+    let ExecutionPlanningAuditPayload::Route { accepted_at, .. } =
+        &mut expected_reconstructed.payload
+    else {
+        unreachable!("route fixture must remain a route");
+    };
+    *accepted_at = route_evidence.accepted_at;
+    assert_eq!(reconstructed, vec![expected_reconstructed]);
+    assert!(
+        serde_json::to_value(&reconstructed[0])?
+            .pointer("/payload/rationale")
+            .is_none(),
+        "normalized route audits must not reconstruct classifier rationale"
     );
     let sql_audit_uid: Uuid =
         sqlx::query_scalar("SELECT moa.execution_route_audit_uid($1,$2,$3,$4,$5)")
@@ -230,10 +246,10 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
         RouteAuditWriteOutcome::Replayed(route_evidence.clone())
     );
     let mut route_conflict = route;
-    let ExecutionPlanningAuditPayload::Route { rationale, .. } = &mut route_conflict.payload else {
+    let ExecutionPlanningAuditPayload::Route { strategy, .. } = &mut route_conflict.payload else {
         unreachable!("route fixture must remain a route");
     };
-    *rationale = "The workflow requires a different durable execution shape.".to_string();
+    *strategy = Some(ExecutionStrategy::Inline);
     assert!(matches!(
         repository.write_route_audit(scope, &route_conflict).await?,
         RouteAuditWriteOutcome::Conflict { audit_uid }
@@ -667,17 +683,10 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
         FinalizationOutcome::Finalized(_)
     ));
 
-    let row: (
-        i64,
-        String,
-        String,
-        Option<String>,
-        Option<Uuid>,
-        Option<String>,
-    ) = sqlx::query_as(
+    let row: (i64, String, Option<String>, Option<Uuid>, Option<String>) = sqlx::query_as(
         r#"
-            SELECT analytics_change_seq, source_kind, route_rationale,
-                   skill_template_ref, skill_template_revision_uid, terminal_reason
+            SELECT analytics_change_seq, source_kind, skill_template_ref,
+                   skill_template_revision_uid, terminal_reason
             FROM moa.execution_run
             WHERE run_uid = $1
             "#,
@@ -687,10 +696,9 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
     .await?;
     assert!(row.0 > initial_change_seq);
     assert_eq!(row.1, "skill_template");
-    assert_eq!(row.2, "The caller selected a pinned execution template.");
-    assert_eq!(row.3.as_deref(), Some(expected_template_ref.as_str()));
-    assert_eq!(row.4, Some(expected_template_revision_uid));
-    assert_eq!(row.5.as_deref(), Some("completed"));
+    assert_eq!(row.2.as_deref(), Some(expected_template_ref.as_str()));
+    assert_eq!(row.3, Some(expected_template_revision_uid));
+    assert_eq!(row.4.as_deref(), Some("completed"));
     let persisted = repository
         .load_run(scope, run.run_uid)
         .await?
@@ -698,16 +706,11 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
     assert_eq!(
         persisted.source_provenance,
         ExecutionSourceProvenance::SkillTemplate {
-            route_rationale: "The caller selected a pinned execution template.".to_string(),
             skill_template_ref: expected_template_ref.clone(),
             skill_template_revision_uid: expected_template_revision_uid,
         }
     );
     assert_eq!(persisted.source_kind, ExecutionSourceKind::SkillTemplate);
-    assert_eq!(
-        persisted.route.rationale,
-        "The caller selected a pinned execution template."
-    );
     assert_eq!(
         persisted.skill_template_ref.as_deref(),
         Some(expected_template_ref.as_str())
@@ -4617,7 +4620,6 @@ fn new_run(
         },
         pinned_instruction_skills: Vec::new(),
         source_provenance: ExecutionSourceProvenance::SkillTemplate {
-            route_rationale: "The caller selected a pinned execution template.".to_string(),
             skill_template_ref: format!("skill://{key}"),
             skill_template_revision_uid: Uuid::now_v7(),
         },

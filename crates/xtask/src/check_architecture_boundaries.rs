@@ -208,8 +208,8 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "turn execution workflow",
         path: "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
         scope: LocScope::File,
-        max_lines: 1_530,
-        reason: "Unified Execute routing adds one bounded classifier, normalized route audits, the Inline loop, one root-only Durable upgrade, replay-safe Durable admission, amendment handling, and compact terminal synthesis within the workflow shell",
+        max_lines: 1_535,
+        reason: "Unified Execute routing adds one bounded classifier, normalized route audits, the Inline loop, one workflow-owned root Durable-upgrade control with exact evidence handoff, replay-safe Durable admission, amendment handling, and compact terminal synthesis within the workflow shell",
     },
     LocBudget {
         label: "worker state types",

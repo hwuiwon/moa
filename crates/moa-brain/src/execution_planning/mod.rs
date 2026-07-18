@@ -63,7 +63,6 @@ enum ClassifiedCompileOutcome {
 pub async fn plan_execution(
     provider: &dyn LLMProvider,
     request: ExecutionPlanningRequest,
-    route_rationale: String,
 ) -> Result<ExecutionPlanningResult> {
     request
         .context
@@ -80,7 +79,7 @@ pub async fn plan_execution(
     if let Some(invocation) = request.execution_template.clone() {
         return instantiate_template(&request, invocation).await;
     }
-    plan_generated(provider, request, route_rationale).await
+    plan_generated(provider, request).await
 }
 
 async fn instantiate_template(
@@ -172,8 +171,6 @@ async fn instantiate_template(
                     compiled: compiled_plan,
                     run_input: candidate.run_input,
                     source_provenance: ExecutionSourceProvenance::SkillTemplate {
-                        route_rationale: "A pinned execution template requires durable execution."
-                            .to_string(),
                         skill_template_ref: canonical_ref,
                         skill_template_revision_uid: template.revision_uid,
                     },
@@ -197,7 +194,6 @@ async fn instantiate_template(
 async fn plan_generated(
     provider: &dyn LLMProvider,
     request: ExecutionPlanningRequest,
-    route_rationale: String,
 ) -> Result<ExecutionPlanningResult> {
     let initial_request = request::initial_completion_request(&request)
         .map_err(|error| MoaError::SerializationError(error.to_string()))?;
@@ -236,7 +232,6 @@ async fn plan_generated(
     if first.classification == ClassifiedCompileOutcome::Accepted {
         return admitted_generated(
             &request,
-            route_rationale,
             *candidate,
             candidate_hash,
             model,
@@ -323,7 +318,6 @@ async fn plan_generated(
     if second.classification == ClassifiedCompileOutcome::Accepted {
         return admitted_generated(
             &request,
-            route_rationale,
             *repaired,
             repaired_hash,
             repaired_model,
@@ -762,13 +756,8 @@ fn compile_audit(
     }
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "admission keeps the compiled result and its exact provenance cohort explicit"
-)]
 fn admitted_generated(
     request: &ExecutionPlanningRequest,
-    route_rationale: String,
     candidate: GeneratedExecutionCandidate,
     candidate_hash: String,
     model: String,
@@ -786,7 +775,6 @@ fn admitted_generated(
             compiled: compiled_plan,
             run_input: candidate.run_input,
             source_provenance: ExecutionSourceProvenance::GeneratedPlan {
-                route_rationale,
                 planner: GeneratedPlanPlannerProvenance {
                     model,
                     prompt_version: EXECUTION_PLANNER_PROMPT_VERSION.to_string(),

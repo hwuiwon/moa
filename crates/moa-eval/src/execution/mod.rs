@@ -48,3 +48,13 @@ pub use snapshot::{
     ExecutionPlanningAuditSummary, ExecutionProgressSummary, ExecutionSessionEventSummary,
     ExecutionTaskKindSummary, ExecutionTaskResultClass,
 };
+
+fn route_token_total(
+    usage: moa_core::types::execution_planning::ExecutionRouteUsage,
+) -> Option<u64> {
+    usage
+        .input_tokens_uncached
+        .checked_add(usage.input_tokens_cache_write)
+        .and_then(|value| value.checked_add(usage.input_tokens_cache_read))
+        .and_then(|value| value.checked_add(usage.output_tokens))
+}

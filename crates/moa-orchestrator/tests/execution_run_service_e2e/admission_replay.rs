@@ -300,8 +300,8 @@ async fn assert_exact_session_events(
         response.originating_user_sequence_num
     );
 
-    let route_rationales: Vec<String> = sqlx::query_scalar(
-        "SELECT rationale FROM moa.execution_route_audit \
+    let routes: Vec<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT decision, strategy, source FROM moa.execution_route_audit \
          WHERE session_id = $1 ORDER BY accepted_at",
     )
     .bind(session_id.0)
@@ -309,8 +309,12 @@ async fn assert_exact_session_events(
     .await
     .context("load admission replay route audits")?;
     assert_eq!(
-        route_rationales,
-        vec!["A pinned execution template requires durable execution."],
+        routes,
+        vec![(
+            "execute".to_string(),
+            Some("durable".to_string()),
+            "selected_execution_template".to_string(),
+        )],
         "pinned-template admission must persist one selected-template route"
     );
     let compile_sources: Vec<String> = sqlx::query_scalar(

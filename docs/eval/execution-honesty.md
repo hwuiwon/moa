@@ -69,7 +69,7 @@ most 256 output tokens. Its strict JSON result selects Respond, Execute, or
 NeedsInput with a bounded free-form rationale, confidence basis points, and
 bounded missing-input list. Execute must also supply exactly one explicit
 internal strategy: Inline or Durable. The rationale is not scored for exact
-wording and never selects the strategy.
+wording, never selects the strategy, and remains ephemeral to the active turn.
 
 The router does not search the user text for phrases. It does not retry, repair,
 recurse, or invoke the planner. Provider failure, collection failure, oversized
@@ -82,8 +82,13 @@ Trusted typed paths remain deterministic: blank input requests clarification;
 an exact pinned template chooses Execute/Durable; internal execution synthesis
 chooses Respond. Only an initial root Execute/Inline turn may make one typed,
 evidence-preserving upgrade to Durable without reclassification or downgrade.
-Route audits persist only redacted provenance: source and outcome, model and
-prompt version, hashes, confidence, usage, cost, and duration.
+Production grants that authority only through the workflow-owned
+`request_durable_execution` control tool, which is injected only for the
+eligible turn and must be called alone; arbitrary tool results are not upgrade
+signals.
+Route audits persist only redacted typed provenance: route and strategy, source
+and outcome, model and prompt version, hashes, confidence, usage, cost, and
+duration. They do not persist classifier rationale.
 
 The corpus labels public route and internal strategy separately. Public-route
 cost compares Respond, Execute, and NeedsInput; Respond on a true Execute case
@@ -153,9 +158,16 @@ Run the mutation gate with:
 scripts/run-execution-mutation-eval.sh
 ```
 
-It previews a nonempty, explicit mutant set and writes cargo-mutants evidence
-and a strict report under `target/execution-mutants/`. Timeouts are not counted
-as caught mutants.
+It previews nonempty, explicit routing, workflow-control, and execution-runtime
+mutant sets, runs each against its owning focused test lane, and writes per-lane
+selection, mutation, and report logs; an append-only phase ledger; a final
+status with both lane and cargo-mutants exit codes; and score evidence plus one
+stable aggregate report under `target/execution-mutants/`. CI uploads the
+complete tree even when a lane fails before aggregation. Each nonempty
+`selected-mutants.txt` is persisted before that lane starts mutation execution,
+so baseline and configuration failures retain the exact attempted selection.
+The aggregate score must meet the configured threshold; timeouts are not
+counted as caught mutants.
 
 ## Live Sampling And Calibration
 

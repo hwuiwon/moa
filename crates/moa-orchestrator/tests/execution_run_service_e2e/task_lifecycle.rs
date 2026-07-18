@@ -1403,8 +1403,6 @@ fn lifecycle_plan_with_output_schema(
 
 fn generated_source(final_plan_hash: &str) -> ExecutionSourceProvenance {
     ExecutionSourceProvenance::GeneratedPlan {
-        route_rationale: "The requested workflow should persist as a durable execution."
-            .to_string(),
         planner: GeneratedPlanPlannerProvenance {
             model: "scripted-fixture".to_string(),
             prompt_version: "task-lifecycle-service-e2e".to_string(),

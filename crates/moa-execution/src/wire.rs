@@ -570,8 +570,6 @@ pub struct ExecutionRunSummary {
     pub status: ExecutionRunStatus,
     /// Normalized source cohort.
     pub source_kind: ExecutionSourceKind,
-    /// Persisted bounded route rationale.
-    pub route_rationale: String,
     /// Exact pinned skill-template reference, when template-backed.
     pub skill_template_ref: Option<String>,
     /// Exact pinned skill-template revision, when template-backed.

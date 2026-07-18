@@ -3,8 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moa_core::types::execution_planning::{
-    ExecutionRouteClassifierOutcome, ExecutionRouteKind, ExecutionRouteProvenance,
-    ExecutionRouteSource, ExecutionStrategy,
+    ExecutionRouteClassifierOutcome, ExecutionRouteKind, ExecutionRouteSource, ExecutionStrategy,
 };
 use moa_eval_core::{EvalError, Result};
 use moa_execution::state::ExecutionRunStatus;
@@ -396,11 +395,12 @@ pub fn aggregate_live_execution_outcomes(
             && provenance.source == ExecutionRouteSource::Classifier
         {
             classifier_attempts = classifier_attempts.saturating_add(1);
-            classifier_tokens = classifier_tokens
-                .checked_add(route_token_total(provenance)?)
-                .ok_or_else(|| {
-                    invalid_config("live classifier token overflowed u64".to_string())
-                })?;
+            let route_tokens = super::route_token_total(provenance.usage).ok_or_else(|| {
+                invalid_config("live route token total overflowed u64".to_string())
+            })?;
+            classifier_tokens = classifier_tokens.checked_add(route_tokens).ok_or_else(|| {
+                invalid_config("live classifier token overflowed u64".to_string())
+            })?;
             classifier_cost = classifier_cost
                 .checked_add(provenance.cost_microusd)
                 .ok_or_else(|| invalid_config("live classifier cost overflowed u64".to_string()))?;
@@ -465,16 +465,6 @@ const fn label_kind(label: ExecutionRoutingLabel) -> ExecutionRouteKind {
         ExecutionRoutingLabel::Execute => ExecutionRouteKind::Execute,
         ExecutionRoutingLabel::NeedsInput => ExecutionRouteKind::NeedsInput,
     }
-}
-
-fn route_token_total(provenance: &ExecutionRouteProvenance) -> Result<u64> {
-    let usage = provenance.usage;
-    usage
-        .input_tokens_uncached
-        .checked_add(usage.input_tokens_cache_write)
-        .and_then(|value| value.checked_add(usage.input_tokens_cache_read))
-        .and_then(|value| value.checked_add(usage.output_tokens))
-        .ok_or_else(|| invalid_config("live route token total overflowed u64".to_string()))
 }
 
 const fn classifier_outcome_label(outcome: ExecutionRouteClassifierOutcome) -> &'static str {

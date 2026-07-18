@@ -53,7 +53,7 @@ use crate::tool_invocation::governed::{
 };
 use crate::turn::util::{
     TurnEvidence, allowed_tool_names, annotate_unresolved_verification,
-    exclude_execution_lifecycle_tool_schemas, response_tool_calls, stable_tool_call_id,
+    exclude_reserved_control_tool_schemas, response_tool_calls, stable_tool_call_id,
     turn_outcome_for_response,
 };
 use crate::turn_driver::{
@@ -365,7 +365,7 @@ async fn run_worker_iteration(
     let selected_skills =
         attach_active_segment_metadata(ctx, input.parent_session, &mut input.completion_request)
             .await?;
-    exclude_execution_lifecycle_tool_schemas(&mut input.completion_request);
+    exclude_reserved_control_tool_schemas(&mut input.completion_request);
     let allowed_tools = allowed_tool_names(&input.completion_request);
 
     driver_progress::set_phase(ctx, TurnPhase::Streaming);

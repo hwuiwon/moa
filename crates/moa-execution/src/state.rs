@@ -379,14 +379,6 @@ pub struct ExecutionTerminalEvidence {
     pub requirement_count: u64,
 }
 
-/// Normalized routing fields persisted with every execution run.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutionRouteFields {
-    /// Bounded human-readable route rationale.
-    pub rationale: String,
-}
-
 /// Durable status of one logical execution task.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

@@ -32,7 +32,7 @@ use moa_core::{
         ExecutionPlanningAuditPayload, ExecutionRouteKind, ExecutionRouteStage,
         ExecutionRunAdmissionStatus, ExecutionRunStarted, ExecutionSourceProvenance,
         ExecutionStrategy, GeneratedPlanPlannerProvenance, execution_planning_hash,
-        execution_route_rationale_is_valid, validate_planning_audit_envelope,
+        validate_planning_audit_envelope,
     },
     types::identifiers::ModelId,
     types::identifiers::SessionId,
@@ -1331,9 +1331,8 @@ async fn assert_ambiguous_mode_selection(
             stage: ExecutionRouteStage::Initial,
             decision: ExecutionRouteKind::Execute,
             strategy: Some(ExecutionStrategy::Inline),
-            rationale,
             ..
-        } if execution_route_rationale_is_valid(rationale)
+        }
     ));
 
     let responses = events
@@ -1595,7 +1594,6 @@ fn validate_generated_plan_hash_chain(
         "compiler final plan hash must equal persisted active plan hash"
     );
     let ExecutionSourceProvenance::GeneratedPlan {
-        route_rationale,
         planner:
             GeneratedPlanPlannerProvenance {
                 candidate_hash,
@@ -1607,10 +1605,6 @@ fn validate_generated_plan_hash_chain(
     else {
         bail!("persisted run must retain explicit generated-plan provenance");
     };
-    ensure!(
-        execution_route_rationale_is_valid(route_rationale),
-        "persisted generated-plan route rationale must remain bounded"
-    );
     ensure!(
         candidate_hash == &evidence.planner_candidate_hash,
         "persisted planner candidate hash must equal the accepted planner audit"
@@ -1639,8 +1633,6 @@ fn generated_plan_hash_chain_rejects_cross_surface_drift() {
         final_plan_hash: "c".repeat(64),
     };
     let provenance = ExecutionSourceProvenance::GeneratedPlan {
-        route_rationale: "The requested workflow should persist as a durable execution."
-            .to_string(),
         planner: GeneratedPlanPlannerProvenance {
             model: "fixture-model".to_string(),
             prompt_version: "execution-planner".to_string(),
@@ -1697,9 +1689,8 @@ async fn assert_generated_plan_audits_and_authorization(
                 stage: ExecutionRouteStage::Initial,
                 decision: ExecutionRouteKind::Execute,
                 strategy: Some(ExecutionStrategy::Durable),
-                rationale,
                 ..
-            } if execution_route_rationale_is_valid(rationale)
+            }
         ),
         "generated-plan route audit drifted"
     );

@@ -27,10 +27,9 @@ use moa_execution::{
     compiler::CanonicalExecutionPlan,
     repository::{ExecutionRunRecord, ExecutionSchedulingSnapshot, ExecutionTaskRecord},
     state::{
-        ExecutionNodeStatus, ExecutionProjection, ExecutionRouteFields, ExecutionRunStatus,
-        ExecutionSourceKind, ExecutionTaskId, ExecutionTaskProjection, ExecutionTaskStatus,
-        ExecutionTerminalCause, ExecutionTerminalEvidence, ExecutionTerminalReason,
-        LogicalTaskKind,
+        ExecutionNodeStatus, ExecutionProjection, ExecutionRunStatus, ExecutionSourceKind,
+        ExecutionTaskId, ExecutionTaskProjection, ExecutionTaskStatus, ExecutionTerminalCause,
+        ExecutionTerminalEvidence, ExecutionTerminalReason, LogicalTaskKind,
     },
 };
 use serde_json::{Value, json};
@@ -209,14 +208,10 @@ fn runtime_parts(
         },
         pinned_instruction_skills: Vec::new(),
         source_provenance: ExecutionSourceProvenance::SkillTemplate {
-            route_rationale: "The caller selected a pinned execution template.".to_string(),
             skill_template_ref: "skill://execution-eval".to_string(),
             skill_template_revision_uid: Uuid::from_u128(0x58f8_f1f3_6a67_c90a_7f8f_2f2f_57f5_c555),
         },
         source_kind: ExecutionSourceKind::SkillTemplate,
-        route: ExecutionRouteFields {
-            rationale: "The caller selected a pinned execution template.".to_string(),
-        },
         skill_template_ref: Some("skill://execution-eval".to_string()),
         skill_template_revision_uid: Some(Uuid::from_u128(
             0x58f8_f1f3_6a67_c90a_7f8f_2f2f_57f5_c555,

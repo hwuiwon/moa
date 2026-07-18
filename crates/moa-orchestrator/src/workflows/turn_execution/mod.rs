@@ -48,10 +48,10 @@ use moa_core::{
     types::context::ContextMessage,
     types::events_stream::EventRecord,
     types::execution_planning::{
-        DurableUpgradeSignal, DurableUpgradeTransitionError, ExecutionPlanningAuditEnvelope,
-        ExecutionPlanningAuditPayload, ExecutionRouteDecision, ExecutionRouteStage,
-        ExecutionRouteUsage, ExecutionRoutingResult, ExecutionStrategy, durable_upgrade_transition,
-        execution_planning_dedupe_key,
+        AdmittedDurableUpgrade, DurableUpgradeSignal, DurableUpgradeTransitionError,
+        ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload, ExecutionRouteDecision,
+        ExecutionRouteStage, ExecutionRouteUsage, ExecutionRoutingResult, ExecutionStrategy,
+        durable_upgrade_transition, execution_planning_dedupe_key,
     },
     types::identifiers::{ModelId, SessionId},
     types::model::ModelCapabilities,
@@ -86,7 +86,8 @@ use self::segments::{
     run_post_outcome_assessment,
 };
 use self::tools::{
-    FileReadTurnCache, RootToolContext, ToolDispatchOutcome, dispatch_response_tool_calls,
+    FileReadTurnCache, RootToolContext, ToolDispatchOutcome, configure_durable_upgrade_tool_schema,
+    dispatch_response_tool_calls,
 };
 
 use crate::objects::session::SessionClient;
@@ -97,7 +98,7 @@ use crate::services::{
 };
 use crate::turn::util::{
     TurnEvidence, allowed_tool_names, annotate_unresolved_verification,
-    ensure_delegation_tool_schemas, exclude_execution_lifecycle_tool_schemas, response_tool_calls,
+    ensure_delegation_tool_schemas, exclude_reserved_control_tool_schemas, response_tool_calls,
     summarize_response_text, turn_outcome_for_response,
 };
 use crate::turn_driver::{
@@ -199,9 +200,9 @@ impl DurableUpgradeGuard {
     fn consume(
         &mut self,
         originating_objective: &str,
-        signal: &DurableUpgradeSignal,
-    ) -> Result<ExecutionRoutingResult, DurableUpgradeTransitionError> {
-        let route = durable_upgrade_transition(
+        signal: DurableUpgradeSignal,
+    ) -> Result<AdmittedDurableUpgrade, DurableUpgradeTransitionError> {
+        let admitted = durable_upgrade_transition(
             originating_objective,
             &self.initial_route,
             self.has_root_user_origin,
@@ -209,7 +210,7 @@ impl DurableUpgradeGuard {
             signal,
         )?;
         self.consumed = true;
-        Ok(route)
+        Ok(admitted)
     }
 }
 
@@ -386,7 +387,7 @@ async fn execute_turn_inside_workflow(
         }
         ExecutionRouteDecision::Execute {
             strategy: ExecutionStrategy::Durable,
-            rationale,
+            ..
         } => {
             driver_progress::initialize_non_loop_progress(ctx, route.clone());
             return execute_durable_admission(
@@ -396,7 +397,6 @@ async fn execute_turn_inside_workflow(
                 &meta,
                 session_id,
                 user_sequence_num,
-                rationale.clone(),
                 None,
             )
             .await;
@@ -430,8 +430,7 @@ async fn execute_turn_inside_workflow(
 
     let mut last_summary = None;
     let mut turn_evidence = TurnEvidence::default();
-    // Per-turn file_read result memory, shared across every model-loop iteration of
-    // this turn so a repeated identical read is served from context with a notice.
+    // Per-turn file_read memory serves repeated identical reads from context with a notice.
     let mut file_read_cache = FileReadTurnCache::default();
 
     for turn_number in 1..=max_turns {
@@ -492,10 +491,9 @@ async fn execute_turn_inside_workflow(
                     turn_number as i64,
                     &turn_latency_snapshot,
                 );
-                // Persist the per-turn coordination/replay/latency summary (gated) so the
-                // conversation-cost analyzer and deterministic coordination tests can read it
-                // from the durable log. Snapshots are taken before this append, so it does not
-                // count itself.
+                // Persist gated per-turn coordination/replay/latency for cost analysis and tests.
+                // Snapshots are taken before this append so the telemetry record cannot count
+                // itself.
                 maybe_append_turn_metrics(
                     ctx,
                     session_id,
@@ -520,19 +518,30 @@ async fn execute_turn_inside_workflow(
         match turn_outcome {
             TurnIterationOutcome::Core(CoreTurnOutcome::Continue) => continue,
             TurnIterationOutcome::DurableUpgrade(signal) => {
-                let upgrade_route = durable_upgrade_guard
-                    .consume(&request.user_message, &signal)
-                    .map_err(durable_upgrade_rejection)?;
+                let admitted = match durable_upgrade_guard.consume(&request.user_message, signal) {
+                    Ok(admitted) => admitted,
+                    Err(DurableUpgradeTransitionError::InvalidSignal(error)) => {
+                        return durable_upgrade_unsupported_body(
+                            ctx,
+                            session_id,
+                            &meta,
+                            error.to_string(),
+                        )
+                        .await;
+                    }
+                    Err(error) => return Err(durable_upgrade_rejection(error)),
+                };
                 let route_audit = route_audit_envelope(
                     ctx,
                     &meta,
                     session_id,
                     user_sequence_num,
-                    &upgrade_route,
+                    &admitted.routing,
                     ExecutionRouteStage::DurableUpgrade,
                 )
                 .await?;
                 persist_planning_audit(workflow, ctx, route_audit).await?;
+                driver_progress::set_execution_route(ctx, &admitted.routing.decision);
                 return execute_durable_admission(
                     workflow,
                     ctx,
@@ -540,24 +549,12 @@ async fn execute_turn_inside_workflow(
                     &meta,
                     session_id,
                     user_sequence_num,
-                    upgrade_route.decision.rationale().to_string(),
-                    Some(signal),
+                    Some(admitted.signal),
                 )
                 .await;
             }
             TurnIterationOutcome::DurableUpgradeUnsupported(message) => {
-                let message = append_zero_cost_assistant_response(
-                    ctx,
-                    session_id,
-                    &meta,
-                    format!("Durable execution upgrade is unsupported: {message}"),
-                )
-                .await?;
-                return Ok(BodyOutcome {
-                    kind: TurnOutcomeKind::Completed,
-                    message,
-                    post_outcome_assessment: None,
-                });
+                return durable_upgrade_unsupported_body(ctx, session_id, &meta, message).await;
             }
             TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled) => {
                 let post_outcome_assessment = capture_current_active_segment_assessment(
@@ -649,21 +646,33 @@ async fn execute_turn_inside_workflow(
 }
 
 fn durable_upgrade_rejection(rejection: DurableUpgradeTransitionError) -> HandlerError {
-    let (code, message) = match rejection {
-        DurableUpgradeTransitionError::NotAuthorized => (
-            409,
-            "Durable upgrade requires an initial root Execute/Inline user turn".to_string(),
-        ),
-        DurableUpgradeTransitionError::AlreadyConsumed => {
-            (409, "Durable upgrade was already consumed".to_string())
-        }
-        DurableUpgradeTransitionError::ObjectiveChanged => (
-            409,
-            "Durable upgrade objective differs from the persisted user objective".to_string(),
-        ),
-        DurableUpgradeTransitionError::InvalidSignal(error) => (422, error.to_string()),
+    let code = match &rejection {
+        DurableUpgradeTransitionError::InvalidSignal(_) => 422,
+        DurableUpgradeTransitionError::NotAuthorized
+        | DurableUpgradeTransitionError::AlreadyConsumed
+        | DurableUpgradeTransitionError::ObjectiveChanged => 409,
     };
-    TerminalError::new_with_code(code, message).into()
+    TerminalError::new_with_code(code, rejection.to_string()).into()
+}
+
+async fn durable_upgrade_unsupported_body(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    meta: &SessionMeta,
+    message: String,
+) -> Result<BodyOutcome, HandlerError> {
+    let message = append_zero_cost_assistant_response(
+        ctx,
+        session_id,
+        meta,
+        format!("Durable execution upgrade is unsupported: {message}"),
+    )
+    .await?;
+    Ok(BodyOutcome {
+        kind: TurnOutcomeKind::Completed,
+        message,
+        post_outcome_assessment: None,
+    })
 }
 
 fn apply_route_cost(result: &mut ExecutionRoutingResult) -> Result<(), HandlerError> {
@@ -822,7 +831,6 @@ async fn execute_durable_admission(
     meta: &SessionMeta,
     session_id: SessionId,
     originating_user_sequence_num: u64,
-    route_rationale: String,
     durable_upgrade: Option<DurableUpgradeSignal>,
 ) -> Result<BodyOutcome, HandlerError> {
     if !has_user_message_origin(request, originating_user_sequence_num) {
@@ -871,7 +879,6 @@ async fn execute_durable_admission(
             config: workflow.config.execution.clone(),
             now: planning_now,
         },
-        route_rationale,
     )
     .await
     .map_err(crate::workflows::errors::moa_error_to_handler_error)?;
@@ -1085,7 +1092,8 @@ async fn run_once_inside_workflow(
         request.tools.clear();
     } else {
         ensure_delegation_tool_schemas(&mut request);
-        exclude_execution_lifecycle_tool_schemas(&mut request);
+        exclude_reserved_control_tool_schemas(&mut request);
+        configure_durable_upgrade_tool_schema(&mut request, turn_context.durable_upgrade_allowed);
     }
     request.metadata.insert(
         DEFER_BRAIN_RESPONSE_METADATA_KEY.to_string(),
@@ -1437,8 +1445,9 @@ mod tests {
         assert!(guard.allows_tool_signal());
         assert_eq!(
             guard
-                .consume(&request.user_message, &signal)
+                .consume(&request.user_message, signal.clone())
                 .expect("authorized first transition should produce a route")
+                .routing
                 .decision,
             ExecutionRouteDecision::Execute {
                 strategy: ExecutionStrategy::Durable,
@@ -1447,7 +1456,7 @@ mod tests {
         );
         assert!(!guard.allows_tool_signal());
         assert_eq!(
-            guard.consume(&request.user_message, &signal),
+            guard.consume(&request.user_message, signal.clone()),
             Err(DurableUpgradeTransitionError::AlreadyConsumed)
         );
 
@@ -1455,7 +1464,7 @@ mod tests {
         let mut changed = signal.clone();
         changed.objective.push(' ');
         assert_eq!(
-            changed_objective_guard.consume(&request.user_message, &changed),
+            changed_objective_guard.consume(&request.user_message, changed),
             Err(DurableUpgradeTransitionError::ObjectiveChanged)
         );
 
@@ -1498,9 +1507,9 @@ mod tests {
     }
 
     #[test]
-    fn provider_tool_list_excludes_execution_lifecycle_tools() {
-        // Pins: external execution-run controls cannot enter the root model's
-        // provider-visible tool list.
+    fn provider_tool_list_excludes_reserved_controls() {
+        // Pins: operator lifecycle tools and the workflow-owned Durable control cannot enter
+        // a provider request unless the root Inline workflow injects its authoritative schema.
         let mut request = moa_core::types::completion::CompletionRequest::new("work");
         request.tools = [
             "execution_runs_list",
@@ -1509,13 +1518,14 @@ mod tests {
             "execution_run_cancel",
             "execution_review_decide",
             "execution_signal",
+            "request_durable_execution",
             "file_read",
         ]
         .into_iter()
         .map(|name| json!({"name": name, "input_schema": {"type": "object"}}))
         .collect();
 
-        crate::turn::util::exclude_execution_lifecycle_tool_schemas(&mut request);
+        crate::turn::util::exclude_reserved_control_tool_schemas(&mut request);
 
         assert_eq!(
             crate::turn::util::allowed_tool_names(&request),

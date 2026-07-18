@@ -252,7 +252,6 @@ pub fn clickhouse_field_expr(dataset_id: &str, field_id: &str) -> Option<&'stati
         ("execution_runs", "initial_plan_hash") => "d.initial_plan_hash",
         ("execution_runs", "active_plan_hash") => "d.active_plan_hash",
         ("execution_runs", "plan_revision") => "d.plan_revision",
-        ("execution_runs", "route_rationale") => "d.route_rationale",
         ("execution_runs", "source_kind") => "d.source_kind",
         ("execution_runs", "skill_template_ref") => "d.skill_template_ref",
         ("execution_runs", "skill_template_revision_uid") => "d.skill_template_revision_uid",

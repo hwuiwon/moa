@@ -108,7 +108,7 @@ pub struct ExecutionRoutingCase {
     pub near_boundary: bool,
     /// Optional typed Inline-to-Durable upgrade input.
     pub durable_upgrade: Option<DurableUpgradeSignal>,
-    /// Exact Durable-upgrade evidence expected to survive corpus transport.
+    /// Exact Durable-upgrade evidence expected after the production transition handoff.
     pub expected_durable_upgrade_evidence: Option<Vec<ExecutionPlanningEvidence>>,
     /// Stable corpus grouping labels.
     pub tags: Vec<String>,
@@ -330,8 +330,10 @@ pub async fn score_routing_cases(
         validate_routing_case(case)?;
         let provider = ScriptedRoutingProvider::new(case.classifier.clone());
         let model = ModelId::new("scripted-route-model");
-        let mut routed = if let Some(upgrade) = case.durable_upgrade.as_ref() {
-            durable_upgrade_transition(
+        let (mut routed, admitted_upgrade_evidence) = if let Some(upgrade) =
+            case.durable_upgrade.as_ref()
+        {
+            let admitted = durable_upgrade_transition(
                 &case.objective,
                 &ExecutionRouteDecision::Execute {
                     strategy: ExecutionStrategy::Inline,
@@ -339,16 +341,17 @@ pub async fn score_routing_cases(
                 },
                 true,
                 false,
-                upgrade,
+                upgrade.clone(),
             )
             .map_err(|error| {
                 invalid_config(format!(
                     "routing case `{}` has an invalid Durable-upgrade transition: {error}",
                     case.case_id
                 ))
-            })?
+            })?;
+            (admitted.routing, Some(admitted.signal.evidence))
         } else {
-            route_execution(
+            let routed = route_execution(
                 &provider,
                 ExecutionRoutingInput {
                     objective: &case.objective,
@@ -359,7 +362,8 @@ pub async fn score_routing_cases(
                 },
             )
             .await
-            .map_err(|error| invalid_config(format!("routing case `{}`: {error}", case.case_id)))?
+            .map_err(|error| invalid_config(format!("routing case `{}`: {error}", case.case_id)))?;
+            (routed, None)
         };
         routed.provenance.cost_microusd = case.classifier.cost_microusd();
         let classifier_calls = provider.call_count();
@@ -371,13 +375,8 @@ pub async fn score_routing_cases(
         let observed_classifier_outcome = routed.provenance.classifier_outcome;
         if expected_calls == 1 {
             classifier_attempts = classifier_attempts.saturating_add(1);
-            let usage = routed.provenance.usage;
-            let route_tokens = usage
-                .input_tokens_uncached
-                .checked_add(usage.input_tokens_cache_write)
-                .and_then(|value| value.checked_add(usage.input_tokens_cache_read))
-                .and_then(|value| value.checked_add(usage.output_tokens))
-                .ok_or_else(|| {
+            let route_tokens =
+                super::route_token_total(routed.provenance.usage).ok_or_else(|| {
                     invalid_config("classifier token total overflowed u64".to_string())
                 })?;
             classifier_tokens = classifier_tokens.checked_add(route_tokens).ok_or_else(|| {
@@ -440,9 +439,10 @@ pub async fn score_routing_cases(
                 near_boundary_inline_correct = near_boundary_inline_correct.saturating_add(1);
             }
         }
-        let evidence_preserved = case.durable_upgrade.as_ref().map(|upgrade| {
-            case.expected_durable_upgrade_evidence.as_ref() == Some(&upgrade.evidence)
-        });
+        let evidence_preserved = admitted_upgrade_evidence
+            .as_ref()
+            .zip(case.expected_durable_upgrade_evidence.as_ref())
+            .map(|(observed, expected)| observed == expected);
         if case.durable_upgrade.is_some() {
             durable_upgrade_cases = durable_upgrade_cases.saturating_add(1);
             if observed_label == ExecutionRoutingLabel::Execute
@@ -586,11 +586,10 @@ pub(crate) fn validate_routing_case(case: &ExecutionRoutingCase) -> Result<()> {
         case.durable_upgrade.as_ref(),
         case.expected_durable_upgrade_evidence.as_ref(),
     ) {
-        (Some(upgrade), Some(expected))
+        (Some(upgrade), Some(_))
             if case.expected_label == ExecutionRoutingLabel::Execute
                 && case.expected_strategy == Some(ExecutionStrategy::Durable)
                 && upgrade.objective.as_bytes() == case.objective.as_bytes()
-                && upgrade.evidence == *expected
                 && matches!(
                     &case.classifier,
                     ExecutionRoutingClassifierFixture::NotCalled

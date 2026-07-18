@@ -38,10 +38,10 @@ use crate::{
     },
     replan::failure_fingerprint,
     state::{
-        ExecutionNodeStatus, ExecutionProjection, ExecutionRouteFields, ExecutionRunStatus,
-        ExecutionSourceKind, ExecutionTaskId, ExecutionTaskProjection, ExecutionTaskStatus,
-        ExecutionTerminalCause, ExecutionTerminalEvidence, ExecutionTerminalReason,
-        FailureFingerprintInput, LogicalTask, LogicalTaskKind, TerminalProjection, WaitingReason,
+        ExecutionNodeStatus, ExecutionProjection, ExecutionRunStatus, ExecutionSourceKind,
+        ExecutionTaskId, ExecutionTaskProjection, ExecutionTaskStatus, ExecutionTerminalCause,
+        ExecutionTerminalEvidence, ExecutionTerminalReason, FailureFingerprintInput, LogicalTask,
+        LogicalTaskKind, TerminalProjection, WaitingReason,
     },
     wire::{
         ExecutionActionReviewResolution, ExecutionPlanningContextSnapshot,
@@ -241,8 +241,6 @@ pub struct ExecutionRunRecord {
     pub source_provenance: ExecutionSourceProvenance,
     /// Normalized source cohort persisted by V000337.
     pub source_kind: ExecutionSourceKind,
-    /// Normalized run-producing route fields persisted by V000337.
-    pub route: ExecutionRouteFields,
     /// Exact pinned skill-template reference for template-backed runs.
     pub skill_template_ref: Option<String>,
     /// Exact pinned skill-template revision for template-backed runs.
@@ -343,8 +341,6 @@ pub struct RouteAuditEvidence {
     pub decision: ExecutionRouteKind,
     /// Selected strategy, present exactly for Execute.
     pub strategy: Option<ExecutionStrategy>,
-    /// Bounded human-readable route rationale.
-    pub rationale: String,
     /// Redacted trusted-bypass or classifier provenance.
     pub provenance: ExecutionRouteProvenance,
     /// First durable acceptance timestamp.
@@ -1158,7 +1154,6 @@ impl ExecutionRepository {
                 stage,
                 decision,
                 strategy,
-                rationale,
                 provenance,
                 accepted_at,
             },
@@ -1200,7 +1195,6 @@ impl ExecutionRepository {
             .bind(route_stage_label(*stage))
             .bind(route_decision_label(*decision))
             .bind(strategy.map(execution_strategy_label))
-            .bind(rationale)
             .bind(route_source_label(provenance.source))
             .bind(route_classifier_outcome_label(
                 provenance.classifier_outcome,
@@ -1254,7 +1248,6 @@ impl ExecutionRepository {
                 && persisted.stage == *stage
                 && persisted.evidence.decision == *decision
                 && persisted.evidence.strategy == *strategy
-                && persisted.evidence.rationale == *rationale
                 && route_provenance_semantically_equal(&persisted.evidence.provenance, provenance)
             {
                 RouteAuditWriteOutcome::Replayed(persisted.evidence)
@@ -1492,7 +1485,6 @@ impl ExecutionRepository {
             .bind(pinned_skills_value)
             .bind(source_provenance_value)
             .bind(source_fields.kind.as_str())
-            .bind(source_fields.route_rationale)
             .bind(source_fields.skill_template_ref)
             .bind(source_fields.skill_template_revision_uid)
             .bind(new_run.input)
@@ -4711,39 +4703,31 @@ fn validate_new_run(scope: ExecutionScope, new_run: &NewExecutionRun) -> Result<
 
 struct NormalizedSourceFields<'a> {
     kind: ExecutionSourceKind,
-    route_rationale: &'a str,
     skill_template_ref: Option<&'a str>,
     skill_template_revision_uid: Option<Uuid>,
 }
 
 fn normalized_source_fields(provenance: &ExecutionSourceProvenance) -> NormalizedSourceFields<'_> {
     match provenance {
-        ExecutionSourceProvenance::GeneratedPlan {
-            route_rationale, ..
-        } => NormalizedSourceFields {
+        ExecutionSourceProvenance::GeneratedPlan { .. } => NormalizedSourceFields {
             kind: ExecutionSourceKind::GeneratedPlan,
-            route_rationale,
             skill_template_ref: None,
             skill_template_revision_uid: None,
         },
         ExecutionSourceProvenance::SkillTemplate {
-            route_rationale,
             skill_template_ref,
             skill_template_revision_uid,
         } => NormalizedSourceFields {
             kind: ExecutionSourceKind::SkillTemplate,
-            route_rationale,
             skill_template_ref: Some(skill_template_ref.as_str()),
             skill_template_revision_uid: Some(*skill_template_revision_uid),
         },
         ExecutionSourceProvenance::ExperimentTemplate {
-            route_rationale,
             skill_template_ref,
             skill_template_revision_uid,
             ..
         } => NormalizedSourceFields {
             kind: ExecutionSourceKind::ExperimentTemplate,
-            route_rationale,
             skill_template_ref: Some(skill_template_ref.as_str()),
             skill_template_revision_uid: Some(*skill_template_revision_uid),
         },
@@ -5011,7 +4995,6 @@ fn route_audit_from_row(row: &PgRow) -> Result<PersistedRouteAudit> {
         .map_err(row_error)?
         .map(|value| execution_strategy_from_str(&value))
         .transpose()?;
-    let rationale = row.try_get::<String, _>("rationale").map_err(row_error)?;
     let confidence_bps = row
         .try_get::<Option<i16>, _>("confidence_bps")
         .map_err(row_error)?
@@ -5034,7 +5017,6 @@ fn route_audit_from_row(row: &PgRow) -> Result<PersistedRouteAudit> {
             audit_uid,
             decision,
             strategy,
-            rationale,
             provenance: ExecutionRouteProvenance {
                 source: route_source_from_str(
                     &row.try_get::<String, _>("source").map_err(row_error)?,
@@ -5335,19 +5317,19 @@ fn row_error(error: sqlx::Error) -> Error {
 const INSERT_ROUTE_AUDIT_SQL: &str = r#"
     INSERT INTO moa.execution_route_audit (
         audit_uid, tenant_id, contact_id, session_id, originating_sequence,
-        stage, decision, strategy, rationale, source, classifier_outcome,
+        stage, decision, strategy, source, classifier_outcome,
         provider_model, prompt_version, objective_hash, response_hash,
         confidence_bps, missing_input_count, input_tokens_uncached,
         input_tokens_cache_write, input_tokens_cache_read, output_tokens,
         cost_microusd, duration_micros, accepted_at, created_at
     )
     VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $24
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+        $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $23
     )
     ON CONFLICT DO NOTHING
     RETURNING
-        audit_uid, stage, decision, strategy, rationale, source, classifier_outcome,
+        audit_uid, stage, decision, strategy, source, classifier_outcome,
         provider_model, prompt_version, objective_hash, response_hash,
         confidence_bps, missing_input_count, input_tokens_uncached,
         input_tokens_cache_write, input_tokens_cache_read, output_tokens,
@@ -5356,7 +5338,7 @@ const INSERT_ROUTE_AUDIT_SQL: &str = r#"
 
 const LOAD_ROUTE_AUDIT_SQL: &str = r#"
     SELECT
-        audit_uid, stage, decision, strategy, rationale, source, classifier_outcome,
+        audit_uid, stage, decision, strategy, source, classifier_outcome,
         provider_model, prompt_version, objective_hash, response_hash,
         confidence_bps, missing_input_count, input_tokens_uncached,
         input_tokens_cache_write, input_tokens_cache_read, output_tokens,
@@ -5466,16 +5448,16 @@ const CREATE_RUN_SQL: &str = r#"
         planning_context_uid, planning_context_hash, owner_user_id,
         goal_contract, initial_plan, active_plan, initial_plan_hash, active_plan_hash,
         capability_catalog, authorization_envelope, pinned_instruction_skills,
-        source_provenance, source_kind, route_rationale,
-        skill_template_ref, skill_template_revision_uid, input, status,
+        source_provenance, source_kind, skill_template_ref,
+        skill_template_revision_uid, input, status,
         budget_max_cost_microusd, budget_max_tokens, budget_max_tasks,
         budget_max_tool_calls, budget_max_retrieved_bytes, budget_deadline_at,
         progress_total_tasks, idempotency_key
     )
     VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-        $25, $26, $27, $28, $29, $30, $31
+        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
+        $24, $25, $26, $27, $28, $29, $30
     )
     ON CONFLICT (
         tenant_id,
@@ -6117,9 +6099,6 @@ fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
     let source_kind = ExecutionSourceKind::from_str(
         &row.try_get::<String, _>("source_kind").map_err(row_error)?,
     )?;
-    let route_rationale = row
-        .try_get::<String, _>("route_rationale")
-        .map_err(row_error)?;
     let status =
         ExecutionRunStatus::from_str(&row.try_get::<String, _>("status").map_err(row_error)?)?;
     let terminal_reason = row
@@ -6173,9 +6152,6 @@ fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
         pinned_instruction_skills: serde_json::from_value(pinned_skills)?,
         source_provenance,
         source_kind,
-        route: ExecutionRouteFields {
-            rationale: route_rationale,
-        },
         skill_template_ref: row.try_get("skill_template_ref").map_err(row_error)?,
         skill_template_revision_uid: row
             .try_get("skill_template_revision_uid")

@@ -26,7 +26,6 @@ async fn execution_planning_metrics_inputs_and_generated_candidate_use_one_stric
     let result = moa_brain::execution_planning::plan_execution(
         &provider,
         execution_planning_request(objective),
-        "The report requires durable execution.".to_string(),
     )
     .await
     .expect("valid strict candidate should plan");
@@ -123,7 +122,6 @@ async fn execution_planning_terminal_provider_outputs_never_repair() {
         let result = moa_brain::execution_planning::plan_execution(
             &provider,
             execution_planning_request(objective),
-            "The report requires durable execution.".to_string(),
         )
         .await
         .expect("terminal planner failure should remain typed");
@@ -152,7 +150,6 @@ async fn execution_planning_compiler_rejection_allows_only_one_repair() {
     let repaired_result = moa_brain::execution_planning::plan_execution(
         &repaired,
         execution_planning_request(objective),
-        "The report requires durable execution.".to_string(),
     )
     .await
     .expect("sole valid repair should be admitted");
@@ -172,7 +169,6 @@ async fn execution_planning_compiler_rejection_allows_only_one_repair() {
     let rejected_result = moa_brain::execution_planning::plan_execution(
         &rejected,
         execution_planning_request(objective),
-        "The report requires durable execution.".to_string(),
     )
     .await
     .expect("second compiler rejection should remain typed");
@@ -335,13 +331,9 @@ async fn execution_routing_respond_execute_use_classifier_while_pinned_template_
             input: json!({ "query": "status" }),
         },
     );
-    let ready = moa_brain::execution_planning::plan_execution(
-        &provider,
-        request.clone(),
-        "The caller selected a pinned durable template.".to_string(),
-    )
-    .await
-    .expect("valid pinned template should instantiate");
+    let ready = moa_brain::execution_planning::plan_execution(&provider, request.clone())
+        .await
+        .expect("valid pinned template should instantiate");
     assert!(matches!(
         ready.kind,
         moa_brain::execution_planning::ExecutionPlanningResultKind::Ready(_)
@@ -352,13 +344,9 @@ async fn execution_routing_respond_execute_use_classifier_while_pinned_template_
         .as_mut()
         .expect("template invocation")
         .input = json!({});
-    let needs_input = moa_brain::execution_planning::plan_execution(
-        &provider,
-        request,
-        "The caller selected a pinned durable template.".to_string(),
-    )
-    .await
-    .expect("invalid pinned input should remain typed");
+    let needs_input = moa_brain::execution_planning::plan_execution(&provider, request)
+        .await
+        .expect("invalid pinned input should remain typed");
     assert!(matches!(
         needs_input.kind,
         moa_brain::execution_planning::ExecutionPlanningResultKind::NeedsInput { .. }

@@ -318,7 +318,6 @@ async fn run_bulk_scenario(
         &audits,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Durable),
-        RouteFixture::Durable,
     );
     assert_generated_plan_audits(&audits);
     assert_eq!(final_brain_response(&events)?, FINAL_RESPONSE);

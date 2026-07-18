@@ -100,7 +100,7 @@ are trace attributes or analytics fields, never Prometheus labels.
 
 | Metric | Type | Labels / use |
 |---|---|---|
-| `moa_execution_routes_total` | counter | `decision`, `strategy`, `reason`, `source`, `classifier_outcome`; public-route volume, internal strategy, trusted-source use, and classifier fallback |
+| `moa_execution_routes_total` | counter | `decision`, `strategy`, `source`, `classifier_outcome`; public-route volume, internal strategy, trusted-source use, and classifier fallback |
 | `moa_execution_planner_calls_total` | counter | `call`, `outcome`; planner repairs and rejection pressure |
 | `moa_execution_compile_duration_seconds` | histogram (`DURATION_SECONDS`) | `source`, `outcome`; compiler latency |
 | `moa_execution_run_state_transitions_total` | counter | `state`; durable run transitions |
@@ -132,8 +132,8 @@ RATIO = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]
 
 The bounded label values are:
 
-Route rationale is bounded persisted explanation, not a metric label. Never
-attach its free-form text to counters, histograms, traces, or log dimensions.
+Classifier rationale is ephemeral turn-local explanation. Never persist or
+attach its free-form text to counters, histograms, traces, logs, or analytics.
 
 - route: `decision=respond|execute|needs_input`,
   `strategy=none|inline|durable`,

@@ -51,14 +51,13 @@ fn execution_analytics_source_contract_is_exact_offline() {
         "'source','classifier_outcome','provider_model','prompt_version'",
         "'objective_hash','response_hash','confidence_bps'",
         "'missing_input_count','usage','cost_microusd','duration_micros'",
-        "'kind','stage','decision','strategy','rationale','provenance','accepted_at'",
+        "'kind','stage','decision','strategy','provenance','accepted_at'",
         "stage TEXT,\n    decision TEXT,\n    strategy TEXT,",
         "decision = 'execute' AND strategy = 'inline'",
         "decision = 'execute' AND strategy = 'durable'",
         "IF route_valid IS NOT TRUE THEN",
         "'respond','execute','needs_input'",
         "'initial','durable_upgrade'",
-        "execution_route_rationale_is_valid",
         "'low_confidence','context_forced_inline'",
         "moa.execution.planner-audit",
         "moa.execution.compile-audit",
@@ -116,6 +115,8 @@ fn execution_analytics_source_contract_is_exact_offline() {
         "source_ref",
         "capability_ref",
         "decision = 'routed'",
+        "route_rationale",
+        "execution_route_rationale_is_valid",
     ] {
         assert!(
             !V000337_SQL.contains(forbidden),
@@ -261,7 +262,6 @@ struct InvalidRouteAuditCell<'a> {
     stage: &'a str,
     decision: &'a str,
     strategy: Option<&'a str>,
-    rationale: &'a str,
     source: &'a str,
     classifier_outcome: &'a str,
     classifier_evidence: bool,
@@ -277,7 +277,7 @@ async fn assert_route_audit_insert_rejected(
         r#"
         INSERT INTO moa.execution_route_audit (
             audit_uid,tenant_id,contact_id,session_id,originating_sequence,
-            stage,decision,strategy,rationale,source,classifier_outcome,
+            stage,decision,strategy,source,classifier_outcome,
             provider_model,prompt_version,objective_hash,response_hash,
             confidence_bps,missing_input_count,input_tokens_uncached,
             input_tokens_cache_write,input_tokens_cache_read,output_tokens,
@@ -289,17 +289,17 @@ async fn assert_route_audit_insert_rejected(
                 '00000000-0000-0000-0000-000000337002',$1,$2
             ),
             '00000000-0000-0000-0000-000000337001',NULL,
-            '00000000-0000-0000-0000-000000337002',$1,$2,$3,$4,$5,$6,$7,
-            CASE WHEN $8 THEN 'route-model' END,
-            CASE WHEN $8 THEN 'execution-router' END,
+            '00000000-0000-0000-0000-000000337002',$1,$2,$3,$4,$5,$6,
+            CASE WHEN $7 THEN 'route-model' END,
+            CASE WHEN $7 THEN 'execution-router' END,
             repeat('a',64),
-            CASE WHEN $8 THEN repeat('b',64) END,
-            (CASE WHEN $8 THEN 9500 END)::SMALLINT,
+            CASE WHEN $7 THEN repeat('b',64) END,
+            (CASE WHEN $7 THEN 9500 END)::SMALLINT,
             (CASE WHEN $3 = 'needs_input' THEN 1 ELSE 0 END)::SMALLINT,
-            (CASE WHEN $8 THEN 1 ELSE 0 END)::BIGINT,
+            (CASE WHEN $7 THEN 1 ELSE 0 END)::BIGINT,
             0::BIGINT,0::BIGINT,0::BIGINT,
-            (CASE WHEN $8 THEN 1 ELSE 0 END)::BIGINT,
-            (CASE WHEN $8 THEN 1 ELSE 0 END)::BIGINT,
+            (CASE WHEN $7 THEN 1 ELSE 0 END)::BIGINT,
+            (CASE WHEN $7 THEN 1 ELSE 0 END)::BIGINT,
             accepted_at,accepted_at
         FROM (SELECT NOW() AS accepted_at) accepted
         "#,
@@ -308,7 +308,6 @@ async fn assert_route_audit_insert_rejected(
     .bind(cell.stage)
     .bind(cell.decision)
     .bind(cell.strategy)
-    .bind(cell.rationale)
     .bind(cell.source)
     .bind(cell.classifier_outcome)
     .bind(cell.classifier_evidence)
@@ -417,17 +416,24 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
         .fetch_one(&target)
         .await?;
         let removed_run_mode_column = removed_serialized_value(&["route_", "mode"]);
-        let route_schema_contract: (bool, bool, bool) = sqlx::query_as(
+        let route_schema_contract: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
             "SELECT \
                 NOT EXISTS (SELECT 1 FROM information_schema.columns \
                     WHERE table_schema = 'moa' AND table_name = 'execution_run' \
                       AND column_name = $1), \
                 NOT EXISTS (SELECT 1 FROM information_schema.columns \
+                    WHERE table_schema = 'moa' AND table_name = 'execution_run' \
+                      AND column_name = 'route_rationale'), \
+                NOT EXISTS (SELECT 1 FROM information_schema.columns \
                     WHERE table_schema = 'moa' AND table_name = 'execution_route_audit' \
                       AND column_name = 'mode'), \
+                NOT EXISTS (SELECT 1 FROM information_schema.columns \
+                    WHERE table_schema = 'moa' AND table_name = 'execution_route_audit' \
+                      AND column_name = 'rationale'), \
                 EXISTS (SELECT 1 FROM information_schema.columns \
                     WHERE table_schema = 'moa' AND table_name = 'execution_route_audit' \
-                      AND column_name = 'strategy')",
+                      AND column_name = 'strategy'), \
+                to_regprocedure('moa.execution_route_rationale_is_valid(text)') IS NULL",
         )
         .bind(&removed_run_mode_column)
         .fetch_one(&target)
@@ -437,16 +443,16 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
             SELECT COUNT(*)
             FROM (
                 VALUES
-                ('initial','needs_input',NULL,'The objective is missing.','blank_objective'),
-                ('initial','needs_input',NULL,'A target is required.','classifier'),
-                ('initial','respond',NULL,'The request only needs an answer.','classifier'),
-                ('initial','execute','inline','The work fits one bounded turn.','classifier'),
-                ('initial','execute','durable','The refinery workflow spans approval shifts.','classifier'),
-                ('initial','execute','durable','A pinned template requires durable execution.','selected_execution_template'),
-                ('durable_upgrade','execute','durable','New evidence requires durable continuation.','durable_upgrade')
-            ) cell(stage,decision,strategy,rationale,source)
+                ('initial','needs_input',NULL,'blank_objective'),
+                ('initial','needs_input',NULL,'classifier'),
+                ('initial','respond',NULL,'classifier'),
+                ('initial','execute','inline','classifier'),
+                ('initial','execute','durable','classifier'),
+                ('initial','execute','durable','selected_execution_template'),
+                ('durable_upgrade','execute','durable','durable_upgrade')
+            ) cell(stage,decision,strategy,source)
             WHERE moa.execution_route_audit_row_is_valid(
-                stage,decision,strategy,rationale,source,
+                stage,decision,strategy,source,
                 CASE WHEN source = 'classifier' THEN 'accepted' ELSE 'not_called' END,
                 CASE WHEN source = 'classifier' THEN 'route-model' END,
                 CASE WHEN source = 'classifier' THEN 'execution-router' END,
@@ -464,7 +470,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
         .await?;
         let invalid_route_cell: bool = sqlx::query_scalar(
             "SELECT moa.execution_route_audit_row_is_valid(\
-             'initial','respond','inline','A direct answer is enough.','classifier',\
+             'initial','respond','inline','classifier',\
              'accepted','route-model','execution-router',repeat('a',64),repeat('b',64),\
              9500::SMALLINT,0::SMALLINT,1::BIGINT,0::BIGINT,0::BIGINT,0::BIGINT,1::BIGINT,1::BIGINT)",
         )
@@ -478,7 +484,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 stage: "initial",
                 decision: "respond",
                 strategy: Some("inline"),
-                rationale: "A direct answer is enough.",
                 source: "classifier",
                 classifier_outcome: "accepted",
                 classifier_evidence: true,
@@ -492,7 +497,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 stage: "initial",
                 decision: "needs_input",
                 strategy: Some("durable"),
-                rationale: "The objective is missing.",
                 source: "blank_objective",
                 classifier_outcome: "not_called",
                 classifier_evidence: false,
@@ -506,7 +510,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 stage: "initial",
                 decision: "execute",
                 strategy: None,
-                rationale: "The work fits one bounded turn.",
                 source: "classifier",
                 classifier_outcome: "accepted",
                 classifier_evidence: true,
@@ -520,7 +523,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 stage: "durable_upgrade",
                 decision: "execute",
                 strategy: Some("durable"),
-                rationale: "New evidence requires durable continuation.",
                 source: "classifier",
                 classifier_outcome: "accepted",
                 classifier_evidence: true,
@@ -534,7 +536,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 stage: "initial",
                 decision: "execute",
                 strategy: Some("durable"),
-                rationale: "A pinned template requires durable execution.",
                 source: "selected_execution_template",
                 classifier_outcome: "not_called",
                 classifier_evidence: true,
@@ -548,7 +549,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 stage: "initial",
                 decision: "routed",
                 strategy: None,
-                rationale: "A direct answer is enough.",
                 source: "classifier",
                 classifier_outcome: "accepted",
                 classifier_evidence: true,
@@ -563,21 +563,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 stage: &removed_upgrade_value,
                 decision: "execute",
                 strategy: Some("durable"),
-                rationale: "The workflow requires durable execution.",
-                source: "classifier",
-                classifier_outcome: "accepted",
-                classifier_evidence: true,
-            },
-        )
-        .await?;
-        assert_route_audit_insert_rejected(
-            &target,
-            InvalidRouteAuditCell {
-                sequence: 110,
-                stage: "initial",
-                decision: "execute",
-                strategy: Some("durable"),
-                rationale: "two\nlines",
                 source: "classifier",
                 classifier_outcome: "accepted",
                 classifier_evidence: true,
@@ -591,7 +576,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 stage: "initial",
                 decision: "execute",
                 strategy: Some("durable"),
-                rationale: "The workflow requires durable execution.",
                 source: &removed_upgrade_value,
                 classifier_outcome: "not_called",
                 classifier_evidence: false,
@@ -607,24 +591,8 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 stage: "initial",
                 decision: "execute",
                 strategy: Some("inline"),
-                rationale: "The work fits one bounded turn.",
                 source: "classifier",
                 classifier_outcome: &removed_context_fallback,
-                classifier_evidence: true,
-            },
-        )
-        .await?;
-        let oversized_rationale = "x".repeat(241);
-        assert_route_audit_insert_rejected(
-            &target,
-            InvalidRouteAuditCell {
-                sequence: 113,
-                stage: "initial",
-                decision: "execute",
-                strategy: Some("durable"),
-                rationale: &oversized_rationale,
-                source: "classifier",
-                classifier_outcome: "accepted",
                 classifier_evidence: true,
             },
         )
@@ -805,7 +773,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 moa.execution_source_provenance_is_valid(
                     jsonb_build_object(
                         'kind','generated_plan',
-                        'route_rationale','The workflow requires durable execution.',
                         'planner',jsonb_build_object(
                             'model','m','prompt_version','p',
                             'candidate_hash',repeat('1',64),
@@ -820,7 +787,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 moa.execution_source_provenance_is_valid(
                     jsonb_build_object(
                         'kind','skill_template',
-                        'route_rationale','The caller selected a pinned execution template.',
                         'skill_template_ref','skill://proof',
                         'skill_template_revision_uid',
                             '00000000-0000-0000-0000-000000337031'
@@ -831,7 +797,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 moa.execution_source_provenance_is_valid(
                     jsonb_build_object(
                         'kind','experiment_template',
-                        'route_rationale','An experiment template requires durable execution.',
                         'skill_template_ref','skill://proof',
                         'skill_template_revision_uid',
                             '00000000-0000-0000-0000-000000337031',
@@ -846,17 +811,14 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 ),
                 moa.execution_source_provenance_is_valid(
                     jsonb_build_object(
-                        'kind','legacy_migration',
+                        'kind','generated_plan',
                         'route_rationale','The workflow requires durable execution.',
-                        'legacy',jsonb_build_object(
-                            'storage_partition_id',
-                                '00000000-0000-0000-0000-000000337020',
-                            'user_id',NULL,'artifact_uid',NULL,'revision_uid',NULL,
-                            'procedure_ref','skill://legacy',
-                            'original_status','completed',
-                            'original_idempotency_key',NULL,
-                            'migrated_idempotency_key',NULL,
-                            'was_nonterminal',false,'error',NULL,'nodes','[]'::JSONB
+                        'planner',jsonb_build_object(
+                            'model','m','prompt_version','p',
+                            'candidate_hash',repeat('1',64),
+                            'compiler_report_hash',repeat('2',64),
+                            'final_plan_hash',repeat('3',64),
+                            'repair_attempts',0
                         )
                     ),
                     '00000000-0000-0000-0000-000000337020',NULL,
@@ -865,7 +827,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 moa.execution_source_provenance_is_valid(
                     jsonb_build_object(
                         'kind','generated_plan',
-                        'route_rationale','The workflow requires durable execution.',
                         'planner',jsonb_build_object(
                             'model','m','prompt_version','p',
                             'candidate_hash',repeat('1',64),
@@ -881,7 +842,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 moa.execution_source_provenance_is_valid(
                     jsonb_build_object(
                         'kind','experiment_template',
-                        'route_rationale','An experiment template requires durable execution.',
                         'skill_template_ref','skill://proof',
                         'skill_template_revision_uid',
                             '00000000-0000-0000-0000-000000337031',
@@ -952,7 +912,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 planning_context_hash,owner_user_id,goal_contract,
                 initial_plan,active_plan,initial_plan_hash,active_plan_hash,
                 capability_catalog,authorization_envelope,source_provenance,input,
-                status,source_kind,route_rationale
+                status,source_kind
             ) VALUES (
                 '00000000-0000-0000-0000-000000337041',
                 '00000000-0000-0000-0000-000000337020',NULL,
@@ -962,7 +922,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 '{}','{}',repeat('3',64),repeat('3',64),'{}','{}',
                 jsonb_build_object(
                     'kind','generated_plan',
-                    'route_rationale','The workflow requires durable execution.',
                     'planner',jsonb_build_object(
                         'model','m','prompt_version','p',
                         'candidate_hash',repeat('1',64),
@@ -971,7 +930,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                         'repair_attempts',0
                     )
                 ),
-                '{}','queued','generated_plan','The workflow requires durable execution.'
+                '{}','queued','generated_plan'
             );
             INSERT INTO moa.execution_task (
                 task_id,run_uid,tenant_id,contact_id,node_id,item_key,
@@ -1061,7 +1020,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                     planning_context_hash,owner_user_id,goal_contract,\
                     initial_plan,active_plan,initial_plan_hash,active_plan_hash,\
                     capability_catalog,authorization_envelope,source_provenance,input,\
-                    status,source_kind,route_rationale\
+                    status,source_kind\
                  ) VALUES (\
                     '00000000-0000-0000-0000-000000337052',\
                     '00000000-0000-0000-0000-000000337020',NULL,\
@@ -1071,7 +1030,6 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                     '{}','{}',repeat('3',64),repeat('3',64),'{}','{}',\
                     jsonb_build_object(\
                         'kind','generated_plan',\
-                        'route_rationale','The workflow requires durable execution.',\
                         'planner',jsonb_build_object(\
                             'model','m','prompt_version','p',\
                             'candidate_hash',repeat('1',64),\
@@ -1080,7 +1038,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                             'repair_attempts',0\
                         )\
                     ),\
-                    '{}','queued','generated_plan','The workflow requires durable execution.'\
+                    '{}','queued','generated_plan'\
                  )",
             )
             .await
@@ -1173,12 +1131,17 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
         target
             .execute(
                 "INSERT INTO analytics.clickhouse_schema_upgrade_state (\
-                    upgrade_key,stage,upgrade_version,export_version_floor,\
+                    upgrade_key,database_uuid,run_table_uuid,task_table_uuid,\
+                    stage,upgrade_version,export_version_floor,\
                     run_high_water_seq,run_high_water_id,\
                     task_high_water_seq,task_high_water_id,\
                     run_page_seq,run_page_id,task_page_seq,task_page_id\
                  ) VALUES (\
-                    'execution_dimensions','pending',NOW(),NOW(),\
+                    'execution_dimensions',\
+                    '00000000-0000-0000-0000-000000337001',\
+                    '00000000-0000-0000-0000-000000337002',\
+                    '00000000-0000-0000-0000-000000337003',\
+                    'pending',NOW(),NOW(),\
                     10,'00000000-0000-0000-0000-000000000010',\
                     20,'00000000-0000-0000-0000-000000000020',\
                     0,'00000000-0000-0000-0000-000000000000',\
@@ -1199,6 +1162,52 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
                 "UPDATE analytics.clickhouse_schema_upgrade_state \
                  SET run_page_seq = -1, updated_at = NOW() \
                  WHERE upgrade_key = 'execution_dimensions'",
+            )
+            .await
+            .is_err();
+
+        let database_identity_change_rejected = target
+            .execute(
+                "INSERT INTO analytics.clickhouse_schema_upgrade_state (\
+                    upgrade_key,generation,database_uuid,run_table_uuid,task_table_uuid,\
+                    stage,upgrade_version,export_version_floor,\
+                    run_high_water_seq,run_high_water_id,\
+                    task_high_water_seq,task_high_water_id,\
+                    run_page_seq,run_page_id,task_page_seq,task_page_id\
+                 ) SELECT \
+                    upgrade_key,2,'00000000-0000-0000-0000-000000337011',\
+                    '00000000-0000-0000-0000-000000337012',\
+                    '00000000-0000-0000-0000-000000337013',\
+                    'pending',export_version_floor + INTERVAL '1 microsecond',\
+                    export_version_floor + INTERVAL '1 microsecond',\
+                    run_high_water_seq,run_high_water_id,\
+                    task_high_water_seq,task_high_water_id,\
+                    0,'00000000-0000-0000-0000-000000000000',\
+                    0,'00000000-0000-0000-0000-000000000000'\
+                 FROM analytics.clickhouse_schema_upgrade_state\
+                 WHERE upgrade_key = 'execution_dimensions' AND generation = 1",
+            )
+            .await
+            .is_err();
+        let partial_table_identity_change_rejected = target
+            .execute(
+                "INSERT INTO analytics.clickhouse_schema_upgrade_state (\
+                    upgrade_key,generation,database_uuid,run_table_uuid,task_table_uuid,\
+                    stage,upgrade_version,export_version_floor,\
+                    run_high_water_seq,run_high_water_id,\
+                    task_high_water_seq,task_high_water_id,\
+                    run_page_seq,run_page_id,task_page_seq,task_page_id\
+                 ) SELECT \
+                    upgrade_key,2,database_uuid,\
+                    '00000000-0000-0000-0000-000000337012',task_table_uuid,\
+                    'pending',export_version_floor + INTERVAL '1 microsecond',\
+                    export_version_floor + INTERVAL '1 microsecond',\
+                    run_high_water_seq,run_high_water_id,\
+                    task_high_water_seq,task_high_water_id,\
+                    0,'00000000-0000-0000-0000-000000000000',\
+                    0,'00000000-0000-0000-0000-000000000000'\
+                 FROM analytics.clickhouse_schema_upgrade_state\
+                 WHERE upgrade_key = 'execution_dimensions' AND generation = 1",
             )
             .await
             .is_err();
@@ -1243,6 +1252,8 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
             task_fact_id,
             skipped_stage_rejected,
             backward_page_rejected,
+            database_identity_change_rejected,
+            partial_table_identity_change_rejected,
             partial_pass_rejected,
         ))
     }
@@ -1279,6 +1290,8 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
         task_fact_id,
         skipped_stage_rejected,
         backward_page_rejected,
+        database_identity_change_rejected,
+        partial_table_identity_change_rejected,
         partial_pass_rejected,
     ) = outcome.expect("V337 staged contract should execute on PostgreSQL");
 
@@ -1293,7 +1306,7 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
     );
     assert!(second.is_empty(), "second V337 apply must be empty");
     assert_eq!(audit_counts, (0, 0, 0));
-    assert_eq!(route_schema_contract, (true, true, true));
+    assert_eq!(route_schema_contract, (true, true, true, true, true, true));
     assert_eq!(valid_route_cells, 7);
     assert!(!invalid_route_cell);
     assert_eq!(removed_mode_sql_state.as_deref(), Some("42703"));
@@ -1320,6 +1333,8 @@ async fn execution_analytics_fresh_cutover_and_exact_contract_db() {
     assert_eq!(task_fact_id, "00000000-0000-0000-0000-000000337042");
     assert!(skipped_stage_rejected);
     assert!(backward_page_rejected);
+    assert!(database_identity_change_rejected);
+    assert!(partial_table_identity_change_rejected);
     assert!(partial_pass_rejected);
 }
 

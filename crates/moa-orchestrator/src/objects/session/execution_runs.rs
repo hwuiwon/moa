@@ -369,7 +369,6 @@ async fn start_external_template_execution(
             config: config.execution.clone(),
             now: planning_now,
         },
-        route.decision.rationale().to_string(),
     )
     .await
     .map_err(crate::workflows::errors::moa_error_to_handler_error)?;

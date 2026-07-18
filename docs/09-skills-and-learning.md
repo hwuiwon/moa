@@ -140,9 +140,12 @@ In Inline Execute, the coordinator can activate `SKILL.md`, invoke its governed
 actions, or use a conversational `Worker` for interactive delegation. Worker
 remains a bounded child-agent primitive, not a bulk DAG scheduler. If an
 initial root Inline turn discovers durable fan-out, joins, reviews, or recovery,
-it may make one typed, evidence-preserving upgrade to Durable. It cannot
-classify again or downgrade; the execution compiler and `ExecutionTask` runtime
-own the graph, with no application fan-out cap below the approved run budget.
+it may call the workflow-owned `request_durable_execution` control tool for one
+typed, evidence-preserving upgrade to Durable. The tool is available only to
+that eligible turn, must be called alone, and cannot be replaced by arbitrary
+tool-result data. The turn cannot classify again or downgrade; the execution
+compiler and `ExecutionTask` runtime own the graph, with no application fan-out
+cap below the approved run budget.
 
 Skill selection alone does not choose Execute or Durable. A published template
 is used only after routing chooses Execute/Durable and the template matches with

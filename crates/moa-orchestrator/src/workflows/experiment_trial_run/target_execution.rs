@@ -811,7 +811,6 @@ fn experiment_template_source_provenance(
     trial_uid: Uuid,
 ) -> ExecutionSourceProvenance {
     ExecutionSourceProvenance::ExperimentTemplate {
-        route_rationale: "An experiment template requires durable execution.".to_string(),
         skill_template_ref,
         skill_template_revision_uid,
         experiment_run_uid,
@@ -1412,7 +1411,6 @@ mod tests {
                 Uuid::from_u128(4),
             ),
             ExecutionSourceProvenance::ExperimentTemplate {
-                route_rationale: "An experiment template requires durable execution.".to_string(),
                 skill_template_ref: "skill://durable-report".to_string(),
                 skill_template_revision_uid: Uuid::from_u128(1),
                 experiment_run_uid: Uuid::from_u128(2),

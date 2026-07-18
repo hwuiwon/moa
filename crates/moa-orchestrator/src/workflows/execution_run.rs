@@ -1836,7 +1836,6 @@ mod tests {
                     authorization,
                     pinned_instruction_skills: Vec::new(),
                     source_provenance: ExecutionSourceProvenance::GeneratedPlan {
-                        route_rationale: "The workflow requires durable execution.".to_string(),
                         planner: GeneratedPlanPlannerProvenance {
                             model: "scripted-confirmed-replan".to_string(),
                             prompt_version: "confirmed-replan".to_string(),

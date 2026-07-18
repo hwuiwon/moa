@@ -518,12 +518,6 @@ fn dataset_specs() -> Vec<DatasetSpec> {
                     AnalyticsFieldKind::Integer,
                 ),
                 dimension(
-                    "route_rationale",
-                    "route_rationale",
-                    "Route Rationale",
-                    AnalyticsFieldKind::String,
-                ),
-                dimension(
                     "source_kind",
                     "source_kind",
                     "Source Kind",
@@ -1220,9 +1214,9 @@ mod tests {
     }
 
     #[test]
-    fn execution_run_catalog_preserves_meaningful_dimensions_without_redundant_mode_offline() {
-        // Pins: durable runs expose routing provenance, terminal evidence,
-        // coverage, cost, and latency without a constant run-mode dimension.
+    fn execution_run_catalog_preserves_bounded_dimensions_without_route_prose_offline() {
+        // Pins: durable runs expose typed source provenance, terminal evidence,
+        // coverage, cost, and latency without route prose or a constant mode.
         let catalog = analytics_catalog();
         let execution_runs = find_dataset(&catalog, "execution_runs")
             .expect("execution_runs must remain in the analytics catalog");
@@ -1242,7 +1236,6 @@ mod tests {
                 "initial_plan_hash",
                 "active_plan_hash",
                 "plan_revision",
-                "route_rationale",
                 "source_kind",
                 "skill_template_ref",
                 "skill_template_revision_uid",

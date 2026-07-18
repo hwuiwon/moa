@@ -77,13 +77,17 @@ NeedsInput emits one bounded deterministic clarification. Execute carries one
 explicit internal strategy: Inline retains the bounded root tool loop and
 optional conversational Worker delegation; Durable persists an
 immutable goal contract and canonical plan, starts `ExecutionRun` detached, and
-returns without making the root model poll status. The route rationale is
-bounded free-form explanation and is never a workflow control input.
+returns without making the root model poll status. A bounded free-form
+classifier rationale may accompany the active turn, but it is never a workflow
+control input and is not persisted in route audits, runs, or analytics.
 
 Only an initial root user-message Execute/Inline turn can make one typed,
 evidence-preserving upgrade to Durable. It does not classify again, cannot
-downgrade, and child-signal or worker-result continuations remain Inline. A
-terminal run requests one guarded compact synthesis turn on the owning session.
+downgrade, and child-signal or worker-result continuations remain Inline. The
+workflow injects `request_durable_execution` only into that eligible turn,
+requires the control tool to be called alone, and rejects arbitrary tool-result
+payloads as upgrade authority. A terminal run requests one guarded compact
+synthesis turn on the owning session.
 Successful Durable admission returns the terminal root-turn outcome `Accepted`,
 publishes one minimal `ExecutionRunStarted` event, and keeps the owning Session
 `Running` while detached execution continues.

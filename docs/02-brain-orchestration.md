@@ -115,12 +115,18 @@ work. It preserves bounded evidence and the byte-identical objective, does not
 call the classifier again, and cannot downgrade. Task difficulty is not a
 Durable signal.
 
+Upgrade authority belongs to the workflow-owned `request_durable_execution`
+control tool. It is injected only for the eligible root Inline turn, must be
+called alone, and carries the bounded rationale and evidence into the one-way
+transition. Arbitrary tool-result payloads cannot trigger an upgrade.
+
 1. Build a `CompletionRequest` from session events and the context pipeline.
 2. Ensure a task segment exists or roll to a new segment when query rewrite marks `is_new_task`.
 3. Select Respond, Execute, or NeedsInput through trusted control facts or one
    bounded auxiliary classifier call; require an explicit Inline/Durable
-   strategy for Execute and persist it with a bounded explanatory rationale
-   before execution. Rationale text is never interpreted as control data.
+   strategy for Execute. A bounded explanatory rationale may live in the active
+   turn, but it is neither interpreted as control data nor persisted in route
+   audits or analytics.
 4. Persist assistant output and tool calls.
 5. Build an `ActionEnvelope`, evaluate action policy, and route allowed tool execution through `ToolExecutor`.
 6. Record tool usage, skill activation, token usage, and turn counts on the active segment.

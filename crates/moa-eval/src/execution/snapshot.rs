@@ -18,8 +18,8 @@ use moa_execution::{
     completion::CompletionCheckResult,
     repository::{ExecutionSchedulingSnapshot, ExecutionTaskRecord},
     state::{
-        ExecutionRouteFields, ExecutionRunStatus, ExecutionSourceKind, ExecutionTaskStatus,
-        ExecutionTerminalEvidence, ExecutionTerminalReason, LogicalTaskKind,
+        ExecutionRunStatus, ExecutionSourceKind, ExecutionTaskStatus, ExecutionTerminalEvidence,
+        ExecutionTerminalReason, LogicalTaskKind,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -51,8 +51,6 @@ pub struct ExecutionEvalRun {
     pub source_kind: ExecutionSourceKind,
     /// Exact admitted source provenance.
     pub source_provenance: ExecutionSourceProvenance,
-    /// Normalized run-producing route.
-    pub route: ExecutionRouteFields,
     /// Current durable run status.
     pub status: ExecutionRunStatus,
     /// Terminal structured output retained only for in-process scoring.
@@ -166,8 +164,6 @@ pub enum ExecutionPlanningAuditSummary {
         decision: ExecutionRouteKind,
         /// Deterministic strategy for an Execute route.
         strategy: Option<ExecutionStrategy>,
-        /// Bounded human-readable route rationale.
-        rationale: String,
     },
     /// One actual provider planner call.
     PlannerCall {
@@ -321,7 +317,6 @@ impl ExecutionEvalSnapshot {
             plan_revision: snapshot.run.plan_revision,
             source_kind: snapshot.run.source_kind,
             source_provenance: snapshot.run.source_provenance.clone(),
-            route: snapshot.run.route,
             status: snapshot.run.status,
             terminal_output: snapshot.run.output.clone(),
             terminal_output_hash,
@@ -501,13 +496,11 @@ fn normalize_audit(audit: &ExecutionPlanningAuditEnvelope) -> ExecutionPlanningA
             stage,
             decision,
             strategy,
-            rationale,
             ..
         } => ExecutionPlanningAuditSummary::Route {
             stage: *stage,
             decision: *decision,
             strategy: *strategy,
-            rationale: rationale.clone(),
         },
         ExecutionPlanningAuditPayload::PlannerCall {
             call_kind,

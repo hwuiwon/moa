@@ -15,7 +15,6 @@ use moa_test_support::{FixtureCapabilityController, OrchestratorTestFixture, Tes
 use crate::execution_execution_support::{
     assertions::{assert_initial_route, assert_no_execution_lifecycle_events},
     evaluation::{collect_execution_eval_snapshot, collect_repository_execution_eval_snapshot},
-    fixtures::RouteFixture,
 };
 
 /// Collects one service snapshot, evaluates typed invariants, and hard-fails any violation.
@@ -87,14 +86,13 @@ pub(crate) fn assert_non_durable_eval(
     events: &[moa_core::types::events_stream::EventRecord],
     decision: ExecutionRouteKind,
     strategy: Option<ExecutionStrategy>,
-    fixture: RouteFixture,
 ) {
     assert!(matches!(
         (decision, strategy),
         (ExecutionRouteKind::Respond, None)
             | (ExecutionRouteKind::Execute, Some(ExecutionStrategy::Inline))
     ));
-    assert_initial_route(audits, decision, strategy, fixture);
+    assert_initial_route(audits, decision, strategy);
     assert_no_execution_lifecycle_events(events);
     assert!(events.iter().all(|record| {
         !matches!(

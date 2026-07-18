@@ -686,12 +686,12 @@ async fn insert_execution_task(pool: &PgPool, tenant_id: TenantId) -> ExecutionT
             planning_context_uid, planning_context_hash, owner_user_id, goal_contract,
             initial_plan, active_plan, initial_plan_hash, active_plan_hash,
             capability_catalog, authorization_envelope, pinned_instruction_skills,
-            source_provenance, source_kind, route_rationale,
+            source_provenance, source_kind,
             input, status, queued_at
         ) VALUES ($1, $2, $3, 1, $4, $5, 'test-owner', '{}'::JSONB, '{}'::JSONB,
                   '{}'::JSONB, $5, $5, '{}'::JSONB, '{}'::JSONB, '[]'::JSONB,
-                  '{"kind":"generated_plan","route_rationale":"The workflow requires durable execution."}'::JSONB,
-                  'generated_plan', 'The workflow requires durable execution.', '{}'::JSONB, 'queued', NOW())
+                  '{"kind":"generated_plan"}'::JSONB,
+                  'generated_plan', '{}'::JSONB, 'queued', NOW())
         "#,
     )
     .bind(run_uid)

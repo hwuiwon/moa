@@ -195,9 +195,9 @@ async fn execution_routing_low_confidence_durable_strategy_falls_back_inline_off
 }
 
 #[tokio::test]
-async fn execution_routing_rejects_corrupt_upgrade_evidence_and_classifier_setup_offline() {
-    // Pins: Durable upgrades preserve exact bounded evidence and can never be
-    // represented by a case that permits a classifier call.
+async fn execution_routing_scores_handoff_evidence_and_rejects_classifier_setup_offline() {
+    // Pins: evidence preservation is scored from the production transition output rather than
+    // accepted tautologically as corpus setup, while upgrades still cannot call the classifier.
     let corpus = load_execution_corpus(&manifest_path())
         .await
         .expect("checked-in execution corpus should load");
@@ -220,7 +220,18 @@ async fn execution_routing_rejects_corrupt_upgrade_evidence_and_classifier_setup
                 value: serde_json::json!({"corrupt": true}),
             },
         );
-    assert!(score_routing_cases(&[corrupt_evidence]).await.is_err());
+    let corrupt_metrics = score_routing_cases(&[corrupt_evidence])
+        .await
+        .expect("mismatched expected evidence should be scored, not rejected as setup");
+    assert_eq!(corrupt_metrics.passed_cases, 0);
+    assert_eq!(
+        corrupt_metrics.durable_upgrade_evidence_preservation_rate,
+        0.0
+    );
+    assert_eq!(
+        corrupt_metrics.cases[0].durable_upgrade_evidence_preserved,
+        Some(false)
+    );
 
     let mut classifier_setup = upgrade;
     classifier_setup.classifier = ExecutionRoutingClassifierFixture::Response {
@@ -254,11 +265,23 @@ async fn execution_routing_durable_upgrade_rejects_non_root_and_reuse_offline() 
     };
 
     assert_eq!(
-        durable_upgrade_transition(&upgrade.objective, &initial_route, false, false, upgrade,),
+        durable_upgrade_transition(
+            &upgrade.objective,
+            &initial_route,
+            false,
+            false,
+            upgrade.clone(),
+        ),
         Err(DurableUpgradeTransitionError::NotAuthorized)
     );
     assert_eq!(
-        durable_upgrade_transition(&upgrade.objective, &initial_route, true, true, upgrade,),
+        durable_upgrade_transition(
+            &upgrade.objective,
+            &initial_route,
+            true,
+            true,
+            upgrade.clone(),
+        ),
         Err(DurableUpgradeTransitionError::AlreadyConsumed)
     );
 }

@@ -200,17 +200,18 @@ contact progress, and public SSE by construction.
 
 The route audit accepts only the normalized decision/strategy matrix:
 
-| Stage | Decision | Strategy | Reason/source shape |
+| Stage | Decision | Strategy | Source |
 |---|---|---|---|
-| Initial | Respond | none | simple response from the classifier |
-| Initial | NeedsInput | none | bounded missing input from blank-objective preflight or the classifier |
-| Initial | Execute | Inline | bounded interactive work, including every classifier fallback |
-| Initial | Execute | Durable | explicit durable work, bulk/resumable/high-fan-out/waiting work, or a selected template |
-| Durable upgrade | Execute | Durable | one trusted, root-only, one-way upgrade |
+| Initial | Respond | none | classifier |
+| Initial | NeedsInput | none | blank-objective preflight or classifier |
+| Initial | Execute | Inline | classifier, including every classifier fallback |
+| Initial | Execute | Durable | classifier or selected execution template |
+| Durable upgrade | Execute | Durable | workflow-owned `request_durable_execution` control transition |
 
-The row retains bounded source and classifier-outcome provenance. It never
-stores raw objective or classifier text, and durable run facts retain route
-reason/source without a constant run-mode dimension.
+The row retains typed source and classifier-outcome provenance plus bounded
+model, prompt, hash, confidence, usage, cost, and duration metadata. Classifier
+rationale is session-local and ephemeral: neither route audits nor durable run
+facts store it. They also never store raw objective or classifier response text.
 
 `SegmentStarted` records segment ID, index, summary, and previous segment ID. `SegmentCompleted` records final counters and duration.
 

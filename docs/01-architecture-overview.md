@@ -65,8 +65,9 @@ node in Durable Execute; no skill is required to define a plan.
   call. An ordinary user turn may first make one separate bounded auxiliary
   classifier call to select this route.
 - `Execute`: authorized work with a deterministic internal strategy. The
-  router supplies `Inline` or `Durable` explicitly; the accompanying rationale
-  is one bounded free-form sentence and never controls execution.
+  router supplies `Inline` or `Durable` explicitly. A classifier may attach one
+  bounded free-form rationale for the active turn, but that text never controls
+  execution and is not persisted.
 - `NeedsInput`: one deterministic clarification with bounded missing fields.
 
 Inline Execute is the bounded root model/tool loop, including repeat and
@@ -75,6 +76,9 @@ Durable Execute instantiates or compiles an immutable plan, starts a detached
 `ExecutionRun`, publishes compact progress, and synthesizes its terminal result
 into the owning session automatically. An initial root Inline turn may make one
 evidence-preserving upgrade to Durable; it cannot downgrade or classify again.
+The workflow exposes `request_durable_execution` only to that eligible turn,
+requires it to be the sole tool call in the model response, and validates its
+typed evidence before upgrading. Ordinary tool results cannot change strategy.
 Difficulty alone does not select Durable. `Worker` is not the bulk DAG primitive.
 
 Ordinary language routing is one strict-schema auxiliary-model classification,
@@ -85,8 +89,8 @@ exact pinned templates use trusted zero-classifier-call routes; a typed Durable
 upgrade is a trusted control transition and is not classifier input. The
 normalized route audit persists `respond | execute | needs_input`, optional
 `inline | durable`, and bounded provenance (source/outcome, model/prompt,
-hashes, confidence, usage, cost, and duration), never raw objective or
-classifier text.
+hashes, confidence, usage, cost, and duration), never raw objective, classifier
+rationale, or classifier response text.
 
 Agents, skills, connectors, actions, and behavior-lab experiment plans are
 canonical artifacts. `moa-artifacts` owns their persisted document model,
@@ -105,7 +109,7 @@ authoring and import/export format. Optional `ui` metadata is non-semantic.
 
 | Boundary | Owner | Contract |
 |---|---|---|
-| `ExecutionRouter` | `moa-brain` | Uses trusted typed bypasses or at most one bounded auxiliary-model call to select Respond, Execute, or concrete missing input; Execute carries an explicit Inline/Durable strategy plus a bounded free-form rationale, and uncertainty falls back to Execute/Inline. |
+| `ExecutionRouter` | `moa-brain` | Uses trusted typed bypasses or at most one bounded auxiliary-model call to select Respond, Execute, or concrete missing input; Execute carries an explicit Inline/Durable strategy, any free-form rationale remains turn-local, and uncertainty falls back to Execute/Inline. |
 | `ExecutionPlanner` | `moa-brain` | Chooses a pinned skill template or asks the auxiliary model for a strict candidate plan and immutable goal contract. |
 | `ExecutionCompiler` | `moa-execution` | Validates, canonicalizes, estimates, and hashes initial plans and amendments against the capability catalog and remaining budget. |
 | `ExecutionProjection` | `moa-execution` | Supplies ordered node/task state to the pure scheduler; it contains no repository or provider handle. |
@@ -128,7 +132,7 @@ An `ExecutionPlanDefinition` carries `schema_version`, `input_schema`,
 `output_schema`, and `nodes`. Each node carries `id`, `depends_on`, optional
 `when`, `input`, `output_schema`, one `operation`, retry policy, optional budget,
 and the goal requirement IDs it serves. The dependency graph is acyclic, and
-its operation enum has exactly seven v1 variants:
+its operation enum has exactly seven variants:
 
 1. `Capability { reference }` invokes one registered governed capability.
 2. `Agent { instructions, skill_refs, capability_refs, max_turns }` runs one

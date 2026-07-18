@@ -20,7 +20,7 @@ use super::{
 
 const EXECUTION_RUN_EXPORT_SQL: &str = "SELECT analytics_change_seq, run_uid, tenant_id, \
         contact_id, session_id, initial_plan_hash, active_plan_hash, plan_revision, \
-        route_rationale, source_kind, skill_template_ref, skill_template_revision_uid, status, \
+        source_kind, skill_template_ref, skill_template_revision_uid, status, \
         terminal_reason, COALESCE(terminal_requirement_count, \
             CASE WHEN jsonb_typeof(goal_contract -> 'requirements') = 'array' \
                  THEN jsonb_array_length(goal_contract -> 'requirements')::BIGINT ELSE 0 END) \
@@ -413,7 +413,6 @@ pub struct DimExecutionRunRow {
     pub initial_plan_hash: String,
     pub active_plan_hash: String,
     pub plan_revision: u64,
-    pub route_rationale: String,
     pub source_kind: String,
     pub skill_template_ref: Option<String>,
     #[serde(with = "clickhouse::serde::uuid::option")]
@@ -504,7 +503,6 @@ pub(super) struct ExecutionRunReadRow {
     initial_plan_hash: String,
     active_plan_hash: String,
     plan_revision: i64,
-    route_rationale: String,
     source_kind: String,
     skill_template_ref: Option<String>,
     skill_template_revision_uid: Option<Uuid>,
@@ -546,7 +544,6 @@ impl ExecutionRunReadRow {
             initial_plan_hash: self.initial_plan_hash,
             active_plan_hash: self.active_plan_hash,
             plan_revision: nonnegative_u64("plan_revision", self.plan_revision)?,
-            route_rationale: self.route_rationale,
             source_kind: self.source_kind,
             skill_template_ref: self.skill_template_ref,
             skill_template_revision_uid: self.skill_template_revision_uid,
@@ -831,13 +828,11 @@ mod tests {
             "{EXECUTION_RUN_EXPORT_SQL}"
         );
         assert!(
-            EXECUTION_RUN_EXPORT_SQL
-                .contains("active_plan_hash, plan_revision, route_rationale, source_kind"),
+            EXECUTION_RUN_EXPORT_SQL.contains("active_plan_hash, plan_revision, source_kind"),
             "{EXECUTION_RUN_EXPORT_SQL}"
         );
         assert!(
             [
-                "route_rationale",
                 "source_kind",
                 "skill_template_ref",
                 "skill_template_revision_uid",
@@ -873,6 +868,7 @@ mod tests {
         );
         for forbidden in [
             "procedure",
+            "route_rationale",
             "source_ref",
             "capability_ref",
             "error ->> 'message'",

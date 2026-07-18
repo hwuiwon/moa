@@ -83,6 +83,13 @@ pub(super) struct ExecutionPosition {
     id: Uuid,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ExecutionClickHouseIdentities {
+    database_uuid: Uuid,
+    run_table_uuid: Uuid,
+    task_table_uuid: Uuid,
+}
+
 impl ExecutionPosition {
     const ZERO: Self = Self {
         seq: 0,
@@ -100,6 +107,10 @@ impl ExecutionPosition {
 
 #[derive(Debug, FromRow)]
 struct ExecutionUpgradeState {
+    generation: i64,
+    database_uuid: Uuid,
+    run_table_uuid: Uuid,
+    task_table_uuid: Uuid,
     stage: String,
     upgrade_version: DateTime<Utc>,
     run_high_water_seq: i64,
@@ -113,6 +124,14 @@ struct ExecutionUpgradeState {
 }
 
 impl ExecutionUpgradeState {
+    fn clickhouse_identities(&self) -> ExecutionClickHouseIdentities {
+        ExecutionClickHouseIdentities {
+            database_uuid: self.database_uuid,
+            run_table_uuid: self.run_table_uuid,
+            task_table_uuid: self.task_table_uuid,
+        }
+    }
+
     fn run_high_water(&self) -> ExecutionPosition {
         ExecutionPosition {
             seq: self.run_high_water_seq,
@@ -138,6 +157,26 @@ impl ExecutionUpgradeState {
         ExecutionPosition {
             seq: self.task_page_seq,
             id: self.task_page_id,
+        }
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct ExecutionUpgradeHead {
+    generation: i64,
+    database_uuid: Uuid,
+    run_table_uuid: Uuid,
+    task_table_uuid: Uuid,
+    export_version_floor: DateTime<Utc>,
+}
+
+impl ExecutionUpgradeHead {
+    #[cfg(test)]
+    fn clickhouse_identities(&self) -> ExecutionClickHouseIdentities {
+        ExecutionClickHouseIdentities {
+            database_uuid: self.database_uuid,
+            run_table_uuid: self.run_table_uuid,
+            task_table_uuid: self.task_table_uuid,
         }
     }
 }
@@ -345,9 +384,16 @@ impl AnalyticsExporter {
         }
     }
 
-    pub(super) async fn ensure_execution_dimension_upgrade(&self) -> Result<(), ExportError> {
-        if self.read_execution_upgrade_state().await?.is_none() {
-            self.initialize_execution_upgrade().await?;
+    pub(super) async fn ensure_execution_dimension_upgrade(
+        &self,
+        identities: ExecutionClickHouseIdentities,
+    ) -> Result<(), ExportError> {
+        if self
+            .read_execution_upgrade_state()
+            .await?
+            .is_none_or(|state| state.clickhouse_identities() != identities)
+        {
+            self.initialize_execution_upgrade(identities).await?;
         }
 
         loop {
@@ -357,20 +403,29 @@ impl AnalyticsExporter {
                         .to_string(),
                 )
             })?;
+            if state.clickhouse_identities() != identities {
+                return Err(ExportError::Contract(format!(
+                    "execution bootstrap generation {} is bound to ClickHouse database/table \
+                     UUIDs ({}, {}, {}), but startup validated ({}, {}, {})",
+                    state.generation,
+                    state.database_uuid,
+                    state.run_table_uuid,
+                    state.task_table_uuid,
+                    identities.database_uuid,
+                    identities.run_table_uuid,
+                    identities.task_table_uuid
+                )));
+            }
             match state.stage.as_str() {
                 "pending" => {
-                    self.upgrade_execution_clickhouse_schema().await?;
-                    self.advance_upgrade_stage("pending", "schema_upgraded")
-                        .await?;
+                    self.advance_upgrade_stage(state.generation, "pending", "schema_upgraded")
+                        .await?
                 }
-                "schema_upgraded" => self.reset_execution_upgrade_cursors().await?,
+                "schema_upgraded" => self.reset_execution_upgrade_cursors(&state).await?,
                 "cursors_reset" => self.export_execution_upgrade_runs(&state).await?,
                 "runs_exported" => self.export_execution_upgrade_tasks(&state).await?,
                 "tasks_exported" => self.complete_execution_upgrade(&state).await?,
-                "complete" => {
-                    self.upgrade_execution_clickhouse_schema().await?;
-                    return Ok(());
-                }
+                "complete" => return Ok(()),
                 stage => {
                     return Err(ExportError::Contract(format!(
                         "unknown execution dimension upgrade stage {stage}"
@@ -384,22 +439,43 @@ impl AnalyticsExporter {
         &self,
     ) -> Result<Option<ExecutionUpgradeState>, ExportError> {
         Ok(sqlx::query_as::<_, ExecutionUpgradeState>(
-            "SELECT stage, upgrade_version, run_high_water_seq, run_high_water_id, \
+            "SELECT generation, database_uuid, run_table_uuid, task_table_uuid, stage, \
+                    upgrade_version, \
+                    run_high_water_seq, run_high_water_id, \
                     task_high_water_seq, task_high_water_id, run_page_seq, run_page_id, \
                     task_page_seq, task_page_id \
-             FROM analytics.clickhouse_schema_upgrade_state WHERE upgrade_key = $1",
+             FROM analytics.clickhouse_schema_upgrade_state WHERE upgrade_key = $1 \
+             ORDER BY generation DESC LIMIT 1",
         )
         .bind(EXECUTION_UPGRADE_KEY)
         .fetch_optional(&self.pool)
         .await?)
     }
 
-    async fn initialize_execution_upgrade(&self) -> Result<(), ExportError> {
+    async fn initialize_execution_upgrade(
+        &self,
+        identities: ExecutionClickHouseIdentities,
+    ) -> Result<(), ExportError> {
         let max_existing = self.max_existing_execution_export_version().await?;
         let mut tx = self.pool.begin().await?;
         sqlx::query(EXECUTION_ANALYTICS_LOCK_SQL)
             .execute(&mut *tx)
             .await?;
+        let previous = sqlx::query_as::<_, ExecutionUpgradeHead>(
+            "SELECT generation, database_uuid, run_table_uuid, task_table_uuid, \
+                    export_version_floor \
+             FROM analytics.clickhouse_schema_upgrade_state \
+             WHERE upgrade_key = $1 ORDER BY generation DESC LIMIT 1 FOR UPDATE",
+        )
+        .bind(EXECUTION_UPGRADE_KEY)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(previous) = previous.as_ref()
+            && !execution_reset_starts_new_generation(previous, identities, &self.database)?
+        {
+            tx.commit().await?;
+            return Ok(());
+        }
         let run_high_water = Self::greatest_execution_position(
             &mut tx,
             "SELECT analytics_change_seq, run_uid \
@@ -417,17 +493,31 @@ impl AnalyticsExporter {
         let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT transaction_timestamp()")
             .fetch_one(&mut *tx)
             .await?;
-        let upgrade_version = monotonic_export_version(database_now, max_existing)?;
+        let prior_floor = previous.as_ref().map(|state| state.export_version_floor);
+        let version_floor = [max_existing, prior_floor].into_iter().flatten().max();
+        let upgrade_version = monotonic_export_version(database_now, version_floor)?;
+        let generation = match previous {
+            Some(previous) => previous.generation.checked_add(1).ok_or_else(|| {
+                ExportError::Contract(
+                    "execution bootstrap generation cannot advance beyond i64::MAX".to_string(),
+                )
+            })?,
+            None => 1,
+        };
         sqlx::query(
             "INSERT INTO analytics.clickhouse_schema_upgrade_state (
-                 upgrade_key, stage, upgrade_version, export_version_floor,
+                 upgrade_key, generation, database_uuid, run_table_uuid, task_table_uuid,
+                 stage, upgrade_version, export_version_floor,
                  run_high_water_seq, run_high_water_id,
                  task_high_water_seq, task_high_water_id,
                  run_page_seq, run_page_id, task_page_seq, task_page_id
-             ) VALUES ($1, 'pending', $2, $2, $3, $4, $5, $6, 0, $7, 0, $7)
-             ON CONFLICT (upgrade_key) DO NOTHING",
+             ) VALUES ($1, $2, $3, $4, $5, 'pending', $6, $6, $7, $8, $9, $10, 0, $11, 0, $11)",
         )
         .bind(EXECUTION_UPGRADE_KEY)
+        .bind(generation)
+        .bind(identities.database_uuid)
+        .bind(identities.run_table_uuid)
+        .bind(identities.task_table_uuid)
         .bind(upgrade_version)
         .bind(run_high_water.seq)
         .bind(run_high_water.id)
@@ -479,13 +569,19 @@ impl AnalyticsExporter {
             .transpose()
     }
 
-    async fn advance_upgrade_stage(&self, expected: &str, next: &str) -> Result<(), ExportError> {
+    async fn advance_upgrade_stage(
+        &self,
+        generation: i64,
+        expected: &str,
+        next: &str,
+    ) -> Result<(), ExportError> {
         let result = sqlx::query(
             "UPDATE analytics.clickhouse_schema_upgrade_state \
-             SET stage = $3, updated_at = NOW() \
-             WHERE upgrade_key = $1 AND stage = $2",
+             SET stage = $4, updated_at = NOW() \
+             WHERE upgrade_key = $1 AND generation = $2 AND stage = $3",
         )
         .bind(EXECUTION_UPGRADE_KEY)
+        .bind(generation)
         .bind(expected)
         .bind(next)
         .execute(&self.pool)
@@ -499,7 +595,10 @@ impl AnalyticsExporter {
         Ok(())
     }
 
-    async fn reset_execution_upgrade_cursors(&self) -> Result<(), ExportError> {
+    async fn reset_execution_upgrade_cursors(
+        &self,
+        state: &ExecutionUpgradeState,
+    ) -> Result<(), ExportError> {
         let mut tx = self.pool.begin().await?;
         for table in [EXECUTION_RUN_TABLE, EXECUTION_TASK_TABLE] {
             sqlx::query(
@@ -524,11 +623,12 @@ impl AnalyticsExporter {
         }
         let result = sqlx::query(
             "UPDATE analytics.clickhouse_schema_upgrade_state \
-             SET stage = 'cursors_reset', run_page_seq = 0, run_page_id = $2, \
-                 task_page_seq = 0, task_page_id = $2, updated_at = NOW() \
-             WHERE upgrade_key = $1 AND stage = 'schema_upgraded'",
+             SET stage = 'cursors_reset', run_page_seq = 0, run_page_id = $3, \
+                 task_page_seq = 0, task_page_id = $3, updated_at = NOW() \
+             WHERE upgrade_key = $1 AND generation = $2 AND stage = 'schema_upgraded'",
         )
         .bind(EXECUTION_UPGRADE_KEY)
+        .bind(state.generation)
         .bind(Uuid::nil())
         .execute(&mut *tx)
         .await?;
@@ -552,10 +652,15 @@ impl AnalyticsExporter {
             let rows = self.read_execution_run_page(page, high_water).await?;
             let Some(last) = rows.last() else {
                 if page != high_water {
-                    self.write_upgrade_page("run_page_seq", "run_page_id", high_water)
-                        .await?;
+                    self.write_upgrade_page(
+                        state.generation,
+                        "run_page_seq",
+                        "run_page_id",
+                        high_water,
+                    )
+                    .await?;
                 }
-                self.advance_upgrade_stage("cursors_reset", "runs_exported")
+                self.advance_upgrade_stage(state.generation, "cursors_reset", "runs_exported")
                     .await?;
                 return Ok(());
             };
@@ -570,7 +675,7 @@ impl AnalyticsExporter {
             self.insert_rows(EXECUTION_RUN_TABLE, &clickhouse_rows)
                 .await?;
             record_rows(EXECUTION_RUN_TABLE, clickhouse_rows.len() as u64);
-            self.write_upgrade_page("run_page_seq", "run_page_id", last)
+            self.write_upgrade_page(state.generation, "run_page_seq", "run_page_id", last)
                 .await?;
             page = last;
         }
@@ -586,10 +691,15 @@ impl AnalyticsExporter {
             let rows = self.read_execution_task_page(page, high_water).await?;
             let Some(last) = rows.last() else {
                 if page != high_water {
-                    self.write_upgrade_page("task_page_seq", "task_page_id", high_water)
-                        .await?;
+                    self.write_upgrade_page(
+                        state.generation,
+                        "task_page_seq",
+                        "task_page_id",
+                        high_water,
+                    )
+                    .await?;
                 }
-                self.advance_upgrade_stage("runs_exported", "tasks_exported")
+                self.advance_upgrade_stage(state.generation, "runs_exported", "tasks_exported")
                     .await?;
                 return Ok(());
             };
@@ -604,7 +714,7 @@ impl AnalyticsExporter {
             self.insert_rows(EXECUTION_TASK_TABLE, &clickhouse_rows)
                 .await?;
             record_rows(EXECUTION_TASK_TABLE, clickhouse_rows.len() as u64);
-            self.write_upgrade_page("task_page_seq", "task_page_id", last)
+            self.write_upgrade_page(state.generation, "task_page_seq", "task_page_id", last)
                 .await?;
             page = last;
         }
@@ -612,21 +722,29 @@ impl AnalyticsExporter {
 
     async fn write_upgrade_page(
         &self,
+        generation: i64,
         seq_column: &str,
         id_column: &str,
         position: ExecutionPosition,
     ) -> Result<(), ExportError> {
         let sql = format!(
             "UPDATE analytics.clickhouse_schema_upgrade_state \
-             SET {seq_column} = $2, {id_column} = $3, updated_at = NOW() \
-             WHERE upgrade_key = $1"
+             SET {seq_column} = $3, {id_column} = $4, updated_at = NOW() \
+             WHERE upgrade_key = $1 AND generation = $2"
         );
-        sqlx::query(&sql)
+        let result = sqlx::query(&sql)
             .bind(EXECUTION_UPGRADE_KEY)
+            .bind(generation)
             .bind(position.seq)
             .bind(position.id)
             .execute(&self.pool)
             .await?;
+        if result.rows_affected() != 1 {
+            return Err(ExportError::Contract(format!(
+                "execution bootstrap generation {generation} page update affected {} rows",
+                result.rows_affected()
+            )));
+        }
         Ok(())
     }
 
@@ -657,10 +775,11 @@ impl AnalyticsExporter {
         }
         let result = sqlx::query(
             "UPDATE analytics.clickhouse_schema_upgrade_state \
-             SET stage = 'complete', completed_at = $2, updated_at = $2 \
-             WHERE upgrade_key = $1 AND stage = 'tasks_exported'",
+             SET stage = 'complete', completed_at = $3, updated_at = $3 \
+             WHERE upgrade_key = $1 AND generation = $2 AND stage = 'tasks_exported'",
         )
         .bind(EXECUTION_UPGRADE_KEY)
+        .bind(state.generation)
         .bind(database_now)
         .execute(&mut *tx)
         .await?;
@@ -831,10 +950,10 @@ impl AnalyticsExporter {
 
     async fn claim_execution_export_version(&self) -> Result<DateTime<Utc>, ExportError> {
         let mut tx = self.pool.begin().await?;
-        let floor: DateTime<Utc> = sqlx::query_scalar(
-            "SELECT export_version_floor \
+        let (generation, floor): (i64, DateTime<Utc>) = sqlx::query_as(
+            "SELECT generation, export_version_floor \
              FROM analytics.clickhouse_schema_upgrade_state \
-             WHERE upgrade_key = $1 FOR UPDATE",
+             WHERE upgrade_key = $1 ORDER BY generation DESC LIMIT 1 FOR UPDATE",
         )
         .bind(EXECUTION_UPGRADE_KEY)
         .fetch_one(&mut *tx)
@@ -843,15 +962,22 @@ impl AnalyticsExporter {
             .fetch_one(&mut *tx)
             .await?;
         let next = monotonic_export_version(database_now, Some(floor))?;
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE analytics.clickhouse_schema_upgrade_state \
-             SET export_version_floor = $2, updated_at = NOW() \
-             WHERE upgrade_key = $1",
+             SET export_version_floor = $3, updated_at = NOW() \
+             WHERE upgrade_key = $1 AND generation = $2",
         )
         .bind(EXECUTION_UPGRADE_KEY)
+        .bind(generation)
         .bind(next)
         .execute(&mut *tx)
         .await?;
+        if result.rows_affected() != 1 {
+            return Err(ExportError::Contract(format!(
+                "execution bootstrap generation {generation} version claim affected {} rows",
+                result.rows_affected()
+            )));
+        }
         tx.commit().await?;
         Ok(next)
     }
@@ -1039,6 +1165,40 @@ fn monotonic_export_version(
     Ok(database_now.max(after_floor))
 }
 
+fn execution_reset_starts_new_generation(
+    previous: &ExecutionUpgradeHead,
+    current: ExecutionClickHouseIdentities,
+    database: &str,
+) -> Result<bool, ExportError> {
+    if current.database_uuid != previous.database_uuid {
+        return Err(ExportError::Contract(format!(
+            "unsafe ClickHouse analytics database reset detected for {database}: database UUID \
+             changed from {} to {}; persisted cursors for non-execution tables cannot be \
+             replayed safely. Do not drop the database; reset execution analytics by dropping \
+             exactly dim_execution_runs and dim_execution_tasks together inside the existing \
+             database",
+            previous.database_uuid, current.database_uuid
+        )));
+    }
+
+    let run_changed = current.run_table_uuid != previous.run_table_uuid;
+    let task_changed = current.task_table_uuid != previous.task_table_uuid;
+    match (run_changed, task_changed) {
+        (false, false) => Ok(false),
+        (true, true) => Ok(true),
+        _ => Err(ExportError::Contract(format!(
+            "unsafe partial execution analytics reset detected in {database}: execution table \
+             UUIDs must change together (dim_execution_runs {} -> {}, dim_execution_tasks {} \
+             -> {}). Drop exactly both execution tables inside the existing ClickHouse database \
+             and restart",
+            previous.run_table_uuid,
+            current.run_table_uuid,
+            previous.task_table_uuid,
+            current.task_table_uuid
+        ))),
+    }
+}
+
 /// Records the number of rows exported to a table.
 fn record_rows(table: &'static str, rows: u64) {
     metrics::counter!("moa_analytics_export_rows_total", "table" => table).increment(rows);
@@ -1146,5 +1306,94 @@ mod tests {
             }),
             current
         );
+    }
+
+    #[test]
+    fn paired_execution_table_reset_starts_one_new_generation() {
+        // Pins: reset recovery is available only when both disposable
+        // execution tables change identity inside the same ClickHouse database.
+        let previous = execution_upgrade_head(1, 2, 3);
+        let current = ExecutionClickHouseIdentities {
+            database_uuid: Uuid::from_u128(1),
+            run_table_uuid: Uuid::from_u128(4),
+            task_table_uuid: Uuid::from_u128(5),
+        };
+
+        assert!(
+            execution_reset_starts_new_generation(&previous, current, "analytics")
+                .expect("a paired table reset should be recoverable")
+        );
+        assert!(
+            !execution_reset_starts_new_generation(
+                &previous,
+                previous.clickhouse_identities(),
+                "analytics"
+            )
+            .expect("unchanged identities should reuse the current generation")
+        );
+    }
+
+    #[test]
+    fn partial_execution_table_reset_is_rejected() {
+        // Pins: recreating only one execution table cannot reset both durable
+        // cursors or produce a coherent table generation.
+        let previous = execution_upgrade_head(1, 2, 3);
+        let current = ExecutionClickHouseIdentities {
+            database_uuid: Uuid::from_u128(1),
+            run_table_uuid: Uuid::from_u128(4),
+            task_table_uuid: Uuid::from_u128(3),
+        };
+
+        let error = execution_reset_starts_new_generation(&previous, current, "analytics")
+            .expect_err("a partial table reset must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "analytics export contract error: unsafe partial execution analytics reset detected \
+             in analytics: execution table UUIDs must change together (dim_execution_runs \
+             00000000-0000-0000-0000-000000000002 -> \
+             00000000-0000-0000-0000-000000000004, dim_execution_tasks \
+             00000000-0000-0000-0000-000000000003 -> \
+             00000000-0000-0000-0000-000000000003). Drop exactly both execution tables inside \
+             the existing ClickHouse database and restart"
+        );
+    }
+
+    #[test]
+    fn whole_clickhouse_database_recreation_is_rejected() {
+        // Pins: replacing the database loses non-execution analytics copies
+        // while their Postgres cursors survive, so no new execution generation
+        // may make that destructive reset look recovered.
+        let previous = execution_upgrade_head(1, 2, 3);
+        let current = ExecutionClickHouseIdentities {
+            database_uuid: Uuid::from_u128(6),
+            run_table_uuid: Uuid::from_u128(4),
+            task_table_uuid: Uuid::from_u128(5),
+        };
+
+        let error = execution_reset_starts_new_generation(&previous, current, "analytics")
+            .expect_err("a whole-database recreation must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "analytics export contract error: unsafe ClickHouse analytics database reset detected \
+             for analytics: database UUID changed from 00000000-0000-0000-0000-000000000001 \
+             to 00000000-0000-0000-0000-000000000006; persisted cursors for non-execution \
+             tables cannot be replayed safely. Do not drop the database; reset execution \
+             analytics by dropping exactly dim_execution_runs and dim_execution_tasks together \
+             inside the existing database"
+        );
+    }
+
+    fn execution_upgrade_head(
+        database_uuid: u128,
+        run_table_uuid: u128,
+        task_table_uuid: u128,
+    ) -> ExecutionUpgradeHead {
+        ExecutionUpgradeHead {
+            generation: 1,
+            database_uuid: Uuid::from_u128(database_uuid),
+            run_table_uuid: Uuid::from_u128(run_table_uuid),
+            task_table_uuid: Uuid::from_u128(task_table_uuid),
+            export_version_floor: DateTime::<Utc>::UNIX_EPOCH,
+        }
     }
 }

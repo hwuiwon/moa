@@ -49,10 +49,6 @@ pub(crate) const DURABLE_ROUTE_RATIONALE: &str =
 /// Stable clarification rationale emitted by scripted route fixtures.
 pub(crate) const NEEDS_INPUT_ROUTE_RATIONALE: &str =
     "A concrete target is required before work can begin.";
-/// Stable rationale emitted by the trusted pinned-template route.
-pub(crate) const TEMPLATE_ROUTE_RATIONALE: &str =
-    "A pinned execution template requires durable execution.";
-
 /// Typed route shape used by scripted service fixtures without constraining rationale prose.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RouteFixture {
@@ -64,10 +60,6 @@ pub(crate) enum RouteFixture {
     Durable,
     /// Missing-input clarification.
     NeedsInput,
-    /// Trusted pinned-template admission.
-    Template,
-    /// Inline-to-Durable transition.
-    DurableUpgrade,
 }
 
 impl RouteFixture {
@@ -76,9 +68,7 @@ impl RouteFixture {
         match self {
             Self::Respond | Self::NeedsInput => None,
             Self::Inline => Some(ExecutionStrategy::Inline),
-            Self::Durable | Self::Template | Self::DurableUpgrade => {
-                Some(ExecutionStrategy::Durable)
-            }
+            Self::Durable => Some(ExecutionStrategy::Durable),
         }
     }
 
@@ -89,8 +79,6 @@ impl RouteFixture {
             Self::Inline => INLINE_ROUTE_RATIONALE,
             Self::Durable => DURABLE_ROUTE_RATIONALE,
             Self::NeedsInput => NEEDS_INPUT_ROUTE_RATIONALE,
-            Self::Template => TEMPLATE_ROUTE_RATIONALE,
-            Self::DurableUpgrade => "Newly discovered work requires durable continuation.",
         }
     }
 }

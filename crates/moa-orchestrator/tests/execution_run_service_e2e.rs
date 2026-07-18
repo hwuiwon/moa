@@ -285,8 +285,6 @@ async fn create_test_planning_context(
 
 fn test_source_provenance(final_plan_hash: &str) -> ExecutionSourceProvenance {
     ExecutionSourceProvenance::GeneratedPlan {
-        route_rationale: "The requested workflow should persist as a durable execution."
-            .to_string(),
         planner: GeneratedPlanPlannerProvenance {
             model: "scripted-fixture".to_string(),
             prompt_version: "execution-run-service-e2e".to_string(),

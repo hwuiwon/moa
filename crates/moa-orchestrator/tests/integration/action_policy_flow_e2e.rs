@@ -239,13 +239,13 @@ async fn insert_execution_review_task(
             planning_context_uid, planning_context_hash, owner_user_id, goal_contract,
             initial_plan, active_plan, initial_plan_hash, active_plan_hash,
             capability_catalog, authorization_envelope, pinned_instruction_skills,
-            source_provenance, source_kind, route_rationale,
+            source_provenance, source_kind,
             input, status, queued_at
         ) VALUES ($1, $2, $3, $4, $5, $6, 'test-owner',
                   '{}'::JSONB, '{}'::JSONB, '{}'::JSONB, $6, $6,
                   '{}'::JSONB, '{}'::JSONB, '[]'::JSONB,
-                  '{"kind":"generated_plan","route_rationale":"The workflow must survive an approval handoff."}'::JSONB,
-                  'generated_plan', 'The workflow must survive an approval handoff.',
+                  '{"kind":"generated_plan"}'::JSONB,
+                  'generated_plan',
                   '{}'::JSONB, 'queued', NOW())
         "#,
     )

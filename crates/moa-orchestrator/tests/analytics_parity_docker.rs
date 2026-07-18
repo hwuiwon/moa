@@ -101,14 +101,46 @@ struct ClickHouseCount {
 }
 
 #[derive(Debug, Row, Deserialize)]
-struct ClickHouseMicros {
-    micros: i64,
+struct ClickHouseTableContract {
+    #[serde(with = "clickhouse::serde::uuid")]
+    table_uuid: Uuid,
+    engine: String,
+    engine_full: String,
+    partition_key: String,
+    sorting_key: String,
+    primary_key: String,
 }
 
 #[derive(Debug, Row, Deserialize)]
-struct ClickHouseTableKeys {
-    sorting_key: String,
-    primary_key: String,
+struct ClickHouseTableIdentity {
+    #[serde(with = "clickhouse::serde::uuid")]
+    table_uuid: Uuid,
+}
+
+#[derive(Debug, Row, Deserialize)]
+struct ClickHouseDatabaseIdentity {
+    #[serde(with = "clickhouse::serde::uuid")]
+    database_uuid: Uuid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow)]
+struct ExecutionBootstrapGeneration {
+    generation: i64,
+    database_uuid: Uuid,
+    run_table_uuid: Uuid,
+    task_table_uuid: Uuid,
+    stage: String,
+    upgrade_version: DateTime<Utc>,
+    export_version_floor: DateTime<Utc>,
+    run_high_water_seq: i64,
+    run_high_water_id: Uuid,
+    task_high_water_seq: i64,
+    task_high_water_id: Uuid,
+    run_page_seq: i64,
+    run_page_id: Uuid,
+    task_page_seq: i64,
+    task_page_id: Uuid,
+    completed_at: Option<DateTime<Utc>>,
 }
 
 async fn clickhouse_columns(
@@ -137,115 +169,42 @@ async fn clickhouse_count(client: &Client, database: &str, table: &str) -> TestR
     Ok(row.row_count)
 }
 
-async fn seed_task9_clickhouse_execution_schema(
-    client: &Client,
-    database: &str,
-    tenant: Uuid,
-    session: Uuid,
-    run_uid: Uuid,
-    task_id: Uuid,
-    future_version: DateTime<Utc>,
-) -> TestResult<()> {
-    client
-        .query("CREATE DATABASE IF NOT EXISTS ?")
-        .bind(Identifier(database))
-        .execute()
-        .await?;
-    client
+async fn clickhouse_table_uuid(client: &Client, database: &str, table: &str) -> TestResult<Uuid> {
+    let row: ClickHouseTableIdentity = client
         .query(
-            "CREATE TABLE ?.dim_execution_runs ( \
-                 run_uid UUID, tenant_id UUID, storage_partition_id String, user_id String, \
-                 session_id Nullable(UUID), source_kind LowCardinality(String), \
-                 source_ref Nullable(String), plan_hash String, plan_revision UInt32, \
-                 route_reason Nullable(String), status LowCardinality(String), \
-                 terminal_reason Nullable(String), error Nullable(String), required_count UInt64, \
-                 satisfied_count UInt64, logical_task_count UInt64, \
-                 reserved_cost_microusd UInt64, actual_cost_microusd UInt64, \
-                 reserved_tokens UInt64, actual_tokens UInt64, \
-                 started_at Nullable(DateTime64(6, 'UTC')), \
-                 completed_at Nullable(DateTime64(6, 'UTC')), \
-                 created_at DateTime64(6, 'UTC'), updated_at DateTime64(6, 'UTC'), \
-                 duration_ms Nullable(Float64), export_version DateTime64(6, 'UTC') \
-             ) ENGINE = ReplacingMergeTree(export_version) ORDER BY (tenant_id, run_uid)",
+            "SELECT uuid AS table_uuid FROM system.tables \
+             WHERE database = ? AND name = ?",
         )
-        .bind(Identifier(database))
-        .execute()
+        .bind(database)
+        .bind(table)
+        .fetch_one()
         .await?;
-    client
-        .query(
-            "CREATE TABLE ?.dim_execution_tasks ( \
-                 task_uid UUID, run_uid UUID, tenant_id UUID, node_id String, \
-                 item_key Nullable(String), capability_ref Nullable(String), \
-                 plan_revision UInt32, status LowCardinality(String), error Nullable(String), \
-                 attempt UInt32, generation UInt64, reserved_cost_microusd UInt64, \
-                 actual_cost_microusd UInt64, reserved_tokens UInt64, actual_tokens UInt64, \
-                 citation_count UInt64, started_at Nullable(DateTime64(6, 'UTC')), \
-                 completed_at Nullable(DateTime64(6, 'UTC')), \
-                 created_at DateTime64(6, 'UTC'), updated_at DateTime64(6, 'UTC'), \
-                 duration_ms Nullable(Float64), export_version DateTime64(6, 'UTC') \
-             ) ENGINE = ReplacingMergeTree(export_version) \
-             ORDER BY (tenant_id, run_uid, task_uid)",
-        )
-        .bind(Identifier(database))
-        .execute()
+    Ok(row.table_uuid)
+}
+
+async fn clickhouse_database_uuid(client: &Client, database: &str) -> TestResult<Uuid> {
+    let row: ClickHouseDatabaseIdentity = client
+        .query("SELECT uuid AS database_uuid FROM system.databases WHERE name = ?")
+        .bind(database)
+        .fetch_one()
         .await?;
-    client
-        .query(
-            "INSERT INTO ?.dim_execution_runs ( \
-                 run_uid, tenant_id, storage_partition_id, user_id, session_id, source_kind, \
-                 source_ref, plan_hash, plan_revision, route_reason, status, terminal_reason, \
-                 error, required_count, satisfied_count, logical_task_count, \
-                 reserved_cost_microusd, actual_cost_microusd, reserved_tokens, actual_tokens, \
-                 started_at, completed_at, created_at, updated_at, duration_ms, export_version \
-             ) VALUES ( \
-                 ?, ?, ?, 'user-1', ?, 'skill_template', 'skill://old', ?, 1, \
-                 'selected_execution_template', 'completed', 'completed', 'old raw error', \
-                 1, 1, 1, 0, 1, 0, 1, \
-                 fromUnixTimestamp64Micro(?), fromUnixTimestamp64Micro(?), \
-                 fromUnixTimestamp64Micro(?), fromUnixTimestamp64Micro(?), \
-                 1000.0, fromUnixTimestamp64Micro(?) \
-             )",
-        )
-        .bind(Identifier(database))
-        .bind(run_uid)
-        .bind(tenant)
-        .bind(tenant.to_string())
-        .bind(session)
-        .bind("f".repeat(64))
-        .bind((future_version - Duration::seconds(2)).timestamp_micros())
-        .bind((future_version - Duration::seconds(1)).timestamp_micros())
-        .bind((future_version - Duration::seconds(3)).timestamp_micros())
-        .bind((future_version - Duration::seconds(1)).timestamp_micros())
-        .bind(future_version.timestamp_micros())
-        .execute()
-        .await?;
-    client
-        .query(
-            "INSERT INTO ?.dim_execution_tasks ( \
-                 task_uid, run_uid, tenant_id, node_id, item_key, capability_ref, plan_revision, \
-                 status, error, attempt, generation, reserved_cost_microusd, \
-                 actual_cost_microusd, reserved_tokens, actual_tokens, citation_count, \
-                 started_at, completed_at, created_at, updated_at, duration_ms, export_version \
-             ) VALUES ( \
-                 ?, ?, ?, 'old-node', NULL, 'docs.search:v1', 1, 'completed', 'old task prose', \
-                 1, 1, 0, 1, 0, 1, 0, \
-                 fromUnixTimestamp64Micro(?), fromUnixTimestamp64Micro(?), \
-                 fromUnixTimestamp64Micro(?), fromUnixTimestamp64Micro(?), \
-                 500.0, fromUnixTimestamp64Micro(?) \
-             )",
-        )
-        .bind(Identifier(database))
-        .bind(task_id)
-        .bind(run_uid)
-        .bind(tenant)
-        .bind((future_version - Duration::milliseconds(750)).timestamp_micros())
-        .bind((future_version - Duration::milliseconds(250)).timestamp_micros())
-        .bind((future_version - Duration::seconds(1)).timestamp_micros())
-        .bind((future_version - Duration::milliseconds(250)).timestamp_micros())
-        .bind(future_version.timestamp_micros())
-        .execute()
-        .await?;
-    Ok(())
+    Ok(row.database_uuid)
+}
+
+async fn execution_bootstrap_generations(
+    pool: &PgPool,
+) -> TestResult<Vec<ExecutionBootstrapGeneration>> {
+    Ok(sqlx::query_as(
+        "SELECT generation, database_uuid, run_table_uuid, task_table_uuid, stage, \
+                upgrade_version, \
+                export_version_floor, run_high_water_seq, run_high_water_id, \
+                task_high_water_seq, task_high_water_id, run_page_seq, run_page_id, \
+                task_page_seq, task_page_id, completed_at \
+         FROM analytics.clickhouse_schema_upgrade_state \
+         WHERE upgrade_key = 'execution_dimensions' ORDER BY generation",
+    )
+    .fetch_all(pool)
+    .await?)
 }
 
 #[tokio::test]
@@ -365,40 +324,17 @@ async fn analytics_parity_all_datasets_docker() -> TestResult<()> {
 
 #[tokio::test]
 #[ignore = "requires local ClickHouse (docker compose --profile clickhouse) and MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1"]
-async fn execution_schema_upgrade_recovery_docker() -> TestResult<()> {
-    // Pins: a future-skewed Task 9 schema upgrades field-for-field, backfills
-    // through durable high waters, and a restarted completed upgrader is a no-op.
+async fn execution_schema_hard_cutover_requires_reset_on_drift_docker() -> TestResult<()> {
+    // Pins: fresh execution dimensions have the exact current schema and keys;
+    // an existing incompatible table is rejected without parsing or rewriting rows.
     if std::env::var("MOA_RUN_CLICKHOUSE_DOCKER_TESTS").as_deref() != Ok("1") {
         return Err("MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1 is required for this test".into());
     }
 
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
-    let tenant = Uuid::now_v7();
-    seed_corpus(&pool, tenant).await?;
-    let (run_uid, session): (Uuid, Uuid) =
-        sqlx::query_as("SELECT run_uid, session_id FROM moa.execution_run LIMIT 1")
-            .fetch_one(&pool)
-            .await?;
-    let task_id: Uuid =
-        sqlx::query_scalar("SELECT task_id FROM moa.execution_task ORDER BY task_id LIMIT 1")
-            .fetch_one(&pool)
-            .await?;
-
-    let config = clickhouse_config("moa_execution_schema_upgrade");
+    let config = clickhouse_config("moa_execution_schema_hard_cutover");
     let client = clickhouse_client(&config);
-    let future_version = Utc::now() + Duration::days(7);
-    seed_task9_clickhouse_execution_schema(
-        &client,
-        &config.database,
-        tenant,
-        session,
-        run_uid,
-        task_id,
-        future_version,
-    )
-    .await?;
-
     let exporter = AnalyticsExporter::from_config(pool.clone(), &config);
     exporter.ensure_clickhouse_schema().await?;
 
@@ -410,7 +346,6 @@ async fn execution_schema_upgrade_recovery_docker() -> TestResult<()> {
         ("initial_plan_hash", "String"),
         ("active_plan_hash", "String"),
         ("plan_revision", "UInt64"),
-        ("route_rationale", "String"),
         ("source_kind", "LowCardinality(String)"),
         ("skill_template_ref", "Nullable(String)"),
         ("skill_template_revision_uid", "Nullable(UUID)"),
@@ -481,79 +416,308 @@ async fn execution_schema_upgrade_recovery_docker() -> TestResult<()> {
             .iter()
             .map(|column| (column.name.as_str(), column.column_type.as_str()))
             .collect();
-        assert_eq!(actual, expected, "{table} final schema differs");
+        assert_eq!(actual, expected, "{table} fresh schema differs");
     }
 
-    let task_keys: ClickHouseTableKeys = client
-        .query(
-            "SELECT sorting_key, primary_key FROM system.tables \
-             WHERE database = ? AND name = 'dim_execution_tasks'",
-        )
-        .bind(&config.database)
-        .fetch_one()
-        .await?;
-    assert_eq!(task_keys.sorting_key, "tenant_id, run_uid, task_id");
-    assert_eq!(task_keys.primary_key, "tenant_id, run_uid, task_id");
-    let swap_artifacts: ClickHouseCount = client
-        .query(
-            "SELECT count() AS row_count FROM system.tables \
-             WHERE database = ? AND name IN (\
-                 'dim_execution_tasks_rebuild', \
-                 'dim_execution_tasks_task9_backup'\
-             )",
-        )
-        .bind(&config.database)
-        .fetch_one()
-        .await?;
-    assert_eq!(
-        swap_artifacts.row_count, 0,
-        "task schema swap leaked tables"
-    );
-
-    let pg_run_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM moa.execution_run")
-        .fetch_one(&pool)
-        .await?;
-    let pg_task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM moa.execution_task")
-        .fetch_one(&pool)
-        .await?;
-    assert_eq!(
-        clickhouse_count(&client, &config.database, "dim_execution_runs").await?,
-        u64::try_from(pg_run_count)?
-    );
-    assert_eq!(
-        clickhouse_count(&client, &config.database, "dim_execution_tasks").await?,
-        u64::try_from(pg_task_count)?
-    );
-    for table in ["dim_execution_runs", "dim_execution_tasks"] {
-        let version: ClickHouseMicros = client
-            .query("SELECT toUnixTimestamp64Micro(min(export_version)) AS micros FROM ?.? FINAL")
-            .bind(Identifier(&config.database))
-            .bind(Identifier(table))
+    for (table, expected_key) in [
+        ("dim_execution_runs", "tenant_id, run_uid"),
+        ("dim_execution_tasks", "tenant_id, run_uid, task_id"),
+    ] {
+        let table_contract: ClickHouseTableContract = client
+            .query(
+                "SELECT uuid AS table_uuid, engine, engine_full, partition_key, \
+                        sorting_key, primary_key FROM system.tables \
+                 WHERE database = ? AND name = ?",
+            )
+            .bind(&config.database)
+            .bind(table)
             .fetch_one()
             .await?;
+        assert!(!table_contract.table_uuid.is_nil(), "{table} table UUID");
+        assert_eq!(
+            table_contract.engine, "ReplacingMergeTree",
+            "{table} engine"
+        );
         assert!(
-            version.micros > future_version.timestamp_micros(),
-            "{table} backfill must supersede the future-skewed Task 9 row"
+            table_contract
+                .engine_full
+                .starts_with("ReplacingMergeTree(export_version) ORDER BY "),
+            "{table} version expression: {}",
+            table_contract.engine_full
+        );
+        assert_eq!(table_contract.partition_key, "", "{table} partition key");
+        assert_eq!(
+            table_contract.sorting_key, expected_key,
+            "{table} sorting key"
+        );
+        assert_eq!(
+            table_contract.primary_key, expected_key,
+            "{table} primary key"
         );
     }
 
-    let before_restart: (String, DateTime<Utc>) = sqlx::query_as(
-        "SELECT stage, export_version_floor \
-         FROM analytics.clickhouse_schema_upgrade_state \
-         WHERE upgrade_key = 'execution_dimensions'",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(before_restart.0, "complete");
+    client
+        .query("DROP TABLE ?.dim_execution_tasks")
+        .bind(Identifier(&config.database))
+        .execute()
+        .await?;
+    client
+        .query(
+            "CREATE TABLE ?.dim_execution_tasks ( \
+                 task_id UUID, run_uid UUID, tenant_id UUID, node_id String, item_key String, \
+                 capability_ref Nullable(String), export_version DateTime64(6, 'UTC') \
+             ) ENGINE = ReplacingMergeTree(export_version) \
+             ORDER BY (tenant_id, run_uid, task_id)",
+        )
+        .bind(Identifier(&config.database))
+        .execute()
+        .await?;
+    client
+        .query(
+            "INSERT INTO ?.dim_execution_tasks VALUES \
+             (?, ?, ?, 'legacy-node', '', 'docs.search:region:version', now64(6))",
+        )
+        .bind(Identifier(&config.database))
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .execute()
+        .await?;
+
+    let error = exporter
+        .ensure_clickhouse_schema()
+        .await
+        .expect_err("an incompatible execution table must require a ClickHouse reset");
+    assert_eq!(
+        error.to_string(),
+        "analytics export contract error: ClickHouse analytics reset required for \
+         dim_execution_tasks: ordered column/type mismatch at position 6: expected task_kind \
+         LowCardinality(String), found capability_ref Nullable(String); in-place execution schema \
+         changes are unsupported"
+    );
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_tasks").await?,
+        1,
+        "hard cutover validation must not copy or rewrite incompatible rows"
+    );
+    let incompatible_columns =
+        clickhouse_columns(&client, &config.database, "dim_execution_tasks").await?;
+    assert_eq!(
+        incompatible_columns
+            .iter()
+            .map(|column| (column.name.as_str(), column.column_type.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("task_id", "UUID"),
+            ("run_uid", "UUID"),
+            ("tenant_id", "UUID"),
+            ("node_id", "String"),
+            ("item_key", "String"),
+            ("capability_ref", "Nullable(String)"),
+            ("export_version", "DateTime64(6, 'UTC')"),
+        ],
+        "hard cutover validation must leave incompatible schema untouched"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local ClickHouse (docker compose --profile clickhouse) and MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1"]
+async fn execution_schema_reset_starts_new_generation_and_restores_history_docker() -> TestResult<()>
+{
+    // Pins: recreating disposable execution tables starts one table-identity-
+    // bound bootstrap generation, restores every historical source row, and a
+    // replayed startup resumes the completed generation instead of adding one.
+    // A partial table reset or whole-database recreation is rejected without a
+    // new generation because only the paired execution-table reset is safe.
+    if std::env::var("MOA_RUN_CLICKHOUSE_DOCKER_TESTS").as_deref() != Ok("1") {
+        return Err("MOA_RUN_CLICKHOUSE_DOCKER_TESTS=1 is required for this test".into());
+    }
+
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let tenant = Uuid::now_v7();
+    seed_corpus(&pool, tenant).await?;
+    let expected_runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM moa.execution_run")
+        .fetch_one(&pool)
+        .await?;
+    let expected_tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM moa.execution_task")
+        .fetch_one(&pool)
+        .await?;
+
+    let config = clickhouse_config("moa_execution_schema_reset_generation");
+    let client = clickhouse_client(&config);
+    let exporter = AnalyticsExporter::from_config(pool.clone(), &config);
     exporter.ensure_clickhouse_schema().await?;
-    let after_restart: (String, DateTime<Utc>) = sqlx::query_as(
-        "SELECT stage, export_version_floor \
-         FROM analytics.clickhouse_schema_upgrade_state \
-         WHERE upgrade_key = 'execution_dimensions'",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(after_restart, before_restart);
+
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_runs").await?,
+        u64::try_from(expected_runs)?
+    );
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_tasks").await?,
+        u64::try_from(expected_tasks)?
+    );
+    let first_generations = execution_bootstrap_generations(&pool).await?;
+    assert_eq!(first_generations.len(), 1);
+    let first = &first_generations[0];
+    let first_database_uuid = clickhouse_database_uuid(&client, &config.database).await?;
+    assert_eq!(first.generation, 1);
+    assert_eq!(first.database_uuid, first_database_uuid);
+    assert_eq!(first.stage, "complete");
+    assert!(first.completed_at.is_some());
+    assert_eq!(first.run_page_seq, first.run_high_water_seq);
+    assert_eq!(first.run_page_id, first.run_high_water_id);
+    assert_eq!(first.task_page_seq, first.task_high_water_seq);
+    assert_eq!(first.task_page_id, first.task_high_water_id);
+    assert_eq!(
+        first.run_table_uuid,
+        clickhouse_table_uuid(&client, &config.database, "dim_execution_runs").await?
+    );
+    assert_eq!(
+        first.task_table_uuid,
+        clickhouse_table_uuid(&client, &config.database, "dim_execution_tasks").await?
+    );
+
+    client
+        .query("DROP TABLE ?.dim_execution_runs")
+        .bind(Identifier(&config.database))
+        .execute()
+        .await?;
+    let partial_reset = AnalyticsExporter::from_config(pool.clone(), &config);
+    let partial_error = partial_reset
+        .ensure_clickhouse_schema()
+        .await
+        .expect_err("a one-table reset must be rejected");
+    let partial_run_uuid =
+        clickhouse_table_uuid(&client, &config.database, "dim_execution_runs").await?;
+    assert_eq!(
+        partial_error.to_string(),
+        format!(
+            "analytics export contract error: unsafe partial execution analytics reset detected \
+             in {}: execution table UUIDs must change together (dim_execution_runs {} -> {}, \
+             dim_execution_tasks {} -> {}). Drop exactly both execution tables inside the \
+             existing ClickHouse database and restart",
+            config.database,
+            first.run_table_uuid,
+            partial_run_uuid,
+            first.task_table_uuid,
+            first.task_table_uuid
+        )
+    );
+    assert_eq!(
+        execution_bootstrap_generations(&pool).await?,
+        first_generations,
+        "a partial reset must not append a bootstrap generation"
+    );
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_tasks").await?,
+        u64::try_from(expected_tasks)?,
+        "partial reset detection must leave the surviving table untouched"
+    );
+
+    for table in ["dim_execution_runs", "dim_execution_tasks"] {
+        client
+            .query("DROP TABLE ?.?")
+            .bind(Identifier(&config.database))
+            .bind(Identifier(table))
+            .execute()
+            .await?;
+    }
+
+    let restarted = AnalyticsExporter::from_config(pool.clone(), &config);
+    restarted.ensure_clickhouse_schema().await?;
+
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_runs").await?,
+        u64::try_from(expected_runs)?,
+        "new run table must be repopulated from the zero cursor"
+    );
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_tasks").await?,
+        u64::try_from(expected_tasks)?,
+        "new task table must be repopulated from the zero cursor"
+    );
+    let second_generations = execution_bootstrap_generations(&pool).await?;
+    assert_eq!(second_generations.len(), 2);
+    assert_eq!(second_generations[0], *first);
+    let second = &second_generations[1];
+    assert_eq!(second.generation, 2);
+    assert_eq!(second.database_uuid, first.database_uuid);
+    assert_eq!(second.stage, "complete");
+    assert!(second.completed_at.is_some());
+    assert_ne!(second.run_table_uuid, first.run_table_uuid);
+    assert_ne!(second.task_table_uuid, first.task_table_uuid);
+    assert_eq!(second.run_page_seq, second.run_high_water_seq);
+    assert_eq!(second.run_page_id, second.run_high_water_id);
+    assert_eq!(second.task_page_seq, second.task_high_water_seq);
+    assert_eq!(second.task_page_id, second.task_high_water_id);
+    assert!(second.upgrade_version > first.export_version_floor);
+    assert!(second.export_version_floor >= second.upgrade_version);
+    assert_eq!(
+        second.run_table_uuid,
+        clickhouse_table_uuid(&client, &config.database, "dim_execution_runs").await?
+    );
+    assert_eq!(
+        second.task_table_uuid,
+        clickhouse_table_uuid(&client, &config.database, "dim_execution_tasks").await?
+    );
+
+    let replayed = AnalyticsExporter::from_config(pool.clone(), &config);
+    replayed.ensure_clickhouse_schema().await?;
+    assert_eq!(
+        execution_bootstrap_generations(&pool).await?,
+        second_generations,
+        "replayed startup must reuse the completed table generation"
+    );
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_runs").await?,
+        u64::try_from(expected_runs)?
+    );
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_tasks").await?,
+        u64::try_from(expected_tasks)?
+    );
+
+    client
+        .query("DROP DATABASE ?")
+        .bind(Identifier(&config.database))
+        .execute()
+        .await?;
+    let recreated = AnalyticsExporter::from_config(pool.clone(), &config);
+    let database_reset_error = recreated
+        .ensure_clickhouse_schema()
+        .await
+        .expect_err("a whole ClickHouse database recreation must be rejected");
+    let recreated_database_uuid = clickhouse_database_uuid(&client, &config.database).await?;
+    assert_ne!(recreated_database_uuid, second.database_uuid);
+    assert_eq!(
+        database_reset_error.to_string(),
+        format!(
+            "analytics export contract error: unsafe ClickHouse analytics database reset detected \
+             for {}: database UUID changed from {} to {}; persisted cursors for non-execution \
+             tables cannot be replayed safely. Do not drop the database; reset execution \
+             analytics by dropping exactly dim_execution_runs and dim_execution_tasks together \
+             inside the existing database",
+            config.database, second.database_uuid, recreated_database_uuid
+        )
+    );
+    assert_eq!(
+        execution_bootstrap_generations(&pool).await?,
+        second_generations,
+        "a whole-database recreation must not append a bootstrap generation"
+    );
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_runs").await?,
+        0,
+        "database reset detection must run before execution history is re-exported"
+    );
+    assert_eq!(
+        clickhouse_count(&client, &config.database, "dim_execution_tasks").await?,
+        0,
+        "database reset detection must run before execution history is re-exported"
+    );
 
     Ok(())
 }
@@ -1393,17 +1557,15 @@ async fn seed_execution_run_and_tasks(
              (run_uid, tenant_id, session_id, originating_user_sequence_num, planning_context_uid, \
               planning_context_hash, owner_user_id, goal_contract, initial_plan, active_plan, \
               initial_plan_hash, active_plan_hash, capability_catalog, authorization_envelope, \
-              source_provenance, source_kind, route_rationale, skill_template_ref, \
+              source_provenance, source_kind, skill_template_ref, \
               skill_template_revision_uid, input, status, progress_total_tasks, started_at) \
          VALUES ($1, $2, $3, 1, $4, $5, 'user-1', \
                  '{\"requirements\":[{\"id\":\"r1\"}]}'::JSONB, '{}'::JSONB, '{}'::JSONB, \
                  $6, $6, '{}'::JSONB, '{}'::JSONB, \
                  jsonb_build_object('kind', 'skill_template', \
-                    'route_rationale', 'The caller selected a pinned execution template.', \
                     'skill_template_ref', 'skill://billing-flow', \
                     'skill_template_revision_uid', lower($7::TEXT)), \
-                 'skill_template', 'The caller selected a pinned execution template.', \
-                 'skill://billing-flow', $7, '{}'::JSONB, 'queued', 2, $8)",
+                 'skill_template', 'skill://billing-flow', $7, '{}'::JSONB, 'queued', 2, $8)",
     )
     .bind(run_uid)
     .bind(tenant)

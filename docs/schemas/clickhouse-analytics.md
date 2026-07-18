@@ -14,7 +14,7 @@ Version columns: every `ReplacingMergeTree` table carries
 `export_version DateTime64(6, 'UTC')`. Timestamp-backed dimensions use the
 exporter's observed `updated_at`; facts use export batch time. Sequence-backed
 execution dimensions use a monotonic exporter version above the durable
-`export_version_floor`, while the schema-upgrade backfill uses one fixed
+`export_version_floor`, while the initial bounded export uses one fixed
 `upgrade_version`. Readers must collapse duplicates with `FINAL` (dims and
 facts only, never `events_raw`).
 
@@ -79,22 +79,21 @@ updated_at DateTime64(6,'UTC'), export_version DateTime64(6,'UTC')`
 
 `dim_execution_runs` — `ORDER BY (tenant_id, run_uid)`:
 `run_uid UUID, tenant_id UUID, contact_id Nullable(UUID), session_id UUID,
-source_kind LowCardinality(String), route_rationale String,
-skill_template_ref Nullable(String),
-skill_template_revision_uid Nullable(UUID), initial_plan_hash String,
-active_plan_hash String, plan_revision UInt64,
+initial_plan_hash String, active_plan_hash String, plan_revision UInt64,
+source_kind LowCardinality(String), skill_template_ref Nullable(String),
+skill_template_revision_uid Nullable(UUID),
 status LowCardinality(String), terminal_reason Nullable(String),
 requirement_count UInt64, satisfied_requirement_count UInt64,
 completion_check_count UInt64, logical_task_count UInt64,
+queued_at Nullable(DateTime64(6,'UTC')),
+started_at Nullable(DateTime64(6,'UTC')),
+queue_to_start_ms Nullable(Float64),
+completed_at Nullable(DateTime64(6,'UTC')), duration_ms Nullable(Float64),
 reserved_cost_microusd UInt64, actual_cost_microusd UInt64,
 reserved_tokens UInt64, actual_tokens UInt64,
 reserved_tasks UInt64, actual_tasks UInt64,
 reserved_tool_calls UInt64, actual_tool_calls UInt64,
 reserved_retrieved_bytes UInt64, actual_retrieved_bytes UInt64,
-queued_at Nullable(DateTime64(6,'UTC')),
-started_at Nullable(DateTime64(6,'UTC')),
-queue_to_start_ms Nullable(Float64),
-completed_at Nullable(DateTime64(6,'UTC')), duration_ms Nullable(Float64),
 created_at DateTime64(6,'UTC'), updated_at DateTime64(6,'UTC'),
 export_version DateTime64(6,'UTC')`
 
@@ -104,12 +103,12 @@ task_kind LowCardinality(String), capability_name Nullable(String),
 capability_version Nullable(String), plan_revision UInt64,
 status LowCardinality(String), failure_class Nullable(String),
 attempt UInt32, generation UInt64, citation_count UInt64,
+queue_latency_ms Nullable(Float64), duration_ms Nullable(Float64),
 reserved_cost_microusd UInt64, actual_cost_microusd UInt64,
 reserved_tokens UInt64, actual_tokens UInt64,
 reserved_tasks UInt64, actual_tasks UInt64,
 reserved_tool_calls UInt64, actual_tool_calls UInt64,
 reserved_retrieved_bytes UInt64, actual_retrieved_bytes UInt64,
-queue_latency_ms Nullable(Float64), duration_ms Nullable(Float64),
 started_at Nullable(DateTime64(6,'UTC')),
 completed_at Nullable(DateTime64(6,'UTC')),
 created_at DateTime64(6,'UTC'), updated_at DateTime64(6,'UTC'),
@@ -118,10 +117,10 @@ export_version DateTime64(6,'UTC')`
 These tables match `analytics.execution_run_fact` and
 `analytics.execution_task_fact` value-for-value. `session_id` and `item_key`
 are non-null, and nullable skill/capability provenance remains nullable.
-`source_ref`, `capability_ref`, `task_uid`, and raw `error` columns do not exist.
-Raw input, output, gaps, cancellation reason, and error prose are never
-exported. Execution-run analytics retain bounded route rationale/source; a constant
-run-mode dimension is deliberately absent.
+Compatibility identity/reference columns and raw `error` do not exist. Raw
+input, output, route rationale, gaps, cancellation reason, and error prose are
+never exported. Execution-run analytics retain typed source provenance; route
+prose and a constant run-mode dimension are deliberately absent.
 
 Run `queue_to_start_ms` is exactly `started_at - queued_at`; it is null when
 either timestamp is null. Run `duration_ms` is `completed_at - started_at`.
@@ -197,8 +196,8 @@ the exporter stamps each tool call with its enclosing turn
 | learning_candidate_fact | `dim_learning_candidates FINAL` |
 | experiment_run_fact | `dim_experiment_run FINAL` |
 
-No ClickHouse materialized views in v1 — session rollups are cheap at query
-time in CH; MVs come later only if profiling demands (and any MV over
+There are no ClickHouse materialized views currently — session rollups are
+cheap at query time in CH; MVs come later only if profiling demands (and any MV over
 `events_raw` must use duplicate-tolerant states, see below).
 
 ## Performance and correctness rules (binding)
@@ -296,11 +295,13 @@ MIN(CASE WHEN cursor_seq IS NULL THEN cursor_ts ELSE exported_at END)
 
 as `read_model_updated_at` across export-state rows.
 
-## Execution Dimension Upgrade
+## Execution Dimension Bootstrap And Hard Cutover
 
-`analytics.clickhouse_schema_upgrade_state`, keyed by
-`execution_dimensions`, is the durable upgrade state. Its checked stages
-are:
+`analytics.clickhouse_schema_upgrade_state` stores durable bootstrap
+generations keyed by `(execution_dimensions, generation)`. Every generation
+records the immutable `system.databases.uuid` and the actual
+`system.tables.uuid` values for `dim_execution_runs` and
+`dim_execution_tasks`. Its checked stages are:
 
 ```text
 pending
@@ -311,36 +312,57 @@ pending
   -> complete
 ```
 
-The row persists non-null `upgrade_version` and `export_version_floor`, complete
-run/task high-water sequence/UUID tuples, paired per-dataset page
-sequence/UUID cursors, and stage timestamps. Stages move only forward.
+Each row persists non-nil ClickHouse database/table UUIDs, `upgrade_version`
+and `export_version_floor`, complete run/task high-water sequence/UUID tuples,
+paired per-dataset page sequence/UUID cursors, and stage timestamps. The
+database UUID cannot change across generations. Stages and page cursors move
+only forward within that generation.
 
 Initialization captures both source high waters under the exclusive advisory
 lock. Empty tables use the zero sentinel. `upgrade_version` is greater than
 every existing execution-dimension version and becomes the initial
 `export_version_floor`.
 
-The upgrader then idempotently:
+Before this state machine initializes, `CREATE TABLE IF NOT EXISTS` creates any
+missing current tables and startup validates both execution tables against the
+exact ordered column/type list, a non-nil Atomic table UUID,
+`ReplacingMergeTree(export_version)`, an empty partition key, and the exact
+sorting and primary keys documented above. An existing mismatch returns a
+precise reset-required error. There is no in-place rename, nullability repair,
+column reorder, table rebuild, row copy, or compatibility parser; operators
+drop exactly both execution tables inside the existing database and restart the
+exporter.
 
-1. renames `task_uid` to `task_id`;
-2. widens `plan_revision` from `UInt32` to `UInt64`;
-3. repairs nullable/non-nullable columns;
-4. adds every normalized execution fact field;
-5. drops `source_ref`, `capability_ref`, and raw `error`;
-6. validates the complete final column contract before recording
-   `schema_upgraded`;
-7. resets regular and upgrade page cursors to the zero sentinel;
-8. exports runs and tasks through their fixed high-water tuples with the fixed
-   `upgrade_version`;
-9. marks `complete` only after both regular cursors equal their stored high
+After a paired reset, newly created tables have new ClickHouse UUIDs. Only when
+both UUIDs differ from the latest durable generation under the same database
+UUID does startup append exactly the next generation, capture new fixed source
+high waters, reset the execution export cursors, and repopulate both tables. A
+one-table reset is rejected. The prior generation remains immutable for
+audit/replay. `upgrade_version` for the new generation is strictly above the
+prior generation's `export_version_floor`, so clock skew cannot let surviving
+older table rows win.
+
+Never drop or recreate the whole ClickHouse analytics database as an execution
+reset. Postgres export cursors for non-execution analytics tables survive that
+operation, so a database UUID change is rejected without appending a generation
+or exporting execution history. Restore the original database using the
+deployment recovery path instead of deleting Postgres cursor state ad hoc.
+
+After validation, the state machine idempotently:
+
+1. records `schema_upgraded` to mean that the current schema was validated;
+2. resets regular and bootstrap page cursors to the zero sentinel;
+3. exports current Postgres runs and tasks through their fixed high-water tuples
+   with the fixed `upgrade_version` and the canonical exporter row types;
+4. marks `complete` only after both regular cursors equal their stored high
    waters and both caught-up timestamps are updated.
 
-ClickHouse mutations run synchronously or the upgrader waits for
-`system.mutations`. A restart resumes the durable stage and page cursor; it
-does not repeat completed logical work. Normal incremental export remains
-paused until the upgrade reaches `complete`. Each later page claims
+A restart with the same table UUIDs resumes that generation's durable stage and
+page cursor; it neither adds a generation nor repeats completed logical work.
+Normal incremental export remains paused until the latest generation reaches
+`complete`. Each later page claims
 `max(database_now, export_version_floor + 1 microsecond)` and persists the new
-floor, so clock skew cannot resurrect upgrade or older rows.
+floor, so clock skew cannot resurrect bootstrap or older rows.
 
 Leader election remains the Postgres advisory lock
 `pg_try_advisory_lock(hashtext('clickhouse-analytics-export'))` held for the

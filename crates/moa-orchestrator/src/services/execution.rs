@@ -2546,7 +2546,6 @@ fn run_summary(run: &ExecutionRunRecord) -> ExecutionRunSummary {
         originating_user_sequence_num: run.originating_user_sequence_num,
         status: run.status,
         source_kind: run.source_kind,
-        route_rationale: run.route.rationale.clone(),
         skill_template_ref: run.skill_template_ref.clone(),
         skill_template_revision_uid: run.skill_template_revision_uid,
         plan_revision: run.plan_revision,
@@ -3713,7 +3712,6 @@ mod tests {
         }];
         let committed_plan_hash = "a".repeat(64);
         let exact = ExecutionSourceProvenance::SkillTemplate {
-            route_rationale: "The caller selected a pinned execution template.".to_string(),
             skill_template_ref: skill_ref.to_string(),
             skill_template_revision_uid: pinned_revision_uid,
         };
@@ -3723,7 +3721,6 @@ mod tests {
         );
 
         let wrong_revision = ExecutionSourceProvenance::SkillTemplate {
-            route_rationale: "The caller selected a pinned execution template.".to_string(),
             skill_template_ref: skill_ref.to_string(),
             skill_template_revision_uid: Uuid::from_u128(8),
         };
@@ -3737,7 +3734,6 @@ mod tests {
         );
 
         let noncanonical = ExecutionSourceProvenance::SkillTemplate {
-            route_rationale: "The caller selected a pinned execution template.".to_string(),
             skill_template_ref: "skill://Durable-Report".to_string(),
             skill_template_revision_uid: pinned_revision_uid,
         };
@@ -3757,7 +3753,6 @@ mod tests {
         skill_template_revision_uid: Uuid,
     ) -> ExecutionSourceProvenance {
         ExecutionSourceProvenance::ExperimentTemplate {
-            route_rationale: "An experiment template requires durable execution.".to_string(),
             skill_template_ref,
             skill_template_revision_uid,
             experiment_run_uid: Uuid::from_u128(21),

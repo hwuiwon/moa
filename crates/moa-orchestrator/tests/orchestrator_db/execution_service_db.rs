@@ -137,7 +137,6 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
                 authorization,
                 pinned_instruction_skills: Vec::new(),
                 source_provenance: ExecutionSourceProvenance::SkillTemplate {
-                    route_rationale: "The caller selected a pinned execution template.".to_string(),
                     skill_template_ref: "skill://execution-lineage".to_string(),
                     skill_template_revision_uid: Uuid::now_v7(),
                 },
@@ -369,11 +368,11 @@ async fn execution_service_rows_require_parent_session_and_keep_authorization_im
             planning_context_uid, planning_context_hash, owner_user_id, goal_contract,
             initial_plan, active_plan, initial_plan_hash, active_plan_hash,
             capability_catalog, authorization_envelope, pinned_instruction_skills,
-            source_provenance, source_kind, route_rationale, input, status
+            source_provenance, source_kind, input, status
         ) VALUES ($1, $2, NULL, 0, $3, $4, 'owner', '{}'::JSONB, '{}'::JSONB, '{}'::JSONB,
                   $4, $4, '{}'::JSONB, '{}'::JSONB, '[]'::JSONB,
-                  '{"kind":"generated_plan","route_rationale":"The workflow requires durable execution."}'::JSONB,
-                  'generated_plan', 'The workflow requires durable execution.', '{}'::JSONB, 'queued')
+                  '{"kind":"generated_plan"}'::JSONB,
+                  'generated_plan', '{}'::JSONB, 'queued')
         "#,
     )
     .bind(run_uid)
@@ -397,13 +396,13 @@ async fn execution_service_rows_require_parent_session_and_keep_authorization_im
             planning_context_uid, planning_context_hash, owner_user_id, goal_contract,
             initial_plan, active_plan, initial_plan_hash, active_plan_hash,
             capability_catalog, authorization_envelope, pinned_instruction_skills,
-            source_provenance, source_kind, route_rationale,
+            source_provenance, source_kind,
             input, status, queued_at
         ) VALUES ($1, $2, $3, 0, $4, $5, 'owner', '{}'::JSONB, '{}'::JSONB, '{}'::JSONB,
                   $5, $5, '{"schema_version":1}'::JSONB,
                   '{"capability_refs":[],"skill_refs":[]}'::JSONB, '[]'::JSONB,
-                  '{"kind":"generated_plan","route_rationale":"The workflow requires durable execution."}'::JSONB,
-                  'generated_plan', 'The workflow requires durable execution.', '{}'::JSONB, 'queued', NOW())
+                  '{"kind":"generated_plan"}'::JSONB,
+                  'generated_plan', '{}'::JSONB, 'queued', NOW())
         "#,
     )
     .bind(run_uid)

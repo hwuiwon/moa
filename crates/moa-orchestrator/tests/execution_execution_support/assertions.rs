@@ -14,8 +14,6 @@ use moa_execution::wire::ExecutionStatusResponse;
 use moa_test_support::execution_audits::load_execution_planning_audits;
 use serde_json::Value;
 
-use super::fixtures::RouteFixture;
-
 const SYNTHESIS_INSTRUCTION: &str = "Synthesize the final user response for execution run";
 const AGENT_INSTRUCTION_SUFFIX: &str = "Pinned instruction skills:";
 
@@ -62,7 +60,6 @@ pub(crate) fn assert_initial_route(
     audits: &[ExecutionPlanningAuditEnvelope],
     decision: ExecutionRouteKind,
     strategy: Option<ExecutionStrategy>,
-    fixture: RouteFixture,
 ) {
     let routes = audits
         .iter()
@@ -71,20 +68,14 @@ pub(crate) fn assert_initial_route(
                 stage,
                 decision,
                 strategy,
-                rationale,
                 ..
-            } => Some((*stage, *decision, *strategy, rationale.as_str())),
+            } => Some((*stage, *decision, *strategy)),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
         routes,
-        vec![(
-            ExecutionRouteStage::Initial,
-            decision,
-            strategy,
-            fixture.rationale(),
-        )],
+        vec![(ExecutionRouteStage::Initial, decision, strategy)],
         "unexpected strict route audit history: {audits:#?}"
     );
 }

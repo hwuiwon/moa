@@ -1,7 +1,7 @@
 //! Progress and cancellation state helpers shared by turn workflows.
 
 use moa_core::{
-    types::execution_planning::ExecutionRouteDecision,
+    types::execution_planning::{ExecutionRouteDecision, ExecutionRouteSummary},
     wire::turn::{TurnPhase, TurnProgress},
 };
 use restate_sdk::prelude::*;
@@ -63,7 +63,7 @@ pub(crate) fn initialize_loop_progress(
     max_tool_calls: usize,
 ) {
     match execution_route {
-        Some(route) => ctx.set(TurnStateKey::EXECUTION_ROUTE, Json::from(route)),
+        Some(route) => set_execution_route(ctx, &route),
         None => ctx.clear(TurnStateKey::EXECUTION_ROUTE),
     }
     ctx.set(TurnStateKey::ITERATION, Json::from(0_u32));
@@ -75,16 +75,23 @@ pub(crate) fn initialize_loop_progress(
     );
 }
 
+/// Stores only the rationale-free route projection in durable workflow progress.
+pub(crate) fn set_execution_route(
+    ctx: &WorkflowContext<'_>,
+    execution_route: &ExecutionRouteDecision,
+) {
+    ctx.set(
+        TurnStateKey::EXECUTION_ROUTE,
+        Json::from(ExecutionRouteSummary::from(execution_route)),
+    );
+}
+
 /// Initializes progress for a route handled without constructing a model loop.
 pub(crate) fn initialize_non_loop_progress(
     ctx: &WorkflowContext<'_>,
     execution_route: ExecutionRouteDecision,
 ) {
-    ctx.set(TurnStateKey::EXECUTION_ROUTE, Json::from(execution_route));
-    ctx.set(TurnStateKey::ITERATION, Json::from(0_u32));
-    ctx.set(TurnStateKey::MAX_TURNS, Json::from(Some(0_u32)));
-    ctx.set(TurnStateKey::TOOL_CALLS, Json::from(0_u32));
-    ctx.set(TurnStateKey::MAX_TOOL_CALLS, Json::from(Some(0_u32)));
+    initialize_loop_progress(ctx, Some(execution_route), 0, 0);
 }
 
 /// Stores the current model-loop iteration using the progress DTO cap.
@@ -148,7 +155,7 @@ pub(crate) async fn snapshot(
             .await?,
     );
     let execution_route = ctx
-        .get::<Json<ExecutionRouteDecision>>(TurnStateKey::EXECUTION_ROUTE)
+        .get::<Json<ExecutionRouteSummary>>(TurnStateKey::EXECUTION_ROUTE)
         .await?
         .map(Json::into_inner);
     let iteration = ctx
