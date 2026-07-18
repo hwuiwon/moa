@@ -26,7 +26,7 @@ async fn execution_planning_metrics_inputs_and_generated_candidate_use_one_stric
     let result = moa_brain::execution_planning::plan_execution(
         &provider,
         execution_planning_request(objective),
-        moa_core::types::execution_planning::ExecutionRouteReason::ExplicitDurableExecution,
+        "The report requires durable execution.".to_string(),
     )
     .await
     .expect("valid strict candidate should plan");
@@ -45,7 +45,7 @@ async fn execution_planning_metrics_inputs_and_generated_candidate_use_one_stric
             .iter()
             .filter(|audit| matches!(
                 &audit.payload,
-                moa_core::types::execution_planning::ExecutionPlanningAuditPayloadV1::PlannerCall {
+                moa_core::types::execution_planning::ExecutionPlanningAuditPayload::PlannerCall {
                     ..
                 }
             ))
@@ -58,7 +58,7 @@ async fn execution_planning_metrics_inputs_and_generated_candidate_use_one_stric
             .iter()
             .filter(|audit| matches!(
                 &audit.payload,
-                moa_core::types::execution_planning::ExecutionPlanningAuditPayloadV1::Compile { .. }
+                moa_core::types::execution_planning::ExecutionPlanningAuditPayload::Compile { .. }
             ))
             .count(),
         1
@@ -67,7 +67,7 @@ async fn execution_planning_metrics_inputs_and_generated_candidate_use_one_stric
         .audits
         .iter()
         .find_map(|audit| match &audit.payload {
-            moa_core::types::execution_planning::ExecutionPlanningAuditPayloadV1::PlannerCall {
+            moa_core::types::execution_planning::ExecutionPlanningAuditPayload::PlannerCall {
                 outcome: moa_core::types::execution_planning::ExecutionPlannerOutcome::Accepted,
                 compiler_report,
                 ..
@@ -79,7 +79,7 @@ async fn execution_planning_metrics_inputs_and_generated_candidate_use_one_stric
         .audits
         .iter()
         .find_map(|audit| match &audit.payload {
-            moa_core::types::execution_planning::ExecutionPlanningAuditPayloadV1::Compile {
+            moa_core::types::execution_planning::ExecutionPlanningAuditPayload::Compile {
                 outcome: moa_core::types::execution_planning::ExecutionCompileOutcome::Accepted,
                 validation_report,
                 ..
@@ -123,7 +123,7 @@ async fn execution_planning_terminal_provider_outputs_never_repair() {
         let result = moa_brain::execution_planning::plan_execution(
             &provider,
             execution_planning_request(objective),
-            moa_core::types::execution_planning::ExecutionRouteReason::ExplicitDurableExecution,
+            "The report requires durable execution.".to_string(),
         )
         .await
         .expect("terminal planner failure should remain typed");
@@ -152,7 +152,7 @@ async fn execution_planning_compiler_rejection_allows_only_one_repair() {
     let repaired_result = moa_brain::execution_planning::plan_execution(
         &repaired,
         execution_planning_request(objective),
-        moa_core::types::execution_planning::ExecutionRouteReason::ExplicitDurableExecution,
+        "The report requires durable execution.".to_string(),
     )
     .await
     .expect("sole valid repair should be admitted");
@@ -172,7 +172,7 @@ async fn execution_planning_compiler_rejection_allows_only_one_repair() {
     let rejected_result = moa_brain::execution_planning::plan_execution(
         &rejected,
         execution_planning_request(objective),
-        moa_core::types::execution_planning::ExecutionRouteReason::ExplicitDurableExecution,
+        "The report requires durable execution.".to_string(),
     )
     .await
     .expect("second compiler rejection should remain typed");
@@ -245,25 +245,26 @@ async fn execution_planning_second_invalid_amendment_stops_without_third_call() 
 async fn execution_routing_respond_execute_use_classifier_while_pinned_template_skips_planner() {
     // Pins: ordinary routes use one strict classifier response while a pinned template remains a
     // zero-planner-call deterministic admission path.
-    for (objective, label, reason, expected_decision) in [
+    for (objective, label, strategy, expected_decision) in [
         (
             "What is a DAG?",
-            moa_brain::execution_planning::ExecutionRouteClassifierLabelV1::Respond,
-            moa_core::types::execution_planning::ExecutionRouteReason::SimpleResponse,
+            moa_brain::execution_planning::ExecutionRouteClassifierLabel::Respond,
+            None,
             moa_core::types::execution_planning::ExecutionRouteKind::Respond,
         ),
         (
             "Investigate the unusual failure and explain it",
-            moa_brain::execution_planning::ExecutionRouteClassifierLabelV1::Execute,
-            moa_core::types::execution_planning::ExecutionRouteReason::BoundedInteractiveWork,
+            moa_brain::execution_planning::ExecutionRouteClassifierLabel::Execute,
+            Some(moa_core::types::execution_planning::ExecutionStrategy::Inline),
             moa_core::types::execution_planning::ExecutionRouteKind::Execute,
         ),
     ] {
         let provider = ScriptedProvider::new(MockLlmProvider.capabilities()).push_text(
             serde_json::to_string(
-                &moa_brain::execution_planning::ExecutionRouteClassifierOutputV1 {
+                &moa_brain::execution_planning::ExecutionRouteClassifierOutput {
                     label,
-                    reason,
+                    strategy,
+                    rationale: "The request fits the selected route and strategy.".to_string(),
                     confidence_bps: 9_500,
                     missing_inputs: Vec::new(),
                 },
@@ -337,7 +338,7 @@ async fn execution_routing_respond_execute_use_classifier_while_pinned_template_
     let ready = moa_brain::execution_planning::plan_execution(
         &provider,
         request.clone(),
-        moa_core::types::execution_planning::ExecutionRouteReason::SelectedExecutionTemplate,
+        "The caller selected a pinned durable template.".to_string(),
     )
     .await
     .expect("valid pinned template should instantiate");
@@ -354,7 +355,7 @@ async fn execution_routing_respond_execute_use_classifier_while_pinned_template_
     let needs_input = moa_brain::execution_planning::plan_execution(
         &provider,
         request,
-        moa_core::types::execution_planning::ExecutionRouteReason::SelectedExecutionTemplate,
+        "The caller selected a pinned durable template.".to_string(),
     )
     .await
     .expect("invalid pinned input should remain typed");
@@ -370,7 +371,7 @@ fn execution_planning_request(
 ) -> moa_brain::execution_planning::ExecutionPlanningRequest {
     moa_brain::execution_planning::ExecutionPlanningRequest {
         objective: objective.to_string(),
-        context: moa_execution::wire::ExecutionPlanningContextSnapshotV1 {
+        context: moa_execution::wire::ExecutionPlanningContextSnapshot {
             schema_version: 1,
             tenant_id: test_tenant_id(),
             contact_id: Some(test_contact_id()),
@@ -615,12 +616,12 @@ fn execution_amendment_candidate(base_plan_revision: u64, valid: bool) -> String
 }
 
 fn execution_planner_outcomes(
-    audits: &[moa_core::types::execution_planning::ExecutionPlanningAuditEnvelopeV1],
+    audits: &[moa_core::types::execution_planning::ExecutionPlanningAuditEnvelope],
 ) -> Vec<moa_core::types::execution_planning::ExecutionPlannerOutcome> {
     audits
         .iter()
         .filter_map(|audit| match &audit.payload {
-            moa_core::types::execution_planning::ExecutionPlanningAuditPayloadV1::PlannerCall {
+            moa_core::types::execution_planning::ExecutionPlanningAuditPayload::PlannerCall {
                 outcome,
                 ..
             } => Some(*outcome),
@@ -630,12 +631,12 @@ fn execution_planner_outcomes(
 }
 
 fn assert_accepted_planner_report_matches_compile(
-    audits: &[moa_core::types::execution_planning::ExecutionPlanningAuditEnvelopeV1],
+    audits: &[moa_core::types::execution_planning::ExecutionPlanningAuditEnvelope],
 ) {
     let planner_report = audits
         .iter()
         .find_map(|audit| match &audit.payload {
-            moa_core::types::execution_planning::ExecutionPlanningAuditPayloadV1::PlannerCall {
+            moa_core::types::execution_planning::ExecutionPlanningAuditPayload::PlannerCall {
                 outcome: moa_core::types::execution_planning::ExecutionPlannerOutcome::Accepted,
                 compiler_report,
                 ..
@@ -646,7 +647,7 @@ fn assert_accepted_planner_report_matches_compile(
     let compile_report = audits
         .iter()
         .find_map(|audit| match &audit.payload {
-            moa_core::types::execution_planning::ExecutionPlanningAuditPayloadV1::Compile {
+            moa_core::types::execution_planning::ExecutionPlanningAuditPayload::Compile {
                 outcome: moa_core::types::execution_planning::ExecutionCompileOutcome::Accepted,
                 validation_report,
                 ..
@@ -658,7 +659,7 @@ fn assert_accepted_planner_report_matches_compile(
     audits.iter().for_each(|audit| {
         moa_core::types::execution_planning::validate_planning_audit_envelope(audit)
             .expect("amendment audits should satisfy the strict core envelope");
-        if let moa_core::types::execution_planning::ExecutionPlanningAuditPayloadV1::Compile {
+        if let moa_core::types::execution_planning::ExecutionPlanningAuditPayload::Compile {
             source: moa_core::types::execution_planning::ExecutionCompileSource::Amendment,
             operation_key,
             run_uid: Some(run_uid),
@@ -693,7 +694,7 @@ fn assert_initial_execution_planner_request(
         .as_ref()
         .expect("planner must request strict structured output");
     assert!(format.strict);
-    assert_eq!(format.name, "generated_execution_candidate_v1");
+    assert_eq!(format.name, "generated_execution_candidate");
     assert_eq!(
         format.schema,
         serde_json::to_value(schemars::schema_for!(

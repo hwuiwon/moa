@@ -387,8 +387,8 @@ mod tests {
             turn_id: "turn-123".to_string(),
             phase: TurnPhase::Tooling,
             execution_route: Some(ExecutionRouteDecision::Execute {
-                reason:
-                    crate::types::execution_planning::ExecutionRouteReason::BoundedInteractiveWork,
+                strategy: crate::types::execution_planning::ExecutionStrategy::Inline,
+                rationale: "The task fits a bounded interactive turn.".to_string(),
             }),
             iteration: 2,
             max_turns: Some(6),
@@ -407,7 +407,8 @@ mod tests {
             value.pointer("/execution_route"),
             Some(&serde_json::json!({
                 "decision": "execute",
-                "reason": "bounded_interactive_work"
+                "strategy": "inline",
+                "rationale": "The task fits a bounded interactive turn."
             }))
         );
         assert!(json.contains("\"iteration\":2"));

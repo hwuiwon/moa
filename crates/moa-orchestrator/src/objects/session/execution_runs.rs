@@ -11,8 +11,8 @@ use moa_brain::execution_planning::{
 use moa_core::traits::{LLMProvider, SessionStore};
 use moa_core::types::completion::{CompletionRequest, CompletionStream};
 use moa_core::types::execution_planning::{
-    ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1, ExecutionRouteDecision,
-    ExecutionRouteReason, ExecutionRouteStage, execution_planning_dedupe_key,
+    ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload, ExecutionRouteDecision,
+    ExecutionRouteSource, ExecutionRouteStage, ExecutionStrategy, execution_planning_dedupe_key,
     validate_planning_audit_envelope,
 };
 use moa_core::types::identifiers::ModelId;
@@ -33,7 +33,7 @@ use crate::workflows::execution_run::ExecutionRunClient;
 
 const EXECUTION_SYNTHESIS_TURN_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0xf61c_9bb0_e9a7_5793_80f5_6a38_5d6e_8eb2);
-const EXECUTION_SYNTHESIS_TURN_DOMAIN: &str = "moa.execution.synthesis-turn.v1";
+const EXECUTION_SYNTHESIS_TURN_DOMAIN: &str = "moa.execution.synthesis-turn";
 
 struct TemplateAdmissionPlanner;
 
@@ -308,9 +308,11 @@ async fn start_external_template_execution(
     if !matches!(
         &route.decision,
         ExecutionRouteDecision::Execute {
-            reason: ExecutionRouteReason::SelectedExecutionTemplate,
+            strategy: ExecutionStrategy::Durable,
+            ..
         }
-    ) {
+    ) || route.provenance.source != ExecutionRouteSource::SelectedExecutionTemplate
+    {
         return Err(TerminalError::new_with_code(
             422,
             "external execution-template admission did not select the trusted Durable template route",
@@ -321,7 +323,7 @@ async fn start_external_template_execution(
     persist_execution_planning_audit(
         ctx,
         session_store.clone(),
-        ExecutionPlanningAuditEnvelopeV1::route(
+        ExecutionPlanningAuditEnvelope::route(
             request.tenant_id,
             request.contact_id,
             session_id,
@@ -367,7 +369,7 @@ async fn start_external_template_execution(
             config: config.execution.clone(),
             now: planning_now,
         },
-        ExecutionRouteReason::SelectedExecutionTemplate,
+        route.decision.rationale().to_string(),
     )
     .await
     .map_err(crate::workflows::errors::moa_error_to_handler_error)?;
@@ -439,7 +441,7 @@ pub(super) fn dispatch_execution_run(
 pub(super) async fn persist_execution_planning_audit(
     ctx: &ObjectContext<'_>,
     session_store: Arc<PostgresSessionStore>,
-    envelope: ExecutionPlanningAuditEnvelopeV1,
+    envelope: ExecutionPlanningAuditEnvelope,
 ) -> Result<(), HandlerError> {
     validate_planning_audit_envelope(&envelope)
         .map_err(|error| TerminalError::new_with_code(422, error.to_string()))?;
@@ -465,7 +467,7 @@ pub(super) async fn persist_execution_planning_audit(
     let dedupe_key = execution_planning_dedupe_key(&envelope)
         .map_err(|error| TerminalError::new_with_code(422, error.to_string()))?;
     let durable_step_suffix = dedupe_key
-        .strip_prefix("execution-planning-v1:")
+        .strip_prefix("execution-planning:")
         .unwrap_or(&dedupe_key)
         .to_string();
     let store = session_store.clone();
@@ -513,7 +515,7 @@ pub(super) async fn persist_execution_planning_audit(
         },
     );
     match &envelope.payload {
-        ExecutionPlanningAuditPayloadV1::Route { .. } => {
+        ExecutionPlanningAuditPayload::Route { .. } => {
             let pool = session_store.pool().clone();
             let audit = envelope.clone();
             let result = ctx
@@ -532,7 +534,7 @@ pub(super) async fn persist_execution_planning_audit(
                 return Err(planning_audit_conflict());
             }
         }
-        ExecutionPlanningAuditPayloadV1::PlannerCall { .. } => {
+        ExecutionPlanningAuditPayload::PlannerCall { .. } => {
             let pool = session_store.pool().clone();
             let audit = envelope.clone();
             let result = ctx
@@ -551,7 +553,7 @@ pub(super) async fn persist_execution_planning_audit(
                 return Err(planning_audit_conflict());
             }
         }
-        ExecutionPlanningAuditPayloadV1::Compile { .. } => {
+        ExecutionPlanningAuditPayload::Compile { .. } => {
             let pool = session_store.pool().clone();
             let audit = envelope;
             let result = ctx

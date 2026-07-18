@@ -2547,7 +2547,7 @@ async fn postgres_analytics_query_read_models_refresh() {
     // failure metadata, without Task 9 aliases or raw error prose.
     let run_row = sqlx::query(
         "SELECT tenant_id, contact_id, session_id, initial_plan_hash, active_plan_hash, \
-                plan_revision, route_reason, source_kind, skill_template_ref, \
+                plan_revision, route_rationale, source_kind, skill_template_ref, \
                 skill_template_revision_uid, status, terminal_reason, requirement_count, \
                 satisfied_requirement_count, completion_check_count, logical_task_count, \
                 queue_to_start_ms, duration_ms, reserved_cost_microusd, actual_cost_microusd, \
@@ -2569,8 +2569,8 @@ async fn postgres_analytics_query_read_models_refresh() {
     assert_eq!(run_row.get::<String, _>("active_plan_hash"), "2".repeat(64));
     assert_eq!(run_row.get::<i64, _>("plan_revision"), 1);
     assert_eq!(
-        run_row.get::<String, _>("route_reason"),
-        "selected_execution_template"
+        run_row.get::<String, _>("route_rationale"),
+        "The caller selected a pinned execution template."
     );
     assert_eq!(run_row.get::<String, _>("source_kind"), "skill_template");
     assert_eq!(
@@ -2893,7 +2893,7 @@ async fn seed_execution_analytics_rows(
              (run_uid, tenant_id, contact_id, session_id, originating_user_sequence_num, \
               planning_context_uid, planning_context_hash, owner_user_id, goal_contract, \
               initial_plan, active_plan, initial_plan_hash, active_plan_hash, capability_catalog, \
-              authorization_envelope, source_provenance, source_kind, route_reason, \
+              authorization_envelope, source_provenance, source_kind, route_rationale, \
               skill_template_ref, skill_template_revision_uid, input, status, \
               progress_total_tasks) \
          VALUES ($1, $2, $3, $4, 1, $5, $6, 'analytics-user', \
@@ -2902,10 +2902,10 @@ async fn seed_execution_analytics_rows(
                  '{}'::JSONB, '{}'::JSONB, $7, $7, '{}'::JSONB, '{}'::JSONB, \
                  jsonb_build_object( \
                     'kind', 'skill_template', \
-                    'route_reason', 'selected_execution_template', \
+                    'route_rationale', 'The caller selected a pinned execution template.', \
                     'skill_template_ref', 'skill://billing-flow', \
                     'skill_template_revision_uid', lower($8::TEXT)), \
-                 'skill_template', 'selected_execution_template', \
+                 'skill_template', 'The caller selected a pinned execution template.', \
                  'skill://billing-flow', $8, '{}'::JSONB, 'queued', 1)",
     )
     .bind(run_uid)

@@ -410,7 +410,7 @@ async fn execution_schema_upgrade_recovery_docker() -> TestResult<()> {
         ("initial_plan_hash", "String"),
         ("active_plan_hash", "String"),
         ("plan_revision", "UInt64"),
-        ("route_reason", "LowCardinality(String)"),
+        ("route_rationale", "String"),
         ("source_kind", "LowCardinality(String)"),
         ("skill_template_ref", "Nullable(String)"),
         ("skill_template_revision_uid", "Nullable(UUID)"),
@@ -498,7 +498,7 @@ async fn execution_schema_upgrade_recovery_docker() -> TestResult<()> {
         .query(
             "SELECT count() AS row_count FROM system.tables \
              WHERE database = ? AND name IN (\
-                 'dim_execution_tasks_v2_rebuild', \
+                 'dim_execution_tasks_rebuild', \
                  'dim_execution_tasks_task9_backup'\
              )",
         )
@@ -540,7 +540,7 @@ async fn execution_schema_upgrade_recovery_docker() -> TestResult<()> {
     let before_restart: (String, DateTime<Utc>) = sqlx::query_as(
         "SELECT stage, export_version_floor \
          FROM analytics.clickhouse_schema_upgrade_state \
-         WHERE upgrade_key = 'execution_dimensions_v2'",
+         WHERE upgrade_key = 'execution_dimensions'",
     )
     .fetch_one(&pool)
     .await?;
@@ -549,7 +549,7 @@ async fn execution_schema_upgrade_recovery_docker() -> TestResult<()> {
     let after_restart: (String, DateTime<Utc>) = sqlx::query_as(
         "SELECT stage, export_version_floor \
          FROM analytics.clickhouse_schema_upgrade_state \
-         WHERE upgrade_key = 'execution_dimensions_v2'",
+         WHERE upgrade_key = 'execution_dimensions'",
     )
     .fetch_one(&pool)
     .await?;
@@ -1393,16 +1393,16 @@ async fn seed_execution_run_and_tasks(
              (run_uid, tenant_id, session_id, originating_user_sequence_num, planning_context_uid, \
               planning_context_hash, owner_user_id, goal_contract, initial_plan, active_plan, \
               initial_plan_hash, active_plan_hash, capability_catalog, authorization_envelope, \
-              source_provenance, source_kind, route_reason, skill_template_ref, \
+              source_provenance, source_kind, route_rationale, skill_template_ref, \
               skill_template_revision_uid, input, status, progress_total_tasks, started_at) \
          VALUES ($1, $2, $3, 1, $4, $5, 'user-1', \
                  '{\"requirements\":[{\"id\":\"r1\"}]}'::JSONB, '{}'::JSONB, '{}'::JSONB, \
                  $6, $6, '{}'::JSONB, '{}'::JSONB, \
                  jsonb_build_object('kind', 'skill_template', \
-                    'route_reason', 'selected_execution_template', \
+                    'route_rationale', 'The caller selected a pinned execution template.', \
                     'skill_template_ref', 'skill://billing-flow', \
                     'skill_template_revision_uid', lower($7::TEXT)), \
-                 'skill_template', 'selected_execution_template', \
+                 'skill_template', 'The caller selected a pinned execution template.', \
                  'skill://billing-flow', $7, '{}'::JSONB, 'queued', 2, $8)",
     )
     .bind(run_uid)

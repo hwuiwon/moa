@@ -67,7 +67,7 @@ execution records:
 
 | Fact | Contract |
 |---|---|
-| `analytics.execution_run_fact` | Tenant/contact/session/run identity; immutable initial and final active plan hashes; plan revision; typed route reason and source kind without a constant run-mode dimension; separate nullable skill-template ref and revision UID; run status and typed terminal reason; requirement, satisfied-requirement, completion-check, and logical-task counts; `queued_at`, `started_at`, exact queue-to-start latency from `started_at - queued_at`, terminal latency; and reserved/actual cost, tokens, tasks, tool calls, and retrieved bytes |
+| `analytics.execution_run_fact` | Tenant/contact/session/run identity; immutable initial and final active plan hashes; plan revision; bounded route rationale and typed source kind without a constant run-mode dimension; separate nullable skill-template ref and revision UID; run status and typed terminal reason; requirement, satisfied-requirement, completion-check, and logical-task counts; `queued_at`, `started_at`, exact queue-to-start latency from `started_at - queued_at`, terminal latency; and reserved/actual cost, tokens, tasks, tool calls, and retrieved bytes |
 | `analytics.execution_task_fact` | Canonical `task_id` (never `task_uid`); tenant/run/node/non-null item identity; task kind; separate nullable capability name/version; task status and typed failure class; attempt and generation; citation count; queue and terminal duration; and all five reserved/actual dimensions |
 
 Raw input, output, terminal gaps, cancellation reason, and error prose are not
@@ -128,7 +128,7 @@ schema contract, `docs/plans/clickhouse-analytics-read-models.md` the design):
 - Runtime aggregates (`skill_resolution_rates`, `segment_baselines`,
   `task_strategy_success_rates`) and `analytics.scores` stay in Postgres.
 - Existing ClickHouse databases are upgraded in place. The durable
-  `execution_dimensions_v2` state machine renames `task_uid` to `task_id`,
+  `execution_dimensions` state machine renames `task_uid` to `task_id`,
   widens `plan_revision` to `UInt64`, repairs nullability, adds normalized
   fields, removes `source_ref`, `capability_ref`, and raw `error`, resets
   sequence cursors, and fully exports through fixed run/task high-water tuples.

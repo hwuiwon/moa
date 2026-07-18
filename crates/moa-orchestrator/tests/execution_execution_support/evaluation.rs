@@ -6,8 +6,8 @@ use anyhow::{Context, Result, bail};
 use moa_core::events::Event;
 use moa_core::types::events_stream::EventRange;
 use moa_eval::execution::{
-    ExecutionCapabilityCallObservationV1, ExecutionEvalSnapshotV1, ExecutionHarnessEvidenceV1,
-    ExecutionSessionEventSummaryV1,
+    ExecutionCapabilityCallObservation, ExecutionEvalSnapshot, ExecutionHarnessEvidence,
+    ExecutionSessionEventSummary,
 };
 use moa_execution::{
     repository::{
@@ -28,7 +28,7 @@ pub(crate) async fn collect_execution_eval_snapshot(
     client: &TestApiClient,
     request: &ExecutionRunRequest,
     capability_controller: Option<&FixtureCapabilityController>,
-) -> Result<ExecutionEvalSnapshotV1> {
+) -> Result<ExecutionEvalSnapshot> {
     let scheduling_snapshot = repository
         .load_scheduling_snapshot(scope, request.run_uid)
         .await
@@ -40,7 +40,7 @@ pub(crate) async fn collect_execution_eval_snapshot(
         .get_events(request.session_id, EventRange::all())
         .await
         .context("read raw durable session events")?;
-    let harness = ExecutionHarnessEvidenceV1 {
+    let harness = ExecutionHarnessEvidence {
         session_events: summarize_session_events(&events),
         capability_calls: capability_observations(&scheduling_snapshot, capability_controller)?,
         final_response: events.iter().rev().find_map(|record| match &record.event {
@@ -49,7 +49,7 @@ pub(crate) async fn collect_execution_eval_snapshot(
         }),
     };
 
-    ExecutionEvalSnapshotV1::from_parts(scheduling_snapshot, task_records, audits, harness)
+    ExecutionEvalSnapshot::from_parts(scheduling_snapshot, task_records, audits, harness)
         .context("assemble strict execution eval snapshot")
 }
 
@@ -61,7 +61,7 @@ pub(crate) async fn collect_repository_execution_eval_snapshot(
     postgres_url: &str,
     session_id: moa_core::types::identifiers::SessionId,
     run_uid: uuid::Uuid,
-) -> Result<ExecutionEvalSnapshotV1> {
+) -> Result<ExecutionEvalSnapshot> {
     let scheduling_snapshot = repository
         .load_scheduling_snapshot(scope, run_uid)
         .await
@@ -69,11 +69,11 @@ pub(crate) async fn collect_repository_execution_eval_snapshot(
         .with_context(|| format!("execution run {run_uid} is not visible"))?;
     let task_records = list_all_task_records(repository, scope, run_uid).await?;
     let audits = load_execution_planning_audits(postgres_url, session_id).await?;
-    ExecutionEvalSnapshotV1::from_parts(
+    ExecutionEvalSnapshot::from_parts(
         scheduling_snapshot,
         task_records,
         audits,
-        ExecutionHarnessEvidenceV1::default(),
+        ExecutionHarnessEvidence::default(),
     )
     .context("assemble repository-only execution eval snapshot")
 }
@@ -119,8 +119,8 @@ fn cursor_key(cursor: &ExecutionTaskCursor) -> (String, String, uuid::Uuid) {
 
 fn summarize_session_events(
     events: &[moa_core::types::events_stream::EventRecord],
-) -> ExecutionSessionEventSummaryV1 {
-    let mut summary = ExecutionSessionEventSummaryV1::default();
+) -> ExecutionSessionEventSummary {
+    let mut summary = ExecutionSessionEventSummary::default();
     for record in events {
         match record.event {
             Event::ExecutionRunStarted(_) => {
@@ -180,7 +180,7 @@ fn summarize_session_events(
 fn capability_observations(
     snapshot: &moa_execution::repository::ExecutionSchedulingSnapshot,
     controller: Option<&FixtureCapabilityController>,
-) -> Result<Vec<ExecutionCapabilityCallObservationV1>> {
+) -> Result<Vec<ExecutionCapabilityCallObservation>> {
     let Some(controller) = controller else {
         return Ok(Vec::new());
     };
@@ -200,7 +200,7 @@ fn capability_observations(
                         attempt.capability
                     )
                 })?;
-            Ok(ExecutionCapabilityCallObservationV1 {
+            Ok(ExecutionCapabilityCallObservation {
                 logical_invocation_id: attempt.invocation_id,
                 reference,
                 item_key: (!attempt.item_key.is_empty()).then_some(attempt.item_key),

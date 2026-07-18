@@ -9,7 +9,6 @@ use moa_artifacts::{
     },
     reference::ArtifactRef,
 };
-use moa_core::types::execution_planning::ExecutionRouteReason;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -17,7 +16,7 @@ use uuid::Uuid;
 use crate::replan::ReplanStopReason;
 use crate::{Error, Result, capability::ExecutionEstimate};
 
-const TASK_NAMESPACE_NAME: &str = "https://moa.ai/execution-task/v1";
+const TASK_NAMESPACE_NAME: &str = "https://moa.ai/execution-task";
 
 /// Stable UUIDv5 newtype for one logical execution task.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -381,11 +380,11 @@ pub struct ExecutionTerminalEvidence {
 }
 
 /// Normalized routing fields persisted with every execution run.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionRouteFields {
-    /// Exact bounded route reason.
-    pub reason: ExecutionRouteReason,
+    /// Bounded human-readable route rationale.
+    pub rationale: String,
 }
 
 /// Durable status of one logical execution task.

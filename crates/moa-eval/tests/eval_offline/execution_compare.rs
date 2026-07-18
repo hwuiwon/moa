@@ -3,16 +3,15 @@
 use std::collections::BTreeMap;
 
 use moa_eval::execution::{
-    ExecutionEvalCaseResultV1, ExecutionEvalComparisonConfigV1, ExecutionEvalLaneV1,
-    ExecutionEvalReportV1, ExecutionJudgeCalibrationStatusV1, compare_execution_eval_reports,
-    mutation_report_from_outcomes,
+    ExecutionEvalCaseResult, ExecutionEvalComparisonConfig, ExecutionEvalLane, ExecutionEvalReport,
+    ExecutionJudgeCalibrationStatus, compare_execution_eval_reports, mutation_report_from_outcomes,
 };
 use serde_json::json;
 
 #[test]
 fn execution_compare_refuses_corpus_seed_repetition_and_case_mismatch_offline() {
     // Pins: paired statistics are never computed over different experimental identities.
-    let baseline = report(ExecutionEvalLaneV1::OfflinePr, 4, true);
+    let baseline = report(ExecutionEvalLane::OfflinePr, 4, true);
 
     let mut mismatch = baseline.clone();
     mismatch
@@ -36,8 +35,8 @@ fn execution_compare_refuses_corpus_seed_repetition_and_case_mismatch_offline() 
 #[test]
 fn execution_compare_deterministically_detects_significant_live_regression_offline() {
     // Pins: one sample cannot gate live quality, while a paired repeated regression can.
-    let baseline = report(ExecutionEvalLaneV1::NightlyLive, 20, true);
-    let candidate = report(ExecutionEvalLaneV1::NightlyLive, 20, false);
+    let baseline = report(ExecutionEvalLane::NightlyLive, 20, true);
+    let candidate = report(ExecutionEvalLane::NightlyLive, 20, false);
     let comparison = compare_execution_eval_reports(&baseline, &candidate, config())
         .expect("paired live reports should compare");
 
@@ -47,8 +46,8 @@ fn execution_compare_deterministically_detects_significant_live_regression_offli
     assert!(comparison.significant_pass_regression);
     assert!(comparison.gate_failed);
 
-    let one_baseline = report(ExecutionEvalLaneV1::NightlyLive, 1, true);
-    let one_candidate = report(ExecutionEvalLaneV1::NightlyLive, 1, false);
+    let one_baseline = report(ExecutionEvalLane::NightlyLive, 1, true);
+    let one_candidate = report(ExecutionEvalLane::NightlyLive, 1, false);
     let one = compare_execution_eval_reports(&one_baseline, &one_candidate, config())
         .expect("one paired case should still produce a trend report");
     assert!(!one.pass_comparison.significant);
@@ -58,8 +57,8 @@ fn execution_compare_deterministically_detects_significant_live_regression_offli
 #[test]
 fn execution_compare_reports_improvement_and_numeric_deltas_stably_offline() {
     // Pins: candidate-minus-baseline direction is consistent for pass, cost, latency, and tasks.
-    let baseline = report(ExecutionEvalLaneV1::OfflinePr, 8, false);
-    let mut candidate = report(ExecutionEvalLaneV1::OfflinePr, 8, true);
+    let baseline = report(ExecutionEvalLane::OfflinePr, 8, false);
+    let mut candidate = report(ExecutionEvalLane::OfflinePr, 8, true);
     for case in &mut candidate.cases {
         case.cost_microusd = 50;
         case.latency_ms = 75;
@@ -99,9 +98,9 @@ fn execution_mutation_report_excludes_unviable_and_retains_missed_timeouts_offli
     assert_eq!(report.timeout_mutants, vec!["generation-fence"]);
 }
 
-fn report(lane: ExecutionEvalLaneV1, count: usize, passed: bool) -> ExecutionEvalReportV1 {
+fn report(lane: ExecutionEvalLane, count: usize, passed: bool) -> ExecutionEvalReport {
     let cases = (0..count)
-        .map(|index| ExecutionEvalCaseResultV1 {
+        .map(|index| ExecutionEvalCaseResult {
             case_id: format!("case-{index:03}"),
             passed,
             contract_omission: None,
@@ -120,20 +119,20 @@ fn report(lane: ExecutionEvalLaneV1, count: usize, passed: bool) -> ExecutionEva
             final_response_hash: None,
         })
         .collect();
-    ExecutionEvalReportV1::new(
+    ExecutionEvalReport::new(
         lane,
         BTreeMap::from([("routing".to_string(), "a".repeat(64))]),
         vec![42],
         1,
-        ExecutionJudgeCalibrationStatusV1::Unavailable,
+        ExecutionJudgeCalibrationStatus::Unavailable,
         None,
         cases,
     )
     .expect("comparison fixture report should validate")
 }
 
-fn config() -> ExecutionEvalComparisonConfigV1 {
-    ExecutionEvalComparisonConfigV1 {
+fn config() -> ExecutionEvalComparisonConfig {
+    ExecutionEvalComparisonConfig {
         bootstrap: moa_eval::kernel::BootstrapConfig {
             resamples: 512,
             seed: 7,

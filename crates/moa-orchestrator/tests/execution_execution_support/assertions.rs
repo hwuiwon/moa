@@ -6,13 +6,15 @@ use moa_core::types::completion::CompletionRequest;
 use moa_core::types::events_stream::EventRecord;
 use moa_core::types::execution_planning::{
     ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
-    ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
-    ExecutionRouteKind, ExecutionRouteReason, ExecutionRouteStage, ExecutionStrategy,
+    ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload,
+    ExecutionRouteKind, ExecutionRouteStage, ExecutionStrategy,
 };
 use moa_execution::state::{ExecutionRunStatus, ExecutionTerminalCause, ExecutionTerminalEvidence};
 use moa_execution::wire::ExecutionStatusResponse;
 use moa_test_support::execution_audits::load_execution_planning_audits;
 use serde_json::Value;
+
+use super::fixtures::RouteFixture;
 
 const SYNTHESIS_INSTRUCTION: &str = "Synthesize the final user response for execution run";
 const AGENT_INSTRUCTION_SUFFIX: &str = "Pinned instruction skills:";
@@ -51,49 +53,54 @@ pub(crate) fn journal_roles(requests: &[CompletionRequest]) -> Vec<JournalReques
 pub(crate) async fn planning_audits(
     postgres_url: &str,
     session_id: moa_core::types::identifiers::SessionId,
-) -> Result<Vec<ExecutionPlanningAuditEnvelopeV1>> {
+) -> Result<Vec<ExecutionPlanningAuditEnvelope>> {
     load_execution_planning_audits(postgres_url, session_id).await
 }
 
 /// Asserts one exact initial deterministic route and no additional route records.
 pub(crate) fn assert_initial_route(
-    audits: &[ExecutionPlanningAuditEnvelopeV1],
+    audits: &[ExecutionPlanningAuditEnvelope],
     decision: ExecutionRouteKind,
     strategy: Option<ExecutionStrategy>,
-    reason: ExecutionRouteReason,
+    fixture: RouteFixture,
 ) {
     let routes = audits
         .iter()
         .filter_map(|audit| match &audit.payload {
-            ExecutionPlanningAuditPayloadV1::Route {
+            ExecutionPlanningAuditPayload::Route {
                 stage,
                 decision,
                 strategy,
-                reason,
+                rationale,
                 ..
-            } => Some((*stage, *decision, *strategy, *reason)),
+            } => Some((*stage, *decision, *strategy, rationale.as_str())),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
         routes,
-        vec![(ExecutionRouteStage::Initial, decision, strategy, reason,)],
+        vec![(
+            ExecutionRouteStage::Initial,
+            decision,
+            strategy,
+            fixture.rationale(),
+        )],
         "unexpected strict route audit history: {audits:#?}"
     );
 }
 
 /// Asserts that the audit history contains no planner or compiler operation.
-pub(crate) fn assert_no_planner_or_compile(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
+pub(crate) fn assert_no_planner_or_compile(audits: &[ExecutionPlanningAuditEnvelope]) {
     assert!(
         audits
             .iter()
-            .all(|audit| matches!(audit.payload, ExecutionPlanningAuditPayloadV1::Route { .. })),
+            .all(|audit| matches!(audit.payload, ExecutionPlanningAuditPayload::Route { .. })),
         "non-Durable route unexpectedly planned or compiled: {audits:#?}"
     );
 }
 
 /// Asserts one accepted initial planner call followed by one accepted generated compile.
-pub(crate) fn assert_generated_plan_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
+pub(crate) fn assert_generated_plan_audits(audits: &[ExecutionPlanningAuditEnvelope]) {
     assert_eq!(
         audits.len(),
         3,
@@ -101,7 +108,7 @@ pub(crate) fn assert_generated_plan_audits(audits: &[ExecutionPlanningAuditEnvel
     );
     assert!(matches!(
         &audits[1].payload,
-        ExecutionPlanningAuditPayloadV1::PlannerCall {
+        ExecutionPlanningAuditPayload::PlannerCall {
             call_kind: ExecutionPlannerCallKind::InitialPlan,
             call_ordinal: 0,
             run_uid: None,
@@ -115,7 +122,7 @@ pub(crate) fn assert_generated_plan_audits(audits: &[ExecutionPlanningAuditEnvel
     ));
     assert!(matches!(
         &audits[2].payload,
-        ExecutionPlanningAuditPayloadV1::Compile {
+        ExecutionPlanningAuditPayload::Compile {
             source: ExecutionCompileSource::GeneratedPlan,
             run_uid: None,
             plan_revision: None,
@@ -127,7 +134,7 @@ pub(crate) fn assert_generated_plan_audits(audits: &[ExecutionPlanningAuditEnvel
 }
 
 /// Asserts one accepted skill-template compiler record and no planner call.
-pub(crate) fn assert_skill_template_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
+pub(crate) fn assert_skill_template_audits(audits: &[ExecutionPlanningAuditEnvelope]) {
     assert_eq!(
         audits.len(),
         2,
@@ -135,7 +142,7 @@ pub(crate) fn assert_skill_template_audits(audits: &[ExecutionPlanningAuditEnvel
     );
     assert!(matches!(
         &audits[1].payload,
-        ExecutionPlanningAuditPayloadV1::Compile {
+        ExecutionPlanningAuditPayload::Compile {
             source: ExecutionCompileSource::SkillTemplate,
             run_uid: None,
             plan_revision: None,
@@ -247,7 +254,7 @@ fn journal_role(request: &CompletionRequest) -> JournalRequestRole {
     if request
         .response_format
         .as_ref()
-        .is_some_and(|format| format.name == "generated_execution_candidate_v1")
+        .is_some_and(|format| format.name == "generated_execution_candidate")
     {
         return JournalRequestRole::InitialPlanner;
     }
@@ -290,7 +297,7 @@ mod tests {
         let normal = CompletionRequest::new("What is a DAG?");
         let mut planner = CompletionRequest::new("strict planner");
         planner.response_format = Some(JsonResponseFormat::strict_json_schema(
-            "generated_execution_candidate_v1",
+            "generated_execution_candidate",
             "candidate",
             json!({"type": "object"}),
         ));

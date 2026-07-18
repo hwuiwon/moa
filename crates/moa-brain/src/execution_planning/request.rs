@@ -17,15 +17,15 @@ use moa_execution::{
     compiler::CanonicalExecutionPlan,
     repository::{CompileAuditWriteOutcome, PlannerCallAuditWriteOutcome},
     state::{ExecutionProjection, ExecutionTaskId},
-    wire::ExecutionPlanningContextSnapshotV1,
+    wire::ExecutionPlanningContextSnapshot,
 };
 use moa_observability::{record_execution_compile_duration, record_execution_planner_call};
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Stable v1 execution-planner prompt identifier.
-pub const EXECUTION_PLANNER_PROMPT_VERSION: &str = "execution-planner-v1";
+/// Stable execution-planner prompt identifier.
+pub const EXECUTION_PLANNER_PROMPT_VERSION: &str = "execution-planner";
 /// Fixed maximum collected planner output tokens.
 pub const EXECUTION_PLANNER_MAX_OUTPUT_TOKENS: usize = 32_768;
 const EXECUTION_PLANNER_PROMPT: &str = include_str!("../prompts/execution_planner.txt");
@@ -36,7 +36,7 @@ pub struct ExecutionPlanningRequest {
     /// Byte-identical persisted user-message text.
     pub objective: String,
     /// Immutable session-derived planning authority and capability snapshot.
-    pub context: ExecutionPlanningContextSnapshotV1,
+    pub context: ExecutionPlanningContextSnapshot,
     /// Explicit exact template invocation, when present.
     pub execution_template: Option<ExecutionTemplateInvocation>,
     /// Bounded evidence from one Inline-to-Durable upgrade.
@@ -73,7 +73,7 @@ pub struct ExecutionAmendmentPlanningRequest {
     /// Active base plan revision.
     pub base_plan_revision: u64,
     /// Persisted original planning context, optionally narrowed for live revocation.
-    pub context: ExecutionPlanningContextSnapshotV1,
+    pub context: ExecutionPlanningContextSnapshot,
     /// Immutable goal and run evidence.
     pub evidence: AmendmentPlanningEvidence,
     /// Resource envelope remaining before amendment acceptance.
@@ -115,7 +115,7 @@ pub fn initial_completion_request(
     };
     strict_request::<GeneratedExecutionCandidate>(
         request.planner_model.clone(),
-        "generated_execution_candidate_v1",
+        "generated_execution_candidate",
         "Generate one strict immutable execution goal and supported execution plan.",
         format!(
             "{EXECUTION_PLANNER_PROMPT}\n\n<frozen_planning_context>{}</frozen_planning_context>",
@@ -175,7 +175,7 @@ pub fn amendment_completion_request(
     }
     strict_request::<GeneratedAmendmentCandidate>(
         request.planner_model.clone(),
-        "generated_amendment_candidate_v1",
+        "generated_amendment_candidate",
         "Generate one strict restricted execution-plan amendment.",
         prompt,
     )

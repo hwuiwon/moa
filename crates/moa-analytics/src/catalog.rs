@@ -518,9 +518,9 @@ fn dataset_specs() -> Vec<DatasetSpec> {
                     AnalyticsFieldKind::Integer,
                 ),
                 dimension(
-                    "route_reason",
-                    "route_reason",
-                    "Route Reason",
+                    "route_rationale",
+                    "route_rationale",
+                    "Route Rationale",
                     AnalyticsFieldKind::String,
                 ),
                 dimension(
@@ -1242,7 +1242,7 @@ mod tests {
                 "initial_plan_hash",
                 "active_plan_hash",
                 "plan_revision",
-                "route_reason",
+                "route_rationale",
                 "source_kind",
                 "skill_template_ref",
                 "skill_template_revision_uid",

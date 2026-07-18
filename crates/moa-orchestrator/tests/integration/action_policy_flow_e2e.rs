@@ -239,13 +239,13 @@ async fn insert_execution_review_task(
             planning_context_uid, planning_context_hash, owner_user_id, goal_contract,
             initial_plan, active_plan, initial_plan_hash, active_plan_hash,
             capability_catalog, authorization_envelope, pinned_instruction_skills,
-            source_provenance, source_kind, route_reason,
+            source_provenance, source_kind, route_rationale,
             input, status, queued_at
         ) VALUES ($1, $2, $3, $4, $5, $6, 'test-owner',
                   '{}'::JSONB, '{}'::JSONB, '{}'::JSONB, $6, $6,
                   '{}'::JSONB, '{}'::JSONB, '[]'::JSONB,
-                  '{"kind":"generated_plan","route_reason":"approval_or_signal"}'::JSONB,
-                  'generated_plan', 'approval_or_signal',
+                  '{"kind":"generated_plan","route_rationale":"The workflow must survive an approval handoff."}'::JSONB,
+                  'generated_plan', 'The workflow must survive an approval handoff.',
                   '{}'::JSONB, 'queued', NOW())
         "#,
     )
@@ -1038,7 +1038,8 @@ fn repeated_tool_loop_script() -> serde_json::Value {
             "completion": {
                 "content": json!({
                     "label": "execute",
-                    "reason": "bounded_interactive_work",
+                    "strategy": "inline",
+                    "rationale": "The work fits a bounded interactive loop.",
                     "confidence_bps": 10_000,
                     "missing_inputs": []
                 }).to_string(),

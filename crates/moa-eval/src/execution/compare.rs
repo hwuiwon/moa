@@ -11,7 +11,7 @@ use crate::kernel::{
     PairedComparison, benjamini_hochberg, cluster_bootstrap_mean_by_user, mcnemar_paired_test,
 };
 
-use super::report::{ExecutionEvalCaseResultV1, ExecutionEvalLaneV1, ExecutionEvalReportV1};
+use super::report::{ExecutionEvalCaseResult, ExecutionEvalLane, ExecutionEvalReport};
 
 /// Current schema version for paired execution-eval comparisons.
 pub const EXECUTION_EVAL_COMPARISON_SCHEMA_VERSION: u8 = 1;
@@ -21,7 +21,7 @@ pub const EXECUTION_MUTATION_REPORT_SCHEMA_VERSION: u8 = 1;
 /// Statistical and practical thresholds for one paired report comparison.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionEvalComparisonConfigV1 {
+pub struct ExecutionEvalComparisonConfig {
     /// Cluster-bootstrap configuration used for every paired numeric delta.
     pub bootstrap: BootstrapConfig,
     /// False-discovery rate applied to paired binary tests.
@@ -30,7 +30,7 @@ pub struct ExecutionEvalComparisonConfigV1 {
     pub practical_pass_rate_regression: f64,
 }
 
-impl Default for ExecutionEvalComparisonConfigV1 {
+impl Default for ExecutionEvalComparisonConfig {
     fn default() -> Self {
         Self {
             bootstrap: BootstrapConfig::default(),
@@ -43,7 +43,7 @@ impl Default for ExecutionEvalComparisonConfigV1 {
 /// Strict paired comparison over execution-eval case IDs.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionEvalComparisonV1 {
+pub struct ExecutionEvalComparison {
     /// Comparison schema version, fixed at `1`.
     pub schema_version: u8,
     /// Number of exactly paired case IDs.
@@ -69,7 +69,7 @@ pub struct ExecutionEvalComparisonV1 {
 /// Strict summary of cargo-mutants outcomes for the targeted execution lane.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionMutationReportV1 {
+pub struct ExecutionMutationReport {
     /// Mutation report schema version, fixed at `1`.
     pub schema_version: u8,
     /// Mutants caught by at least one selected test.
@@ -92,10 +92,10 @@ pub struct ExecutionMutationReportV1 {
 
 /// Compares two validated reports after enforcing exact paired identity.
 pub fn compare_execution_eval_reports(
-    baseline: &ExecutionEvalReportV1,
-    candidate: &ExecutionEvalReportV1,
-    config: ExecutionEvalComparisonConfigV1,
-) -> Result<ExecutionEvalComparisonV1> {
+    baseline: &ExecutionEvalReport,
+    candidate: &ExecutionEvalReport,
+    config: ExecutionEvalComparisonConfig,
+) -> Result<ExecutionEvalComparison> {
     baseline.validate()?;
     candidate.validate()?;
     validate_comparison_config(config)?;
@@ -144,10 +144,10 @@ pub fn compare_execution_eval_reports(
     );
     let significant_pass_regression = pass_comparison.significant
         && pass_rate_delta.mean < -config.practical_pass_rate_regression;
-    let live_comparison = baseline.lane == ExecutionEvalLaneV1::NightlyLive
-        && candidate.lane == ExecutionEvalLaneV1::NightlyLive;
+    let live_comparison = baseline.lane == ExecutionEvalLane::NightlyLive
+        && candidate.lane == ExecutionEvalLane::NightlyLive;
 
-    Ok(ExecutionEvalComparisonV1 {
+    Ok(ExecutionEvalComparison {
         schema_version: EXECUTION_EVAL_COMPARISON_SCHEMA_VERSION,
         paired_cases: u64::try_from(baseline.cases.len())
             .map_err(|_| invalid_config("paired case count exceeds u64".to_string()))?,
@@ -163,7 +163,7 @@ pub fn compare_execution_eval_reports(
 }
 
 /// Parses cargo-mutants `outcomes.json` while preserving every missed and timeout identity.
-pub fn mutation_report_from_outcomes(value: &Value) -> Result<ExecutionMutationReportV1> {
+pub fn mutation_report_from_outcomes(value: &Value) -> Result<ExecutionMutationReport> {
     let outcomes = value
         .as_array()
         .or_else(|| value.get("outcomes").and_then(Value::as_array))
@@ -203,7 +203,7 @@ pub fn mutation_report_from_outcomes(value: &Value) -> Result<ExecutionMutationR
     }
     missed_mutants.sort();
     timeout_mutants.sort();
-    Ok(ExecutionMutationReportV1 {
+    Ok(ExecutionMutationReport {
         schema_version: EXECUTION_MUTATION_REPORT_SCHEMA_VERSION,
         caught,
         missed,
@@ -216,7 +216,7 @@ pub fn mutation_report_from_outcomes(value: &Value) -> Result<ExecutionMutationR
     })
 }
 
-fn validate_comparison_config(config: ExecutionEvalComparisonConfigV1) -> Result<()> {
+fn validate_comparison_config(config: ExecutionEvalComparisonConfig) -> Result<()> {
     if config.bootstrap.resamples == 0
         || !config.false_discovery_rate.is_finite()
         || !(0.0..=1.0).contains(&config.false_discovery_rate)
@@ -230,10 +230,7 @@ fn validate_comparison_config(config: ExecutionEvalComparisonConfigV1) -> Result
     Ok(())
 }
 
-fn validate_pairing(
-    baseline: &ExecutionEvalReportV1,
-    candidate: &ExecutionEvalReportV1,
-) -> Result<()> {
+fn validate_pairing(baseline: &ExecutionEvalReport, candidate: &ExecutionEvalReport) -> Result<()> {
     if baseline.corpus_hashes != candidate.corpus_hashes {
         return Err(invalid_config(
             "execution comparison refused different corpus hashes".to_string(),
@@ -259,18 +256,18 @@ fn validate_pairing(
     Ok(())
 }
 
-fn case_ids(cases: &[ExecutionEvalCaseResultV1]) -> BTreeSet<&str> {
+fn case_ids(cases: &[ExecutionEvalCaseResult]) -> BTreeSet<&str> {
     cases.iter().map(|case| case.case_id.as_str()).collect()
 }
 
-fn case_map(cases: &[ExecutionEvalCaseResultV1]) -> BTreeMap<&str, &ExecutionEvalCaseResultV1> {
+fn case_map(cases: &[ExecutionEvalCaseResult]) -> BTreeMap<&str, &ExecutionEvalCaseResult> {
     cases
         .iter()
         .map(|case| (case.case_id.as_str(), case))
         .collect()
 }
 
-fn binary_outcomes(cases: &[ExecutionEvalCaseResultV1]) -> Vec<BinaryProbeOutcome> {
+fn binary_outcomes(cases: &[ExecutionEvalCaseResult]) -> Vec<BinaryProbeOutcome> {
     cases
         .iter()
         .map(|case| BinaryProbeOutcome {
@@ -282,10 +279,10 @@ fn binary_outcomes(cases: &[ExecutionEvalCaseResultV1]) -> Vec<BinaryProbeOutcom
 
 fn paired_interval(
     metric_name: &str,
-    baseline: &BTreeMap<&str, &ExecutionEvalCaseResultV1>,
-    candidate: &BTreeMap<&str, &ExecutionEvalCaseResultV1>,
+    baseline: &BTreeMap<&str, &ExecutionEvalCaseResult>,
+    candidate: &BTreeMap<&str, &ExecutionEvalCaseResult>,
     config: BootstrapConfig,
-    metric: impl Fn(&ExecutionEvalCaseResultV1) -> f64,
+    metric: impl Fn(&ExecutionEvalCaseResult) -> f64,
 ) -> ClusterBootstrapReport {
     let observations = baseline
         .iter()

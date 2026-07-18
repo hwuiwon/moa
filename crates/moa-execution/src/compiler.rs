@@ -35,7 +35,7 @@ use crate::{
 pub struct CompileExecutionRequest {
     /// Immutable user-derived goal contract.
     pub goal: ExecutionGoalContract,
-    /// Candidate v1 execution plan.
+    /// Candidate execution plan.
     pub plan: ExecutionPlanDefinition,
     /// Concrete run input validated against the plan input schema.
     pub run_input: Value,

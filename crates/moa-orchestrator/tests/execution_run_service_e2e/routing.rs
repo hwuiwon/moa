@@ -17,13 +17,12 @@ use moa_core::events::{
 };
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::execution_planning::{
-    ExecutionRouteKind, ExecutionRouteReason, ExecutionRunAdmissionStatus,
-    ExecutionSourceProvenanceV1, ExecutionStrategy, ExecutionTemplateInvocation,
-    PinnedExecutionTemplateRef,
+    ExecutionRouteKind, ExecutionRunAdmissionStatus, ExecutionSourceProvenance, ExecutionStrategy,
+    ExecutionTemplateInvocation, PinnedExecutionTemplateRef,
 };
 use moa_core::types::session::SessionStatus;
 use moa_core::wire::turn::{RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnTrigger};
-use moa_eval::execution::ExecutionInvariantSpecV1;
+use moa_eval::execution::ExecutionInvariantSpec;
 use moa_execution::{
     repository::{ExecutionRepository, ExecutionScope},
     state::{ExecutionRunStatus, ExecutionTaskStatus},
@@ -42,7 +41,7 @@ use crate::execution_execution_support::assertions::{
     journal_requests, journal_roles, planning_audits, sole_event_sequence,
 };
 use crate::execution_execution_support::fixtures::{
-    SERVICE_TIMEOUT, await_active_execution_progress, await_execution_terminal,
+    RouteFixture, SERVICE_TIMEOUT, await_active_execution_progress, await_execution_terminal,
     await_run_started_event, await_session_settled, await_turn_outcome, execution_run_request,
     list_execution_tasks, publish_skill, raw_events, route_classifier_completion,
     seed_allow_policy, start_turn, start_turn_in_session,
@@ -57,11 +56,11 @@ const INLINE_FINAL: &str = "The fixture analysis found the bounded cause.";
 const SYNTHESIS_MATCH: &str = "Synthesize the final user response for execution run";
 const TEMPLATE_SKILL_NAME: &str = "service-template-report";
 const TEMPLATE_FINAL: &str = "The pinned template produced the requested report.";
-const RESEARCH_AGENT_SENTINEL: &str = "NO_SKILL_RESEARCH_AGENT_V1";
+const RESEARCH_AGENT_SENTINEL: &str = "NO_SKILL_RESEARCH_AGENT";
 const RESEARCH_FINAL: &str = "The durable no-skill research run completed.";
 const INSTRUCTION_SKILL_NAME: &str = "agent-task-research";
 const INSTRUCTION_SKILL_SENTINEL: &str = "AGENT_TASK_SKILL_SENTINEL_42";
-const INSTRUCTION_AGENT_SENTINEL: &str = "USE_PINNED_AGENT_TASK_SKILL_V1";
+const INSTRUCTION_AGENT_SENTINEL: &str = "USE_PINNED_AGENT_TASK_SKILL";
 const INSTRUCTION_FINAL: &str = "The pinned instruction skill completed inside the Agent task.";
 const INLINE_INSTRUCTION_OBJECTIVE: &str =
     "Use the agent-task-research instruction skill to inspect this bounded case";
@@ -79,7 +78,7 @@ async fn respond_simple_question_uses_no_tools_planner_or_run_service_e2e() -> R
             "default": text_completion(RESPOND_FINAL),
             "keyed": [route_classifier_completion(
                 ExecutionRouteKind::Respond,
-                ExecutionRouteReason::SimpleResponse,
+                RouteFixture::Respond,
             )]
         }),
         FixtureCapabilityOptions::default(),
@@ -102,7 +101,7 @@ async fn respond_simple_question_uses_no_tools_planner_or_run_service_e2e() -> R
         &audits,
         ExecutionRouteKind::Respond,
         None,
-        ExecutionRouteReason::SimpleResponse,
+        RouteFixture::Respond,
     );
     assert_no_planner_or_compile(&audits);
     assert_eq!(
@@ -119,7 +118,7 @@ async fn respond_simple_question_uses_no_tools_planner_or_run_service_e2e() -> R
         &events,
         ExecutionRouteKind::Respond,
         None,
-        ExecutionRouteReason::SimpleResponse,
+        RouteFixture::Respond,
     );
     assert_eq!(final_brain_response(&events)?, RESPOND_FINAL);
 
@@ -133,7 +132,7 @@ async fn respond_simple_question_uses_no_tools_planner_or_run_service_e2e() -> R
             .response_format
             .as_ref()
             .map(|format| format.name.as_str()),
-        Some("execution_route_classifier_v1")
+        Some("execution_route_classifier")
     );
     assert!(requests.iter().all(|request| request.tools.is_empty()));
     assert!(requests[1].response_format.is_none());
@@ -150,7 +149,7 @@ async fn execute_inline_runs_bounded_tool_loop_without_durable_run_service_e2e()
             "keyed": [
                 route_classifier_completion(
                     ExecutionRouteKind::Execute,
-                    ExecutionRouteReason::BoundedInteractiveWork,
+                    RouteFixture::Inline,
                 ),
                 keyed_completion(INLINE_TOOL_RESULT, text_completion(INLINE_FINAL)),
                 keyed_completion(
@@ -223,7 +222,7 @@ async fn execute_inline_runs_bounded_tool_loop_without_durable_run_service_e2e()
         &audits,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Inline),
-        ExecutionRouteReason::BoundedInteractiveWork,
+        RouteFixture::Inline,
     );
     assert_no_planner_or_compile(&audits);
     assert_eq!(
@@ -248,7 +247,7 @@ async fn execute_inline_runs_bounded_tool_loop_without_durable_run_service_e2e()
         &events,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Inline),
-        ExecutionRouteReason::BoundedInteractiveWork,
+        RouteFixture::Inline,
     );
     assert_eq!(final_brain_response(&events)?, INLINE_FINAL);
 
@@ -266,7 +265,7 @@ async fn execute_inline_runs_bounded_tool_loop_without_durable_run_service_e2e()
             .response_format
             .as_ref()
             .map(|format| format.name.as_str()),
-        Some("execution_route_classifier_v1")
+        Some("execution_route_classifier")
     );
     assert!(
         requests[1..]
@@ -294,7 +293,7 @@ async fn execute_inline_uses_instruction_only_skill_without_durable_run_service_
             "keyed": [
                 route_classifier_completion(
                     ExecutionRouteKind::Execute,
-                    ExecutionRouteReason::BoundedInteractiveWork,
+                    RouteFixture::Inline,
                 ),
                 keyed_completion(
                     INSTRUCTION_SKILL_SENTINEL,
@@ -351,7 +350,7 @@ async fn execute_inline_uses_instruction_only_skill_without_durable_run_service_
         &audits,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Inline),
-        ExecutionRouteReason::BoundedInteractiveWork,
+        RouteFixture::Inline,
     );
     assert_no_planner_or_compile(&audits);
     assert_eq!(
@@ -376,7 +375,7 @@ async fn execute_inline_uses_instruction_only_skill_without_durable_run_service_
         &events,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Inline),
-        ExecutionRouteReason::BoundedInteractiveWork,
+        RouteFixture::Inline,
     );
     assert_eq!(final_brain_response(&events)?, INLINE_INSTRUCTION_FINAL);
 
@@ -396,7 +395,7 @@ async fn execute_inline_uses_instruction_only_skill_without_durable_run_service_
                 request
                     .response_format
                     .as_ref()
-                    .is_some_and(|format| format.name == "execution_route_classifier_v1")
+                    .is_some_and(|format| format.name == "execution_route_classifier")
             })
             .count(),
         1
@@ -510,7 +509,7 @@ async fn published_skill_template_starts_without_plan_generation_service_e2e() -
         &audits,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Durable),
-        ExecutionRouteReason::SelectedExecutionTemplate,
+        RouteFixture::Template,
     );
     assert_skill_template_audits(&audits);
     assert_eq!(
@@ -538,7 +537,7 @@ async fn published_skill_template_starts_without_plan_generation_service_e2e() -
         request
             .response_format
             .as_ref()
-            .is_none_or(|format| format.name != "generated_execution_candidate_v1")
+            .is_none_or(|format| format.name != "generated_execution_candidate")
     }));
     Ok(())
 }
@@ -555,7 +554,7 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
             "keyed": [
                 route_classifier_completion(
                     ExecutionRouteKind::Execute,
-                    ExecutionRouteReason::ExplicitDurableExecution,
+                    RouteFixture::Durable,
                 ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion(RESEARCH_FINAL)),
                 keyed_completion(
@@ -622,7 +621,7 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
         &audits,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Durable),
-        ExecutionRouteReason::ExplicitDurableExecution,
+        RouteFixture::Durable,
     );
     assert_generated_plan_audits(&audits);
     assert_eq!(final_brain_response(&events)?, RESEARCH_FINAL);
@@ -634,16 +633,16 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
         None,
         "generated-run-executes-and-synthesizes",
         &[
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Completed],
             },
-            ExecutionInvariantSpecV1::TaskCount {
+            ExecutionInvariantSpec::TaskCount {
                 node_id: "research".to_string(),
                 exact: 1,
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -664,7 +663,7 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
             .response_format
             .as_ref()
             .map(|format| format.name.as_str()),
-        Some("generated_execution_candidate_v1")
+        Some("generated_execution_candidate")
     );
     Ok(())
 }
@@ -687,7 +686,7 @@ async fn instruction_only_skill_is_available_inside_agent_task_service_e2e() -> 
             "keyed": [
                 route_classifier_completion(
                     ExecutionRouteKind::Execute,
-                    ExecutionRouteReason::ExplicitDurableExecution,
+                    RouteFixture::Durable,
                 ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion(INSTRUCTION_FINAL)),
                 keyed_completion(
@@ -750,7 +749,7 @@ async fn instruction_only_skill_is_available_inside_agent_task_service_e2e() -> 
         &audits,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Durable),
-        ExecutionRouteReason::ExplicitDurableExecution,
+        RouteFixture::Durable,
     );
     assert_generated_plan_audits(&audits);
     assert_eq!(final_brain_response(&events)?, INSTRUCTION_FINAL);
@@ -793,7 +792,7 @@ async fn non_root_continuations_cannot_enter_or_upgrade_to_durable_service_e2e()
             "default": text_completion(SYNTHESIS_FINAL),
             "keyed": [route_classifier_completion(
                 ExecutionRouteKind::Execute,
-                ExecutionRouteReason::ExplicitDurableExecution,
+                RouteFixture::Durable,
             )]
         }),
         FixtureCapabilityOptions::default(),
@@ -950,7 +949,7 @@ async fn non_root_continuations_cannot_enter_or_upgrade_to_durable_service_e2e()
                 request
                     .response_format
                     .as_ref()
-                    .is_some_and(|format| format.name == "execution_route_classifier_v1")
+                    .is_some_and(|format| format.name == "execution_route_classifier")
             })
             .count(),
         2,
@@ -960,7 +959,7 @@ async fn non_root_continuations_cannot_enter_or_upgrade_to_durable_service_e2e()
         request
             .response_format
             .as_ref()
-            .is_none_or(|format| format.name != "generated_execution_candidate_v1")
+            .is_none_or(|format| format.name != "generated_execution_candidate")
     }));
     Ok(())
 }
@@ -1178,12 +1177,12 @@ Return a concise structured research result for the task input.
 }
 
 fn assert_persisted_skill_template_provenance(
-    actual: &ExecutionSourceProvenanceV1,
+    actual: &ExecutionSourceProvenance,
     expected_skill_ref: &str,
     expected_revision_uid: uuid::Uuid,
 ) -> Result<()> {
-    let ExecutionSourceProvenanceV1::SkillTemplate {
-        route_reason,
+    let ExecutionSourceProvenance::SkillTemplate {
+        route_rationale,
         skill_template_ref,
         skill_template_revision_uid,
     } = actual
@@ -1191,8 +1190,8 @@ fn assert_persisted_skill_template_provenance(
         anyhow::bail!("persisted execution source is not a skill template: {actual:?}");
     };
     anyhow::ensure!(
-        *route_reason == ExecutionRouteReason::SelectedExecutionTemplate,
-        "persisted skill-template route reason mismatch: {route_reason:?}"
+        route_rationale == RouteFixture::Template.rationale(),
+        "persisted skill-template route rationale mismatch: {route_rationale:?}"
     );
     anyhow::ensure!(
         skill_template_ref == expected_skill_ref,
@@ -1245,11 +1244,12 @@ fn assert_generated_execution_event_order(events: &[moa_core::types::events_stre
 #[cfg(test)]
 mod tests {
     use moa_artifacts::document::{ArtifactDefinition, ArtifactDocument};
-    use moa_core::types::execution_planning::{ExecutionRouteReason, ExecutionSourceProvenanceV1};
+    use moa_core::types::execution_planning::ExecutionSourceProvenance;
 
     use super::{
-        INSTRUCTION_SKILL_NAME, TEMPLATE_SKILL_NAME, assert_persisted_skill_template_provenance,
-        instruction_skill_source, template_skill_source,
+        INSTRUCTION_SKILL_NAME, RouteFixture, TEMPLATE_SKILL_NAME,
+        assert_persisted_skill_template_provenance, instruction_skill_source,
+        template_skill_source,
     };
 
     #[test]
@@ -1273,8 +1273,8 @@ mod tests {
 
         let revision_uid = uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
             .expect("parse deterministic template revision");
-        let provenance = ExecutionSourceProvenanceV1::SkillTemplate {
-            route_reason: ExecutionRouteReason::SelectedExecutionTemplate,
+        let provenance = ExecutionSourceProvenance::SkillTemplate {
+            route_rationale: RouteFixture::Template.rationale().to_string(),
             skill_template_ref: "skill://service-template-report".to_string(),
             skill_template_revision_uid: revision_uid,
         };

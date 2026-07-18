@@ -3,17 +3,17 @@
 use std::path::PathBuf;
 
 use moa_brain::execution_planning::{
-    ExecutionRouteClassifierLabelV1, ExecutionRouteClassifierOutputV1,
+    ExecutionRouteClassifierLabel, ExecutionRouteClassifierOutput,
 };
 use moa_core::types::{
     completion::TokenUsage,
     execution_planning::{
         DurableUpgradeTransitionError, ExecutionRouteClassifierOutcome, ExecutionRouteDecision,
-        ExecutionRouteReason, ExecutionStrategy, durable_upgrade_transition,
+        ExecutionStrategy, durable_upgrade_transition,
     },
 };
 use moa_eval::execution::{
-    ExecutionRoutingCaseV1, ExecutionRoutingClassifierFixtureV1, ExecutionRoutingLabelV1,
+    ExecutionRoutingCase, ExecutionRoutingClassifierFixture, ExecutionRoutingLabel,
     load_execution_corpus, score_routing_cases,
 };
 
@@ -24,22 +24,23 @@ fn manifest_path() -> PathBuf {
 fn response_case(
     case_id: &str,
     expected_strategy: ExecutionStrategy,
-    expected_reason: ExecutionRouteReason,
-    observed_label: ExecutionRouteClassifierLabelV1,
-    observed_reason: ExecutionRouteReason,
+    observed_label: ExecutionRouteClassifierLabel,
+    observed_strategy: Option<ExecutionStrategy>,
     confidence_bps: u16,
     expected_outcome: ExecutionRouteClassifierOutcome,
-) -> ExecutionRoutingCaseV1 {
-    ExecutionRoutingCaseV1 {
+) -> ExecutionRoutingCase {
+    ExecutionRoutingCase {
         schema_version: 1,
         case_id: case_id.to_string(),
         objective: "Evaluate the supplied work exactly".to_string(),
         attachment_count: 0,
         has_recent_target: false,
-        classifier: ExecutionRoutingClassifierFixtureV1::Response {
-            output: ExecutionRouteClassifierOutputV1 {
+        classifier: ExecutionRoutingClassifierFixture::Response {
+            output: ExecutionRouteClassifierOutput {
                 label: observed_label,
-                reason: observed_reason,
+                strategy: observed_strategy,
+                rationale: "A domain-specific workflow supports this route and strategy."
+                    .to_string(),
                 confidence_bps,
                 missing_inputs: Vec::new(),
             },
@@ -47,9 +48,8 @@ fn response_case(
             cost_microusd: 0,
         },
         expected_classifier_outcome: expected_outcome,
-        expected_label: ExecutionRoutingLabelV1::Execute,
+        expected_label: ExecutionRoutingLabel::Execute,
         expected_strategy: Some(expected_strategy),
-        expected_reason,
         near_boundary: false,
         durable_upgrade: None,
         expected_durable_upgrade_evidence: None,
@@ -100,7 +100,7 @@ async fn execution_routing_scores_decision_strategy_and_upgrade_separately_offli
     let upgrades = metrics
         .cases
         .iter()
-        .filter(|case| case.expected_reason == ExecutionRouteReason::DurableUpgrade)
+        .filter(|case| case.durable_upgrade_evidence_preserved.is_some())
         .collect::<Vec<_>>();
     assert_eq!(upgrades.len(), 40);
     assert!(upgrades.iter().all(|case| {
@@ -117,45 +117,40 @@ async fn execution_routing_costs_pin_catastrophe_and_strategy_direction_offline(
         response_case(
             "execute-respond-catastrophe",
             ExecutionStrategy::Durable,
-            ExecutionRouteReason::HighFanout,
-            ExecutionRouteClassifierLabelV1::Respond,
-            ExecutionRouteReason::SimpleResponse,
+            ExecutionRouteClassifierLabel::Respond,
+            None,
             9_500,
             ExecutionRouteClassifierOutcome::Accepted,
         ),
         response_case(
             "inline-durable-over-execution",
             ExecutionStrategy::Inline,
-            ExecutionRouteReason::BoundedInteractiveWork,
-            ExecutionRouteClassifierLabelV1::Execute,
-            ExecutionRouteReason::HighFanout,
+            ExecutionRouteClassifierLabel::Execute,
+            Some(ExecutionStrategy::Durable),
             9_500,
             ExecutionRouteClassifierOutcome::Accepted,
         ),
         response_case(
             "durable-inline-under-execution",
             ExecutionStrategy::Durable,
-            ExecutionRouteReason::HighFanout,
-            ExecutionRouteClassifierLabelV1::Execute,
-            ExecutionRouteReason::BoundedInteractiveWork,
+            ExecutionRouteClassifierLabel::Execute,
+            Some(ExecutionStrategy::Inline),
             9_500,
             ExecutionRouteClassifierOutcome::Accepted,
         ),
         response_case(
             "inline-inline-exact-match",
             ExecutionStrategy::Inline,
-            ExecutionRouteReason::BoundedInteractiveWork,
-            ExecutionRouteClassifierLabelV1::Execute,
-            ExecutionRouteReason::BoundedInteractiveWork,
+            ExecutionRouteClassifierLabel::Execute,
+            Some(ExecutionStrategy::Inline),
             9_500,
             ExecutionRouteClassifierOutcome::Accepted,
         ),
         response_case(
             "durable-durable-exact-match",
             ExecutionStrategy::Durable,
-            ExecutionRouteReason::HighFanout,
-            ExecutionRouteClassifierLabelV1::Execute,
-            ExecutionRouteReason::HighFanout,
+            ExecutionRouteClassifierLabel::Execute,
+            Some(ExecutionStrategy::Durable),
             9_500,
             ExecutionRouteClassifierOutcome::Accepted,
         ),
@@ -177,15 +172,14 @@ async fn execution_routing_costs_pin_catastrophe_and_strategy_direction_offline(
 }
 
 #[tokio::test]
-async fn execution_routing_low_confidence_durable_reason_falls_back_inline_offline() {
+async fn execution_routing_low_confidence_durable_strategy_falls_back_inline_offline() {
     // Pins: an untrusted Durable recommendation below the confidence boundary
     // uses the production Execute/Inline fallback instead of starting a run.
     let case = response_case(
         "low-confidence-durable-fallback",
         ExecutionStrategy::Inline,
-        ExecutionRouteReason::BoundedInteractiveWork,
-        ExecutionRouteClassifierLabelV1::Execute,
-        ExecutionRouteReason::HighFanout,
+        ExecutionRouteClassifierLabel::Execute,
+        Some(ExecutionStrategy::Durable),
         7_999,
         ExecutionRouteClassifierOutcome::LowConfidence,
     );
@@ -229,10 +223,11 @@ async fn execution_routing_rejects_corrupt_upgrade_evidence_and_classifier_setup
     assert!(score_routing_cases(&[corrupt_evidence]).await.is_err());
 
     let mut classifier_setup = upgrade;
-    classifier_setup.classifier = ExecutionRoutingClassifierFixtureV1::Response {
-        output: ExecutionRouteClassifierOutputV1 {
-            label: ExecutionRouteClassifierLabelV1::Execute,
-            reason: ExecutionRouteReason::HighFanout,
+    classifier_setup.classifier = ExecutionRoutingClassifierFixture::Response {
+        output: ExecutionRouteClassifierOutput {
+            label: ExecutionRouteClassifierLabel::Execute,
+            strategy: Some(ExecutionStrategy::Durable),
+            rationale: "The workflow must survive a delayed approval.".to_string(),
             confidence_bps: 9_500,
             missing_inputs: Vec::new(),
         },
@@ -254,7 +249,8 @@ async fn execution_routing_durable_upgrade_rejects_non_root_and_reuse_offline() 
         .find_map(|case| case.durable_upgrade.as_ref())
         .expect("corpus should contain a Durable-upgrade signal");
     let initial_route = ExecutionRouteDecision::Execute {
-        reason: ExecutionRouteReason::BoundedInteractiveWork,
+        strategy: ExecutionStrategy::Inline,
+        rationale: "The work can begin in a bounded interactive loop.".to_string(),
     };
 
     assert_eq!(

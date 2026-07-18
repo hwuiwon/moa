@@ -61,14 +61,6 @@ impl AnalyticsExporter {
             "UUID",
         )
         .await?;
-        self.repair_nullable_column(
-            "dim_execution_runs",
-            &columns,
-            "route_reason",
-            "''",
-            "LowCardinality(String)",
-        )
-        .await?;
         self.modify_column_if_needed("dim_execution_runs", &columns, "plan_revision", "UInt64")
             .await?;
 
@@ -76,6 +68,7 @@ impl AnalyticsExporter {
             ("contact_id", "Nullable(UUID)", "NULL"),
             ("initial_plan_hash", "String", "''"),
             ("active_plan_hash", "String", "''"),
+            ("route_rationale", "String", "''"),
             ("skill_template_ref", "Nullable(String)", "NULL"),
             ("skill_template_revision_uid", "Nullable(UUID)", "NULL"),
             ("requirement_count", "UInt64", "0"),
@@ -112,6 +105,7 @@ impl AnalyticsExporter {
             "user_id",
             "source_ref",
             "plan_hash",
+            "route_reason",
             "required_count",
             "satisfied_count",
             "error",
@@ -177,7 +171,7 @@ impl AnalyticsExporter {
     /// Rebuilds the Task 9 execution-task dimension because ClickHouse cannot
     /// rename `task_uid` while it belongs to the table sorting key.
     async fn rebuild_legacy_execution_task_schema(&self) -> Result<(), ExportError> {
-        const REBUILD_TABLE: &str = "dim_execution_tasks_v2_rebuild";
+        const REBUILD_TABLE: &str = "dim_execution_tasks_rebuild";
         const BACKUP_TABLE: &str = "dim_execution_tasks_task9_backup";
         let clickhouse = self.clickhouse.clone().with_database(&self.database);
 
@@ -537,7 +531,7 @@ const TABLE_DDL: &[&str] = &[
         initial_plan_hash String,
         active_plan_hash String,
         plan_revision UInt64,
-        route_reason LowCardinality(String),
+        route_rationale String,
         source_kind LowCardinality(String),
         skill_template_ref Nullable(String),
         skill_template_revision_uid Nullable(UUID),
@@ -681,7 +675,7 @@ const EXECUTION_RUN_COLUMNS: &[(&str, &str)] = &[
     ("initial_plan_hash", "String"),
     ("active_plan_hash", "String"),
     ("plan_revision", "UInt64"),
-    ("route_reason", "LowCardinality(String)"),
+    ("route_rationale", "String"),
     ("source_kind", "LowCardinality(String)"),
     ("skill_template_ref", "Nullable(String)"),
     ("skill_template_revision_uid", "Nullable(UUID)"),
@@ -763,7 +757,7 @@ mod tests {
                 ("initial_plan_hash", "String"),
                 ("active_plan_hash", "String"),
                 ("plan_revision", "UInt64"),
-                ("route_reason", "LowCardinality(String)"),
+                ("route_rationale", "String"),
                 ("source_kind", "LowCardinality(String)"),
                 ("skill_template_ref", "Nullable(String)"),
                 ("skill_template_revision_uid", "Nullable(UUID)"),

@@ -65,9 +65,8 @@ node in Durable Execute; no skill is required to define a plan.
   call. An ordinary user turn may first make one separate bounded auxiliary
   classifier call to select this route.
 - `Execute`: authorized work with a deterministic internal strategy. The
-  `bounded_interactive_work` reason selects `Inline`; explicit durable
-  execution, bulk collection, resumable work, high fan-out, approval/signal
-  waits, selected templates, and durable upgrades select `Durable`.
+  router supplies `Inline` or `Durable` explicitly; the accompanying rationale
+  is one bounded free-form sentence and never controls execution.
 - `NeedsInput`: one deterministic clarification with bounded missing fields.
 
 Inline Execute is the bounded root model/tool loop, including repeat and
@@ -106,7 +105,7 @@ authoring and import/export format. Optional `ui` metadata is non-semantic.
 
 | Boundary | Owner | Contract |
 |---|---|---|
-| `ExecutionRouter` | `moa-brain` | Uses trusted typed bypasses or at most one bounded auxiliary-model call to select Respond, Execute, or concrete missing input; a closed reason matrix derives optional Inline/Durable strategy and uncertainty falls back to Execute/Inline. |
+| `ExecutionRouter` | `moa-brain` | Uses trusted typed bypasses or at most one bounded auxiliary-model call to select Respond, Execute, or concrete missing input; Execute carries an explicit Inline/Durable strategy plus a bounded free-form rationale, and uncertainty falls back to Execute/Inline. |
 | `ExecutionPlanner` | `moa-brain` | Chooses a pinned skill template or asks the auxiliary model for a strict candidate plan and immutable goal contract. |
 | `ExecutionCompiler` | `moa-execution` | Validates, canonicalizes, estimates, and hashes initial plans and amendments against the capability catalog and remaining budget. |
 | `ExecutionProjection` | `moa-execution` | Supplies ordered node/task state to the pure scheduler; it contains no repository or provider handle. |

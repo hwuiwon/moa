@@ -18,7 +18,7 @@ faithfulness; reader/agent answer quality requires a separate execution lane.
 Durable-run contract fidelity, false-completion prevention, recovery, routing,
 and cost are owned by the
 [Execution Honesty Evaluation](eval/execution-honesty.md). Its typed
-`ExecutionEvalReportV1` is the only eval report in this repository that claims
+`ExecutionEvalReport` is the only eval report in this repository that claims
 execution success from persisted run/task state.
 
 Execution routing evaluation separates two boundaries. Public-route errors
@@ -126,7 +126,7 @@ Every run emits a `ScoreCard` with:
 runner observes a nonblank response and zero error events. It is a transport and
 response-delivery health signal. It does not prove requirement coverage,
 capability execution, or durable-run completion; those claims require the typed
-execution snapshot and invariants in `ExecutionEvalReportV1`.
+execution snapshot and invariants in `ExecutionEvalReport`.
 
 ## Budgets
 

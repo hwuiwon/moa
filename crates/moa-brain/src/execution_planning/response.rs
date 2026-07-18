@@ -2,7 +2,7 @@
 
 use moa_artifacts::execution_plan::ExecutionBudgetLimit;
 use moa_core::types::execution_planning::{
-    ExecutionPlanningAuditEnvelopeV1, ExecutionSourceProvenanceV1,
+    ExecutionPlanningAuditEnvelope, ExecutionSourceProvenance,
 };
 use moa_execution::compiler::CompiledExecution;
 use serde_json::Value;
@@ -15,7 +15,7 @@ pub struct AdmittedExecutionPlan {
     /// Canonical structured input used by the plan.
     pub run_input: Value,
     /// Closed source provenance persisted on the execution run.
-    pub source_provenance: ExecutionSourceProvenanceV1,
+    pub source_provenance: ExecutionSourceProvenance,
     /// Approved budget copied from the immutable planning context.
     pub approved_budget: ExecutionBudgetLimit,
 }
@@ -37,7 +37,7 @@ pub struct ExecutionPlanningResult {
     /// Closed planning result.
     pub kind: ExecutionPlanningResultKind,
     /// Ordered immutable planner and compiler audit envelopes.
-    pub audits: Vec<ExecutionPlanningAuditEnvelopeV1>,
+    pub audits: Vec<ExecutionPlanningAuditEnvelope>,
 }
 
 /// Closed result of amendment generation and validation.
@@ -64,5 +64,5 @@ pub struct ExecutionAmendmentPlanningResult {
     /// Closed amendment outcome.
     pub kind: ExecutionAmendmentPlanningResultKind,
     /// Ordered immutable audit envelopes.
-    pub audits: Vec<ExecutionPlanningAuditEnvelopeV1>,
+    pub audits: Vec<ExecutionPlanningAuditEnvelope>,
 }

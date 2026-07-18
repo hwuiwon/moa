@@ -52,9 +52,9 @@ MOA_DATABASE_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa \
 ```
 
 After migration, inspect `_refinery_schema_history` for version 337 and verify
-that `moa.execution_route_audit` has `decision`, nullable `strategy`, `reason`,
+that `moa.execution_route_audit` has `decision`, nullable `strategy`, `rationale`,
 and bounded provenance columns. Verify that `moa.execution_run` and
-`analytics.execution_run_fact` retain route reason/source and do not carry a
+`analytics.execution_run_fact` retain route rationale/source and do not carry a
 constant run-mode dimension. Run the focused clean-apply/idempotency database
 test before trusting a second apply.
 
@@ -123,7 +123,7 @@ Inspect sources in this order. Do not skip directly to logs or traces:
    completion-check evidence, budget/reservation totals, waiting reasons, and
    timestamps. A greater `wake_epoch` means the latest scheduling mutation is
    not yet acknowledged. Do not infer the execution path from a constant mode
-   field; use the persisted route reason/source and planning audit.
+   field; use the persisted route rationale/source and planning audit.
 2. Inspect active `moa.execution_task` rows: state, `task_id`, attempt,
    generation fence, reservation/actual values, and
    `reserved_at`/`started_at`/`completed_at`. A stale generation must never
@@ -279,7 +279,7 @@ reset cursors, or recapture a high water manually.
 
 For an interrupted schema upgrade, inspect
 `analytics.clickhouse_schema_upgrade_state` at key
-`execution_dimensions_v2`. The durable stages are:
+`execution_dimensions`. The durable stages are:
 
 ```text
 pending

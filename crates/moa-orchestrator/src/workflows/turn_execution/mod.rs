@@ -48,10 +48,10 @@ use moa_core::{
     types::context::ContextMessage,
     types::events_stream::EventRecord,
     types::execution_planning::{
-        DurableUpgradeSignal, DurableUpgradeTransitionError, ExecutionPlanningAuditEnvelopeV1,
-        ExecutionPlanningAuditPayloadV1, ExecutionRouteDecision, ExecutionRouteReason,
-        ExecutionRouteStage, ExecutionRouteUsageV1, ExecutionRoutingResultV1, ExecutionStrategy,
-        durable_upgrade_transition, execution_planning_dedupe_key,
+        DurableUpgradeSignal, DurableUpgradeTransitionError, ExecutionPlanningAuditEnvelope,
+        ExecutionPlanningAuditPayload, ExecutionRouteDecision, ExecutionRouteStage,
+        ExecutionRouteUsage, ExecutionRoutingResult, ExecutionStrategy, durable_upgrade_transition,
+        execution_planning_dedupe_key,
     },
     types::identifiers::{ModelId, SessionId},
     types::model::ModelCapabilities,
@@ -193,18 +193,14 @@ impl DurableUpgradeGuard {
     fn allows_tool_signal(&self) -> bool {
         self.has_root_user_origin
             && !self.consumed
-            && matches!(
-                &self.initial_route,
-                ExecutionRouteDecision::Execute { reason }
-                    if reason.strategy() == Some(ExecutionStrategy::Inline)
-            )
+            && self.initial_route.strategy() == Some(ExecutionStrategy::Inline)
     }
 
     fn consume(
         &mut self,
         originating_objective: &str,
         signal: &DurableUpgradeSignal,
-    ) -> Result<ExecutionRoutingResultV1, DurableUpgradeTransitionError> {
+    ) -> Result<ExecutionRoutingResult, DurableUpgradeTransitionError> {
         let route = durable_upgrade_transition(
             originating_objective,
             &self.initial_route,
@@ -337,7 +333,7 @@ async fn execute_turn_inside_workflow(
     };
     let route = if execution_synthesis_turn {
         ExecutionRouteDecision::Respond {
-            reason: ExecutionRouteReason::SimpleResponse,
+            rationale: "This turn synthesizes the completed durable execution.".to_string(),
         }
     } else {
         route_result
@@ -348,8 +344,10 @@ async fn execute_turn_inside_workflow(
     };
     let durable_route = matches!(
         &route,
-        ExecutionRouteDecision::Execute { reason }
-            if reason.strategy() == Some(ExecutionStrategy::Durable)
+        ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Durable,
+            ..
+        }
     );
     if !has_user_message_origin(request, user_sequence_num)
         && (request.execution_template.is_some() || durable_route)
@@ -386,9 +384,10 @@ async fn execute_turn_inside_workflow(
                 post_outcome_assessment: None,
             });
         }
-        ExecutionRouteDecision::Execute { reason }
-            if reason.strategy() == Some(ExecutionStrategy::Durable) =>
-        {
+        ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Durable,
+            rationale,
+        } => {
             driver_progress::initialize_non_loop_progress(ctx, route.clone());
             return execute_durable_admission(
                 workflow,
@@ -397,18 +396,16 @@ async fn execute_turn_inside_workflow(
                 &meta,
                 session_id,
                 user_sequence_num,
-                *reason,
+                rationale.clone(),
                 None,
             )
             .await;
         }
         ExecutionRouteDecision::Respond { .. }
         | ExecutionRouteDecision::Execute {
-            reason: ExecutionRouteReason::BoundedInteractiveWork,
+            strategy: ExecutionStrategy::Inline,
+            ..
         } => {}
-        ExecutionRouteDecision::Execute { .. } => {
-            return Err(TerminalError::new("execution route has no model-loop strategy").into());
-        }
     }
 
     let session_limits = workflow.session_limits();
@@ -543,7 +540,7 @@ async fn execute_turn_inside_workflow(
                     &meta,
                     session_id,
                     user_sequence_num,
-                    ExecutionRouteReason::DurableUpgrade,
+                    upgrade_route.decision.rationale().to_string(),
                     Some(signal),
                 )
                 .await;
@@ -664,16 +661,12 @@ fn durable_upgrade_rejection(rejection: DurableUpgradeTransitionError) -> Handle
             409,
             "Durable upgrade objective differs from the persisted user objective".to_string(),
         ),
-        DurableUpgradeTransitionError::UnsupportedReason => (
-            422,
-            "Durable upgrade reason is not a supported discovered Durable shape".to_string(),
-        ),
         DurableUpgradeTransitionError::InvalidSignal(error) => (422, error.to_string()),
     };
     TerminalError::new_with_code(code, message).into()
 }
 
-fn apply_route_cost(result: &mut ExecutionRoutingResultV1) -> Result<(), HandlerError> {
+fn apply_route_cost(result: &mut ExecutionRoutingResult) -> Result<(), HandlerError> {
     let Some(model) = result.provenance.provider_model.as_deref() else {
         return Ok(());
     };
@@ -683,7 +676,7 @@ fn apply_route_cost(result: &mut ExecutionRoutingResultV1) -> Result<(), Handler
     Ok(())
 }
 
-fn token_usage_from_route(usage: ExecutionRouteUsageV1) -> Result<TokenUsage, HandlerError> {
+fn token_usage_from_route(usage: ExecutionRouteUsage) -> Result<TokenUsage, HandlerError> {
     let convert = |value, field| {
         usize::try_from(value).map_err(|_| {
             HandlerError::from(TerminalError::new_with_code(
@@ -708,15 +701,15 @@ async fn route_audit_envelope(
     meta: &SessionMeta,
     session_id: SessionId,
     originating_sequence: u64,
-    route: &ExecutionRoutingResultV1,
+    route: &ExecutionRoutingResult,
     stage: ExecutionRouteStage,
-) -> Result<ExecutionPlanningAuditEnvelopeV1, HandlerError> {
+) -> Result<ExecutionPlanningAuditEnvelope, HandlerError> {
     let accepted_at_operation = match stage {
         ExecutionRouteStage::Initial => "execution_route_initial_accepted_at",
         ExecutionRouteStage::DurableUpgrade => "execution_route_durable_upgrade_accepted_at",
     };
     let accepted_at = durable_utc_now(ctx, accepted_at_operation).await?;
-    Ok(ExecutionPlanningAuditEnvelopeV1::route(
+    Ok(ExecutionPlanningAuditEnvelope::route(
         meta.tenant_id,
         meta.contact.as_ref().map(|contact| contact.contact_id),
         session_id,
@@ -731,7 +724,7 @@ async fn route_audit_envelope(
 async fn persist_planning_audit(
     workflow: &TurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
-    envelope: ExecutionPlanningAuditEnvelopeV1,
+    envelope: ExecutionPlanningAuditEnvelope,
 ) -> Result<(), HandlerError> {
     let scope = envelope.contact_id.map_or(
         ExecutionScope::Tenant {
@@ -744,11 +737,11 @@ async fn persist_planning_audit(
     );
     let durable_step_suffix = execution_planning_dedupe_key(&envelope)
         .map_err(|error| TerminalError::new_with_code(422, error.to_string()))?
-        .strip_prefix("execution-planning-v1:")
+        .strip_prefix("execution-planning:")
         .unwrap_or("audit")
         .to_string();
     match &envelope.payload {
-        ExecutionPlanningAuditPayloadV1::Route { .. } => {
+        ExecutionPlanningAuditPayload::Route { .. } => {
             let pool = workflow.session_store.pool().clone();
             let audit = envelope.clone();
             let result = ctx
@@ -767,7 +760,7 @@ async fn persist_planning_audit(
                 return Err(planning_audit_conflict());
             }
         }
-        ExecutionPlanningAuditPayloadV1::PlannerCall { .. } => {
+        ExecutionPlanningAuditPayload::PlannerCall { .. } => {
             let pool = workflow.session_store.pool().clone();
             let audit = envelope.clone();
             let result = ctx
@@ -786,7 +779,7 @@ async fn persist_planning_audit(
                 return Err(planning_audit_conflict());
             }
         }
-        ExecutionPlanningAuditPayloadV1::Compile { .. } => {
+        ExecutionPlanningAuditPayload::Compile { .. } => {
             let pool = workflow.session_store.pool().clone();
             let audit = envelope;
             let result = ctx
@@ -829,7 +822,7 @@ async fn execute_durable_admission(
     meta: &SessionMeta,
     session_id: SessionId,
     originating_user_sequence_num: u64,
-    route_reason: moa_core::types::execution_planning::ExecutionRouteReason,
+    route_rationale: String,
     durable_upgrade: Option<DurableUpgradeSignal>,
 ) -> Result<BodyOutcome, HandlerError> {
     if !has_user_message_origin(request, originating_user_sequence_num) {
@@ -878,7 +871,7 @@ async fn execute_durable_admission(
             config: workflow.config.execution.clone(),
             now: planning_now,
         },
-        route_reason,
+        route_rationale,
     )
     .await
     .map_err(crate::workflows::errors::moa_error_to_handler_error)?;
@@ -1426,12 +1419,12 @@ mod tests {
             execution_template: None,
         };
         let inline_route = ExecutionRouteDecision::Execute {
-            reason:
-                moa_core::types::execution_planning::ExecutionRouteReason::BoundedInteractiveWork,
+            strategy: ExecutionStrategy::Inline,
+            rationale: "The inspection can begin in a bounded interactive loop.".to_string(),
         };
         let signal = moa_core::types::execution_planning::DurableUpgradeSignal {
             objective: request.user_message.clone(),
-            reason: moa_core::types::execution_planning::ExecutionRouteReason::HighFanout,
+            rationale: "The discovered account workflow must continue durably.".to_string(),
             evidence: vec![
                 moa_core::types::execution_planning::ExecutionPlanningEvidence {
                     source: "tool:inventory".to_string(),
@@ -1448,7 +1441,8 @@ mod tests {
                 .expect("authorized first transition should produce a route")
                 .decision,
             ExecutionRouteDecision::Execute {
-                reason: ExecutionRouteReason::DurableUpgrade,
+                strategy: ExecutionStrategy::Durable,
+                rationale: signal.rationale.clone(),
             }
         );
         assert!(!guard.allows_tool_signal());
@@ -1479,7 +1473,8 @@ mod tests {
 
         request.trigger = TurnTrigger::UserMessage;
         let durable_route = ExecutionRouteDecision::Execute {
-            reason: moa_core::types::execution_planning::ExecutionRouteReason::HighFanout,
+            strategy: ExecutionStrategy::Durable,
+            rationale: "The account workflow must run durably.".to_string(),
         };
         assert!(
             !DurableUpgradeGuard::new(&request, 1, &durable_route).allows_tool_signal(),

@@ -17,9 +17,9 @@ use moa_core::{
     types::{
         action_policy::ActionRuleScope,
         execution_planning::{
-            ExecutionAuditViolationV1, ExecutionCompileOutcome, ExecutionCompileSource,
-            ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
-            bounded_audit_report, execution_planning_hash,
+            ExecutionAuditViolation, ExecutionCompileOutcome, ExecutionCompileSource,
+            ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload, bounded_audit_report,
+            execution_planning_hash,
         },
         experience::LearningCandidate,
         identifiers::TenantId,
@@ -937,7 +937,7 @@ struct SkillTemplateCompileRequest<'a> {
 }
 
 struct SkillTemplateCompile {
-    audit: ExecutionPlanningAuditEnvelopeV1,
+    audit: ExecutionPlanningAuditEnvelope,
     accepted: bool,
 }
 
@@ -974,7 +974,7 @@ fn compile_skill_execution_template(
     let candidate_bytes = artifact_canonical_json_bytes(&candidate)
         .map_err(|error| MoaError::SerializationError(error.to_string()))?;
     let candidate_hash =
-        execution_planning_hash("moa.execution.compile-candidate.v1", &candidate_bytes);
+        execution_planning_hash("moa.execution.compile-candidate", &candidate_bytes);
     let approved_budget = ExecutionBudgetLimit {
         max_cost_microusd: Some(request.config.execution.max_cost_microusd),
         max_tokens: Some(request.config.execution.max_tokens),
@@ -1051,13 +1051,13 @@ fn compile_skill_execution_template(
         .map(|compiled| compiled.plan.plan_hash.to_string());
     let accepted = compile_outcome == ExecutionCompileOutcome::Accepted;
     Ok(SkillTemplateCompile {
-        audit: ExecutionPlanningAuditEnvelopeV1 {
+        audit: ExecutionPlanningAuditEnvelope {
             schema_version: 1,
             tenant_id: request.tenant_id,
             contact_id: None,
             session_id: None,
             originating_sequence: None,
-            payload: ExecutionPlanningAuditPayloadV1::Compile {
+            payload: ExecutionPlanningAuditPayload::Compile {
                 source,
                 operation_key: request.operation_key.to_string(),
                 run_uid: None,
@@ -1116,7 +1116,7 @@ fn compiler_report_json(outcome: &CompileExecutionOutcome) -> Result<String> {
         .report
         .issues
         .iter()
-        .map(|issue| ExecutionAuditViolationV1 {
+        .map(|issue| ExecutionAuditViolation {
             code: issue.code.clone(),
             path: issue.path.clone(),
             message: issue.message.clone(),
@@ -1189,8 +1189,8 @@ mod tests {
         config::MoaConfig,
         types::{
             execution_planning::{
-                ExecutionAuditReportV1, ExecutionCompileOutcome, ExecutionCompileSource,
-                ExecutionPlanningAuditPayloadV1,
+                ExecutionAuditReport, ExecutionCompileOutcome, ExecutionCompileSource,
+                ExecutionPlanningAuditPayload,
             },
             identifiers::TenantId,
         },
@@ -1382,7 +1382,7 @@ mod tests {
             compile_outcome_and_candidate_hash(&compiled).0,
             ExecutionCompileOutcome::NeedsInput
         );
-        let ExecutionPlanningAuditPayloadV1::Compile {
+        let ExecutionPlanningAuditPayload::Compile {
             validation_report,
             final_plan_hash,
             ..
@@ -1391,7 +1391,7 @@ mod tests {
             panic!("input ambiguity must emit a compile audit");
         };
         assert_eq!(final_plan_hash, &None);
-        let ExecutionAuditReportV1::Compiler { violations, .. } =
+        let ExecutionAuditReport::Compiler { violations, .. } =
             serde_json::from_str(validation_report).expect("strict compiler report parses")
         else {
             panic!("input ambiguity must emit a compiler report");
@@ -1467,7 +1467,7 @@ mod tests {
     fn compile_outcome_and_candidate_hash(
         compiled: &super::SkillTemplateCompile,
     ) -> (ExecutionCompileOutcome, String) {
-        let ExecutionPlanningAuditPayloadV1::Compile {
+        let ExecutionPlanningAuditPayload::Compile {
             outcome,
             candidate_hash,
             ..
@@ -1584,7 +1584,7 @@ mod tests {
         assert_eq!(compiled.audit.contact_id, None);
         assert_eq!(compiled.audit.session_id, None);
         assert_eq!(compiled.audit.originating_sequence, None);
-        let ExecutionPlanningAuditPayloadV1::Compile {
+        let ExecutionPlanningAuditPayload::Compile {
             source,
             operation_key: persisted_key,
             outcome,
@@ -1602,9 +1602,9 @@ mod tests {
         assert_eq!(candidate_hash.len(), 64);
         assert!(final_plan_hash.is_some());
         assert!(matches!(
-            serde_json::from_str::<ExecutionAuditReportV1>(&validation_report)
+            serde_json::from_str::<ExecutionAuditReport>(&validation_report)
                 .expect("compiler report stays strict"),
-            ExecutionAuditReportV1::Compiler { .. }
+            ExecutionAuditReport::Compiler { .. }
         ));
     }
 

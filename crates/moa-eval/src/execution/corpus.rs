@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
 use super::{
-    contract::{ExecutionContractCaseV1, validate_contract_case},
-    live::{ExecutionTaskQualityCaseV1, validate_task_quality_corpus},
-    routing::{ExecutionRoutingCaseV1, ExecutionRoutingLabelV1, validate_routing_case},
+    contract::{ExecutionContractCase, validate_contract_case},
+    live::{ExecutionTaskQualityCase, validate_task_quality_corpus},
+    routing::{ExecutionRoutingCase, ExecutionRoutingLabel, validate_routing_case},
 };
 use moa_core::types::execution_planning::{ExecutionRouteClassifierOutcome, ExecutionStrategy};
 
@@ -22,7 +22,7 @@ const CONTRACT_CASE_COUNT_MIN: usize = 80;
 /// One checked-in corpus file declared by the execution manifest.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionCorpusFileV1 {
+pub struct ExecutionCorpusFile {
     /// Relative path from the manifest directory.
     pub path: PathBuf,
     /// Exact lowercase SHA-256 of the file bytes.
@@ -34,32 +34,32 @@ pub struct ExecutionCorpusFileV1 {
 /// Strict manifest for the routing and recorded-contract corpora.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionCorpusManifestV1 {
+pub struct ExecutionCorpusManifest {
     /// Manifest schema version, fixed at `1`.
     pub schema_version: u8,
     /// Routing corpus file contract.
-    pub routing: ExecutionCorpusFileV1,
+    pub routing: ExecutionCorpusFile,
     /// Recorded contract corpus file contract.
-    pub contract: ExecutionCorpusFileV1,
+    pub contract: ExecutionCorpusFile,
     /// Sampled live task-quality corpus file contract.
-    pub task_quality: ExecutionCorpusFileV1,
+    pub task_quality: ExecutionCorpusFile,
 }
 
 /// Fully loaded and validated execution corpus package.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ExecutionCorpusV1 {
+pub struct ExecutionCorpus {
     /// Strict checked-in manifest.
-    pub manifest: ExecutionCorpusManifestV1,
+    pub manifest: ExecutionCorpusManifest,
     /// Exactly 320 labeled routing cases.
-    pub routing_cases: Vec<ExecutionRoutingCaseV1>,
+    pub routing_cases: Vec<ExecutionRoutingCase>,
     /// At least 80 strict recorded contract cases.
-    pub contract_cases: Vec<ExecutionContractCaseV1>,
+    pub contract_cases: Vec<ExecutionContractCase>,
     /// Exactly 20 sampled live task-quality cases.
-    pub task_quality_cases: Vec<ExecutionTaskQualityCaseV1>,
+    pub task_quality_cases: Vec<ExecutionTaskQualityCase>,
 }
 
 /// Loads, byte-verifies, parses, and validates one execution corpus package.
-pub async fn load_execution_corpus(manifest_path: &Path) -> Result<ExecutionCorpusV1> {
+pub async fn load_execution_corpus(manifest_path: &Path) -> Result<ExecutionCorpus> {
     let manifest_bytes = tokio::fs::read(manifest_path)
         .await
         .map_err(|source| EvalError::Io {
@@ -72,13 +72,12 @@ pub async fn load_execution_corpus(manifest_path: &Path) -> Result<ExecutionCorp
             manifest_path.display()
         ))
     })?;
-    let manifest =
-        toml::from_str::<ExecutionCorpusManifestV1>(manifest_text).map_err(|source| {
-            EvalError::ParseToml {
-                path: manifest_path.to_path_buf(),
-                source,
-            }
-        })?;
+    let manifest = toml::from_str::<ExecutionCorpusManifest>(manifest_text).map_err(|source| {
+        EvalError::ParseToml {
+            path: manifest_path.to_path_buf(),
+            source,
+        }
+    })?;
     validate_manifest(&manifest)?;
     let root = manifest_path.parent().ok_or_else(|| {
         invalid_config("execution corpus manifest has no parent directory".to_string())
@@ -89,10 +88,10 @@ pub async fn load_execution_corpus(manifest_path: &Path) -> Result<ExecutionCorp
     let routing_bytes = read_verified(&routing_path, &manifest.routing).await?;
     let contract_bytes = read_verified(&contract_path, &manifest.contract).await?;
     let task_quality_bytes = read_verified(&task_quality_path, &manifest.task_quality).await?;
-    let routing_cases = parse_jsonl::<ExecutionRoutingCaseV1>(&routing_path, &routing_bytes)?;
-    let contract_cases = parse_jsonl::<ExecutionContractCaseV1>(&contract_path, &contract_bytes)?;
+    let routing_cases = parse_jsonl::<ExecutionRoutingCase>(&routing_path, &routing_bytes)?;
+    let contract_cases = parse_jsonl::<ExecutionContractCase>(&contract_path, &contract_bytes)?;
     let task_quality_cases =
-        parse_jsonl::<ExecutionTaskQualityCaseV1>(&task_quality_path, &task_quality_bytes)?;
+        parse_jsonl::<ExecutionTaskQualityCase>(&task_quality_path, &task_quality_bytes)?;
     validate_routing_corpus(&routing_cases, &manifest.routing)?;
     validate_contract_corpus(&contract_cases, &manifest.contract)?;
     validate_count(
@@ -101,7 +100,7 @@ pub async fn load_execution_corpus(manifest_path: &Path) -> Result<ExecutionCorp
         manifest.task_quality.count,
     )?;
     validate_task_quality_corpus(&task_quality_cases)?;
-    Ok(ExecutionCorpusV1 {
+    Ok(ExecutionCorpus {
         manifest,
         routing_cases,
         contract_cases,
@@ -109,7 +108,7 @@ pub async fn load_execution_corpus(manifest_path: &Path) -> Result<ExecutionCorp
     })
 }
 
-fn validate_manifest(manifest: &ExecutionCorpusManifestV1) -> Result<()> {
+fn validate_manifest(manifest: &ExecutionCorpusManifest) -> Result<()> {
     if manifest.schema_version != EXECUTION_CORPUS_MANIFEST_SCHEMA_VERSION {
         return Err(invalid_config(format!(
             "execution corpus manifest version {} is unsupported",
@@ -131,7 +130,7 @@ fn validate_manifest(manifest: &ExecutionCorpusManifestV1) -> Result<()> {
     Ok(())
 }
 
-async fn read_verified(path: &Path, file: &ExecutionCorpusFileV1) -> Result<Vec<u8>> {
+async fn read_verified(path: &Path, file: &ExecutionCorpusFile) -> Result<Vec<u8>> {
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|source| EvalError::Io {
@@ -175,8 +174,8 @@ fn parse_jsonl<T: DeserializeOwned>(path: &Path, bytes: &[u8]) -> Result<Vec<T>>
 }
 
 fn validate_routing_corpus(
-    cases: &[ExecutionRoutingCaseV1],
-    file: &ExecutionCorpusFileV1,
+    cases: &[ExecutionRoutingCase],
+    file: &ExecutionCorpusFile,
 ) -> Result<()> {
     validate_count("routing", cases.len(), file.count)?;
     if cases.len() != ROUTING_CASE_COUNT {
@@ -200,9 +199,9 @@ fn validate_routing_corpus(
             )));
         }
         let label = match case.expected_label {
-            ExecutionRoutingLabelV1::Respond => "respond",
-            ExecutionRoutingLabelV1::Execute => "execute",
-            ExecutionRoutingLabelV1::NeedsInput => "needs_input",
+            ExecutionRoutingLabel::Respond => "respond",
+            ExecutionRoutingLabel::Execute => "execute",
+            ExecutionRoutingLabel::NeedsInput => "needs_input",
         };
         *labels.entry(label).or_default() += 1;
         if let Some(strategy) = case.expected_strategy {
@@ -218,7 +217,7 @@ fn validate_routing_corpus(
             case.expected_classifier_outcome,
             ExecutionRouteClassifierOutcome::Accepted | ExecutionRouteClassifierOutcome::NotCalled
         ));
-        motivating_case |= case.expected_label == ExecutionRoutingLabelV1::Execute
+        motivating_case |= case.expected_label == ExecutionRoutingLabel::Execute
             && case.expected_strategy == Some(ExecutionStrategy::Durable)
             && case
                 .tags
@@ -249,8 +248,8 @@ fn validate_routing_corpus(
 }
 
 fn validate_contract_corpus(
-    cases: &[ExecutionContractCaseV1],
-    file: &ExecutionCorpusFileV1,
+    cases: &[ExecutionContractCase],
+    file: &ExecutionCorpusFile,
 ) -> Result<()> {
     validate_count("contract", cases.len(), file.count)?;
     if cases.len() < CONTRACT_CASE_COUNT_MIN {

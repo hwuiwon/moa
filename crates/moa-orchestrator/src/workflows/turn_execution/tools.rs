@@ -7,7 +7,7 @@ use moa_core::{
     types::completion::ToolCallContent,
     types::completion::ToolInvocation,
     types::execution_planning::{
-        DurableUpgradeSignal, ExecutionPlanningEvidence, ExecutionRouteReason,
+        DurableUpgradeSignal, ExecutionPlanningEvidence, ExecutionStrategy,
     },
     types::identifiers::{SessionId, ToolCallId},
     types::session::SessionMeta,
@@ -120,7 +120,8 @@ enum InlineToolResultRoute {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DiscoveredExecutionShape {
-    reason: ExecutionRouteReason,
+    strategy: ExecutionStrategy,
+    rationale: String,
     summary: String,
     value: serde_json::Value,
 }
@@ -149,21 +150,14 @@ fn durable_upgrade_from_tool_result(
             ));
         }
     };
-    if !matches!(
-        discovered.reason,
-        ExecutionRouteReason::BulkCollection
-            | ExecutionRouteReason::DurableOrResumable
-            | ExecutionRouteReason::HighFanout
-            | ExecutionRouteReason::ApprovalOrSignal
-    ) {
+    if discovered.strategy != ExecutionStrategy::Durable {
         return InlineToolResultRoute::Unsupported(
-            "tool result execution_shape reason is not a newly discovered Durable shape"
-                .to_string(),
+            "tool result execution_shape strategy is not Durable".to_string(),
         );
     }
     let signal = DurableUpgradeSignal {
         objective: objective.to_string(),
-        reason: discovered.reason,
+        rationale: discovered.rationale,
         evidence: vec![ExecutionPlanningEvidence {
             source: format!("tool:{}", invocation.name),
             summary: discovered.summary,
@@ -538,7 +532,8 @@ mod tests {
             is_error: false,
             structured: Some(json!({
                 "execution_shape": {
-                    "reason": "high_fanout",
+                    "strategy": "durable",
+                    "rationale": "The discovered account workflow must continue durably.",
                     "summary": "inventory contains 420 independently processable accounts",
                     "value": discovered
                 }
@@ -556,8 +551,8 @@ mod tests {
         };
         assert_eq!(signal.objective, objective);
         assert_eq!(
-            signal.reason,
-            moa_core::types::execution_planning::ExecutionRouteReason::HighFanout
+            signal.rationale,
+            "The discovered account workflow must continue durably."
         );
         assert_eq!(signal.evidence.len(), 1);
         assert_eq!(signal.evidence[0].source, "tool:tenant_inventory");
@@ -588,7 +583,8 @@ mod tests {
             "shape",
             json!({
                 "execution_shape": {
-                    "reason": "high_fanout",
+                    "strategy": "durable",
+                    "rationale": "The discovered work must continue durably.",
                     "summary": "many independent items",
                     "value": {"count": 500}
                 }
@@ -611,7 +607,7 @@ mod tests {
     #[test]
     fn inline_upgrade_rejects_non_durable_or_malformed_execution_shapes() {
         // Pins: the strict execution_shape contract admits only newly discovered Durable
-        // reasons and rejects malformed evidence instead of widening authority.
+        // strategies and rejects malformed evidence instead of widening authority.
         let invocation = ToolInvocation {
             id: None,
             name: "search".to_string(),
@@ -622,7 +618,8 @@ mod tests {
                 "inline",
                 json!({
                     "execution_shape": {
-                        "reason": "bounded_interactive_work",
+                        "strategy": "inline",
+                        "rationale": "The work remains bounded.",
                         "summary": "still bounded",
                         "value": {"count": 2}
                     }
@@ -633,7 +630,8 @@ mod tests {
                 "malformed",
                 json!({
                     "execution_shape": {
-                        "reason": "high_fanout",
+                        "strategy": "durable",
+                        "rationale": "The work must continue durably.",
                         "summary": "missing value"
                     }
                 }),

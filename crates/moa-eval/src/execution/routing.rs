@@ -7,7 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use moa_brain::execution_planning::{
-    EXECUTION_ROUTER_RESPONSE_MAX_BYTES, ExecutionRouteClassifierOutputV1, ExecutionRoutingInput,
+    EXECUTION_ROUTER_RESPONSE_MAX_BYTES, ExecutionRouteClassifierOutput, ExecutionRoutingInput,
     route_execution,
 };
 use moa_core::{
@@ -19,7 +19,7 @@ use moa_core::{
         },
         execution_planning::{
             DurableUpgradeSignal, ExecutionPlanningEvidence, ExecutionRouteClassifierOutcome,
-            ExecutionRouteDecision, ExecutionRouteReason, ExecutionStrategy,
+            ExecutionRouteDecision, ExecutionRouteSource, ExecutionStrategy,
             durable_upgrade_transition,
         },
         identifiers::ModelId,
@@ -30,12 +30,12 @@ use moa_eval_core::{EvalError, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use super::report::ExecutionEvalAggregateMetricsV1;
+use super::report::ExecutionEvalAggregateMetrics;
 
 /// Expected closed route label for one corpus case.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutionRoutingLabelV1 {
+pub enum ExecutionRoutingLabel {
     /// Direct model response without tools.
     Respond,
     /// Authorized work using a deterministic internal strategy.
@@ -47,11 +47,11 @@ pub enum ExecutionRoutingLabelV1 {
 /// Scripted provider behavior used to exercise the production classifier path offline.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ExecutionRoutingClassifierFixtureV1 {
+pub enum ExecutionRoutingClassifierFixture {
     /// Return one strict typed classifier response with fixed token usage and cost.
     Response {
         /// Strict classifier payload serialized by the scripted provider.
-        output: ExecutionRouteClassifierOutputV1,
+        output: ExecutionRouteClassifierOutput,
         /// Normalized provider usage returned with the response.
         usage: TokenUsage,
         /// Provider-owning boundary cost applied after routing.
@@ -69,7 +69,7 @@ pub enum ExecutionRoutingClassifierFixtureV1 {
     NotCalled,
 }
 
-impl ExecutionRoutingClassifierFixtureV1 {
+impl ExecutionRoutingClassifierFixture {
     const fn cost_microusd(&self) -> u64 {
         match self {
             Self::Response { cost_microusd, .. } => *cost_microusd,
@@ -85,7 +85,7 @@ impl ExecutionRoutingClassifierFixtureV1 {
 /// One strict labeled routing case.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionRoutingCaseV1 {
+pub struct ExecutionRoutingCase {
     /// Case schema version, fixed at `1`.
     pub schema_version: u8,
     /// Stable unique case identifier.
@@ -97,15 +97,13 @@ pub struct ExecutionRoutingCaseV1 {
     /// Whether recent bounded session metadata identifies a concrete target.
     pub has_recent_target: bool,
     /// Deterministic scripted classifier behavior.
-    pub classifier: ExecutionRoutingClassifierFixtureV1,
+    pub classifier: ExecutionRoutingClassifierFixture,
     /// Exact classifier or trusted-bypass outcome expected from production routing.
     pub expected_classifier_outcome: ExecutionRouteClassifierOutcome,
     /// Human-adjudicated expected route label.
-    pub expected_label: ExecutionRoutingLabelV1,
+    pub expected_label: ExecutionRoutingLabel,
     /// Human-adjudicated strategy, present only for Execute.
     pub expected_strategy: Option<ExecutionStrategy>,
-    /// Human-adjudicated expected closed route reason.
-    pub expected_reason: ExecutionRouteReason,
     /// Whether this is a deliberately ambiguous Execute/Inline boundary example.
     pub near_boundary: bool,
     /// Optional typed Inline-to-Durable upgrade input.
@@ -119,26 +117,22 @@ pub struct ExecutionRoutingCaseV1 {
 /// One production-router result for a labeled case.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionRoutingCaseResultV1 {
+pub struct ExecutionRoutingCaseResult {
     /// Stable corpus case identifier.
     pub case_id: String,
     /// Expected route label.
-    pub expected_label: ExecutionRoutingLabelV1,
+    pub expected_label: ExecutionRoutingLabel,
     /// Observed production route label.
-    pub observed_label: ExecutionRoutingLabelV1,
+    pub observed_label: ExecutionRoutingLabel,
     /// Expected deterministic strategy, present only for Execute.
     pub expected_strategy: Option<ExecutionStrategy>,
     /// Observed deterministic strategy, present only for Execute.
     pub observed_strategy: Option<ExecutionStrategy>,
-    /// Expected closed route reason.
-    pub expected_reason: ExecutionRouteReason,
-    /// Observed closed route reason.
-    pub observed_reason: ExecutionRouteReason,
     /// Observed classifier or trusted-bypass outcome.
     pub observed_classifier_outcome: ExecutionRouteClassifierOutcome,
     /// Number of scripted provider calls made by the production router.
     pub classifier_calls: u64,
-    /// Whether label and reason both match.
+    /// Whether route, strategy, provenance, and upgrade evidence all match.
     pub passed: bool,
     /// Asymmetric cost for the public route-kind prediction.
     pub routing_cost: u64,
@@ -151,10 +145,10 @@ pub struct ExecutionRoutingCaseResultV1 {
 /// Aggregate routing metrics with exact denominators.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionRoutingMetricsV1 {
+pub struct ExecutionRoutingMetrics {
     /// Number of corpus cases.
     pub total_cases: u64,
-    /// Number whose expected label and reason matched.
+    /// Number whose expected route and strategy matched.
     pub passed_cases: u64,
     /// Total asymmetric public route cost.
     pub weighted_routing_cost_total: u64,
@@ -191,12 +185,12 @@ pub struct ExecutionRoutingMetricsV1 {
     /// Mean classifier duration in milliseconds per classifier-attempted route.
     pub classifier_latency_ms_per_routed_turn: f64,
     /// Ordered case-level results.
-    pub cases: Vec<ExecutionRoutingCaseResultV1>,
+    pub cases: Vec<ExecutionRoutingCaseResult>,
 }
 
-impl ExecutionRoutingMetricsV1 {
+impl ExecutionRoutingMetrics {
     /// Copies routing metrics into the common execution report dashboard fields.
-    pub fn apply_to_report_metrics(&self, metrics: &mut ExecutionEvalAggregateMetricsV1) {
+    pub fn apply_to_report_metrics(&self, metrics: &mut ExecutionEvalAggregateMetrics) {
         metrics.weighted_routing_cost = Some(self.weighted_routing_cost_mean);
         metrics.weighted_strategy_cost = Some(self.weighted_strategy_cost_mean);
         metrics.respond_on_execute_rate = Some(self.respond_on_execute_rate);
@@ -218,12 +212,12 @@ impl ExecutionRoutingMetricsV1 {
 }
 
 struct ScriptedRoutingProvider {
-    fixture: ExecutionRoutingClassifierFixtureV1,
+    fixture: ExecutionRoutingClassifierFixture,
     calls: AtomicU64,
 }
 
 impl ScriptedRoutingProvider {
-    fn new(fixture: ExecutionRoutingClassifierFixtureV1) -> Self {
+    fn new(fixture: ExecutionRoutingClassifierFixture) -> Self {
         Self {
             fixture,
             calls: AtomicU64::new(0),
@@ -251,7 +245,7 @@ impl LLMProvider for ScriptedRoutingProvider {
     ) -> moa_core::error::Result<CompletionStream> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         match &self.fixture {
-            ExecutionRoutingClassifierFixtureV1::Response { output, usage, .. } => {
+            ExecutionRoutingClassifierFixture::Response { output, usage, .. } => {
                 let text = serde_json::to_string(output).map_err(|error| {
                     moa_core::error::MoaError::SerializationError(error.to_string())
                 })?;
@@ -259,12 +253,12 @@ impl LLMProvider for ScriptedRoutingProvider {
                     text, *usage,
                 )))
             }
-            ExecutionRoutingClassifierFixtureV1::ProviderError => {
+            ExecutionRoutingClassifierFixture::ProviderError => {
                 Err(moa_core::error::MoaError::ProviderError(
                     "scripted route provider failure".to_string(),
                 ))
             }
-            ExecutionRoutingClassifierFixtureV1::StreamError => {
+            ExecutionRoutingClassifierFixture::StreamError => {
                 let (sender, receiver) = mpsc::channel(1);
                 drop(sender);
                 let completion = tokio::spawn(async {
@@ -274,16 +268,16 @@ impl LLMProvider for ScriptedRoutingProvider {
                 });
                 Ok(CompletionStream::new(receiver, completion))
             }
-            ExecutionRoutingClassifierFixtureV1::Malformed => Ok(CompletionStream::from_response(
+            ExecutionRoutingClassifierFixture::Malformed => Ok(CompletionStream::from_response(
                 scripted_response("{}".to_string(), TokenUsage::default()),
             )),
-            ExecutionRoutingClassifierFixtureV1::Oversized => {
+            ExecutionRoutingClassifierFixture::Oversized => {
                 Ok(CompletionStream::from_response(scripted_response(
                     "x".repeat(EXECUTION_ROUTER_RESPONSE_MAX_BYTES + 1),
                     TokenUsage::default(),
                 )))
             }
-            ExecutionRoutingClassifierFixtureV1::NotCalled => {
+            ExecutionRoutingClassifierFixture::NotCalled => {
                 Err(moa_core::error::MoaError::ProviderError(
                     "trusted route unexpectedly called the classifier".to_string(),
                 ))
@@ -306,8 +300,8 @@ fn scripted_response(text: String, usage: TokenUsage) -> CompletionResponse {
 
 /// Scores strict cases through the production async router and a scripted provider.
 pub async fn score_routing_cases(
-    cases: &[ExecutionRoutingCaseV1],
-) -> Result<ExecutionRoutingMetricsV1> {
+    cases: &[ExecutionRoutingCase],
+) -> Result<ExecutionRoutingMetrics> {
     let mut results = Vec::with_capacity(cases.len());
     let mut weighted_routing_cost_total = 0_u64;
     let mut weighted_strategy_cost_total = 0_u64;
@@ -340,7 +334,8 @@ pub async fn score_routing_cases(
             durable_upgrade_transition(
                 &case.objective,
                 &ExecutionRouteDecision::Execute {
-                    reason: ExecutionRouteReason::BoundedInteractiveWork,
+                    strategy: ExecutionStrategy::Inline,
+                    rationale: "This request can begin in a bounded interactive loop.".to_string(),
                 },
                 true,
                 false,
@@ -372,8 +367,7 @@ pub async fn score_routing_cases(
             routed.provenance.source
                 == moa_core::types::execution_planning::ExecutionRouteSource::Classifier,
         );
-        let (observed_label, observed_strategy, observed_reason) =
-            decision_route(&routed.decision)?;
+        let (observed_label, observed_strategy) = decision_route(&routed.decision)?;
         let observed_classifier_outcome = routed.provenance.classifier_outcome;
         if expected_calls == 1 {
             classifier_attempts = classifier_attempts.saturating_add(1);
@@ -424,14 +418,14 @@ pub async fn score_routing_cases(
                 })?;
             strategy_cost_cases = strategy_cost_cases.saturating_add(1);
         }
-        if case.expected_label == ExecutionRoutingLabelV1::Execute {
+        if case.expected_label == ExecutionRoutingLabel::Execute {
             execute_cases = execute_cases.saturating_add(1);
-            if observed_label == ExecutionRoutingLabelV1::Respond {
+            if observed_label == ExecutionRoutingLabel::Respond {
                 respond_on_execute = respond_on_execute.saturating_add(1);
             }
             if case.expected_strategy == Some(ExecutionStrategy::Durable) {
                 durable_strategy_cases = durable_strategy_cases.saturating_add(1);
-                if observed_label == ExecutionRoutingLabelV1::Execute
+                if observed_label == ExecutionRoutingLabel::Execute
                     && observed_strategy == Some(ExecutionStrategy::Durable)
                 {
                     durable_strategy_correct = durable_strategy_correct.saturating_add(1);
@@ -440,7 +434,7 @@ pub async fn score_routing_cases(
         }
         if case.near_boundary {
             near_boundary_inline = near_boundary_inline.saturating_add(1);
-            if observed_label == ExecutionRoutingLabelV1::Execute
+            if observed_label == ExecutionRoutingLabel::Execute
                 && observed_strategy == Some(ExecutionStrategy::Inline)
             {
                 near_boundary_inline_correct = near_boundary_inline_correct.saturating_add(1);
@@ -451,9 +445,9 @@ pub async fn score_routing_cases(
         });
         if case.durable_upgrade.is_some() {
             durable_upgrade_cases = durable_upgrade_cases.saturating_add(1);
-            if observed_label == ExecutionRoutingLabelV1::Execute
+            if observed_label == ExecutionRoutingLabel::Execute
                 && observed_strategy == Some(ExecutionStrategy::Durable)
-                && observed_reason == ExecutionRouteReason::DurableUpgrade
+                && routed.provenance.source == ExecutionRouteSource::DurableUpgrade
                 && classifier_calls == 0
             {
                 durable_upgrade_correct = durable_upgrade_correct.saturating_add(1);
@@ -463,30 +457,27 @@ pub async fn score_routing_cases(
                     durable_upgrade_evidence_preserved.saturating_add(1);
             }
         }
-        if case.expected_label == ExecutionRoutingLabelV1::NeedsInput {
+        if case.expected_label == ExecutionRoutingLabel::NeedsInput {
             needs_input_cases = needs_input_cases.saturating_add(1);
-            if observed_label != ExecutionRoutingLabelV1::NeedsInput {
+            if observed_label != ExecutionRoutingLabel::NeedsInput {
                 needs_input_false_accepts = needs_input_false_accepts.saturating_add(1);
             }
         } else {
             concrete_route_cases = concrete_route_cases.saturating_add(1);
-            if observed_label == ExecutionRoutingLabelV1::NeedsInput {
+            if observed_label == ExecutionRoutingLabel::NeedsInput {
                 unnecessary_clarifications = unnecessary_clarifications.saturating_add(1);
             }
         }
-        results.push(ExecutionRoutingCaseResultV1 {
+        results.push(ExecutionRoutingCaseResult {
             case_id: case.case_id.clone(),
             expected_label: case.expected_label,
             observed_label,
             expected_strategy: case.expected_strategy,
             observed_strategy,
-            expected_reason: case.expected_reason,
-            observed_reason,
             observed_classifier_outcome,
             classifier_calls,
             passed: observed_label == case.expected_label
                 && observed_strategy == case.expected_strategy
-                && observed_reason == case.expected_reason
                 && observed_classifier_outcome == case.expected_classifier_outcome
                 && classifier_calls == expected_calls
                 && evidence_preserved != Some(false),
@@ -501,7 +492,7 @@ pub async fn score_routing_cases(
         results.iter().filter(|result| result.passed).count(),
         "passing routing case count",
     )?;
-    Ok(ExecutionRoutingMetricsV1 {
+    Ok(ExecutionRoutingMetrics {
         total_cases,
         passed_cases,
         weighted_routing_cost_total,
@@ -535,7 +526,7 @@ pub async fn score_routing_cases(
 }
 
 /// Validates one routing case independently of corpus-level counts.
-pub(crate) fn validate_routing_case(case: &ExecutionRoutingCaseV1) -> Result<()> {
+pub(crate) fn validate_routing_case(case: &ExecutionRoutingCase) -> Result<()> {
     if case.schema_version != 1
         || case.case_id.trim().is_empty()
         || case.objective.trim().is_empty()
@@ -546,7 +537,7 @@ pub(crate) fn validate_routing_case(case: &ExecutionRoutingCaseV1) -> Result<()>
         )));
     }
     if case.near_boundary
-        && (case.expected_label != ExecutionRoutingLabelV1::Execute
+        && (case.expected_label != ExecutionRoutingLabel::Execute
             || case.expected_strategy != Some(ExecutionStrategy::Inline))
     {
         return Err(invalid_config(format!(
@@ -555,22 +546,22 @@ pub(crate) fn validate_routing_case(case: &ExecutionRoutingCaseV1) -> Result<()>
         )));
     }
     let fixed_fixture_outcome = match &case.classifier {
-        ExecutionRoutingClassifierFixtureV1::ProviderError => {
+        ExecutionRoutingClassifierFixture::ProviderError => {
             Some(ExecutionRouteClassifierOutcome::ProviderError)
         }
-        ExecutionRoutingClassifierFixtureV1::StreamError => {
+        ExecutionRoutingClassifierFixture::StreamError => {
             Some(ExecutionRouteClassifierOutcome::StreamError)
         }
-        ExecutionRoutingClassifierFixtureV1::Malformed => {
+        ExecutionRoutingClassifierFixture::Malformed => {
             Some(ExecutionRouteClassifierOutcome::SchemaRejected)
         }
-        ExecutionRoutingClassifierFixtureV1::Oversized => {
+        ExecutionRoutingClassifierFixture::Oversized => {
             Some(ExecutionRouteClassifierOutcome::Oversized)
         }
-        ExecutionRoutingClassifierFixtureV1::NotCalled => {
+        ExecutionRoutingClassifierFixture::NotCalled => {
             Some(ExecutionRouteClassifierOutcome::NotCalled)
         }
-        ExecutionRoutingClassifierFixtureV1::Response { .. } => None,
+        ExecutionRoutingClassifierFixture::Response { .. } => None,
     };
     if fixed_fixture_outcome.is_some_and(|outcome| outcome != case.expected_classifier_outcome) {
         return Err(invalid_config(format!(
@@ -578,39 +569,16 @@ pub(crate) fn validate_routing_case(case: &ExecutionRoutingCaseV1) -> Result<()>
             case.case_id
         )));
     }
-    let reason_matches = matches!(
+    let strategy_matches = matches!(
+        (case.expected_label, case.expected_strategy),
         (
-            case.expected_label,
-            case.expected_strategy,
-            case.expected_reason
-        ),
-        (
-            ExecutionRoutingLabelV1::Respond,
-            None,
-            ExecutionRouteReason::SimpleResponse
-        ) | (
-            ExecutionRoutingLabelV1::Execute,
-            Some(ExecutionStrategy::Inline),
-            ExecutionRouteReason::BoundedInteractiveWork
-        ) | (
-            ExecutionRoutingLabelV1::Execute,
-            Some(ExecutionStrategy::Durable),
-            ExecutionRouteReason::ExplicitDurableExecution
-                | ExecutionRouteReason::BulkCollection
-                | ExecutionRouteReason::DurableOrResumable
-                | ExecutionRouteReason::HighFanout
-                | ExecutionRouteReason::ApprovalOrSignal
-                | ExecutionRouteReason::SelectedExecutionTemplate
-                | ExecutionRouteReason::DurableUpgrade
-        ) | (
-            ExecutionRoutingLabelV1::NeedsInput,
-            None,
-            ExecutionRouteReason::PreflightInputMissing
-        )
+            ExecutionRoutingLabel::Respond | ExecutionRoutingLabel::NeedsInput,
+            None
+        ) | (ExecutionRoutingLabel::Execute, Some(_))
     );
-    if !reason_matches {
+    if !strategy_matches {
         return Err(invalid_config(format!(
-            "routing case `{}` has a reason inconsistent with its label",
+            "routing case `{}` has a strategy inconsistent with its label",
             case.case_id
         )));
     }
@@ -619,15 +587,13 @@ pub(crate) fn validate_routing_case(case: &ExecutionRoutingCaseV1) -> Result<()>
         case.expected_durable_upgrade_evidence.as_ref(),
     ) {
         (Some(upgrade), Some(expected))
-            if case.expected_label == ExecutionRoutingLabelV1::Execute
+            if case.expected_label == ExecutionRoutingLabel::Execute
                 && case.expected_strategy == Some(ExecutionStrategy::Durable)
-                && case.expected_reason == ExecutionRouteReason::DurableUpgrade
                 && upgrade.objective.as_bytes() == case.objective.as_bytes()
-                && upgrade.reason.strategy() == Some(ExecutionStrategy::Durable)
                 && upgrade.evidence == *expected
                 && matches!(
                     &case.classifier,
-                    ExecutionRoutingClassifierFixtureV1::NotCalled
+                    ExecutionRoutingClassifierFixture::NotCalled
                 )
                 && case.expected_classifier_outcome
                     == ExecutionRouteClassifierOutcome::NotCalled =>
@@ -639,7 +605,7 @@ pub(crate) fn validate_routing_case(case: &ExecutionRoutingCaseV1) -> Result<()>
         (None, None)
             if !matches!(
                 &case.classifier,
-                ExecutionRoutingClassifierFixtureV1::NotCalled
+                ExecutionRoutingClassifierFixture::NotCalled
             ) => {}
         _ => {
             return Err(invalid_config(format!(
@@ -653,30 +619,26 @@ pub(crate) fn validate_routing_case(case: &ExecutionRoutingCaseV1) -> Result<()>
 
 fn decision_route(
     decision: &ExecutionRouteDecision,
-) -> Result<(
-    ExecutionRoutingLabelV1,
-    Option<ExecutionStrategy>,
-    ExecutionRouteReason,
-)> {
+) -> Result<(ExecutionRoutingLabel, Option<ExecutionStrategy>)> {
     let label = match decision.kind() {
         moa_core::types::execution_planning::ExecutionRouteKind::Respond => {
-            ExecutionRoutingLabelV1::Respond
+            ExecutionRoutingLabel::Respond
         }
         moa_core::types::execution_planning::ExecutionRouteKind::Execute => {
-            ExecutionRoutingLabelV1::Execute
+            ExecutionRoutingLabel::Execute
         }
         moa_core::types::execution_planning::ExecutionRouteKind::NeedsInput => {
-            ExecutionRoutingLabelV1::NeedsInput
+            ExecutionRoutingLabel::NeedsInput
         }
     };
     let strategy = decision.strategy();
     if !matches!(
         (label, strategy),
         (
-            ExecutionRoutingLabelV1::Respond | ExecutionRoutingLabelV1::NeedsInput,
+            ExecutionRoutingLabel::Respond | ExecutionRoutingLabel::NeedsInput,
             None
         ) | (
-            ExecutionRoutingLabelV1::Execute,
+            ExecutionRoutingLabel::Execute,
             Some(ExecutionStrategy::Inline | ExecutionStrategy::Durable)
         )
     ) {
@@ -684,7 +646,7 @@ fn decision_route(
             "route kind and deterministic strategy are inconsistent".to_string(),
         ));
     }
-    Ok((label, strategy, decision.reason()))
+    Ok((label, strategy))
 }
 
 const fn classifier_outcome_label(outcome: ExecutionRouteClassifierOutcome) -> &'static str {
@@ -702,10 +664,10 @@ const fn classifier_outcome_label(outcome: ExecutionRouteClassifierOutcome) -> &
 }
 
 pub(crate) const fn routing_cost(
-    expected: ExecutionRoutingLabelV1,
-    observed: ExecutionRoutingLabelV1,
+    expected: ExecutionRoutingLabel,
+    observed: ExecutionRoutingLabel,
 ) -> u64 {
-    use ExecutionRoutingLabelV1::{Execute, NeedsInput, Respond};
+    use ExecutionRoutingLabel::{Execute, NeedsInput, Respond};
     match (observed, expected) {
         (Respond, Respond) | (Execute, Execute) | (NeedsInput, NeedsInput) => 0,
         (Respond, Execute) => 50,
@@ -716,12 +678,12 @@ pub(crate) const fn routing_cost(
 }
 
 pub(crate) const fn strategy_cost(
-    expected_route: ExecutionRoutingLabelV1,
+    expected_route: ExecutionRoutingLabel,
     expected_strategy: Option<ExecutionStrategy>,
-    observed_route: ExecutionRoutingLabelV1,
+    observed_route: ExecutionRoutingLabel,
     observed_strategy: Option<ExecutionStrategy>,
 ) -> Option<u64> {
-    use ExecutionRoutingLabelV1::Execute;
+    use ExecutionRoutingLabel::Execute;
     use ExecutionStrategy::{Durable, Inline};
     match (
         expected_route,
@@ -759,53 +721,47 @@ mod tests {
 
     #[test]
     fn direct_route_decisions_expose_route_kind_and_deterministic_strategy() {
-        // Pins: the compile cutover derives Inline and Durable from the production reason matrix.
+        // Pins: routing evals score the typed strategy without interpreting rationale prose.
+        let rationale = "A specialist workflow outside the old taxonomy fits this strategy.";
         let cases = [
             (
                 ExecutionRouteDecision::Respond {
-                    reason: ExecutionRouteReason::SimpleResponse,
+                    rationale: rationale.to_string(),
                 },
-                ExecutionRoutingLabelV1::Respond,
+                ExecutionRoutingLabel::Respond,
                 None,
             ),
             (
                 ExecutionRouteDecision::Execute {
-                    reason: ExecutionRouteReason::BoundedInteractiveWork,
+                    strategy: ExecutionStrategy::Inline,
+                    rationale: rationale.to_string(),
                 },
-                ExecutionRoutingLabelV1::Execute,
+                ExecutionRoutingLabel::Execute,
                 Some(ExecutionStrategy::Inline),
             ),
             (
                 ExecutionRouteDecision::Execute {
-                    reason: ExecutionRouteReason::HighFanout,
+                    strategy: ExecutionStrategy::Durable,
+                    rationale: rationale.to_string(),
                 },
-                ExecutionRoutingLabelV1::Execute,
+                ExecutionRoutingLabel::Execute,
                 Some(ExecutionStrategy::Durable),
             ),
             (
                 ExecutionRouteDecision::NeedsInput {
-                    reason: ExecutionRouteReason::PreflightInputMissing,
+                    rationale: rationale.to_string(),
                     missing_inputs: vec!["objective".to_string()],
                 },
-                ExecutionRoutingLabelV1::NeedsInput,
+                ExecutionRoutingLabel::NeedsInput,
                 None,
             ),
         ];
         for (decision, expected_label, expected_strategy) in cases {
-            let (observed_label, observed_strategy, observed_reason) = decision_route(&decision)
+            let (observed_label, observed_strategy) = decision_route(&decision)
                 .expect("a valid direct route should have a deterministic strategy");
             assert_eq!(observed_label, expected_label);
             assert_eq!(observed_strategy, expected_strategy);
-            assert_eq!(observed_reason, decision.reason());
+            assert_eq!(decision.rationale(), rationale);
         }
-
-        let invalid = ExecutionRouteDecision::Execute {
-            reason: ExecutionRouteReason::SimpleResponse,
-        };
-        assert!(matches!(
-            decision_route(&invalid),
-            Err(EvalError::InvalidConfig(message))
-                if message == "route kind and deterministic strategy are inconsistent"
-        ));
     }
 }

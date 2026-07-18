@@ -562,7 +562,8 @@ fn write_skill_file_read_fixture(path: &Path, final_text: &str) -> Result<()> {
             "completion": {
                 "content": json!({
                     "label": "execute",
-                    "reason": "bounded_interactive_work",
+                    "strategy": "inline",
+                    "rationale": "The work fits a bounded interactive loop.",
                     "confidence_bps": 10_000,
                     "missing_inputs": []
                 }).to_string(),

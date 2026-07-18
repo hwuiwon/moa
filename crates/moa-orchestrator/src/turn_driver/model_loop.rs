@@ -53,11 +53,10 @@ pub(crate) fn root_loop_plan(
 ) -> Option<TurnLoopPlan> {
     let class = match request.route {
         ExecutionRouteDecision::Respond { .. } => ModelLoopClass::Respond,
-        ExecutionRouteDecision::Execute { reason }
-            if reason.strategy() == Some(ExecutionStrategy::Inline) =>
-        {
-            ModelLoopClass::InlineExecute
-        }
+        ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Inline,
+            ..
+        } => ModelLoopClass::InlineExecute,
         ExecutionRouteDecision::Execute { .. } | ExecutionRouteDecision::NeedsInput { .. } => {
             return None;
         }
@@ -105,7 +104,7 @@ fn loop_plan(
 #[cfg(test)]
 mod tests {
     use moa_core::config::SessionLimitsConfig;
-    use moa_core::types::execution_planning::{ExecutionRouteDecision, ExecutionRouteReason};
+    use moa_core::types::execution_planning::{ExecutionRouteDecision, ExecutionStrategy};
 
     use super::{RootLoopPlanRequest, WorkerLoopPlanRequest, root_loop_plan, worker_loop_plan};
 
@@ -117,7 +116,7 @@ mod tests {
         let respond = root_loop_plan(
             RootLoopPlanRequest {
                 route: &ExecutionRouteDecision::Respond {
-                    reason: ExecutionRouteReason::SimpleResponse,
+                    rationale: "The request only needs a response.".to_string(),
                 },
                 request_max_turns: None,
             },
@@ -134,7 +133,8 @@ mod tests {
         let inline = root_loop_plan(
             RootLoopPlanRequest {
                 route: &ExecutionRouteDecision::Execute {
-                    reason: ExecutionRouteReason::BoundedInteractiveWork,
+                    strategy: ExecutionStrategy::Inline,
+                    rationale: "The work fits a bounded interactive loop.".to_string(),
                 },
                 request_max_turns: None,
             },
@@ -156,10 +156,11 @@ mod tests {
         let limits = SessionLimitsConfig::default();
         for route in [
             ExecutionRouteDecision::Execute {
-                reason: ExecutionRouteReason::ExplicitDurableExecution,
+                strategy: ExecutionStrategy::Durable,
+                rationale: "The workflow requires durable execution.".to_string(),
             },
             ExecutionRouteDecision::NeedsInput {
-                reason: ExecutionRouteReason::PreflightInputMissing,
+                rationale: "The target is required before work can begin.".to_string(),
                 missing_inputs: vec!["target".to_string()],
             },
         ] {

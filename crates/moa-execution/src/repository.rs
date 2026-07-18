@@ -11,11 +11,10 @@ use moa_core::{
     types::contact::ContactId,
     types::execution_planning::{
         ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
-        ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
-        ExecutionRouteClassifierOutcome, ExecutionRouteKind, ExecutionRouteProvenanceV1,
-        ExecutionRouteReason, ExecutionRouteSource, ExecutionRouteStage, ExecutionRouteUsageV1,
-        ExecutionSourceProvenanceV1, ExecutionStrategy, route_provenance_semantically_equal,
-        validate_planning_audit_envelope,
+        ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload,
+        ExecutionRouteClassifierOutcome, ExecutionRouteKind, ExecutionRouteProvenance,
+        ExecutionRouteSource, ExecutionRouteStage, ExecutionRouteUsage, ExecutionSourceProvenance,
+        ExecutionStrategy, route_provenance_semantically_equal, validate_planning_audit_envelope,
     },
     types::identifiers::{SessionId, TenantId, UserId},
 };
@@ -45,7 +44,7 @@ use crate::{
         FailureFingerprintInput, LogicalTask, LogicalTaskKind, TerminalProjection, WaitingReason,
     },
     wire::{
-        ExecutionActionReviewResolution, ExecutionPlanningContextSnapshotV1,
+        ExecutionActionReviewResolution, ExecutionPlanningContextSnapshot,
         ExecutionTerminalDelivery, PinnedInstructionSkill, execution_terminal_delivery_from_state,
     },
 };
@@ -186,7 +185,7 @@ pub struct NewExecutionRun {
     /// Sorted exact instruction-skill revisions available to task-local agents.
     pub pinned_instruction_skills: Vec<PinnedInstructionSkill>,
     /// Skill-template or generated-plan provenance.
-    pub source_provenance: ExecutionSourceProvenanceV1,
+    pub source_provenance: ExecutionSourceProvenance,
     /// Structured run input.
     pub input: Value,
     /// Initial status, which must be queued or awaiting confirmation.
@@ -239,7 +238,7 @@ pub struct ExecutionRunRecord {
     /// Sorted exact persisted instruction-skill revisions.
     pub pinned_instruction_skills: Vec<PinnedInstructionSkill>,
     /// Skill-template or generated-plan provenance.
-    pub source_provenance: ExecutionSourceProvenanceV1,
+    pub source_provenance: ExecutionSourceProvenance,
     /// Normalized source cohort persisted by V000337.
     pub source_kind: ExecutionSourceKind,
     /// Normalized run-producing route fields persisted by V000337.
@@ -306,7 +305,7 @@ pub struct ExecutionRunRecord {
 #[derive(Clone, Debug)]
 pub struct NewExecutionPlanningContext {
     /// Exact immutable snapshot whose canonical bytes are hashed.
-    pub snapshot: ExecutionPlanningContextSnapshotV1,
+    pub snapshot: ExecutionPlanningContextSnapshot,
     /// Domain-separated hash of the canonical snapshot bytes.
     pub planning_context_hash: ExecutionHash,
 }
@@ -317,7 +316,7 @@ pub struct ExecutionPlanningContextRecord {
     /// Durable planning-context identifier.
     pub planning_context_uid: Uuid,
     /// Exact immutable snapshot.
-    pub snapshot: ExecutionPlanningContextSnapshotV1,
+    pub snapshot: ExecutionPlanningContextSnapshot,
     /// Domain-separated hash of the canonical snapshot bytes.
     pub planning_context_hash: ExecutionHash,
     /// Database-owned creation timestamp.
@@ -344,10 +343,10 @@ pub struct RouteAuditEvidence {
     pub decision: ExecutionRouteKind,
     /// Selected strategy, present exactly for Execute.
     pub strategy: Option<ExecutionStrategy>,
-    /// Exact closed route reason.
-    pub reason: ExecutionRouteReason,
+    /// Bounded human-readable route rationale.
+    pub rationale: String,
     /// Redacted trusted-bypass or classifier provenance.
-    pub provenance: ExecutionRouteProvenanceV1,
+    pub provenance: ExecutionRouteProvenance,
     /// First durable acceptance timestamp.
     pub accepted_at: DateTime<Utc>,
 }
@@ -1151,15 +1150,15 @@ impl ExecutionRepository {
     pub async fn write_route_audit(
         &self,
         scope: ExecutionScope,
-        envelope: &ExecutionPlanningAuditEnvelopeV1,
+        envelope: &ExecutionPlanningAuditEnvelope,
     ) -> Result<RouteAuditWriteOutcome> {
         validate_audit_scope(scope, envelope)?;
         let (
-            ExecutionPlanningAuditPayloadV1::Route {
+            ExecutionPlanningAuditPayload::Route {
                 stage,
                 decision,
                 strategy,
-                reason,
+                rationale,
                 provenance,
                 accepted_at,
             },
@@ -1201,7 +1200,7 @@ impl ExecutionRepository {
             .bind(route_stage_label(*stage))
             .bind(route_decision_label(*decision))
             .bind(strategy.map(execution_strategy_label))
-            .bind(execution_route_reason_label(*reason))
+            .bind(rationale)
             .bind(route_source_label(provenance.source))
             .bind(route_classifier_outcome_label(
                 provenance.classifier_outcome,
@@ -1255,7 +1254,7 @@ impl ExecutionRepository {
                 && persisted.stage == *stage
                 && persisted.evidence.decision == *decision
                 && persisted.evidence.strategy == *strategy
-                && persisted.evidence.reason == *reason
+                && persisted.evidence.rationale == *rationale
                 && route_provenance_semantically_equal(&persisted.evidence.provenance, provenance)
             {
                 RouteAuditWriteOutcome::Replayed(persisted.evidence)
@@ -1271,11 +1270,11 @@ impl ExecutionRepository {
     pub async fn write_planner_call_audit(
         &self,
         scope: ExecutionScope,
-        envelope: &ExecutionPlanningAuditEnvelopeV1,
+        envelope: &ExecutionPlanningAuditEnvelope,
     ) -> Result<PlannerCallAuditWriteOutcome> {
         validate_audit_scope(scope, envelope)?;
         let (
-            ExecutionPlanningAuditPayloadV1::PlannerCall {
+            ExecutionPlanningAuditPayload::PlannerCall {
                 call_kind,
                 call_ordinal,
                 run_uid,
@@ -1373,10 +1372,10 @@ impl ExecutionRepository {
     pub async fn write_compile_audit(
         &self,
         scope: ExecutionScope,
-        envelope: &ExecutionPlanningAuditEnvelopeV1,
+        envelope: &ExecutionPlanningAuditEnvelope,
     ) -> Result<CompileAuditWriteOutcome> {
         validate_audit_scope(scope, envelope)?;
-        let ExecutionPlanningAuditPayloadV1::Compile {
+        let ExecutionPlanningAuditPayload::Compile {
             source,
             operation_key,
             run_uid,
@@ -1493,7 +1492,7 @@ impl ExecutionRepository {
             .bind(pinned_skills_value)
             .bind(source_provenance_value)
             .bind(source_fields.kind.as_str())
-            .bind(source_fields.route_reason_label)
+            .bind(source_fields.route_rationale)
             .bind(source_fields.skill_template_ref)
             .bind(source_fields.skill_template_revision_uid)
             .bind(new_run.input)
@@ -4712,75 +4711,42 @@ fn validate_new_run(scope: ExecutionScope, new_run: &NewExecutionRun) -> Result<
 
 struct NormalizedSourceFields<'a> {
     kind: ExecutionSourceKind,
-    route_reason_label: &'static str,
+    route_rationale: &'a str,
     skill_template_ref: Option<&'a str>,
     skill_template_revision_uid: Option<Uuid>,
 }
 
-fn normalized_source_fields(
-    provenance: &ExecutionSourceProvenanceV1,
-) -> NormalizedSourceFields<'_> {
+fn normalized_source_fields(provenance: &ExecutionSourceProvenance) -> NormalizedSourceFields<'_> {
     match provenance {
-        ExecutionSourceProvenanceV1::GeneratedPlan { route_reason, .. } => NormalizedSourceFields {
+        ExecutionSourceProvenance::GeneratedPlan {
+            route_rationale, ..
+        } => NormalizedSourceFields {
             kind: ExecutionSourceKind::GeneratedPlan,
-            route_reason_label: execution_route_reason_label(*route_reason),
+            route_rationale,
             skill_template_ref: None,
             skill_template_revision_uid: None,
         },
-        ExecutionSourceProvenanceV1::SkillTemplate {
-            route_reason,
+        ExecutionSourceProvenance::SkillTemplate {
+            route_rationale,
             skill_template_ref,
             skill_template_revision_uid,
         } => NormalizedSourceFields {
             kind: ExecutionSourceKind::SkillTemplate,
-            route_reason_label: execution_route_reason_label(*route_reason),
+            route_rationale,
             skill_template_ref: Some(skill_template_ref.as_str()),
             skill_template_revision_uid: Some(*skill_template_revision_uid),
         },
-        ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason,
+        ExecutionSourceProvenance::ExperimentTemplate {
+            route_rationale,
             skill_template_ref,
             skill_template_revision_uid,
             ..
         } => NormalizedSourceFields {
             kind: ExecutionSourceKind::ExperimentTemplate,
-            route_reason_label: execution_route_reason_label(*route_reason),
+            route_rationale,
             skill_template_ref: Some(skill_template_ref.as_str()),
             skill_template_revision_uid: Some(*skill_template_revision_uid),
         },
-    }
-}
-
-const fn execution_route_reason_label(reason: ExecutionRouteReason) -> &'static str {
-    match reason {
-        ExecutionRouteReason::SimpleResponse => "simple_response",
-        ExecutionRouteReason::BoundedInteractiveWork => "bounded_interactive_work",
-        ExecutionRouteReason::PreflightInputMissing => "preflight_input_missing",
-        ExecutionRouteReason::ExplicitDurableExecution => "explicit_durable_execution",
-        ExecutionRouteReason::BulkCollection => "bulk_collection",
-        ExecutionRouteReason::DurableOrResumable => "durable_or_resumable",
-        ExecutionRouteReason::HighFanout => "high_fanout",
-        ExecutionRouteReason::ApprovalOrSignal => "approval_or_signal",
-        ExecutionRouteReason::SelectedExecutionTemplate => "selected_execution_template",
-        ExecutionRouteReason::DurableUpgrade => "durable_upgrade",
-    }
-}
-
-fn execution_route_reason_from_str(value: &str) -> Result<ExecutionRouteReason> {
-    match value {
-        "simple_response" => Ok(ExecutionRouteReason::SimpleResponse),
-        "bounded_interactive_work" => Ok(ExecutionRouteReason::BoundedInteractiveWork),
-        "preflight_input_missing" => Ok(ExecutionRouteReason::PreflightInputMissing),
-        "explicit_durable_execution" => Ok(ExecutionRouteReason::ExplicitDurableExecution),
-        "bulk_collection" => Ok(ExecutionRouteReason::BulkCollection),
-        "durable_or_resumable" => Ok(ExecutionRouteReason::DurableOrResumable),
-        "high_fanout" => Ok(ExecutionRouteReason::HighFanout),
-        "approval_or_signal" => Ok(ExecutionRouteReason::ApprovalOrSignal),
-        "selected_execution_template" => Ok(ExecutionRouteReason::SelectedExecutionTemplate),
-        "durable_upgrade" => Ok(ExecutionRouteReason::DurableUpgrade),
-        _ => Err(Error::InvalidRepositoryData {
-            message: format!("unknown execution route reason `{value}`"),
-        }),
     }
 }
 
@@ -4860,9 +4826,9 @@ impl PersistedPlannerAudit {
     fn semantically_matches(
         &self,
         audit_uid: Uuid,
-        envelope: &ExecutionPlanningAuditEnvelopeV1,
+        envelope: &ExecutionPlanningAuditEnvelope,
     ) -> bool {
-        let ExecutionPlanningAuditPayloadV1::PlannerCall {
+        let ExecutionPlanningAuditPayload::PlannerCall {
             call_kind,
             call_ordinal,
             run_uid,
@@ -4908,9 +4874,9 @@ impl PersistedCompileAudit {
     fn semantically_matches(
         &self,
         audit_uid: Uuid,
-        envelope: &ExecutionPlanningAuditEnvelopeV1,
+        envelope: &ExecutionPlanningAuditEnvelope,
     ) -> bool {
-        let ExecutionPlanningAuditPayloadV1::Compile {
+        let ExecutionPlanningAuditPayload::Compile {
             source,
             operation_key,
             run_uid,
@@ -4940,7 +4906,7 @@ impl PersistedCompileAudit {
 
 fn validate_audit_scope(
     scope: ExecutionScope,
-    envelope: &ExecutionPlanningAuditEnvelopeV1,
+    envelope: &ExecutionPlanningAuditEnvelope,
 ) -> Result<()> {
     validate_planning_audit_envelope(envelope).map_err(|error| Error::InvalidRepositoryInput {
         message: error.to_string(),
@@ -4965,7 +4931,7 @@ fn route_audit_uid(
     stage: ExecutionRouteStage,
 ) -> Result<Uuid> {
     execution_audit_uid(
-        "moa.execution.route-audit.v1",
+        "moa.execution.route-audit",
         &[
             Some(tenant_id.0.to_string()),
             contact_id.map(|value| value.0.to_string()),
@@ -4988,7 +4954,7 @@ fn planner_audit_uid(
     call_ordinal: u8,
 ) -> Result<Uuid> {
     execution_audit_uid(
-        "moa.execution.planner-audit.v1",
+        "moa.execution.planner-audit",
         &[
             Some(tenant_id.0.to_string()),
             contact_id.map(|value| value.0.to_string()),
@@ -5009,7 +4975,7 @@ fn compile_audit_uid(
     operation_key: &str,
 ) -> Result<Uuid> {
     execution_audit_uid(
-        "moa.execution.compile-audit.v1",
+        "moa.execution.compile-audit",
         &[
             Some(tenant_id.0.to_string()),
             contact_id.map(|value| value.0.to_string()),
@@ -5045,8 +5011,7 @@ fn route_audit_from_row(row: &PgRow) -> Result<PersistedRouteAudit> {
         .map_err(row_error)?
         .map(|value| execution_strategy_from_str(&value))
         .transpose()?;
-    let reason =
-        execution_route_reason_from_str(&row.try_get::<String, _>("reason").map_err(row_error)?)?;
+    let rationale = row.try_get::<String, _>("rationale").map_err(row_error)?;
     let confidence_bps = row
         .try_get::<Option<i16>, _>("confidence_bps")
         .map_err(row_error)?
@@ -5069,8 +5034,8 @@ fn route_audit_from_row(row: &PgRow) -> Result<PersistedRouteAudit> {
             audit_uid,
             decision,
             strategy,
-            reason,
-            provenance: ExecutionRouteProvenanceV1 {
+            rationale,
+            provenance: ExecutionRouteProvenance {
                 source: route_source_from_str(
                     &row.try_get::<String, _>("source").map_err(row_error)?,
                 )?,
@@ -5084,7 +5049,7 @@ fn route_audit_from_row(row: &PgRow) -> Result<PersistedRouteAudit> {
                 response_hash: row.try_get("response_hash").map_err(row_error)?,
                 confidence_bps,
                 missing_input_count,
-                usage: ExecutionRouteUsageV1 {
+                usage: ExecutionRouteUsage {
                     input_tokens_uncached: required_u64(row, "input_tokens_uncached")?,
                     input_tokens_cache_write: required_u64(row, "input_tokens_cache_write")?,
                     input_tokens_cache_read: required_u64(row, "input_tokens_cache_read")?,
@@ -5370,7 +5335,7 @@ fn row_error(error: sqlx::Error) -> Error {
 const INSERT_ROUTE_AUDIT_SQL: &str = r#"
     INSERT INTO moa.execution_route_audit (
         audit_uid, tenant_id, contact_id, session_id, originating_sequence,
-        stage, decision, strategy, reason, source, classifier_outcome,
+        stage, decision, strategy, rationale, source, classifier_outcome,
         provider_model, prompt_version, objective_hash, response_hash,
         confidence_bps, missing_input_count, input_tokens_uncached,
         input_tokens_cache_write, input_tokens_cache_read, output_tokens,
@@ -5382,7 +5347,7 @@ const INSERT_ROUTE_AUDIT_SQL: &str = r#"
     )
     ON CONFLICT DO NOTHING
     RETURNING
-        audit_uid, stage, decision, strategy, reason, source, classifier_outcome,
+        audit_uid, stage, decision, strategy, rationale, source, classifier_outcome,
         provider_model, prompt_version, objective_hash, response_hash,
         confidence_bps, missing_input_count, input_tokens_uncached,
         input_tokens_cache_write, input_tokens_cache_read, output_tokens,
@@ -5391,7 +5356,7 @@ const INSERT_ROUTE_AUDIT_SQL: &str = r#"
 
 const LOAD_ROUTE_AUDIT_SQL: &str = r#"
     SELECT
-        audit_uid, stage, decision, strategy, reason, source, classifier_outcome,
+        audit_uid, stage, decision, strategy, rationale, source, classifier_outcome,
         provider_model, prompt_version, objective_hash, response_hash,
         confidence_bps, missing_input_count, input_tokens_uncached,
         input_tokens_cache_write, input_tokens_cache_read, output_tokens,
@@ -5501,7 +5466,7 @@ const CREATE_RUN_SQL: &str = r#"
         planning_context_uid, planning_context_hash, owner_user_id,
         goal_contract, initial_plan, active_plan, initial_plan_hash, active_plan_hash,
         capability_catalog, authorization_envelope, pinned_instruction_skills,
-        source_provenance, source_kind, route_reason,
+        source_provenance, source_kind, route_rationale,
         skill_template_ref, skill_template_revision_uid, input, status,
         budget_max_cost_microusd, budget_max_tokens, budget_max_tasks,
         budget_max_tool_calls, budget_max_retrieved_bytes, budget_deadline_at,
@@ -6147,15 +6112,14 @@ fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
         }
     };
     let waiting_reasons: Value = row.try_get("waiting_reasons").map_err(row_error)?;
-    let source_provenance: ExecutionSourceProvenanceV1 =
+    let source_provenance: ExecutionSourceProvenance =
         serde_json::from_value(row.try_get("source_provenance").map_err(row_error)?)?;
     let source_kind = ExecutionSourceKind::from_str(
         &row.try_get::<String, _>("source_kind").map_err(row_error)?,
     )?;
-    let route_reason = execution_route_reason_from_str(
-        &row.try_get::<String, _>("route_reason")
-            .map_err(row_error)?,
-    )?;
+    let route_rationale = row
+        .try_get::<String, _>("route_rationale")
+        .map_err(row_error)?;
     let status =
         ExecutionRunStatus::from_str(&row.try_get::<String, _>("status").map_err(row_error)?)?;
     let terminal_reason = row
@@ -6210,7 +6174,7 @@ fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
         source_provenance,
         source_kind,
         route: ExecutionRouteFields {
-            reason: route_reason,
+            rationale: route_rationale,
         },
         skill_template_ref: row.try_get("skill_template_ref").map_err(row_error)?,
         skill_template_revision_uid: row
@@ -6332,7 +6296,7 @@ mod tests {
     #[test]
     fn execution_route_repository_parsers_accept_exact_current_values() {
         // Pins: repository reconstruction accepts every value in the normalized
-        // decision, strategy, reason, source, stage, and classifier-outcome contract.
+        // decision, strategy, source, stage, and classifier-outcome contract.
         for (value, expected) in [
             ("respond", ExecutionRouteKind::Respond),
             ("execute", ExecutionRouteKind::Execute),
@@ -6407,38 +6371,6 @@ mod tests {
                 expected
             );
         }
-        for (value, expected) in [
-            ("simple_response", ExecutionRouteReason::SimpleResponse),
-            (
-                "bounded_interactive_work",
-                ExecutionRouteReason::BoundedInteractiveWork,
-            ),
-            (
-                "preflight_input_missing",
-                ExecutionRouteReason::PreflightInputMissing,
-            ),
-            (
-                "explicit_durable_execution",
-                ExecutionRouteReason::ExplicitDurableExecution,
-            ),
-            ("bulk_collection", ExecutionRouteReason::BulkCollection),
-            (
-                "durable_or_resumable",
-                ExecutionRouteReason::DurableOrResumable,
-            ),
-            ("high_fanout", ExecutionRouteReason::HighFanout),
-            ("approval_or_signal", ExecutionRouteReason::ApprovalOrSignal),
-            (
-                "selected_execution_template",
-                ExecutionRouteReason::SelectedExecutionTemplate,
-            ),
-            ("durable_upgrade", ExecutionRouteReason::DurableUpgrade),
-        ] {
-            assert_eq!(
-                execution_route_reason_from_str(value).expect("current reason should parse"),
-                expected
-            );
-        }
     }
 
     #[test]
@@ -6457,11 +6389,5 @@ mod tests {
         assert!(route_stage_from_str(&removed_upgrade).is_err());
         assert!(route_source_from_str(&removed_upgrade).is_err());
         assert!(route_classifier_outcome_from_str(&["context_forced_", "act"].concat()).is_err());
-        for value in [["explicit_", "run"].concat(), removed_upgrade] {
-            assert!(
-                execution_route_reason_from_str(&value).is_err(),
-                "accepted {value}"
-            );
-        }
     }
 }

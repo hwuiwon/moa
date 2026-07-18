@@ -553,7 +553,8 @@ fn guardrail_script() -> serde_json::Value {
             "completion": {
                 "content": json!({
                     "label": "execute",
-                    "reason": "bounded_interactive_work",
+                    "strategy": "inline",
+                    "rationale": "The work fits a bounded interactive loop.",
                     "confidence_bps": 10_000,
                     "missing_inputs": []
                 }).to_string(),

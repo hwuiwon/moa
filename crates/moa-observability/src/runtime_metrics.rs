@@ -17,7 +17,7 @@ use moa_core::{
     types::execution_planning::{
         ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
         ExecutionPlannerOutcome, ExecutionRouteClassifierOutcome, ExecutionRouteKind,
-        ExecutionRouteReason, ExecutionRouteSource, ExecutionStrategy,
+        ExecutionRouteSource, ExecutionStrategy,
     },
     types::identifiers::ModelId,
     types::identifiers::TenantId,
@@ -970,7 +970,6 @@ pub fn record_session_event_load(event_count: u64) {
 pub fn record_execution_route(
     decision: ExecutionRouteKind,
     strategy: Option<ExecutionStrategy>,
-    reason: ExecutionRouteReason,
     source: ExecutionRouteSource,
     outcome: ExecutionRouteClassifierOutcome,
     duration_micros: u64,
@@ -979,7 +978,6 @@ pub fn record_execution_route(
         "moa_execution_routes_total",
         "decision" => execution_route_decision(decision),
         "strategy" => strategy.map_or("none", execution_strategy),
-        "reason" => execution_route_reason(reason),
         "source" => execution_route_source(source),
         "classifier_outcome" => execution_route_classifier_outcome(outcome)
     )
@@ -1869,21 +1867,6 @@ const fn execution_route_classifier_outcome(
     }
 }
 
-const fn execution_route_reason(reason: ExecutionRouteReason) -> &'static str {
-    match reason {
-        ExecutionRouteReason::SimpleResponse => "simple_response",
-        ExecutionRouteReason::BoundedInteractiveWork => "bounded_interactive_work",
-        ExecutionRouteReason::PreflightInputMissing => "preflight_input_missing",
-        ExecutionRouteReason::ExplicitDurableExecution => "explicit_durable_execution",
-        ExecutionRouteReason::BulkCollection => "bulk_collection",
-        ExecutionRouteReason::DurableOrResumable => "durable_or_resumable",
-        ExecutionRouteReason::HighFanout => "high_fanout",
-        ExecutionRouteReason::ApprovalOrSignal => "approval_or_signal",
-        ExecutionRouteReason::SelectedExecutionTemplate => "selected_execution_template",
-        ExecutionRouteReason::DurableUpgrade => "durable_upgrade",
-    }
-}
-
 const fn execution_planner_call(call: ExecutionPlannerCallKind) -> &'static str {
     match call {
         ExecutionPlannerCallKind::InitialPlan => "initial_plan",
@@ -2493,7 +2476,6 @@ mod tests {
             record_execution_route(
                 ExecutionRouteKind::Execute,
                 Some(ExecutionStrategy::Durable),
-                ExecutionRouteReason::ExplicitDurableExecution,
                 ExecutionRouteSource::Classifier,
                 ExecutionRouteClassifierOutcome::Accepted,
                 5_000,
@@ -2640,10 +2622,18 @@ mod tests {
             .join("\n");
         assert!(execution_series.contains("decision=\"execute\""));
         assert!(execution_series.contains("strategy=\"durable\""));
+        let route_series = rendered
+            .lines()
+            .filter(|line| line.starts_with("moa_execution_routes_total{"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !route_series.contains("{reason=") && !route_series.contains(",reason="),
+            "free-form route rationale must never become a metrics label"
+        );
         for label in [
             "decision=",
             "strategy=",
-            "reason=",
             "call=",
             "outcome=",
             "classifier_outcome=",

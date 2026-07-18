@@ -15,7 +15,7 @@ use moa_core::types::action_policy::{ActionClass, ActionPolicyEffect, RiskLevel}
 use moa_core::types::session::SessionStatus;
 use moa_core::types::tools::{IdempotencyClass, ToolDiffStrategy, ToolInputShape, ToolPolicySpec};
 use moa_core::wire::turn::TurnOutcomeKind;
-use moa_eval::execution::ExecutionInvariantSpecV1;
+use moa_eval::execution::ExecutionInvariantSpec;
 use moa_execution::bindings::extract_map_key;
 use moa_execution::capability::{ExecutionEstimate, capability_version};
 use moa_execution::state::{ExecutionTaskId, ExecutionTaskProjection, ExecutionTaskStatus};
@@ -38,12 +38,12 @@ use crate::execution_execution_support::assertions::{
     assert_initial_route, final_brain_response, journal_requests, journal_roles, planning_audits,
 };
 use crate::execution_execution_support::fixtures::{
-    POLL_INTERVAL, await_execution_terminal_with_timeout, await_run_started_event,
+    POLL_INTERVAL, RouteFixture, await_execution_terminal_with_timeout, await_run_started_event,
     await_session_settled, await_turn_outcome, execution_run_request, raw_events,
     route_classifier_completion, seed_allow_policy, start_turn_in_session,
 };
 use moa_core::types::execution_planning::{
-    ExecutionPlanningAuditPayloadV1, ExecutionRouteKind, ExecutionRouteReason, ExecutionStrategy,
+    ExecutionPlanningAuditPayload, ExecutionRouteKind, ExecutionStrategy,
 };
 
 const COMPANY_COUNT: usize = 500;
@@ -163,7 +163,7 @@ async fn bulk_fixture() -> Result<OrchestratorTestFixture> {
             "keyed": [
                 route_classifier_completion(
                     ExecutionRouteKind::Execute,
-                    ExecutionRouteReason::BulkCollection,
+                    RouteFixture::Durable,
                 ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion(FINAL_RESPONSE)),
                 keyed_completion(
@@ -216,11 +216,11 @@ async fn run_bulk_scenario(
             .await?
             .into_iter()
             .filter_map(|audit| match audit.payload {
-                ExecutionPlanningAuditPayloadV1::Compile {
+                ExecutionPlanningAuditPayload::Compile {
                     validation_report, ..
                 } => Some(validation_report),
-                ExecutionPlanningAuditPayloadV1::Route { .. }
-                | ExecutionPlanningAuditPayloadV1::PlannerCall { .. } => None,
+                ExecutionPlanningAuditPayload::Route { .. }
+                | ExecutionPlanningAuditPayload::PlannerCall { .. } => None,
             })
             .collect::<Vec<_>>();
         let planner_capabilities =
@@ -318,7 +318,7 @@ async fn run_bulk_scenario(
         &audits,
         ExecutionRouteKind::Execute,
         Some(ExecutionStrategy::Durable),
-        ExecutionRouteReason::BulkCollection,
+        RouteFixture::Durable,
     );
     assert_generated_plan_audits(&audits);
     assert_eq!(final_brain_response(&events)?, FINAL_RESPONSE);
@@ -353,39 +353,39 @@ async fn run_bulk_scenario(
         Some(controller),
         label,
         &[
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![moa_execution::state::ExecutionRunStatus::Completed],
             },
-            ExecutionInvariantSpecV1::TaskCount {
+            ExecutionInvariantSpec::TaskCount {
                 node_id: MAP_NODE_ID.to_string(),
                 exact: COMPANY_COUNT as u64,
             },
-            ExecutionInvariantSpecV1::TaskCount {
+            ExecutionInvariantSpec::TaskCount {
                 node_id: REDUCE_NODE_ID.to_string(),
                 exact: 1,
             },
-            ExecutionInvariantSpecV1::MapCoverage {
+            ExecutionInvariantSpec::MapCoverage {
                 node_id: MAP_NODE_ID.to_string(),
                 expected_keys,
                 require_all_when_completed: true,
             },
-            ExecutionInvariantSpecV1::CompletionCheckPassed {
+            ExecutionInvariantSpec::CompletionCheckPassed {
                 check_id: "coverage_complete".to_string(),
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpecV1::AllowedCapabilitiesOnly {
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpec::AllowedCapabilitiesOnly {
                 references: vec![
                     fixture_capability_reference(&map_tool())?,
                     fixture_capability_reference(&reducer_tool())?,
                 ],
             },
-            ExecutionInvariantSpecV1::SessionEventCountAtMost {
+            ExecutionInvariantSpec::SessionEventCountAtMost {
                 event_kind: "progress".to_string(),
                 max: 20,
             },
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -688,7 +688,7 @@ fn fixture_capability_reference(tool: &FixtureCapabilityTool) -> Result<Capabili
         diff_strategy: ToolDiffStrategy::None,
     };
     let version = capability_version(
-        "moa.execution.capability.mcp.v1",
+        "moa.execution.capability.mcp",
         &json!({
             "name": tool.name,
             "input_schema": tool.input_schema,

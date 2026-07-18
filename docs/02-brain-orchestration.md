@@ -97,7 +97,7 @@ transition and is never classifier input. Any uncertain or malformed classifier
 result selects Execute/Inline without retry or planner fallback.
 
 - Respond makes one model call with no tools and no planning call.
-- Execute derives exactly one strategy from its reason. Inline runs the bounded
+- Execute carries exactly one explicit strategy. Inline runs the bounded
   root model/tool loop and may use conversational workers. Durable instantiates
   a pinned skill template or compiles a strict generated plan, persists it,
   starts `ExecutionRun` detached, and returns acceptance without polling it
@@ -118,8 +118,9 @@ Durable signal.
 1. Build a `CompletionRequest` from session events and the context pipeline.
 2. Ensure a task segment exists or roll to a new segment when query rewrite marks `is_new_task`.
 3. Select Respond, Execute, or NeedsInput through trusted control facts or one
-   bounded auxiliary classifier call; derive optional Inline/Durable strategy
-   from the closed reason matrix and persist both before execution.
+   bounded auxiliary classifier call; require an explicit Inline/Durable
+   strategy for Execute and persist it with a bounded explanatory rationale
+   before execution. Rationale text is never interpreted as control data.
 4. Persist assistant output and tool calls.
 5. Build an `ActionEnvelope`, evaluate action policy, and route allowed tool execution through `ToolExecutor`.
 6. Record tool usage, skill activation, token usage, and turn counts on the active segment.

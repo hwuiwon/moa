@@ -7,14 +7,14 @@ use moa_execution::state::{ExecutionRunStatus, ExecutionTaskStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::snapshot::{ExecutionEvalSnapshotV1, total_accounted_resources};
+use super::snapshot::{ExecutionEvalSnapshot, total_accounted_resources};
 
 const MAX_KEY_SAMPLE: usize = 25;
 
 /// One deterministic assertion over an execution snapshot.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ExecutionInvariantSpecV1 {
+pub enum ExecutionInvariantSpec {
     /// Require the run status to be one of the listed statuses.
     TerminalStatusIn {
         /// Allowed durable run statuses.
@@ -85,7 +85,7 @@ pub enum ExecutionInvariantSpecV1 {
 /// Stable result of evaluating one execution invariant.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionInvariantResultV1 {
+pub struct ExecutionInvariantResult {
     /// Stable invariant identity, including scoped node or check identifiers.
     pub invariant_id: String,
     /// Whether the assertion passed for the observed run.
@@ -100,10 +100,10 @@ pub struct ExecutionInvariantResultV1 {
     pub completion_guard_passed: Option<bool>,
 }
 
-impl ExecutionInvariantSpecV1 {
+impl ExecutionInvariantSpec {
     /// Evaluates this invariant against one redacted snapshot.
     #[must_use]
-    pub fn evaluate(&self, snapshot: &ExecutionEvalSnapshotV1) -> ExecutionInvariantResultV1 {
+    pub fn evaluate(&self, snapshot: &ExecutionEvalSnapshot) -> ExecutionInvariantResult {
         match self {
             Self::TerminalStatusIn { statuses } => {
                 let passed = statuses.contains(&snapshot.run.status);
@@ -245,18 +245,18 @@ impl ExecutionInvariantSpecV1 {
 /// Evaluates an ordered list of deterministic invariant specifications.
 #[must_use]
 pub fn evaluate_invariants(
-    snapshot: &ExecutionEvalSnapshotV1,
-    specs: &[ExecutionInvariantSpecV1],
-) -> Vec<ExecutionInvariantResultV1> {
+    snapshot: &ExecutionEvalSnapshot,
+    specs: &[ExecutionInvariantSpec],
+) -> Vec<ExecutionInvariantResult> {
     specs.iter().map(|spec| spec.evaluate(snapshot)).collect()
 }
 
 fn evaluate_map_coverage(
-    snapshot: &ExecutionEvalSnapshotV1,
+    snapshot: &ExecutionEvalSnapshot,
     node_id: &str,
     expected_keys: &[String],
     require_all_when_completed: bool,
-) -> ExecutionInvariantResultV1 {
+) -> ExecutionInvariantResult {
     let expected = expected_keys.iter().cloned().collect::<BTreeSet<_>>();
     let tasks = snapshot
         .tasks
@@ -310,10 +310,10 @@ fn evaluate_map_coverage(
 }
 
 fn evaluate_completion_check(
-    snapshot: &ExecutionEvalSnapshotV1,
+    snapshot: &ExecutionEvalSnapshot,
     check_id: &str,
     expected_passed: bool,
-) -> ExecutionInvariantResultV1 {
+) -> ExecutionInvariantResult {
     let observed = snapshot
         .run
         .completion_check_results
@@ -338,7 +338,7 @@ fn evaluate_completion_check(
     )
 }
 
-fn evaluate_budget(snapshot: &ExecutionEvalSnapshotV1) -> ExecutionInvariantResultV1 {
+fn evaluate_budget(snapshot: &ExecutionEvalSnapshot) -> ExecutionInvariantResult {
     let total = total_accounted_resources(snapshot);
     let limit = &snapshot.run.budget_ledger.limit;
     let within = total.is_some_and(|total| {
@@ -366,8 +366,8 @@ fn evaluate_budget(snapshot: &ExecutionEvalSnapshotV1) -> ExecutionInvariantResu
     )
 }
 
-fn evaluate_progress(snapshot: &ExecutionEvalSnapshotV1) -> ExecutionInvariantResultV1 {
-    let observed = super::snapshot::ExecutionProgressSummaryV1 {
+fn evaluate_progress(snapshot: &ExecutionEvalSnapshot) -> ExecutionInvariantResult {
+    let observed = super::snapshot::ExecutionProgressSummary {
         total_tasks: usize_to_u64(snapshot.tasks.len()),
         completed_tasks: usize_to_u64(
             snapshot
@@ -406,7 +406,7 @@ fn evaluate_progress(snapshot: &ExecutionEvalSnapshotV1) -> ExecutionInvariantRe
     )
 }
 
-fn evaluate_logical_effects(snapshot: &ExecutionEvalSnapshotV1) -> ExecutionInvariantResultV1 {
+fn evaluate_logical_effects(snapshot: &ExecutionEvalSnapshot) -> ExecutionInvariantResult {
     let mut effects = BTreeMap::<&str, u64>::new();
     for observation in &snapshot.harness.capability_calls {
         if !observation.replayed {
@@ -438,9 +438,9 @@ fn evaluate_logical_effects(snapshot: &ExecutionEvalSnapshotV1) -> ExecutionInva
 }
 
 fn evaluate_capability_allowlist(
-    snapshot: &ExecutionEvalSnapshotV1,
+    snapshot: &ExecutionEvalSnapshot,
     references: &[CapabilityReference],
-) -> ExecutionInvariantResultV1 {
+) -> ExecutionInvariantResult {
     let forbidden = snapshot
         .harness
         .capability_calls
@@ -467,10 +467,10 @@ fn evaluate_capability_allowlist(
 }
 
 fn evaluate_completed_keys(
-    snapshot: &ExecutionEvalSnapshotV1,
+    snapshot: &ExecutionEvalSnapshot,
     node_id: &str,
     item_keys: &[String],
-) -> ExecutionInvariantResultV1 {
+) -> ExecutionInvariantResult {
     let expected = item_keys.iter().cloned().collect::<BTreeSet<_>>();
     let completed = snapshot
         .tasks
@@ -501,8 +501,8 @@ fn result(
     observed: Value,
     diagnostic: &str,
     completion_guard_passed: Option<bool>,
-) -> ExecutionInvariantResultV1 {
-    ExecutionInvariantResultV1 {
+) -> ExecutionInvariantResult {
+    ExecutionInvariantResult {
         invariant_id: invariant_id.to_string(),
         passed,
         expected,

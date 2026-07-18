@@ -206,7 +206,7 @@ pub fn validate_execution_goal_contract(contract: &ExecutionGoalContract) -> Val
     report
 }
 
-/// Validates the standalone structural invariants of a v1 execution plan.
+/// Validates the standalone structural invariants of an execution plan.
 #[must_use]
 pub fn validate_execution_plan_definition(
     definition: &ExecutionPlanDefinition,

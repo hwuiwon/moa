@@ -73,11 +73,12 @@ cancellation do not wait behind a long turn.
 
 After context compilation, `TurnExecution` selects exactly one public route:
 Respond, Execute, or NeedsInput. Respond makes one no-tool model call.
-NeedsInput emits one bounded deterministic clarification. Execute derives one
-internal strategy from its closed reason: Inline retains the bounded root tool
-loop and optional conversational Worker delegation; Durable persists an
+NeedsInput emits one bounded deterministic clarification. Execute carries one
+explicit internal strategy: Inline retains the bounded root tool loop and
+optional conversational Worker delegation; Durable persists an
 immutable goal contract and canonical plan, starts `ExecutionRun` detached, and
-returns without making the root model poll status.
+returns without making the root model poll status. The route rationale is
+bounded free-form explanation and is never a workflow control input.
 
 Only an initial root user-message Execute/Inline turn can make one typed,
 evidence-preserving upgrade to Durable. It does not classify again, cannot

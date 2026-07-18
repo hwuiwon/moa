@@ -158,11 +158,12 @@ turn.
 
 Execution routing happens after context compilation and is not retrieval or
 skill routing. `TurnExecution` selects exactly one public route: Respond,
-Execute, or NeedsInput. Execute then derives its optional internal strategy from
-the closed reason matrix: Inline for bounded interactive work, Durable for
-explicit durable work, bulk collection, recovery or waits, high fan-out,
-selected templates, and a typed durable upgrade. Classifier uncertainty falls
-back to Execute/Inline.
+Execute, or NeedsInput. Execute carries its internal strategy from an explicit
+classifier or trusted-route field: Inline for bounded interactive
+work and Durable when the work must persist independently. Each route also
+carries one trimmed, single-line, free-form rationale of at most 240 UTF-8
+bytes. The rationale is persisted for explanation but never interpreted to
+select a strategy. Classifier uncertainty falls back to Execute/Inline.
 
 Respond and Execute/Inline make no execution-planning call. For
 Execute/Durable, a selected high-confidence skill template is instantiated
@@ -178,7 +179,7 @@ or unsupported result rather than a silent direct answer.
 `ExecutionCompiler` validates capability/schema references, dependencies,
 non-recursive maps, reducer bounds, authorization metadata, data bindings,
 worst-case resources, completion coverage, and amendments. Planner provenance,
-candidate JSON, compiler report, route reason, and final canonical hash are
+candidate JSON, compiler report, route rationale, and final canonical hash are
 persisted. One-off compiled snapshots are not skills and are never
 auto-published.
 

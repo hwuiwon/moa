@@ -58,7 +58,7 @@ const PULL_STATEMENT_TIMEOUT_MS: i32 = 30_000;
 const EXECUTION_ANALYTICS_LOCK_SQL: &str = "SELECT pg_advisory_xact_lock(1297047877, 337)";
 
 /// Durable key for the execution dimension schema/backfill state machine.
-const EXECUTION_UPGRADE_KEY: &str = "execution_dimensions_v2";
+const EXECUTION_UPGRADE_KEY: &str = "execution_dimensions";
 
 const EXECUTION_RUN_TABLE: &str = "dim_execution_runs";
 const EXECUTION_TASK_TABLE: &str = "dim_execution_tasks";
@@ -678,7 +678,7 @@ impl AnalyticsExporter {
         let state = self.read_execution_upgrade_state().await?;
         if state.as_ref().map(|state| state.stage.as_str()) != Some("complete") {
             return Err(ExportError::Contract(
-                "normal execution export is paused until execution_dimensions_v2 is complete"
+                "normal execution export is paused until execution_dimensions is complete"
                     .to_string(),
             ));
         }

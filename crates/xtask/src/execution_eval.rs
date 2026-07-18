@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use moa_core::types::execution_planning::ExecutionRouteKind;
 use moa_eval::execution::{
-    ExecutionEvalCaseResultV1, ExecutionEvalComparisonConfigV1, ExecutionEvalLaneV1,
-    ExecutionEvalReportV1, ExecutionJudgeCalibrationStatusV1, compare_execution_eval_reports,
-    load_execution_corpus, mutation_report_from_outcomes, score_contract_case, score_routing_cases,
+    ExecutionEvalCaseResult, ExecutionEvalComparisonConfig, ExecutionEvalLane, ExecutionEvalReport,
+    ExecutionJudgeCalibrationStatus, compare_execution_eval_reports, load_execution_corpus,
+    mutation_report_from_outcomes, score_contract_case, score_routing_cases,
 };
 
 const DEFAULT_MANIFEST: &str = "crates/moa-eval/scenarios/execution/manifest.toml";
@@ -48,7 +48,7 @@ fn run_offline(options: OfflineOptions) -> Result<()> {
     let mut cases = routing
         .cases
         .iter()
-        .map(|result| ExecutionEvalCaseResultV1 {
+        .map(|result| ExecutionEvalCaseResult {
             case_id: format!("routing:{}", result.case_id),
             passed: result.passed,
             contract_omission: None,
@@ -69,7 +69,7 @@ fn run_offline(options: OfflineOptions) -> Result<()> {
         .collect::<Vec<_>>();
     for contract_case in &corpus.contract_cases {
         let score = score_contract_case(contract_case).map_err(anyhow::Error::from)?;
-        cases.push(ExecutionEvalCaseResultV1 {
+        cases.push(ExecutionEvalCaseResult {
             case_id: format!("contract:{}", contract_case.case_id),
             passed: !score.contract_omission,
             contract_omission: Some(score.contract_omission),
@@ -89,12 +89,12 @@ fn run_offline(options: OfflineOptions) -> Result<()> {
             final_response_hash: None,
         });
     }
-    let mut report = ExecutionEvalReportV1::new(
-        ExecutionEvalLaneV1::OfflinePr,
+    let mut report = ExecutionEvalReport::new(
+        ExecutionEvalLane::OfflinePr,
         manifest_hashes(&corpus.manifest),
         vec![0],
         1,
-        ExecutionJudgeCalibrationStatusV1::Unavailable,
+        ExecutionJudgeCalibrationStatus::Unavailable,
         None,
         cases,
     )
@@ -113,7 +113,7 @@ fn run_offline(options: OfflineOptions) -> Result<()> {
 }
 
 fn check(options: CheckOptions) -> Result<()> {
-    let report: ExecutionEvalReportV1 = read_json(&options.report)?;
+    let report: ExecutionEvalReport = read_json(&options.report)?;
     report.validate().map_err(anyhow::Error::from)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -195,14 +195,14 @@ fn check(options: CheckOptions) -> Result<()> {
 }
 
 fn compare(options: CompareOptions) -> Result<()> {
-    let baseline: ExecutionEvalReportV1 = read_json(&options.baseline)?;
-    let candidate: ExecutionEvalReportV1 = read_json(&options.candidate)?;
+    let baseline: ExecutionEvalReport = read_json(&options.baseline)?;
+    let candidate: ExecutionEvalReport = read_json(&options.candidate)?;
     let comparison = compare_execution_eval_reports(
         &baseline,
         &candidate,
-        ExecutionEvalComparisonConfigV1 {
+        ExecutionEvalComparisonConfig {
             practical_pass_rate_regression: options.practical_pass_rate_regression,
-            ..ExecutionEvalComparisonConfigV1::default()
+            ..ExecutionEvalComparisonConfig::default()
         },
     )
     .map_err(anyhow::Error::from)?;
@@ -246,7 +246,7 @@ fn mutation_report(options: MutationOptions) -> Result<()> {
 }
 
 fn manifest_hashes(
-    manifest: &moa_eval::execution::ExecutionCorpusManifestV1,
+    manifest: &moa_eval::execution::ExecutionCorpusManifest,
 ) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("contract".to_string(), manifest.contract.sha256.clone()),
@@ -258,11 +258,11 @@ fn manifest_hashes(
     ])
 }
 
-const fn route_kind(label: moa_eval::execution::ExecutionRoutingLabelV1) -> ExecutionRouteKind {
+const fn route_kind(label: moa_eval::execution::ExecutionRoutingLabel) -> ExecutionRouteKind {
     match label {
-        moa_eval::execution::ExecutionRoutingLabelV1::Respond => ExecutionRouteKind::Respond,
-        moa_eval::execution::ExecutionRoutingLabelV1::Execute => ExecutionRouteKind::Execute,
-        moa_eval::execution::ExecutionRoutingLabelV1::NeedsInput => ExecutionRouteKind::NeedsInput,
+        moa_eval::execution::ExecutionRoutingLabel::Respond => ExecutionRouteKind::Respond,
+        moa_eval::execution::ExecutionRoutingLabel::Execute => ExecutionRouteKind::Execute,
+        moa_eval::execution::ExecutionRoutingLabel::NeedsInput => ExecutionRouteKind::NeedsInput,
     }
 }
 

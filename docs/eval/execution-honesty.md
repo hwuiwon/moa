@@ -12,7 +12,7 @@ execution false completion. Reports retain both rates.
 
 ## Source Of Truth
 
-`ExecutionEvalSnapshotV1` is a bounded read model over production state. Its
+`ExecutionEvalSnapshot` is a bounded read model over production state. Its
 inputs are the same scheduling projection, ordered task records, normalized
 planning audits, and session events used to operate the run. The service tests
 collect these through `ExecutionRepository` and the normal session event API.
@@ -24,7 +24,7 @@ budget totals, task identity and status, planning outcomes, bounded event
 counts, and fixture-provided logical capability-call evidence. It excludes raw
 task outputs, prompts, full event bodies, credentials, and raw transcripts.
 
-`ExecutionEvalReportV1` is strict and versioned. Unknown fields fail parsing.
+`ExecutionEvalReport` is strict and versioned. Unknown fields fail parsing.
 Case rows contain stable IDs, typed invariant results, contract scores, route
 provenance, observed status, counts, cost, latency, and hashes of terminal
 outputs or final responses. They do not contain those outputs or responses.
@@ -66,13 +66,14 @@ Ordinary user turns make at most one bounded auxiliary-model classifier call.
 The classifier receives the objective and bounded structural signals, has no
 tools, retrieval, or native web access, uses temperature zero, and may emit at
 most 256 output tokens. Its strict JSON result selects Respond, Execute, or
-NeedsInput with a closed reason, confidence basis points, and bounded
-missing-input list. Execute derives exactly one internal strategy from the
-reason: Inline or Durable.
+NeedsInput with a bounded free-form rationale, confidence basis points, and
+bounded missing-input list. Execute must also supply exactly one explicit
+internal strategy: Inline or Durable. The rationale is not scored for exact
+wording and never selects the strategy.
 
 The router does not search the user text for phrases. It does not retry, repair,
 recurse, or invoke the planner. Provider failure, collection failure, oversized
-or malformed output, an invalid label/reason pair, or insufficient confidence
+or malformed output, an invalid label/strategy/rationale shape, or insufficient confidence
 falls back to Execute/Inline. Attachments or a recent target also prevent a
 classifier from choosing context-free Respond or NeedsInput. Uncertainty
 therefore cannot fabricate a direct answer or start expensive durable work.

@@ -80,7 +80,7 @@ pub enum ReplanDecision {
     },
 }
 
-/// Fixed reasons that terminate replanning in v1.
+/// Fixed reasons that terminate replanning.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplanStopReason {
@@ -134,7 +134,7 @@ pub fn failure_fingerprint(input: &FailureFingerprintInput) -> Result<ExecutionH
     )
 }
 
-/// Applies the fixed v1 stop-condition precedence to one proposed amendment.
+/// Applies the fixed stop-condition precedence to one proposed amendment.
 #[must_use]
 pub fn evaluate_replan_stop(request: ReplanEvaluationRequest) -> ReplanDecision {
     if let Some(reason) = evaluate_replan_resource_stop(

@@ -54,7 +54,7 @@ mod support;
 
 const EXPERIMENT_EXECUTION_SESSION_NAMESPACE: Uuid =
     Uuid::from_u128(0xc2a6_731c_2d80_5d4a_9d10_2d20_1283_c6ec);
-const EXPERIMENT_EXECUTION_SESSION_DOMAIN: &str = "moa.experiment.execution-session.v1";
+const EXPERIMENT_EXECUTION_SESSION_DOMAIN: &str = "moa.experiment.execution-session";
 const TEMPLATE_SKILL_REF: &str = "skill://experiment-resolution";
 
 fn spawn_orchestrator(

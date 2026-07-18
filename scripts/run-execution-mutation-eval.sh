@@ -27,7 +27,7 @@ if ! docker compose -f "${ROOT_DIR}/docker-compose.yml" exec -T postgres \
   exit 1
 fi
 
-FUNCTION_FILTER='(evaluate_completion|evaluate_coverage|BudgetLedger::try_reserve|BudgetLedger::reconcile_cumulative|validate_amendment_reference_narrowing|validate_plan_references|ExecutionRepository::record_task_outcome|task_outcome_is_exact_replay|classifier_fallback|classifier_fallback_with_response|valid_classifier_output|below_confidence_threshold|ExecutionRouteReason::strategy|durable_upgrade_transition|routing_cost|strategy_cost)'
+FUNCTION_FILTER='(evaluate_completion|evaluate_coverage|BudgetLedger::try_reserve|BudgetLedger::reconcile_cumulative|validate_amendment_reference_narrowing|validate_plan_references|ExecutionRepository::record_task_outcome|task_outcome_is_exact_replay|classifier_fallback|classifier_fallback_with_response|valid_classifier_output|below_confidence_threshold|execution_route_rationale_is_valid|durable_upgrade_transition|routing_cost|strategy_cost)'
 MUTANT_ARGS=(
   --manifest-path "${ROOT_DIR}/Cargo.toml"
   --config "${CONFIG_PATH}"

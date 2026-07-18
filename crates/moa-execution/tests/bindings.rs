@@ -7,7 +7,7 @@ use serde_json::json;
 
 #[test]
 fn bindings_replace_whole_values_and_enforce_dependency_visibility() {
-    // Pins: v1 resolves only whole-value references to run input or direct dependency output.
+    // Pins: bindings resolve only whole-value references to run input or direct dependency output.
     let run_input = json!({ "query": "damaged order" });
     let outputs = BTreeMap::from([
         ("visible".to_string(), json!({ "items": [1, 2] })),

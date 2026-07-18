@@ -12,12 +12,11 @@ use moa_core::events::ExecutionTaskResultsRef;
 use moa_core::types::{
     contact::ContactId,
     execution_planning::{
-        ExecutionAuditReportV1, ExecutionCompileOutcome, ExecutionCompileSource,
-        ExecutionPlannerCallKind, ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1,
-        ExecutionPlanningAuditPayloadV1, ExecutionRouteClassifierOutcome, ExecutionRouteDecision,
-        ExecutionRouteKind, ExecutionRouteProvenanceV1, ExecutionRouteReason, ExecutionRouteSource,
-        ExecutionRouteStage, ExecutionRouteUsageV1, ExecutionSourceProvenanceV1, ExecutionStrategy,
-        canonical_json_bytes,
+        ExecutionAuditReport, ExecutionCompileOutcome, ExecutionCompileSource,
+        ExecutionPlannerCallKind, ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope,
+        ExecutionPlanningAuditPayload, ExecutionRouteClassifierOutcome, ExecutionRouteDecision,
+        ExecutionRouteKind, ExecutionRouteProvenance, ExecutionRouteSource, ExecutionRouteStage,
+        ExecutionRouteUsage, ExecutionSourceProvenance, ExecutionStrategy, canonical_json_bytes,
     },
     identifiers::{SessionId, TenantId, UserId},
 };
@@ -48,7 +47,7 @@ use moa_execution::{
         FailureFingerprintInput, LogicalTask, LogicalTaskKind, TerminalProjection,
     },
     wire::{
-        ExecutionActionReviewResolution, ExecutionPlanningContextSnapshotV1,
+        ExecutionActionReviewResolution, ExecutionPlanningContextSnapshot,
         execution_progress_from_run, planning_context_hash,
     },
 };
@@ -67,7 +66,7 @@ async fn planning_context_snapshot_is_immutable_and_exactly_replayed_db() -> Tes
     let repository = ExecutionRepository::new(pool.clone());
     let tenant_id = TenantId::new();
     let scope = ExecutionScope::Tenant { tenant_id };
-    let snapshot = ExecutionPlanningContextSnapshotV1 {
+    let snapshot = ExecutionPlanningContextSnapshot {
         schema_version: 1,
         tenant_id,
         contact_id: None,
@@ -164,25 +163,26 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
     let first_at = Utc::now();
 
     let decision = ExecutionRouteDecision::Execute {
-        reason: ExecutionRouteReason::ExplicitDurableExecution,
+        strategy: ExecutionStrategy::Durable,
+        rationale: "The workflow requires durable execution.".to_string(),
     };
-    let route = ExecutionPlanningAuditEnvelopeV1::route(
+    let route = ExecutionPlanningAuditEnvelope::route(
         tenant_id,
         None,
         session_id,
         7,
         ExecutionRouteStage::Initial,
         &decision,
-        ExecutionRouteProvenanceV1 {
+        ExecutionRouteProvenance {
             source: ExecutionRouteSource::Classifier,
             classifier_outcome: ExecutionRouteClassifierOutcome::Accepted,
             provider_model: Some("route-model".to_string()),
-            prompt_version: Some("execution-router-v1".to_string()),
+            prompt_version: Some("execution-router".to_string()),
             objective_hash: "a".repeat(64),
             response_hash: Some("b".repeat(64)),
             confidence_bps: Some(9_500),
             missing_input_count: 0,
-            usage: ExecutionRouteUsageV1 {
+            usage: ExecutionRouteUsage {
                 input_tokens_uncached: 11,
                 input_tokens_cache_write: 2,
                 input_tokens_cache_read: 3,
@@ -201,8 +201,8 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
     assert_eq!(route_evidence.decision, ExecutionRouteKind::Execute);
     assert_eq!(route_evidence.strategy, Some(ExecutionStrategy::Durable));
     assert_eq!(
-        route_evidence.reason,
-        ExecutionRouteReason::ExplicitDurableExecution
+        route_evidence.rationale,
+        "The workflow requires durable execution."
     );
     let sql_audit_uid: Uuid =
         sqlx::query_scalar("SELECT moa.execution_route_audit_uid($1,$2,$3,$4,$5)")
@@ -215,7 +215,7 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
             .await?;
     assert_eq!(route_evidence.audit_uid, sql_audit_uid);
     let mut route_retry = route.clone();
-    let ExecutionPlanningAuditPayloadV1::Route {
+    let ExecutionPlanningAuditPayload::Route {
         accepted_at,
         provenance,
         ..
@@ -230,10 +230,10 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
         RouteAuditWriteOutcome::Replayed(route_evidence.clone())
     );
     let mut route_conflict = route;
-    let ExecutionPlanningAuditPayloadV1::Route { reason, .. } = &mut route_conflict.payload else {
+    let ExecutionPlanningAuditPayload::Route { rationale, .. } = &mut route_conflict.payload else {
         unreachable!("route fixture must remain a route");
     };
-    *reason = ExecutionRouteReason::HighFanout;
+    *rationale = "The workflow requires a different durable execution shape.".to_string();
     assert!(matches!(
         repository.write_route_audit(scope, &route_conflict).await?,
         RouteAuditWriteOutcome::Conflict { audit_uid }
@@ -247,16 +247,17 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
     };
     let contact_session_id = SessionId::new();
     let contact_decision = ExecutionRouteDecision::Execute {
-        reason: ExecutionRouteReason::SelectedExecutionTemplate,
+        strategy: ExecutionStrategy::Durable,
+        rationale: "The caller selected a pinned execution template.".to_string(),
     };
-    let contact_route = ExecutionPlanningAuditEnvelopeV1::route(
+    let contact_route = ExecutionPlanningAuditEnvelope::route(
         tenant_id,
         Some(contact_id),
         contact_session_id,
         8,
         ExecutionRouteStage::Initial,
         &contact_decision,
-        ExecutionRouteProvenanceV1 {
+        ExecutionRouteProvenance {
             source: ExecutionRouteSource::SelectedExecutionTemplate,
             classifier_outcome: ExecutionRouteClassifierOutcome::NotCalled,
             provider_model: None,
@@ -265,7 +266,7 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
             response_hash: None,
             confidence_bps: None,
             missing_input_count: 0,
-            usage: ExecutionRouteUsageV1::default(),
+            usage: ExecutionRouteUsage::default(),
             cost_microusd: 0,
             duration_micros: 0,
         },
@@ -284,20 +285,20 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
         RouteAuditWriteOutcome::Replayed(contact_evidence)
     );
 
-    let planner = ExecutionPlanningAuditEnvelopeV1 {
+    let planner = ExecutionPlanningAuditEnvelope {
         schema_version: 1,
         tenant_id,
         contact_id: None,
         session_id: Some(session_id),
         originating_sequence: Some(7),
-        payload: ExecutionPlanningAuditPayloadV1::PlannerCall {
+        payload: ExecutionPlanningAuditPayload::PlannerCall {
             call_kind: ExecutionPlannerCallKind::InitialPlan,
             call_ordinal: 0,
             run_uid: None,
             plan_revision: None,
             outcome: ExecutionPlannerOutcome::ProviderError,
             provider_model: "planner-test".to_string(),
-            prompt_version: "execution-planner-v1".to_string(),
+            prompt_version: "execution-planner".to_string(),
             candidate_hash: None,
             candidate_json: None,
             compiler_report: None,
@@ -311,7 +312,7 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
         panic!("first planner audit must apply");
     };
     let mut planner_retry = planner.clone();
-    let ExecutionPlanningAuditPayloadV1::PlannerCall {
+    let ExecutionPlanningAuditPayload::PlannerCall {
         duration_micros,
         created_at,
         ..
@@ -329,7 +330,7 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
     );
     assert_eq!(planner_evidence.duration_micros, 17);
     let mut planner_conflict = planner;
-    let ExecutionPlanningAuditPayloadV1::PlannerCall { provider_model, .. } =
+    let ExecutionPlanningAuditPayload::PlannerCall { provider_model, .. } =
         &mut planner_conflict.payload
     else {
         unreachable!("planner fixture must remain a planner call");
@@ -344,18 +345,18 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
     ));
 
     let validation_report =
-        String::from_utf8(canonical_json_bytes(&ExecutionAuditReportV1::Compiler {
+        String::from_utf8(canonical_json_bytes(&ExecutionAuditReport::Compiler {
             violations: Vec::new(),
             omitted_violations: 0,
             full_report_hash: "b".repeat(64),
         })?)?;
-    let compile = ExecutionPlanningAuditEnvelopeV1 {
+    let compile = ExecutionPlanningAuditEnvelope {
         schema_version: 1,
         tenant_id,
         contact_id: None,
         session_id: Some(session_id),
         originating_sequence: Some(7),
-        payload: ExecutionPlanningAuditPayloadV1::Compile {
+        payload: ExecutionPlanningAuditPayload::Compile {
             source: ExecutionCompileSource::GeneratedPlan,
             operation_key: format!("session:{session_id}:7:generated:0"),
             run_uid: None,
@@ -374,7 +375,7 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
         panic!("first compile audit must apply");
     };
     let mut compile_retry = compile.clone();
-    let ExecutionPlanningAuditPayloadV1::Compile {
+    let ExecutionPlanningAuditPayload::Compile {
         duration_micros,
         created_at,
         ..
@@ -392,7 +393,7 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
     );
     assert_eq!(compile_evidence.duration_micros, 23);
     let mut compile_conflict = compile;
-    let ExecutionPlanningAuditPayloadV1::Compile { candidate_hash, .. } =
+    let ExecutionPlanningAuditPayload::Compile { candidate_hash, .. } =
         &mut compile_conflict.payload
     else {
         unreachable!("compile fixture must remain a compile audit");
@@ -609,7 +610,7 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
         budget(10),
     );
     let (expected_template_ref, expected_template_revision_uid) = match &new_run.source_provenance {
-        ExecutionSourceProvenanceV1::SkillTemplate {
+        ExecutionSourceProvenance::SkillTemplate {
             skill_template_ref,
             skill_template_revision_uid,
             ..
@@ -675,7 +676,7 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
         Option<String>,
     ) = sqlx::query_as(
         r#"
-            SELECT analytics_change_seq, source_kind, route_reason,
+            SELECT analytics_change_seq, source_kind, route_rationale,
                    skill_template_ref, skill_template_revision_uid, terminal_reason
             FROM moa.execution_run
             WHERE run_uid = $1
@@ -686,7 +687,7 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
     .await?;
     assert!(row.0 > initial_change_seq);
     assert_eq!(row.1, "skill_template");
-    assert_eq!(row.2, "selected_execution_template");
+    assert_eq!(row.2, "The caller selected a pinned execution template.");
     assert_eq!(row.3.as_deref(), Some(expected_template_ref.as_str()));
     assert_eq!(row.4, Some(expected_template_revision_uid));
     assert_eq!(row.5.as_deref(), Some("completed"));
@@ -696,16 +697,16 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
         .expect("finalized analytics fixture must round trip through the repository");
     assert_eq!(
         persisted.source_provenance,
-        ExecutionSourceProvenanceV1::SkillTemplate {
-            route_reason: ExecutionRouteReason::SelectedExecutionTemplate,
+        ExecutionSourceProvenance::SkillTemplate {
+            route_rationale: "The caller selected a pinned execution template.".to_string(),
             skill_template_ref: expected_template_ref.clone(),
             skill_template_revision_uid: expected_template_revision_uid,
         }
     );
     assert_eq!(persisted.source_kind, ExecutionSourceKind::SkillTemplate);
     assert_eq!(
-        persisted.route.reason,
-        ExecutionRouteReason::SelectedExecutionTemplate
+        persisted.route.rationale,
+        "The caller selected a pinned execution template."
     );
     assert_eq!(
         persisted.skill_template_ref.as_deref(),
@@ -4543,7 +4544,7 @@ async fn create_run(
         .await?
         .is_none()
     {
-        let snapshot = ExecutionPlanningContextSnapshotV1 {
+        let snapshot = ExecutionPlanningContextSnapshot {
             schema_version: 1,
             tenant_id: run.tenant_id,
             contact_id: run.contact_id,
@@ -4615,8 +4616,8 @@ fn new_run(
             skill_refs: Vec::new(),
         },
         pinned_instruction_skills: Vec::new(),
-        source_provenance: ExecutionSourceProvenanceV1::SkillTemplate {
-            route_reason: ExecutionRouteReason::SelectedExecutionTemplate,
+        source_provenance: ExecutionSourceProvenance::SkillTemplate {
+            route_rationale: "The caller selected a pinned execution template.".to_string(),
             skill_template_ref: format!("skill://{key}"),
             skill_template_revision_uid: Uuid::now_v7(),
         },

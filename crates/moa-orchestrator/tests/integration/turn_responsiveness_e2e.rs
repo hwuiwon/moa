@@ -31,11 +31,19 @@ async fn execution_routing_writes_normalized_audits_outside_session_progress_ser
     let run_objective = "Start an execution run for a durable report";
     let fixture = OrchestratorTestFixture::with_script(json!({
         "responses": [
-            classifier_response("respond", "simple_response"),
+            classifier_response("respond", None, "The request only needs a direct response."),
             { "completion": { "content": "4" } },
-            classifier_response("execute", "bounded_interactive_work"),
+            classifier_response(
+                "execute",
+                Some("inline"),
+                "The work fits a bounded interactive loop.",
+            ),
             { "completion": { "content": "inspection complete" } },
-            classifier_response("execute", "explicit_durable_execution"),
+            classifier_response(
+                "execute",
+                Some("durable"),
+                "The requested report should persist as a durable execution.",
+            ),
             { "completion": { "content": execution_candidate(run_objective) } }
         ],
         "keyed": [{
@@ -307,7 +315,8 @@ fn main_loop_should_not_run_script() -> serde_json::Value {
             "completion": {
                 "content": json!({
                     "label": "needs_input",
-                    "reason": "preflight_input_missing",
+                    "strategy": null,
+                    "rationale": "The target and requested change are required before work can begin.",
                     "confidence_bps": 10_000,
                     "missing_inputs": ["target", "specific change"]
                 }).to_string(),
@@ -388,12 +397,13 @@ fn execution_candidate(objective: &str) -> String {
     .to_string()
 }
 
-fn classifier_response(label: &str, reason: &str) -> serde_json::Value {
+fn classifier_response(label: &str, strategy: Option<&str>, rationale: &str) -> serde_json::Value {
     json!({
         "completion": {
             "content": json!({
                 "label": label,
-                "reason": reason,
+                "strategy": strategy,
+                "rationale": rationale,
                 "confidence_bps": 10_000,
                 "missing_inputs": []
             }).to_string(),

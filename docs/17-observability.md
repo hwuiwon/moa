@@ -132,9 +132,11 @@ RATIO = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]
 
 The bounded label values are:
 
+Route rationale is bounded persisted explanation, not a metric label. Never
+attach its free-form text to counters, histograms, traces, or log dimensions.
+
 - route: `decision=respond|execute|needs_input`,
   `strategy=none|inline|durable`,
-  `reason=simple_response|bounded_interactive_work|preflight_input_missing|explicit_durable_execution|bulk_collection|durable_or_resumable|high_fanout|approval_or_signal|selected_execution_template|durable_upgrade`,
   `source=classifier|blank_objective|selected_execution_template|durable_upgrade`, and
   `classifier_outcome=not_called|accepted|provider_error|stream_error|oversized|schema_rejected|invalid_decision|low_confidence|context_forced_inline`;
 - planner:

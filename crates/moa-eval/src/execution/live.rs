@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moa_core::types::execution_planning::{
-    ExecutionRouteClassifierOutcome, ExecutionRouteKind, ExecutionRouteProvenanceV1,
+    ExecutionRouteClassifierOutcome, ExecutionRouteKind, ExecutionRouteProvenance,
     ExecutionRouteSource, ExecutionStrategy,
 };
 use moa_eval_core::{EvalError, Result};
@@ -14,10 +14,10 @@ use crate::kernel::CostLedger;
 
 use super::{
     report::{
-        ExecutionEvalCaseResultV1, ExecutionEvalLaneV1, ExecutionEvalProviderV1,
-        ExecutionEvalReportV1, ExecutionJudgeCalibrationStatusV1,
+        ExecutionEvalCaseResult, ExecutionEvalLane, ExecutionEvalProvider, ExecutionEvalReport,
+        ExecutionJudgeCalibrationStatus,
     },
-    routing::{ExecutionRoutingLabelV1, routing_cost, strategy_cost},
+    routing::{ExecutionRoutingLabel, routing_cost, strategy_cost},
 };
 
 /// Required number of logical cases in the initial live execution corpus.
@@ -28,7 +28,7 @@ pub const EXECUTION_LIVE_REPETITIONS: u32 = 5;
 /// One strict live routing, planner, and task-quality case.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionTaskQualityCaseV1 {
+pub struct ExecutionTaskQualityCase {
     /// Case schema version, fixed at `1`.
     pub schema_version: u8,
     /// Stable logical case identifier.
@@ -36,7 +36,7 @@ pub struct ExecutionTaskQualityCaseV1 {
     /// Exact user objective sent to an independent session.
     pub objective: String,
     /// Human-adjudicated route required before planner/task scoring.
-    pub expected_route: ExecutionRoutingLabelV1,
+    pub expected_route: ExecutionRoutingLabel,
     /// Human-adjudicated strategy, present only for Execute.
     pub expected_strategy: Option<ExecutionStrategy>,
     /// Allowed durable terminal statuses; empty for non-Durable cases.
@@ -64,7 +64,7 @@ pub struct ExecutionTaskQualityCaseV1 {
 /// Provider-neutral forecast authorized before any live dispatch.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionLiveCostForecastV1 {
+pub struct ExecutionLiveCostForecast {
     /// Number of logical corpus cases.
     pub case_count: u64,
     /// Number of independent runs per logical case.
@@ -78,21 +78,21 @@ pub struct ExecutionLiveCostForecastV1 {
 /// One persisted independent live outcome ready for report aggregation.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionLiveRunOutcomeV1 {
+pub struct ExecutionLiveRunOutcome {
     /// Logical task-quality case identifier.
     pub case_id: String,
     /// One-based independent repetition number.
     pub repetition: u32,
     /// Observed final routing label, including NeedsInput.
-    pub observed_route: ExecutionRoutingLabelV1,
+    pub observed_route: ExecutionRoutingLabel,
     /// Observed deterministic strategy, present only for Execute.
     pub observed_strategy: Option<ExecutionStrategy>,
     /// Common redacted execution-eval case result.
-    pub result: ExecutionEvalCaseResultV1,
+    pub result: ExecutionEvalCaseResult,
 }
 
 /// Validates one task-quality case independently of corpus-level cardinality.
-pub(crate) fn validate_task_quality_case(case: &ExecutionTaskQualityCaseV1) -> Result<()> {
+pub(crate) fn validate_task_quality_case(case: &ExecutionTaskQualityCase) -> Result<()> {
     if case.schema_version != 1
         || case.case_id.trim().is_empty()
         || case.objective.trim().is_empty()
@@ -119,7 +119,7 @@ pub(crate) fn validate_task_quality_case(case: &ExecutionTaskQualityCaseV1) -> R
         )));
     }
     match (case.expected_route, case.expected_strategy) {
-        (ExecutionRoutingLabelV1::Execute, Some(ExecutionStrategy::Durable)) => {
+        (ExecutionRoutingLabel::Execute, Some(ExecutionStrategy::Durable)) => {
             if case.allowed_terminal_statuses.is_empty()
                 || case.reference_task_count == 0
                 || case.max_task_count == 0
@@ -130,8 +130,8 @@ pub(crate) fn validate_task_quality_case(case: &ExecutionTaskQualityCaseV1) -> R
                 )));
             }
         }
-        (ExecutionRoutingLabelV1::Respond | ExecutionRoutingLabelV1::NeedsInput, None)
-        | (ExecutionRoutingLabelV1::Execute, Some(ExecutionStrategy::Inline)) => {
+        (ExecutionRoutingLabel::Respond | ExecutionRoutingLabel::NeedsInput, None)
+        | (ExecutionRoutingLabel::Execute, Some(ExecutionStrategy::Inline)) => {
             if !case.allowed_terminal_statuses.is_empty()
                 || case.min_task_count != 0
                 || case.max_task_count != 0
@@ -155,7 +155,7 @@ pub(crate) fn validate_task_quality_case(case: &ExecutionTaskQualityCaseV1) -> R
 }
 
 /// Validates the exact initial task-quality corpus and its required cohorts.
-pub(crate) fn validate_task_quality_corpus(cases: &[ExecutionTaskQualityCaseV1]) -> Result<()> {
+pub(crate) fn validate_task_quality_corpus(cases: &[ExecutionTaskQualityCase]) -> Result<()> {
     if cases.len() != EXECUTION_LIVE_CASE_COUNT {
         return Err(invalid_config(format!(
             "execution task-quality corpus must contain exactly {EXECUTION_LIVE_CASE_COUNT} cases"
@@ -194,10 +194,10 @@ pub(crate) fn validate_task_quality_corpus(cases: &[ExecutionTaskQualityCaseV1])
 
 /// Forecasts all repeated provider work and rejects over-budget runs before dispatch.
 pub fn forecast_live_execution_cost(
-    cases: &[ExecutionTaskQualityCaseV1],
+    cases: &[ExecutionTaskQualityCase],
     repetitions: u32,
     budget_usd: f64,
-) -> Result<ExecutionLiveCostForecastV1> {
+) -> Result<ExecutionLiveCostForecast> {
     validate_task_quality_corpus(cases)?;
     if repetitions == 0 || !budget_usd.is_finite() || budget_usd <= 0.0 {
         return Err(invalid_config(
@@ -227,7 +227,7 @@ pub fn forecast_live_execution_cost(
     let run_count = case_count
         .checked_mul(repetitions_u64)
         .ok_or_else(|| invalid_config("live run count overflowed u64".to_string()))?;
-    Ok(ExecutionLiveCostForecastV1 {
+    Ok(ExecutionLiveCostForecast {
         case_count,
         repetitions,
         run_count,
@@ -237,13 +237,13 @@ pub fn forecast_live_execution_cost(
 
 /// Aggregates exactly `k` independent outcomes per logical live case into one strict report.
 pub fn aggregate_live_execution_outcomes(
-    cases: &[ExecutionTaskQualityCaseV1],
-    outcomes: &[ExecutionLiveRunOutcomeV1],
+    cases: &[ExecutionTaskQualityCase],
+    outcomes: &[ExecutionLiveRunOutcome],
     repetitions: u32,
     corpus_hashes: BTreeMap<String, String>,
-    calibration_status: ExecutionJudgeCalibrationStatusV1,
-    provider: ExecutionEvalProviderV1,
-) -> Result<ExecutionEvalReportV1> {
+    calibration_status: ExecutionJudgeCalibrationStatus,
+    provider: ExecutionEvalProvider,
+) -> Result<ExecutionEvalReport> {
     validate_task_quality_corpus(cases)?;
     if repetitions != EXECUTION_LIVE_REPETITIONS {
         return Err(invalid_config(format!(
@@ -322,7 +322,7 @@ pub fn aggregate_live_execution_outcomes(
         let route_passed = outcome.observed_route == case.expected_route
             && outcome.observed_strategy == case.expected_strategy;
         let status_passed = match (case.expected_route, case.expected_strategy) {
-            (ExecutionRoutingLabelV1::Execute, Some(ExecutionStrategy::Durable)) => outcome
+            (ExecutionRoutingLabel::Execute, Some(ExecutionStrategy::Durable)) => outcome
                 .result
                 .observed_run_status
                 .is_some_and(|status| case.allowed_terminal_statuses.contains(&status)),
@@ -372,15 +372,15 @@ pub fn aggregate_live_execution_outcomes(
                 .ok_or_else(|| invalid_config("live strategy cost overflowed u64".to_string()))?;
             strategy_cost_cases = strategy_cost_cases.saturating_add(1);
         }
-        if case.expected_route == ExecutionRoutingLabelV1::Execute {
+        if case.expected_route == ExecutionRoutingLabel::Execute {
             execute_cases = execute_cases.saturating_add(1);
             respond_on_execute = respond_on_execute.saturating_add(u64::from(
-                outcome.observed_route == ExecutionRoutingLabelV1::Respond,
+                outcome.observed_route == ExecutionRoutingLabel::Respond,
             ));
             if case.expected_strategy == Some(ExecutionStrategy::Durable) {
                 durable_strategy_cases = durable_strategy_cases.saturating_add(1);
                 durable_strategy_correct = durable_strategy_correct.saturating_add(u64::from(
-                    outcome.observed_route == ExecutionRoutingLabelV1::Execute
+                    outcome.observed_route == ExecutionRoutingLabel::Execute
                         && outcome.observed_strategy == Some(ExecutionStrategy::Durable),
                 ));
             }
@@ -388,7 +388,7 @@ pub fn aggregate_live_execution_outcomes(
         if case.tags.iter().any(|tag| tag == "near-boundary-inline") {
             near_boundary_inline = near_boundary_inline.saturating_add(1);
             near_boundary_inline_correct = near_boundary_inline_correct.saturating_add(u64::from(
-                outcome.observed_route == ExecutionRoutingLabelV1::Execute
+                outcome.observed_route == ExecutionRoutingLabel::Execute
                     && outcome.observed_strategy == Some(ExecutionStrategy::Inline),
             ));
         }
@@ -420,8 +420,8 @@ pub fn aggregate_live_execution_outcomes(
     }
 
     let seeds = cases.iter().map(|case| case.seed).collect::<Vec<_>>();
-    let mut report = ExecutionEvalReportV1::new(
-        ExecutionEvalLaneV1::NightlyLive,
+    let mut report = ExecutionEvalReport::new(
+        ExecutionEvalLane::NightlyLive,
         corpus_hashes,
         seeds,
         repetitions,
@@ -459,15 +459,15 @@ pub fn aggregate_live_execution_outcomes(
     Ok(report)
 }
 
-const fn label_kind(label: ExecutionRoutingLabelV1) -> ExecutionRouteKind {
+const fn label_kind(label: ExecutionRoutingLabel) -> ExecutionRouteKind {
     match label {
-        ExecutionRoutingLabelV1::Respond => ExecutionRouteKind::Respond,
-        ExecutionRoutingLabelV1::Execute => ExecutionRouteKind::Execute,
-        ExecutionRoutingLabelV1::NeedsInput => ExecutionRouteKind::NeedsInput,
+        ExecutionRoutingLabel::Respond => ExecutionRouteKind::Respond,
+        ExecutionRoutingLabel::Execute => ExecutionRouteKind::Execute,
+        ExecutionRoutingLabel::NeedsInput => ExecutionRouteKind::NeedsInput,
     }
 }
 
-fn route_token_total(provenance: &ExecutionRouteProvenanceV1) -> Result<u64> {
+fn route_token_total(provenance: &ExecutionRouteProvenance) -> Result<u64> {
     let usage = provenance.usage;
     usage
         .input_tokens_uncached

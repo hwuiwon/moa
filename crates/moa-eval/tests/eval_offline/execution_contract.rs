@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use moa_artifacts::execution_plan::ExecutionRequirement;
-use moa_eval::execution::{TextExpectationV1, load_execution_corpus, score_contract_case};
+use moa_eval::execution::{TextExpectation, load_execution_corpus, score_contract_case};
 
 #[tokio::test]
 async fn execution_contract_recorded_candidates_match_every_gold_category_offline() {
@@ -67,13 +67,13 @@ async fn execution_contract_one_actual_entry_cannot_satisfy_two_gold_entries_off
     case.candidate.goal.completion_checks.clear();
     case.expected.completion_checks.clear();
     case.expected.requirements = vec![
-        TextExpectationV1 {
+        TextExpectation {
             expectation_id: "overlap-a".to_string(),
             all_terms: vec!["every issuer".to_string()],
             any_terms: Vec::new(),
             forbidden_terms: Vec::new(),
         },
-        TextExpectationV1 {
+        TextExpectation {
             expectation_id: "overlap-b".to_string(),
             all_terms: vec!["five years".to_string()],
             any_terms: Vec::new(),

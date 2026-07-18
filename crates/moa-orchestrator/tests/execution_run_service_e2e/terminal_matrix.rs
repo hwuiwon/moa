@@ -23,9 +23,8 @@ use moa_core::{
         contact::SessionActorRef,
         execution_planning::{
             ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
-            ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1,
-            ExecutionPlanningAuditPayloadV1, ExecutionRouteKind, ExecutionRouteReason,
-            ExecutionRouteStage, ExecutionStrategy,
+            ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload,
+            ExecutionRouteKind, ExecutionRouteStage, ExecutionStrategy,
         },
         identifiers::{SessionId, TenantId, UserId},
         session::SessionStatus,
@@ -69,8 +68,8 @@ use crate::execution_execution_support::assertions::{
     planning_audits,
 };
 use crate::execution_execution_support::fixtures::{
-    SERVICE_TIMEOUT, await_execution_terminal, await_session_settled, await_turn_outcome,
-    execution_run_request, raw_events, route_classifier_completion,
+    RouteFixture, SERVICE_TIMEOUT, await_execution_terminal, await_session_settled,
+    await_turn_outcome, execution_run_request, raw_events, route_classifier_completion,
     route_classifier_needs_input_completion, seed_allow_policy, start_turn, start_turn_in_session,
 };
 
@@ -79,9 +78,9 @@ const AMENDMENT_MATCH: &str = "<frozen_amendment_context>";
 const SYNTHESIS_MATCH: &str = "Synthesize the final user response for execution run";
 const ESCALATION_OBJECTIVE: &str = "Investigate the unusual failure and explain it";
 const ESCALATION_TOOL: &str = "discover_fixture_execution_shape";
-const REPLAN_SEED_AGENT_SENTINEL: &str = "TERMINAL_MATRIX_REPLAN_SEED_AGENT_V1";
-const REPLAN_AGENT_SENTINEL: &str = "TERMINAL_MATRIX_REPLAN_AGENT_V1";
-const REPAIRED_AGENT_SENTINEL: &str = "TERMINAL_MATRIX_REPAIRED_AGENT_V1";
+const REPLAN_SEED_AGENT_SENTINEL: &str = "TERMINAL_MATRIX_REPLAN_SEED_AGENT";
+const REPLAN_AGENT_SENTINEL: &str = "TERMINAL_MATRIX_REPLAN_AGENT";
+const REPAIRED_AGENT_SENTINEL: &str = "TERMINAL_MATRIX_REPAIRED_AGENT";
 const REQ_USEFUL: &str = "useful";
 const REQ_REMAINING: &str = "remaining";
 
@@ -94,7 +93,7 @@ async fn no_run_needs_input_persists_strict_route_audit_service_e2e() -> Result<
         json!({
             "default": text_completion("unexpected provider call"),
             "keyed": [route_classifier_needs_input_completion(
-                ExecutionRouteReason::PreflightInputMissing,
+                RouteFixture::NeedsInput,
                 &["target"]
             )]
         }),
@@ -114,14 +113,14 @@ async fn no_run_needs_input_persists_strict_route_audit_service_e2e() -> Result<
         "preflight must emit exactly one route audit"
     );
     assert!(matches!(
-        audits[0].payload,
-        ExecutionPlanningAuditPayloadV1::Route {
+        &audits[0].payload,
+        ExecutionPlanningAuditPayload::Route {
             stage: ExecutionRouteStage::Initial,
             decision: ExecutionRouteKind::NeedsInput,
             strategy: None,
-            reason: ExecutionRouteReason::PreflightInputMissing,
+            rationale,
             ..
-        }
+        } if rationale == RouteFixture::NeedsInput.rationale()
     ));
     assert_no_execution_lifecycle_events(&events);
     assert_eq!(
@@ -153,7 +152,7 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
             "keyed": [
                 route_classifier_completion(
                     ExecutionRouteKind::Execute,
-                    ExecutionRouteReason::BoundedInteractiveWork
+                    RouteFixture::Inline
                 ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion("escalated run complete")),
                 keyed_completion(
@@ -187,7 +186,8 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
                 outcomes: vec![FixtureCapabilityOutcome::Success {
                     output: json!({
                         "execution_shape": {
-                            "reason": "bulk_collection",
+                            "strategy": "durable",
+                            "rationale": "Newly discovered work requires durable continuation.",
                             "summary": "the bounded probe discovered collection-wide work",
                             "value": {"company_count": 500}
                         }
@@ -223,8 +223,8 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
     assert_completed_terminal(&status, 1, 1);
     assert_eq!(status.run.source_kind, ExecutionSourceKind::GeneratedPlan);
     assert_eq!(
-        status.run.route_reason,
-        ExecutionRouteReason::DurableUpgrade
+        status.run.route_rationale,
+        RouteFixture::DurableUpgrade.rationale()
     );
     assert_eq!(
         await_session_settled(test.client(), started.session_id).await?,
@@ -298,7 +298,7 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
                 request
                     .response_format
                     .as_ref()
-                    .is_some_and(|format| format.name == "execution_route_classifier_v1")
+                    .is_some_and(|format| format.name == "execution_route_classifier")
             })
             .count(),
         1,
@@ -310,7 +310,7 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
             request
                 .response_format
                 .as_ref()
-                .is_some_and(|format| format.name == "generated_execution_candidate_v1")
+                .is_some_and(|format| format.name == "generated_execution_candidate")
         })
         .context("Durable upgrade omitted its sole generated planner request")?;
     let planner_context = planner
@@ -330,8 +330,10 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
         Some(&json!(ESCALATION_OBJECTIVE))
     );
     assert_eq!(
-        frozen.pointer("/durable_upgrade/reason"),
-        Some(&json!("bulk_collection"))
+        frozen.pointer("/durable_upgrade/rationale"),
+        Some(&json!(
+            "Newly discovered work requires durable continuation."
+        ))
     );
     assert_eq!(
         frozen.pointer("/durable_upgrade/evidence"),
@@ -363,7 +365,7 @@ async fn rejected_initial_candidate_and_sole_repair_persist_strict_audits_servic
             "keyed": [
                 route_classifier_completion(
                     ExecutionRouteKind::Execute,
-                    ExecutionRouteReason::ExplicitDurableExecution
+                    RouteFixture::Durable
                 ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion("repair run complete"))
             ]
@@ -402,7 +404,7 @@ async fn rejected_initial_candidate_and_sole_repair_persist_strict_audits_servic
             request
                 .response_format
                 .as_ref()
-                .is_some_and(|format| format.name == "generated_execution_candidate_v1")
+                .is_some_and(|format| format.name == "generated_execution_candidate")
         })
         .count();
     assert_eq!(
@@ -426,7 +428,7 @@ async fn oversized_initial_candidate_is_terminal_without_repair_service_e2e() ->
             "responses": [text_completion(oversized)],
             "keyed": [route_classifier_completion(
                 ExecutionRouteKind::Execute,
-                ExecutionRouteReason::ExplicitDurableExecution
+                RouteFixture::Durable
             )]
         }),
         FixtureCapabilityOptions::default(),
@@ -445,18 +447,18 @@ async fn oversized_initial_candidate_is_terminal_without_repair_service_e2e() ->
         "oversized planning emits route plus one planner call"
     );
     assert!(matches!(
-        audits[0].payload,
-        ExecutionPlanningAuditPayloadV1::Route {
+        &audits[0].payload,
+        ExecutionPlanningAuditPayload::Route {
             stage: ExecutionRouteStage::Initial,
             decision: ExecutionRouteKind::Execute,
             strategy: Some(ExecutionStrategy::Durable),
-            reason: ExecutionRouteReason::ExplicitDurableExecution,
+            rationale,
             ..
-        }
+        } if rationale == RouteFixture::Durable.rationale()
     ));
     assert!(matches!(
         audits[1].payload,
-        ExecutionPlanningAuditPayloadV1::PlannerCall {
+        ExecutionPlanningAuditPayload::PlannerCall {
             call_kind: ExecutionPlannerCallKind::InitialPlan,
             call_ordinal: 0,
             run_uid: None,
@@ -468,10 +470,11 @@ async fn oversized_initial_candidate_is_terminal_without_repair_service_e2e() ->
             ..
         }
     ));
-    assert!(audits.iter().all(|audit| !matches!(
-        audit.payload,
-        ExecutionPlanningAuditPayloadV1::Compile { .. }
-    )));
+    assert!(
+        audits
+            .iter()
+            .all(|audit| !matches!(audit.payload, ExecutionPlanningAuditPayload::Compile { .. }))
+    );
     assert_no_execution_lifecycle_events(&before);
     assert_eq!(
         planning_audits(&fixture.postgres_url, started.session_id).await?,
@@ -495,7 +498,7 @@ async fn amendment_planning_persists_revision_fenced_strict_audits_service_e2e()
             "keyed": [
                 route_classifier_completion(
                     ExecutionRouteKind::Execute,
-                    ExecutionRouteReason::ExplicitDurableExecution
+                    RouteFixture::Durable
                 ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion("amended run complete")),
                 keyed_completion(
@@ -586,9 +589,9 @@ async fn amendment_planning_persists_revision_fenced_strict_audits_service_e2e()
     assert_eq!(
         response_formats,
         vec![
-            "execution_route_classifier_v1",
-            "generated_execution_candidate_v1",
-            "generated_amendment_candidate_v1"
+            "execution_route_classifier",
+            "generated_execution_candidate",
+            "generated_amendment_candidate"
         ]
     );
     Ok(())
@@ -1772,35 +1775,35 @@ fn keyed_completion(match_substring: &str, completion: Value) -> Value {
     json!({"match": match_substring, "completion": completion})
 }
 
-fn assert_durable_upgrade_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
+fn assert_durable_upgrade_audits(audits: &[ExecutionPlanningAuditEnvelope]) {
     assert_eq!(
         audits.len(),
         4,
         "Inline Durable upgrade must emit two routes, planner, compile"
     );
     assert!(matches!(
-        audits[0].payload,
-        ExecutionPlanningAuditPayloadV1::Route {
+        &audits[0].payload,
+        ExecutionPlanningAuditPayload::Route {
             stage: ExecutionRouteStage::Initial,
             decision: ExecutionRouteKind::Execute,
             strategy: Some(ExecutionStrategy::Inline),
-            reason: ExecutionRouteReason::BoundedInteractiveWork,
+            rationale,
             ..
-        }
+        } if rationale == RouteFixture::Inline.rationale()
     ));
     assert!(matches!(
-        audits[1].payload,
-        ExecutionPlanningAuditPayloadV1::Route {
+        &audits[1].payload,
+        ExecutionPlanningAuditPayload::Route {
             stage: ExecutionRouteStage::DurableUpgrade,
             decision: ExecutionRouteKind::Execute,
             strategy: Some(ExecutionStrategy::Durable),
-            reason: ExecutionRouteReason::DurableUpgrade,
+            rationale,
             ..
-        }
+        } if rationale == RouteFixture::DurableUpgrade.rationale()
     ));
     assert!(matches!(
         audits[2].payload,
-        ExecutionPlanningAuditPayloadV1::PlannerCall {
+        ExecutionPlanningAuditPayload::PlannerCall {
             call_kind: ExecutionPlannerCallKind::InitialPlan,
             call_ordinal: 0,
             outcome: ExecutionPlannerOutcome::Accepted,
@@ -1809,7 +1812,7 @@ fn assert_durable_upgrade_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
     ));
     assert!(matches!(
         audits[3].payload,
-        ExecutionPlanningAuditPayloadV1::Compile {
+        ExecutionPlanningAuditPayload::Compile {
             source: ExecutionCompileSource::GeneratedPlan,
             outcome: ExecutionCompileOutcome::Accepted,
             ..
@@ -1817,25 +1820,25 @@ fn assert_durable_upgrade_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
     ));
 }
 
-fn assert_initial_repair_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
+fn assert_initial_repair_audits(audits: &[ExecutionPlanningAuditEnvelope]) {
     assert_eq!(
         audits.len(),
         5,
         "repair history must be route plus four operations"
     );
     assert!(matches!(
-        audits[0].payload,
-        ExecutionPlanningAuditPayloadV1::Route {
+        &audits[0].payload,
+        ExecutionPlanningAuditPayload::Route {
             stage: ExecutionRouteStage::Initial,
             decision: ExecutionRouteKind::Execute,
             strategy: Some(ExecutionStrategy::Durable),
-            reason: ExecutionRouteReason::ExplicitDurableExecution,
+            rationale,
             ..
-        }
+        } if rationale == RouteFixture::Durable.rationale()
     ));
     assert!(matches!(
         audits[1].payload,
-        ExecutionPlanningAuditPayloadV1::PlannerCall {
+        ExecutionPlanningAuditPayload::PlannerCall {
             call_kind: ExecutionPlannerCallKind::InitialPlan,
             call_ordinal: 0,
             outcome: ExecutionPlannerOutcome::CompilerRejected,
@@ -1847,7 +1850,7 @@ fn assert_initial_repair_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
     ));
     assert!(matches!(
         audits[2].payload,
-        ExecutionPlanningAuditPayloadV1::Compile {
+        ExecutionPlanningAuditPayload::Compile {
             source: ExecutionCompileSource::GeneratedPlan,
             outcome: ExecutionCompileOutcome::Rejected,
             final_plan_hash: None,
@@ -1856,7 +1859,7 @@ fn assert_initial_repair_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
     ));
     assert!(matches!(
         audits[3].payload,
-        ExecutionPlanningAuditPayloadV1::PlannerCall {
+        ExecutionPlanningAuditPayload::PlannerCall {
             call_kind: ExecutionPlannerCallKind::InitialRepair,
             call_ordinal: 1,
             outcome: ExecutionPlannerOutcome::Accepted,
@@ -1868,7 +1871,7 @@ fn assert_initial_repair_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
     ));
     assert!(matches!(
         audits[4].payload,
-        ExecutionPlanningAuditPayloadV1::Compile {
+        ExecutionPlanningAuditPayload::Compile {
             source: ExecutionCompileSource::GeneratedPlan,
             outcome: ExecutionCompileOutcome::Accepted,
             final_plan_hash: Some(_),
@@ -1877,25 +1880,25 @@ fn assert_initial_repair_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
     ));
 }
 
-fn assert_amendment_audits(audits: &[ExecutionPlanningAuditEnvelopeV1], run_uid: uuid::Uuid) {
+fn assert_amendment_audits(audits: &[ExecutionPlanningAuditEnvelope], run_uid: uuid::Uuid) {
     assert_eq!(
         audits.len(),
         5,
         "amended run must retain route, initial planning, and amendment planning"
     );
     assert!(matches!(
-        audits[0].payload,
-        ExecutionPlanningAuditPayloadV1::Route {
+        &audits[0].payload,
+        ExecutionPlanningAuditPayload::Route {
             stage: ExecutionRouteStage::Initial,
             decision: ExecutionRouteKind::Execute,
             strategy: Some(ExecutionStrategy::Durable),
-            reason: ExecutionRouteReason::ExplicitDurableExecution,
+            rationale,
             ..
-        }
+        } if rationale == RouteFixture::Durable.rationale()
     ));
     assert!(matches!(
         audits[1].payload,
-        ExecutionPlanningAuditPayloadV1::PlannerCall {
+        ExecutionPlanningAuditPayload::PlannerCall {
             call_kind: ExecutionPlannerCallKind::InitialPlan,
             call_ordinal: 0,
             outcome: ExecutionPlannerOutcome::Accepted,
@@ -1904,7 +1907,7 @@ fn assert_amendment_audits(audits: &[ExecutionPlanningAuditEnvelopeV1], run_uid:
     ));
     assert!(matches!(
         audits[2].payload,
-        ExecutionPlanningAuditPayloadV1::Compile {
+        ExecutionPlanningAuditPayload::Compile {
             source: ExecutionCompileSource::GeneratedPlan,
             outcome: ExecutionCompileOutcome::Accepted,
             ..
@@ -1915,10 +1918,10 @@ fn assert_amendment_audits(audits: &[ExecutionPlanningAuditEnvelopeV1], run_uid:
         .filter(|audit| {
             matches!(
                 audit.payload,
-                ExecutionPlanningAuditPayloadV1::PlannerCall {
+                ExecutionPlanningAuditPayload::PlannerCall {
                     call_kind: ExecutionPlannerCallKind::Amendment,
                     ..
-                } | ExecutionPlanningAuditPayloadV1::Compile {
+                } | ExecutionPlanningAuditPayload::Compile {
                     source: ExecutionCompileSource::Amendment,
                     ..
                 }
@@ -1933,7 +1936,7 @@ fn assert_amendment_audits(audits: &[ExecutionPlanningAuditEnvelopeV1], run_uid:
     );
     assert!(matches!(
         amendment[0].payload,
-        ExecutionPlanningAuditPayloadV1::PlannerCall {
+        ExecutionPlanningAuditPayload::PlannerCall {
             call_kind: ExecutionPlannerCallKind::Amendment,
             call_ordinal: 0,
             run_uid: Some(actual_run_uid),
@@ -1947,7 +1950,7 @@ fn assert_amendment_audits(audits: &[ExecutionPlanningAuditEnvelopeV1], run_uid:
     ));
     assert!(matches!(
         amendment[1].payload,
-        ExecutionPlanningAuditPayloadV1::Compile {
+        ExecutionPlanningAuditPayload::Compile {
             source: ExecutionCompileSource::Amendment,
             run_uid: Some(actual_run_uid),
             plan_revision: Some(1),

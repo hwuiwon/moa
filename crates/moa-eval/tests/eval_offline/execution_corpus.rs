@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use moa_core::types::execution_planning::ExecutionStrategy;
-use moa_eval::execution::{ExecutionRoutingLabelV1, load_execution_corpus};
+use moa_eval::execution::{ExecutionRoutingLabel, load_execution_corpus};
 
 fn manifest_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenarios/execution/manifest.toml")
@@ -23,7 +23,7 @@ async fn execution_corpus_loads_exact_counts_hashes_and_required_cohorts_offline
         corpus
             .routing_cases
             .iter()
-            .filter(|case| case.expected_label == ExecutionRoutingLabelV1::Respond)
+            .filter(|case| case.expected_label == ExecutionRoutingLabel::Respond)
             .count(),
         60
     );
@@ -32,7 +32,7 @@ async fn execution_corpus_loads_exact_counts_hashes_and_required_cohorts_offline
             .routing_cases
             .iter()
             .filter(|case| {
-                case.expected_label == ExecutionRoutingLabelV1::Execute
+                case.expected_label == ExecutionRoutingLabel::Execute
                     && case.expected_strategy == Some(ExecutionStrategy::Inline)
             })
             .count(),
@@ -43,7 +43,7 @@ async fn execution_corpus_loads_exact_counts_hashes_and_required_cohorts_offline
             .routing_cases
             .iter()
             .filter(|case| {
-                case.expected_label == ExecutionRoutingLabelV1::Execute
+                case.expected_label == ExecutionRoutingLabel::Execute
                     && case.expected_strategy == Some(ExecutionStrategy::Durable)
             })
             .count(),
@@ -53,7 +53,7 @@ async fn execution_corpus_loads_exact_counts_hashes_and_required_cohorts_offline
         corpus
             .routing_cases
             .iter()
-            .filter(|case| case.expected_label == ExecutionRoutingLabelV1::NeedsInput)
+            .filter(|case| case.expected_label == ExecutionRoutingLabel::NeedsInput)
             .count(),
         20
     );
@@ -61,7 +61,7 @@ async fn execution_corpus_loads_exact_counts_hashes_and_required_cohorts_offline
         case.tags
             .iter()
             .any(|tag| tag == "sp500-ai-five-year-screen")
-            && case.expected_label == ExecutionRoutingLabelV1::Execute
+            && case.expected_label == ExecutionRoutingLabel::Execute
             && case.expected_strategy == Some(ExecutionStrategy::Durable)
     }));
     assert_eq!(

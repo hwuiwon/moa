@@ -68,7 +68,7 @@ mod tests {
     use super::ExecutionConfig;
 
     #[test]
-    fn execution_config_defaults_match_the_v1_resource_contract() {
+    fn execution_config_defaults_match_the_resource_contract() {
         // Pins: run admission and compiler estimates share the documented safety defaults.
         assert_eq!(
             ExecutionConfig::default(),

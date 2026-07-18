@@ -8,9 +8,8 @@ use moa_artifacts::execution_plan::{
 };
 use moa_core::types::execution_planning::{
     ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
-    ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
-    ExecutionRouteKind, ExecutionRouteReason, ExecutionRouteStage, ExecutionSourceProvenanceV1,
-    ExecutionStrategy,
+    ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload,
+    ExecutionRouteKind, ExecutionRouteStage, ExecutionSourceProvenance, ExecutionStrategy,
 };
 use moa_eval_core::{EvalError, Result};
 use moa_execution::{
@@ -31,7 +30,7 @@ use uuid::Uuid;
 
 /// Current schema version for execution-eval snapshots.
 pub const EXECUTION_EVAL_SNAPSHOT_SCHEMA_VERSION: u8 = 1;
-const TERMINAL_OUTPUT_HASH_DOMAIN: &[u8] = b"moa.execution-eval.terminal-output.v1\0";
+const TERMINAL_OUTPUT_HASH_DOMAIN: &[u8] = b"moa.execution-eval.terminal-output\0";
 const MAX_CAPABILITY_OBSERVATIONS: usize = 10_000;
 const MAX_FINAL_RESPONSE_BYTES: usize = 1_048_576;
 const MAX_OBSERVATION_TEXT_BYTES: usize = 512;
@@ -39,7 +38,7 @@ const MAX_OBSERVATION_TEXT_BYTES: usize = 512;
 /// Redacted state for one execution run.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionEvalRunV1 {
+pub struct ExecutionEvalRun {
     /// Durable run identifier.
     pub run_uid: Uuid,
     /// Immutable user-derived goal contract.
@@ -51,7 +50,7 @@ pub struct ExecutionEvalRunV1 {
     /// Normalized source cohort.
     pub source_kind: ExecutionSourceKind,
     /// Exact admitted source provenance.
-    pub source_provenance: ExecutionSourceProvenanceV1,
+    pub source_provenance: ExecutionSourceProvenance,
     /// Normalized run-producing route.
     pub route: ExecutionRouteFields,
     /// Current durable run status.
@@ -71,13 +70,13 @@ pub struct ExecutionEvalRunV1 {
     /// Approved, reserved, and consumed resource accounting.
     pub budget_ledger: BudgetLedger,
     /// Persisted task progress counters.
-    pub progress: ExecutionProgressSummaryV1,
+    pub progress: ExecutionProgressSummary,
 }
 
 /// Persisted run progress counters used for projection consistency checks.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionProgressSummaryV1 {
+pub struct ExecutionProgressSummary {
     /// Number of materialized tasks.
     pub total_tasks: u64,
     /// Number of completed tasks.
@@ -91,7 +90,7 @@ pub struct ExecutionProgressSummaryV1 {
 /// Redacted persisted state for one logical execution task.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionEvalTaskV1 {
+pub struct ExecutionEvalTask {
     /// Stable logical task identifier.
     pub task_id: moa_execution::state::ExecutionTaskId,
     /// Stable plan node identifier.
@@ -105,11 +104,11 @@ pub struct ExecutionEvalTaskV1 {
     /// One-based dispatch generation fence.
     pub generation: u64,
     /// Redacted task-kind category.
-    pub kind: ExecutionTaskKindSummaryV1,
+    pub kind: ExecutionTaskKindSummary,
     /// Governed capabilities available to or invoked by the task.
     pub capability_refs: Vec<CapabilityReference>,
     /// Latest typed result category without result payloads.
-    pub result_class: Option<ExecutionTaskResultClassV1>,
+    pub result_class: Option<ExecutionTaskResultClass>,
     /// Cumulative resource usage.
     pub usage: ExecutionUsage,
     /// Whether this logical task was reconciled terminally.
@@ -121,7 +120,7 @@ pub struct ExecutionEvalTaskV1 {
 /// Redacted task-kind category.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutionTaskKindSummaryV1 {
+pub enum ExecutionTaskKindSummary {
     /// Direct governed capability invocation.
     Capability,
     /// Bounded task-local agent.
@@ -139,7 +138,7 @@ pub enum ExecutionTaskKindSummaryV1 {
 /// Redacted task-result category.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ExecutionTaskResultClassV1 {
+pub enum ExecutionTaskResultClass {
     /// Task completed successfully.
     Completed,
     /// Task requires declared-audience input.
@@ -158,7 +157,7 @@ pub enum ExecutionTaskResultClassV1 {
 /// Normalized planning-audit fields retained for deterministic evaluation.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ExecutionPlanningAuditSummaryV1 {
+pub enum ExecutionPlanningAuditSummary {
     /// One deterministic routing decision.
     Route {
         /// Initial or Durable-upgrade stage.
@@ -167,8 +166,8 @@ pub enum ExecutionPlanningAuditSummaryV1 {
         decision: ExecutionRouteKind,
         /// Deterministic strategy for an Execute route.
         strategy: Option<ExecutionStrategy>,
-        /// Stable route reason.
-        reason: ExecutionRouteReason,
+        /// Bounded human-readable route rationale.
+        rationale: String,
     },
     /// One actual provider planner call.
     PlannerCall {
@@ -211,7 +210,7 @@ pub enum ExecutionPlanningAuditSummaryV1 {
 /// Bounded counts of execution-related session event categories.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionSessionEventSummaryV1 {
+pub struct ExecutionSessionEventSummary {
     /// Number of run-start events.
     pub run_started: u64,
     /// Number of progress events.
@@ -226,7 +225,7 @@ pub struct ExecutionSessionEventSummaryV1 {
     pub raw_task_output: u64,
 }
 
-impl ExecutionSessionEventSummaryV1 {
+impl ExecutionSessionEventSummary {
     /// Looks up one stable event-category count.
     #[must_use]
     pub fn count(&self, event_kind: &str) -> Option<u64> {
@@ -245,7 +244,7 @@ impl ExecutionSessionEventSummaryV1 {
 /// One fixture-observed logical capability invocation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionCapabilityCallObservationV1 {
+pub struct ExecutionCapabilityCallObservation {
     /// Fixture-stable logical invocation identifier.
     pub logical_invocation_id: String,
     /// Exact governed capability reference.
@@ -259,11 +258,11 @@ pub struct ExecutionCapabilityCallObservationV1 {
 /// Optional deterministic fixture evidence outside run/task persistence.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionHarnessEvidenceV1 {
+pub struct ExecutionHarnessEvidence {
     /// Bounded session-event category counts.
-    pub session_events: ExecutionSessionEventSummaryV1,
+    pub session_events: ExecutionSessionEventSummary,
     /// Optional logical capability-call observations.
-    pub capability_calls: Vec<ExecutionCapabilityCallObservationV1>,
+    pub capability_calls: Vec<ExecutionCapabilityCallObservation>,
     /// Final synthesized response retained only for in-process scoring.
     pub final_response: Option<String>,
 }
@@ -271,26 +270,26 @@ pub struct ExecutionHarnessEvidenceV1 {
 /// Strict redacted read model assembled from the same state consumed by the runtime.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionEvalSnapshotV1 {
+pub struct ExecutionEvalSnapshot {
     /// Snapshot schema version, fixed at `1`.
     pub schema_version: u8,
     /// Redacted durable run state.
-    pub run: ExecutionEvalRunV1,
+    pub run: ExecutionEvalRun,
     /// Complete ordered redacted task state.
-    pub tasks: Vec<ExecutionEvalTaskV1>,
+    pub tasks: Vec<ExecutionEvalTask>,
     /// Normalized route, planner, and compiler audits.
-    pub planning_audits: Vec<ExecutionPlanningAuditSummaryV1>,
+    pub planning_audits: Vec<ExecutionPlanningAuditSummary>,
     /// Optional deterministic fixture evidence.
-    pub harness: ExecutionHarnessEvidenceV1,
+    pub harness: ExecutionHarnessEvidence,
 }
 
-impl ExecutionEvalSnapshotV1 {
+impl ExecutionEvalSnapshot {
     /// Builds a strict redacted snapshot from runtime-owned typed state.
     pub fn from_parts(
         snapshot: ExecutionSchedulingSnapshot,
         task_records: Vec<ExecutionTaskRecord>,
-        planning_audits: Vec<ExecutionPlanningAuditEnvelopeV1>,
-        harness: ExecutionHarnessEvidenceV1,
+        planning_audits: Vec<ExecutionPlanningAuditEnvelope>,
+        harness: ExecutionHarnessEvidence,
     ) -> Result<Self> {
         validate_task_projection(&snapshot, &task_records)?;
         validate_harness(&harness)?;
@@ -304,7 +303,7 @@ impl ExecutionEvalSnapshotV1 {
             .collect::<std::result::Result<Vec<CompletionCheckResult>, _>>()
             .map_err(|error| {
                 invalid_config(format!(
-                    "execution completion-check evidence is not typed V1 data: {error}"
+                    "execution completion-check evidence is not typed data: {error}"
                 ))
             })?;
         ensure_unique_check_ids(&completion_check_results)?;
@@ -315,7 +314,7 @@ impl ExecutionEvalSnapshotV1 {
             .as_ref()
             .map(canonical_terminal_output_hash)
             .transpose()?;
-        let run = ExecutionEvalRunV1 {
+        let run = ExecutionEvalRun {
             run_uid: snapshot.run.run_uid,
             goal: snapshot.run.goal.clone(),
             active_plan_hash: snapshot.run.active_plan_hash.to_string(),
@@ -331,7 +330,7 @@ impl ExecutionEvalSnapshotV1 {
             terminal_evidence: snapshot.run.terminal_evidence.clone(),
             terminal_reason: snapshot.run.terminal_reason,
             budget_ledger: snapshot.budget_ledger,
-            progress: ExecutionProgressSummaryV1 {
+            progress: ExecutionProgressSummary {
                 total_tasks: snapshot.run.progress_total_tasks,
                 completed_tasks: snapshot.run.progress_completed_tasks,
                 failed_tasks: snapshot.run.progress_failed_tasks,
@@ -409,7 +408,7 @@ fn ensure_unique_check_ids(checks: &[CompletionCheckResult]) -> Result<()> {
     Ok(())
 }
 
-fn validate_harness(harness: &ExecutionHarnessEvidenceV1) -> Result<()> {
+fn validate_harness(harness: &ExecutionHarnessEvidence) -> Result<()> {
     if harness.capability_calls.len() > MAX_CAPABILITY_OBSERVATIONS {
         return Err(invalid_config(format!(
             "execution harness supplied {} capability observations; maximum is {MAX_CAPABILITY_OBSERVATIONS}",
@@ -448,25 +447,25 @@ fn validate_bounded_text(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn redact_task(record: &ExecutionTaskRecord) -> Result<ExecutionEvalTaskV1> {
+fn redact_task(record: &ExecutionTaskRecord) -> Result<ExecutionEvalTask> {
     let (kind, capability_refs) = match &record.kind {
         LogicalTaskKind::Capability { reference } => (
-            ExecutionTaskKindSummaryV1::Capability,
+            ExecutionTaskKindSummary::Capability,
             vec![reference.clone()],
         ),
         LogicalTaskKind::Agent {
             capability_refs, ..
-        } => (ExecutionTaskKindSummaryV1::Agent, capability_refs.clone()),
-        LogicalTaskKind::Review { .. } => (ExecutionTaskKindSummaryV1::Review, Vec::new()),
-        LogicalTaskKind::WaitSignal { .. } => (ExecutionTaskKindSummaryV1::WaitSignal, Vec::new()),
-        LogicalTaskKind::Output { .. } => (ExecutionTaskKindSummaryV1::Output, Vec::new()),
+        } => (ExecutionTaskKindSummary::Agent, capability_refs.clone()),
+        LogicalTaskKind::Review { .. } => (ExecutionTaskKindSummary::Review, Vec::new()),
+        LogicalTaskKind::WaitSignal { .. } => (ExecutionTaskKindSummary::WaitSignal, Vec::new()),
+        LogicalTaskKind::Output { .. } => (ExecutionTaskKindSummary::Output, Vec::new()),
         LogicalTaskKind::CompletionVerifier { .. } => {
-            (ExecutionTaskKindSummaryV1::CompletionVerifier, Vec::new())
+            (ExecutionTaskKindSummary::CompletionVerifier, Vec::new())
         }
     };
     let citation_count = u64::try_from(record.citations.len())
         .map_err(|_| invalid_config("execution task citation count exceeds u64".to_string()))?;
-    Ok(ExecutionEvalTaskV1 {
+    Ok(ExecutionEvalTask {
         task_id: record.task_id,
         node_id: record.node_id.clone(),
         item_key: record.item_key.clone(),
@@ -484,33 +483,33 @@ fn redact_task(record: &ExecutionTaskRecord) -> Result<ExecutionEvalTaskV1> {
 
 fn result_class(
     outcome: &moa_artifacts::execution_plan::ExecutionTaskOutcome,
-) -> ExecutionTaskResultClassV1 {
+) -> ExecutionTaskResultClass {
     match &outcome.result {
-        ExecutionTaskResult::Completed { .. } => ExecutionTaskResultClassV1::Completed,
-        ExecutionTaskResult::NeedsInput { .. } => ExecutionTaskResultClassV1::NeedsInput,
-        ExecutionTaskResult::NeedsReplan { .. } => ExecutionTaskResultClassV1::NeedsReplan,
-        ExecutionTaskResult::Cancelled { .. } => ExecutionTaskResultClassV1::Cancelled,
-        ExecutionTaskResult::Failed { class, .. } => ExecutionTaskResultClassV1::Failed {
+        ExecutionTaskResult::Completed { .. } => ExecutionTaskResultClass::Completed,
+        ExecutionTaskResult::NeedsInput { .. } => ExecutionTaskResultClass::NeedsInput,
+        ExecutionTaskResult::NeedsReplan { .. } => ExecutionTaskResultClass::NeedsReplan,
+        ExecutionTaskResult::Cancelled { .. } => ExecutionTaskResultClass::Cancelled,
+        ExecutionTaskResult::Failed { class, .. } => ExecutionTaskResultClass::Failed {
             class: class.clone(),
         },
     }
 }
 
-fn normalize_audit(audit: &ExecutionPlanningAuditEnvelopeV1) -> ExecutionPlanningAuditSummaryV1 {
+fn normalize_audit(audit: &ExecutionPlanningAuditEnvelope) -> ExecutionPlanningAuditSummary {
     match &audit.payload {
-        ExecutionPlanningAuditPayloadV1::Route {
+        ExecutionPlanningAuditPayload::Route {
             stage,
             decision,
             strategy,
-            reason,
+            rationale,
             ..
-        } => ExecutionPlanningAuditSummaryV1::Route {
+        } => ExecutionPlanningAuditSummary::Route {
             stage: *stage,
             decision: *decision,
             strategy: *strategy,
-            reason: *reason,
+            rationale: rationale.clone(),
         },
-        ExecutionPlanningAuditPayloadV1::PlannerCall {
+        ExecutionPlanningAuditPayload::PlannerCall {
             call_kind,
             call_ordinal,
             run_uid,
@@ -520,7 +519,7 @@ fn normalize_audit(audit: &ExecutionPlanningAuditEnvelopeV1) -> ExecutionPlannin
             prompt_version,
             candidate_hash,
             ..
-        } => ExecutionPlanningAuditSummaryV1::PlannerCall {
+        } => ExecutionPlanningAuditSummary::PlannerCall {
             call_kind: *call_kind,
             call_ordinal: *call_ordinal,
             run_uid: *run_uid,
@@ -530,7 +529,7 @@ fn normalize_audit(audit: &ExecutionPlanningAuditEnvelopeV1) -> ExecutionPlannin
             prompt_version: prompt_version.clone(),
             candidate_hash: candidate_hash.clone(),
         },
-        ExecutionPlanningAuditPayloadV1::Compile {
+        ExecutionPlanningAuditPayload::Compile {
             source,
             operation_key,
             run_uid,
@@ -539,7 +538,7 @@ fn normalize_audit(audit: &ExecutionPlanningAuditEnvelopeV1) -> ExecutionPlannin
             candidate_hash,
             final_plan_hash,
             ..
-        } => ExecutionPlanningAuditSummaryV1::Compile {
+        } => ExecutionPlanningAuditSummary::Compile {
             source: *source,
             operation_key: operation_key.clone(),
             run_uid: *run_uid,
@@ -562,7 +561,7 @@ fn canonical_terminal_output_hash(value: &Value) -> Result<String> {
 }
 
 pub(crate) fn total_accounted_resources(
-    snapshot: &ExecutionEvalSnapshotV1,
+    snapshot: &ExecutionEvalSnapshot,
 ) -> Option<ExecutionEstimate> {
     snapshot
         .run
