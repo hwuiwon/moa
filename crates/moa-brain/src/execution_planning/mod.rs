@@ -40,9 +40,9 @@ pub use response::{
     ExecutionPlanningResult, ExecutionPlanningResultKind,
 };
 pub use routing::{
-    EXECUTION_ROUTER_HIGH_RISK_CONFIDENCE_BPS, EXECUTION_ROUTER_MAX_OUTPUT_TOKENS,
-    EXECUTION_ROUTER_PROMPT_VERSION, EXECUTION_ROUTER_RESPONSE_MAX_BYTES,
-    EXECUTION_ROUTER_RUN_CONFIDENCE_BPS, ExecutionRouteClassifierLabelV1,
+    EXECUTION_ROUTER_DURABLE_CONFIDENCE_BPS, EXECUTION_ROUTER_HIGH_RISK_CONFIDENCE_BPS,
+    EXECUTION_ROUTER_MAX_OUTPUT_TOKENS, EXECUTION_ROUTER_PROMPT_VERSION,
+    EXECUTION_ROUTER_RESPONSE_MAX_BYTES, ExecutionRouteClassifierLabelV1,
     ExecutionRouteClassifierOutputV1, ExecutionRoutingInput, record_applied_route_audit,
     route_execution,
 };
@@ -871,17 +871,16 @@ fn contract_error(
     MoaError::ValidationError(error.to_string())
 }
 
-/// Returns whether a rejected pinned template may safely fall back to bounded Act.
+/// Returns whether a rejected pinned template may safely fall back to Inline Execute.
 #[must_use]
-pub fn pinned_template_may_fallback_to_act(
+pub fn pinned_template_may_fallback_to_inline(
     independent_route: &ExecutionRouteDecision,
     report: &ExecutionValidationReport,
 ) -> bool {
     if !matches!(
         independent_route,
-        ExecutionRouteDecision::Routed {
-            mode: moa_core::types::execution_planning::ExecutionMode::Act,
-            ..
+        ExecutionRouteDecision::Execute {
+            reason: ExecutionRouteReason::BoundedInteractiveWork
         }
     ) {
         return false;
@@ -1382,9 +1381,8 @@ mod tests {
 
     #[test]
     fn execution_planning_pinned_template_fallback_is_gap_closed() {
-        // Pins: Act fallback is disallowed for every authority/input/execution-shape gap.
-        let act = ExecutionRouteDecision::Routed {
-            mode: moa_core::types::execution_planning::ExecutionMode::Act,
+        // Pins: Inline fallback is disallowed for every authority/input/execution-shape gap.
+        let inline = ExecutionRouteDecision::Execute {
             reason: ExecutionRouteReason::BoundedInteractiveWork,
         };
         let structural = ExecutionValidationReport {
@@ -1395,7 +1393,7 @@ mod tests {
                 message: "invalid".to_string(),
             }],
         };
-        assert!(pinned_template_may_fallback_to_act(&act, &structural));
+        assert!(pinned_template_may_fallback_to_inline(&inline, &structural));
         for code in [
             "invalid_run_input",
             "capability_not_in_catalog",
@@ -1415,7 +1413,7 @@ mod tests {
                 }],
             };
             assert!(
-                !pinned_template_may_fallback_to_act(&act, &report),
+                !pinned_template_may_fallback_to_inline(&inline, &report),
                 "{code}"
             );
         }

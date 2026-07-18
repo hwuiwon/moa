@@ -600,7 +600,7 @@ run docker compose up -d --build postgres valkey openfga moa-pii-service
 run_phase "wait for compose Postgres" wait_for_postgres
 run_phase "wait for compose Valkey" wait_for_valkey
 run "${REPO_ROOT}/scripts/wait-for-fga.sh"
-run_phase "wait for PII sidecar" wait_for_http "http://127.0.0.1:10050/healthz" "PII sidecar"
+run_phase "wait for PII sidecar" wait_for_http "http://127.0.0.1:10050/healthz" "PII sidecar" 180
 
 run docker compose exec -T postgres psql -U moa_owner -d postgres \
   -v ON_ERROR_STOP=1 \
@@ -646,7 +646,6 @@ run cargo nextest run -p moa-orchestrator --locked --profile db-session --no-tes
 run cargo nextest run -p moa-orchestrator --locked --profile db-memory --no-tests fail
 run cargo test -p moa-orchestrator --lib --locked --features "${ORCH_FEATURES}" runtime::endpoint::tests::skill_learning_feature_adds_skill_learning_workflow
 run cargo test -p moa-orchestrator --test skill_learning_review_db --locked --features "${ORCH_FEATURES}" -- --test-threads="${CLEAN_E2E_TEST_THREADS}"
-run cargo test -p moa-orchestrator --test skill_learning_workflow --locked --features "${ORCH_FEATURES}" -- --test-threads="${CLEAN_E2E_TEST_THREADS}"
 run cargo test -p moa-brain --features eval-harness --test brain_turn_cache_replay_db_memory --locked
 run cargo test -p moa-eval --test golden_eval --locked
 

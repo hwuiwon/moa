@@ -285,7 +285,7 @@ async fn create_test_planning_context(
 
 fn test_source_provenance(final_plan_hash: &str) -> ExecutionSourceProvenanceV1 {
     ExecutionSourceProvenanceV1::GeneratedPlan {
-        route_reason: ExecutionRouteReason::ExplicitRun,
+        route_reason: ExecutionRouteReason::ExplicitDurableExecution,
         planner: GeneratedPlanPlannerProvenanceV1 {
             model: "scripted-fixture".to_string(),
             prompt_version: "execution-run-service-e2e-v1".to_string(),

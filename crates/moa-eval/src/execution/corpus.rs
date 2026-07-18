@@ -12,7 +12,7 @@ use super::{
     live::{ExecutionTaskQualityCaseV1, validate_task_quality_corpus},
     routing::{ExecutionRoutingCaseV1, ExecutionRoutingLabelV1, validate_routing_case},
 };
-use moa_core::types::execution_planning::ExecutionRouteClassifierOutcome;
+use moa_core::types::execution_planning::{ExecutionRouteClassifierOutcome, ExecutionStrategy};
 
 /// Current schema version for the execution corpus manifest.
 pub const EXECUTION_CORPUS_MANIFEST_SCHEMA_VERSION: u8 = 1;
@@ -186,8 +186,9 @@ fn validate_routing_corpus(
     }
     let mut ids = BTreeSet::new();
     let mut labels = BTreeMap::<&str, usize>::new();
+    let mut strategies = BTreeMap::<&str, usize>::new();
     let mut near_boundary = 0_usize;
-    let mut escalation = 0_usize;
+    let mut durable_upgrade = 0_usize;
     let mut motivating_case = false;
     let mut classifier_fallback = 0_usize;
     for case in cases {
@@ -200,38 +201,48 @@ fn validate_routing_corpus(
         }
         let label = match case.expected_label {
             ExecutionRoutingLabelV1::Respond => "respond",
-            ExecutionRoutingLabelV1::Act => "act",
-            ExecutionRoutingLabelV1::Run => "run",
+            ExecutionRoutingLabelV1::Execute => "execute",
             ExecutionRoutingLabelV1::NeedsInput => "needs_input",
         };
         *labels.entry(label).or_default() += 1;
+        if let Some(strategy) = case.expected_strategy {
+            let label = match strategy {
+                ExecutionStrategy::Inline => "inline",
+                ExecutionStrategy::Durable => "durable",
+            };
+            *strategies.entry(label).or_default() += 1;
+        }
         near_boundary += usize::from(case.near_boundary);
-        escalation += usize::from(case.escalation.is_some());
+        durable_upgrade += usize::from(case.durable_upgrade.is_some());
         classifier_fallback += usize::from(!matches!(
             case.expected_classifier_outcome,
             ExecutionRouteClassifierOutcome::Accepted | ExecutionRouteClassifierOutcome::NotCalled
         ));
-        motivating_case |= case
-            .tags
-            .iter()
-            .any(|tag| tag == "sp500-ai-five-year-screen");
+        motivating_case |= case.expected_label == ExecutionRoutingLabelV1::Execute
+            && case.expected_strategy == Some(ExecutionStrategy::Durable)
+            && case
+                .tags
+                .iter()
+                .any(|tag| tag == "sp500-ai-five-year-screen");
     }
-    let required = [
-        ("respond", 60_usize),
-        ("act", 140),
-        ("run", 100),
-        ("needs_input", 20),
-    ];
+    let required = [("respond", 60_usize), ("execute", 240), ("needs_input", 20)];
     for (label, minimum) in required {
-        if labels.get(label).copied().unwrap_or_default() < minimum {
+        if labels.get(label).copied().unwrap_or_default() != minimum {
             return Err(invalid_config(format!(
-                "execution routing corpus requires at least {minimum} `{label}` cases"
+                "execution routing corpus requires exactly {minimum} `{label}` cases"
             )));
         }
     }
-    if near_boundary < 80 || escalation < 40 || classifier_fallback < 24 || !motivating_case {
+    for (strategy, expected) in [("inline", 140_usize), ("durable", 100_usize)] {
+        if strategies.get(strategy).copied().unwrap_or_default() != expected {
+            return Err(invalid_config(format!(
+                "execution routing corpus requires exactly {expected} `{strategy}` strategy cases"
+            )));
+        }
+    }
+    if near_boundary < 80 || durable_upgrade < 40 || classifier_fallback < 24 || !motivating_case {
         return Err(invalid_config(
-            "execution routing corpus is missing near-boundary, escalation, fallback, or motivating coverage".to_string(),
+            "execution routing corpus is missing near-boundary, Durable-upgrade, fallback, or motivating coverage".to_string(),
         ));
     }
     Ok(())

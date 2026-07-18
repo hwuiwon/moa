@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use moa_core::types::execution_planning::{ExecutionRouteKind, ExecutionStrategy};
 use moa_eval::execution::{
     ExecutionEvalCaseResultV1, ExecutionEvalLaneV1, ExecutionEvalReportV1,
     ExecutionInvariantSpecV1, ExecutionJudgeCalibrationStatusV1,
@@ -71,6 +72,21 @@ fn execution_report_rejects_version_identity_hash_metric_and_count_drift_offline
     let mut report = valid_report();
     report.metrics.total_cases = 99;
     assert!(report.validate().is_err());
+}
+
+#[test]
+fn execution_report_rejects_missing_or_extraneous_strategy_offline() {
+    // Pins: Execute rows require exactly one internal strategy while Respond and
+    // NeedsInput rows cannot smuggle a run-mode equivalent into the report.
+    let mut missing = valid_report();
+    missing.cases[0].observed_route = Some(ExecutionRouteKind::Execute);
+    missing.cases[0].observed_strategy = None;
+    assert!(missing.validate().is_err());
+
+    let mut extraneous = valid_report();
+    extraneous.cases[0].observed_route = Some(ExecutionRouteKind::Respond);
+    extraneous.cases[0].observed_strategy = Some(ExecutionStrategy::Inline);
+    assert!(extraneous.validate().is_err());
 }
 
 #[test]

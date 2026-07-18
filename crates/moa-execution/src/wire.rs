@@ -572,8 +572,6 @@ pub struct ExecutionRunSummary {
     pub status: ExecutionRunStatus,
     /// Normalized source cohort.
     pub source_kind: ExecutionSourceKind,
-    /// Persisted run-producing route mode.
-    pub route_mode: moa_core::types::execution_planning::ExecutionMode,
     /// Persisted bounded route reason.
     pub route_reason: moa_core::types::execution_planning::ExecutionRouteReason,
     /// Exact pinned skill-template reference, when template-backed.

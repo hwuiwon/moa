@@ -1405,7 +1405,7 @@ fn lifecycle_plan_with_output_schema(
 
 fn generated_source(final_plan_hash: &str) -> ExecutionSourceProvenanceV1 {
     ExecutionSourceProvenanceV1::GeneratedPlan {
-        route_reason: ExecutionRouteReason::ExplicitRun,
+        route_reason: ExecutionRouteReason::ExplicitDurableExecution,
         planner: GeneratedPlanPlannerProvenanceV1 {
             model: "scripted-fixture".to_string(),
             prompt_version: "task-lifecycle-service-e2e-v1".to_string(),

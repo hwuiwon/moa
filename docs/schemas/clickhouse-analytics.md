@@ -79,8 +79,8 @@ updated_at DateTime64(6,'UTC'), export_version DateTime64(6,'UTC')`
 
 `dim_execution_runs` — `ORDER BY (tenant_id, run_uid)`:
 `run_uid UUID, tenant_id UUID, contact_id Nullable(UUID), session_id UUID,
-source_kind LowCardinality(String), route_mode LowCardinality(String),
-route_reason LowCardinality(String), skill_template_ref Nullable(String),
+source_kind LowCardinality(String), route_reason LowCardinality(String),
+skill_template_ref Nullable(String),
 skill_template_revision_uid Nullable(UUID), initial_plan_hash String,
 active_plan_hash String, plan_revision UInt64,
 status LowCardinality(String), terminal_reason Nullable(String),
@@ -120,7 +120,8 @@ These tables match `analytics.execution_run_fact` and
 are non-null, and nullable skill/capability provenance remains nullable.
 `source_ref`, `capability_ref`, `task_uid`, and raw `error` columns do not exist.
 Raw input, output, gaps, cancellation reason, and error prose are never
-exported.
+exported. Execution-run analytics retain route reason/source; a constant
+run-mode dimension is deliberately absent.
 
 Run `queue_to_start_ms` is exactly `started_at - queued_at`; it is null when
 either timestamp is null. Run `duration_ms` is `completed_at - started_at`.

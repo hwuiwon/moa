@@ -1,4 +1,4 @@
-//! Bounded model-assisted selection of respond, act, run, or clarification.
+//! Bounded model-assisted selection of respond, execute, or clarification.
 
 use std::{collections::HashMap, time::Instant};
 
@@ -9,10 +9,10 @@ use moa_core::{
         completion::{CompletionRequest, JsonResponseFormat, NativeWebSearchPolicy, TokenUsage},
         context::ContextMessage,
         execution_planning::{
-            ActEscalationSignal, ExecutionMode, ExecutionRouteClassifierOutcome,
-            ExecutionRouteDecision, ExecutionRouteProvenanceV1, ExecutionRouteReason,
-            ExecutionRouteSource, ExecutionRouteUsageV1, ExecutionRoutingResultV1,
-            ExecutionTemplateInvocation, execution_planning_hash,
+            ExecutionRouteClassifierOutcome, ExecutionRouteDecision, ExecutionRouteProvenanceV1,
+            ExecutionRouteReason, ExecutionRouteSource, ExecutionRouteUsageV1,
+            ExecutionRoutingResultV1, ExecutionStrategy, ExecutionTemplateInvocation,
+            execution_planning_hash,
         },
         identifiers::ModelId,
     },
@@ -31,8 +31,8 @@ pub const EXECUTION_ROUTER_MAX_OUTPUT_TOKENS: usize = 256;
 pub const EXECUTION_ROUTER_RESPONSE_MAX_BYTES: usize = 16_384;
 /// Confidence required before a direct response or clarification is accepted.
 pub const EXECUTION_ROUTER_HIGH_RISK_CONFIDENCE_BPS: u16 = 9_000;
-/// Confidence required before a durable run is started.
-pub const EXECUTION_ROUTER_RUN_CONFIDENCE_BPS: u16 = 8_000;
+/// Confidence required before the Durable strategy is selected.
+pub const EXECUTION_ROUTER_DURABLE_CONFIDENCE_BPS: u16 = 8_000;
 
 const EXECUTION_ROUTER_MAX_MISSING_INPUTS: usize = 8;
 const EXECUTION_ROUTER_MAX_MISSING_INPUT_BYTES: usize = 256;
@@ -40,21 +40,19 @@ const EXECUTION_ROUTER_PROMPT: &str = include_str!("../prompts/execution_router.
 const ROUTER_STAGE_METADATA_KEY: &str = "moa.pipeline.stage";
 const OPENAI_REASONING_EFFORT_METADATA_KEY: &str = "_moa.openai.reasoning_effort";
 
-/// Immutable inputs used by the execution-mode router.
+/// Immutable inputs used by the execution router.
 #[derive(Clone, Copy, Debug)]
 pub struct ExecutionRoutingInput<'a> {
     /// Exact current user objective.
     pub objective: &'a str,
     /// Exact explicit template invocation, when supplied by a trusted caller surface.
     pub execution_template: Option<&'a ExecutionTemplateInvocation>,
-    /// Bounded evidence emitted by an already-running Act turn.
-    pub escalation: Option<&'a ActEscalationSignal>,
     /// Number of attachments supplied on the current user turn.
     pub attachment_count: usize,
     /// Whether bounded session metadata identifies a recent target.
     pub has_recent_target: bool,
     /// Configured auxiliary model used for ordinary route classification.
-    pub route_model: &'a ModelId,
+    pub classifier_model: &'a ModelId,
 }
 
 /// Closed label emitted by the strict route classifier.
@@ -63,10 +61,8 @@ pub struct ExecutionRoutingInput<'a> {
 pub enum ExecutionRouteClassifierLabelV1 {
     /// Produce one user-facing response without tools.
     Respond,
-    /// Use the bounded interactive model/tool loop.
-    Act,
-    /// Compile or instantiate a durable execution run.
-    Run,
+    /// Execute authorized work using a deterministic internal strategy.
+    Execute,
     /// Ask for concrete missing caller input.
     NeedsInput,
 }
@@ -102,29 +98,10 @@ pub async fn route_execution(
     let objective_hash = objective_hash(input.objective);
     if input.execution_template.is_some() {
         return Ok(trusted_result(
-            ExecutionRouteDecision::Routed {
-                mode: ExecutionMode::Run,
+            ExecutionRouteDecision::Execute {
                 reason: ExecutionRouteReason::SelectedExecutionTemplate,
             },
             ExecutionRouteSource::SelectedExecutionTemplate,
-            objective_hash,
-        ));
-    }
-    if let Some(escalation) = input.escalation {
-        escalation
-            .validate()
-            .map_err(|error| MoaError::ValidationError(error.to_string()))?;
-        if escalation.objective.as_bytes() != input.objective.as_bytes() {
-            return Err(MoaError::ValidationError(
-                "Act escalation objective must match the originating user objective".to_string(),
-            ));
-        }
-        return Ok(trusted_result(
-            ExecutionRouteDecision::Routed {
-                mode: ExecutionMode::Run,
-                reason: ExecutionRouteReason::ActEscalation,
-            },
-            ExecutionRouteSource::ActEscalation,
             objective_hash,
         ));
     }
@@ -230,7 +207,7 @@ pub async fn route_execution(
     {
         return Ok(classifier_fallback_with_response(
             objective_hash,
-            ExecutionRouteClassifierOutcome::ContextForcedAct,
+            ExecutionRouteClassifierOutcome::ContextForcedInline,
             provider_model,
             response_hash,
             Some(output.confidence_bps),
@@ -267,7 +244,7 @@ pub fn record_applied_route_audit(result: &RouteAuditWriteOutcome) {
     };
     record_execution_route(
         evidence.decision,
-        evidence.mode,
+        evidence.strategy,
         evidence.reason,
         evidence.provenance.source,
         evidence.provenance.classifier_outcome,
@@ -287,7 +264,7 @@ fn classifier_request(input: &ExecutionRoutingInput<'_>) -> Result<CompletionReq
     let frozen_json = serde_json::to_string(&frozen)
         .map_err(|error| MoaError::SerializationError(error.to_string()))?;
     Ok(CompletionRequest {
-        model: Some(input.route_model.clone()),
+        model: Some(input.classifier_model.clone()),
         messages: vec![
             ContextMessage::system(EXECUTION_ROUTER_PROMPT),
             ContextMessage::user(frozen_json),
@@ -297,7 +274,7 @@ fn classifier_request(input: &ExecutionRoutingInput<'_>) -> Result<CompletionReq
         temperature: Some(0.0),
         response_format: Some(JsonResponseFormat::strict_json_schema(
             "execution_route_classifier_v1",
-            "Classify one user turn into respond, act, run, or needs_input.",
+            "Classify one user turn into respond, execute, or needs_input.",
             schema,
         )),
         native_web_search: NativeWebSearchPolicy::Disabled,
@@ -323,7 +300,7 @@ fn trusted_result(
         ExecutionRouteDecision::NeedsInput { missing_inputs, .. } => {
             u8::try_from(missing_inputs.len()).unwrap_or(u8::MAX)
         }
-        ExecutionRouteDecision::Routed { .. } => 0,
+        ExecutionRouteDecision::Respond { .. } | ExecutionRouteDecision::Execute { .. } => 0,
     };
     ExecutionRoutingResultV1 {
         decision,
@@ -353,14 +330,13 @@ fn classifier_fallback(
     duration_micros: u64,
 ) -> ExecutionRoutingResultV1 {
     ExecutionRoutingResultV1 {
-        decision: ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Act,
+        decision: ExecutionRouteDecision::Execute {
             reason: ExecutionRouteReason::BoundedInteractiveWork,
         },
         provenance: ExecutionRouteProvenanceV1 {
             source: ExecutionRouteSource::Classifier,
             classifier_outcome: outcome,
-            provider_model: Some(input.route_model.to_string()),
+            provider_model: Some(input.classifier_model.to_string()),
             prompt_version: Some(EXECUTION_ROUTER_PROMPT_VERSION.to_string()),
             objective_hash,
             response_hash,
@@ -383,8 +359,7 @@ fn classifier_fallback_with_response(
     duration_micros: u64,
 ) -> ExecutionRoutingResultV1 {
     ExecutionRoutingResultV1 {
-        decision: ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Act,
+        decision: ExecutionRouteDecision::Execute {
             reason: ExecutionRouteReason::BoundedInteractiveWork,
         },
         provenance: ExecutionRouteProvenanceV1 {
@@ -413,11 +388,11 @@ fn valid_classifier_output(output: &ExecutionRouteClassifierOutputV1) -> bool {
             ExecutionRouteClassifierLabelV1::Respond,
             ExecutionRouteReason::SimpleResponse
         ) | (
-            ExecutionRouteClassifierLabelV1::Act,
+            ExecutionRouteClassifierLabelV1::Execute,
             ExecutionRouteReason::BoundedInteractiveWork
         ) | (
-            ExecutionRouteClassifierLabelV1::Run,
-            ExecutionRouteReason::ExplicitRun
+            ExecutionRouteClassifierLabelV1::Execute,
+            ExecutionRouteReason::ExplicitDurableExecution
                 | ExecutionRouteReason::BulkCollection
                 | ExecutionRouteReason::DurableOrResumable
                 | ExecutionRouteReason::HighFanout
@@ -438,9 +413,9 @@ fn valid_classifier_output(output: &ExecutionRouteClassifierOutputV1) -> bool {
                         && value.len() <= EXECUTION_ROUTER_MAX_MISSING_INPUT_BYTES
                 })
         }
-        ExecutionRouteClassifierLabelV1::Respond
-        | ExecutionRouteClassifierLabelV1::Act
-        | ExecutionRouteClassifierLabelV1::Run => output.missing_inputs.is_empty(),
+        ExecutionRouteClassifierLabelV1::Respond | ExecutionRouteClassifierLabelV1::Execute => {
+            output.missing_inputs.is_empty()
+        }
     }
 }
 
@@ -449,10 +424,12 @@ fn below_confidence_threshold(output: &ExecutionRouteClassifierOutputV1) -> bool
         ExecutionRouteClassifierLabelV1::Respond | ExecutionRouteClassifierLabelV1::NeedsInput => {
             output.confidence_bps < EXECUTION_ROUTER_HIGH_RISK_CONFIDENCE_BPS
         }
-        ExecutionRouteClassifierLabelV1::Run => {
-            output.confidence_bps < EXECUTION_ROUTER_RUN_CONFIDENCE_BPS
+        ExecutionRouteClassifierLabelV1::Execute
+            if output.reason.strategy() == Some(ExecutionStrategy::Durable) =>
+        {
+            output.confidence_bps < EXECUTION_ROUTER_DURABLE_CONFIDENCE_BPS
         }
-        ExecutionRouteClassifierLabelV1::Act => false,
+        ExecutionRouteClassifierLabelV1::Execute => false,
     }
 }
 
@@ -462,16 +439,10 @@ fn decision_from_output(output: ExecutionRouteClassifierOutputV1) -> ExecutionRo
             reason: output.reason,
             missing_inputs: output.missing_inputs,
         },
-        ExecutionRouteClassifierLabelV1::Respond => ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Respond,
+        ExecutionRouteClassifierLabelV1::Respond => ExecutionRouteDecision::Respond {
             reason: output.reason,
         },
-        ExecutionRouteClassifierLabelV1::Act => ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Act,
-            reason: output.reason,
-        },
-        ExecutionRouteClassifierLabelV1::Run => ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Run,
+        ExecutionRouteClassifierLabelV1::Execute => ExecutionRouteDecision::Execute {
             reason: output.reason,
         },
     }
@@ -490,7 +461,7 @@ fn decision_missing_input_count(decision: &ExecutionRouteDecision) -> Result<u8>
                 )
             })
         }
-        ExecutionRouteDecision::Routed { .. } => Ok(0),
+        ExecutionRouteDecision::Respond { .. } | ExecutionRouteDecision::Execute { .. } => Ok(0),
     }
 }
 
@@ -526,7 +497,7 @@ mod tests {
         error::MoaError,
         types::{
             completion::{CompletionContent, CompletionResponse, CompletionStream, StopReason},
-            execution_planning::{ExecutionPlanningEvidence, PinnedExecutionTemplateRef},
+            execution_planning::PinnedExecutionTemplateRef,
             model::ModelCapabilities,
         },
     };
@@ -605,7 +576,7 @@ mod tests {
         }
     }
 
-    fn route_model() -> ModelId {
+    fn classifier_model() -> ModelId {
         ModelId::new("route-model")
     }
 
@@ -613,10 +584,9 @@ mod tests {
         ExecutionRoutingInput {
             objective,
             execution_template: None,
-            escalation: None,
             attachment_count: 0,
             has_recent_target: false,
-            route_model: model,
+            classifier_model: model,
         }
     }
 
@@ -659,9 +629,9 @@ mod tests {
     #[tokio::test]
     async fn execution_routing_uses_one_strict_bounded_classifier_call_offline() {
         // Pins: an ordinary user route is one no-tools/no-search strict auxiliary call.
-        let model = route_model();
+        let model = classifier_model();
         let provider = ScriptedRouteProvider::new(ProviderBehavior::Response(response(&output(
-            ExecutionRouteClassifierLabelV1::Run,
+            ExecutionRouteClassifierLabelV1::Execute,
             ExecutionRouteReason::BulkCollection,
             9_500,
         ))));
@@ -678,8 +648,7 @@ mod tests {
         assert_eq!(provider.call_count(), 1);
         assert_eq!(
             result.decision,
-            ExecutionRouteDecision::Routed {
-                mode: ExecutionMode::Run,
+            ExecutionRouteDecision::Execute {
                 reason: ExecutionRouteReason::BulkCollection,
             }
         );
@@ -696,18 +665,36 @@ mod tests {
         assert_eq!(request.temperature, Some(0.0));
         assert_eq!(request.native_web_search, NativeWebSearchPolicy::Disabled);
         assert_eq!(request.messages.len(), 2);
-        assert!(
-            request
-                .response_format
-                .as_ref()
-                .is_some_and(|format| format.strict)
+        assert!(!request.messages[1].content.contains("escalation"));
+        assert!(!request.messages[1].content.contains("durable_upgrade"));
+        let response_format = request
+            .response_format
+            .as_ref()
+            .expect("route classifier should require a response format");
+        assert!(response_format.strict);
+        assert_eq!(
+            response_format.schema.pointer("/properties/label/$ref"),
+            Some(&json!("#/$defs/ExecutionRouteClassifierLabelV1"))
+        );
+        let label_variants = response_format
+            .schema
+            .pointer("/$defs/ExecutionRouteClassifierLabelV1/oneOf")
+            .and_then(serde_json::Value::as_array)
+            .expect("route classifier label schema should be a closed oneOf");
+        assert_eq!(label_variants.len(), 3);
+        assert_eq!(
+            label_variants
+                .iter()
+                .filter_map(|variant| variant.get("const").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>(),
+            vec!["respond", "execute", "needs_input"]
         );
     }
 
     #[tokio::test]
-    async fn execution_routing_trusted_routes_make_zero_classifier_calls_offline() {
-        // Pins: typed control facts bypass probabilistic language classification.
-        let model = route_model();
+    async fn execution_routing_template_and_blank_routes_make_zero_classifier_calls_offline() {
+        // Pins: exact templates and blank objectives bypass probabilistic classification.
+        let model = classifier_model();
         let provider = ScriptedRouteProvider::new(ProviderBehavior::ProviderError);
         let template = ExecutionTemplateInvocation {
             template: PinnedExecutionTemplateRef {
@@ -730,29 +717,6 @@ mod tests {
             ExecutionRouteSource::SelectedExecutionTemplate
         );
 
-        let escalation = ActEscalationSignal {
-            objective: "inspect every issuer".to_string(),
-            reason: ExecutionRouteReason::BulkCollection,
-            evidence: vec![ExecutionPlanningEvidence {
-                source: "act".to_string(),
-                summary: "scope is the full universe".to_string(),
-                value: json!({"issuers": 500}),
-            }],
-        };
-        let escalation_result = route_execution(
-            &provider,
-            ExecutionRoutingInput {
-                escalation: Some(&escalation),
-                ..routing_input("inspect every issuer", &model)
-            },
-        )
-        .await
-        .expect("typed escalation route should succeed");
-        assert_eq!(
-            escalation_result.provenance.source,
-            ExecutionRouteSource::ActEscalation
-        );
-
         let blank_result = route_execution(&provider, routing_input("  ", &model))
             .await
             .expect("blank objective preflight should succeed");
@@ -767,9 +731,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execution_routing_failures_and_low_confidence_fall_back_to_act_offline() {
-        // Pins: uncertain routing never becomes a direct response or an unapproved run.
-        let model = route_model();
+    async fn execution_routing_failures_and_low_confidence_fall_back_to_inline_offline() {
+        // Pins: uncertain routing always falls back to Execute/Inline.
+        let model = classifier_model();
         let cases = [
             (
                 ProviderBehavior::ProviderError,
@@ -784,8 +748,14 @@ mod tests {
                 ExecutionRouteClassifierOutcome::SchemaRejected,
             ),
             (
+                ProviderBehavior::Response(response_text(
+                    "x".repeat(EXECUTION_ROUTER_RESPONSE_MAX_BYTES + 1),
+                )),
+                ExecutionRouteClassifierOutcome::Oversized,
+            ),
+            (
                 ProviderBehavior::Response(response(&output(
-                    ExecutionRouteClassifierLabelV1::Run,
+                    ExecutionRouteClassifierLabelV1::Execute,
                     ExecutionRouteReason::BulkCollection,
                     7_999,
                 ))),
@@ -808,8 +778,7 @@ mod tests {
             assert_eq!(provider.call_count(), 1);
             assert_eq!(
                 result.decision,
-                ExecutionRouteDecision::Routed {
-                    mode: ExecutionMode::Act,
+                ExecutionRouteDecision::Execute {
                     reason: ExecutionRouteReason::BoundedInteractiveWork,
                 }
             );
@@ -820,11 +789,11 @@ mod tests {
     #[tokio::test]
     async fn execution_routing_enforces_confidence_boundaries_exactly_offline() {
         // Pins: confidence basis points admit exact thresholds and reject values outside them.
-        let model = route_model();
+        let model = classifier_model();
         let cases = [
             (
                 output(
-                    ExecutionRouteClassifierLabelV1::Run,
+                    ExecutionRouteClassifierLabelV1::Execute,
                     ExecutionRouteReason::BulkCollection,
                     10_000,
                 ),
@@ -832,7 +801,7 @@ mod tests {
             ),
             (
                 output(
-                    ExecutionRouteClassifierLabelV1::Run,
+                    ExecutionRouteClassifierLabelV1::Execute,
                     ExecutionRouteReason::BulkCollection,
                     10_001,
                 ),
@@ -840,9 +809,9 @@ mod tests {
             ),
             (
                 output(
-                    ExecutionRouteClassifierLabelV1::Run,
+                    ExecutionRouteClassifierLabelV1::Execute,
                     ExecutionRouteReason::BulkCollection,
-                    EXECUTION_ROUTER_RUN_CONFIDENCE_BPS,
+                    EXECUTION_ROUTER_DURABLE_CONFIDENCE_BPS,
                 ),
                 ExecutionRouteClassifierOutcome::Accepted,
             ),
@@ -859,6 +828,14 @@ mod tests {
                     ExecutionRouteClassifierLabelV1::Respond,
                     ExecutionRouteReason::SimpleResponse,
                     EXECUTION_ROUTER_HIGH_RISK_CONFIDENCE_BPS,
+                ),
+                ExecutionRouteClassifierOutcome::Accepted,
+            ),
+            (
+                output(
+                    ExecutionRouteClassifierLabelV1::Execute,
+                    ExecutionRouteReason::BoundedInteractiveWork,
+                    0,
                 ),
                 ExecutionRouteClassifierOutcome::Accepted,
             ),
@@ -881,7 +858,7 @@ mod tests {
     #[tokio::test]
     async fn execution_routing_rejects_blank_and_oversized_missing_inputs_offline() {
         // Pins: each classifier-requested input is concrete, nonblank, and byte bounded.
-        let model = route_model();
+        let model = classifier_model();
         let invalid_missing_inputs = [
             "   ".to_string(),
             "x".repeat(EXECUTION_ROUTER_MAX_MISSING_INPUT_BYTES + 1),
@@ -906,9 +883,8 @@ mod tests {
             );
             assert!(matches!(
                 result.decision,
-                ExecutionRouteDecision::Routed {
-                    mode: ExecutionMode::Act,
-                    ..
+                ExecutionRouteDecision::Execute {
+                    reason: ExecutionRouteReason::BoundedInteractiveWork
                 }
             ));
         }
@@ -916,39 +892,56 @@ mod tests {
 
     #[tokio::test]
     async fn execution_routing_context_prevents_respond_or_clarification_offline() {
-        // Pins: attachments and recent targets keep context-dependent work inside Act.
-        let model = route_model();
-        let provider = ScriptedRouteProvider::new(ProviderBehavior::Response(response(&output(
-            ExecutionRouteClassifierLabelV1::Respond,
-            ExecutionRouteReason::SimpleResponse,
+        // Pins: attachments and recent targets keep context-dependent work inside Inline Execute.
+        let model = classifier_model();
+        let mut needs_input = output(
+            ExecutionRouteClassifierLabelV1::NeedsInput,
+            ExecutionRouteReason::PreflightInputMissing,
             9_500,
-        ))));
-        let result = route_execution(
-            &provider,
-            ExecutionRoutingInput {
-                attachment_count: 1,
-                ..routing_input("summarize this", &model)
-            },
-        )
-        .await
-        .expect("attachment route should classify");
-        assert_eq!(
-            result.provenance.classifier_outcome,
-            ExecutionRouteClassifierOutcome::ContextForcedAct
         );
-        assert!(matches!(
-            result.decision,
-            ExecutionRouteDecision::Routed {
-                mode: ExecutionMode::Act,
-                ..
-            }
-        ));
+        needs_input.missing_inputs = vec!["target".to_string()];
+        for (classifier_output, attachment_count, has_recent_target) in [
+            (
+                output(
+                    ExecutionRouteClassifierLabelV1::Respond,
+                    ExecutionRouteReason::SimpleResponse,
+                    9_500,
+                ),
+                1,
+                false,
+            ),
+            (needs_input, 0, true),
+        ] {
+            let provider = ScriptedRouteProvider::new(ProviderBehavior::Response(response(
+                &classifier_output,
+            )));
+            let result = route_execution(
+                &provider,
+                ExecutionRoutingInput {
+                    attachment_count,
+                    has_recent_target,
+                    ..routing_input("summarize this", &model)
+                },
+            )
+            .await
+            .expect("context-dependent route should classify");
+            assert_eq!(
+                result.provenance.classifier_outcome,
+                ExecutionRouteClassifierOutcome::ContextForcedInline
+            );
+            assert_eq!(
+                result.decision,
+                ExecutionRouteDecision::Execute {
+                    reason: ExecutionRouteReason::BoundedInteractiveWork
+                }
+            );
+        }
     }
 
     #[tokio::test]
     async fn execution_routing_needs_input_preserves_bounded_missing_fields_offline() {
         // Pins: classifier clarification carries concrete bounded inputs to the caller.
-        let model = route_model();
+        let model = classifier_model();
         let mut needs_input = output(
             ExecutionRouteClassifierLabelV1::NeedsInput,
             ExecutionRouteReason::PreflightInputMissing,

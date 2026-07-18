@@ -9,7 +9,7 @@ use moa_artifacts::{
     },
     reference::ArtifactRef,
 };
-use moa_core::types::execution_planning::{ExecutionMode, ExecutionRouteReason};
+use moa_core::types::execution_planning::ExecutionRouteReason;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -384,8 +384,6 @@ pub struct ExecutionTerminalEvidence {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionRouteFields {
-    /// Run-producing execution mode.
-    pub mode: ExecutionMode,
     /// Exact bounded route reason.
     pub reason: ExecutionRouteReason,
 }

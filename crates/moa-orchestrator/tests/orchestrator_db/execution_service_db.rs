@@ -369,11 +369,11 @@ async fn execution_service_rows_require_parent_session_and_keep_authorization_im
             planning_context_uid, planning_context_hash, owner_user_id, goal_contract,
             initial_plan, active_plan, initial_plan_hash, active_plan_hash,
             capability_catalog, authorization_envelope, pinned_instruction_skills,
-            source_provenance, source_kind, route_mode, route_reason, input, status
+            source_provenance, source_kind, route_reason, input, status
         ) VALUES ($1, $2, NULL, 0, $3, $4, 'owner', '{}'::JSONB, '{}'::JSONB, '{}'::JSONB,
                   $4, $4, '{}'::JSONB, '{}'::JSONB, '[]'::JSONB,
-                  '{"kind":"generated_plan","route_reason":"explicit_run"}'::JSONB,
-                  'generated_plan', 'run', 'explicit_run', '{}'::JSONB, 'queued')
+                  '{"kind":"generated_plan","route_reason":"explicit_durable_execution"}'::JSONB,
+                  'generated_plan', 'explicit_durable_execution', '{}'::JSONB, 'queued')
         "#,
     )
     .bind(run_uid)
@@ -397,13 +397,13 @@ async fn execution_service_rows_require_parent_session_and_keep_authorization_im
             planning_context_uid, planning_context_hash, owner_user_id, goal_contract,
             initial_plan, active_plan, initial_plan_hash, active_plan_hash,
             capability_catalog, authorization_envelope, pinned_instruction_skills,
-            source_provenance, source_kind, route_mode, route_reason,
+            source_provenance, source_kind, route_reason,
             input, status, queued_at
         ) VALUES ($1, $2, $3, 0, $4, $5, 'owner', '{}'::JSONB, '{}'::JSONB, '{}'::JSONB,
                   $5, $5, '{"schema_version":1}'::JSONB,
                   '{"capability_refs":[],"skill_refs":[]}'::JSONB, '[]'::JSONB,
-                  '{"kind":"generated_plan","route_reason":"explicit_run"}'::JSONB,
-                  'generated_plan', 'run', 'explicit_run', '{}'::JSONB, 'queued', NOW())
+                  '{"kind":"generated_plan","route_reason":"explicit_durable_execution"}'::JSONB,
+                  'generated_plan', 'explicit_durable_execution', '{}'::JSONB, 'queued', NOW())
         "#,
     )
     .bind(run_uid)

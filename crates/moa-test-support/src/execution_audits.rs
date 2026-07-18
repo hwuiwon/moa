@@ -32,7 +32,7 @@ pub async fn load_execution_planning_audits(
                         'kind', 'route',
                         'stage', stage,
                         'decision', decision,
-                        'mode', mode,
+                        'strategy', strategy,
                         'reason', reason,
                         'provenance', jsonb_build_object(
                             'source', source,

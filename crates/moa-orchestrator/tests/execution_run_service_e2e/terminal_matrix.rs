@@ -22,10 +22,10 @@ use moa_core::{
     types::{
         contact::SessionActorRef,
         execution_planning::{
-            ExecutionCompileOutcome, ExecutionCompileSource, ExecutionMode,
-            ExecutionPlannerCallKind, ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1,
-            ExecutionPlanningAuditPayloadV1, ExecutionRouteDecisionKind, ExecutionRouteReason,
-            ExecutionRouteStage,
+            ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
+            ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1,
+            ExecutionPlanningAuditPayloadV1, ExecutionRouteKind, ExecutionRouteReason,
+            ExecutionRouteStage, ExecutionStrategy,
         },
         identifiers::{SessionId, TenantId, UserId},
         session::SessionStatus,
@@ -49,9 +49,9 @@ use moa_execution::{
         ReservationOutcome, RunFinalizationRequest, TaskOutcomeWrite, TransitionOutcome,
     },
     state::{
-        ExecutionLimitStop, ExecutionRunStatus, ExecutionTaskFailure, ExecutionTaskId,
-        ExecutionTerminalCause, ExecutionTerminalEvidence, LogicalTask, LogicalTaskKind,
-        TerminalProjection,
+        ExecutionLimitStop, ExecutionRunStatus, ExecutionSourceKind, ExecutionTaskFailure,
+        ExecutionTaskId, ExecutionTerminalCause, ExecutionTerminalEvidence, LogicalTask,
+        LogicalTaskKind, TerminalProjection,
     },
     wire::{
         ExecutionCancelRequest, ExecutionMutationResponse, ExecutionRunRequest,
@@ -117,8 +117,8 @@ async fn no_run_needs_input_persists_strict_route_audit_service_e2e() -> Result<
         audits[0].payload,
         ExecutionPlanningAuditPayloadV1::Route {
             stage: ExecutionRouteStage::Initial,
-            decision: ExecutionRouteDecisionKind::NeedsInput,
-            mode: None,
+            decision: ExecutionRouteKind::NeedsInput,
+            strategy: None,
             reason: ExecutionRouteReason::PreflightInputMissing,
             ..
         }
@@ -141,16 +141,18 @@ async fn no_run_needs_input_persists_strict_route_audit_service_e2e() -> Result<
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn act_escalation_persists_strict_route_and_compile_history_service_e2e() -> Result<()> {
-    // Pins: structured evidence discovered by a bounded Act turn records a
-    // second typed route before one generated plan is admitted.
+async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service_e2e() -> Result<()>
+{
+    // Pins: one valid structured shape discovered by Execute/Inline preserves its evidence,
+    // records one one-way Durable upgrade, and admits exactly one generated run without
+    // reclassifying the objective.
     let candidate = output_candidate(ESCALATION_OBJECTIVE, 1, json!({"answer": "escalated"}));
     let fixture = OrchestratorTestFixture::with_execution_fixture(
         json!({
             "default": text_completion("unexpected scripted fallback"),
             "keyed": [
                 route_classifier_completion(
-                    ExecutionMode::Act,
+                    ExecutionRouteKind::Execute,
                     ExecutionRouteReason::BoundedInteractiveWork
                 ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion("escalated run complete")),
@@ -164,7 +166,7 @@ async fn act_escalation_persists_strict_route_and_compile_history_service_e2e() 
                         "content": "",
                         "tool_calls": [{
                             "name": ESCALATION_TOOL,
-                            "id": "terminal-matrix-act-escalation",
+                            "id": "terminal-matrix-durable-upgrade",
                             "input": {"query": "unusual failure"}
                         }]
                     })
@@ -197,7 +199,7 @@ async fn act_escalation_persists_strict_route_and_compile_history_service_e2e() 
     )
     .await?;
     let test = fixture.isolated().await;
-    let session_id = test.create_session("strict-act-escalation").await?;
+    let session_id = test.create_session("strict-durable-upgrade").await?;
     let session = test.client().get_session(session_id).await?;
     seed_allow_policy(&fixture, test.client(), session.tenant_id, ESCALATION_TOOL).await?;
     let started = start_turn_in_session(&test, session_id, ESCALATION_OBJECTIVE, None).await?;
@@ -211,7 +213,7 @@ async fn act_escalation_persists_strict_route_and_compile_history_service_e2e() 
 
     let outcome = await_turn_outcome(test.client(), &started).await?;
     let TurnOutcomeKind::Accepted { execution_run_uid } = outcome.kind else {
-        bail!("Act escalation did not admit a run: {outcome:?}");
+        bail!("Inline Durable upgrade did not admit a run: {outcome:?}");
     };
     let status = await_execution_terminal(
         test.client(),
@@ -219,16 +221,125 @@ async fn act_escalation_persists_strict_route_and_compile_history_service_e2e() 
     )
     .await?;
     assert_completed_terminal(&status, 1, 1);
+    assert_eq!(status.run.source_kind, ExecutionSourceKind::GeneratedPlan);
+    assert_eq!(
+        status.run.route_reason,
+        ExecutionRouteReason::DurableUpgrade
+    );
     assert_eq!(
         await_session_settled(test.client(), started.session_id).await?,
         SessionStatus::Paused
     );
 
     let audits = planning_audits(&fixture.postgres_url, started.session_id).await?;
-    assert_act_escalation_audits(&audits);
+    assert_durable_upgrade_audits(&audits);
     assert_eq!(
         planning_audits(&fixture.postgres_url, started.session_id).await?,
         audits
+    );
+    let events = raw_events(test.client(), started.session_id).await?;
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|record| match &record.event {
+                Event::ExecutionRunStarted(started) => Some(started.run_uid),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![execution_run_uid],
+        "one Inline turn must admit exactly one Durable run"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(record.event, Event::ExecutionCompleted(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(record.event, Event::ExecutionSynthesisRequested(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(record.event, Event::ToolCall { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|record| matches!(record.event, Event::ToolResult { success: true, .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        crate::execution_execution_support::assertions::final_brain_response(&events)?,
+        "escalated run complete"
+    );
+    let requests = journal_requests(fixture.scripted_requests()?)?;
+    assert_eq!(
+        crate::execution_execution_support::assertions::journal_roles(&requests),
+        vec![
+            crate::execution_execution_support::assertions::JournalRequestRole::Normal,
+            crate::execution_execution_support::assertions::JournalRequestRole::Normal,
+            crate::execution_execution_support::assertions::JournalRequestRole::InitialPlanner,
+            crate::execution_execution_support::assertions::JournalRequestRole::Synthesis,
+        ]
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                request
+                    .response_format
+                    .as_ref()
+                    .is_some_and(|format| format.name == "execution_route_classifier_v1")
+            })
+            .count(),
+        1,
+        "Durable upgrade must not reclassify the root objective"
+    );
+    let planner = requests
+        .iter()
+        .find(|request| {
+            request
+                .response_format
+                .as_ref()
+                .is_some_and(|format| format.name == "generated_execution_candidate_v1")
+        })
+        .context("Durable upgrade omitted its sole generated planner request")?;
+    let planner_context = planner
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let frozen = planner_context
+        .split_once("<frozen_planning_context>")
+        .and_then(|(_, suffix)| suffix.split_once("</frozen_planning_context>"))
+        .map(|(json, _)| json)
+        .context("Durable upgrade planner omitted frozen planning context")?;
+    let frozen: Value = serde_json::from_str(frozen)?;
+    assert_eq!(
+        frozen.pointer("/durable_upgrade/objective"),
+        Some(&json!(ESCALATION_OBJECTIVE))
+    );
+    assert_eq!(
+        frozen.pointer("/durable_upgrade/reason"),
+        Some(&json!("bulk_collection"))
+    );
+    assert_eq!(
+        frozen.pointer("/durable_upgrade/evidence"),
+        Some(&json!([{
+            "source": format!("tool:{ESCALATION_TOOL}"),
+            "summary": "the bounded probe discovered collection-wide work",
+            "value": {"company_count": 500}
+        }]))
     );
     Ok(())
 }
@@ -251,8 +362,8 @@ async fn rejected_initial_candidate_and_sole_repair_persist_strict_audits_servic
             ],
             "keyed": [
                 route_classifier_completion(
-                    ExecutionMode::Run,
-                    ExecutionRouteReason::ExplicitRun
+                    ExecutionRouteKind::Execute,
+                    ExecutionRouteReason::ExplicitDurableExecution
                 ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion("repair run complete"))
             ]
@@ -314,8 +425,8 @@ async fn oversized_initial_candidate_is_terminal_without_repair_service_e2e() ->
             "default": text_completion("unexpected scripted fallback"),
             "responses": [text_completion(oversized)],
             "keyed": [route_classifier_completion(
-                ExecutionMode::Run,
-                ExecutionRouteReason::ExplicitRun
+                ExecutionRouteKind::Execute,
+                ExecutionRouteReason::ExplicitDurableExecution
             )]
         }),
         FixtureCapabilityOptions::default(),
@@ -337,9 +448,9 @@ async fn oversized_initial_candidate_is_terminal_without_repair_service_e2e() ->
         audits[0].payload,
         ExecutionPlanningAuditPayloadV1::Route {
             stage: ExecutionRouteStage::Initial,
-            decision: ExecutionRouteDecisionKind::Routed,
-            mode: Some(ExecutionMode::Run),
-            reason: ExecutionRouteReason::ExplicitRun,
+            decision: ExecutionRouteKind::Execute,
+            strategy: Some(ExecutionStrategy::Durable),
+            reason: ExecutionRouteReason::ExplicitDurableExecution,
             ..
         }
     ));
@@ -383,8 +494,8 @@ async fn amendment_planning_persists_revision_fenced_strict_audits_service_e2e()
             "default": text_completion("unexpected scripted fallback"),
             "keyed": [
                 route_classifier_completion(
-                    ExecutionMode::Run,
-                    ExecutionRouteReason::ExplicitRun
+                    ExecutionRouteKind::Execute,
+                    ExecutionRouteReason::ExplicitDurableExecution
                 ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion("amended run complete")),
                 keyed_completion(
@@ -1661,18 +1772,18 @@ fn keyed_completion(match_substring: &str, completion: Value) -> Value {
     json!({"match": match_substring, "completion": completion})
 }
 
-fn assert_act_escalation_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
+fn assert_durable_upgrade_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
     assert_eq!(
         audits.len(),
         4,
-        "Act escalation must emit two routes, planner, compile"
+        "Inline Durable upgrade must emit two routes, planner, compile"
     );
     assert!(matches!(
         audits[0].payload,
         ExecutionPlanningAuditPayloadV1::Route {
             stage: ExecutionRouteStage::Initial,
-            decision: ExecutionRouteDecisionKind::Routed,
-            mode: Some(ExecutionMode::Act),
+            decision: ExecutionRouteKind::Execute,
+            strategy: Some(ExecutionStrategy::Inline),
             reason: ExecutionRouteReason::BoundedInteractiveWork,
             ..
         }
@@ -1680,10 +1791,10 @@ fn assert_act_escalation_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
     assert!(matches!(
         audits[1].payload,
         ExecutionPlanningAuditPayloadV1::Route {
-            stage: ExecutionRouteStage::ActEscalation,
-            decision: ExecutionRouteDecisionKind::Routed,
-            mode: Some(ExecutionMode::Run),
-            reason: ExecutionRouteReason::ActEscalation,
+            stage: ExecutionRouteStage::DurableUpgrade,
+            decision: ExecutionRouteKind::Execute,
+            strategy: Some(ExecutionStrategy::Durable),
+            reason: ExecutionRouteReason::DurableUpgrade,
             ..
         }
     ));
@@ -1716,9 +1827,9 @@ fn assert_initial_repair_audits(audits: &[ExecutionPlanningAuditEnvelopeV1]) {
         audits[0].payload,
         ExecutionPlanningAuditPayloadV1::Route {
             stage: ExecutionRouteStage::Initial,
-            decision: ExecutionRouteDecisionKind::Routed,
-            mode: Some(ExecutionMode::Run),
-            reason: ExecutionRouteReason::ExplicitRun,
+            decision: ExecutionRouteKind::Execute,
+            strategy: Some(ExecutionStrategy::Durable),
+            reason: ExecutionRouteReason::ExplicitDurableExecution,
             ..
         }
     ));
@@ -1776,9 +1887,9 @@ fn assert_amendment_audits(audits: &[ExecutionPlanningAuditEnvelopeV1], run_uid:
         audits[0].payload,
         ExecutionPlanningAuditPayloadV1::Route {
             stage: ExecutionRouteStage::Initial,
-            decision: ExecutionRouteDecisionKind::Routed,
-            mode: Some(ExecutionMode::Run),
-            reason: ExecutionRouteReason::ExplicitRun,
+            decision: ExecutionRouteKind::Execute,
+            strategy: Some(ExecutionStrategy::Durable),
+            reason: ExecutionRouteReason::ExplicitDurableExecution,
             ..
         }
     ));

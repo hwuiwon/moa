@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use moa_core::types::execution_planning::ExecutionStrategy;
 use moa_eval::execution::{ExecutionRoutingLabelV1, load_execution_corpus};
 
 fn manifest_path() -> PathBuf {
@@ -30,7 +31,10 @@ async fn execution_corpus_loads_exact_counts_hashes_and_required_cohorts_offline
         corpus
             .routing_cases
             .iter()
-            .filter(|case| case.expected_label == ExecutionRoutingLabelV1::Act)
+            .filter(|case| {
+                case.expected_label == ExecutionRoutingLabelV1::Execute
+                    && case.expected_strategy == Some(ExecutionStrategy::Inline)
+            })
             .count(),
         140
     );
@@ -38,7 +42,10 @@ async fn execution_corpus_loads_exact_counts_hashes_and_required_cohorts_offline
         corpus
             .routing_cases
             .iter()
-            .filter(|case| case.expected_label == ExecutionRoutingLabelV1::Run)
+            .filter(|case| {
+                case.expected_label == ExecutionRoutingLabelV1::Execute
+                    && case.expected_strategy == Some(ExecutionStrategy::Durable)
+            })
             .count(),
         100
     );
@@ -54,6 +61,15 @@ async fn execution_corpus_loads_exact_counts_hashes_and_required_cohorts_offline
         case.tags
             .iter()
             .any(|tag| tag == "sp500-ai-five-year-screen")
-            && case.expected_label == ExecutionRoutingLabelV1::Run
+            && case.expected_label == ExecutionRoutingLabelV1::Execute
+            && case.expected_strategy == Some(ExecutionStrategy::Durable)
     }));
+    assert_eq!(
+        corpus
+            .routing_cases
+            .iter()
+            .filter(|case| case.durable_upgrade.is_some())
+            .count(),
+        40
+    );
 }

@@ -811,7 +811,7 @@ fn experiment_template_source_provenance(
     trial_uid: Uuid,
 ) -> ExecutionSourceProvenanceV1 {
     ExecutionSourceProvenanceV1::ExperimentTemplate {
-        route_reason: ExecutionRouteReason::ExplicitRun,
+        route_reason: ExecutionRouteReason::ExplicitDurableExecution,
         skill_template_ref,
         skill_template_revision_uid,
         experiment_run_uid,
@@ -1412,7 +1412,7 @@ mod tests {
                 Uuid::from_u128(4),
             ),
             ExecutionSourceProvenanceV1::ExperimentTemplate {
-                route_reason: ExecutionRouteReason::ExplicitRun,
+                route_reason: ExecutionRouteReason::ExplicitDurableExecution,
                 skill_template_ref: "skill://durable-report".to_string(),
                 skill_template_revision_uid: Uuid::from_u128(1),
                 experiment_run_uid: Uuid::from_u128(2),

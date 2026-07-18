@@ -126,8 +126,8 @@ fn spawn_orchestrator(
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
 async fn support_agent_selects_refund_skill_without_starting_execution_run() -> Result<()> {
-    // Pins: selecting a custom instruction/action skill in Act materializes its instructions but
-    // does not implicitly start a detached execution run.
+    // Pins: selecting a custom instruction/action skill in Execute/Inline materializes its
+    // instructions but does not implicitly start a detached execution run.
     let _guard = RESTATE_E2E_LOCK.lock().await;
     if !cfg!(feature = "provider-overrides") {
         return Ok(());
@@ -557,6 +557,18 @@ fn write_skill_file_read_fixture(path: &Path, final_text: &str) -> Result<()> {
                 "tool_calls": []
             }
         },
+        "keyed": [{
+            "match": "You classify one user turn into MOA's public execution decision.",
+            "completion": {
+                "content": json!({
+                    "label": "execute",
+                    "reason": "bounded_interactive_work",
+                    "confidence_bps": 10_000,
+                    "missing_inputs": []
+                }).to_string(),
+                "tool_calls": []
+            }
+        }],
         "responses": [
             {
                 "completion": {

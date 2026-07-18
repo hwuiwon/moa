@@ -10,7 +10,7 @@ use moa_artifacts::reference::ArtifactRef;
 use moa_core::events::Event;
 use moa_core::types::action_policy::{ActionPolicyEffect, ActionRuleScope};
 use moa_core::types::events_stream::{EventRange, EventRecord};
-use moa_core::types::execution_planning::{ExecutionMode, ExecutionRouteReason};
+use moa_core::types::execution_planning::{ExecutionRouteKind, ExecutionRouteReason};
 use moa_core::types::execution_planning::{ExecutionRunStarted, ExecutionTemplateInvocation};
 use moa_core::types::identifiers::{SessionId, TenantId};
 use moa_core::types::session::SessionStatus;
@@ -36,17 +36,17 @@ pub(crate) const SERVICE_TIMEOUT: Duration = Duration::from_secs(90);
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Stable system-prompt fragment used to target the pre-mode classifier request.
 pub(crate) const ROUTE_CLASSIFIER_MATCH: &str =
-    "You classify one user turn into MOA's execution mode.";
+    "You classify one user turn into MOA's public execution decision.";
 
 /// Builds one strict scripted response for the production route classifier.
 pub(crate) fn route_classifier_completion(
-    mode: ExecutionMode,
+    decision: ExecutionRouteKind,
     reason: ExecutionRouteReason,
 ) -> Value {
-    let label = match mode {
-        ExecutionMode::Respond => "respond",
-        ExecutionMode::Act => "act",
-        ExecutionMode::Run => "run",
+    let label = match decision {
+        ExecutionRouteKind::Respond => "respond",
+        ExecutionRouteKind::Execute => "execute",
+        ExecutionRouteKind::NeedsInput => "needs_input",
     };
     json!({
         "match": ROUTE_CLASSIFIER_MATCH,

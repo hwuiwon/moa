@@ -5,9 +5,9 @@ use moa_core::events::Event;
 use moa_core::types::completion::CompletionRequest;
 use moa_core::types::events_stream::EventRecord;
 use moa_core::types::execution_planning::{
-    ExecutionCompileOutcome, ExecutionCompileSource, ExecutionMode, ExecutionPlannerCallKind,
+    ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
     ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
-    ExecutionRouteDecisionKind, ExecutionRouteReason, ExecutionRouteStage,
+    ExecutionRouteKind, ExecutionRouteReason, ExecutionRouteStage, ExecutionStrategy,
 };
 use moa_execution::state::{ExecutionRunStatus, ExecutionTerminalCause, ExecutionTerminalEvidence};
 use moa_execution::wire::ExecutionStatusResponse;
@@ -58,7 +58,8 @@ pub(crate) async fn planning_audits(
 /// Asserts one exact initial deterministic route and no additional route records.
 pub(crate) fn assert_initial_route(
     audits: &[ExecutionPlanningAuditEnvelopeV1],
-    mode: ExecutionMode,
+    decision: ExecutionRouteKind,
+    strategy: Option<ExecutionStrategy>,
     reason: ExecutionRouteReason,
 ) {
     let routes = audits
@@ -67,21 +68,16 @@ pub(crate) fn assert_initial_route(
             ExecutionPlanningAuditPayloadV1::Route {
                 stage,
                 decision,
-                mode,
+                strategy,
                 reason,
                 ..
-            } => Some((*stage, *decision, *mode, *reason)),
+            } => Some((*stage, *decision, *strategy, *reason)),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
         routes,
-        vec![(
-            ExecutionRouteStage::Initial,
-            ExecutionRouteDecisionKind::Routed,
-            Some(mode),
-            reason,
-        )],
+        vec![(ExecutionRouteStage::Initial, decision, strategy, reason,)],
         "unexpected strict route audit history: {audits:#?}"
     );
 }
@@ -92,7 +88,7 @@ pub(crate) fn assert_no_planner_or_compile(audits: &[ExecutionPlanningAuditEnvel
         audits
             .iter()
             .all(|audit| matches!(audit.payload, ExecutionPlanningAuditPayloadV1::Route { .. })),
-        "non-Run route unexpectedly planned or compiled: {audits:#?}"
+        "non-Durable route unexpectedly planned or compiled: {audits:#?}"
     );
 }
 
@@ -191,7 +187,7 @@ pub(crate) fn assert_no_execution_lifecycle_events(events: &[EventRecord]) {
         .collect::<Vec<_>>();
     assert!(
         unexpected.is_empty(),
-        "non-Run route emitted execution lifecycle events: {unexpected:#?}"
+        "non-Durable route emitted execution lifecycle events: {unexpected:#?}"
     );
 }
 

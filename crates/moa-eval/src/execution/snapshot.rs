@@ -7,10 +7,10 @@ use moa_artifacts::execution_plan::{
     ExecutionUsage,
 };
 use moa_core::types::execution_planning::{
-    ExecutionCompileOutcome, ExecutionCompileSource, ExecutionMode, ExecutionPlannerCallKind,
+    ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
     ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
-    ExecutionRouteDecisionKind, ExecutionRouteReason, ExecutionRouteStage,
-    ExecutionSourceProvenanceV1,
+    ExecutionRouteKind, ExecutionRouteReason, ExecutionRouteStage, ExecutionSourceProvenanceV1,
+    ExecutionStrategy,
 };
 use moa_eval_core::{EvalError, Result};
 use moa_execution::{
@@ -161,12 +161,12 @@ pub enum ExecutionTaskResultClassV1 {
 pub enum ExecutionPlanningAuditSummaryV1 {
     /// One deterministic routing decision.
     Route {
-        /// Initial or Act-escalation stage.
+        /// Initial or Durable-upgrade stage.
         stage: ExecutionRouteStage,
-        /// Needs-input or routed decision.
-        decision: ExecutionRouteDecisionKind,
-        /// Selected execution mode, when routed.
-        mode: Option<ExecutionMode>,
+        /// Public route kind.
+        decision: ExecutionRouteKind,
+        /// Deterministic strategy for an Execute route.
+        strategy: Option<ExecutionStrategy>,
         /// Stable route reason.
         reason: ExecutionRouteReason,
     },
@@ -501,13 +501,13 @@ fn normalize_audit(audit: &ExecutionPlanningAuditEnvelopeV1) -> ExecutionPlannin
         ExecutionPlanningAuditPayloadV1::Route {
             stage,
             decision,
-            mode,
+            strategy,
             reason,
             ..
         } => ExecutionPlanningAuditSummaryV1::Route {
             stage: *stage,
             decision: *decision,
-            mode: *mode,
+            strategy: *strategy,
             reason: *reason,
         },
         ExecutionPlanningAuditPayloadV1::PlannerCall {

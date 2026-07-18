@@ -21,6 +21,14 @@ and cost are owned by the
 `ExecutionEvalReportV1` is the only eval report in this repository that claims
 execution success from persisted run/task state.
 
+Execution routing evaluation separates two boundaries. Public-route errors
+compare Respond, Execute, and NeedsInput and feed weighted routing cost plus the
+catastrophic Respond-on-Execute rate. Internal-strategy errors are scored only
+when both expected and observed routes are Execute; they compare Inline and
+Durable and feed weighted strategy cost, near-boundary Inline recall, Durable
+strategy recall, and one-way-upgrade evidence metrics. A route error is never
+relabelled as a strategy error.
+
 Retrieval-affecting changes additionally gate on the offline
 [Golden Retrieval Set](eval/golden-retrieval-set.md) before any live sweep:
 graded nDCG@10, recall@4/@25, and per-probe-type slices (with standard errors

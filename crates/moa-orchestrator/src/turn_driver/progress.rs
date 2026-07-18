@@ -58,11 +58,14 @@ pub(crate) fn set_phase(ctx: &WorkflowContext<'_>, phase: TurnPhase) {
 /// Initializes shared model-loop progress fields.
 pub(crate) fn initialize_loop_progress(
     ctx: &WorkflowContext<'_>,
-    execution_route: ExecutionRouteDecision,
+    execution_route: Option<ExecutionRouteDecision>,
     max_turns: usize,
     max_tool_calls: usize,
 ) {
-    ctx.set(TurnStateKey::EXECUTION_ROUTE, Json::from(execution_route));
+    match execution_route {
+        Some(route) => ctx.set(TurnStateKey::EXECUTION_ROUTE, Json::from(route)),
+        None => ctx.clear(TurnStateKey::EXECUTION_ROUTE),
+    }
     ctx.set(TurnStateKey::ITERATION, Json::from(0_u32));
     ctx.set(TurnStateKey::MAX_TURNS, Json::from(progress_cap(max_turns)));
     ctx.set(TurnStateKey::TOOL_CALLS, Json::from(0_u32));
@@ -70,6 +73,18 @@ pub(crate) fn initialize_loop_progress(
         TurnStateKey::MAX_TOOL_CALLS,
         Json::from(progress_cap(max_tool_calls)),
     );
+}
+
+/// Initializes progress for a route handled without constructing a model loop.
+pub(crate) fn initialize_non_loop_progress(
+    ctx: &WorkflowContext<'_>,
+    execution_route: ExecutionRouteDecision,
+) {
+    ctx.set(TurnStateKey::EXECUTION_ROUTE, Json::from(execution_route));
+    ctx.set(TurnStateKey::ITERATION, Json::from(0_u32));
+    ctx.set(TurnStateKey::MAX_TURNS, Json::from(Some(0_u32)));
+    ctx.set(TurnStateKey::TOOL_CALLS, Json::from(0_u32));
+    ctx.set(TurnStateKey::MAX_TOOL_CALLS, Json::from(Some(0_u32)));
 }
 
 /// Stores the current model-loop iteration using the progress DTO cap.

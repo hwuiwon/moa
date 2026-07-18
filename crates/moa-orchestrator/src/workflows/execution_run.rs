@@ -1839,7 +1839,7 @@ mod tests {
                     authorization,
                     pinned_instruction_skills: Vec::new(),
                     source_provenance: ExecutionSourceProvenanceV1::GeneratedPlan {
-                        route_reason: ExecutionRouteReason::ExplicitRun,
+                        route_reason: ExecutionRouteReason::ExplicitDurableExecution,
                         planner: GeneratedPlanPlannerProvenanceV1 {
                             model: "scripted-confirmed-replan".to_string(),
                             prompt_version: "confirmed-replan-v1".to_string(),

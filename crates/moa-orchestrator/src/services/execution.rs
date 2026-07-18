@@ -2546,7 +2546,6 @@ fn run_summary(run: &ExecutionRunRecord) -> ExecutionRunSummary {
         originating_user_sequence_num: run.originating_user_sequence_num,
         status: run.status,
         source_kind: run.source_kind,
-        route_mode: run.route.mode,
         route_reason: run.route.reason,
         skill_template_ref: run.skill_template_ref.clone(),
         skill_template_revision_uid: run.skill_template_revision_uid,
@@ -3759,7 +3758,7 @@ mod tests {
         skill_template_revision_uid: Uuid,
     ) -> ExecutionSourceProvenanceV1 {
         ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+            route_reason: ExecutionRouteReason::ExplicitDurableExecution,
             skill_template_ref,
             skill_template_revision_uid,
             experiment_run_uid: Uuid::from_u128(21),

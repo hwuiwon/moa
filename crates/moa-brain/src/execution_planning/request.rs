@@ -9,7 +9,7 @@ use moa_core::{
     types::{
         completion::{CompletionRequest, JsonResponseFormat, NativeWebSearchPolicy},
         context::ContextMessage,
-        execution_planning::{ActEscalationSignal, ExecutionTemplateInvocation},
+        execution_planning::{DurableUpgradeSignal, ExecutionTemplateInvocation},
         identifiers::ModelId,
     },
 };
@@ -39,8 +39,8 @@ pub struct ExecutionPlanningRequest {
     pub context: ExecutionPlanningContextSnapshotV1,
     /// Explicit exact template invocation, when present.
     pub execution_template: Option<ExecutionTemplateInvocation>,
-    /// Bounded evidence from an Act-to-Run escalation.
-    pub escalation: Option<ActEscalationSignal>,
+    /// Bounded evidence from one Inline-to-Durable upgrade.
+    pub durable_upgrade: Option<DurableUpgradeSignal>,
     /// Auxiliary provider model selected by server configuration.
     pub planner_model: ModelId,
     /// Tenant-independent compiler and estimate settings.
@@ -96,7 +96,7 @@ struct FrozenInitialPrompt<'a> {
     pinned_instruction_skills: &'a [moa_execution::wire::PinnedInstructionSkill],
     execution_templates: &'a [moa_execution::wire::PinnedExecutionTemplate],
     budget: &'a moa_artifacts::execution_plan::ExecutionBudgetLimit,
-    escalation: Option<&'a ActEscalationSignal>,
+    durable_upgrade: Option<&'a DurableUpgradeSignal>,
 }
 
 /// Constructs the exact no-tools, no-native-search strict initial planner request.
@@ -111,7 +111,7 @@ pub fn initial_completion_request(
         pinned_instruction_skills: &request.context.pinned_instruction_skills,
         execution_templates: &request.context.execution_templates,
         budget: &request.context.budget,
-        escalation: request.escalation.as_ref(),
+        durable_upgrade: request.durable_upgrade.as_ref(),
     };
     strict_request::<GeneratedExecutionCandidate>(
         request.planner_model.clone(),

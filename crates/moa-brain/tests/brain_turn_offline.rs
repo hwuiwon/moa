@@ -26,7 +26,7 @@ async fn execution_planning_metrics_inputs_and_generated_candidate_use_one_stric
     let result = moa_brain::execution_planning::plan_execution(
         &provider,
         execution_planning_request(objective),
-        moa_core::types::execution_planning::ExecutionRouteReason::ExplicitRun,
+        moa_core::types::execution_planning::ExecutionRouteReason::ExplicitDurableExecution,
     )
     .await
     .expect("valid strict candidate should plan");
@@ -123,7 +123,7 @@ async fn execution_planning_terminal_provider_outputs_never_repair() {
         let result = moa_brain::execution_planning::plan_execution(
             &provider,
             execution_planning_request(objective),
-            moa_core::types::execution_planning::ExecutionRouteReason::ExplicitRun,
+            moa_core::types::execution_planning::ExecutionRouteReason::ExplicitDurableExecution,
         )
         .await
         .expect("terminal planner failure should remain typed");
@@ -152,7 +152,7 @@ async fn execution_planning_compiler_rejection_allows_only_one_repair() {
     let repaired_result = moa_brain::execution_planning::plan_execution(
         &repaired,
         execution_planning_request(objective),
-        moa_core::types::execution_planning::ExecutionRouteReason::ExplicitRun,
+        moa_core::types::execution_planning::ExecutionRouteReason::ExplicitDurableExecution,
     )
     .await
     .expect("sole valid repair should be admitted");
@@ -172,7 +172,7 @@ async fn execution_planning_compiler_rejection_allows_only_one_repair() {
     let rejected_result = moa_brain::execution_planning::plan_execution(
         &rejected,
         execution_planning_request(objective),
-        moa_core::types::execution_planning::ExecutionRouteReason::ExplicitRun,
+        moa_core::types::execution_planning::ExecutionRouteReason::ExplicitDurableExecution,
     )
     .await
     .expect("second compiler rejection should remain typed");
@@ -242,21 +242,21 @@ async fn execution_planning_second_invalid_amendment_stops_without_third_call() 
 }
 
 #[tokio::test]
-async fn execution_routing_respond_act_use_classifier_while_pinned_template_skips_planner() {
+async fn execution_routing_respond_execute_use_classifier_while_pinned_template_skips_planner() {
     // Pins: ordinary routes use one strict classifier response while a pinned template remains a
     // zero-planner-call deterministic admission path.
-    for (objective, label, reason, expected_mode) in [
+    for (objective, label, reason, expected_decision) in [
         (
             "What is a DAG?",
             moa_brain::execution_planning::ExecutionRouteClassifierLabelV1::Respond,
             moa_core::types::execution_planning::ExecutionRouteReason::SimpleResponse,
-            moa_core::types::execution_planning::ExecutionMode::Respond,
+            moa_core::types::execution_planning::ExecutionRouteKind::Respond,
         ),
         (
             "Investigate the unusual failure and explain it",
-            moa_brain::execution_planning::ExecutionRouteClassifierLabelV1::Act,
+            moa_brain::execution_planning::ExecutionRouteClassifierLabelV1::Execute,
             moa_core::types::execution_planning::ExecutionRouteReason::BoundedInteractiveWork,
-            moa_core::types::execution_planning::ExecutionMode::Act,
+            moa_core::types::execution_planning::ExecutionRouteKind::Execute,
         ),
     ] {
         let provider = ScriptedProvider::new(MockLlmProvider.capabilities()).push_text(
@@ -270,25 +270,20 @@ async fn execution_routing_respond_act_use_classifier_while_pinned_template_skip
             )
             .expect("classifier fixture should serialize"),
         );
-        let route_model = moa_core::types::identifiers::ModelId::new("route-model");
+        let classifier_model = moa_core::types::identifiers::ModelId::new("route-model");
         let routed = moa_brain::execution_planning::route_execution(
             &provider,
             moa_brain::execution_planning::ExecutionRoutingInput {
                 objective,
                 execution_template: None,
-                escalation: None,
                 attachment_count: 0,
                 has_recent_target: false,
-                route_model: &route_model,
+                classifier_model: &classifier_model,
             },
         )
         .await
         .expect("ordinary route should classify");
-        assert!(matches!(
-            routed.decision,
-            moa_core::types::execution_planning::ExecutionRouteDecision::Routed { mode, .. }
-                if mode == expected_mode
-        ));
+        assert_eq!(routed.decision.kind(), expected_decision);
         assert_eq!(provider.recorded_requests().len(), 1);
     }
 
@@ -401,7 +396,7 @@ fn execution_planning_request(
             },
         },
         execution_template: None,
-        escalation: None,
+        durable_upgrade: None,
         planner_model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         config: moa_core::config::ExecutionConfig::default(),
         now: Utc::now(),

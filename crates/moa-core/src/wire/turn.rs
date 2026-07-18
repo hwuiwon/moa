@@ -382,12 +382,11 @@ mod tests {
 
     #[test]
     fn progress_projection_round_trips_additive_fields() {
-        // Pins: turn progress exposes responsiveness state without a separate taxonomy.
+        // Pins: turn progress exposes additive responsiveness fields and the direct Execute route.
         let progress = TurnProgress {
             turn_id: "turn-123".to_string(),
             phase: TurnPhase::Tooling,
-            execution_route: Some(ExecutionRouteDecision::Routed {
-                mode: crate::types::execution_planning::ExecutionMode::Act,
+            execution_route: Some(ExecutionRouteDecision::Execute {
                 reason:
                     crate::types::execution_planning::ExecutionRouteReason::BoundedInteractiveWork,
             }),
@@ -402,7 +401,15 @@ mod tests {
         };
 
         let json = serde_json::to_string(&progress).expect("serialize turn progress");
-        assert!(json.contains("\"mode\":\"act\""));
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("parse serialized turn progress");
+        assert_eq!(
+            value.pointer("/execution_route"),
+            Some(&serde_json::json!({
+                "decision": "execute",
+                "reason": "bounded_interactive_work"
+            }))
+        );
         assert!(json.contains("\"iteration\":2"));
         assert!(json.contains("\"max_turns\":6"));
         assert!(json.contains("\"tool_calls\":3"));

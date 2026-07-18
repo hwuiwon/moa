@@ -27,12 +27,12 @@ use moa_core::{
     types::events_stream::EventRange,
     types::events_stream::EventRecord,
     types::execution_planning::{
-        ExecutionAuditReportV1, ExecutionCompileOutcome, ExecutionCompileSource, ExecutionMode,
+        ExecutionAuditReportV1, ExecutionCompileOutcome, ExecutionCompileSource,
         ExecutionPlannerCallKind, ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1,
-        ExecutionPlanningAuditPayloadV1, ExecutionRouteDecisionKind, ExecutionRouteReason,
+        ExecutionPlanningAuditPayloadV1, ExecutionRouteKind, ExecutionRouteReason,
         ExecutionRouteStage, ExecutionRunAdmissionStatus, ExecutionRunStarted,
-        ExecutionSourceProvenanceV1, GeneratedPlanPlannerProvenanceV1, execution_planning_hash,
-        validate_planning_audit_envelope,
+        ExecutionSourceProvenanceV1, ExecutionStrategy, GeneratedPlanPlannerProvenanceV1,
+        execution_planning_hash, validate_planning_audit_envelope,
     },
     types::identifiers::ModelId,
     types::identifiers::SessionId,
@@ -1330,8 +1330,8 @@ async fn assert_ambiguous_mode_selection(
         &audits[0].payload,
         ExecutionPlanningAuditPayloadV1::Route {
             stage: ExecutionRouteStage::Initial,
-            decision: ExecutionRouteDecisionKind::Routed,
-            mode: Some(ExecutionMode::Act),
+            decision: ExecutionRouteKind::Execute,
+            strategy: Some(ExecutionStrategy::Inline),
             reason: ExecutionRouteReason::BoundedInteractiveWork,
             ..
         }
@@ -1596,7 +1596,7 @@ fn validate_generated_plan_hash_chain(
         "compiler final plan hash must equal persisted active plan hash"
     );
     let ExecutionSourceProvenanceV1::GeneratedPlan {
-        route_reason: ExecutionRouteReason::ExplicitRun,
+        route_reason: ExecutionRouteReason::ExplicitDurableExecution,
         planner:
             GeneratedPlanPlannerProvenanceV1 {
                 candidate_hash,
@@ -1636,7 +1636,7 @@ fn generated_plan_hash_chain_rejects_cross_surface_drift() {
         final_plan_hash: "c".repeat(64),
     };
     let provenance = ExecutionSourceProvenanceV1::GeneratedPlan {
-        route_reason: ExecutionRouteReason::ExplicitRun,
+        route_reason: ExecutionRouteReason::ExplicitDurableExecution,
         planner: GeneratedPlanPlannerProvenanceV1 {
             model: "fixture-model".to_string(),
             prompt_version: "execution-planner-v1".to_string(),
@@ -1691,9 +1691,9 @@ async fn assert_generated_plan_audits_and_authorization(
             &audits[0].payload,
             ExecutionPlanningAuditPayloadV1::Route {
                 stage: ExecutionRouteStage::Initial,
-                decision: ExecutionRouteDecisionKind::Routed,
-                mode: Some(ExecutionMode::Run),
-                reason: ExecutionRouteReason::ExplicitRun,
+                decision: ExecutionRouteKind::Execute,
+                strategy: Some(ExecutionStrategy::Durable),
+                reason: ExecutionRouteReason::ExplicitDurableExecution,
                 ..
             }
         ),
@@ -1914,8 +1914,8 @@ fn validate_generated_plan_event_order(events: &[EventRecord]) -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1, local Restate/Postgres, and a supported provider API key"]
-async fn coordinator_ambiguous_mode_selection_pins_typed_act_route_provider_e2e() -> Result<()> {
-    // Pins: difficult but bounded work remains Act with its stable typed reason and no run planning.
+async fn coordinator_ambiguous_selection_pins_execute_inline_route_provider_e2e() -> Result<()> {
+    // Pins: difficult but bounded work remains Execute/Inline with its typed reason and no planning.
     let harness = SupplementaryLiveHarness::start("ambiguous-mode-selection").await?;
     let turn_id = harness
         .start_turn(AMBIGUOUS_MODE_SELECTION_PROMPT, 3)

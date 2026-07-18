@@ -11,9 +11,9 @@ use moa_brain::execution_planning::{
 use moa_core::traits::{LLMProvider, SessionStore};
 use moa_core::types::completion::{CompletionRequest, CompletionStream};
 use moa_core::types::execution_planning::{
-    ExecutionMode, ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
-    ExecutionRouteDecision, ExecutionRouteDecisionKind, ExecutionRouteReason, ExecutionRouteStage,
-    execution_planning_dedupe_key, validate_planning_audit_envelope,
+    ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1, ExecutionRouteDecision,
+    ExecutionRouteReason, ExecutionRouteStage, execution_planning_dedupe_key,
+    validate_planning_audit_envelope,
 };
 use moa_core::types::identifiers::ModelId;
 use moa_core::types::model::ModelCapabilities;
@@ -287,7 +287,7 @@ async fn start_external_template_execution(
         input: request.input.clone(),
     };
     let config = OrchestratorCtx::current_config();
-    let route_model = ModelId::new(
+    let classifier_model = ModelId::new(
         config
             .models
             .auxiliary
@@ -299,43 +299,38 @@ async fn start_external_template_execution(
         ExecutionRoutingInput {
             objective: &request.objective,
             execution_template: Some(&invocation),
-            escalation: None,
             attachment_count: 0,
             has_recent_target: false,
-            route_model: &route_model,
+            classifier_model: &classifier_model,
         },
     )
     .await?;
-    let ExecutionRouteDecision::Routed {
-        mode: ExecutionMode::Run,
-        reason: ExecutionRouteReason::SelectedExecutionTemplate,
-    } = route.decision
-    else {
+    if !matches!(
+        &route.decision,
+        ExecutionRouteDecision::Execute {
+            reason: ExecutionRouteReason::SelectedExecutionTemplate,
+        }
+    ) {
         return Err(TerminalError::new_with_code(
             422,
-            "external execution-template admission did not select the Task 7 template route",
+            "external execution-template admission did not select the trusted Durable template route",
         )
         .into());
-    };
+    }
     let accepted_at = durable_utc_now(ctx).await?;
     persist_execution_planning_audit(
         ctx,
         session_store.clone(),
-        ExecutionPlanningAuditEnvelopeV1 {
-            schema_version: 1,
-            tenant_id: request.tenant_id,
-            contact_id: request.contact_id,
-            session_id: Some(session_id),
-            originating_sequence: Some(originating_user_sequence_num),
-            payload: ExecutionPlanningAuditPayloadV1::Route {
-                stage: ExecutionRouteStage::Initial,
-                decision: ExecutionRouteDecisionKind::Routed,
-                mode: Some(ExecutionMode::Run),
-                reason: ExecutionRouteReason::SelectedExecutionTemplate,
-                provenance: route.provenance,
-                accepted_at,
-            },
-        },
+        ExecutionPlanningAuditEnvelopeV1::route(
+            request.tenant_id,
+            request.contact_id,
+            session_id,
+            originating_user_sequence_num,
+            ExecutionRouteStage::Initial,
+            &route.decision,
+            route.provenance,
+            accepted_at,
+        ),
     )
     .await?;
 
@@ -367,7 +362,7 @@ async fn start_external_template_execution(
             objective: request.objective.clone(),
             context: planning_context.snapshot.clone(),
             execution_template: Some(invocation),
-            escalation: None,
+            durable_upgrade: None,
             planner_model: ModelId::new(planner_model),
             config: config.execution.clone(),
             now: planning_now,

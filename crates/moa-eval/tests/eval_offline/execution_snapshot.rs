@@ -11,9 +11,8 @@ use moa_artifacts::execution_plan::{
 };
 use moa_core::types::{
     execution_planning::{
-        ExecutionMode, ExecutionPlannerCallKind, ExecutionPlannerOutcome,
-        ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1, ExecutionRouteReason,
-        ExecutionSourceProvenanceV1,
+        ExecutionPlannerCallKind, ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1,
+        ExecutionPlanningAuditPayloadV1, ExecutionRouteReason, ExecutionSourceProvenanceV1,
     },
     identifiers::{SessionId, TenantId, UserId},
 };
@@ -219,7 +218,6 @@ fn runtime_parts(
         },
         source_kind: ExecutionSourceKind::SkillTemplate,
         route: ExecutionRouteFields {
-            mode: ExecutionMode::Run,
             reason: ExecutionRouteReason::SelectedExecutionTemplate,
         },
         skill_template_ref: Some("skill://execution-eval".to_string()),

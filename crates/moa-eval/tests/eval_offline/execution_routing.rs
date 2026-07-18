@@ -2,15 +2,66 @@
 
 use std::path::PathBuf;
 
-use moa_eval::execution::{load_execution_corpus, score_routing_cases};
+use moa_brain::execution_planning::{
+    ExecutionRouteClassifierLabelV1, ExecutionRouteClassifierOutputV1,
+};
+use moa_core::types::{
+    completion::TokenUsage,
+    execution_planning::{
+        DurableUpgradeTransitionError, ExecutionRouteClassifierOutcome, ExecutionRouteDecision,
+        ExecutionRouteReason, ExecutionStrategy, durable_upgrade_transition,
+    },
+};
+use moa_eval::execution::{
+    ExecutionRoutingCaseV1, ExecutionRoutingClassifierFixtureV1, ExecutionRoutingLabelV1,
+    load_execution_corpus, score_routing_cases,
+};
+
+fn manifest_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenarios/execution/manifest.toml")
+}
+
+fn response_case(
+    case_id: &str,
+    expected_strategy: ExecutionStrategy,
+    expected_reason: ExecutionRouteReason,
+    observed_label: ExecutionRouteClassifierLabelV1,
+    observed_reason: ExecutionRouteReason,
+    confidence_bps: u16,
+    expected_outcome: ExecutionRouteClassifierOutcome,
+) -> ExecutionRoutingCaseV1 {
+    ExecutionRoutingCaseV1 {
+        schema_version: 1,
+        case_id: case_id.to_string(),
+        objective: "Evaluate the supplied work exactly".to_string(),
+        attachment_count: 0,
+        has_recent_target: false,
+        classifier: ExecutionRoutingClassifierFixtureV1::Response {
+            output: ExecutionRouteClassifierOutputV1 {
+                label: observed_label,
+                reason: observed_reason,
+                confidence_bps,
+                missing_inputs: Vec::new(),
+            },
+            usage: TokenUsage::default(),
+            cost_microusd: 0,
+        },
+        expected_classifier_outcome: expected_outcome,
+        expected_label: ExecutionRoutingLabelV1::Execute,
+        expected_strategy: Some(expected_strategy),
+        expected_reason,
+        near_boundary: false,
+        durable_upgrade: None,
+        expected_durable_upgrade_evidence: None,
+        tags: Vec::new(),
+    }
+}
 
 #[tokio::test]
-async fn execution_routing_scores_scripted_classifier_without_respond_on_run_offline() {
-    // Pins: the complete corpus drives the async production router and conservative fallback
-    // policy, with Respond-on-Run held at exactly zero.
-    let manifest =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenarios/execution/manifest.toml");
-    let corpus = load_execution_corpus(&manifest)
+async fn execution_routing_scores_decision_strategy_and_upgrade_separately_offline() {
+    // Pins: the complete corpus drives the production router and shared Durable-upgrade
+    // transition with exact public-route, strategy, fallback, and evidence metrics.
+    let corpus = load_execution_corpus(&manifest_path())
         .await
         .expect("checked-in execution corpus should load");
     let metrics = score_routing_cases(&corpus.routing_cases)
@@ -19,50 +70,199 @@ async fn execution_routing_scores_scripted_classifier_without_respond_on_run_off
 
     assert_eq!(metrics.total_cases, 320);
     assert_eq!(metrics.passed_cases, 320);
-    assert_eq!(metrics.respond_on_run_count, 0);
-    assert_eq!(metrics.respond_on_run_rate, 0.0);
-    assert_eq!(metrics.near_boundary_act_recall, 1.0);
-    assert_eq!(metrics.escalation_recall, 1.0);
-    assert_eq!(metrics.escalation_evidence_preservation_rate, 1.0);
+    assert_eq!(metrics.weighted_routing_cost_total, 0);
+    assert_eq!(metrics.weighted_strategy_cost_total, 0);
+    assert_eq!(metrics.respond_on_execute_count, 0);
+    assert_eq!(metrics.respond_on_execute_rate, 0.0);
+    assert_eq!(metrics.near_boundary_inline_recall, 1.0);
+    assert_eq!(metrics.durable_strategy_recall, 1.0);
+    assert_eq!(metrics.durable_upgrade_recall, 1.0);
+    assert_eq!(metrics.durable_upgrade_evidence_preservation_rate, 1.0);
     assert_eq!(metrics.needs_input_false_accept_rate, 0.0);
     assert_eq!(metrics.unnecessary_clarification_rate, 0.0);
+    for outcome in [
+        "provider_error",
+        "stream_error",
+        "schema_rejected",
+        "oversized",
+        "low_confidence",
+        "invalid_decision",
+    ] {
+        assert_eq!(metrics.classifier_fallback_counts.get(outcome), Some(&4));
+    }
     assert_eq!(
-        metrics.classifier_fallback_counts.get("provider_error"),
-        Some(&4)
-    );
-    assert_eq!(
-        metrics.classifier_fallback_counts.get("stream_error"),
-        Some(&4)
-    );
-    assert_eq!(
-        metrics.classifier_fallback_counts.get("schema_rejected"),
-        Some(&4)
-    );
-    assert_eq!(
-        metrics.classifier_fallback_counts.get("oversized"),
-        Some(&4)
-    );
-    assert_eq!(
-        metrics.classifier_fallback_counts.get("low_confidence"),
-        Some(&4)
-    );
-    assert_eq!(
-        metrics.classifier_fallback_counts.get("invalid_decision"),
-        Some(&4)
-    );
-    assert_eq!(
-        metrics.classifier_fallback_counts.get("context_forced_act"),
+        metrics
+            .classifier_fallback_counts
+            .get("context_forced_inline"),
         Some(&8)
     );
     assert_eq!(metrics.classifier_fallback_rate, 32.0 / 280.0);
-    assert!(metrics.classifier_tokens_per_routed_turn > 0.0);
-    assert!(metrics.classifier_cost_microusd_per_routed_turn > 0.0);
-    assert!(metrics.classifier_latency_ms_per_routed_turn >= 0.0);
+    let upgrades = metrics
+        .cases
+        .iter()
+        .filter(|case| case.expected_reason == ExecutionRouteReason::DurableUpgrade)
+        .collect::<Vec<_>>();
+    assert_eq!(upgrades.len(), 40);
+    assert!(upgrades.iter().all(|case| {
+        case.classifier_calls == 0 && case.durable_upgrade_evidence_preserved == Some(true)
+    }));
 }
 
-#[test]
-fn execution_routing_respond_on_run_cost_is_catastrophic_offline() {
-    // Pins: mutation of the asymmetric catastrophe cell from 50 to zero must fail this guard.
-    let source = include_str!("../../src/execution/routing.rs");
-    assert!(source.contains("(Respond, Run) => 50"));
+#[tokio::test]
+async fn execution_routing_costs_pin_catastrophe_and_strategy_direction_offline() {
+    // Pins: Execute-to-Respond stays catastrophic while strategy over- and
+    // under-execution remain separate, direction-sensitive costs and exact
+    // Execute strategy matches remain comparable at zero cost.
+    let cases = vec![
+        response_case(
+            "execute-respond-catastrophe",
+            ExecutionStrategy::Durable,
+            ExecutionRouteReason::HighFanout,
+            ExecutionRouteClassifierLabelV1::Respond,
+            ExecutionRouteReason::SimpleResponse,
+            9_500,
+            ExecutionRouteClassifierOutcome::Accepted,
+        ),
+        response_case(
+            "inline-durable-over-execution",
+            ExecutionStrategy::Inline,
+            ExecutionRouteReason::BoundedInteractiveWork,
+            ExecutionRouteClassifierLabelV1::Execute,
+            ExecutionRouteReason::HighFanout,
+            9_500,
+            ExecutionRouteClassifierOutcome::Accepted,
+        ),
+        response_case(
+            "durable-inline-under-execution",
+            ExecutionStrategy::Durable,
+            ExecutionRouteReason::HighFanout,
+            ExecutionRouteClassifierLabelV1::Execute,
+            ExecutionRouteReason::BoundedInteractiveWork,
+            9_500,
+            ExecutionRouteClassifierOutcome::Accepted,
+        ),
+        response_case(
+            "inline-inline-exact-match",
+            ExecutionStrategy::Inline,
+            ExecutionRouteReason::BoundedInteractiveWork,
+            ExecutionRouteClassifierLabelV1::Execute,
+            ExecutionRouteReason::BoundedInteractiveWork,
+            9_500,
+            ExecutionRouteClassifierOutcome::Accepted,
+        ),
+        response_case(
+            "durable-durable-exact-match",
+            ExecutionStrategy::Durable,
+            ExecutionRouteReason::HighFanout,
+            ExecutionRouteClassifierLabelV1::Execute,
+            ExecutionRouteReason::HighFanout,
+            9_500,
+            ExecutionRouteClassifierOutcome::Accepted,
+        ),
+    ];
+    let metrics = score_routing_cases(&cases)
+        .await
+        .expect("cost probe cases should score");
+
+    assert_eq!(metrics.cases[0].routing_cost, 50);
+    assert_eq!(metrics.cases[0].strategy_cost, None);
+    assert_eq!(metrics.cases[1].routing_cost, 0);
+    assert_eq!(metrics.cases[1].strategy_cost, Some(4));
+    assert_eq!(metrics.cases[2].routing_cost, 0);
+    assert_eq!(metrics.cases[2].strategy_cost, Some(8));
+    assert_eq!(metrics.cases[3].routing_cost, 0);
+    assert_eq!(metrics.cases[3].strategy_cost, Some(0));
+    assert_eq!(metrics.cases[4].routing_cost, 0);
+    assert_eq!(metrics.cases[4].strategy_cost, Some(0));
+}
+
+#[tokio::test]
+async fn execution_routing_low_confidence_durable_reason_falls_back_inline_offline() {
+    // Pins: an untrusted Durable recommendation below the confidence boundary
+    // uses the production Execute/Inline fallback instead of starting a run.
+    let case = response_case(
+        "low-confidence-durable-fallback",
+        ExecutionStrategy::Inline,
+        ExecutionRouteReason::BoundedInteractiveWork,
+        ExecutionRouteClassifierLabelV1::Execute,
+        ExecutionRouteReason::HighFanout,
+        7_999,
+        ExecutionRouteClassifierOutcome::LowConfidence,
+    );
+    let metrics = score_routing_cases(&[case])
+        .await
+        .expect("low-confidence case should score");
+    assert_eq!(metrics.passed_cases, 1);
+    assert_eq!(
+        metrics.cases[0].observed_strategy,
+        Some(ExecutionStrategy::Inline)
+    );
+    assert_eq!(metrics.cases[0].classifier_calls, 1);
+}
+
+#[tokio::test]
+async fn execution_routing_rejects_corrupt_upgrade_evidence_and_classifier_setup_offline() {
+    // Pins: Durable upgrades preserve exact bounded evidence and can never be
+    // represented by a case that permits a classifier call.
+    let corpus = load_execution_corpus(&manifest_path())
+        .await
+        .expect("checked-in execution corpus should load");
+    let upgrade = corpus
+        .routing_cases
+        .iter()
+        .find(|case| case.durable_upgrade.is_some())
+        .expect("corpus should contain a Durable-upgrade case")
+        .clone();
+
+    let mut corrupt_evidence = upgrade.clone();
+    corrupt_evidence
+        .expected_durable_upgrade_evidence
+        .as_mut()
+        .expect("upgrade should pin evidence")
+        .push(
+            moa_core::types::execution_planning::ExecutionPlanningEvidence {
+                source: "corrupt".to_string(),
+                summary: "not emitted by the production transition".to_string(),
+                value: serde_json::json!({"corrupt": true}),
+            },
+        );
+    assert!(score_routing_cases(&[corrupt_evidence]).await.is_err());
+
+    let mut classifier_setup = upgrade;
+    classifier_setup.classifier = ExecutionRoutingClassifierFixtureV1::Response {
+        output: ExecutionRouteClassifierOutputV1 {
+            label: ExecutionRouteClassifierLabelV1::Execute,
+            reason: ExecutionRouteReason::HighFanout,
+            confidence_bps: 9_500,
+            missing_inputs: Vec::new(),
+        },
+        usage: TokenUsage::default(),
+        cost_microusd: 0,
+    };
+    assert!(score_routing_cases(&[classifier_setup]).await.is_err());
+}
+
+#[tokio::test]
+async fn execution_routing_durable_upgrade_rejects_non_root_and_reuse_offline() {
+    // Pins: the eval's real Durable-upgrade transition remains root-only and one-way.
+    let corpus = load_execution_corpus(&manifest_path())
+        .await
+        .expect("checked-in execution corpus should load");
+    let upgrade = corpus
+        .routing_cases
+        .iter()
+        .find_map(|case| case.durable_upgrade.as_ref())
+        .expect("corpus should contain a Durable-upgrade signal");
+    let initial_route = ExecutionRouteDecision::Execute {
+        reason: ExecutionRouteReason::BoundedInteractiveWork,
+    };
+
+    assert_eq!(
+        durable_upgrade_transition(&upgrade.objective, &initial_route, false, false, upgrade,),
+        Err(DurableUpgradeTransitionError::NotAuthorized)
+    );
+    assert_eq!(
+        durable_upgrade_transition(&upgrade.objective, &initial_route, true, true, upgrade,),
+        Err(DurableUpgradeTransitionError::AlreadyConsumed)
+    );
 }

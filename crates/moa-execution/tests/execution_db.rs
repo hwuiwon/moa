@@ -12,12 +12,12 @@ use moa_core::events::ExecutionTaskResultsRef;
 use moa_core::types::{
     contact::ContactId,
     execution_planning::{
-        ExecutionAuditReportV1, ExecutionCompileOutcome, ExecutionCompileSource, ExecutionMode,
+        ExecutionAuditReportV1, ExecutionCompileOutcome, ExecutionCompileSource,
         ExecutionPlannerCallKind, ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1,
-        ExecutionPlanningAuditPayloadV1, ExecutionRouteClassifierOutcome,
-        ExecutionRouteDecisionKind, ExecutionRouteProvenanceV1, ExecutionRouteReason,
-        ExecutionRouteSource, ExecutionRouteStage, ExecutionRouteUsageV1,
-        ExecutionSourceProvenanceV1, canonical_json_bytes,
+        ExecutionPlanningAuditPayloadV1, ExecutionRouteClassifierOutcome, ExecutionRouteDecision,
+        ExecutionRouteKind, ExecutionRouteProvenanceV1, ExecutionRouteReason, ExecutionRouteSource,
+        ExecutionRouteStage, ExecutionRouteUsageV1, ExecutionSourceProvenanceV1, ExecutionStrategy,
+        canonical_json_bytes,
     },
     identifiers::{SessionId, TenantId, UserId},
 };
@@ -43,9 +43,9 @@ use moa_execution::{
         TransitionOutcome, ValidatedAmendment, WakeAckOutcome,
     },
     state::{
-        ExecutionLimitStop, ExecutionRunStatus, ExecutionTaskId, ExecutionTaskStatus,
-        ExecutionTerminalCause, FailureFingerprintInput, LogicalTask, LogicalTaskKind,
-        TerminalProjection,
+        ExecutionLimitStop, ExecutionRunStatus, ExecutionSourceKind, ExecutionTaskId,
+        ExecutionTaskStatus, ExecutionTerminalCause, ExecutionTerminalReason,
+        FailureFingerprintInput, LogicalTask, LogicalTaskKind, TerminalProjection,
     },
     wire::{
         ExecutionActionReviewResolution, ExecutionPlanningContextSnapshotV1,
@@ -163,43 +163,57 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
     let session_id = SessionId::new();
     let first_at = Utc::now();
 
-    let route = ExecutionPlanningAuditEnvelopeV1 {
-        schema_version: 1,
-        tenant_id,
-        contact_id: None,
-        session_id: Some(session_id),
-        originating_sequence: Some(7),
-        payload: ExecutionPlanningAuditPayloadV1::Route {
-            stage: ExecutionRouteStage::Initial,
-            decision: ExecutionRouteDecisionKind::Routed,
-            mode: Some(ExecutionMode::Run),
-            reason: ExecutionRouteReason::ExplicitRun,
-            provenance: ExecutionRouteProvenanceV1 {
-                source: ExecutionRouteSource::Classifier,
-                classifier_outcome: ExecutionRouteClassifierOutcome::Accepted,
-                provider_model: Some("route-model".to_string()),
-                prompt_version: Some("execution-router-v1".to_string()),
-                objective_hash: "a".repeat(64),
-                response_hash: Some("b".repeat(64)),
-                confidence_bps: Some(9_500),
-                missing_input_count: 0,
-                usage: ExecutionRouteUsageV1 {
-                    input_tokens_uncached: 11,
-                    input_tokens_cache_write: 2,
-                    input_tokens_cache_read: 3,
-                    output_tokens: 5,
-                },
-                cost_microusd: 7,
-                duration_micros: 9,
-            },
-            accepted_at: first_at,
-        },
+    let decision = ExecutionRouteDecision::Execute {
+        reason: ExecutionRouteReason::ExplicitDurableExecution,
     };
+    let route = ExecutionPlanningAuditEnvelopeV1::route(
+        tenant_id,
+        None,
+        session_id,
+        7,
+        ExecutionRouteStage::Initial,
+        &decision,
+        ExecutionRouteProvenanceV1 {
+            source: ExecutionRouteSource::Classifier,
+            classifier_outcome: ExecutionRouteClassifierOutcome::Accepted,
+            provider_model: Some("route-model".to_string()),
+            prompt_version: Some("execution-router-v1".to_string()),
+            objective_hash: "a".repeat(64),
+            response_hash: Some("b".repeat(64)),
+            confidence_bps: Some(9_500),
+            missing_input_count: 0,
+            usage: ExecutionRouteUsageV1 {
+                input_tokens_uncached: 11,
+                input_tokens_cache_write: 2,
+                input_tokens_cache_read: 3,
+                output_tokens: 5,
+            },
+            cost_microusd: 7,
+            duration_micros: 9,
+        },
+        first_at,
+    );
     let RouteAuditWriteOutcome::Applied(route_evidence) =
         repository.write_route_audit(scope, &route).await?
     else {
         panic!("first route audit must apply");
     };
+    assert_eq!(route_evidence.decision, ExecutionRouteKind::Execute);
+    assert_eq!(route_evidence.strategy, Some(ExecutionStrategy::Durable));
+    assert_eq!(
+        route_evidence.reason,
+        ExecutionRouteReason::ExplicitDurableExecution
+    );
+    let sql_audit_uid: Uuid =
+        sqlx::query_scalar("SELECT moa.execution_route_audit_uid($1,$2,$3,$4,$5)")
+            .bind(tenant_id.0)
+            .bind(Option::<Uuid>::None)
+            .bind(session_id.0)
+            .bind(7_i64)
+            .bind("initial")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(route_evidence.audit_uid, sql_audit_uid);
     let mut route_retry = route.clone();
     let ExecutionPlanningAuditPayloadV1::Route {
         accepted_at,
@@ -225,6 +239,50 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
         RouteAuditWriteOutcome::Conflict { audit_uid }
             if audit_uid == route_evidence.audit_uid
     ));
+
+    let contact_id = ContactId::new();
+    let contact_scope = ExecutionScope::Contact {
+        tenant_id,
+        contact_id,
+    };
+    let contact_session_id = SessionId::new();
+    let contact_decision = ExecutionRouteDecision::Execute {
+        reason: ExecutionRouteReason::SelectedExecutionTemplate,
+    };
+    let contact_route = ExecutionPlanningAuditEnvelopeV1::route(
+        tenant_id,
+        Some(contact_id),
+        contact_session_id,
+        8,
+        ExecutionRouteStage::Initial,
+        &contact_decision,
+        ExecutionRouteProvenanceV1 {
+            source: ExecutionRouteSource::SelectedExecutionTemplate,
+            classifier_outcome: ExecutionRouteClassifierOutcome::NotCalled,
+            provider_model: None,
+            prompt_version: None,
+            objective_hash: "c".repeat(64),
+            response_hash: None,
+            confidence_bps: None,
+            missing_input_count: 0,
+            usage: ExecutionRouteUsageV1::default(),
+            cost_microusd: 0,
+            duration_micros: 0,
+        },
+        first_at,
+    );
+    let RouteAuditWriteOutcome::Applied(contact_evidence) = repository
+        .write_route_audit(contact_scope, &contact_route)
+        .await?
+    else {
+        panic!("contact-scoped route audit must apply");
+    };
+    assert_eq!(
+        repository
+            .write_route_audit(contact_scope, &contact_route)
+            .await?,
+        RouteAuditWriteOutcome::Replayed(contact_evidence)
+    );
 
     let planner = ExecutionPlanningAuditEnvelopeV1 {
         schema_version: 1,
@@ -356,7 +414,28 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(counts, (1, 1, 1));
+    assert_eq!(counts, (2, 1, 1));
+    assert_eq!(
+        count_route_audits_as_app_role(&pool, Some(tenant_id), None, false).await?,
+        1
+    );
+    assert_eq!(
+        count_route_audits_as_app_role(&pool, Some(tenant_id), Some(contact_id), false).await?,
+        1
+    );
+    assert_eq!(
+        count_route_audits_as_app_role(&pool, Some(tenant_id), Some(ContactId::new()), false,)
+            .await?,
+        0
+    );
+    assert_eq!(
+        count_route_audits_as_app_role(&pool, Some(TenantId::new()), None, false).await?,
+        0
+    );
+    assert_eq!(
+        count_route_audits_as_app_role(&pool, None, None, true).await?,
+        2
+    );
     Ok(())
 }
 
@@ -591,13 +670,12 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
         i64,
         String,
         String,
-        String,
         Option<String>,
         Option<Uuid>,
         Option<String>,
     ) = sqlx::query_as(
         r#"
-            SELECT analytics_change_seq, source_kind, route_mode, route_reason,
+            SELECT analytics_change_seq, source_kind, route_reason,
                    skill_template_ref, skill_template_revision_uid, terminal_reason
             FROM moa.execution_run
             WHERE run_uid = $1
@@ -608,11 +686,39 @@ async fn execution_analytics_metadata_round_trips_normalized_source_and_terminal
     .await?;
     assert!(row.0 > initial_change_seq);
     assert_eq!(row.1, "skill_template");
-    assert_eq!(row.2, "run");
-    assert_eq!(row.3, "selected_execution_template");
-    assert_eq!(row.4.as_deref(), Some(expected_template_ref.as_str()));
-    assert_eq!(row.5, Some(expected_template_revision_uid));
-    assert_eq!(row.6.as_deref(), Some("completed"));
+    assert_eq!(row.2, "selected_execution_template");
+    assert_eq!(row.3.as_deref(), Some(expected_template_ref.as_str()));
+    assert_eq!(row.4, Some(expected_template_revision_uid));
+    assert_eq!(row.5.as_deref(), Some("completed"));
+    let persisted = repository
+        .load_run(scope, run.run_uid)
+        .await?
+        .expect("finalized analytics fixture must round trip through the repository");
+    assert_eq!(
+        persisted.source_provenance,
+        ExecutionSourceProvenanceV1::SkillTemplate {
+            route_reason: ExecutionRouteReason::SelectedExecutionTemplate,
+            skill_template_ref: expected_template_ref.clone(),
+            skill_template_revision_uid: expected_template_revision_uid,
+        }
+    );
+    assert_eq!(persisted.source_kind, ExecutionSourceKind::SkillTemplate);
+    assert_eq!(
+        persisted.route.reason,
+        ExecutionRouteReason::SelectedExecutionTemplate
+    );
+    assert_eq!(
+        persisted.skill_template_ref.as_deref(),
+        Some(expected_template_ref.as_str())
+    );
+    assert_eq!(
+        persisted.skill_template_revision_uid,
+        Some(expected_template_revision_uid)
+    );
+    assert_eq!(
+        persisted.terminal_reason,
+        Some(ExecutionTerminalReason::Completed)
+    );
     Ok(())
 }
 
@@ -4393,6 +4499,38 @@ async fn cancellation_request(
             &snapshot.projection,
         )?,
     })
+}
+
+/// Counts route-audit rows after assuming the application role and installing
+/// one exact tenant/contact/control-plane RLS scope for the transaction.
+async fn count_route_audits_as_app_role(
+    pool: &sqlx::PgPool,
+    tenant_id: Option<TenantId>,
+    contact_id: Option<ContactId>,
+    control_plane: bool,
+) -> Result<i64, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        r#"
+        SELECT
+            pg_catalog.set_config('moa.tenant_id', $1, true),
+            pg_catalog.set_config('moa.contact_id', $2, true),
+            pg_catalog.set_config('moa.control_plane', $3, true)
+        "#,
+    )
+    .bind(tenant_id.map(|id| id.to_string()).unwrap_or_default())
+    .bind(contact_id.map(|id| id.to_string()).unwrap_or_default())
+    .bind(if control_plane { "true" } else { "false" })
+    .execute(&mut *transaction)
+    .await?;
+    let count = sqlx::query_scalar("SELECT COUNT(*) FROM moa.execution_route_audit")
+        .fetch_one(&mut *transaction)
+        .await?;
+    transaction.rollback().await?;
+    Ok(count)
 }
 
 async fn create_run(

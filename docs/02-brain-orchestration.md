@@ -87,33 +87,39 @@ long-running LLM/tool loop lives in `TurnExecution`, so concurrent `snapshot`,
 There is no previous session-local turn runner; `TurnExecution` owns the durable
 turn loop.
 
-`TurnExecution` first selects one mode, then owns its turn mechanics. Ordinary
-user language is classified by at most one strict, no-tools auxiliary-model
-call before mode execution. Therefore `respond` means one user-facing response
+`TurnExecution` first selects one public route, then owns its turn mechanics.
+Ordinary user language is classified by at most one strict, no-tools auxiliary-model
+call before route execution. Therefore Respond means one user-facing response
 call after at most one classifier call, not one total provider call. Trusted
-template invocation, typed Act escalation, blank-objective preflight, and
-internal synthesis bypass the classifier. Any uncertain or malformed
-classifier result selects `act` without retry or planner fallback.
+template invocation, blank-objective preflight, and internal synthesis bypass
+the classifier. A typed Durable upgrade is a separate trusted control
+transition and is never classifier input. Any uncertain or malformed classifier
+result selects Execute/Inline without retry or planner fallback.
 
-- `needs_input` appends one deterministic clarification carrying the bounded
-  missing fields returned by routing.
+- Respond makes one model call with no tools and no planning call.
+- Execute derives exactly one strategy from its reason. Inline runs the bounded
+  root model/tool loop and may use conversational workers. Durable instantiates
+  a pinned skill template or compiles a strict generated plan, persists it,
+  starts `ExecutionRun` detached, and returns acceptance without polling it
+  from the root model.
+- NeedsInput appends one deterministic clarification carrying bounded missing
+  fields.
 
-- `respond` makes one model call with no tools and no planning call.
-- `act` runs the existing bounded root model/tool loop and may use
-  conversational workers.
-- `run` instantiates a pinned skill template or compiles a strict generated
-  plan, persists it, starts `ExecutionRun` detached, and returns acceptance
-  without polling it from the root model.
+Skills are optional inputs after routing, never routes or admission gates.
+Custom instruction-only skills work in the Inline loop and in declared Durable
+`Agent` nodes; their absence is not an execution error.
 
-An `act` turn may escalate to `run` after discovering durable, high-fan-out,
-resumable, or review-bearing work. Task difficulty by itself is not a routing
-signal.
+An initial root Execute/Inline turn may upgrade exactly once to Durable after
+discovering high-fan-out, resumable, approval-bearing, or otherwise durable
+work. It preserves bounded evidence and the byte-identical objective, does not
+call the classifier again, and cannot downgrade. Task difficulty is not a
+Durable signal.
 
 1. Build a `CompletionRequest` from session events and the context pipeline.
 2. Ensure a task segment exists or roll to a new segment when query rewrite marks `is_new_task`.
-3. Select `respond`, `act`, `run`, or `needs_input` through trusted control facts
-   or one bounded auxiliary classifier call; persist the redacted normalized
-   route audit before mode execution.
+3. Select Respond, Execute, or NeedsInput through trusted control facts or one
+   bounded auxiliary classifier call; derive optional Inline/Durable strategy
+   from the closed reason matrix and persist both before execution.
 4. Persist assistant output and tool calls.
 5. Build an `ActionEnvelope`, evaluate action policy, and route allowed tool execution through `ToolExecutor`.
 6. Record tool usage, skill activation, token usage, and turn counts on the active segment.
@@ -225,7 +231,7 @@ Tenant action reviews are decided by tenant admins through `ActionReviews`; conv
 
 `Worker` admits conversational messages and starts at most one `WorkerTurnExecution` workflow per active child turn. Workflow callbacks carry the admitted `turn_id`; stale responses, tool results, approval clears, and outcomes are ignored rather than mutating a newer turn.
 
-Delegation is owned by the root coordinator in `act`. Workers are bounded
+Delegation is owned by the root coordinator in Execute/Inline. Workers are bounded
 general-purpose child agents: they run task-local turns with scoped tools and
 budgets, report results, and do not own decomposition or final synthesis.
 Workers do not spawn or manage other workers. Coordinator delegation is bounded
@@ -238,7 +244,7 @@ without losing the final result. `spawn_worker.task` carries the purpose,
 relevant context, expected output, evidence requirements, constraints, and
 relevant skill instructions; optional controls bound tools, tokens, and turns.
 
-Workers support interactive, steerable delegation inside `act`. They are not
+Workers support interactive, steerable delegation inside Execute/Inline. They are not
 plan nodes, map items, reducers, or the bulk DAG substrate. Work that needs an
 explicit dependency graph, durable joins, scalable map materialization, review
 waits, or exact coverage uses `ExecutionRun` and stable `ExecutionTask` rows.

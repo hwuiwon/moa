@@ -43,7 +43,7 @@ use crate::execution_execution_support::fixtures::{
     route_classifier_completion, seed_allow_policy, start_turn_in_session,
 };
 use moa_core::types::execution_planning::{
-    ExecutionMode, ExecutionPlanningAuditPayloadV1, ExecutionRouteReason,
+    ExecutionPlanningAuditPayloadV1, ExecutionRouteKind, ExecutionRouteReason, ExecutionStrategy,
 };
 
 const COMPANY_COUNT: usize = 500;
@@ -162,8 +162,8 @@ async fn bulk_fixture() -> Result<OrchestratorTestFixture> {
             "default": text_completion("unexpected scripted-provider fallback"),
             "keyed": [
                 route_classifier_completion(
-                    ExecutionMode::Run,
-                    ExecutionRouteReason::ExplicitRun,
+                    ExecutionRouteKind::Execute,
+                    ExecutionRouteReason::BulkCollection,
                 ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion(FINAL_RESPONSE)),
                 keyed_completion(
@@ -316,8 +316,9 @@ async fn run_bulk_scenario(
     let audits = planning_audits(&fixture.postgres_url, session_id).await?;
     assert_initial_route(
         &audits,
-        ExecutionMode::Run,
-        ExecutionRouteReason::ExplicitRun,
+        ExecutionRouteKind::Execute,
+        Some(ExecutionStrategy::Durable),
+        ExecutionRouteReason::BulkCollection,
     );
     assert_generated_plan_audits(&audits);
     assert_eq!(final_brain_response(&events)?, FINAL_RESPONSE);

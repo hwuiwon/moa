@@ -76,7 +76,6 @@ impl AnalyticsExporter {
             ("contact_id", "Nullable(UUID)", "NULL"),
             ("initial_plan_hash", "String", "''"),
             ("active_plan_hash", "String", "''"),
-            ("route_mode", "LowCardinality(String)", "'run'"),
             ("skill_template_ref", "Nullable(String)", "NULL"),
             ("skill_template_revision_uid", "Nullable(UUID)", "NULL"),
             ("requirement_count", "UInt64", "0"),
@@ -126,11 +125,11 @@ impl AnalyticsExporter {
     }
 
     async fn upgrade_execution_task_schema(&self) -> Result<(), ExportError> {
-        let mut columns = self.execution_columns("dim_execution_tasks").await?;
-        self.rename_column_if_needed("dim_execution_tasks", &columns, "task_uid", "task_id")
-            .await?;
-        columns = self.execution_columns("dim_execution_tasks").await?;
-
+        let columns = self.execution_columns("dim_execution_tasks").await?;
+        if columns.contains_key("task_uid") {
+            self.rebuild_legacy_execution_task_schema().await?;
+            return Ok(());
+        }
         self.repair_nullable_column("dim_execution_tasks", &columns, "item_key", "''", "String")
             .await?;
         self.modify_column_if_needed("dim_execution_tasks", &columns, "plan_revision", "UInt64")
@@ -171,6 +170,80 @@ impl AnalyticsExporter {
                 .await?;
         }
         self.reorder_execution_columns("dim_execution_tasks", EXECUTION_TASK_COLUMNS)
+            .await?;
+        Ok(())
+    }
+
+    /// Rebuilds the Task 9 execution-task dimension because ClickHouse cannot
+    /// rename `task_uid` while it belongs to the table sorting key.
+    async fn rebuild_legacy_execution_task_schema(&self) -> Result<(), ExportError> {
+        const REBUILD_TABLE: &str = "dim_execution_tasks_v2_rebuild";
+        const BACKUP_TABLE: &str = "dim_execution_tasks_task9_backup";
+        let clickhouse = self.clickhouse.clone().with_database(&self.database);
+
+        for table in [REBUILD_TABLE, BACKUP_TABLE] {
+            clickhouse
+                .query("DROP TABLE IF EXISTS ?")
+                .bind(Identifier(table))
+                .execute()
+                .await?;
+        }
+
+        let columns = EXECUTION_TASK_COLUMNS
+            .iter()
+            .map(|(name, column_type)| format!("{name} {column_type}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let create = format!(
+            "CREATE TABLE ? ({columns}) ENGINE = ReplacingMergeTree(export_version) \
+             ORDER BY (tenant_id, run_uid, task_id)"
+        );
+        clickhouse
+            .query(&create)
+            .bind(Identifier(REBUILD_TABLE))
+            .execute()
+            .await?;
+
+        clickhouse
+            .query(
+                "INSERT INTO ? (\
+                    task_id,run_uid,tenant_id,node_id,item_key,task_kind,\
+                    capability_name,capability_version,plan_revision,status,failure_class,\
+                    attempt,generation,citation_count,queue_latency_ms,duration_ms,\
+                    reserved_cost_microusd,actual_cost_microusd,reserved_tokens,actual_tokens,\
+                    reserved_tasks,actual_tasks,reserved_tool_calls,actual_tool_calls,\
+                    reserved_retrieved_bytes,actual_retrieved_bytes,started_at,completed_at,\
+                    created_at,updated_at,export_version\
+                 ) SELECT \
+                    task_uid,run_uid,tenant_id,node_id,ifNull(item_key,''),\
+                    if(capability_ref IS NULL,'output','capability'),\
+                    if(capability_ref IS NULL,NULL,\
+                        splitByChar(':',assumeNotNull(capability_ref))[1]),\
+                    if(capability_ref IS NULL,NULL,\
+                        nullIf(splitByChar(':',assumeNotNull(capability_ref))[2],'')),\
+                    toUInt64(plan_revision),status,NULL,attempt,generation,citation_count,\
+                    NULL,duration_ms,reserved_cost_microusd,actual_cost_microusd,\
+                    reserved_tokens,actual_tokens,0,0,0,0,0,0,started_at,completed_at,\
+                    created_at,updated_at,export_version \
+                 FROM ?",
+            )
+            .bind(Identifier(REBUILD_TABLE))
+            .bind(Identifier("dim_execution_tasks"))
+            .execute()
+            .await?;
+
+        clickhouse
+            .query("RENAME TABLE ? TO ?, ? TO ?")
+            .bind(Identifier("dim_execution_tasks"))
+            .bind(Identifier(BACKUP_TABLE))
+            .bind(Identifier(REBUILD_TABLE))
+            .bind(Identifier("dim_execution_tasks"))
+            .execute()
+            .await?;
+        clickhouse
+            .query("DROP TABLE IF EXISTS ?")
+            .bind(Identifier(BACKUP_TABLE))
+            .execute()
             .await?;
         Ok(())
     }
@@ -464,7 +537,6 @@ const TABLE_DDL: &[&str] = &[
         initial_plan_hash String,
         active_plan_hash String,
         plan_revision UInt64,
-        route_mode LowCardinality(String),
         route_reason LowCardinality(String),
         source_kind LowCardinality(String),
         skill_template_ref Nullable(String),
@@ -609,7 +681,6 @@ const EXECUTION_RUN_COLUMNS: &[(&str, &str)] = &[
     ("initial_plan_hash", "String"),
     ("active_plan_hash", "String"),
     ("plan_revision", "UInt64"),
-    ("route_mode", "LowCardinality(String)"),
     ("route_reason", "LowCardinality(String)"),
     ("source_kind", "LowCardinality(String)"),
     ("skill_template_ref", "Nullable(String)"),
@@ -680,15 +751,52 @@ mod tests {
 
     #[test]
     fn execution_clickhouse_contract_has_only_normalized_columns() {
-        // Pins: the final execution dimensions use canonical identity,
-        // UInt64 plan revisions, non-null session/item keys, and no Task 9
-        // compatibility or raw-prose columns.
-        let run: std::collections::BTreeMap<_, _> = EXECUTION_RUN_COLUMNS.iter().copied().collect();
+        // Pins: the final execution run dimension preserves routing provenance,
+        // terminal evidence, coverage, cost, and latency without a redundant mode.
+        assert_eq!(
+            EXECUTION_RUN_COLUMNS,
+            &[
+                ("run_uid", "UUID"),
+                ("tenant_id", "UUID"),
+                ("contact_id", "Nullable(UUID)"),
+                ("session_id", "UUID"),
+                ("initial_plan_hash", "String"),
+                ("active_plan_hash", "String"),
+                ("plan_revision", "UInt64"),
+                ("route_reason", "LowCardinality(String)"),
+                ("source_kind", "LowCardinality(String)"),
+                ("skill_template_ref", "Nullable(String)"),
+                ("skill_template_revision_uid", "Nullable(UUID)"),
+                ("status", "LowCardinality(String)"),
+                ("terminal_reason", "Nullable(String)"),
+                ("requirement_count", "UInt64"),
+                ("satisfied_requirement_count", "UInt64"),
+                ("completion_check_count", "UInt64"),
+                ("logical_task_count", "UInt64"),
+                ("queued_at", "Nullable(DateTime64(6, 'UTC'))"),
+                ("started_at", "Nullable(DateTime64(6, 'UTC'))"),
+                ("queue_to_start_ms", "Nullable(Float64)"),
+                ("completed_at", "Nullable(DateTime64(6, 'UTC'))"),
+                ("duration_ms", "Nullable(Float64)"),
+                ("reserved_cost_microusd", "UInt64"),
+                ("actual_cost_microusd", "UInt64"),
+                ("reserved_tokens", "UInt64"),
+                ("actual_tokens", "UInt64"),
+                ("reserved_tasks", "UInt64"),
+                ("actual_tasks", "UInt64"),
+                ("reserved_tool_calls", "UInt64"),
+                ("actual_tool_calls", "UInt64"),
+                ("reserved_retrieved_bytes", "UInt64"),
+                ("actual_retrieved_bytes", "UInt64"),
+                ("created_at", "DateTime64(6, 'UTC')"),
+                ("updated_at", "DateTime64(6, 'UTC')"),
+                ("export_version", "DateTime64(6, 'UTC')"),
+            ]
+        );
+
         let task: std::collections::BTreeMap<_, _> =
             EXECUTION_TASK_COLUMNS.iter().copied().collect();
 
-        assert_eq!(run.get("session_id"), Some(&"UUID"));
-        assert_eq!(run.get("plan_revision"), Some(&"UInt64"));
         assert_eq!(task.get("item_key"), Some(&"String"));
         assert_eq!(task.get("plan_revision"), Some(&"UInt64"));
         assert!(task.contains_key("task_id"));
@@ -701,14 +809,17 @@ mod tests {
             "user_id",
         ] {
             assert!(
-                !run.contains_key(forbidden) && !task.contains_key(forbidden),
+                !EXECUTION_RUN_COLUMNS
+                    .iter()
+                    .any(|(name, _)| *name == forbidden)
+                    && !task.contains_key(forbidden),
                 "forbidden execution dimension column {forbidden}"
             );
         }
 
         let ddl = TABLE_DDL.join("\n");
-        assert!(!ddl.contains("task_uid"));
-        assert!(!ddl.contains("source_ref"));
-        assert!(!ddl.contains("capability_ref"));
+        for forbidden in ["task_uid", "source_ref", "capability_ref"] {
+            assert!(!ddl.contains(forbidden));
+        }
     }
 }

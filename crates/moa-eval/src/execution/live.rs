@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moa_core::types::execution_planning::{
-    ExecutionMode, ExecutionRouteClassifierOutcome, ExecutionRouteProvenanceV1,
-    ExecutionRouteSource,
+    ExecutionRouteClassifierOutcome, ExecutionRouteKind, ExecutionRouteProvenanceV1,
+    ExecutionRouteSource, ExecutionStrategy,
 };
 use moa_eval_core::{EvalError, Result};
 use moa_execution::state::ExecutionRunStatus;
@@ -17,7 +17,7 @@ use super::{
         ExecutionEvalCaseResultV1, ExecutionEvalLaneV1, ExecutionEvalProviderV1,
         ExecutionEvalReportV1, ExecutionJudgeCalibrationStatusV1,
     },
-    routing::ExecutionRoutingLabelV1,
+    routing::{ExecutionRoutingLabelV1, routing_cost, strategy_cost},
 };
 
 /// Required number of logical cases in the initial live execution corpus.
@@ -37,7 +37,9 @@ pub struct ExecutionTaskQualityCaseV1 {
     pub objective: String,
     /// Human-adjudicated route required before planner/task scoring.
     pub expected_route: ExecutionRoutingLabelV1,
-    /// Allowed durable terminal statuses; empty for non-Run cases.
+    /// Human-adjudicated strategy, present only for Execute.
+    pub expected_strategy: Option<ExecutionStrategy>,
+    /// Allowed durable terminal statuses; empty for non-Durable cases.
     pub allowed_terminal_statuses: Vec<ExecutionRunStatus>,
     /// Inclusive minimum persisted logical-task count.
     pub min_task_count: u64,
@@ -83,6 +85,8 @@ pub struct ExecutionLiveRunOutcomeV1 {
     pub repetition: u32,
     /// Observed final routing label, including NeedsInput.
     pub observed_route: ExecutionRoutingLabelV1,
+    /// Observed deterministic strategy, present only for Execute.
+    pub observed_strategy: Option<ExecutionStrategy>,
     /// Common redacted execution-eval case result.
     pub result: ExecutionEvalCaseResultV1,
 }
@@ -114,21 +118,20 @@ pub(crate) fn validate_task_quality_case(case: &ExecutionTaskQualityCaseV1) -> R
             case.case_id
         )));
     }
-    match case.expected_route {
-        ExecutionRoutingLabelV1::Run => {
+    match (case.expected_route, case.expected_strategy) {
+        (ExecutionRoutingLabelV1::Execute, Some(ExecutionStrategy::Durable)) => {
             if case.allowed_terminal_statuses.is_empty()
                 || case.reference_task_count == 0
                 || case.max_task_count == 0
             {
                 return Err(invalid_config(format!(
-                    "Run task-quality case `{}` requires statuses and positive task references",
+                    "Durable Execute task-quality case `{}` requires statuses and positive task references",
                     case.case_id
                 )));
             }
         }
-        ExecutionRoutingLabelV1::Respond
-        | ExecutionRoutingLabelV1::Act
-        | ExecutionRoutingLabelV1::NeedsInput => {
+        (ExecutionRoutingLabelV1::Respond | ExecutionRoutingLabelV1::NeedsInput, None)
+        | (ExecutionRoutingLabelV1::Execute, Some(ExecutionStrategy::Inline)) => {
             if !case.allowed_terminal_statuses.is_empty()
                 || case.min_task_count != 0
                 || case.max_task_count != 0
@@ -136,10 +139,16 @@ pub(crate) fn validate_task_quality_case(case: &ExecutionTaskQualityCaseV1) -> R
                 || case.contract_case_id.is_some()
             {
                 return Err(invalid_config(format!(
-                    "non-Run task-quality case `{}` cannot declare run-only expectations",
+                    "non-Durable task-quality case `{}` cannot declare run-only expectations",
                     case.case_id
                 )));
             }
+        }
+        _ => {
+            return Err(invalid_config(format!(
+                "task-quality case `{}` has an inconsistent route and strategy",
+                case.case_id
+            )));
         }
     }
     Ok(())
@@ -166,8 +175,8 @@ pub(crate) fn validate_task_quality_corpus(cases: &[ExecutionTaskQualityCaseV1])
     }
     for required in [
         "respond",
-        "near-boundary-act",
-        "durable-run",
+        "near-boundary-inline",
+        "durable-execute",
         "bulk-coverage",
         "evidence-citations",
         "exclusions",
@@ -261,12 +270,15 @@ pub fn aggregate_live_execution_outcomes(
         .iter()
         .map(|case| (case.case_id.as_str(), true))
         .collect::<BTreeMap<_, _>>();
-    let mut routing_cost = 0_u64;
-    let mut routing_denominator = 0_u64;
-    let mut true_run = 0_u64;
-    let mut respond_on_run = 0_u64;
-    let mut near_boundary_act = 0_u64;
-    let mut near_boundary_act_correct = 0_u64;
+    let mut total_routing_cost = 0_u64;
+    let mut total_strategy_cost = 0_u64;
+    let mut strategy_cost_cases = 0_u64;
+    let mut execute_cases = 0_u64;
+    let mut respond_on_execute = 0_u64;
+    let mut durable_strategy_cases = 0_u64;
+    let mut durable_strategy_correct = 0_u64;
+    let mut near_boundary_inline = 0_u64;
+    let mut near_boundary_inline_correct = 0_u64;
     let mut classifier_attempts = 0_u64;
     let mut classifier_fallbacks = 0_u64;
     let mut fallback_counts = BTreeMap::<String, u64>::new();
@@ -300,15 +312,17 @@ pub fn aggregate_live_execution_outcomes(
                 "live outcome case result must use identity `{expected_result_id}`"
             )));
         }
-        let observed_mode = label_mode(outcome.observed_route);
-        if outcome.result.observed_route != observed_mode {
+        if outcome.result.observed_route != Some(label_kind(outcome.observed_route))
+            || outcome.result.observed_strategy != outcome.observed_strategy
+        {
             return Err(invalid_config(format!(
                 "live outcome `{expected_result_id}` route label and common result disagree"
             )));
         }
-        let route_passed = outcome.observed_route == case.expected_route;
-        let status_passed = match case.expected_route {
-            ExecutionRoutingLabelV1::Run => outcome
+        let route_passed = outcome.observed_route == case.expected_route
+            && outcome.observed_strategy == case.expected_strategy;
+        let status_passed = match (case.expected_route, case.expected_strategy) {
+            (ExecutionRoutingLabelV1::Execute, Some(ExecutionStrategy::Durable)) => outcome
                 .result
                 .observed_run_status
                 .is_some_and(|status| case.allowed_terminal_statuses.contains(&status)),
@@ -344,22 +358,38 @@ pub fn aggregate_live_execution_outcomes(
             .ok_or_else(|| {
                 invalid_config("live reference-task aggregate overflowed u64".to_string())
             })?;
-        if let Some(cost) = mode_cost(case.expected_route, outcome.observed_route) {
-            routing_cost = routing_cost
+        total_routing_cost = total_routing_cost
+            .checked_add(routing_cost(case.expected_route, outcome.observed_route))
+            .ok_or_else(|| invalid_config("live routing cost overflowed u64".to_string()))?;
+        if let Some(cost) = strategy_cost(
+            case.expected_route,
+            case.expected_strategy,
+            outcome.observed_route,
+            outcome.observed_strategy,
+        ) {
+            total_strategy_cost = total_strategy_cost
                 .checked_add(cost)
-                .ok_or_else(|| invalid_config("live routing cost overflowed u64".to_string()))?;
-            routing_denominator = routing_denominator.saturating_add(1);
+                .ok_or_else(|| invalid_config("live strategy cost overflowed u64".to_string()))?;
+            strategy_cost_cases = strategy_cost_cases.saturating_add(1);
         }
-        if case.expected_route == ExecutionRoutingLabelV1::Run {
-            true_run = true_run.saturating_add(1);
-            respond_on_run = respond_on_run.saturating_add(u64::from(
+        if case.expected_route == ExecutionRoutingLabelV1::Execute {
+            execute_cases = execute_cases.saturating_add(1);
+            respond_on_execute = respond_on_execute.saturating_add(u64::from(
                 outcome.observed_route == ExecutionRoutingLabelV1::Respond,
             ));
+            if case.expected_strategy == Some(ExecutionStrategy::Durable) {
+                durable_strategy_cases = durable_strategy_cases.saturating_add(1);
+                durable_strategy_correct = durable_strategy_correct.saturating_add(u64::from(
+                    outcome.observed_route == ExecutionRoutingLabelV1::Execute
+                        && outcome.observed_strategy == Some(ExecutionStrategy::Durable),
+                ));
+            }
         }
-        if case.tags.iter().any(|tag| tag == "near-boundary-act") {
-            near_boundary_act = near_boundary_act.saturating_add(1);
-            near_boundary_act_correct = near_boundary_act_correct.saturating_add(u64::from(
-                outcome.observed_route == ExecutionRoutingLabelV1::Act,
+        if case.tags.iter().any(|tag| tag == "near-boundary-inline") {
+            near_boundary_inline = near_boundary_inline.saturating_add(1);
+            near_boundary_inline_correct = near_boundary_inline_correct.saturating_add(u64::from(
+                outcome.observed_route == ExecutionRoutingLabelV1::Execute
+                    && outcome.observed_strategy == Some(ExecutionStrategy::Inline),
             ));
         }
         if let Some(provenance) = &outcome.result.route_provenance
@@ -409,9 +439,13 @@ pub fn aggregate_live_execution_outcomes(
     report.metrics.pass_variance = Some(pass_rate * (1.0 - pass_rate));
     report.metrics.cost_per_success_microusd = ratio(total_cost, successful);
     report.metrics.task_count_ratio_vs_reference = ratio(task_count, reference_task_count);
-    report.metrics.weighted_routing_cost = ratio(routing_cost, routing_denominator);
-    report.metrics.respond_on_run_rate = ratio(respond_on_run, true_run);
-    report.metrics.near_boundary_act_recall = ratio(near_boundary_act_correct, near_boundary_act);
+    report.metrics.weighted_routing_cost = ratio(total_routing_cost, total);
+    report.metrics.weighted_strategy_cost = ratio(total_strategy_cost, strategy_cost_cases);
+    report.metrics.respond_on_execute_rate = ratio(respond_on_execute, execute_cases);
+    report.metrics.near_boundary_inline_recall =
+        ratio(near_boundary_inline_correct, near_boundary_inline);
+    report.metrics.durable_strategy_recall =
+        ratio(durable_strategy_correct, durable_strategy_cases);
     report.metrics.classifier_fallback_rate = ratio(classifier_fallbacks, classifier_attempts);
     report.metrics.classifier_fallback_counts =
         (!fallback_counts.is_empty()).then_some(fallback_counts);
@@ -425,27 +459,12 @@ pub fn aggregate_live_execution_outcomes(
     Ok(report)
 }
 
-fn label_mode(label: ExecutionRoutingLabelV1) -> Option<ExecutionMode> {
+const fn label_kind(label: ExecutionRoutingLabelV1) -> ExecutionRouteKind {
     match label {
-        ExecutionRoutingLabelV1::Respond => Some(ExecutionMode::Respond),
-        ExecutionRoutingLabelV1::Act => Some(ExecutionMode::Act),
-        ExecutionRoutingLabelV1::Run => Some(ExecutionMode::Run),
-        ExecutionRoutingLabelV1::NeedsInput => None,
+        ExecutionRoutingLabelV1::Respond => ExecutionRouteKind::Respond,
+        ExecutionRoutingLabelV1::Execute => ExecutionRouteKind::Execute,
+        ExecutionRoutingLabelV1::NeedsInput => ExecutionRouteKind::NeedsInput,
     }
-}
-
-fn mode_cost(expected: ExecutionRoutingLabelV1, observed: ExecutionRoutingLabelV1) -> Option<u64> {
-    use ExecutionRoutingLabelV1::{Act, Respond, Run};
-    Some(match (observed, expected) {
-        (Respond, Respond) | (Act, Act) | (Run, Run) => 0,
-        (Respond, Act) => 3,
-        (Respond, Run) => 50,
-        (Act, Respond) => 1,
-        (Act, Run) => 8,
-        (Run, Respond) => 6,
-        (Run, Act) => 4,
-        _ => return None,
-    })
 }
 
 fn route_token_total(provenance: &ExecutionRouteProvenanceV1) -> Result<u64> {
@@ -468,7 +487,7 @@ const fn classifier_outcome_label(outcome: ExecutionRouteClassifierOutcome) -> &
         ExecutionRouteClassifierOutcome::SchemaRejected => "schema_rejected",
         ExecutionRouteClassifierOutcome::InvalidDecision => "invalid_decision",
         ExecutionRouteClassifierOutcome::LowConfidence => "low_confidence",
-        ExecutionRouteClassifierOutcome::ContextForcedAct => "context_forced_act",
+        ExecutionRouteClassifierOutcome::ContextForcedInline => "context_forced_inline",
     }
 }
 

@@ -548,6 +548,18 @@ fn guardrail_script() -> serde_json::Value {
                 ]
             }
         },
+        "keyed": [{
+            "match": "You classify one user turn into MOA's public execution decision.",
+            "completion": {
+                "content": json!({
+                    "label": "execute",
+                    "reason": "bounded_interactive_work",
+                    "confidence_bps": 10_000,
+                    "missing_inputs": []
+                }).to_string(),
+                "tool_calls": []
+            }
+        }],
         "responses": [
             {
                 "completion": {

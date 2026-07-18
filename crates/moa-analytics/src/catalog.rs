@@ -518,12 +518,6 @@ fn dataset_specs() -> Vec<DatasetSpec> {
                     AnalyticsFieldKind::Integer,
                 ),
                 dimension(
-                    "route_mode",
-                    "route_mode",
-                    "Route Mode",
-                    AnalyticsFieldKind::String,
-                ),
-                dimension(
                     "route_reason",
                     "route_reason",
                     "Route Reason",
@@ -1222,6 +1216,60 @@ mod tests {
                 .iter()
                 .all(|dataset| !dataset.description.contains("analytics.")),
             "public descriptions must not leak backing SQL relation names"
+        );
+    }
+
+    #[test]
+    fn execution_run_catalog_preserves_meaningful_dimensions_without_redundant_mode_offline() {
+        // Pins: durable runs expose routing provenance, terminal evidence,
+        // coverage, cost, and latency without a constant run-mode dimension.
+        let catalog = analytics_catalog();
+        let execution_runs = find_dataset(&catalog, "execution_runs")
+            .expect("execution_runs must remain in the analytics catalog");
+        let field_ids: Vec<_> = execution_runs
+            .fields
+            .iter()
+            .map(|field| field.id.as_str())
+            .collect();
+
+        assert_eq!(
+            field_ids,
+            vec![
+                "tenant_id",
+                "run_uid",
+                "contact_id",
+                "session_id",
+                "initial_plan_hash",
+                "active_plan_hash",
+                "plan_revision",
+                "route_reason",
+                "source_kind",
+                "skill_template_ref",
+                "skill_template_revision_uid",
+                "status",
+                "terminal_reason",
+                "logical_task_count",
+                "queued_at",
+                "started_at",
+                "completed_at",
+                "created_at",
+                "updated_at",
+                "requirement_count",
+                "satisfied_requirement_count",
+                "completion_check_count",
+                "reserved_cost_microusd",
+                "actual_cost_microusd",
+                "reserved_tokens",
+                "actual_tokens",
+                "reserved_tasks",
+                "actual_tasks",
+                "reserved_tool_calls",
+                "actual_tool_calls",
+                "reserved_retrieved_bytes",
+                "actual_retrieved_bytes",
+                "queue_to_start_ms",
+                "duration_ms",
+            ]
         );
     }
 }

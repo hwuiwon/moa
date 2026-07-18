@@ -423,7 +423,7 @@ $$;
 CREATE OR REPLACE FUNCTION moa.execution_route_provenance_is_valid(
     stage TEXT,
     decision TEXT,
-    mode TEXT,
+    strategy TEXT,
     reason TEXT,
     provenance JSONB
 ) RETURNS BOOLEAN
@@ -495,29 +495,29 @@ BEGIN
     route_valid := CASE source_kind
         WHEN 'classifier' THEN
             stage = 'initial' AND (
-                (decision = 'needs_input' AND mode IS NULL
+                (decision = 'needs_input' AND strategy IS NULL
                     AND reason = 'preflight_input_missing')
-                OR (decision = 'routed' AND mode = 'respond'
+                OR (decision = 'respond' AND strategy IS NULL
                     AND reason = 'simple_response')
-                OR (decision = 'routed' AND mode = 'act'
+                OR (decision = 'execute' AND strategy = 'inline'
                     AND reason = 'bounded_interactive_work')
-                OR (decision = 'routed' AND mode = 'run' AND reason IN (
-                    'explicit_run','bulk_collection','durable_or_resumable',
+                OR (decision = 'execute' AND strategy = 'durable' AND reason IN (
+                    'explicit_durable_execution','bulk_collection','durable_or_resumable',
                     'high_fanout','approval_or_signal'
                 ))
             )
         WHEN 'blank_objective' THEN
-            stage = 'initial' AND decision = 'needs_input' AND mode IS NULL
+            stage = 'initial' AND decision = 'needs_input' AND strategy IS NULL
                 AND reason = 'preflight_input_missing'
         WHEN 'selected_execution_template' THEN
-            stage = 'initial' AND decision = 'routed' AND mode = 'run'
+            stage = 'initial' AND decision = 'execute' AND strategy = 'durable'
                 AND reason = 'selected_execution_template'
-        WHEN 'act_escalation' THEN
-            stage = 'act_escalation' AND decision = 'routed' AND mode = 'run'
-                AND reason = 'act_escalation'
+        WHEN 'durable_upgrade' THEN
+            stage = 'durable_upgrade' AND decision = 'execute' AND strategy = 'durable'
+                AND reason = 'durable_upgrade'
         ELSE FALSE
     END;
-    IF NOT route_valid THEN
+    IF route_valid IS NOT TRUE THEN
         RETURN FALSE;
     END IF;
 
@@ -540,7 +540,7 @@ BEGIN
     IF classifier_outcome NOT IN (
            'accepted','provider_error','stream_error','oversized',
            'schema_rejected','invalid_decision','low_confidence',
-           'context_forced_act'
+           'context_forced_inline'
        )
        OR jsonb_typeof(provenance -> 'provider_model') <> 'string'
        OR octet_length(provenance ->> 'provider_model') NOT BETWEEN 1 AND 128
@@ -550,9 +550,9 @@ BEGIN
     END IF;
     collected := classifier_outcome IN (
         'accepted','oversized','schema_rejected','invalid_decision',
-        'low_confidence','context_forced_act'
+        'low_confidence','context_forced_inline'
     );
-    parsed := classifier_outcome IN ('accepted','low_confidence','context_forced_act');
+    parsed := classifier_outcome IN ('accepted','low_confidence','context_forced_inline');
     IF collected <> (provenance ->> 'response_hash' IS NOT NULL)
        OR (
            provenance ->> 'response_hash' IS NOT NULL
@@ -574,7 +574,7 @@ BEGIN
        OR (
            classifier_outcome <> 'accepted'
            AND NOT (
-               decision = 'routed' AND mode = 'act'
+               decision = 'execute' AND strategy = 'inline'
                AND reason = 'bounded_interactive_work'
            )
        ) THEN
@@ -657,15 +657,15 @@ BEGIN
            OR NOT moa.execution_json_object_has_exact_keys(
                payload,
                ARRAY[
-                   'kind','stage','decision','mode','reason','provenance','accepted_at'
+                   'kind','stage','decision','strategy','reason','provenance','accepted_at'
                ]
            )
-           OR payload ->> 'stage' NOT IN ('initial','act_escalation')
-           OR payload ->> 'decision' NOT IN ('needs_input','routed')
+           OR payload ->> 'stage' NOT IN ('initial','durable_upgrade')
+           OR payload ->> 'decision' NOT IN ('respond','execute','needs_input')
            OR payload ->> 'reason' NOT IN (
                'preflight_input_missing','simple_response','bounded_interactive_work',
-               'explicit_run','bulk_collection','durable_or_resumable','high_fanout',
-               'approval_or_signal','selected_execution_template','act_escalation'
+               'explicit_durable_execution','bulk_collection','durable_or_resumable','high_fanout',
+               'approval_or_signal','selected_execution_template','durable_upgrade'
            )
            OR jsonb_typeof(payload -> 'provenance') <> 'object'
            OR jsonb_typeof(payload -> 'accepted_at') <> 'string' THEN
@@ -675,7 +675,7 @@ BEGIN
         RETURN moa.execution_route_provenance_is_valid(
             payload ->> 'stage',
             payload ->> 'decision',
-            payload ->> 'mode',
+            payload ->> 'strategy',
             payload ->> 'reason',
             payload -> 'provenance'
         );
@@ -912,8 +912,8 @@ BEGIN
                provenance, ARRAY['kind','route_reason','planner']
            )
            OR provenance ->> 'route_reason' NOT IN (
-               'explicit_run','bulk_collection','durable_or_resumable',
-               'high_fanout','approval_or_signal','act_escalation'
+               'explicit_durable_execution','bulk_collection','durable_or_resumable',
+               'high_fanout','approval_or_signal','durable_upgrade'
            )
            OR jsonb_typeof(provenance -> 'planner') <> 'object' THEN
             RETURN FALSE;
@@ -964,7 +964,7 @@ BEGIN
                        'score_run_id','trial_uid'
                    ]
                )
-           AND provenance ->> 'route_reason' = 'explicit_run'
+           AND provenance ->> 'route_reason' = 'explicit_durable_execution'
            AND moa.execution_skill_ref_is_canonical(
                provenance ->> 'skill_template_ref'
            )
@@ -1262,7 +1262,6 @@ ALTER TABLE moa.execution_run
         )
     ) STORED,
     ADD COLUMN source_kind TEXT,
-    ADD COLUMN route_mode TEXT,
     ADD COLUMN route_reason TEXT,
     ADD COLUMN skill_template_ref TEXT,
     ADD COLUMN skill_template_revision_uid UUID,
@@ -1294,7 +1293,6 @@ ALTER TABLE moa.execution_template_admission
 
 UPDATE moa.execution_run
 SET source_kind = source_provenance ->> 'kind',
-    route_mode = 'run',
     route_reason = source_provenance ->> 'route_reason',
     skill_template_ref = CASE
         WHEN source_provenance ->> 'kind' IN (
@@ -1319,7 +1317,6 @@ SET source_kind = source_provenance ->> 'kind',
 
 ALTER TABLE moa.execution_run
     ALTER COLUMN source_kind SET NOT NULL,
-    ALTER COLUMN route_mode SET NOT NULL,
     ALTER COLUMN route_reason SET NOT NULL,
     ADD CONSTRAINT execution_run_normalized_scope_key
         UNIQUE (run_uid, tenant_id, contact_scope_id),
@@ -1328,20 +1325,19 @@ ALTER TABLE moa.execution_run
             'generated_plan','skill_template','experiment_template'
         )
     ),
-    ADD CONSTRAINT execution_run_route_mode_check CHECK (route_mode = 'run'),
     ADD CONSTRAINT execution_run_route_reason_check CHECK (
         route_reason IN (
             'preflight_input_missing','simple_response','bounded_interactive_work',
-            'explicit_run','bulk_collection','durable_or_resumable','high_fanout',
-            'approval_or_signal','selected_execution_template','act_escalation'
+            'explicit_durable_execution','bulk_collection','durable_or_resumable','high_fanout',
+            'approval_or_signal','selected_execution_template','durable_upgrade'
         )
     ),
     ADD CONSTRAINT execution_run_source_route_template_check CHECK (
         CASE source_kind
             WHEN 'generated_plan' THEN
                 route_reason IN (
-                    'explicit_run','bulk_collection','durable_or_resumable',
-                    'high_fanout','approval_or_signal','act_escalation'
+                    'explicit_durable_execution','bulk_collection','durable_or_resumable',
+                    'high_fanout','approval_or_signal','durable_upgrade'
                 )
                 AND skill_template_ref IS NULL
                 AND skill_template_revision_uid IS NULL
@@ -1351,7 +1347,7 @@ ALTER TABLE moa.execution_run
                 AND skill_template_revision_uid IS NOT NULL
                 AND moa.execution_skill_ref_is_canonical(skill_template_ref)
             WHEN 'experiment_template' THEN
-                route_reason = 'explicit_run'
+                route_reason = 'explicit_durable_execution'
                 AND skill_template_ref IS NOT NULL
                 AND skill_template_revision_uid IS NOT NULL
                 AND moa.execution_skill_ref_is_canonical(skill_template_ref)
@@ -1424,7 +1420,6 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     IF NEW.source_kind IS DISTINCT FROM OLD.source_kind
-       OR NEW.route_mode IS DISTINCT FROM OLD.route_mode
        OR NEW.route_reason IS DISTINCT FROM OLD.route_reason
        OR NEW.skill_template_ref IS DISTINCT FROM OLD.skill_template_ref
        OR NEW.skill_template_revision_uid IS DISTINCT FROM OLD.skill_template_revision_uid THEN
@@ -1459,7 +1454,7 @@ FOR EACH ROW EXECUTE FUNCTION moa.enforce_execution_run_normalized_update();
 CREATE OR REPLACE FUNCTION moa.execution_route_audit_row_is_valid(
     stage TEXT,
     decision TEXT,
-    mode TEXT,
+    strategy TEXT,
     reason TEXT,
     source TEXT,
     classifier_outcome TEXT,
@@ -1482,7 +1477,7 @@ AS $$
     SELECT moa.execution_route_provenance_is_valid(
         stage,
         decision,
-        mode,
+        strategy,
         reason,
         jsonb_build_object(
             'source', source,
@@ -1597,7 +1592,7 @@ CREATE TABLE moa.execution_route_audit (
     originating_sequence BIGINT NOT NULL CHECK (originating_sequence >= 0),
     stage TEXT NOT NULL,
     decision TEXT NOT NULL,
-    mode TEXT,
+    strategy TEXT,
     reason TEXT NOT NULL,
     source TEXT NOT NULL,
     classifier_outcome TEXT NOT NULL,
@@ -1626,7 +1621,7 @@ CREATE TABLE moa.execution_route_audit (
     ),
     CONSTRAINT execution_route_audit_matrix_check CHECK (
         moa.execution_route_audit_row_is_valid(
-            stage, decision, mode, reason, source, classifier_outcome,
+            stage, decision, strategy, reason, source, classifier_outcome,
             provider_model, prompt_version, objective_hash, response_hash,
             confidence_bps, missing_input_count, input_tokens_uncached,
             input_tokens_cache_write, input_tokens_cache_read, output_tokens,
@@ -1988,7 +1983,6 @@ SELECT
     r.initial_plan_hash,
     r.active_plan_hash,
     r.plan_revision,
-    r.route_mode,
     r.route_reason,
     r.source_kind,
     r.skill_template_ref,

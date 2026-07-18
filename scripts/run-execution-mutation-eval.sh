@@ -27,17 +27,21 @@ if ! docker compose -f "${ROOT_DIR}/docker-compose.yml" exec -T postgres \
   exit 1
 fi
 
-FUNCTION_FILTER='(evaluate_completion|evaluate_coverage|BudgetLedger::try_reserve|BudgetLedger::reconcile_cumulative|validate_amendment_reference_narrowing|validate_plan_references|ExecutionRepository::record_task_outcome|task_outcome_is_exact_replay|classifier_fallback|classifier_fallback_with_response|valid_classifier_output|below_confidence_threshold)'
+FUNCTION_FILTER='(evaluate_completion|evaluate_coverage|BudgetLedger::try_reserve|BudgetLedger::reconcile_cumulative|validate_amendment_reference_narrowing|validate_plan_references|ExecutionRepository::record_task_outcome|task_outcome_is_exact_replay|classifier_fallback|classifier_fallback_with_response|valid_classifier_output|below_confidence_threshold|ExecutionRouteReason::strategy|durable_upgrade_transition|routing_cost|strategy_cost)'
 MUTANT_ARGS=(
   --manifest-path "${ROOT_DIR}/Cargo.toml"
   --config "${CONFIG_PATH}"
   --package moa-execution
   --package moa-brain
+  --package moa-core
+  --package moa-eval
   --file "crates/moa-execution/src/completion.rs"
   --file "crates/moa-execution/src/budget.rs"
   --file "crates/moa-execution/src/compiler.rs"
   --file "crates/moa-execution/src/repository.rs"
   --file "crates/moa-brain/src/execution_planning/routing.rs"
+  --file "crates/moa-core/src/types/execution_planning.rs"
+  --file "crates/moa-eval/src/execution/routing.rs"
   --re "${FUNCTION_FILTER}"
 )
 

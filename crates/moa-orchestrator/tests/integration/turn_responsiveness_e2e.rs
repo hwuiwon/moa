@@ -18,28 +18,31 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const CLARIFICATION_RESPONSE: &str = "What should I change? Point me at the file, message, object, or output and the specific fix you want.";
+const CLARIFICATION_RESPONSE: &str =
+    "I need the following information before I can continue:\n\n- target\n- specific change";
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
 async fn execution_routing_writes_normalized_audits_outside_session_progress_service_e2e()
 -> Result<()> {
-    // Pins: the real Session -> TurnExecution -> Execution service path distinguishes all three
-    // routes, durably audits planning in normalized storage, and returns Accepted with one run UID
-    // without placing planner internals in Session/progress events.
+    // Pins: the real Session -> TurnExecution -> Execution service path distinguishes Respond,
+    // Execute/Inline, and Execute/Durable, durably audits normalized routing, and returns Accepted
+    // with one run UID without placing planner internals in Session/progress events.
     let run_objective = "Start an execution run for a durable report";
     let fixture = OrchestratorTestFixture::with_script(json!({
-        "keyed": [
-            {
-                "match": "Inspect the repository",
-                "completion": { "content": "inspection complete" }
-            },
-            {
-                "match": run_objective,
-                "completion": { "content": execution_candidate(run_objective) }
-            }
+        "responses": [
+            classifier_response("respond", "simple_response"),
+            { "completion": { "content": "4" } },
+            classifier_response("execute", "bounded_interactive_work"),
+            { "completion": { "content": "inspection complete" } },
+            classifier_response("execute", "explicit_durable_execution"),
+            { "completion": { "content": execution_candidate(run_objective) } }
         ],
-        "default": { "completion": { "content": "4" } }
+        "keyed": [{
+            "match": "Synthesize the final user response for execution run",
+            "completion": { "content": "durable report complete" }
+        }],
+        "default": { "completion": { "content": "unexpected scripted fallback" } }
     }))
     .await?;
     let test = fixture.isolated().await;
@@ -55,77 +58,84 @@ async fn execution_routing_writes_normalized_audits_outside_session_progress_ser
         event_summary(&respond_events)
     );
     assert_eq!(
-        route_modes(&fixture.postgres_url, respond_session).await?,
-        vec!["respond"]
+        route_decisions_and_strategies(&fixture.postgres_url, respond_session).await?,
+        vec![("respond".to_string(), None)]
     );
 
-    let act_session = test.create_session("execution-route-act").await?;
-    let (_, act_outcome, act_events) = run_scripted_turn(
+    let inline_session = test.create_session("execution-route-inline").await?;
+    let (_, inline_outcome, inline_events) = run_scripted_turn(
         &fixture.client,
-        act_session,
+        inline_session,
         "Inspect the repository and explain the result.",
     )
     .await?;
     assert_eq!(
-        act_outcome.kind,
+        inline_outcome.kind,
         TurnOutcomeKind::Completed,
-        "act outcome: {}; events: {}",
-        act_outcome.message,
-        event_summary(&act_events)
+        "Inline outcome: {}; events: {}",
+        inline_outcome.message,
+        event_summary(&inline_events)
     );
     assert_eq!(
-        route_modes(&fixture.postgres_url, act_session).await?,
-        vec!["act"]
+        route_decisions_and_strategies(&fixture.postgres_url, inline_session).await?,
+        vec![("execute".to_string(), Some("inline".to_string()))]
     );
 
-    let run_session = test.create_session("execution-route-run").await?;
-    let (_, run_outcome, run_events) =
-        run_scripted_turn(&fixture.client, run_session, run_objective).await?;
-    let TurnOutcomeKind::Accepted { execution_run_uid } = run_outcome.kind else {
+    let durable_session = test.create_session("execution-route-durable").await?;
+    let (_, durable_outcome, durable_events) =
+        run_scripted_turn(&fixture.client, durable_session, run_objective).await?;
+    let TurnOutcomeKind::Accepted { execution_run_uid } = durable_outcome.kind else {
         panic!(
-            "explicit run must return Accepted, got {:?}: {}; events: {}",
-            run_outcome.kind,
-            run_outcome.message,
-            event_summary(&run_events)
+            "explicit Durable execution must return Accepted, got {:?}: {}; events: {}",
+            durable_outcome.kind,
+            durable_outcome.message,
+            event_summary(&durable_events)
         );
     };
     assert_eq!(
-        route_modes(&fixture.postgres_url, run_session).await?,
-        vec!["run"]
+        route_decisions_and_strategies(&fixture.postgres_url, durable_session).await?,
+        vec![("execute".to_string(), Some("durable".to_string()))]
     );
-    assert!(run_events.iter().any(|record| {
+    assert!(durable_events.iter().any(|record| {
         matches!(
             &record.event,
             Event::ExecutionRunStarted(started) if started.run_uid == execution_run_uid
         )
     }));
     assert_eq!(
-        planner_outcomes(&fixture.postgres_url, run_session).await?,
+        planner_outcomes(&fixture.postgres_url, durable_session).await?,
         vec!["accepted"]
     );
     assert_eq!(
-        compile_outcomes(&fixture.postgres_url, run_session).await?,
+        compile_outcomes(&fixture.postgres_url, durable_session).await?,
         vec!["accepted"]
     );
     assert_eq!(
         fixture
             .client
-            .session(run_session.to_string())
+            .session(durable_session.to_string())
             .status()
             .await?,
         SessionStatus::Running
     );
 
+    let snapshot_end = durable_events
+        .last()
+        .expect("durable turn event snapshot should contain at least one event")
+        .sequence_num;
     let progress: SessionProgress = fixture
         .client
         .post_call(
-            &format!("/Session/{run_session}/progress"),
+            &format!("/Session/{durable_session}/progress"),
             &SessionProgressRequest {
-                event_range: EventRange::all(),
+                event_range: EventRange {
+                    to_seq: Some(snapshot_end),
+                    ..EventRange::all()
+                },
             },
         )
         .await?;
-    assert_eq!(progress.events, run_events);
+    assert_eq!(progress.events, durable_events);
     Ok(())
 }
 
@@ -292,6 +302,18 @@ async fn read_turn_progress(ingress_url: &str, turn_id: &str) -> Result<TurnProg
 
 fn main_loop_should_not_run_script() -> serde_json::Value {
     json!({
+        "keyed": [{
+            "match": "You classify one user turn into MOA's public execution decision.",
+            "completion": {
+                "content": json!({
+                    "label": "needs_input",
+                    "reason": "preflight_input_missing",
+                    "confidence_bps": 10_000,
+                    "missing_inputs": ["target", "specific change"]
+                }).to_string(),
+                "tool_calls": []
+            }
+        }],
         "default": {
             "completion": {
                 "content": "MAIN LOOP SHOULD NOT RUN",
@@ -366,13 +388,34 @@ fn execution_candidate(objective: &str) -> String {
     .to_string()
 }
 
-async fn route_modes(postgres_url: &str, session_id: SessionId) -> Result<Vec<String>> {
-    audit_column(
-        postgres_url,
-        "SELECT mode FROM moa.execution_route_audit WHERE session_id = $1 ORDER BY accepted_at",
-        session_id,
+fn classifier_response(label: &str, reason: &str) -> serde_json::Value {
+    json!({
+        "completion": {
+            "content": json!({
+                "label": label,
+                "reason": reason,
+                "confidence_bps": 10_000,
+                "missing_inputs": []
+            }).to_string(),
+            "tool_calls": []
+        }
+    })
+}
+
+async fn route_decisions_and_strategies(
+    postgres_url: &str,
+    session_id: SessionId,
+) -> Result<Vec<(String, Option<String>)>> {
+    let pool = PgPool::connect(postgres_url).await?;
+    let values = sqlx::query_as(
+        "SELECT decision, strategy FROM moa.execution_route_audit \
+         WHERE session_id = $1 ORDER BY accepted_at",
     )
-    .await
+    .bind(session_id.0)
+    .fetch_all(&pool)
+    .await?;
+    pool.close().await;
+    Ok(values)
 }
 
 async fn planner_outcomes(postgres_url: &str, session_id: SessionId) -> Result<Vec<String>> {

@@ -1,7 +1,10 @@
 //! Typed execution-eval assertions shared by deterministic service scenarios.
 
 use anyhow::{Context, Result};
-use moa_core::{events::Event, types::execution_planning::ExecutionMode};
+use moa_core::{
+    events::Event,
+    types::execution_planning::{ExecutionRouteKind, ExecutionStrategy},
+};
 use moa_eval::execution::{ExecutionEvalCaseResultV1, ExecutionInvariantSpecV1};
 use moa_execution::{
     repository::{ExecutionRepository, ExecutionScope},
@@ -77,15 +80,20 @@ pub(crate) async fn assert_repository_execution_eval_case(
     Ok(result)
 }
 
-/// Pins a non-Run route to one typed route audit and zero execution lifecycle events.
-pub(crate) fn assert_non_run_eval(
+/// Pins a non-Durable route to one typed route audit and zero execution lifecycle events.
+pub(crate) fn assert_non_durable_eval(
     audits: &[moa_core::types::execution_planning::ExecutionPlanningAuditEnvelopeV1],
     events: &[moa_core::types::events_stream::EventRecord],
-    mode: ExecutionMode,
+    decision: ExecutionRouteKind,
+    strategy: Option<ExecutionStrategy>,
     reason: moa_core::types::execution_planning::ExecutionRouteReason,
 ) {
-    assert!(matches!(mode, ExecutionMode::Respond | ExecutionMode::Act));
-    assert_initial_route(audits, mode, reason);
+    assert!(matches!(
+        (decision, strategy),
+        (ExecutionRouteKind::Respond, None)
+            | (ExecutionRouteKind::Execute, Some(ExecutionStrategy::Inline))
+    ));
+    assert_initial_route(audits, decision, strategy, reason);
     assert_no_execution_lifecycle_events(events);
     assert!(events.iter().all(|record| {
         !matches!(

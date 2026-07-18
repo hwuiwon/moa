@@ -34,6 +34,30 @@ of the default tenant connection.
 
 ## Execution Run Operations
 
+### Fresh V000337 Inspection
+
+Validate the execution analytics cutover from a fresh schema, not a developer
+database whose migration history may contain an older checksum. For an
+explicitly disposable local compose stack only, stop the stack and remove its
+volumes, start Postgres again, and run the canonical refinery migration path.
+Never use a volume reset on shared, staging, or production data.
+
+```bash
+docker compose down -v
+docker compose up -d postgres
+MOA_DATABASE_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa \
+  cargo test -p moa-migrations --test run_idempotency_db --locked \
+  execution_analytics_fresh_cutover_and_exact_contract_db -- \
+  --ignored --exact --nocapture
+```
+
+After migration, inspect `_refinery_schema_history` for version 337 and verify
+that `moa.execution_route_audit` has `decision`, nullable `strategy`, `reason`,
+and bounded provenance columns. Verify that `moa.execution_run` and
+`analytics.execution_run_fact` retain route reason/source and do not carry a
+constant run-mode dimension. Run the focused clean-apply/idempotency database
+test before trusting a second apply.
+
 ### Capacity And Backpressure
 
 Execution plans have no application active-worker, plan-node, map-item, or task
@@ -95,8 +119,11 @@ Inspect sources in this order. Do not skip directly to logs or traces:
 
 1. Inspect the durable run through `Execution/status` and
    `moa.execution_run`: `status`, `wake_epoch`, `processed_wake_epoch`,
-   `plan_revision`, waiting reasons, and timestamps. A greater `wake_epoch`
-   means the latest scheduling mutation is not yet acknowledged.
+   immutable goal contract, active plan hash/revision, typed terminal reason,
+   completion-check evidence, budget/reservation totals, waiting reasons, and
+   timestamps. A greater `wake_epoch` means the latest scheduling mutation is
+   not yet acknowledged. Do not infer the execution path from a constant mode
+   field; use the persisted route reason/source and planning audit.
 2. Inspect active `moa.execution_task` rows: state, `task_id`, attempt,
    generation fence, reservation/actual values, and
    `reserved_at`/`started_at`/`completed_at`. A stale generation must never

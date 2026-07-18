@@ -21,16 +21,14 @@ pub const EXECUTION_AUDIT_ENVELOPE_MAX_BYTES: usize = 4_194_304;
 /// Maximum number of retained violations in a bounded audit report.
 pub const EXECUTION_AUDIT_MAX_VIOLATIONS: usize = 256;
 
-/// Stable execution mode selected for one root user turn.
+/// Internal execution strategy selected for an Execute route.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutionMode {
-    /// Produce one model response without tools or planning.
-    Respond,
+pub enum ExecutionStrategy {
     /// Run the bounded interactive model/tool loop.
-    Act,
+    Inline,
     /// Compile or instantiate and detach a durable execution run.
-    Run,
+    Durable,
 }
 
 /// Stable primary reason for one execution-routing decision.
@@ -43,8 +41,8 @@ pub enum ExecutionRouteReason {
     BoundedInteractiveWork,
     /// Required preflight information is missing.
     PreflightInputMissing,
-    /// The user explicitly requested durable run execution.
-    ExplicitRun,
+    /// The user explicitly requested durable execution.
+    ExplicitDurableExecution,
     /// The request spans a bulk collection.
     BulkCollection,
     /// The work must survive or resume across process lifetimes.
@@ -55,14 +53,42 @@ pub enum ExecutionRouteReason {
     ApprovalOrSignal,
     /// The caller selected one exact pinned execution template.
     SelectedExecutionTemplate,
-    /// A bounded Act turn discovered run-shaped work.
-    ActEscalation,
+    /// A bounded Inline turn requested one-way Durable execution.
+    DurableUpgrade,
+}
+
+impl ExecutionRouteReason {
+    /// Returns the deterministic strategy associated with this closed reason.
+    #[must_use]
+    pub const fn strategy(self) -> Option<ExecutionStrategy> {
+        match self {
+            Self::SimpleResponse | Self::PreflightInputMissing => None,
+            Self::BoundedInteractiveWork => Some(ExecutionStrategy::Inline),
+            Self::ExplicitDurableExecution
+            | Self::BulkCollection
+            | Self::DurableOrResumable
+            | Self::HighFanout
+            | Self::ApprovalOrSignal
+            | Self::SelectedExecutionTemplate
+            | Self::DurableUpgrade => Some(ExecutionStrategy::Durable),
+        }
+    }
 }
 
 /// Final execution-routing outcome, including preflight clarification.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionRouteDecision {
+    /// Produce one model response without tools or planning.
+    Respond {
+        /// Stable reason for the direct response.
+        reason: ExecutionRouteReason,
+    },
+    /// Execute authorized work using a deterministic internal strategy.
+    Execute {
+        /// Stable reason that determines Inline or Durable execution.
+        reason: ExecutionRouteReason,
+    },
     /// Routing cannot proceed until missing input is supplied.
     NeedsInput {
         /// Stable reason for the input request.
@@ -70,13 +96,34 @@ pub enum ExecutionRouteDecision {
         /// Bounded concrete inputs the caller must supply.
         missing_inputs: Vec<String>,
     },
-    /// The turn was assigned one execution mode.
-    Routed {
-        /// Selected execution mode.
-        mode: ExecutionMode,
-        /// Stable primary routing reason.
-        reason: ExecutionRouteReason,
-    },
+}
+
+impl ExecutionRouteDecision {
+    /// Returns the redacted scalar route kind for audit and metrics.
+    #[must_use]
+    pub const fn kind(&self) -> ExecutionRouteKind {
+        match self {
+            Self::Respond { .. } => ExecutionRouteKind::Respond,
+            Self::Execute { .. } => ExecutionRouteKind::Execute,
+            Self::NeedsInput { .. } => ExecutionRouteKind::NeedsInput,
+        }
+    }
+
+    /// Returns the stable reason carried by this decision.
+    #[must_use]
+    pub const fn reason(&self) -> ExecutionRouteReason {
+        match self {
+            Self::Respond { reason }
+            | Self::Execute { reason }
+            | Self::NeedsInput { reason, .. } => *reason,
+        }
+    }
+
+    /// Returns the internal strategy derived from the closed reason matrix.
+    #[must_use]
+    pub const fn strategy(&self) -> Option<ExecutionStrategy> {
+        self.reason().strategy()
+    }
 }
 
 /// Trusted or model-assisted source of one execution route.
@@ -89,8 +136,8 @@ pub enum ExecutionRouteSource {
     BlankObjective,
     /// Exact trusted execution-template invocation.
     SelectedExecutionTemplate,
-    /// Validated typed escalation from an Act turn.
-    ActEscalation,
+    /// Validated one-way upgrade from Inline to Durable execution.
+    DurableUpgrade,
 }
 
 /// Closed outcome of the optional execution-route classifier call.
@@ -113,8 +160,8 @@ pub enum ExecutionRouteClassifierOutcome {
     InvalidDecision,
     /// A risky classifier decision did not meet its confidence threshold.
     LowConfidence,
-    /// Existing attachments or a recent target required bounded Act context.
-    ContextForcedAct,
+    /// Existing attachments or a recent target required bounded Inline context.
+    ContextForcedInline,
 }
 
 /// Normalized token usage retained for one execution-route classifier call.
@@ -180,7 +227,7 @@ pub struct ExecutionRoutingResultV1 {
     pub provenance: ExecutionRouteProvenanceV1,
 }
 
-/// Bounded evidence gathered by an Act turn before escalation.
+/// Bounded evidence gathered by an Inline turn before a Durable upgrade.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlanningEvidence {
@@ -192,19 +239,19 @@ pub struct ExecutionPlanningEvidence {
     pub value: Value,
 }
 
-/// Typed request to escalate a bounded Act turn into a durable run.
+/// Typed request to upgrade a bounded Inline turn into Durable execution.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ActEscalationSignal {
-    /// Exact user-derived run objective.
+pub struct DurableUpgradeSignal {
+    /// Exact user-derived Durable execution objective.
     pub objective: String,
-    /// Stable run-shaped reason discovered by Act.
+    /// Stable Durable reason discovered by Inline execution.
     pub reason: ExecutionRouteReason,
     /// Bounded structured evidence already gathered by the turn.
     pub evidence: Vec<ExecutionPlanningEvidence>,
 }
 
-impl ActEscalationSignal {
+impl DurableUpgradeSignal {
     /// Validates all deterministic evidence bounds without truncation.
     pub fn validate(&self) -> Result<(), ExecutionPlanningContractError> {
         ensure_bytes("objective", &self.objective, 4_096)?;
@@ -243,6 +290,84 @@ impl ActEscalationSignal {
     }
 }
 
+/// Deterministic rejection from the one-way Inline-to-Durable transition.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum DurableUpgradeTransitionError {
+    /// The transition did not originate from an initial root user Execute/Inline turn.
+    #[error("Durable upgrade requires an initial root Execute/Inline user turn")]
+    NotAuthorized,
+    /// The initial Inline turn already consumed its only transition.
+    #[error("Durable upgrade was already consumed")]
+    AlreadyConsumed,
+    /// The signal changed the byte-exact originating objective.
+    #[error("Durable upgrade objective differs from the persisted user objective")]
+    ObjectiveChanged,
+    /// The discovered reason is not one of the supported Durable shapes.
+    #[error("Durable upgrade reason is not a supported discovered Durable shape")]
+    UnsupportedReason,
+    /// The typed signal exceeded a deterministic contract bound.
+    #[error("{0}")]
+    InvalidSignal(ExecutionPlanningContractError),
+}
+
+/// Applies the pure one-way Inline-to-Durable transition used by production turns and evals.
+pub fn durable_upgrade_transition(
+    originating_objective: &str,
+    initial_route: &ExecutionRouteDecision,
+    has_root_user_origin: bool,
+    already_consumed: bool,
+    signal: &DurableUpgradeSignal,
+) -> Result<ExecutionRoutingResultV1, DurableUpgradeTransitionError> {
+    if already_consumed {
+        return Err(DurableUpgradeTransitionError::AlreadyConsumed);
+    }
+    if !has_root_user_origin
+        || !matches!(
+            initial_route,
+            ExecutionRouteDecision::Execute { reason }
+                if reason.strategy() == Some(ExecutionStrategy::Inline)
+        )
+    {
+        return Err(DurableUpgradeTransitionError::NotAuthorized);
+    }
+    if signal.objective.as_bytes() != originating_objective.as_bytes() {
+        return Err(DurableUpgradeTransitionError::ObjectiveChanged);
+    }
+    if !matches!(
+        signal.reason,
+        ExecutionRouteReason::BulkCollection
+            | ExecutionRouteReason::DurableOrResumable
+            | ExecutionRouteReason::HighFanout
+            | ExecutionRouteReason::ApprovalOrSignal
+    ) {
+        return Err(DurableUpgradeTransitionError::UnsupportedReason);
+    }
+    signal
+        .validate()
+        .map_err(DurableUpgradeTransitionError::InvalidSignal)?;
+    Ok(ExecutionRoutingResultV1 {
+        decision: ExecutionRouteDecision::Execute {
+            reason: ExecutionRouteReason::DurableUpgrade,
+        },
+        provenance: ExecutionRouteProvenanceV1 {
+            source: ExecutionRouteSource::DurableUpgrade,
+            classifier_outcome: ExecutionRouteClassifierOutcome::NotCalled,
+            provider_model: None,
+            prompt_version: None,
+            objective_hash: execution_planning_hash(
+                "moa.execution.route-objective.v1",
+                originating_objective.as_bytes(),
+            ),
+            response_hash: None,
+            confidence_bps: None,
+            missing_input_count: 0,
+            usage: ExecutionRouteUsageV1::default(),
+            cost_microusd: 0,
+            duration_micros: 0,
+        },
+    })
+}
+
 /// Exact pinned execution-template revision selected by a caller.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -269,18 +394,20 @@ pub struct ExecutionTemplateInvocation {
 pub enum ExecutionRouteStage {
     /// Initial root-turn route.
     Initial,
-    /// Typed Act-to-Run escalation route.
-    ActEscalation,
+    /// One-way Inline-to-Durable upgrade route.
+    DurableUpgrade,
 }
 
-/// Closed route-decision category stored in audit history.
+/// Closed route-decision category stored in audit history and metrics.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutionRouteDecisionKind {
-    /// Missing input prevented routing.
+pub enum ExecutionRouteKind {
+    /// Produce one direct response.
+    Respond,
+    /// Execute authorized work.
+    Execute,
+    /// Request concrete missing input.
     NeedsInput,
-    /// A concrete execution mode was selected.
-    Routed,
 }
 
 /// Closed planner-call category stored in audit history.
@@ -370,18 +497,53 @@ pub struct ExecutionPlanningAuditEnvelopeV1 {
     pub payload: ExecutionPlanningAuditPayloadV1,
 }
 
+impl ExecutionPlanningAuditEnvelopeV1 {
+    /// Builds a route-audit envelope by deriving decision and strategy from one typed route.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the normalized route audit keeps its ownership and identity tuple explicit"
+    )]
+    #[must_use]
+    pub fn route(
+        tenant_id: TenantId,
+        contact_id: Option<ContactId>,
+        session_id: SessionId,
+        originating_sequence: u64,
+        stage: ExecutionRouteStage,
+        decision: &ExecutionRouteDecision,
+        provenance: ExecutionRouteProvenanceV1,
+        accepted_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            tenant_id,
+            contact_id,
+            session_id: Some(session_id),
+            originating_sequence: Some(originating_sequence),
+            payload: ExecutionPlanningAuditPayloadV1::Route {
+                stage,
+                decision: decision.kind(),
+                strategy: decision.strategy(),
+                reason: decision.reason(),
+                provenance,
+                accepted_at,
+            },
+        }
+    }
+}
+
 /// Closed v1 execution-planning audit payload.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionPlanningAuditPayloadV1 {
     /// One trusted or model-assisted routing decision.
     Route {
-        /// Initial or Act-escalation route stage.
+        /// Initial route or one-way Durable-upgrade stage.
         stage: ExecutionRouteStage,
-        /// Needs-input or routed outcome.
-        decision: ExecutionRouteDecisionKind,
-        /// Selected execution mode for routed decisions.
-        mode: Option<ExecutionMode>,
+        /// Redacted public route decision.
+        decision: ExecutionRouteKind,
+        /// Internal strategy, present exactly for Execute decisions.
+        strategy: Option<ExecutionStrategy>,
         /// Stable primary route reason.
         reason: ExecutionRouteReason,
         /// Redacted trusted-bypass or classifier provenance.
@@ -635,7 +797,7 @@ pub enum ExecutionSourceProvenanceV1 {
     },
     /// Exact pinned execution template invoked by a behavior-lab experiment.
     ExperimentTemplate {
-        /// Fixed explicit-run route reason.
+        /// Fixed explicit-Durable route reason.
         route_reason: ExecutionRouteReason,
         /// Byte-identical canonical skill artifact reference.
         skill_template_ref: String,
@@ -665,16 +827,16 @@ impl ExecutionSourceProvenanceV1 {
             } => {
                 if !matches!(
                     route_reason,
-                    ExecutionRouteReason::ExplicitRun
+                    ExecutionRouteReason::ExplicitDurableExecution
                         | ExecutionRouteReason::BulkCollection
                         | ExecutionRouteReason::DurableOrResumable
                         | ExecutionRouteReason::HighFanout
                         | ExecutionRouteReason::ApprovalOrSignal
-                        | ExecutionRouteReason::ActEscalation
+                        | ExecutionRouteReason::DurableUpgrade
                 ) {
                     return Err(ExecutionPlanningContractError::InvalidField {
                         field: "route_reason".to_string(),
-                        message: "generated_plan requires a run-shaped route reason".to_string(),
+                        message: "generated_plan requires a Durable route reason".to_string(),
                     });
                 }
                 ensure_nonempty_bytes("planner.model", &planner.model, 128)?;
@@ -717,10 +879,11 @@ impl ExecutionSourceProvenanceV1 {
                 skill_template_ref,
                 ..
             } => {
-                if *route_reason != ExecutionRouteReason::ExplicitRun {
+                if *route_reason != ExecutionRouteReason::ExplicitDurableExecution {
                     return Err(ExecutionPlanningContractError::InvalidField {
                         field: "route_reason".to_string(),
-                        message: "experiment_template requires explicit_run".to_string(),
+                        message: "experiment_template requires explicit_durable_execution"
+                            .to_string(),
                     });
                 }
                 ensure_nonempty_bytes("skill_template_ref", skill_template_ref, 535)?;
@@ -886,7 +1049,7 @@ pub fn planning_audit_semantically_equal(
             ExecutionPlanningAuditPayloadV1::Route {
                 stage: left_stage,
                 decision: left_decision,
-                mode: left_mode,
+                strategy: left_strategy,
                 reason: left_reason,
                 provenance: left_provenance,
                 ..
@@ -894,14 +1057,14 @@ pub fn planning_audit_semantically_equal(
             ExecutionPlanningAuditPayloadV1::Route {
                 stage: right_stage,
                 decision: right_decision,
-                mode: right_mode,
+                strategy: right_strategy,
                 reason: right_reason,
                 provenance: right_provenance,
                 ..
             },
         ) => {
-            (left_stage, left_decision, left_mode, left_reason)
-                == (right_stage, right_decision, right_mode, right_reason)
+            (left_stage, left_decision, left_strategy, left_reason)
+                == (right_stage, right_decision, right_strategy, right_reason)
                 && route_provenance_semantically_equal(left_provenance, right_provenance)
         }
         (
@@ -1025,7 +1188,7 @@ pub fn validate_planning_audit_envelope(
         ExecutionPlanningAuditPayloadV1::Route {
             stage,
             decision,
-            mode,
+            strategy,
             reason,
             provenance,
             ..
@@ -1036,7 +1199,7 @@ pub fn validate_planning_audit_envelope(
                     message: "route records must be session-bound".to_string(),
                 });
             }
-            validate_route_audit(*stage, *decision, *mode, *reason, provenance)?;
+            validate_route_audit(*stage, *decision, *strategy, *reason, provenance)?;
         }
         ExecutionPlanningAuditPayloadV1::PlannerCall {
             call_kind,
@@ -1273,8 +1436,8 @@ pub fn route_provenance_semantically_equal(
 
 fn validate_route_audit(
     stage: ExecutionRouteStage,
-    decision: ExecutionRouteDecisionKind,
-    mode: Option<ExecutionMode>,
+    decision: ExecutionRouteKind,
+    strategy: Option<ExecutionStrategy>,
     reason: ExecutionRouteReason,
     provenance: &ExecutionRouteProvenanceV1,
 ) -> Result<(), ExecutionPlanningContractError> {
@@ -1282,23 +1445,23 @@ fn validate_route_audit(
         ExecutionRouteSource::Classifier => {
             stage == ExecutionRouteStage::Initial
                 && matches!(
-                    (decision, mode, reason),
+                    (decision, strategy, reason),
                     (
-                        ExecutionRouteDecisionKind::NeedsInput,
+                        ExecutionRouteKind::NeedsInput,
                         None,
                         ExecutionRouteReason::PreflightInputMissing
                     ) | (
-                        ExecutionRouteDecisionKind::Routed,
-                        Some(ExecutionMode::Respond),
+                        ExecutionRouteKind::Respond,
+                        None,
                         ExecutionRouteReason::SimpleResponse
                     ) | (
-                        ExecutionRouteDecisionKind::Routed,
-                        Some(ExecutionMode::Act),
+                        ExecutionRouteKind::Execute,
+                        Some(ExecutionStrategy::Inline),
                         ExecutionRouteReason::BoundedInteractiveWork
                     ) | (
-                        ExecutionRouteDecisionKind::Routed,
-                        Some(ExecutionMode::Run),
-                        ExecutionRouteReason::ExplicitRun
+                        ExecutionRouteKind::Execute,
+                        Some(ExecutionStrategy::Durable),
+                        ExecutionRouteReason::ExplicitDurableExecution
                             | ExecutionRouteReason::BulkCollection
                             | ExecutionRouteReason::DurableOrResumable
                             | ExecutionRouteReason::HighFanout
@@ -1308,10 +1471,10 @@ fn validate_route_audit(
         }
         ExecutionRouteSource::BlankObjective => {
             matches!(
-                (stage, decision, mode, reason),
+                (stage, decision, strategy, reason),
                 (
                     ExecutionRouteStage::Initial,
-                    ExecutionRouteDecisionKind::NeedsInput,
+                    ExecutionRouteKind::NeedsInput,
                     None,
                     ExecutionRouteReason::PreflightInputMissing
                 )
@@ -1319,23 +1482,23 @@ fn validate_route_audit(
         }
         ExecutionRouteSource::SelectedExecutionTemplate => {
             matches!(
-                (stage, decision, mode, reason),
+                (stage, decision, strategy, reason),
                 (
                     ExecutionRouteStage::Initial,
-                    ExecutionRouteDecisionKind::Routed,
-                    Some(ExecutionMode::Run),
+                    ExecutionRouteKind::Execute,
+                    Some(ExecutionStrategy::Durable),
                     ExecutionRouteReason::SelectedExecutionTemplate
                 )
             )
         }
-        ExecutionRouteSource::ActEscalation => {
+        ExecutionRouteSource::DurableUpgrade => {
             matches!(
-                (stage, decision, mode, reason),
+                (stage, decision, strategy, reason),
                 (
-                    ExecutionRouteStage::ActEscalation,
-                    ExecutionRouteDecisionKind::Routed,
-                    Some(ExecutionMode::Run),
-                    ExecutionRouteReason::ActEscalation
+                    ExecutionRouteStage::DurableUpgrade,
+                    ExecutionRouteKind::Execute,
+                    Some(ExecutionStrategy::Durable),
+                    ExecutionRouteReason::DurableUpgrade
                 )
             )
         }
@@ -1343,7 +1506,8 @@ fn validate_route_audit(
     if !route_matches_source {
         return Err(ExecutionPlanningContractError::InvalidField {
             field: "payload".to_string(),
-            message: "route stage, decision, mode, reason, and source are inconsistent".to_string(),
+            message: "route stage, decision, strategy, reason, and source are inconsistent"
+                .to_string(),
         });
     }
 
@@ -1363,7 +1527,7 @@ fn validate_route_audit(
             message: "must be within 0..=10000".to_string(),
         });
     }
-    let needs_input = decision == ExecutionRouteDecisionKind::NeedsInput;
+    let needs_input = decision == ExecutionRouteKind::NeedsInput;
     if needs_input != (1..=8).contains(&provenance.missing_input_count) {
         return Err(ExecutionPlanningContractError::InvalidField {
             field: "payload.provenance.missing_input_count".to_string(),
@@ -1417,7 +1581,7 @@ fn validate_route_audit(
             | ExecutionRouteClassifierOutcome::SchemaRejected
             | ExecutionRouteClassifierOutcome::InvalidDecision
             | ExecutionRouteClassifierOutcome::LowConfidence
-            | ExecutionRouteClassifierOutcome::ContextForcedAct
+            | ExecutionRouteClassifierOutcome::ContextForcedInline
     );
     if collected != provenance.response_hash.is_some() {
         return Err(ExecutionPlanningContractError::InvalidField {
@@ -1435,7 +1599,7 @@ fn validate_route_audit(
         provenance.classifier_outcome,
         ExecutionRouteClassifierOutcome::Accepted
             | ExecutionRouteClassifierOutcome::LowConfidence
-            | ExecutionRouteClassifierOutcome::ContextForcedAct
+            | ExecutionRouteClassifierOutcome::ContextForcedInline
     );
     if parsed != provenance.confidence_bps.is_some()
         || (provenance.classifier_outcome == ExecutionRouteClassifierOutcome::InvalidDecision
@@ -1448,17 +1612,17 @@ fn validate_route_audit(
     }
     if provenance.classifier_outcome != ExecutionRouteClassifierOutcome::Accepted
         && !matches!(
-            (decision, mode, reason),
+            (decision, strategy, reason),
             (
-                ExecutionRouteDecisionKind::Routed,
-                Some(ExecutionMode::Act),
+                ExecutionRouteKind::Execute,
+                Some(ExecutionStrategy::Inline),
                 ExecutionRouteReason::BoundedInteractiveWork
             )
         )
     {
         return Err(ExecutionPlanningContractError::InvalidField {
             field: "payload.provenance.classifier_outcome".to_string(),
-            message: "non-accepted classifier outcomes must conservatively route to Act"
+            message: "non-accepted classifier outcomes must conservatively Execute Inline"
                 .to_string(),
         });
     }
@@ -1628,6 +1792,281 @@ mod tests {
         }
     }
 
+    fn route_provenance(
+        source: ExecutionRouteSource,
+        needs_input: bool,
+    ) -> ExecutionRouteProvenanceV1 {
+        if source == ExecutionRouteSource::Classifier {
+            let mut provenance = accepted_classifier_provenance();
+            provenance.missing_input_count = u8::from(needs_input);
+            provenance
+        } else {
+            ExecutionRouteProvenanceV1 {
+                source,
+                classifier_outcome: ExecutionRouteClassifierOutcome::NotCalled,
+                provider_model: None,
+                prompt_version: None,
+                objective_hash: "a".repeat(64),
+                response_hash: None,
+                confidence_bps: None,
+                missing_input_count: u8::from(needs_input),
+                usage: ExecutionRouteUsageV1::default(),
+                cost_microusd: 0,
+                duration_micros: 0,
+            }
+        }
+    }
+
+    #[test]
+    fn execution_route_direct_variants_have_exact_serde_shapes() {
+        // Pins: the public route contract is direct Respond, Execute, or NeedsInput.
+        let cases = [
+            (
+                ExecutionRouteDecision::Respond {
+                    reason: ExecutionRouteReason::SimpleResponse,
+                },
+                serde_json::json!({
+                    "decision": "respond",
+                    "reason": "simple_response"
+                }),
+            ),
+            (
+                ExecutionRouteDecision::Execute {
+                    reason: ExecutionRouteReason::BoundedInteractiveWork,
+                },
+                serde_json::json!({
+                    "decision": "execute",
+                    "reason": "bounded_interactive_work"
+                }),
+            ),
+            (
+                ExecutionRouteDecision::NeedsInput {
+                    reason: ExecutionRouteReason::PreflightInputMissing,
+                    missing_inputs: vec!["objective".to_string()],
+                },
+                serde_json::json!({
+                    "decision": "needs_input",
+                    "reason": "preflight_input_missing",
+                    "missing_inputs": ["objective"]
+                }),
+            ),
+        ];
+        for (decision, expected) in cases {
+            assert_eq!(
+                serde_json::to_value(&decision).expect("route decision should serialize"),
+                expected.clone()
+            );
+            assert_eq!(
+                serde_json::from_value::<ExecutionRouteDecision>(expected)
+                    .expect("route decision shape should deserialize"),
+                decision
+            );
+        }
+        let removed_durable_reason = ["explicit_", "run"].concat();
+        for removed in [
+            serde_json::json!({"decision":"routed","mode":"respond","reason":"simple_response"}),
+            serde_json::json!({"decision":"act","reason":"bounded_interactive_work"}),
+            serde_json::json!({
+                "decision": "run",
+                "reason": removed_durable_reason
+            }),
+        ] {
+            assert!(serde_json::from_value::<ExecutionRouteDecision>(removed).is_err());
+        }
+    }
+
+    #[test]
+    fn execution_route_reason_strategy_matrix_is_total() {
+        // Pins: every closed route reason deterministically maps to no strategy, Inline, or Durable.
+        let cases = [
+            (ExecutionRouteReason::SimpleResponse, None),
+            (ExecutionRouteReason::PreflightInputMissing, None),
+            (
+                ExecutionRouteReason::BoundedInteractiveWork,
+                Some(ExecutionStrategy::Inline),
+            ),
+            (
+                ExecutionRouteReason::ExplicitDurableExecution,
+                Some(ExecutionStrategy::Durable),
+            ),
+            (
+                ExecutionRouteReason::BulkCollection,
+                Some(ExecutionStrategy::Durable),
+            ),
+            (
+                ExecutionRouteReason::DurableOrResumable,
+                Some(ExecutionStrategy::Durable),
+            ),
+            (
+                ExecutionRouteReason::HighFanout,
+                Some(ExecutionStrategy::Durable),
+            ),
+            (
+                ExecutionRouteReason::ApprovalOrSignal,
+                Some(ExecutionStrategy::Durable),
+            ),
+            (
+                ExecutionRouteReason::SelectedExecutionTemplate,
+                Some(ExecutionStrategy::Durable),
+            ),
+            (
+                ExecutionRouteReason::DurableUpgrade,
+                Some(ExecutionStrategy::Durable),
+            ),
+        ];
+        assert_eq!(cases.len(), 10);
+        for (reason, expected) in cases {
+            assert_eq!(reason.strategy(), expected, "wrong strategy for {reason:?}");
+        }
+    }
+
+    #[test]
+    fn execution_route_audit_matrix_accepts_only_exact_combinations() {
+        // Pins: route validation has one closed decision/strategy/reason/source/stage matrix.
+        let legal = [
+            (
+                ExecutionRouteStage::Initial,
+                ExecutionRouteKind::Respond,
+                None,
+                ExecutionRouteReason::SimpleResponse,
+                ExecutionRouteSource::Classifier,
+            ),
+            (
+                ExecutionRouteStage::Initial,
+                ExecutionRouteKind::Execute,
+                Some(ExecutionStrategy::Inline),
+                ExecutionRouteReason::BoundedInteractiveWork,
+                ExecutionRouteSource::Classifier,
+            ),
+            (
+                ExecutionRouteStage::Initial,
+                ExecutionRouteKind::NeedsInput,
+                None,
+                ExecutionRouteReason::PreflightInputMissing,
+                ExecutionRouteSource::Classifier,
+            ),
+            (
+                ExecutionRouteStage::Initial,
+                ExecutionRouteKind::NeedsInput,
+                None,
+                ExecutionRouteReason::PreflightInputMissing,
+                ExecutionRouteSource::BlankObjective,
+            ),
+            (
+                ExecutionRouteStage::Initial,
+                ExecutionRouteKind::Execute,
+                Some(ExecutionStrategy::Durable),
+                ExecutionRouteReason::SelectedExecutionTemplate,
+                ExecutionRouteSource::SelectedExecutionTemplate,
+            ),
+            (
+                ExecutionRouteStage::DurableUpgrade,
+                ExecutionRouteKind::Execute,
+                Some(ExecutionStrategy::Durable),
+                ExecutionRouteReason::DurableUpgrade,
+                ExecutionRouteSource::DurableUpgrade,
+            ),
+        ];
+        let classifier_durable_reasons = [
+            ExecutionRouteReason::ExplicitDurableExecution,
+            ExecutionRouteReason::BulkCollection,
+            ExecutionRouteReason::DurableOrResumable,
+            ExecutionRouteReason::HighFanout,
+            ExecutionRouteReason::ApprovalOrSignal,
+        ];
+        let stages = [
+            ExecutionRouteStage::Initial,
+            ExecutionRouteStage::DurableUpgrade,
+        ];
+        let decisions = [
+            ExecutionRouteKind::Respond,
+            ExecutionRouteKind::Execute,
+            ExecutionRouteKind::NeedsInput,
+        ];
+        let strategies = [
+            None,
+            Some(ExecutionStrategy::Inline),
+            Some(ExecutionStrategy::Durable),
+        ];
+        let reasons = [
+            ExecutionRouteReason::SimpleResponse,
+            ExecutionRouteReason::BoundedInteractiveWork,
+            ExecutionRouteReason::PreflightInputMissing,
+            ExecutionRouteReason::ExplicitDurableExecution,
+            ExecutionRouteReason::BulkCollection,
+            ExecutionRouteReason::DurableOrResumable,
+            ExecutionRouteReason::HighFanout,
+            ExecutionRouteReason::ApprovalOrSignal,
+            ExecutionRouteReason::SelectedExecutionTemplate,
+            ExecutionRouteReason::DurableUpgrade,
+        ];
+        let sources = [
+            ExecutionRouteSource::Classifier,
+            ExecutionRouteSource::BlankObjective,
+            ExecutionRouteSource::SelectedExecutionTemplate,
+            ExecutionRouteSource::DurableUpgrade,
+        ];
+        for stage in stages {
+            for decision in decisions {
+                for strategy in strategies {
+                    for reason in reasons {
+                        for source in sources {
+                            let expected = legal
+                                .contains(&(stage, decision, strategy, reason, source))
+                                || (stage == ExecutionRouteStage::Initial
+                                    && decision == ExecutionRouteKind::Execute
+                                    && strategy == Some(ExecutionStrategy::Durable)
+                                    && classifier_durable_reasons.contains(&reason)
+                                    && source == ExecutionRouteSource::Classifier);
+                            assert_eq!(
+                                validate_route_audit(
+                                    stage,
+                                    decision,
+                                    strategy,
+                                    reason,
+                                    &route_provenance(
+                                        source,
+                                        decision == ExecutionRouteKind::NeedsInput,
+                                    ),
+                                )
+                                .is_ok(),
+                                expected,
+                                "unexpected matrix result for {stage:?}/{decision:?}/{strategy:?}/{reason:?}/{source:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn execution_route_audit_constructor_derives_decision_and_strategy() {
+        // Pins: all route producers share one typed derivation of persisted decision and strategy.
+        let decision = ExecutionRouteDecision::Execute {
+            reason: ExecutionRouteReason::BulkCollection,
+        };
+        let envelope = ExecutionPlanningAuditEnvelopeV1::route(
+            TenantId::from(Uuid::from_u128(1)),
+            None,
+            SessionId(Uuid::from_u128(2)),
+            3,
+            ExecutionRouteStage::Initial,
+            &decision,
+            accepted_classifier_provenance(),
+            Utc::now(),
+        );
+        assert!(matches!(
+            envelope.payload,
+            ExecutionPlanningAuditPayloadV1::Route {
+                decision: ExecutionRouteKind::Execute,
+                strategy: Some(ExecutionStrategy::Durable),
+                reason: ExecutionRouteReason::BulkCollection,
+                ..
+            }
+        ));
+    }
+
     fn planner_call_envelope(
         outcome: ExecutionPlannerOutcome,
         candidate_hash: Option<String>,
@@ -1725,7 +2164,7 @@ mod tests {
         // Pins: generated and skill-template source cohorts stay closed and plan-hash bound.
         let hash = "a".repeat(64);
         let provenance = ExecutionSourceProvenanceV1::GeneratedPlan {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+            route_reason: ExecutionRouteReason::ExplicitDurableExecution,
             planner: GeneratedPlanPlannerProvenanceV1 {
                 model: "planner-model".to_string(),
                 prompt_version: "execution-planner-v1".to_string(),
@@ -1745,7 +2184,7 @@ mod tests {
         };
         assert_eq!(skill.validate(&hash), Ok(()));
         let wrong_skill_route = ExecutionSourceProvenanceV1::SkillTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+            route_reason: ExecutionRouteReason::ExplicitDurableExecution,
             skill_template_ref: "skill://durable-report".to_string(),
             skill_template_revision_uid: Uuid::from_u128(1),
         };
@@ -1761,7 +2200,7 @@ mod tests {
         // Pins: run provenance carries every experiment identity and writes an explicit null
         // trial field, while trial provenance writes its exact UUID and no extra keys.
         let run = ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+            route_reason: ExecutionRouteReason::ExplicitDurableExecution,
             skill_template_ref: "skill://durable-report".to_string(),
             skill_template_revision_uid: Uuid::from_u128(1),
             experiment_run_uid: Uuid::from_u128(2),
@@ -1770,7 +2209,7 @@ mod tests {
         };
         let run_json = serde_json::json!({
             "kind": "experiment_template",
-            "route_reason": "explicit_run",
+            "route_reason": "explicit_durable_execution",
             "skill_template_ref": "skill://durable-report",
             "skill_template_revision_uid": "00000000-0000-0000-0000-000000000001",
             "experiment_run_uid": "00000000-0000-0000-0000-000000000002",
@@ -1789,7 +2228,7 @@ mod tests {
 
         let trial_uid = Uuid::from_u128(4);
         let trial = ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+            route_reason: ExecutionRouteReason::ExplicitDurableExecution,
             skill_template_ref: "skill://durable-report".to_string(),
             skill_template_revision_uid: Uuid::from_u128(1),
             experiment_run_uid: Uuid::from_u128(2),
@@ -1815,7 +2254,7 @@ mod tests {
         // cross-cohort field, use the skill route, or carry an empty template reference.
         let hash = "a".repeat(64);
         let valid = ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+            route_reason: ExecutionRouteReason::ExplicitDurableExecution,
             skill_template_ref: "skill://durable-report".to_string(),
             skill_template_revision_uid: Uuid::from_u128(1),
             experiment_run_uid: Uuid::from_u128(2),
@@ -1858,7 +2297,7 @@ mod tests {
         ));
 
         let empty_ref = ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+            route_reason: ExecutionRouteReason::ExplicitDurableExecution,
             skill_template_ref: String::new(),
             skill_template_revision_uid: Uuid::from_u128(1),
             experiment_run_uid: Uuid::from_u128(2),
@@ -2051,8 +2490,8 @@ mod tests {
             originating_sequence: None,
             payload: ExecutionPlanningAuditPayloadV1::Route {
                 stage: ExecutionRouteStage::Initial,
-                decision: ExecutionRouteDecisionKind::Routed,
-                mode: Some(ExecutionMode::Respond),
+                decision: ExecutionRouteKind::Respond,
+                strategy: None,
                 reason: ExecutionRouteReason::SimpleResponse,
                 provenance: accepted_classifier_provenance(),
                 accepted_at: Utc::now(),
@@ -2158,8 +2597,8 @@ mod tests {
             originating_sequence: Some(1),
             payload: ExecutionPlanningAuditPayloadV1::Route {
                 stage: ExecutionRouteStage::Initial,
-                decision: ExecutionRouteDecisionKind::Routed,
-                mode: Some(ExecutionMode::Respond),
+                decision: ExecutionRouteKind::Respond,
+                strategy: None,
                 reason: ExecutionRouteReason::SimpleResponse,
                 provenance: accepted_classifier_provenance(),
                 accepted_at: Utc::now(),

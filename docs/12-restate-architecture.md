@@ -71,16 +71,25 @@ requests, and outcome recording. It starts `TurnExecution` and returns quickly.
 The workflow owns the long LLM/tool loop so read-only status, queueing, and
 cancellation do not wait behind a long turn.
 
-After context compilation, `TurnExecution` selects `respond`, `act`, or `run`.
-`respond` makes one no-tool model call. `act` retains the bounded root tool loop
-and optional conversational Worker delegation. `run` persists an immutable goal
-contract and canonical plan, starts `ExecutionRun` detached, and returns without
-making the root model poll status. A terminal run requests one guarded synthesis
-turn on the owning session. Only a root user-message trigger can enter `run` or
-emit an Act-to-Run escalation; child-signal and worker-result continuations stay
-inside the bounded `act` turn. Successful admission returns the terminal root-turn
-outcome `Accepted`, publishes one minimal `ExecutionRunStarted` event, and keeps
-the owning Session `Running` while detached execution continues.
+After context compilation, `TurnExecution` selects exactly one public route:
+Respond, Execute, or NeedsInput. Respond makes one no-tool model call.
+NeedsInput emits one bounded deterministic clarification. Execute derives one
+internal strategy from its closed reason: Inline retains the bounded root tool
+loop and optional conversational Worker delegation; Durable persists an
+immutable goal contract and canonical plan, starts `ExecutionRun` detached, and
+returns without making the root model poll status.
+
+Only an initial root user-message Execute/Inline turn can make one typed,
+evidence-preserving upgrade to Durable. It does not classify again, cannot
+downgrade, and child-signal or worker-result continuations remain Inline. A
+terminal run requests one guarded compact synthesis turn on the owning session.
+Successful Durable admission returns the terminal root-turn outcome `Accepted`,
+publishes one minimal `ExecutionRunStarted` event, and keeps the owning Session
+`Running` while detached execution continues.
+
+Skills are optional execution inputs, not routing decisions or admission gates.
+Custom instruction-only skills work in Inline Execute and in declared Durable
+`Agent` nodes; neither selection nor absence changes the public route.
 
 ## Admission Control
 
@@ -190,13 +199,13 @@ ordinary process memory. Process-local maps are allowed only as reconnect
 caches, transport demultiplexing, or performance caches whose correctness owner
 is Postgres, Restate, or explicitly configured Redis runtime cache.
 
-## Main-Agent/Worker Coordination In Act
+## Main-Agent/Worker Coordination In Inline Execute
 
 Coordinator turns can return while detached workers keep running across
 Kubernetes replicas. Coordination is split into two planes so the high-frequency
 path never serializes through the single-writer parent VO.
 
-This section describes conversational delegation in `act`. `Worker` remains
+This section describes conversational delegation in Inline Execute. `Worker` remains
 available for interactive, steerable child-agent work but is not a plan node or
 bulk DAG primitive. Worker fan-out controls do not cap execution-run maps.
 
@@ -466,7 +475,7 @@ awakeables plus parent-cached terminal results instead of status polling.
 3. Top-level turns run in `TurnExecution` workflows keyed by turn ID.
 4. Worker turns run in `WorkerTurnExecution` workflows keyed by turn ID.
 5. `ExecutionRun` and `ExecutionTask` are the only durable typed-DAG runtime;
-   `Worker` remains conversational delegation in `act`.
+   `Worker` remains conversational delegation in Inline Execute.
 6. Tenant action reviews use the `ActionReviews` service plus Postgres rows
    and events; they do not block turn workflows.
 7. Product-visible events, execution state, learning, memory, lineage, and audit stay in

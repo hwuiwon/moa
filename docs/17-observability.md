@@ -100,7 +100,7 @@ are trace attributes or analytics fields, never Prometheus labels.
 
 | Metric | Type | Labels / use |
 |---|---|---|
-| `moa_execution_routes_total` | counter | `decision`, `mode`, `reason`; route volume and escalation |
+| `moa_execution_routes_total` | counter | `decision`, `strategy`, `reason`, `source`, `classifier_outcome`; public-route volume, internal strategy, trusted-source use, and classifier fallback |
 | `moa_execution_planner_calls_total` | counter | `call`, `outcome`; planner repairs and rejection pressure |
 | `moa_execution_compile_duration_seconds` | histogram (`DURATION_SECONDS`) | `source`, `outcome`; compiler latency |
 | `moa_execution_run_state_transitions_total` | counter | `state`; durable run transitions |
@@ -132,9 +132,11 @@ RATIO = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]
 
 The bounded label values are:
 
-- route: `decision=needs_input|routed`,
-  `mode=none|respond|act|run`, and
-  `reason=simple_response|bounded_interactive_work|preflight_input_missing|explicit_run|bulk_collection|durable_or_resumable|high_fanout|approval_or_signal|selected_execution_template|act_escalation`;
+- route: `decision=respond|execute|needs_input`,
+  `strategy=none|inline|durable`,
+  `reason=simple_response|bounded_interactive_work|preflight_input_missing|explicit_durable_execution|bulk_collection|durable_or_resumable|high_fanout|approval_or_signal|selected_execution_template|durable_upgrade`,
+  `source=classifier|blank_objective|selected_execution_template|durable_upgrade`, and
+  `classifier_outcome=not_called|accepted|provider_error|stream_error|oversized|schema_rejected|invalid_decision|low_confidence|context_forced_inline`;
 - planner:
   `call=initial_plan|initial_repair|amendment|amendment_repair` and
   `outcome=accepted|needs_input|unsupported|schema_rejected|immutable_goal_changed|compiler_rejected|oversized|provider_error`;
@@ -155,7 +157,10 @@ The bounded label values are:
 - terminal reason:
   `completed|goal_incomplete|budget_exceeded|deadline_exceeded|cancelled|no_progress|duplicate_plan|duplicate_amendment|repeated_failure|budget_exhausted|task_failure|unsupported_plan|blocked|internal_failure`.
 
-Emission points are durable and one-shot. Route emits after Session acceptance;
+The normalized route matrix is Respond/none, NeedsInput/none,
+Execute/Inline, or Execute/Durable. Only the last pair may be recorded at the
+durable-upgrade stage, and every non-accepted classifier outcome records
+Execute/Inline. Emission points are durable and one-shot. Route emits after Session acceptance;
 planner emits once per completed provider call, including provider errors;
 compiler duration wraps each real compiler invocation. State counters emit only
 after a committed transition. Queue-to-start observes the sole first

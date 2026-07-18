@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moa_core::types::execution_planning::{ExecutionMode, ExecutionRouteProvenanceV1};
+use moa_core::types::execution_planning::{
+    ExecutionRouteKind, ExecutionRouteProvenanceV1, ExecutionStrategy,
+};
 use moa_eval_core::{EvalError, Result};
 use moa_execution::state::ExecutionRunStatus;
 use serde::{Deserialize, Serialize};
@@ -78,8 +80,10 @@ pub struct ExecutionEvalCaseResultV1 {
     pub execution_false_completion: bool,
     /// Observed durable execution status, absent for non-execution routing cases.
     pub observed_run_status: Option<ExecutionRunStatus>,
-    /// Final routed mode for a routing-aware case.
-    pub observed_route: Option<ExecutionMode>,
+    /// Final route kind for a routing-aware case.
+    pub observed_route: Option<ExecutionRouteKind>,
+    /// Deterministic strategy for an observed Execute route.
+    pub observed_strategy: Option<ExecutionStrategy>,
     /// Exact redacted classifier provenance retained for a routing-aware case.
     pub route_provenance: Option<ExecutionRouteProvenanceV1>,
     /// Ordered deterministic invariant results.
@@ -127,6 +131,7 @@ impl ExecutionEvalCaseResultV1 {
             execution_false_completion,
             observed_run_status: Some(snapshot.run.status),
             observed_route: None,
+            observed_strategy: None,
             route_provenance: None,
             invariants,
             cost_microusd: snapshot.run.budget_ledger.consumed.cost_microusd,
@@ -162,14 +167,18 @@ pub struct ExecutionEvalAggregateMetricsV1 {
     pub execution_false_completion_rate: Option<f64>,
     /// Asymmetric routing cost, when a routing corpus was evaluated.
     pub weighted_routing_cost: Option<f64>,
-    /// True Run cases incorrectly predicted Respond.
-    pub respond_on_run_rate: Option<f64>,
-    /// Recall over adjudicated near-boundary Act cases.
-    pub near_boundary_act_recall: Option<f64>,
-    /// Recall over typed Act-to-Run escalation cases.
-    pub escalation_recall: Option<f64>,
-    /// Exact evidence preservation across typed escalation cases.
-    pub escalation_evidence_preservation_rate: Option<f64>,
+    /// Asymmetric Inline/Durable strategy cost, when Execute cases were evaluated.
+    pub weighted_strategy_cost: Option<f64>,
+    /// True Execute cases incorrectly predicted Respond.
+    pub respond_on_execute_rate: Option<f64>,
+    /// Recall over adjudicated near-boundary Execute/Inline cases.
+    pub near_boundary_inline_recall: Option<f64>,
+    /// Recall over all expected Durable strategies.
+    pub durable_strategy_recall: Option<f64>,
+    /// Recall over typed Inline-to-Durable upgrade cases.
+    pub durable_upgrade_recall: Option<f64>,
+    /// Exact evidence preservation across typed Durable-upgrade cases.
+    pub durable_upgrade_evidence_preservation_rate: Option<f64>,
     /// True NeedsInput cases incorrectly accepted into a concrete mode.
     pub needs_input_false_accept_rate: Option<f64>,
     /// True concrete-mode cases unnecessarily predicted NeedsInput.
@@ -242,10 +251,12 @@ impl ExecutionEvalAggregateMetricsV1 {
             contract_macro_f1: mean_optional(cases.iter().map(|case| case.contract_score)),
             execution_false_completion_rate: ratio(execution_false_completions, impossible_cases),
             weighted_routing_cost: None,
-            respond_on_run_rate: None,
-            near_boundary_act_recall: None,
-            escalation_recall: None,
-            escalation_evidence_preservation_rate: None,
+            weighted_strategy_cost: None,
+            respond_on_execute_rate: None,
+            near_boundary_inline_recall: None,
+            durable_strategy_recall: None,
+            durable_upgrade_recall: None,
+            durable_upgrade_evidence_preservation_rate: None,
             needs_input_false_accept_rate: None,
             unnecessary_clarification_rate: None,
             classifier_fallback_rate: None,
@@ -362,6 +373,23 @@ fn validate_case(case: &ExecutionEvalCaseResultV1) -> Result<()> {
     validate_optional_hash("terminal_output_hash", case.terminal_output_hash.as_deref())?;
     validate_optional_hash("final_response_hash", case.final_response_hash.as_deref())?;
     validate_optional_rate("contract_score", case.contract_score)?;
+    if !matches!(
+        (case.observed_route, case.observed_strategy),
+        (None, None)
+            | (
+                Some(ExecutionRouteKind::Respond | ExecutionRouteKind::NeedsInput),
+                None
+            )
+            | (
+                Some(ExecutionRouteKind::Execute),
+                Some(ExecutionStrategy::Inline | ExecutionStrategy::Durable)
+            )
+    ) {
+        return Err(invalid_config(format!(
+            "execution eval case `{}` has an inconsistent route and strategy",
+            case.case_id
+        )));
+    }
 
     let mut invariant_ids = BTreeSet::new();
     for invariant in &case.invariants {
@@ -455,12 +483,17 @@ fn validate_metrics(metrics: &ExecutionEvalAggregateMetricsV1) -> Result<()> {
         metrics.execution_false_completion_rate,
     )?;
     validate_optional_nonnegative("weighted_routing_cost", metrics.weighted_routing_cost)?;
-    validate_optional_rate("respond_on_run_rate", metrics.respond_on_run_rate)?;
-    validate_optional_rate("near_boundary_act_recall", metrics.near_boundary_act_recall)?;
-    validate_optional_rate("escalation_recall", metrics.escalation_recall)?;
+    validate_optional_nonnegative("weighted_strategy_cost", metrics.weighted_strategy_cost)?;
+    validate_optional_rate("respond_on_execute_rate", metrics.respond_on_execute_rate)?;
     validate_optional_rate(
-        "escalation_evidence_preservation_rate",
-        metrics.escalation_evidence_preservation_rate,
+        "near_boundary_inline_recall",
+        metrics.near_boundary_inline_recall,
+    )?;
+    validate_optional_rate("durable_strategy_recall", metrics.durable_strategy_recall)?;
+    validate_optional_rate("durable_upgrade_recall", metrics.durable_upgrade_recall)?;
+    validate_optional_rate(
+        "durable_upgrade_evidence_preservation_rate",
+        metrics.durable_upgrade_evidence_preservation_rate,
     )?;
     validate_optional_rate(
         "needs_input_false_accept_rate",
@@ -509,7 +542,7 @@ fn validate_classifier_fallback_counts(counts: Option<&BTreeMap<String, u64>>) -
         "schema_rejected",
         "invalid_decision",
         "low_confidence",
-        "context_forced_act",
+        "context_forced_inline",
     ];
     if counts
         .iter()

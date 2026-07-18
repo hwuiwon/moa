@@ -14,8 +14,8 @@ use moa_brain::execution_planning::{
 use moa_core::types::{
     completion::TokenUsage,
     execution_planning::{
-        ActEscalationSignal, ExecutionPlanningEvidence, ExecutionRouteClassifierOutcome,
-        ExecutionRouteReason,
+        DurableUpgradeSignal, ExecutionPlanningEvidence, ExecutionRouteClassifierOutcome,
+        ExecutionRouteReason, ExecutionStrategy,
     },
 };
 use moa_eval::execution::{
@@ -33,12 +33,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&root)?;
     let routing = jsonl(&routing_cases())?;
     let contract = jsonl(&contract_cases())?;
+    let task_quality = fs::read(root.join("task-quality-v1.jsonl"))?;
     fs::write(root.join("routing-v1.jsonl"), &routing)?;
     fs::write(root.join("contract-recorded-v1.jsonl"), &contract)?;
     let manifest = format!(
-        "schema_version = 1\n\n[routing]\npath = \"routing-v1.jsonl\"\nsha256 = \"{}\"\ncount = 320\n\n[contract]\npath = \"contract-recorded-v1.jsonl\"\nsha256 = \"{}\"\ncount = 80\n",
+        "schema_version = 1\n\n[routing]\npath = \"routing-v1.jsonl\"\nsha256 = \"{}\"\ncount = 320\n\n[contract]\npath = \"contract-recorded-v1.jsonl\"\nsha256 = \"{}\"\ncount = 80\n\n[task_quality]\npath = \"task-quality-v1.jsonl\"\nsha256 = \"{}\"\ncount = 20\n",
         sha256(&routing),
         sha256(&contract),
+        sha256(&task_quality),
     );
     fs::write(root.join("manifest.toml"), manifest)?;
     Ok(())
@@ -64,6 +66,7 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
             format!("respond-{index:03}"),
             format!("Explain the stable concept numbered {index} in one concise answer."),
             ExecutionRoutingLabelV1::Respond,
+            None,
             ExecutionRouteReason::SimpleResponse,
             response_fixture(
                 ExecutionRouteClassifierLabelV1::Respond,
@@ -76,14 +79,15 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
     }
     for index in 0..140 {
         let mut case = route_case(
-            format!("act-{index:03}"),
+            format!("execute-inline-{index:03}"),
             format!(
                 "Investigate the bounded issue numbered {index} and use the available context."
             ),
-            ExecutionRoutingLabelV1::Act,
+            ExecutionRoutingLabelV1::Execute,
+            Some(ExecutionStrategy::Inline),
             ExecutionRouteReason::BoundedInteractiveWork,
             response_fixture(
-                ExecutionRouteClassifierLabelV1::Act,
+                ExecutionRouteClassifierLabelV1::Execute,
                 ExecutionRouteReason::BoundedInteractiveWork,
                 9_000,
                 Vec::new(),
@@ -120,7 +124,7 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
                 }
                 4 => {
                     case.classifier = response_fixture(
-                        ExecutionRouteClassifierLabelV1::Run,
+                        ExecutionRouteClassifierLabelV1::Execute,
                         ExecutionRouteReason::BulkCollection,
                         7_999,
                         Vec::new(),
@@ -147,8 +151,8 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
                 Vec::new(),
             );
             case.attachment_count = 1;
-            case.expected_classifier_outcome = ExecutionRouteClassifierOutcome::ContextForcedAct;
-            case.tags.push("context-forced-act".to_string());
+            case.expected_classifier_outcome = ExecutionRouteClassifierOutcome::ContextForcedInline;
+            case.tags.push("context-forced-inline".to_string());
         }
         cases.push(case);
     }
@@ -161,16 +165,17 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
             )
         };
         let mut case = route_case(
-            format!("run-{index:03}"),
+            format!("execute-durable-{index:03}"),
             objective.clone(),
-            ExecutionRoutingLabelV1::Run,
+            ExecutionRoutingLabelV1::Execute,
+            Some(ExecutionStrategy::Durable),
             if index == 0 {
                 ExecutionRouteReason::BulkCollection
             } else {
                 ExecutionRouteReason::HighFanout
             },
             response_fixture(
-                ExecutionRouteClassifierLabelV1::Run,
+                ExecutionRouteClassifierLabelV1::Execute,
                 if index == 0 {
                     ExecutionRouteReason::BulkCollection
                 } else {
@@ -186,20 +191,20 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
         }
         if index >= 60 {
             let evidence = vec![ExecutionPlanningEvidence {
-                source: "act".to_string(),
+                source: "inline-tool".to_string(),
                 summary: format!("discovered bulk universe {index}"),
                 value: json!({"items": 500, "case": index}),
             }];
-            case.expected_reason = ExecutionRouteReason::ActEscalation;
+            case.expected_reason = ExecutionRouteReason::DurableUpgrade;
             case.classifier = ExecutionRoutingClassifierFixtureV1::NotCalled;
             case.expected_classifier_outcome = ExecutionRouteClassifierOutcome::NotCalled;
-            case.escalation = Some(ActEscalationSignal {
+            case.durable_upgrade = Some(DurableUpgradeSignal {
                 objective,
                 reason: ExecutionRouteReason::HighFanout,
                 evidence: evidence.clone(),
             });
-            case.expected_escalation_evidence = Some(evidence);
-            case.tags.push("act-escalation".to_string());
+            case.expected_durable_upgrade_evidence = Some(evidence);
+            case.tags.push("durable-upgrade".to_string());
         }
         cases.push(case);
     }
@@ -208,6 +213,7 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
             format!("needs-input-{index:03}"),
             format!("Screen the requested dataset {index}."),
             ExecutionRoutingLabelV1::NeedsInput,
+            None,
             ExecutionRouteReason::PreflightInputMissing,
             response_fixture(
                 ExecutionRouteClassifierLabelV1::NeedsInput,
@@ -227,6 +233,7 @@ fn route_case(
     case_id: String,
     objective: String,
     expected_label: ExecutionRoutingLabelV1,
+    expected_strategy: Option<ExecutionStrategy>,
     expected_reason: ExecutionRouteReason,
     classifier: ExecutionRoutingClassifierFixtureV1,
     expected_classifier_outcome: ExecutionRouteClassifierOutcome,
@@ -240,10 +247,11 @@ fn route_case(
         classifier,
         expected_classifier_outcome,
         expected_label,
+        expected_strategy,
         expected_reason,
         near_boundary: false,
-        escalation: None,
-        expected_escalation_evidence: None,
+        durable_upgrade: None,
+        expected_durable_upgrade_evidence: None,
         tags: Vec::new(),
     }
 }

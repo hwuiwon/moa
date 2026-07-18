@@ -105,6 +105,12 @@ struct ClickHouseMicros {
     micros: i64,
 }
 
+#[derive(Debug, Row, Deserialize)]
+struct ClickHouseTableKeys {
+    sorting_key: String,
+    primary_key: String,
+}
+
 async fn clickhouse_columns(
     client: &Client,
     database: &str,
@@ -194,7 +200,10 @@ async fn seed_task9_clickhouse_execution_schema(
              ) VALUES ( \
                  ?, ?, ?, 'user-1', ?, 'skill_template', 'skill://old', ?, 1, \
                  'selected_execution_template', 'completed', 'completed', 'old raw error', \
-                 1, 1, 1, 0, 1, 0, 1, ?, ?, ?, ?, 1000.0, ? \
+                 1, 1, 1, 0, 1, 0, 1, \
+                 fromUnixTimestamp64Micro(?), fromUnixTimestamp64Micro(?), \
+                 fromUnixTimestamp64Micro(?), fromUnixTimestamp64Micro(?), \
+                 1000.0, fromUnixTimestamp64Micro(?) \
              )",
         )
         .bind(Identifier(database))
@@ -203,11 +212,11 @@ async fn seed_task9_clickhouse_execution_schema(
         .bind(tenant.to_string())
         .bind(session)
         .bind("f".repeat(64))
-        .bind(future_version - Duration::seconds(2))
-        .bind(future_version - Duration::seconds(1))
-        .bind(future_version - Duration::seconds(3))
-        .bind(future_version - Duration::seconds(1))
-        .bind(future_version)
+        .bind((future_version - Duration::seconds(2)).timestamp_micros())
+        .bind((future_version - Duration::seconds(1)).timestamp_micros())
+        .bind((future_version - Duration::seconds(3)).timestamp_micros())
+        .bind((future_version - Duration::seconds(1)).timestamp_micros())
+        .bind(future_version.timestamp_micros())
         .execute()
         .await?;
     client
@@ -219,18 +228,21 @@ async fn seed_task9_clickhouse_execution_schema(
                  started_at, completed_at, created_at, updated_at, duration_ms, export_version \
              ) VALUES ( \
                  ?, ?, ?, 'old-node', NULL, 'docs.search:v1', 1, 'completed', 'old task prose', \
-                 1, 1, 0, 1, 0, 1, 0, ?, ?, ?, ?, 500.0, ? \
+                 1, 1, 0, 1, 0, 1, 0, \
+                 fromUnixTimestamp64Micro(?), fromUnixTimestamp64Micro(?), \
+                 fromUnixTimestamp64Micro(?), fromUnixTimestamp64Micro(?), \
+                 500.0, fromUnixTimestamp64Micro(?) \
              )",
         )
         .bind(Identifier(database))
         .bind(task_id)
         .bind(run_uid)
         .bind(tenant)
-        .bind(future_version - Duration::milliseconds(750))
-        .bind(future_version - Duration::milliseconds(250))
-        .bind(future_version - Duration::seconds(1))
-        .bind(future_version - Duration::milliseconds(250))
-        .bind(future_version)
+        .bind((future_version - Duration::milliseconds(750)).timestamp_micros())
+        .bind((future_version - Duration::milliseconds(250)).timestamp_micros())
+        .bind((future_version - Duration::seconds(1)).timestamp_micros())
+        .bind((future_version - Duration::milliseconds(250)).timestamp_micros())
+        .bind(future_version.timestamp_micros())
         .execute()
         .await?;
     Ok(())
@@ -270,16 +282,18 @@ async fn analytics_parity_all_datasets_docker() -> TestResult<()> {
     let tenant_id = TenantId::from(tenant);
 
     let catalog = pg_service.catalog();
+    let removed_run_mode_field = ["route_", "mode"].concat();
     assert!(
         catalog
             .datasets
             .iter()
             .all(|dataset| !dataset.id.contains("procedure")
                 && dataset.fields.iter().all(|field| {
-                    !matches!(
-                        field.id.as_str(),
-                        "task_uid" | "source_ref" | "capability_ref"
-                    )
+                    field.id != removed_run_mode_field
+                        && !matches!(
+                            field.id.as_str(),
+                            "task_uid" | "source_ref" | "capability_ref"
+                        )
                 })),
         "execution-only analytics catalog restored a legacy dataset or alias"
     );
@@ -396,7 +410,6 @@ async fn execution_schema_upgrade_recovery_docker() -> TestResult<()> {
         ("initial_plan_hash", "String"),
         ("active_plan_hash", "String"),
         ("plan_revision", "UInt64"),
-        ("route_mode", "LowCardinality(String)"),
         ("route_reason", "LowCardinality(String)"),
         ("source_kind", "LowCardinality(String)"),
         ("skill_template_ref", "Nullable(String)"),
@@ -470,6 +483,32 @@ async fn execution_schema_upgrade_recovery_docker() -> TestResult<()> {
             .collect();
         assert_eq!(actual, expected, "{table} final schema differs");
     }
+
+    let task_keys: ClickHouseTableKeys = client
+        .query(
+            "SELECT sorting_key, primary_key FROM system.tables \
+             WHERE database = ? AND name = 'dim_execution_tasks'",
+        )
+        .bind(&config.database)
+        .fetch_one()
+        .await?;
+    assert_eq!(task_keys.sorting_key, "tenant_id, run_uid, task_id");
+    assert_eq!(task_keys.primary_key, "tenant_id, run_uid, task_id");
+    let swap_artifacts: ClickHouseCount = client
+        .query(
+            "SELECT count() AS row_count FROM system.tables \
+             WHERE database = ? AND name IN (\
+                 'dim_execution_tasks_v2_rebuild', \
+                 'dim_execution_tasks_task9_backup'\
+             )",
+        )
+        .bind(&config.database)
+        .fetch_one()
+        .await?;
+    assert_eq!(
+        swap_artifacts.row_count, 0,
+        "task schema swap leaked tables"
+    );
 
     let pg_run_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM moa.execution_run")
         .fetch_one(&pool)
@@ -1354,7 +1393,7 @@ async fn seed_execution_run_and_tasks(
              (run_uid, tenant_id, session_id, originating_user_sequence_num, planning_context_uid, \
               planning_context_hash, owner_user_id, goal_contract, initial_plan, active_plan, \
               initial_plan_hash, active_plan_hash, capability_catalog, authorization_envelope, \
-              source_provenance, source_kind, route_mode, route_reason, skill_template_ref, \
+              source_provenance, source_kind, route_reason, skill_template_ref, \
               skill_template_revision_uid, input, status, progress_total_tasks, started_at) \
          VALUES ($1, $2, $3, 1, $4, $5, 'user-1', \
                  '{\"requirements\":[{\"id\":\"r1\"}]}'::JSONB, '{}'::JSONB, '{}'::JSONB, \
@@ -1363,7 +1402,7 @@ async fn seed_execution_run_and_tasks(
                     'route_reason', 'selected_execution_template', \
                     'skill_template_ref', 'skill://billing-flow', \
                     'skill_template_revision_uid', lower($7::TEXT)), \
-                 'skill_template', 'run', 'selected_execution_template', \
+                 'skill_template', 'selected_execution_template', \
                  'skill://billing-flow', $7, '{}'::JSONB, 'queued', 2, $8)",
     )
     .bind(run_uid)

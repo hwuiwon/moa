@@ -7,7 +7,7 @@ use moa_core::{
     types::completion::ToolCallContent,
     types::completion::ToolInvocation,
     types::execution_planning::{
-        ActEscalationSignal, ExecutionPlanningEvidence, ExecutionRouteReason,
+        DurableUpgradeSignal, ExecutionPlanningEvidence, ExecutionRouteReason,
     },
     types::identifiers::{SessionId, ToolCallId},
     types::session::SessionMeta,
@@ -104,16 +104,16 @@ async fn handle_delegation_tool(
 #[derive(Clone, Debug)]
 pub(super) enum ToolDispatchOutcome {
     Completed,
-    ActEscalation(ActEscalationSignal),
-    ActEscalationUnsupported(String),
+    DurableUpgrade(DurableUpgradeSignal),
+    DurableUpgradeUnsupported(String),
     Cancelled,
     ToolBudgetExceeded(ToolBudgetExhausted),
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum ActToolResultRoute {
+enum InlineToolResultRoute {
     Continue,
-    Escalate(ActEscalationSignal),
+    DurableUpgrade(DurableUpgradeSignal),
     Unsupported(String),
 }
 
@@ -125,26 +125,26 @@ struct DiscoveredExecutionShape {
     value: serde_json::Value,
 }
 
-fn reevaluate_act_tool_result(
+fn durable_upgrade_from_tool_result(
     objective: &str,
-    origin_allows_run: bool,
+    durable_upgrade_allowed: bool,
     invocation: &ToolInvocation,
     output: &ToolOutput,
-) -> ActToolResultRoute {
-    if !origin_allows_run || output.is_error {
-        return ActToolResultRoute::Continue;
+) -> InlineToolResultRoute {
+    if !durable_upgrade_allowed || output.is_error {
+        return InlineToolResultRoute::Continue;
     }
     let Some(shape) = output
         .structured
         .as_ref()
         .and_then(|structured| structured.get("execution_shape"))
     else {
-        return ActToolResultRoute::Continue;
+        return InlineToolResultRoute::Continue;
     };
     let discovered = match serde_json::from_value::<DiscoveredExecutionShape>(shape.clone()) {
         Ok(discovered) => discovered,
         Err(error) => {
-            return ActToolResultRoute::Unsupported(format!(
+            return InlineToolResultRoute::Unsupported(format!(
                 "invalid structured execution-shape evidence: {error}"
             ));
         }
@@ -156,11 +156,12 @@ fn reevaluate_act_tool_result(
             | ExecutionRouteReason::HighFanout
             | ExecutionRouteReason::ApprovalOrSignal
     ) {
-        return ActToolResultRoute::Unsupported(
-            "tool result execution_shape reason is not a newly discovered run shape".to_string(),
+        return InlineToolResultRoute::Unsupported(
+            "tool result execution_shape reason is not a newly discovered Durable shape"
+                .to_string(),
         );
     }
-    let signal = ActEscalationSignal {
+    let signal = DurableUpgradeSignal {
         objective: objective.to_string(),
         reason: discovered.reason,
         evidence: vec![ExecutionPlanningEvidence {
@@ -170,8 +171,8 @@ fn reevaluate_act_tool_result(
         }],
     };
     match signal.validate() {
-        Ok(()) => ActToolResultRoute::Escalate(signal),
-        Err(error) => ActToolResultRoute::Unsupported(error.to_string()),
+        Ok(()) => InlineToolResultRoute::DurableUpgrade(signal),
+        Err(error) => InlineToolResultRoute::Unsupported(error.to_string()),
     }
 }
 
@@ -324,7 +325,7 @@ pub(super) struct RootToolContext<'a> {
     /// Skills injected into this turn's manifest, used to detect which the model engaged.
     pub(super) selected_skills: &'a [String],
     pub(super) objective: &'a str,
-    pub(super) act_escalation_allowed: bool,
+    pub(super) durable_upgrade_allowed: bool,
     pub(super) turn_evidence: &'a mut TurnEvidence,
     /// Per-turn `file_read` result memory shared across this turn's model-loop iterations.
     pub(super) file_read_cache: &'a mut FileReadTurnCache,
@@ -364,12 +365,12 @@ pub(super) async fn dispatch_response_tool_calls(
         )
         .await?
         {
-            ActToolResultRoute::Continue => {}
-            ActToolResultRoute::Escalate(signal) => {
-                return Ok(ToolDispatchOutcome::ActEscalation(signal));
+            InlineToolResultRoute::Continue => {}
+            InlineToolResultRoute::DurableUpgrade(signal) => {
+                return Ok(ToolDispatchOutcome::DurableUpgrade(signal));
             }
-            ActToolResultRoute::Unsupported(message) => {
-                return Ok(ToolDispatchOutcome::ActEscalationUnsupported(message));
+            InlineToolResultRoute::Unsupported(message) => {
+                return Ok(ToolDispatchOutcome::DurableUpgradeUnsupported(message));
             }
         }
     }
@@ -408,7 +409,7 @@ async fn handle_tool_call(
     allowed_tools: &std::collections::BTreeSet<String>,
     index: usize,
     tool_call: &ToolCallContent,
-) -> Result<ActToolResultRoute, HandlerError> {
+) -> Result<InlineToolResultRoute, HandlerError> {
     driver_progress::set_phase(ctx, TurnPhase::Tooling);
     let meta = tool_context.meta;
     let session_id = tool_context.session_id;
@@ -439,9 +440,9 @@ async fn handle_tool_call(
         tool_context
             .turn_evidence
             .record_tool_result(&tool_call.invocation, &cached_output);
-        return Ok(reevaluate_act_tool_result(
+        return Ok(durable_upgrade_from_tool_result(
             tool_context.objective,
-            tool_context.act_escalation_allowed,
+            tool_context.durable_upgrade_allowed,
             &tool_call.invocation,
             &cached_output,
         ));
@@ -503,9 +504,9 @@ async fn handle_tool_call(
             (tool_call.invocation.clone(), output)
         }
     };
-    Ok(reevaluate_act_tool_result(
+    Ok(durable_upgrade_from_tool_result(
         tool_context.objective,
-        tool_context.act_escalation_allowed,
+        tool_context.durable_upgrade_allowed,
         &invocation,
         &output,
     ))
@@ -519,11 +520,12 @@ mod tests {
     use moa_core::types::tools::ToolOutput;
     use serde_json::json;
 
-    use super::{ActToolResultRoute, reevaluate_act_tool_result};
+    use super::{InlineToolResultRoute, durable_upgrade_from_tool_result};
 
     #[test]
-    fn qualifying_structured_act_result_escalates_with_bounded_preserved_evidence() {
-        // Pins: a trusted structured run-shape fact becomes one bounded signal with the root objective intact.
+    fn qualifying_structured_inline_result_requests_bounded_durable_upgrade() {
+        // Pins: a successful trusted structured Durable shape becomes one bounded signal
+        // with the byte-identical root objective and discovered evidence intact.
         let objective = "Inspect the affected tenant accounts";
         let invocation = ToolInvocation {
             id: Some("discover-shape".to_string()),
@@ -547,10 +549,10 @@ mod tests {
             artifact: None,
         };
 
-        let ActToolResultRoute::Escalate(signal) =
-            reevaluate_act_tool_result(objective, true, &invocation, &output)
+        let InlineToolResultRoute::DurableUpgrade(signal) =
+            durable_upgrade_from_tool_result(objective, true, &invocation, &output)
         else {
-            panic!("qualifying Act result should emit an escalation signal");
+            panic!("qualifying Inline result should emit a Durable-upgrade signal");
         };
         assert_eq!(signal.objective, objective);
         assert_eq!(
@@ -568,8 +570,9 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_or_non_user_act_results_never_escalate() {
-        // Pins: ordinary tool output and forbidden origins remain in Act even when text mentions fan-out.
+    fn ordinary_failed_or_non_root_inline_results_never_request_durable_upgrade() {
+        // Pins: ordinary, failed, and non-root/synthesis/worker tool results remain Inline
+        // even when their text or structured payload mentions fan-out.
         let invocation = ToolInvocation {
             id: None,
             name: "search".to_string(),
@@ -577,8 +580,8 @@ mod tests {
         };
         let ordinary = ToolOutput::text("hundreds of matches", Duration::ZERO);
         assert_eq!(
-            reevaluate_act_tool_result("investigate", true, &invocation, &ordinary),
-            ActToolResultRoute::Continue
+            durable_upgrade_from_tool_result("investigate", true, &invocation, &ordinary),
+            InlineToolResultRoute::Continue
         );
 
         let structured = ToolOutput::json(
@@ -593,9 +596,55 @@ mod tests {
             Duration::ZERO,
         );
         assert_eq!(
-            reevaluate_act_tool_result("investigate", false, &invocation, &structured),
-            ActToolResultRoute::Continue
+            durable_upgrade_from_tool_result("investigate", false, &invocation, &structured),
+            InlineToolResultRoute::Continue
         );
+
+        let mut failed = structured.clone();
+        failed.is_error = true;
+        assert_eq!(
+            durable_upgrade_from_tool_result("investigate", true, &invocation, &failed),
+            InlineToolResultRoute::Continue
+        );
+    }
+
+    #[test]
+    fn inline_upgrade_rejects_non_durable_or_malformed_execution_shapes() {
+        // Pins: the strict execution_shape contract admits only newly discovered Durable
+        // reasons and rejects malformed evidence instead of widening authority.
+        let invocation = ToolInvocation {
+            id: None,
+            name: "search".to_string(),
+            input: json!({"query": "shape"}),
+        };
+        for output in [
+            ToolOutput::json(
+                "inline",
+                json!({
+                    "execution_shape": {
+                        "reason": "bounded_interactive_work",
+                        "summary": "still bounded",
+                        "value": {"count": 2}
+                    }
+                }),
+                Duration::ZERO,
+            ),
+            ToolOutput::json(
+                "malformed",
+                json!({
+                    "execution_shape": {
+                        "reason": "high_fanout",
+                        "summary": "missing value"
+                    }
+                }),
+                Duration::ZERO,
+            ),
+        ] {
+            assert!(matches!(
+                durable_upgrade_from_tool_result("investigate", true, &invocation, &output),
+                InlineToolResultRoute::Unsupported(_)
+            ));
+        }
     }
 
     use super::{ESCALATED_SERVE_THRESHOLD, FileReadTurnCache};

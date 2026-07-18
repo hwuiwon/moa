@@ -67,7 +67,7 @@ execution records:
 
 | Fact | Contract |
 |---|---|
-| `analytics.execution_run_fact` | Tenant/contact/session/run identity; immutable initial and final active plan hashes; plan revision; `route_mode=run`; typed route reason and source kind; separate nullable skill-template ref and revision UID; run status and typed terminal reason; requirement, satisfied-requirement, completion-check, and logical-task counts; `queued_at`, `started_at`, exact queue-to-start latency from `started_at - queued_at`, terminal latency; and reserved/actual cost, tokens, tasks, tool calls, and retrieved bytes |
+| `analytics.execution_run_fact` | Tenant/contact/session/run identity; immutable initial and final active plan hashes; plan revision; typed route reason and source kind without a constant run-mode dimension; separate nullable skill-template ref and revision UID; run status and typed terminal reason; requirement, satisfied-requirement, completion-check, and logical-task counts; `queued_at`, `started_at`, exact queue-to-start latency from `started_at - queued_at`, terminal latency; and reserved/actual cost, tokens, tasks, tool calls, and retrieved bytes |
 | `analytics.execution_task_fact` | Canonical `task_id` (never `task_uid`); tenant/run/node/non-null item identity; task kind; separate nullable capability name/version; task status and typed failure class; attempt and generation; citation count; queue and terminal duration; and all five reserved/actual dimensions |
 
 Raw input, output, terminal gaps, cancellation reason, and error prose are not

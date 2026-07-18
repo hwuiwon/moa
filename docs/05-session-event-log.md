@@ -198,6 +198,20 @@ calls, and compiler outcomes are written directly to the normalized
 and compiler reports out of model-visible history, session search, compaction,
 contact progress, and public SSE by construction.
 
+The route audit accepts only the normalized decision/strategy matrix:
+
+| Stage | Decision | Strategy | Reason/source shape |
+|---|---|---|---|
+| Initial | Respond | none | simple response from the classifier |
+| Initial | NeedsInput | none | bounded missing input from blank-objective preflight or the classifier |
+| Initial | Execute | Inline | bounded interactive work, including every classifier fallback |
+| Initial | Execute | Durable | explicit durable work, bulk/resumable/high-fan-out/waiting work, or a selected template |
+| Durable upgrade | Execute | Durable | one trusted, root-only, one-way upgrade |
+
+The row retains bounded source and classifier-outcome provenance. It never
+stores raw objective or classifier text, and durable run facts retain route
+reason/source without a constant run-mode dimension.
+
 `SegmentStarted` records segment ID, index, summary, and previous segment ID. `SegmentCompleted` records final counters and duration.
 
 `WorkerSpawned`, `WorkerMessageSent`, `WorkerStatusChanged`, and

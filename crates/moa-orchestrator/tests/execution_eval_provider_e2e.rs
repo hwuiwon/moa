@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use moa_artifacts::execution_plan::GeneratedExecutionCandidate;
 use moa_core::types::execution_planning::{
-    ExecutionMode, ExecutionPlannerOutcome, ExecutionPlanningAuditPayloadV1,
-    ExecutionRouteDecisionKind, ExecutionRouteProvenanceV1, ExecutionRouteStage,
+    ExecutionPlannerOutcome, ExecutionPlanningAuditPayloadV1, ExecutionRouteKind,
+    ExecutionRouteProvenanceV1, ExecutionRouteStage, ExecutionStrategy,
 };
 use moa_core::types::identifiers::ModelId;
 use moa_core::wire::turn::{StartTurnRequest, TurnOutcomeKind};
@@ -131,11 +131,12 @@ async fn execution_eval_live_provider_repeated_task_quality_provider_e2e() -> Re
         .await
         .with_context(|| format!("write live execution report {}", output.display()))?;
     eprintln!(
-        "wrote live execution report: path={} pass_at_1={:.4} pass_all_k={:.4} respond_on_run_rate={:.4}",
+        "wrote live execution report: path={} pass_at_1={:.4} pass_all_k={:.4} respond_on_execute_rate={:.4} durable_strategy_recall={:.4}",
         output.display(),
         report.metrics.pass_at_1.unwrap_or_default(),
         report.metrics.pass_all_k.unwrap_or_default(),
-        report.metrics.respond_on_run_rate.unwrap_or_default()
+        report.metrics.respond_on_execute_rate.unwrap_or_default(),
+        report.metrics.durable_strategy_recall.unwrap_or_default()
     );
     Ok(())
 }
@@ -191,7 +192,7 @@ async fn run_live_case(
     )
     .await
     .context("load live execution planning audits")?;
-    let (observed_route, provenance) = initial_route(&audits)?;
+    let (observed_route, observed_strategy, provenance) = initial_route(&audits)?;
     let contract = score_generated_contract(contract_cases, case, &audits)?;
     let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     let result_id = format!("{}#run={repetition}", case.case_id);
@@ -244,7 +245,8 @@ async fn run_live_case(
                 impossible_case: false,
                 execution_false_completion: false,
                 observed_run_status: None,
-                observed_route: route_mode(observed_route),
+                observed_route: Some(route_kind(observed_route)),
+                observed_strategy,
                 route_provenance: Some(provenance.clone()),
                 invariants: Vec::new(),
                 cost_microusd: 0,
@@ -255,7 +257,8 @@ async fn run_live_case(
             }
         }
     };
-    result.observed_route = route_mode(observed_route);
+    result.observed_route = Some(route_kind(observed_route));
+    result.observed_strategy = observed_strategy;
     result.route_provenance = Some(provenance.clone());
     result.cost_microusd = result
         .cost_microusd
@@ -265,9 +268,10 @@ async fn run_live_case(
         result.contract_score = Some(score);
         result.contract_omission = Some(omission);
     }
-    let route_passed = observed_route == case.expected_route;
-    let status_passed = match case.expected_route {
-        ExecutionRoutingLabelV1::Run => result
+    let route_passed =
+        observed_route == case.expected_route && observed_strategy == case.expected_strategy;
+    let status_passed = match (case.expected_route, case.expected_strategy) {
+        (ExecutionRoutingLabelV1::Execute, Some(ExecutionStrategy::Durable)) => result
             .observed_run_status
             .is_some_and(|status| case.allowed_terminal_statuses.contains(&status)),
         _ => result.observed_run_status.is_none(),
@@ -284,6 +288,7 @@ async fn run_live_case(
         case_id: case.case_id.clone(),
         repetition,
         observed_route,
+        observed_strategy,
         result,
     })
 }
@@ -312,33 +317,28 @@ async fn await_run_settled_or_deadline(
 
 fn initial_route(
     audits: &[moa_core::types::execution_planning::ExecutionPlanningAuditEnvelopeV1],
-) -> Result<(ExecutionRoutingLabelV1, ExecutionRouteProvenanceV1)> {
+) -> Result<(
+    ExecutionRoutingLabelV1,
+    Option<ExecutionStrategy>,
+    ExecutionRouteProvenanceV1,
+)> {
     audits
         .iter()
         .find_map(|audit| match &audit.payload {
             ExecutionPlanningAuditPayloadV1::Route {
                 stage: ExecutionRouteStage::Initial,
                 decision,
-                mode,
+                strategy,
                 provenance,
                 ..
             } => {
-                let route = match (*decision, *mode) {
-                    (ExecutionRouteDecisionKind::NeedsInput, None) => {
-                        ExecutionRoutingLabelV1::NeedsInput
-                    }
-                    (ExecutionRouteDecisionKind::Routed, Some(ExecutionMode::Respond)) => {
-                        ExecutionRoutingLabelV1::Respond
-                    }
-                    (ExecutionRouteDecisionKind::Routed, Some(ExecutionMode::Act)) => {
-                        ExecutionRoutingLabelV1::Act
-                    }
-                    (ExecutionRouteDecisionKind::Routed, Some(ExecutionMode::Run)) => {
-                        ExecutionRoutingLabelV1::Run
-                    }
+                let route = match (*decision, *strategy) {
+                    (ExecutionRouteKind::Respond, None) => ExecutionRoutingLabelV1::Respond,
+                    (ExecutionRouteKind::Execute, Some(_)) => ExecutionRoutingLabelV1::Execute,
+                    (ExecutionRouteKind::NeedsInput, None) => ExecutionRoutingLabelV1::NeedsInput,
                     _ => return None,
                 };
-                Some((route, provenance.clone()))
+                Some((route, *strategy, provenance.clone()))
             }
             _ => None,
         })
@@ -375,12 +375,11 @@ fn score_generated_contract(
     Ok(Some((score.macro_f1, score.contract_omission)))
 }
 
-fn route_mode(label: ExecutionRoutingLabelV1) -> Option<ExecutionMode> {
+const fn route_kind(label: ExecutionRoutingLabelV1) -> ExecutionRouteKind {
     match label {
-        ExecutionRoutingLabelV1::Respond => Some(ExecutionMode::Respond),
-        ExecutionRoutingLabelV1::Act => Some(ExecutionMode::Act),
-        ExecutionRoutingLabelV1::Run => Some(ExecutionMode::Run),
-        ExecutionRoutingLabelV1::NeedsInput => None,
+        ExecutionRoutingLabelV1::Respond => ExecutionRouteKind::Respond,
+        ExecutionRoutingLabelV1::Execute => ExecutionRouteKind::Execute,
+        ExecutionRoutingLabelV1::NeedsInput => ExecutionRouteKind::NeedsInput,
     }
 }
 

@@ -559,7 +559,7 @@ async fn assert_canonical_planning_and_provenance(
     assert_eq!(
         provenance,
         ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+            route_reason: ExecutionRouteReason::ExplicitDurableExecution,
             skill_template_ref: exact_template.skill_ref.clone(),
             skill_template_revision_uid: exact_template.revision_uid,
             experiment_run_uid,

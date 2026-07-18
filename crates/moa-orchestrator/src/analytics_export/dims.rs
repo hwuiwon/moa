@@ -19,7 +19,7 @@ use super::{
 };
 
 const EXECUTION_RUN_EXPORT_SQL: &str = "SELECT analytics_change_seq, run_uid, tenant_id, \
-        contact_id, session_id, initial_plan_hash, active_plan_hash, plan_revision, route_mode, \
+        contact_id, session_id, initial_plan_hash, active_plan_hash, plan_revision, \
         route_reason, source_kind, skill_template_ref, skill_template_revision_uid, status, \
         terminal_reason, COALESCE(terminal_requirement_count, \
             CASE WHEN jsonb_typeof(goal_contract -> 'requirements') = 'array' \
@@ -413,7 +413,6 @@ pub struct DimExecutionRunRow {
     pub initial_plan_hash: String,
     pub active_plan_hash: String,
     pub plan_revision: u64,
-    pub route_mode: String,
     pub route_reason: String,
     pub source_kind: String,
     pub skill_template_ref: Option<String>,
@@ -505,7 +504,6 @@ pub(super) struct ExecutionRunReadRow {
     initial_plan_hash: String,
     active_plan_hash: String,
     plan_revision: i64,
-    route_mode: String,
     route_reason: String,
     source_kind: String,
     skill_template_ref: Option<String>,
@@ -548,7 +546,6 @@ impl ExecutionRunReadRow {
             initial_plan_hash: self.initial_plan_hash,
             active_plan_hash: self.active_plan_hash,
             plan_revision: nonnegative_u64("plan_revision", self.plan_revision)?,
-            route_mode: self.route_mode,
             route_reason: self.route_reason,
             source_kind: self.source_kind,
             skill_template_ref: self.skill_template_ref,
@@ -834,9 +831,36 @@ mod tests {
             "{EXECUTION_RUN_EXPORT_SQL}"
         );
         assert!(
-            EXECUTION_RUN_EXPORT_SQL.contains("skill_template_revision_uid")
-                && EXECUTION_RUN_EXPORT_SQL.contains("reserved_retrieved_bytes")
-                && EXECUTION_RUN_EXPORT_SQL.contains("actual_retrieved_bytes"),
+            EXECUTION_RUN_EXPORT_SQL
+                .contains("active_plan_hash, plan_revision, route_reason, source_kind"),
+            "{EXECUTION_RUN_EXPORT_SQL}"
+        );
+        assert!(
+            [
+                "route_reason",
+                "source_kind",
+                "skill_template_ref",
+                "skill_template_revision_uid",
+                "terminal_reason",
+                "requirement_count",
+                "satisfied_requirement_count",
+                "completion_check_count",
+                "logical_task_count",
+                "queue_to_start_ms",
+                "duration_ms",
+                "reserved_cost_microusd",
+                "actual_cost_microusd",
+                "reserved_tokens",
+                "actual_tokens",
+                "reserved_tasks",
+                "actual_tasks",
+                "reserved_tool_calls",
+                "actual_tool_calls",
+                "reserved_retrieved_bytes",
+                "actual_retrieved_bytes",
+            ]
+            .into_iter()
+            .all(|field| EXECUTION_RUN_EXPORT_SQL.contains(field)),
             "{EXECUTION_RUN_EXPORT_SQL}"
         );
         assert!(

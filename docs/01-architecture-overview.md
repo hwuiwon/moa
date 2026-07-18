@@ -14,11 +14,11 @@ Runtime boundary
         |
         v
 Brain and execution
-  TurnExecution -> respond | act | run
+  TurnExecution -> Respond | Execute | NeedsInput
   Context pipeline -> provider router -> LLM
   Tool router -> built-ins / hands / MCP
-  Act delegation -> Restate Worker virtual objects
-  Run planning/compiler -> Restate ExecutionRun / ExecutionTask workflows
+  Execute Inline delegation -> Restate Worker virtual objects
+  Execute Durable planning/compiler -> Restate ExecutionRun / ExecutionTask workflows
         |
         v
 Product data in Postgres / Neon
@@ -56,33 +56,38 @@ without turning connector sync into session memory ingestion.
 MOA has one user-facing capability artifact kind: the skill. A skill can remain
 instructions only, can expose governed actions or code capabilities, and may
 also carry an optional `execution_plan` in `skill.moa.yaml`. Instruction-only
-skills are selected normally in `act` and may be pinned on an `Agent` node in a
-run; no skill is required to define a plan.
+skills are selected normally in Inline Execute and may be pinned on an `Agent`
+node in Durable Execute; no skill is required to define a plan.
 
-`TurnExecution` chooses exactly one execution mode:
+`TurnExecution` chooses exactly one public route:
 
-- `respond`: one user-facing model response, no tools, and no plan-generation
+- `Respond`: one user-facing model response, no tools, and no plan-generation
   call. An ordinary user turn may first make one separate bounded auxiliary
-  classifier call to select this mode.
-- `act`: the bounded root model/tool loop, including repeat and tool-call
-  limits. It may use visible skills and conversational `Worker` delegation.
-- `run`: instantiate or compile an immutable plan, start a detached durable
-  run, publish compact progress, and synthesize its terminal result into the
-  owning session automatically.
+  classifier call to select this route.
+- `Execute`: authorized work with a deterministic internal strategy. The
+  `bounded_interactive_work` reason selects `Inline`; explicit durable
+  execution, bulk collection, resumable work, high fan-out, approval/signal
+  waits, selected templates, and durable upgrades select `Durable`.
+- `NeedsInput`: one deterministic clarification with bounded missing fields.
 
-`act` may escalate to `run` when investigation reveals resumable, high-fan-out,
-long-running, or review-bearing work. Difficulty alone does not select `run`.
-`Worker` remains available for interactive delegation in `act`; it is not the
-bulk DAG primitive.
+Inline Execute is the bounded root model/tool loop, including repeat and
+tool-call limits, visible skills, and conversational `Worker` delegation.
+Durable Execute instantiates or compiles an immutable plan, starts a detached
+`ExecutionRun`, publishes compact progress, and synthesizes its terminal result
+into the owning session automatically. An initial root Inline turn may make one
+evidence-preserving upgrade to Durable; it cannot downgrade or classify again.
+Difficulty alone does not select Durable. `Worker` is not the bulk DAG primitive.
 
 Ordinary language routing is one strict-schema auxiliary-model classification,
 not phrase matching. The classifier has no tools, retrieval, or web search and
 cannot retry or invoke the planner. Provider, stream, size, schema, matrix, or
-confidence failures conservatively select `act`. Blank objectives, exact pinned
-templates, typed Act escalation, and internal execution synthesis use trusted
-zero-classifier-call routes. The normalized route audit persists only the final
-decision and bounded provenance (source/outcome, model/prompt, hashes,
-confidence, usage, cost, and duration), never raw objective or classifier text.
+confidence failures conservatively select Execute/Inline. Blank objectives and
+exact pinned templates use trusted zero-classifier-call routes; a typed Durable
+upgrade is a trusted control transition and is not classifier input. The
+normalized route audit persists `respond | execute | needs_input`, optional
+`inline | durable`, and bounded provenance (source/outcome, model/prompt,
+hashes, confidence, usage, cost, and duration), never raw objective or
+classifier text.
 
 Agents, skills, connectors, actions, and behavior-lab experiment plans are
 canonical artifacts. `moa-artifacts` owns their persisted document model,
@@ -101,7 +106,7 @@ authoring and import/export format. Optional `ui` metadata is non-semantic.
 
 | Boundary | Owner | Contract |
 |---|---|---|
-| `ExecutionRouter` | `moa-brain` | Uses trusted typed bypasses or at most one bounded auxiliary-model call to select `respond`, `act`, `run`, or concrete missing input; uncertainty falls back to `act`. |
+| `ExecutionRouter` | `moa-brain` | Uses trusted typed bypasses or at most one bounded auxiliary-model call to select Respond, Execute, or concrete missing input; a closed reason matrix derives optional Inline/Durable strategy and uncertainty falls back to Execute/Inline. |
 | `ExecutionPlanner` | `moa-brain` | Chooses a pinned skill template or asks the auxiliary model for a strict candidate plan and immutable goal contract. |
 | `ExecutionCompiler` | `moa-execution` | Validates, canonicalizes, estimates, and hashes initial plans and amendments against the capability catalog and remaining budget. |
 | `ExecutionProjection` | `moa-execution` | Supplies ordered node/task state to the pure scheduler; it contains no repository or provider handle. |
@@ -413,10 +418,11 @@ User message
        7 memory
        8 history
        9 runtime_context
-  -> TurnExecution selects respond, act, or run
-       respond: one model response, no tools or planning call
-       act: bounded model/tool loop; optional conversational Worker delegation
-       run: instantiate/compile, persist, and detach ExecutionRun
+  -> TurnExecution selects Respond, Execute, or NeedsInput
+       Respond: one model response, no tools or planning call
+       Execute/Inline: bounded model/tool loop; optional Worker delegation
+       Execute/Durable: instantiate/compile, persist, and detach ExecutionRun
+       NeedsInput: deterministic bounded clarification
   -> Query rewrite may mark `is_new_task`
   -> SegmentTracker opens or rolls a task segment
   -> LLM response is streamed/collected

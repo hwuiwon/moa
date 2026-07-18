@@ -187,8 +187,8 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "moa-core Rust source",
         path: "crates/moa-core/src",
         scope: LocScope::RustTree,
-        max_lines: 25_390,
-        reason: "Existing tenant-purge and scalability contracts remain; Tasks 7-11 add shared execution routing, classifier provenance, configuration, planning-audit, session-event, and observability DTOs without rebuilding the moa-core root facade",
+        max_lines: 25_836,
+        reason: "Unified Execute routing adds shared Respond/Execute/NeedsInput decisions, Inline/Durable strategies, classifier provenance and configuration, normalized planning audits, session events, and observability DTOs without rebuilding the moa-core root facade",
     },
     LocBudget {
         label: "public edge route ladder",
@@ -208,8 +208,8 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "turn execution workflow",
         path: "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
         scope: LocScope::File,
-        max_lines: 1_429,
-        reason: "Tasks 7-9 add model-assisted respond/act/run routing, strict run admission, Act escalation, planning audits, durable amendment handling, replay-safe execution admission, and terminal synthesis within the durable workflow shell",
+        max_lines: 1_530,
+        reason: "Unified Execute routing adds one bounded classifier, normalized route audits, the Inline loop, one root-only Durable upgrade, replay-safe Durable admission, amendment handling, and compact terminal synthesis within the workflow shell",
     },
     LocBudget {
         label: "worker state types",

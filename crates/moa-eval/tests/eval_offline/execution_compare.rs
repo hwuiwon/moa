@@ -110,6 +110,7 @@ fn report(lane: ExecutionEvalLaneV1, count: usize, passed: bool) -> ExecutionEva
             execution_false_completion: false,
             observed_run_status: None,
             observed_route: None,
+            observed_strategy: None,
             route_provenance: None,
             invariants: Vec::new(),
             cost_microusd: 100,
