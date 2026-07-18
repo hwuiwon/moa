@@ -1,8 +1,11 @@
 //! Typed execution-eval assertions shared by deterministic service scenarios.
 
 use anyhow::{Context, Result};
-use moa_core::{events::Event, types::execution_planning::ExecutionMode};
-use moa_eval::execution::{ExecutionEvalCaseResultV1, ExecutionInvariantSpecV1};
+use moa_core::{
+    events::Event,
+    types::execution_planning::{ExecutionRouteKind, ExecutionStrategy},
+};
+use moa_eval::execution::{ExecutionEvalCaseResult, ExecutionInvariantSpec};
 use moa_execution::{
     repository::{ExecutionRepository, ExecutionScope},
     wire::ExecutionRunRequest,
@@ -21,8 +24,8 @@ pub(crate) async fn assert_execution_eval_case(
     request: &ExecutionRunRequest,
     capability_controller: Option<&FixtureCapabilityController>,
     case_id: &str,
-    specs: &[ExecutionInvariantSpecV1],
-) -> Result<ExecutionEvalCaseResultV1> {
+    specs: &[ExecutionInvariantSpec],
+) -> Result<ExecutionEvalCaseResult> {
     let pool = sqlx::PgPool::connect(&fixture.postgres_url)
         .await
         .context("connect execution service eval collector")?;
@@ -46,7 +49,7 @@ pub(crate) async fn assert_execution_eval_case(
     )
     .await?;
     pool.close().await;
-    let result = ExecutionEvalCaseResultV1::evaluate(case_id, &snapshot, specs, 0)?;
+    let result = ExecutionEvalCaseResult::evaluate(case_id, &snapshot, specs, 0)?;
     if !result.passed {
         anyhow::bail!("execution eval case `{case_id}` failed: {result:#?}");
     }
@@ -60,8 +63,8 @@ pub(crate) async fn assert_repository_execution_eval_case(
     scope: ExecutionScope,
     request: &ExecutionRunRequest,
     case_id: &str,
-    specs: &[ExecutionInvariantSpecV1],
-) -> Result<ExecutionEvalCaseResultV1> {
+    specs: &[ExecutionInvariantSpec],
+) -> Result<ExecutionEvalCaseResult> {
     let snapshot = collect_repository_execution_eval_snapshot(
         repository,
         scope,
@@ -70,22 +73,26 @@ pub(crate) async fn assert_repository_execution_eval_case(
         request.run_uid,
     )
     .await?;
-    let result = ExecutionEvalCaseResultV1::evaluate(case_id, &snapshot, specs, 0)?;
+    let result = ExecutionEvalCaseResult::evaluate(case_id, &snapshot, specs, 0)?;
     if !result.passed {
         anyhow::bail!("repository execution eval case `{case_id}` failed: {result:#?}");
     }
     Ok(result)
 }
 
-/// Pins a non-Run route to one typed route audit and zero execution lifecycle events.
-pub(crate) fn assert_non_run_eval(
-    audits: &[moa_core::types::execution_planning::ExecutionPlanningAuditEnvelopeV1],
+/// Pins a non-Durable route to one typed route audit and zero execution lifecycle events.
+pub(crate) fn assert_non_durable_eval(
+    audits: &[moa_core::types::execution_planning::ExecutionPlanningAuditEnvelope],
     events: &[moa_core::types::events_stream::EventRecord],
-    mode: ExecutionMode,
-    reason: moa_core::types::execution_planning::ExecutionRouteReason,
+    decision: ExecutionRouteKind,
+    strategy: Option<ExecutionStrategy>,
 ) {
-    assert!(matches!(mode, ExecutionMode::Respond | ExecutionMode::Act));
-    assert_initial_route(audits, mode, reason);
+    assert!(matches!(
+        (decision, strategy),
+        (ExecutionRouteKind::Respond, None)
+            | (ExecutionRouteKind::Execute, Some(ExecutionStrategy::Inline))
+    ));
+    assert_initial_route(audits, decision, strategy);
     assert_no_execution_lifecycle_events(events);
     assert!(events.iter().all(|record| {
         !matches!(

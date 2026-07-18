@@ -10,15 +10,15 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use moa_artifacts::execution_plan::GeneratedExecutionCandidate;
 use moa_core::types::execution_planning::{
-    ExecutionMode, ExecutionPlannerOutcome, ExecutionPlanningAuditPayloadV1,
-    ExecutionRouteDecisionKind, ExecutionRouteProvenanceV1, ExecutionRouteStage,
+    ExecutionPlannerOutcome, ExecutionPlanningAuditPayload, ExecutionRouteKind,
+    ExecutionRouteProvenance, ExecutionRouteStage, ExecutionStrategy,
 };
 use moa_core::types::identifiers::ModelId;
 use moa_core::wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use moa_eval::execution::{
-    EXECUTION_LIVE_REPETITIONS, ExecutionCalibrationArtifactV1, ExecutionEvalCaseResultV1,
-    ExecutionEvalProviderV1, ExecutionInvariantSpecV1, ExecutionJudgeCalibrationStatusV1,
-    ExecutionLiveRunOutcomeV1, ExecutionRoutingLabelV1, ExecutionTaskQualityCaseV1,
+    EXECUTION_LIVE_REPETITIONS, ExecutionCalibrationArtifact, ExecutionEvalCaseResult,
+    ExecutionEvalProvider, ExecutionInvariantSpec, ExecutionJudgeCalibrationStatus,
+    ExecutionLiveRunOutcome, ExecutionRoutingLabel, ExecutionTaskQualityCase,
     aggregate_live_execution_outcomes, forecast_live_execution_cost, load_execution_corpus,
     score_contract_case, score_execution_calibration,
 };
@@ -114,10 +114,10 @@ async fn execution_eval_live_provider_repeated_task_quality_provider_e2e() -> Re
         EXECUTION_LIVE_REPETITIONS,
         hashes,
         calibration_status,
-        ExecutionEvalProviderV1 {
+        ExecutionEvalProvider {
             provider: provider_name.to_string(),
             model: model.as_str().to_string(),
-            prompt_version: "execution-live-v1".to_string(),
+            prompt_version: "execution-live".to_string(),
         },
     )
     .context("aggregate strict live execution report")?;
@@ -131,11 +131,12 @@ async fn execution_eval_live_provider_repeated_task_quality_provider_e2e() -> Re
         .await
         .with_context(|| format!("write live execution report {}", output.display()))?;
     eprintln!(
-        "wrote live execution report: path={} pass_at_1={:.4} pass_all_k={:.4} respond_on_run_rate={:.4}",
+        "wrote live execution report: path={} pass_at_1={:.4} pass_all_k={:.4} respond_on_execute_rate={:.4} durable_strategy_recall={:.4}",
         output.display(),
         report.metrics.pass_at_1.unwrap_or_default(),
         report.metrics.pass_all_k.unwrap_or_default(),
-        report.metrics.respond_on_run_rate.unwrap_or_default()
+        report.metrics.respond_on_execute_rate.unwrap_or_default(),
+        report.metrics.durable_strategy_recall.unwrap_or_default()
     );
     Ok(())
 }
@@ -143,11 +144,11 @@ async fn execution_eval_live_provider_repeated_task_quality_provider_e2e() -> Re
 async fn run_live_case(
     fixture: &OrchestratorTestFixture,
     repository: &ExecutionRepository,
-    contract_cases: &[moa_eval::execution::ExecutionContractCaseV1],
-    case: &ExecutionTaskQualityCaseV1,
+    contract_cases: &[moa_eval::execution::ExecutionContractCase],
+    case: &ExecutionTaskQualityCase,
     repetition: u32,
     model: &ModelId,
-) -> Result<ExecutionLiveRunOutcomeV1> {
+) -> Result<ExecutionLiveRunOutcome> {
     let started_at = Instant::now();
     let test = fixture.isolated().await;
     let session_id = test
@@ -191,7 +192,7 @@ async fn run_live_case(
     )
     .await
     .context("load live execution planning audits")?;
-    let (observed_route, provenance) = initial_route(&audits)?;
+    let (observed_route, observed_strategy, provenance) = initial_route(&audits)?;
     let contract = score_generated_contract(contract_cases, case, &audits)?;
     let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     let result_id = format!("{}#run={repetition}", case.case_id);
@@ -218,25 +219,25 @@ async fn run_live_case(
             .await
             .context("collect production live execution snapshot")?;
             let mut specs = vec![
-                ExecutionInvariantSpecV1::TerminalStatusIn {
+                ExecutionInvariantSpec::TerminalStatusIn {
                     statuses: case.allowed_terminal_statuses.clone(),
                 },
-                ExecutionInvariantSpecV1::BudgetWithinApproved,
-                ExecutionInvariantSpecV1::ProgressMatchesTasks,
-                ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+                ExecutionInvariantSpec::BudgetWithinApproved,
+                ExecutionInvariantSpec::ProgressMatchesTasks,
+                ExecutionInvariantSpec::NoRawTaskOutputEvents,
             ];
             if case.tags.iter().any(|tag| tag == "honest-partial")
                 && !case
                     .allowed_terminal_statuses
                     .contains(&moa_execution::state::ExecutionRunStatus::Completed)
             {
-                specs.push(ExecutionInvariantSpecV1::MustNotComplete);
+                specs.push(ExecutionInvariantSpec::MustNotComplete);
             }
-            ExecutionEvalCaseResultV1::evaluate(result_id.clone(), &snapshot, &specs, latency_ms)
+            ExecutionEvalCaseResult::evaluate(result_id.clone(), &snapshot, &specs, latency_ms)
                 .context("evaluate live execution invariants")?
         }
         TurnOutcomeKind::Completed | TurnOutcomeKind::Cancelled | TurnOutcomeKind::Failed => {
-            ExecutionEvalCaseResultV1 {
+            ExecutionEvalCaseResult {
                 case_id: result_id,
                 passed: false,
                 contract_omission: None,
@@ -244,7 +245,8 @@ async fn run_live_case(
                 impossible_case: false,
                 execution_false_completion: false,
                 observed_run_status: None,
-                observed_route: route_mode(observed_route),
+                observed_route: Some(route_kind(observed_route)),
+                observed_strategy,
                 route_provenance: Some(provenance.clone()),
                 invariants: Vec::new(),
                 cost_microusd: 0,
@@ -255,7 +257,8 @@ async fn run_live_case(
             }
         }
     };
-    result.observed_route = route_mode(observed_route);
+    result.observed_route = Some(route_kind(observed_route));
+    result.observed_strategy = observed_strategy;
     result.route_provenance = Some(provenance.clone());
     result.cost_microusd = result
         .cost_microusd
@@ -265,9 +268,10 @@ async fn run_live_case(
         result.contract_score = Some(score);
         result.contract_omission = Some(omission);
     }
-    let route_passed = observed_route == case.expected_route;
-    let status_passed = match case.expected_route {
-        ExecutionRoutingLabelV1::Run => result
+    let route_passed =
+        observed_route == case.expected_route && observed_strategy == case.expected_strategy;
+    let status_passed = match (case.expected_route, case.expected_strategy) {
+        (ExecutionRoutingLabel::Execute, Some(ExecutionStrategy::Durable)) => result
             .observed_run_status
             .is_some_and(|status| case.allowed_terminal_statuses.contains(&status)),
         _ => result.observed_run_status.is_none(),
@@ -280,10 +284,11 @@ async fn run_live_case(
         && !result.execution_false_completion
         && result.contract_omission != Some(true)
         && result.invariants.iter().all(|invariant| invariant.passed);
-    Ok(ExecutionLiveRunOutcomeV1 {
+    Ok(ExecutionLiveRunOutcome {
         case_id: case.case_id.clone(),
         repetition,
         observed_route,
+        observed_strategy,
         result,
     })
 }
@@ -311,34 +316,29 @@ async fn await_run_settled_or_deadline(
 }
 
 fn initial_route(
-    audits: &[moa_core::types::execution_planning::ExecutionPlanningAuditEnvelopeV1],
-) -> Result<(ExecutionRoutingLabelV1, ExecutionRouteProvenanceV1)> {
+    audits: &[moa_core::types::execution_planning::ExecutionPlanningAuditEnvelope],
+) -> Result<(
+    ExecutionRoutingLabel,
+    Option<ExecutionStrategy>,
+    ExecutionRouteProvenance,
+)> {
     audits
         .iter()
         .find_map(|audit| match &audit.payload {
-            ExecutionPlanningAuditPayloadV1::Route {
+            ExecutionPlanningAuditPayload::Route {
                 stage: ExecutionRouteStage::Initial,
                 decision,
-                mode,
+                strategy,
                 provenance,
                 ..
             } => {
-                let route = match (*decision, *mode) {
-                    (ExecutionRouteDecisionKind::NeedsInput, None) => {
-                        ExecutionRoutingLabelV1::NeedsInput
-                    }
-                    (ExecutionRouteDecisionKind::Routed, Some(ExecutionMode::Respond)) => {
-                        ExecutionRoutingLabelV1::Respond
-                    }
-                    (ExecutionRouteDecisionKind::Routed, Some(ExecutionMode::Act)) => {
-                        ExecutionRoutingLabelV1::Act
-                    }
-                    (ExecutionRouteDecisionKind::Routed, Some(ExecutionMode::Run)) => {
-                        ExecutionRoutingLabelV1::Run
-                    }
+                let route = match (*decision, *strategy) {
+                    (ExecutionRouteKind::Respond, None) => ExecutionRoutingLabel::Respond,
+                    (ExecutionRouteKind::Execute, Some(_)) => ExecutionRoutingLabel::Execute,
+                    (ExecutionRouteKind::NeedsInput, None) => ExecutionRoutingLabel::NeedsInput,
                     _ => return None,
                 };
-                Some((route, provenance.clone()))
+                Some((route, *strategy, provenance.clone()))
             }
             _ => None,
         })
@@ -346,15 +346,15 @@ fn initial_route(
 }
 
 fn score_generated_contract(
-    contract_cases: &[moa_eval::execution::ExecutionContractCaseV1],
-    task_case: &ExecutionTaskQualityCaseV1,
-    audits: &[moa_core::types::execution_planning::ExecutionPlanningAuditEnvelopeV1],
+    contract_cases: &[moa_eval::execution::ExecutionContractCase],
+    task_case: &ExecutionTaskQualityCase,
+    audits: &[moa_core::types::execution_planning::ExecutionPlanningAuditEnvelope],
 ) -> Result<Option<(f64, bool)>> {
     let Some(contract_case_id) = task_case.contract_case_id.as_deref() else {
         return Ok(None);
     };
     let Some(candidate_json) = audits.iter().find_map(|audit| match &audit.payload {
-        ExecutionPlanningAuditPayloadV1::PlannerCall {
+        ExecutionPlanningAuditPayload::PlannerCall {
             outcome: ExecutionPlannerOutcome::Accepted,
             candidate_json: Some(candidate_json),
             ..
@@ -375,12 +375,11 @@ fn score_generated_contract(
     Ok(Some((score.macro_f1, score.contract_omission)))
 }
 
-fn route_mode(label: ExecutionRoutingLabelV1) -> Option<ExecutionMode> {
+const fn route_kind(label: ExecutionRoutingLabel) -> ExecutionRouteKind {
     match label {
-        ExecutionRoutingLabelV1::Respond => Some(ExecutionMode::Respond),
-        ExecutionRoutingLabelV1::Act => Some(ExecutionMode::Act),
-        ExecutionRoutingLabelV1::Run => Some(ExecutionMode::Run),
-        ExecutionRoutingLabelV1::NeedsInput => None,
+        ExecutionRoutingLabel::Respond => ExecutionRouteKind::Respond,
+        ExecutionRoutingLabel::Execute => ExecutionRouteKind::Execute,
+        ExecutionRoutingLabel::NeedsInput => ExecutionRouteKind::NeedsInput,
     }
 }
 
@@ -418,13 +417,13 @@ fn configured_live_provider() -> Result<(&'static str, ModelId)> {
     )
 }
 
-fn load_calibration_status() -> Result<(ExecutionJudgeCalibrationStatusV1, Option<String>)> {
+fn load_calibration_status() -> Result<(ExecutionJudgeCalibrationStatus, Option<String>)> {
     let Ok(path) = std::env::var("MOA_EXECUTION_EVAL_CALIBRATION") else {
-        return Ok((ExecutionJudgeCalibrationStatusV1::Unavailable, None));
+        return Ok((ExecutionJudgeCalibrationStatus::Unavailable, None));
     };
     let bytes =
         std::fs::read(&path).with_context(|| format!("read execution judge calibration {path}"))?;
-    let artifact = serde_json::from_slice::<ExecutionCalibrationArtifactV1>(&bytes)
+    let artifact = serde_json::from_slice::<ExecutionCalibrationArtifact>(&bytes)
         .with_context(|| format!("parse execution judge calibration {path}"))?;
     let report = score_execution_calibration(&artifact)
         .context("score execution judge calibration artifact")?;

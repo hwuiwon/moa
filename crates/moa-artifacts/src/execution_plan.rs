@@ -1,4 +1,4 @@
-//! Canonical v1 execution-plan, goal, outcome, and amendment definitions.
+//! Canonical execution-plan, goal, outcome, and amendment definitions.
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -91,7 +91,7 @@ pub struct CompletionCheck {
     pub kind: CompletionCheckKind,
 }
 
-/// Supported v1 completion checks.
+/// Supported execution completion checks.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompletionCheckKind {
@@ -123,11 +123,11 @@ pub enum CompletionCheckKind {
     },
 }
 
-/// Canonical immutable v1 execution-plan definition.
+/// Canonical immutable execution-plan definition.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlanDefinition {
-    /// Execution-plan schema version, which must be `1` for v1.
+    /// Execution-plan schema version, which must be `1`.
     pub schema_version: u32,
     /// JSON Schema for run input.
     pub input_schema: Value,
@@ -254,7 +254,7 @@ pub enum ExecutionReducer {
     },
 }
 
-/// The seven operations supported by the v1 execution-plan DSL.
+/// The seven operations supported by the execution-plan DSL.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionOperation {
@@ -336,7 +336,7 @@ pub struct ExecutionBudgetLimit {
 /// Versioned outcome returned by one executable task.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct ExecutionTaskOutcome {
-    /// Task-outcome schema version, which must be `1` for v1.
+    /// Task-outcome schema version, which must be `1`.
     pub schema_version: u32,
     /// Cumulative actual usage for this logical task since first dispatch.
     pub usage: ExecutionUsage,
@@ -345,7 +345,7 @@ pub struct ExecutionTaskOutcome {
     pub result: ExecutionTaskResult,
 }
 
-/// Supported v1 task result states.
+/// Supported execution task result states.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionTaskResult {
@@ -452,7 +452,7 @@ pub struct ExecutionCitation {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanAmendment {
-    /// Amendment schema version, which must be `1` for v1.
+    /// Amendment schema version, which must be `1`.
     pub schema_version: u32,
     /// Active plan revision to which the amendment applies.
     pub base_plan_revision: u64,
@@ -464,7 +464,7 @@ pub struct PlanAmendment {
     pub operations: Vec<PlanAmendmentOperation>,
 }
 
-/// Restricted operations available in a v1 plan amendment.
+/// Restricted operations available in a plan amendment.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlanAmendmentOperation {
@@ -509,7 +509,7 @@ pub struct ExecutionGoalTemplate {
 pub struct ExecutionPlanTemplate {
     /// Reusable goal semantics instantiated with the current user objective.
     pub goal: ExecutionGoalTemplate,
-    /// Canonical v1 execution plan.
+    /// Canonical execution plan.
     pub plan: ExecutionPlanDefinition,
 }
 
@@ -538,7 +538,7 @@ impl ExecutionPlanTemplate {
 pub struct GeneratedExecutionCandidate {
     /// Immutable complete user goal contract.
     pub goal: ExecutionGoalContract,
-    /// Candidate v1 execution plan.
+    /// Candidate execution plan.
     pub plan: ExecutionPlanDefinition,
     /// Structured run input validated by the candidate plan.
     pub run_input: Value,

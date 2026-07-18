@@ -33,8 +33,10 @@ use tempfile::tempdir;
 const SCENARIO_ROOT: &str = "scenarios/long_conversation";
 const EXPERIENCE_LEARNING_SCENARIO: &str = "experience_learning_task_conditioned_strategy_reuse";
 const EXPERIENCE_LEARNING_MATRIX_FILE: &str = "task_matrix.toml";
-const MATRIX_MAX_MANIFEST_CHARS: usize = 510;
-const MATRIX_MAX_PER_SKILL_CHARS: usize = 128;
+// Production framing is 547 chars; 700 admits one newline plus one capped 128-char entry,
+// but not a second entry because selection charges one newline per entry.
+const EXPERIENCE_LEARNING_MAX_MANIFEST_CHARS: usize = 700;
+const EXPERIENCE_LEARNING_MAX_PER_SKILL_CHARS: usize = 128;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -146,8 +148,8 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
     let mut agent_config = agent_config_for(scenario_name);
     agent_config.permissions.allow_rules = allow_rules;
     if scenario_name == EXPERIENCE_LEARNING_SCENARIO {
-        base_config.skill_budget.max_manifest_chars = Some(510);
-        base_config.skill_budget.max_per_skill_chars = 128;
+        base_config.skill_budget.max_manifest_chars = Some(EXPERIENCE_LEARNING_MAX_MANIFEST_CHARS);
+        base_config.skill_budget.max_per_skill_chars = EXPERIENCE_LEARNING_MAX_PER_SKILL_CHARS;
         configure_experience_learning_database(
             &mut base_config,
             &eval_storage_partition_id_for_agent(&agent_config.name),
@@ -487,8 +489,8 @@ async fn run_learning_matrix_case(
     let mut base_config = moa_core::config::MoaConfig::default();
     base_config.database.url = moa_test_support::postgres::test_database_url();
     base_config.query_rewrite.enabled = false;
-    base_config.skill_budget.max_manifest_chars = Some(MATRIX_MAX_MANIFEST_CHARS);
-    base_config.skill_budget.max_per_skill_chars = MATRIX_MAX_PER_SKILL_CHARS;
+    base_config.skill_budget.max_manifest_chars = Some(EXPERIENCE_LEARNING_MAX_MANIFEST_CHARS);
+    base_config.skill_budget.max_per_skill_chars = EXPERIENCE_LEARNING_MAX_PER_SKILL_CHARS;
 
     let agent_config = learning_matrix_agent_config(matrix_case);
     configure_learning_matrix_database(

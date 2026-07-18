@@ -16,7 +16,7 @@ pub mod canonical;
 pub mod connector;
 /// Artifact document wrappers and metadata.
 pub mod document;
-/// Canonical v1 execution-plan, goal, outcome, and amendment definitions.
+/// Canonical execution-plan, goal, outcome, and amendment definitions.
 pub mod execution_plan;
 /// Stable artifact reference parsing and formatting.
 pub mod reference;

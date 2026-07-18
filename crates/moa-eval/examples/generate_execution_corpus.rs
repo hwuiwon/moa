@@ -9,20 +9,20 @@ use moa_artifacts::execution_plan::{
     MapTask, RetryPolicy,
 };
 use moa_brain::execution_planning::{
-    ExecutionRouteClassifierLabelV1, ExecutionRouteClassifierOutputV1,
+    ExecutionRouteClassifierLabel, ExecutionRouteClassifierOutput,
 };
 use moa_core::types::{
     completion::TokenUsage,
     execution_planning::{
-        ActEscalationSignal, ExecutionPlanningEvidence, ExecutionRouteClassifierOutcome,
-        ExecutionRouteReason,
+        DurableUpgradeSignal, ExecutionPlanningEvidence, ExecutionRouteClassifierOutcome,
+        ExecutionStrategy,
     },
 };
 use moa_eval::execution::{
-    CompletionCheckExpectationV1, CoverageExpectationV1, DeliverableExpectationV1,
-    ExecutionContractCaseV1, ExecutionContractExpectationsV1, ExecutionRoutingCaseV1,
-    ExecutionRoutingClassifierFixtureV1, ExecutionRoutingLabelV1, RunInputExpectationV1,
-    TextExpectationV1, contract::CompletionCheckKindExpectationV1,
+    CompletionCheckExpectation, CoverageExpectation, DeliverableExpectation, ExecutionContractCase,
+    ExecutionContractExpectations, ExecutionRoutingCase, ExecutionRoutingClassifierFixture,
+    ExecutionRoutingLabel, RunInputExpectation, TextExpectation,
+    contract::CompletionCheckKindExpectation,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -33,12 +33,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&root)?;
     let routing = jsonl(&routing_cases())?;
     let contract = jsonl(&contract_cases())?;
-    fs::write(root.join("routing-v1.jsonl"), &routing)?;
-    fs::write(root.join("contract-recorded-v1.jsonl"), &contract)?;
+    let task_quality = fs::read(root.join("task-quality.jsonl"))?;
+    fs::write(root.join("routing.jsonl"), &routing)?;
+    fs::write(root.join("contract-recorded.jsonl"), &contract)?;
     let manifest = format!(
-        "schema_version = 1\n\n[routing]\npath = \"routing-v1.jsonl\"\nsha256 = \"{}\"\ncount = 320\n\n[contract]\npath = \"contract-recorded-v1.jsonl\"\nsha256 = \"{}\"\ncount = 80\n",
+        "schema_version = 1\n\n[routing]\npath = \"routing.jsonl\"\nsha256 = \"{}\"\ncount = 320\n\n[contract]\npath = \"contract-recorded.jsonl\"\nsha256 = \"{}\"\ncount = 80\n\n[task_quality]\npath = \"task-quality.jsonl\"\nsha256 = \"{}\"\ncount = 20\n",
         sha256(&routing),
         sha256(&contract),
+        sha256(&task_quality),
     );
     fs::write(root.join("manifest.toml"), manifest)?;
     Ok(())
@@ -57,17 +59,17 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
+fn routing_cases() -> Vec<ExecutionRoutingCase> {
     let mut cases = Vec::with_capacity(320);
     for index in 0..60 {
         cases.push(route_case(
             format!("respond-{index:03}"),
             format!("Explain the stable concept numbered {index} in one concise answer."),
-            ExecutionRoutingLabelV1::Respond,
-            ExecutionRouteReason::SimpleResponse,
+            ExecutionRoutingLabel::Respond,
+            None,
             response_fixture(
-                ExecutionRouteClassifierLabelV1::Respond,
-                ExecutionRouteReason::SimpleResponse,
+                ExecutionRouteClassifierLabel::Respond,
+                None,
                 9_500,
                 Vec::new(),
             ),
@@ -76,15 +78,15 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
     }
     for index in 0..140 {
         let mut case = route_case(
-            format!("act-{index:03}"),
+            format!("execute-inline-{index:03}"),
             format!(
                 "Investigate the bounded issue numbered {index} and use the available context."
             ),
-            ExecutionRoutingLabelV1::Act,
-            ExecutionRouteReason::BoundedInteractiveWork,
+            ExecutionRoutingLabel::Execute,
+            Some(ExecutionStrategy::Inline),
             response_fixture(
-                ExecutionRouteClassifierLabelV1::Act,
-                ExecutionRouteReason::BoundedInteractiveWork,
+                ExecutionRouteClassifierLabel::Execute,
+                Some(ExecutionStrategy::Inline),
                 9_000,
                 Vec::new(),
             ),
@@ -101,27 +103,27 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
             case.tags.push("classifier-fallback".to_string());
             match fault_index / 4 {
                 0 => {
-                    case.classifier = ExecutionRoutingClassifierFixtureV1::ProviderError;
+                    case.classifier = ExecutionRoutingClassifierFixture::ProviderError;
                     case.expected_classifier_outcome =
                         ExecutionRouteClassifierOutcome::ProviderError;
                 }
                 1 => {
-                    case.classifier = ExecutionRoutingClassifierFixtureV1::StreamError;
+                    case.classifier = ExecutionRoutingClassifierFixture::StreamError;
                     case.expected_classifier_outcome = ExecutionRouteClassifierOutcome::StreamError;
                 }
                 2 => {
-                    case.classifier = ExecutionRoutingClassifierFixtureV1::Malformed;
+                    case.classifier = ExecutionRoutingClassifierFixture::Malformed;
                     case.expected_classifier_outcome =
                         ExecutionRouteClassifierOutcome::SchemaRejected;
                 }
                 3 => {
-                    case.classifier = ExecutionRoutingClassifierFixtureV1::Oversized;
+                    case.classifier = ExecutionRoutingClassifierFixture::Oversized;
                     case.expected_classifier_outcome = ExecutionRouteClassifierOutcome::Oversized;
                 }
                 4 => {
                     case.classifier = response_fixture(
-                        ExecutionRouteClassifierLabelV1::Run,
-                        ExecutionRouteReason::BulkCollection,
+                        ExecutionRouteClassifierLabel::Execute,
+                        Some(ExecutionStrategy::Durable),
                         7_999,
                         Vec::new(),
                     );
@@ -130,8 +132,8 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
                 }
                 _ => {
                     case.classifier = response_fixture(
-                        ExecutionRouteClassifierLabelV1::Respond,
-                        ExecutionRouteReason::BulkCollection,
+                        ExecutionRouteClassifierLabel::Respond,
+                        Some(ExecutionStrategy::Durable),
                         9_500,
                         Vec::new(),
                     );
@@ -141,14 +143,14 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
             }
         } else if (104..112).contains(&index) {
             case.classifier = response_fixture(
-                ExecutionRouteClassifierLabelV1::Respond,
-                ExecutionRouteReason::SimpleResponse,
+                ExecutionRouteClassifierLabel::Respond,
+                None,
                 9_500,
                 Vec::new(),
             );
             case.attachment_count = 1;
-            case.expected_classifier_outcome = ExecutionRouteClassifierOutcome::ContextForcedAct;
-            case.tags.push("context-forced-act".to_string());
+            case.expected_classifier_outcome = ExecutionRouteClassifierOutcome::ContextForcedInline;
+            case.tags.push("context-forced-inline".to_string());
         }
         cases.push(case);
     }
@@ -161,21 +163,13 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
             )
         };
         let mut case = route_case(
-            format!("run-{index:03}"),
+            format!("execute-durable-{index:03}"),
             objective.clone(),
-            ExecutionRoutingLabelV1::Run,
-            if index == 0 {
-                ExecutionRouteReason::BulkCollection
-            } else {
-                ExecutionRouteReason::HighFanout
-            },
+            ExecutionRoutingLabel::Execute,
+            Some(ExecutionStrategy::Durable),
             response_fixture(
-                ExecutionRouteClassifierLabelV1::Run,
-                if index == 0 {
-                    ExecutionRouteReason::BulkCollection
-                } else {
-                    ExecutionRouteReason::HighFanout
-                },
+                ExecutionRouteClassifierLabel::Execute,
+                Some(ExecutionStrategy::Durable),
                 9_500,
                 Vec::new(),
             ),
@@ -186,20 +180,21 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
         }
         if index >= 60 {
             let evidence = vec![ExecutionPlanningEvidence {
-                source: "act".to_string(),
+                source: "inline-tool".to_string(),
                 summary: format!("discovered bulk universe {index}"),
                 value: json!({"items": 500, "case": index}),
             }];
-            case.expected_reason = ExecutionRouteReason::ActEscalation;
-            case.classifier = ExecutionRoutingClassifierFixtureV1::NotCalled;
+            case.classifier = ExecutionRoutingClassifierFixture::NotCalled;
             case.expected_classifier_outcome = ExecutionRouteClassifierOutcome::NotCalled;
-            case.escalation = Some(ActEscalationSignal {
+            case.durable_upgrade = Some(DurableUpgradeSignal {
                 objective,
-                reason: ExecutionRouteReason::HighFanout,
+                rationale: format!(
+                    "The discovered workflow {index} must continue durably across independent work items."
+                ),
                 evidence: evidence.clone(),
             });
-            case.expected_escalation_evidence = Some(evidence);
-            case.tags.push("act-escalation".to_string());
+            case.expected_durable_upgrade_evidence = Some(evidence);
+            case.tags.push("durable-upgrade".to_string());
         }
         cases.push(case);
     }
@@ -207,11 +202,11 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
         let mut case = route_case(
             format!("needs-input-{index:03}"),
             format!("Screen the requested dataset {index}."),
-            ExecutionRoutingLabelV1::NeedsInput,
-            ExecutionRouteReason::PreflightInputMissing,
+            ExecutionRoutingLabel::NeedsInput,
+            None,
             response_fixture(
-                ExecutionRouteClassifierLabelV1::NeedsInput,
-                ExecutionRouteReason::PreflightInputMissing,
+                ExecutionRouteClassifierLabel::NeedsInput,
+                None,
                 9_500,
                 vec!["coverage universe".to_string()],
             ),
@@ -226,12 +221,12 @@ fn routing_cases() -> Vec<ExecutionRoutingCaseV1> {
 fn route_case(
     case_id: String,
     objective: String,
-    expected_label: ExecutionRoutingLabelV1,
-    expected_reason: ExecutionRouteReason,
-    classifier: ExecutionRoutingClassifierFixtureV1,
+    expected_label: ExecutionRoutingLabel,
+    expected_strategy: Option<ExecutionStrategy>,
+    classifier: ExecutionRoutingClassifierFixture,
     expected_classifier_outcome: ExecutionRouteClassifierOutcome,
-) -> ExecutionRoutingCaseV1 {
-    ExecutionRoutingCaseV1 {
+) -> ExecutionRoutingCase {
+    ExecutionRoutingCase {
         schema_version: 1,
         case_id,
         objective,
@@ -240,24 +235,40 @@ fn route_case(
         classifier,
         expected_classifier_outcome,
         expected_label,
-        expected_reason,
+        expected_strategy,
         near_boundary: false,
-        escalation: None,
-        expected_escalation_evidence: None,
+        durable_upgrade: None,
+        expected_durable_upgrade_evidence: None,
         tags: Vec::new(),
     }
 }
 
 fn response_fixture(
-    label: ExecutionRouteClassifierLabelV1,
-    reason: ExecutionRouteReason,
+    label: ExecutionRouteClassifierLabel,
+    strategy: Option<ExecutionStrategy>,
     confidence_bps: u16,
     missing_inputs: Vec<String>,
-) -> ExecutionRoutingClassifierFixtureV1 {
-    ExecutionRoutingClassifierFixtureV1::Response {
-        output: ExecutionRouteClassifierOutputV1 {
+) -> ExecutionRoutingClassifierFixture {
+    ExecutionRoutingClassifierFixture::Response {
+        output: ExecutionRouteClassifierOutput {
             label,
-            reason,
+            strategy,
+            rationale: match (label, strategy) {
+                (ExecutionRouteClassifierLabel::Respond, None) => {
+                    "The request only requires a direct explanatory response."
+                }
+                (ExecutionRouteClassifierLabel::Execute, Some(ExecutionStrategy::Inline)) => {
+                    "The requested work fits a bounded interactive execution loop."
+                }
+                (ExecutionRouteClassifierLabel::Execute, Some(ExecutionStrategy::Durable)) => {
+                    "The requested workflow should persist as a durable execution."
+                }
+                (ExecutionRouteClassifierLabel::NeedsInput, None) => {
+                    "A concrete coverage universe is required before work can begin."
+                }
+                _ => "The declared route and strategy are intentionally inconsistent.",
+            }
+            .to_string(),
             confidence_bps,
             missing_inputs,
         },
@@ -271,11 +282,11 @@ fn response_fixture(
     }
 }
 
-fn contract_cases() -> Vec<ExecutionContractCaseV1> {
+fn contract_cases() -> Vec<ExecutionContractCase> {
     (0..80).map(contract_case).collect()
 }
 
-fn contract_case(index: usize) -> ExecutionContractCaseV1 {
+fn contract_case(index: usize) -> ExecutionContractCase {
     let suffix = format!("{index:03}");
     let keys = vec![
         format!("issuer-{suffix}-a"),
@@ -426,11 +437,11 @@ fn contract_case(index: usize) -> ExecutionContractCaseV1 {
             "definition": "artificial intelligence or AI"
         }),
     };
-    ExecutionContractCaseV1 {
+    ExecutionContractCase {
         schema_version: 1,
         case_id: format!("contract-{suffix}"),
         candidate,
-        expected: ExecutionContractExpectationsV1 {
+        expected: ExecutionContractExpectations {
             requirements: vec![
                 text_expectation(
                     "expected-screen",
@@ -445,38 +456,38 @@ fn contract_case(index: usize) -> ExecutionContractCaseV1 {
                     &["define ai mentions", "artificial intelligence"],
                 ),
             ],
-            deliverables: vec![DeliverableExpectationV1 {
+            deliverables: vec![DeliverableExpectation {
                 expectation_id: "expected-deliverable".to_string(),
                 output_pointer: "/report".to_string(),
                 schema: report_schema,
             }],
-            coverage: vec![CoverageExpectationV1 {
+            coverage: vec![CoverageExpectation {
                 expectation_id: "expected-coverage".to_string(),
                 map_node_id: "screen".to_string(),
                 expected_keys: keys,
                 require_all: true,
             }],
             completion_checks: vec![
-                CompletionCheckExpectationV1 {
+                CompletionCheckExpectation {
                     expectation_id: "expected-check-coverage".to_string(),
-                    kind: CompletionCheckKindExpectationV1::MapCoverage,
+                    kind: CompletionCheckKindExpectation::MapCoverage,
                     requirement_expectation_ids: vec!["expected-screen".to_string()],
                     constraint_expectation_ids: vec!["expected-exclusions".to_string()],
                 },
-                CompletionCheckExpectationV1 {
+                CompletionCheckExpectation {
                     expectation_id: "expected-check-citations".to_string(),
-                    kind: CompletionCheckKindExpectationV1::Citations,
+                    kind: CompletionCheckKindExpectation::Citations,
                     requirement_expectation_ids: vec!["expected-report".to_string()],
                     constraint_expectation_ids: vec!["expected-definition".to_string()],
                 },
             ],
             run_input: vec![
-                RunInputExpectationV1 {
+                RunInputExpectation {
                     expectation_id: "expected-years".to_string(),
                     pointer: "/years".to_string(),
                     value: json!(5),
                 },
-                RunInputExpectationV1 {
+                RunInputExpectation {
                     expectation_id: "expected-definition-input".to_string(),
                     pointer: "/definition".to_string(),
                     value: json!("artificial intelligence or AI"),
@@ -495,8 +506,8 @@ fn contract_case(index: usize) -> ExecutionContractCaseV1 {
     }
 }
 
-fn text_expectation(expectation_id: &str, all_terms: &[&str]) -> TextExpectationV1 {
-    TextExpectationV1 {
+fn text_expectation(expectation_id: &str, all_terms: &[&str]) -> TextExpectation {
+    TextExpectation {
         expectation_id: expectation_id.to_string(),
         all_terms: all_terms.iter().map(|term| (*term).to_string()).collect(),
         any_terms: Vec::new(),

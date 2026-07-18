@@ -4,22 +4,22 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use moa_core::types::execution_planning::{
-    ExecutionMode, ExecutionRouteClassifierOutcome, ExecutionRouteProvenanceV1,
-    ExecutionRouteSource, ExecutionRouteUsageV1,
+    ExecutionRouteClassifierOutcome, ExecutionRouteKind, ExecutionRouteProvenance,
+    ExecutionRouteSource, ExecutionRouteUsage, ExecutionStrategy,
 };
 use moa_eval::execution::{
-    EXECUTION_LIVE_CASE_COUNT, EXECUTION_LIVE_REPETITIONS, ExecutionEvalCaseResultV1,
-    ExecutionEvalProviderV1, ExecutionJudgeCalibrationStatusV1, ExecutionLiveRunOutcomeV1,
-    ExecutionRoutingLabelV1, ExecutionTaskQualityCaseV1, aggregate_live_execution_outcomes,
+    EXECUTION_LIVE_CASE_COUNT, EXECUTION_LIVE_REPETITIONS, ExecutionEvalCaseResult,
+    ExecutionEvalProvider, ExecutionJudgeCalibrationStatus, ExecutionLiveRunOutcome,
+    ExecutionRoutingLabel, ExecutionTaskQualityCase, aggregate_live_execution_outcomes,
     forecast_live_execution_cost,
 };
 use moa_execution::state::ExecutionRunStatus;
 
-fn cases() -> Vec<ExecutionTaskQualityCaseV1> {
+fn cases() -> Vec<ExecutionTaskQualityCase> {
     let required_tags = [
         "respond",
-        "near-boundary-act",
-        "durable-run",
+        "near-boundary-inline",
+        "durable-execute",
         "bulk-coverage",
         "evidence-citations",
         "exclusions",
@@ -28,28 +28,35 @@ fn cases() -> Vec<ExecutionTaskQualityCaseV1> {
     ];
     (0..EXECUTION_LIVE_CASE_COUNT)
         .map(|index| {
-            let expected_route = match index {
-                0 => ExecutionRoutingLabelV1::Respond,
-                1 => ExecutionRoutingLabelV1::Act,
-                _ => ExecutionRoutingLabelV1::Run,
+            let (expected_route, expected_strategy) = match index {
+                0 => (ExecutionRoutingLabel::Respond, None),
+                1 => (
+                    ExecutionRoutingLabel::Execute,
+                    Some(ExecutionStrategy::Inline),
+                ),
+                _ => (
+                    ExecutionRoutingLabel::Execute,
+                    Some(ExecutionStrategy::Durable),
+                ),
             };
-            let is_run = expected_route == ExecutionRoutingLabelV1::Run;
+            let is_durable = expected_strategy == Some(ExecutionStrategy::Durable);
             let mut tags = vec![required_tags[index.min(required_tags.len() - 1)].to_string()];
             if index == 1 {
-                tags.push("near-boundary-act".to_string());
+                tags.push("near-boundary-inline".to_string());
             }
-            ExecutionTaskQualityCaseV1 {
+            ExecutionTaskQualityCase {
                 schema_version: 1,
                 case_id: format!("live-{index:03}"),
                 objective: format!("live objective {index}"),
                 expected_route,
-                allowed_terminal_statuses: is_run
+                expected_strategy,
+                allowed_terminal_statuses: is_durable
                     .then_some(vec![ExecutionRunStatus::Completed])
                     .unwrap_or_default(),
-                min_task_count: u64::from(is_run),
-                max_task_count: u64::from(is_run),
-                reference_task_count: u64::from(is_run),
-                contract_case_id: is_run.then(|| format!("contract-{index:03}")),
+                min_task_count: u64::from(is_durable),
+                max_task_count: u64::from(is_durable),
+                reference_task_count: u64::from(is_durable),
+                contract_case_id: is_durable.then(|| format!("contract-{index:03}")),
                 final_message_rubric: "State what was and was not completed.".to_string(),
                 estimated_input_tokens_per_run: 2_000,
                 estimated_output_tokens_per_run: 1_000,
@@ -60,17 +67,17 @@ fn cases() -> Vec<ExecutionTaskQualityCaseV1> {
         .collect()
 }
 
-fn provenance(index: usize) -> ExecutionRouteProvenanceV1 {
-    ExecutionRouteProvenanceV1 {
+fn provenance(index: usize) -> ExecutionRouteProvenance {
+    ExecutionRouteProvenance {
         source: ExecutionRouteSource::Classifier,
         classifier_outcome: ExecutionRouteClassifierOutcome::Accepted,
         provider_model: Some("small-live-router".to_string()),
-        prompt_version: Some("execution-router-v1".to_string()),
+        prompt_version: Some("execution-router".to_string()),
         objective_hash: format!("{index:064x}"),
         response_hash: Some(format!("{:064x}", index + 100)),
         confidence_bps: Some(9_500),
         missing_input_count: 0,
-        usage: ExecutionRouteUsageV1 {
+        usage: ExecutionRouteUsage {
             input_tokens_uncached: 100,
             input_tokens_cache_write: 0,
             input_tokens_cache_read: 0,
@@ -81,33 +88,37 @@ fn provenance(index: usize) -> ExecutionRouteProvenanceV1 {
     }
 }
 
-fn outcomes(cases: &[ExecutionTaskQualityCaseV1]) -> Vec<ExecutionLiveRunOutcomeV1> {
+fn outcomes(cases: &[ExecutionTaskQualityCase]) -> Vec<ExecutionLiveRunOutcome> {
     cases
         .iter()
         .enumerate()
         .flat_map(|(index, case)| {
             (1..=EXECUTION_LIVE_REPETITIONS).map(move |repetition| {
-                let is_run = case.expected_route == ExecutionRoutingLabelV1::Run;
+                let is_durable = case.expected_strategy == Some(ExecutionStrategy::Durable);
                 let observed_route = case.expected_route;
-                let task_count = u64::from(is_run);
-                ExecutionLiveRunOutcomeV1 {
+                let observed_strategy = case.expected_strategy;
+                let task_count = u64::from(is_durable);
+                ExecutionLiveRunOutcome {
                     case_id: case.case_id.clone(),
                     repetition,
                     observed_route,
-                    result: ExecutionEvalCaseResultV1 {
+                    observed_strategy,
+                    result: ExecutionEvalCaseResult {
                         case_id: format!("{}#run={repetition}", case.case_id),
                         passed: true,
-                        contract_omission: is_run.then_some(false),
-                        contract_score: is_run.then_some(1.0),
+                        contract_omission: is_durable.then_some(false),
+                        contract_score: is_durable.then_some(1.0),
                         impossible_case: false,
                         execution_false_completion: false,
-                        observed_run_status: is_run.then_some(ExecutionRunStatus::Completed),
+                        observed_run_status: is_durable.then_some(ExecutionRunStatus::Completed),
                         observed_route: match observed_route {
-                            ExecutionRoutingLabelV1::Respond => Some(ExecutionMode::Respond),
-                            ExecutionRoutingLabelV1::Act => Some(ExecutionMode::Act),
-                            ExecutionRoutingLabelV1::Run => Some(ExecutionMode::Run),
-                            ExecutionRoutingLabelV1::NeedsInput => None,
+                            ExecutionRoutingLabel::Respond => Some(ExecutionRouteKind::Respond),
+                            ExecutionRoutingLabel::Execute => Some(ExecutionRouteKind::Execute),
+                            ExecutionRoutingLabel::NeedsInput => {
+                                Some(ExecutionRouteKind::NeedsInput)
+                            }
                         },
+                        observed_strategy,
                         route_provenance: Some(provenance(index)),
                         invariants: Vec::new(),
                         cost_microusd: 100,
@@ -153,11 +164,11 @@ fn execution_live_aggregation_requires_five_independent_outcomes_and_reports_rel
         &outcomes,
         EXECUTION_LIVE_REPETITIONS,
         hashes.clone(),
-        ExecutionJudgeCalibrationStatusV1::Unavailable,
-        ExecutionEvalProviderV1 {
+        ExecutionJudgeCalibrationStatus::Unavailable,
+        ExecutionEvalProvider {
             provider: "live".to_string(),
             model: "configured".to_string(),
-            prompt_version: "execution-planner-v1".to_string(),
+            prompt_version: "execution-planner".to_string(),
         },
     )
     .expect("complete repeated outcomes should aggregate");
@@ -167,12 +178,15 @@ fn execution_live_aggregation_requires_five_independent_outcomes_and_reports_rel
     assert_eq!(report.metrics.pass_at_1, Some(1.0));
     assert_eq!(report.metrics.pass_all_k, Some(1.0));
     assert_eq!(report.metrics.pass_variance, Some(0.0));
-    assert_eq!(report.metrics.respond_on_run_rate, Some(0.0));
+    assert_eq!(report.metrics.respond_on_execute_rate, Some(0.0));
+    assert_eq!(report.metrics.weighted_routing_cost, Some(0.0));
+    assert_eq!(report.metrics.weighted_strategy_cost, Some(0.0));
+    assert_eq!(report.metrics.durable_strategy_recall, Some(1.0));
     assert_eq!(report.metrics.classifier_fallback_rate, Some(0.0));
     assert_eq!(report.metrics.task_count_ratio_vs_reference, Some(1.0));
     assert_eq!(
         report.judge_calibration_status,
-        ExecutionJudgeCalibrationStatusV1::Unavailable
+        ExecutionJudgeCalibrationStatus::Unavailable
     );
 
     outcomes.pop();
@@ -182,11 +196,11 @@ fn execution_live_aggregation_requires_five_independent_outcomes_and_reports_rel
             &outcomes,
             EXECUTION_LIVE_REPETITIONS,
             hashes,
-            ExecutionJudgeCalibrationStatusV1::Unavailable,
-            ExecutionEvalProviderV1 {
+            ExecutionJudgeCalibrationStatus::Unavailable,
+            ExecutionEvalProvider {
                 provider: "live".to_string(),
                 model: "configured".to_string(),
-                prompt_version: "execution-planner-v1".to_string(),
+                prompt_version: "execution-planner".to_string(),
             },
         )
         .is_err()

@@ -27,9 +27,9 @@ use moa_core::{
     types::agent::AgentSkillPolicy,
     types::events_stream::EventRange,
     types::execution_planning::{
-        ExecutionAdmissionEstimateV1, ExecutionConfirmationEvidenceV1,
-        ExecutionEstimateMethodologyV1, ExecutionPlanningContractError,
-        ExecutionRunAdmissionStatus, ExecutionRunStarted, ExecutionSourceProvenanceV1,
+        ExecutionAdmissionEstimate, ExecutionConfirmationEvidence, ExecutionEstimateMethodology,
+        ExecutionPlanningContractError, ExecutionRunAdmissionStatus, ExecutionRunStarted,
+        ExecutionSourceProvenance,
     },
 };
 use moa_db::ScopedConn;
@@ -68,14 +68,14 @@ use moa_execution::{
         ExecutionAmendmentRequest, ExecutionCancelRequest, ExecutionConfirmRequest,
         ExecutionConflictReason, ExecutionInputRequest, ExecutionMutationResponse,
         ExecutionPlanningContextRequest, ExecutionPlanningContextResponse,
-        ExecutionPlanningContextSnapshotV1, ExecutionReviewDecision,
-        ExecutionReviewDecisionRequest, ExecutionRunCursor, ExecutionRunListRequest,
-        ExecutionRunListResponse, ExecutionRunRequest, ExecutionRunSummary, ExecutionRunWakeReason,
-        ExecutionRunWakeRequest, ExecutionSignalRequest, ExecutionStartRequest,
-        ExecutionStartResponse, ExecutionStatusResponse, ExecutionSynthesisEvidence,
-        ExecutionSynthesisEvidenceRequest, ExecutionTaskCursor, ExecutionTaskListRequest,
-        ExecutionTaskListResponse, PinnedExecutionTemplate, PinnedInstructionSkill, decode_cursor,
-        encode_cursor, originating_user_event_hash, planning_context_hash,
+        ExecutionPlanningContextSnapshot, ExecutionReviewDecision, ExecutionReviewDecisionRequest,
+        ExecutionRunCursor, ExecutionRunListRequest, ExecutionRunListResponse, ExecutionRunRequest,
+        ExecutionRunSummary, ExecutionRunWakeReason, ExecutionRunWakeRequest,
+        ExecutionSignalRequest, ExecutionStartRequest, ExecutionStartResponse,
+        ExecutionStatusResponse, ExecutionSynthesisEvidence, ExecutionSynthesisEvidenceRequest,
+        ExecutionTaskCursor, ExecutionTaskListRequest, ExecutionTaskListResponse,
+        PinnedExecutionTemplate, PinnedInstructionSkill, decode_cursor, encode_cursor,
+        originating_user_event_hash, planning_context_hash,
     },
 };
 use moa_hands::{ToolExecution, ToolRouter};
@@ -1056,7 +1056,7 @@ async fn planning_context_inner(
         &originating_event,
     )
     .map_err(execution_error)?;
-    let snapshot = ExecutionPlanningContextSnapshotV1 {
+    let snapshot = ExecutionPlanningContextSnapshot {
         schema_version: 1,
         tenant_id: request.tenant_id,
         contact_id: request.contact_id,
@@ -1438,23 +1438,23 @@ async fn start_inner(
 }
 
 fn validate_start_source_provenance(
-    provenance: &ExecutionSourceProvenanceV1,
+    provenance: &ExecutionSourceProvenance,
     committed_plan_hash: &str,
     execution_templates: &[PinnedExecutionTemplate],
 ) -> Result<(), ExecutionPlanningContractError> {
     provenance.validate(committed_plan_hash)?;
     let (skill_template_ref, skill_template_revision_uid) = match provenance {
-        ExecutionSourceProvenanceV1::SkillTemplate {
+        ExecutionSourceProvenance::SkillTemplate {
             skill_template_ref,
             skill_template_revision_uid,
             ..
         }
-        | ExecutionSourceProvenanceV1::ExperimentTemplate {
+        | ExecutionSourceProvenance::ExperimentTemplate {
             skill_template_ref,
             skill_template_revision_uid,
             ..
         } => (skill_template_ref, skill_template_revision_uid),
-        ExecutionSourceProvenanceV1::GeneratedPlan { .. } => return Ok(()),
+        ExecutionSourceProvenance::GeneratedPlan { .. } => return Ok(()),
     };
     let parsed = skill_template_ref.parse::<ArtifactRef>().map_err(|error| {
         ExecutionPlanningContractError::InvalidField {
@@ -2511,7 +2511,7 @@ fn verify_run_scope(
 fn verify_start_replay(
     run: &ExecutionRunRecord,
     request: &ExecutionStartRequest,
-    snapshot: &ExecutionPlanningContextSnapshotV1,
+    snapshot: &ExecutionPlanningContextSnapshot,
 ) -> Result<(), HandlerError> {
     let expected_hash = request
         .planning_context_hash
@@ -2546,8 +2546,6 @@ fn run_summary(run: &ExecutionRunRecord) -> ExecutionRunSummary {
         originating_user_sequence_num: run.originating_user_sequence_num,
         status: run.status,
         source_kind: run.source_kind,
-        route_mode: run.route.mode,
-        route_reason: run.route.reason,
         skill_template_ref: run.skill_template_ref.clone(),
         skill_template_revision_uid: run.skill_template_revision_uid,
         plan_revision: run.plan_revision,
@@ -2637,16 +2635,16 @@ fn execution_run_started_delivery(
     };
     let confirmation = response
         .confirmation_required
-        .then(|| ExecutionConfirmationEvidenceV1 {
+        .then(|| ExecutionConfirmationEvidence {
             active_plan_hash: response.active_plan_hash.to_string(),
-            estimate: ExecutionAdmissionEstimateV1 {
+            estimate: ExecutionAdmissionEstimate {
                 cost_microusd: response.estimate.cost_microusd,
                 tokens: response.estimate.tokens,
                 tasks: response.estimate.tasks,
                 tool_calls: response.estimate.tool_calls,
                 retrieved_bytes: response.estimate.retrieved_bytes,
             },
-            methodology: ExecutionEstimateMethodologyV1::ConservativeWorstCaseV1,
+            methodology: ExecutionEstimateMethodology::ConservativeWorstCase,
         });
     ExecutionRunStartedDelivery {
         started: ExecutionRunStarted {
@@ -2901,7 +2899,7 @@ fn registered_tool_capability(
                 tool_name: definition.name.clone(),
             },
             ExecutionClass::Data,
-            "moa.execution.capability.memory.v1",
+            "moa.execution.capability.memory",
             json!({"kind": "memory"}),
         ),
         ToolExecution::BuiltIn(_) => (
@@ -2913,7 +2911,7 @@ fn registered_tool_capability(
             } else {
                 ExecutionClass::Compute
             },
-            "moa.execution.capability.builtin.v1",
+            "moa.execution.capability.builtin",
             json!({"kind": "builtin"}),
         ),
         ToolExecution::Hand { .. } => (
@@ -2921,7 +2919,7 @@ fn registered_tool_capability(
                 name: definition.name.clone(),
             },
             ExecutionClass::Compute,
-            "moa.execution.capability.hand.v1",
+            "moa.execution.capability.hand",
             json!({"kind": "hand"}),
         ),
         ToolExecution::Mcp { server_name } => (
@@ -2930,7 +2928,7 @@ fn registered_tool_capability(
                 name: definition.name.clone(),
             },
             ExecutionClass::External,
-            "moa.execution.capability.mcp.v1",
+            "moa.execution.capability.mcp",
             json!({"kind": "mcp", "server": server_name}),
         ),
     };
@@ -3277,8 +3275,7 @@ mod tests {
     use moa_core::types::{
         agent::{AgentSkillPolicy, AgentSkillPolicyMode},
         execution_planning::{
-            ExecutionPlanningContractError, ExecutionRouteReason, ExecutionSourceProvenanceV1,
-            PinnedExecutionTemplateRef,
+            ExecutionPlanningContractError, ExecutionSourceProvenance, PinnedExecutionTemplateRef,
         },
     };
     use moa_execution::{
@@ -3714,8 +3711,7 @@ mod tests {
             },
         }];
         let committed_plan_hash = "a".repeat(64);
-        let exact = ExecutionSourceProvenanceV1::SkillTemplate {
-            route_reason: ExecutionRouteReason::SelectedExecutionTemplate,
+        let exact = ExecutionSourceProvenance::SkillTemplate {
             skill_template_ref: skill_ref.to_string(),
             skill_template_revision_uid: pinned_revision_uid,
         };
@@ -3724,8 +3720,7 @@ mod tests {
             Ok(())
         );
 
-        let wrong_revision = ExecutionSourceProvenanceV1::SkillTemplate {
-            route_reason: ExecutionRouteReason::SelectedExecutionTemplate,
+        let wrong_revision = ExecutionSourceProvenance::SkillTemplate {
             skill_template_ref: skill_ref.to_string(),
             skill_template_revision_uid: Uuid::from_u128(8),
         };
@@ -3738,8 +3733,7 @@ mod tests {
             })
         );
 
-        let noncanonical = ExecutionSourceProvenanceV1::SkillTemplate {
-            route_reason: ExecutionRouteReason::SelectedExecutionTemplate,
+        let noncanonical = ExecutionSourceProvenance::SkillTemplate {
             skill_template_ref: "skill://Durable-Report".to_string(),
             skill_template_revision_uid: pinned_revision_uid,
         };
@@ -3757,9 +3751,8 @@ mod tests {
     fn experiment_template_provenance(
         skill_template_ref: String,
         skill_template_revision_uid: Uuid,
-    ) -> ExecutionSourceProvenanceV1 {
-        ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+    ) -> ExecutionSourceProvenance {
+        ExecutionSourceProvenance::ExperimentTemplate {
             skill_template_ref,
             skill_template_revision_uid,
             experiment_run_uid: Uuid::from_u128(21),

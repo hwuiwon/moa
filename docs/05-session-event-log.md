@@ -198,6 +198,21 @@ calls, and compiler outcomes are written directly to the normalized
 and compiler reports out of model-visible history, session search, compaction,
 contact progress, and public SSE by construction.
 
+The route audit accepts only the normalized decision/strategy matrix:
+
+| Stage | Decision | Strategy | Source |
+|---|---|---|---|
+| Initial | Respond | none | classifier |
+| Initial | NeedsInput | none | blank-objective preflight or classifier |
+| Initial | Execute | Inline | classifier, including every classifier fallback |
+| Initial | Execute | Durable | classifier or selected execution template |
+| Durable upgrade | Execute | Durable | workflow-owned `request_durable_execution` control transition |
+
+The row retains typed source and classifier-outcome provenance plus bounded
+model, prompt, hash, confidence, usage, cost, and duration metadata. Classifier
+rationale is session-local and ephemeral: neither route audits nor durable run
+facts store it. They also never store raw objective or classifier response text.
+
 `SegmentStarted` records segment ID, index, summary, and previous segment ID. `SegmentCompleted` records final counters and duration.
 
 `WorkerSpawned`, `WorkerMessageSent`, `WorkerStatusChanged`, and

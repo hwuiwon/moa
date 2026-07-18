@@ -2,9 +2,10 @@
 
 use std::collections::BTreeMap;
 
+use moa_core::types::execution_planning::{ExecutionRouteKind, ExecutionStrategy};
 use moa_eval::execution::{
-    ExecutionEvalCaseResultV1, ExecutionEvalLaneV1, ExecutionEvalReportV1,
-    ExecutionInvariantSpecV1, ExecutionJudgeCalibrationStatusV1,
+    ExecutionEvalCaseResult, ExecutionEvalLane, ExecutionEvalReport, ExecutionInvariantSpec,
+    ExecutionJudgeCalibrationStatus,
 };
 use moa_execution::state::{ExecutionRunStatus, ExecutionTaskStatus};
 use serde_json::{Value, json};
@@ -13,7 +14,7 @@ use super::execution_snapshot::eval_snapshot;
 
 #[test]
 fn execution_report_rejects_unknown_missing_renamed_and_duplicate_fields_offline() {
-    // Pins: the V1 report wire fails closed instead of tolerating schema drift.
+    // Pins: the execution report wire fails closed instead of tolerating schema drift.
     let report = valid_report();
     let value = serde_json::to_value(&report).expect("valid report should serialize");
 
@@ -22,14 +23,14 @@ fn execution_report_rejects_unknown_missing_renamed_and_duplicate_fields_offline
         .as_object_mut()
         .expect("report JSON should be an object")
         .insert("unexpected".to_string(), json!(true));
-    assert!(serde_json::from_value::<ExecutionEvalReportV1>(unknown).is_err());
+    assert!(serde_json::from_value::<ExecutionEvalReport>(unknown).is_err());
 
     let mut missing = value.clone();
     missing
         .as_object_mut()
         .expect("report JSON should be an object")
         .remove("lane");
-    assert!(serde_json::from_value::<ExecutionEvalReportV1>(missing).is_err());
+    assert!(serde_json::from_value::<ExecutionEvalReport>(missing).is_err());
 
     let mut renamed = value;
     let object = renamed
@@ -39,11 +40,11 @@ fn execution_report_rejects_unknown_missing_renamed_and_duplicate_fields_offline
         .remove("schema_version")
         .expect("fixture should have schema_version");
     object.insert("version".to_string(), schema_version);
-    assert!(serde_json::from_value::<ExecutionEvalReportV1>(renamed).is_err());
+    assert!(serde_json::from_value::<ExecutionEvalReport>(renamed).is_err());
 
     let encoded = serde_json::to_string(&report).expect("valid report should serialize");
     let duplicated = encoded.replacen('{', "{\"schema_version\":1,", 1);
-    assert!(serde_json::from_str::<ExecutionEvalReportV1>(&duplicated).is_err());
+    assert!(serde_json::from_str::<ExecutionEvalReport>(&duplicated).is_err());
 }
 
 #[test]
@@ -74,6 +75,21 @@ fn execution_report_rejects_version_identity_hash_metric_and_count_drift_offline
 }
 
 #[test]
+fn execution_report_rejects_missing_or_extraneous_strategy_offline() {
+    // Pins: Execute rows require exactly one internal strategy while Respond and
+    // NeedsInput rows cannot smuggle a run-mode equivalent into the report.
+    let mut missing = valid_report();
+    missing.cases[0].observed_route = Some(ExecutionRouteKind::Execute);
+    missing.cases[0].observed_strategy = None;
+    assert!(missing.validate().is_err());
+
+    let mut extraneous = valid_report();
+    extraneous.cases[0].observed_route = Some(ExecutionRouteKind::Respond);
+    extraneous.cases[0].observed_strategy = Some(ExecutionStrategy::Inline);
+    assert!(extraneous.validate().is_err());
+}
+
+#[test]
 fn execution_report_recomputes_false_completion_from_typed_case_rows_offline() {
     // Pins: false-completion numerator and denominator cannot be edited independently of case evidence.
     let partial = eval_snapshot(
@@ -84,12 +100,12 @@ fn execution_report_recomputes_false_completion_from_typed_case_rows_offline() {
         ExecutionRunStatus::Completed,
         &[("issuer-a", ExecutionTaskStatus::Completed)],
     );
-    let spec = ExecutionInvariantSpecV1::MapCoverage {
+    let spec = ExecutionInvariantSpec::MapCoverage {
         node_id: "research".to_string(),
         expected_keys: vec!["issuer-a".to_string(), "issuer-b".to_string()],
         require_all_when_completed: true,
     };
-    let partial_case = ExecutionEvalCaseResultV1::evaluate(
+    let partial_case = ExecutionEvalCaseResult::evaluate(
         "silent-incomplete-partial",
         &partial,
         std::slice::from_ref(&spec),
@@ -97,14 +113,14 @@ fn execution_report_recomputes_false_completion_from_typed_case_rows_offline() {
     )
     .expect("partial case should evaluate");
     let completed_case =
-        ExecutionEvalCaseResultV1::evaluate("silent-incomplete-completed", &completed, &[spec], 10)
+        ExecutionEvalCaseResult::evaluate("silent-incomplete-completed", &completed, &[spec], 10)
             .expect("completed case should evaluate");
-    let report = ExecutionEvalReportV1::new(
-        ExecutionEvalLaneV1::OfflinePr,
+    let report = ExecutionEvalReport::new(
+        ExecutionEvalLane::OfflinePr,
         BTreeMap::from([("execution-fixture".to_string(), "a".repeat(64))]),
         vec![42],
         1,
-        ExecutionJudgeCalibrationStatusV1::Unavailable,
+        ExecutionJudgeCalibrationStatus::Unavailable,
         None,
         vec![partial_case, completed_case],
     )
@@ -146,15 +162,15 @@ fn execution_report_serialization_contains_hashes_not_raw_execution_payloads_off
     }
 }
 
-fn valid_report() -> ExecutionEvalReportV1 {
+fn valid_report() -> ExecutionEvalReport {
     let snapshot = eval_snapshot(
         ExecutionRunStatus::Partial,
         &[("issuer-a", ExecutionTaskStatus::Completed)],
     );
-    let case = ExecutionEvalCaseResultV1::evaluate(
+    let case = ExecutionEvalCaseResult::evaluate(
         "silent-incomplete-partial",
         &snapshot,
-        &[ExecutionInvariantSpecV1::MapCoverage {
+        &[ExecutionInvariantSpec::MapCoverage {
             node_id: "research".to_string(),
             expected_keys: vec!["issuer-a".to_string(), "issuer-b".to_string()],
             require_all_when_completed: true,
@@ -162,12 +178,12 @@ fn valid_report() -> ExecutionEvalReportV1 {
         10,
     )
     .expect("fixture case should evaluate");
-    ExecutionEvalReportV1::new(
-        ExecutionEvalLaneV1::OfflinePr,
+    ExecutionEvalReport::new(
+        ExecutionEvalLane::OfflinePr,
         BTreeMap::from([("execution-fixture".to_string(), "a".repeat(64))]),
         vec![42],
         1,
-        ExecutionJudgeCalibrationStatusV1::Unavailable,
+        ExecutionJudgeCalibrationStatus::Unavailable,
         None,
         vec![case],
     )

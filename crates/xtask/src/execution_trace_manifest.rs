@@ -1030,14 +1030,14 @@ const SENDERS: &[SenderManifestEntry] = &[
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
-        "execute_run_admission",
+        "execute_durable_admission",
         IDENTITY_TRACE_HELPER,
         "ExecutionClient",
         "planning_context"
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
-        "execute_run_admission",
+        "execute_durable_admission",
         IDENTITY_TRACE_HELPER,
         "ExecutionClient",
         "start"

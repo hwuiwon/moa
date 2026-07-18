@@ -34,6 +34,31 @@ of the default tenant connection.
 
 ## Execution Run Operations
 
+### Fresh V000337 Inspection
+
+Validate the execution analytics cutover from a fresh schema, not a developer
+database whose migration history may contain an older checksum. For an
+explicitly disposable local compose stack only, stop the stack and remove its
+volumes, start Postgres again, and run the canonical refinery migration path.
+Never use a volume reset on shared, staging, or production data.
+
+```bash
+docker compose down -v
+docker compose up -d postgres
+MOA_DATABASE_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa \
+  cargo test -p moa-migrations --test run_idempotency_db --locked \
+  execution_analytics_fresh_cutover_and_exact_contract_db -- \
+  --ignored --exact --nocapture
+```
+
+After migration, inspect `_refinery_schema_history` for version 337 and verify
+that `moa.execution_route_audit` has `decision`, nullable `strategy`, and bounded
+typed source/classifier provenance columns without free-form rationale. Verify
+that `moa.execution_run` and `analytics.execution_run_fact` retain typed source
+and plan-hash provenance without rationale or a constant run-mode dimension.
+Run the focused clean-apply/idempotency database test before trusting a second
+apply.
+
 ### Capacity And Backpressure
 
 Execution plans have no application active-worker, plan-node, map-item, or task
@@ -95,8 +120,11 @@ Inspect sources in this order. Do not skip directly to logs or traces:
 
 1. Inspect the durable run through `Execution/status` and
    `moa.execution_run`: `status`, `wake_epoch`, `processed_wake_epoch`,
-   `plan_revision`, waiting reasons, and timestamps. A greater `wake_epoch`
-   means the latest scheduling mutation is not yet acknowledged.
+   immutable goal contract, active plan hash/revision, typed terminal reason,
+   completion-check evidence, budget/reservation totals, waiting reasons, and
+   timestamps. A greater `wake_epoch` means the latest scheduling mutation is
+   not yet acknowledged. Do not infer the execution path from a constant mode
+   field; use the persisted typed route source and planning audit.
 2. Inspect active `moa.execution_task` rows: state, `task_id`, attempt,
    generation fence, reservation/actual values, and
    `reserved_at`/`started_at`/`completed_at`. A stale generation must never
@@ -244,15 +272,32 @@ Retention inside ClickHouse: `turn_lineage` drops via table TTL
 have no TTL — their Postgres sources are the retention authority until the
 events tiering phase (see the plan's north-star section).
 
-### Execution Analytics Upgrade And Recovery
+### Execution Analytics Bootstrap And Schema Drift Recovery
 
-The execution-dimension upgrade and normal incremental export are resumable
-state machines under the existing single exporter lease. Do not drop tables,
-reset cursors, or recapture a high water manually.
+Execution-dimension bootstrap and normal incremental export are resumable state
+machines under the existing single exporter lease. Missing current ClickHouse
+tables are created automatically. Existing execution tables must match the
+exact ordered columns/types, a non-nil Atomic table UUID,
+`ReplacingMergeTree(export_version)`, an empty partition key, and the exact
+sorting/primary keys. The exporter never alters, rebuilds, copies, or translates
+a mismatched execution table.
 
-For an interrupted schema upgrade, inspect
-`analytics.clickhouse_schema_upgrade_state` at key
-`execution_dimensions_v2`. The durable stages are:
+If startup reports `ClickHouse analytics reset required`, drop exactly
+`dim_execution_runs` and `dim_execution_tasks` together inside the existing
+ClickHouse analytics database, then restart the exporter. Never drop or
+recreate the whole database: Postgres cursors for the other ClickHouse copies
+survive and cannot prove a complete historical replay. A changed database UUID
+is therefore rejected without adding a bootstrap generation. Restore the
+original database from the deployment backup/recovery path; do not delete
+Postgres cursor state as an ad hoc repair. Do not issue ad hoc `ALTER`, `RENAME`,
+or `INSERT SELECT` repairs, and do not reset Postgres source data.
+
+For an interrupted bootstrap after schema validation, inspect the latest row in
+`analytics.clickhouse_schema_upgrade_state` for `execution_dimensions` ordered
+by `generation DESC`. Confirm that its `run_table_uuid` and `task_table_uuid`
+match ClickHouse `system.tables.uuid` and that its `database_uuid` matches
+`system.databases.uuid`. The database UUID is immutable across every
+generation. The durable stages are:
 
 ```text
 pending
@@ -264,10 +309,15 @@ pending
 ```
 
 Restart the exporter after correcting ClickHouse availability or credentials.
-It resumes the recorded stage, validates completed DDL, and continues from the
-persisted per-dataset page cursor to the stored run/task high-water tuples.
-Schema mutations are synchronous, or the upgrader waits for
-`system.mutations` before advancing the stage.
+It resumes the recorded stage, revalidates the exact current schema, and
+continues from the persisted per-dataset page cursor to the stored run/task
+high-water tuples. After a paired execution-table reset, new execution-table
+UUIDs append one generation only when both UUIDs change under the same database
+UUID, reset both execution cursors, and restore all source rows through new
+fixed high waters. Replayed startup with unchanged table UUIDs reuses the latest
+generation. A one-table reset is rejected; drop both execution tables together
+and retry. Do not delete prior generation rows; their version floors keep reset
+recovery monotonic under clock skew.
 
 Normal execution export also persists an immutable active pass bound
 `(pass_high_water_seq, pass_high_water_id)` and `pass_started_at`. After a

@@ -1,7 +1,7 @@
 //! Progress and cancellation state helpers shared by turn workflows.
 
 use moa_core::{
-    types::execution_planning::ExecutionRouteDecision,
+    types::execution_planning::{ExecutionRouteDecision, ExecutionRouteSummary},
     wire::turn::{TurnPhase, TurnProgress},
 };
 use restate_sdk::prelude::*;
@@ -58,11 +58,14 @@ pub(crate) fn set_phase(ctx: &WorkflowContext<'_>, phase: TurnPhase) {
 /// Initializes shared model-loop progress fields.
 pub(crate) fn initialize_loop_progress(
     ctx: &WorkflowContext<'_>,
-    execution_route: ExecutionRouteDecision,
+    execution_route: Option<ExecutionRouteDecision>,
     max_turns: usize,
     max_tool_calls: usize,
 ) {
-    ctx.set(TurnStateKey::EXECUTION_ROUTE, Json::from(execution_route));
+    match execution_route {
+        Some(route) => set_execution_route(ctx, &route),
+        None => ctx.clear(TurnStateKey::EXECUTION_ROUTE),
+    }
     ctx.set(TurnStateKey::ITERATION, Json::from(0_u32));
     ctx.set(TurnStateKey::MAX_TURNS, Json::from(progress_cap(max_turns)));
     ctx.set(TurnStateKey::TOOL_CALLS, Json::from(0_u32));
@@ -70,6 +73,25 @@ pub(crate) fn initialize_loop_progress(
         TurnStateKey::MAX_TOOL_CALLS,
         Json::from(progress_cap(max_tool_calls)),
     );
+}
+
+/// Stores only the rationale-free route projection in durable workflow progress.
+pub(crate) fn set_execution_route(
+    ctx: &WorkflowContext<'_>,
+    execution_route: &ExecutionRouteDecision,
+) {
+    ctx.set(
+        TurnStateKey::EXECUTION_ROUTE,
+        Json::from(ExecutionRouteSummary::from(execution_route)),
+    );
+}
+
+/// Initializes progress for a route handled without constructing a model loop.
+pub(crate) fn initialize_non_loop_progress(
+    ctx: &WorkflowContext<'_>,
+    execution_route: ExecutionRouteDecision,
+) {
+    initialize_loop_progress(ctx, Some(execution_route), 0, 0);
 }
 
 /// Stores the current model-loop iteration using the progress DTO cap.
@@ -133,7 +155,7 @@ pub(crate) async fn snapshot(
             .await?,
     );
     let execution_route = ctx
-        .get::<Json<ExecutionRouteDecision>>(TurnStateKey::EXECUTION_ROUTE)
+        .get::<Json<ExecutionRouteSummary>>(TurnStateKey::EXECUTION_ROUTE)
         .await?
         .map(Json::into_inner);
     let iteration = ctx

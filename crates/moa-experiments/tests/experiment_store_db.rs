@@ -1469,7 +1469,6 @@ async fn insert_execution_run(
     let plan_hash = "2".repeat(64);
     let source_provenance = json!({
         "kind": "experiment_template",
-        "route_reason": "explicit_run",
         "skill_template_ref": "skill://experiment-link",
         "skill_template_revision_uid": Uuid::now_v7(),
         "experiment_run_uid": experiment_run_uid,

@@ -2,15 +2,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moa_core::types::execution_planning::{ExecutionMode, ExecutionRouteProvenanceV1};
+use moa_core::types::execution_planning::{
+    ExecutionRouteKind, ExecutionRouteProvenance, ExecutionStrategy,
+};
 use moa_eval_core::{EvalError, Result};
 use moa_execution::state::ExecutionRunStatus;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    invariants::{ExecutionInvariantResultV1, ExecutionInvariantSpecV1, evaluate_invariants},
-    snapshot::ExecutionEvalSnapshotV1,
+    invariants::{ExecutionInvariantResult, ExecutionInvariantSpec, evaluate_invariants},
+    snapshot::ExecutionEvalSnapshot,
 };
 
 /// Current schema version for execution-eval reports.
@@ -18,12 +20,12 @@ pub const EXECUTION_EVAL_REPORT_SCHEMA_VERSION: u8 = 1;
 const MAX_CASE_ID_BYTES: usize = 256;
 const MAX_INVARIANT_JSON_BYTES: usize = 16_384;
 const MAX_DIAGNOSTIC_BYTES: usize = 1_024;
-const FINAL_RESPONSE_HASH_DOMAIN: &[u8] = b"moa.execution-eval.final-response.v1\0";
+const FINAL_RESPONSE_HASH_DOMAIN: &[u8] = b"moa.execution-eval.final-response\0";
 
 /// Execution-eval lane that produced a report.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutionEvalLaneV1 {
+pub enum ExecutionEvalLane {
     /// Pure functions and checked-in corpora used as a PR hard gate.
     OfflinePr,
     /// Scripted-provider production-path scenarios used as a PR hard gate.
@@ -39,7 +41,7 @@ pub enum ExecutionEvalLaneV1 {
 /// Calibration state for any semantic judge metrics attached to a report.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutionJudgeCalibrationStatusV1 {
+pub enum ExecutionJudgeCalibrationStatus {
     /// No complete human-label artifact was supplied; judged metrics are unavailable.
     Unavailable,
     /// The supplied artifact passed every agreement and judge-accuracy threshold.
@@ -51,7 +53,7 @@ pub enum ExecutionJudgeCalibrationStatusV1 {
 /// Provider and model provenance for a live or recorded report.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionEvalProviderV1 {
+pub struct ExecutionEvalProvider {
     /// Stable provider identifier.
     pub provider: String,
     /// Stable model identifier.
@@ -63,7 +65,7 @@ pub struct ExecutionEvalProviderV1 {
 /// One case-level deterministic execution-eval result.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionEvalCaseResultV1 {
+pub struct ExecutionEvalCaseResult {
     /// Stable corpus case identifier.
     pub case_id: String,
     /// Whether all case-level gates passed.
@@ -78,12 +80,14 @@ pub struct ExecutionEvalCaseResultV1 {
     pub execution_false_completion: bool,
     /// Observed durable execution status, absent for non-execution routing cases.
     pub observed_run_status: Option<ExecutionRunStatus>,
-    /// Final routed mode for a routing-aware case.
-    pub observed_route: Option<ExecutionMode>,
+    /// Final route kind for a routing-aware case.
+    pub observed_route: Option<ExecutionRouteKind>,
+    /// Deterministic strategy for an observed Execute route.
+    pub observed_strategy: Option<ExecutionStrategy>,
     /// Exact redacted classifier provenance retained for a routing-aware case.
-    pub route_provenance: Option<ExecutionRouteProvenanceV1>,
+    pub route_provenance: Option<ExecutionRouteProvenance>,
     /// Ordered deterministic invariant results.
-    pub invariants: Vec<ExecutionInvariantResultV1>,
+    pub invariants: Vec<ExecutionInvariantResult>,
     /// Reconciled provider and capability cost for the case.
     pub cost_microusd: u64,
     /// Measured case latency.
@@ -96,12 +100,12 @@ pub struct ExecutionEvalCaseResultV1 {
     pub final_response_hash: Option<String>,
 }
 
-impl ExecutionEvalCaseResultV1 {
+impl ExecutionEvalCaseResult {
     /// Evaluates deterministic invariants and builds one redacted case result.
     pub fn evaluate(
         case_id: impl Into<String>,
-        snapshot: &ExecutionEvalSnapshotV1,
-        specs: &[ExecutionInvariantSpecV1],
+        snapshot: &ExecutionEvalSnapshot,
+        specs: &[ExecutionInvariantSpec],
         latency_ms: u64,
     ) -> Result<Self> {
         let invariants = evaluate_invariants(snapshot, specs);
@@ -127,6 +131,7 @@ impl ExecutionEvalCaseResultV1 {
             execution_false_completion,
             observed_run_status: Some(snapshot.run.status),
             observed_route: None,
+            observed_strategy: None,
             route_provenance: None,
             invariants,
             cost_microusd: snapshot.run.budget_ledger.consumed.cost_microusd,
@@ -141,7 +146,7 @@ impl ExecutionEvalCaseResultV1 {
 /// Aggregate metrics and exact denominators for one execution-eval report.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionEvalAggregateMetricsV1 {
+pub struct ExecutionEvalAggregateMetrics {
     /// Number of case rows.
     pub total_cases: u64,
     /// Number of passing case rows.
@@ -162,14 +167,18 @@ pub struct ExecutionEvalAggregateMetricsV1 {
     pub execution_false_completion_rate: Option<f64>,
     /// Asymmetric routing cost, when a routing corpus was evaluated.
     pub weighted_routing_cost: Option<f64>,
-    /// True Run cases incorrectly predicted Respond.
-    pub respond_on_run_rate: Option<f64>,
-    /// Recall over adjudicated near-boundary Act cases.
-    pub near_boundary_act_recall: Option<f64>,
-    /// Recall over typed Act-to-Run escalation cases.
-    pub escalation_recall: Option<f64>,
-    /// Exact evidence preservation across typed escalation cases.
-    pub escalation_evidence_preservation_rate: Option<f64>,
+    /// Asymmetric Inline/Durable strategy cost, when Execute cases were evaluated.
+    pub weighted_strategy_cost: Option<f64>,
+    /// True Execute cases incorrectly predicted Respond.
+    pub respond_on_execute_rate: Option<f64>,
+    /// Recall over adjudicated near-boundary Execute/Inline cases.
+    pub near_boundary_inline_recall: Option<f64>,
+    /// Recall over all expected Durable strategies.
+    pub durable_strategy_recall: Option<f64>,
+    /// Recall over typed Inline-to-Durable upgrade cases.
+    pub durable_upgrade_recall: Option<f64>,
+    /// Exact evidence preservation across typed Durable-upgrade cases.
+    pub durable_upgrade_evidence_preservation_rate: Option<f64>,
     /// True NeedsInput cases incorrectly accepted into a concrete mode.
     pub needs_input_false_accept_rate: Option<f64>,
     /// True concrete-mode cases unnecessarily predicted NeedsInput.
@@ -198,9 +207,9 @@ pub struct ExecutionEvalAggregateMetricsV1 {
     pub mutation_score: Option<f64>,
 }
 
-impl ExecutionEvalAggregateMetricsV1 {
+impl ExecutionEvalAggregateMetrics {
     /// Computes exact count-derived metrics from case rows.
-    pub fn from_cases(cases: &[ExecutionEvalCaseResultV1]) -> Result<Self> {
+    pub fn from_cases(cases: &[ExecutionEvalCaseResult]) -> Result<Self> {
         let total_cases = usize_to_u64(cases.len(), "total execution eval cases")?;
         let passed_cases = usize_to_u64(
             cases.iter().filter(|case| case.passed).count(),
@@ -242,10 +251,12 @@ impl ExecutionEvalAggregateMetricsV1 {
             contract_macro_f1: mean_optional(cases.iter().map(|case| case.contract_score)),
             execution_false_completion_rate: ratio(execution_false_completions, impossible_cases),
             weighted_routing_cost: None,
-            respond_on_run_rate: None,
-            near_boundary_act_recall: None,
-            escalation_recall: None,
-            escalation_evidence_preservation_rate: None,
+            weighted_strategy_cost: None,
+            respond_on_execute_rate: None,
+            near_boundary_inline_recall: None,
+            durable_strategy_recall: None,
+            durable_upgrade_recall: None,
+            durable_upgrade_evidence_preservation_rate: None,
             needs_input_false_accept_rate: None,
             unnecessary_clarification_rate: None,
             classifier_fallback_rate: None,
@@ -266,11 +277,11 @@ impl ExecutionEvalAggregateMetricsV1 {
 /// Strict, versioned execution evaluation report.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionEvalReportV1 {
+pub struct ExecutionEvalReport {
     /// Report schema version, fixed at `1`.
     pub schema_version: u8,
     /// Lane that produced this report.
-    pub lane: ExecutionEvalLaneV1,
+    pub lane: ExecutionEvalLane,
     /// Exact lowercase SHA-256 hashes for every checked-in or generated corpus.
     pub corpus_hashes: BTreeMap<String, String>,
     /// Deterministic corpus or bootstrap seeds.
@@ -278,27 +289,27 @@ pub struct ExecutionEvalReportV1 {
     /// Number of independent outcomes recorded per logical case.
     pub repetitions: u32,
     /// Calibration status governing any semantic judge metrics.
-    pub judge_calibration_status: ExecutionJudgeCalibrationStatusV1,
+    pub judge_calibration_status: ExecutionJudgeCalibrationStatus,
     /// Provider/model provenance when applicable.
-    pub provider: Option<ExecutionEvalProviderV1>,
+    pub provider: Option<ExecutionEvalProvider>,
     /// Stable per-case results.
-    pub cases: Vec<ExecutionEvalCaseResultV1>,
+    pub cases: Vec<ExecutionEvalCaseResult>,
     /// Exact report aggregates.
-    pub metrics: ExecutionEvalAggregateMetricsV1,
+    pub metrics: ExecutionEvalAggregateMetrics,
 }
 
-impl ExecutionEvalReportV1 {
+impl ExecutionEvalReport {
     /// Builds and validates a report from strict case rows.
     pub fn new(
-        lane: ExecutionEvalLaneV1,
+        lane: ExecutionEvalLane,
         corpus_hashes: BTreeMap<String, String>,
         seeds: Vec<u64>,
         repetitions: u32,
-        judge_calibration_status: ExecutionJudgeCalibrationStatusV1,
-        provider: Option<ExecutionEvalProviderV1>,
-        cases: Vec<ExecutionEvalCaseResultV1>,
+        judge_calibration_status: ExecutionJudgeCalibrationStatus,
+        provider: Option<ExecutionEvalProvider>,
+        cases: Vec<ExecutionEvalCaseResult>,
     ) -> Result<Self> {
-        let metrics = ExecutionEvalAggregateMetricsV1::from_cases(&cases)?;
+        let metrics = ExecutionEvalAggregateMetrics::from_cases(&cases)?;
         let report = Self {
             schema_version: EXECUTION_EVAL_REPORT_SCHEMA_VERSION,
             lane,
@@ -342,7 +353,7 @@ impl ExecutionEvalReportV1 {
         }
 
         validate_metrics(&self.metrics)?;
-        let computed = ExecutionEvalAggregateMetricsV1::from_cases(&self.cases)?;
+        let computed = ExecutionEvalAggregateMetrics::from_cases(&self.cases)?;
         validate_count_derived_metrics(&self.metrics, &computed)
     }
 
@@ -353,7 +364,7 @@ impl ExecutionEvalReportV1 {
     }
 }
 
-fn validate_case(case: &ExecutionEvalCaseResultV1) -> Result<()> {
+fn validate_case(case: &ExecutionEvalCaseResult) -> Result<()> {
     if case.case_id.trim().is_empty() || case.case_id.len() > MAX_CASE_ID_BYTES {
         return Err(invalid_config(format!(
             "execution eval case ID must contain 1..={MAX_CASE_ID_BYTES} bytes"
@@ -362,6 +373,23 @@ fn validate_case(case: &ExecutionEvalCaseResultV1) -> Result<()> {
     validate_optional_hash("terminal_output_hash", case.terminal_output_hash.as_deref())?;
     validate_optional_hash("final_response_hash", case.final_response_hash.as_deref())?;
     validate_optional_rate("contract_score", case.contract_score)?;
+    if !matches!(
+        (case.observed_route, case.observed_strategy),
+        (None, None)
+            | (
+                Some(ExecutionRouteKind::Respond | ExecutionRouteKind::NeedsInput),
+                None
+            )
+            | (
+                Some(ExecutionRouteKind::Execute),
+                Some(ExecutionStrategy::Inline | ExecutionStrategy::Durable)
+            )
+    ) {
+        return Err(invalid_config(format!(
+            "execution eval case `{}` has an inconsistent route and strategy",
+            case.case_id
+        )));
+    }
 
     let mut invariant_ids = BTreeSet::new();
     for invariant in &case.invariants {
@@ -432,7 +460,7 @@ fn validate_corpus_hashes(hashes: &BTreeMap<String, String>) -> Result<()> {
     Ok(())
 }
 
-fn validate_provider(provider: Option<&ExecutionEvalProviderV1>) -> Result<()> {
+fn validate_provider(provider: Option<&ExecutionEvalProvider>) -> Result<()> {
     let Some(provider) = provider else {
         return Ok(());
     };
@@ -447,7 +475,7 @@ fn validate_provider(provider: Option<&ExecutionEvalProviderV1>) -> Result<()> {
     Ok(())
 }
 
-fn validate_metrics(metrics: &ExecutionEvalAggregateMetricsV1) -> Result<()> {
+fn validate_metrics(metrics: &ExecutionEvalAggregateMetrics) -> Result<()> {
     validate_optional_rate("contract_omission_rate", metrics.contract_omission_rate)?;
     validate_optional_rate("contract_macro_f1", metrics.contract_macro_f1)?;
     validate_optional_rate(
@@ -455,12 +483,17 @@ fn validate_metrics(metrics: &ExecutionEvalAggregateMetricsV1) -> Result<()> {
         metrics.execution_false_completion_rate,
     )?;
     validate_optional_nonnegative("weighted_routing_cost", metrics.weighted_routing_cost)?;
-    validate_optional_rate("respond_on_run_rate", metrics.respond_on_run_rate)?;
-    validate_optional_rate("near_boundary_act_recall", metrics.near_boundary_act_recall)?;
-    validate_optional_rate("escalation_recall", metrics.escalation_recall)?;
+    validate_optional_nonnegative("weighted_strategy_cost", metrics.weighted_strategy_cost)?;
+    validate_optional_rate("respond_on_execute_rate", metrics.respond_on_execute_rate)?;
     validate_optional_rate(
-        "escalation_evidence_preservation_rate",
-        metrics.escalation_evidence_preservation_rate,
+        "near_boundary_inline_recall",
+        metrics.near_boundary_inline_recall,
+    )?;
+    validate_optional_rate("durable_strategy_recall", metrics.durable_strategy_recall)?;
+    validate_optional_rate("durable_upgrade_recall", metrics.durable_upgrade_recall)?;
+    validate_optional_rate(
+        "durable_upgrade_evidence_preservation_rate",
+        metrics.durable_upgrade_evidence_preservation_rate,
     )?;
     validate_optional_rate(
         "needs_input_false_accept_rate",
@@ -509,7 +542,7 @@ fn validate_classifier_fallback_counts(counts: Option<&BTreeMap<String, u64>>) -
         "schema_rejected",
         "invalid_decision",
         "low_confidence",
-        "context_forced_act",
+        "context_forced_inline",
     ];
     if counts
         .iter()
@@ -523,8 +556,8 @@ fn validate_classifier_fallback_counts(counts: Option<&BTreeMap<String, u64>>) -
 }
 
 fn validate_count_derived_metrics(
-    actual: &ExecutionEvalAggregateMetricsV1,
-    expected: &ExecutionEvalAggregateMetricsV1,
+    actual: &ExecutionEvalAggregateMetrics,
+    expected: &ExecutionEvalAggregateMetrics,
 ) -> Result<()> {
     if actual.total_cases != expected.total_cases
         || actual.passed_cases != expected.passed_cases

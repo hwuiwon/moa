@@ -6,7 +6,7 @@ use moa_artifacts::execution_plan::{
     ExecutionPlanDefinition, ExecutionRequirement, RetryPolicy,
 };
 use moa_core::{
-    config::ExecutionConfig, events::Event, types::execution_planning::ExecutionSourceProvenanceV1,
+    config::ExecutionConfig, events::Event, types::execution_planning::ExecutionSourceProvenance,
 };
 use moa_execution::{
     compiler::{CompileExecutionRequest, compile},
@@ -131,7 +131,7 @@ async fn execution_observability_exports_stable_identity_and_replay_safe_service
     })
     .compiled
     .context("compile observable output-only execution")?;
-    let source_provenance: ExecutionSourceProvenanceV1 =
+    let source_provenance: ExecutionSourceProvenance =
         crate::test_source_provenance(&compiled.plan.plan_hash.to_string());
     let started: ExecutionStartResponse = test
         .client()

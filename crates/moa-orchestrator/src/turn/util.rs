@@ -182,24 +182,27 @@ pub(crate) fn summarize_response_text(response: &CompletionResponse) -> Option<S
     Some(trimmed.chars().take(MAX_SUMMARY_CHARS).collect())
 }
 
-/// Ensures the v2 delegation tool schemas are available on the request.
+/// Ensures the delegation tool schemas are available on the request.
 pub(crate) fn ensure_delegation_tool_schemas(request: &mut CompletionRequest) {
     for schema in delegation_tool_schemas() {
         ensure_tool_schema(request, schema);
     }
 }
 
-/// Removes operator-facing execution lifecycle controls from a provider request.
-pub(crate) fn exclude_execution_lifecycle_tool_schemas(request: &mut CompletionRequest) {
+/// Workflow-owned control name reserved for the eligible root Inline turn.
+pub(crate) const DURABLE_UPGRADE_CONTROL_TOOL_NAME: &str = "request_durable_execution";
+
+/// Removes workflow- and operator-owned controls from a provider request.
+pub(crate) fn exclude_reserved_control_tool_schemas(request: &mut CompletionRequest) {
     request.tools.retain(|schema| {
         schema
             .get("name")
             .and_then(serde_json::Value::as_str)
-            .is_none_or(|name| !is_execution_lifecycle_tool_name(name))
+            .is_none_or(|name| !is_reserved_control_tool_name(name))
     });
 }
 
-fn is_execution_lifecycle_tool_name(name: &str) -> bool {
+fn is_reserved_control_tool_name(name: &str) -> bool {
     matches!(
         name,
         "execution_runs_list"
@@ -208,7 +211,7 @@ fn is_execution_lifecycle_tool_name(name: &str) -> bool {
             | "execution_run_cancel"
             | "execution_review_decide"
             | "execution_signal"
-    )
+    ) || name == DURABLE_UPGRADE_CONTROL_TOOL_NAME
 }
 
 fn ensure_tool_schema(request: &mut CompletionRequest, schema: serde_json::Value) {

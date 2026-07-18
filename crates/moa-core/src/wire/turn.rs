@@ -5,7 +5,7 @@ use crate::{
     types::channel::Attachment,
     types::contact::ContactRef,
     types::events_stream::{EventRange, EventRecord},
-    types::execution_planning::{ExecutionRouteDecision, ExecutionTemplateInvocation},
+    types::execution_planning::{ExecutionRouteSummary, ExecutionTemplateInvocation},
     types::identifiers::AgentSignalId,
 };
 use crate::{
@@ -150,9 +150,9 @@ pub struct TurnProgress {
     pub turn_id: String,
     /// Current durable phase.
     pub phase: TurnPhase,
-    /// Deterministic execution route selected for a root turn.
+    /// Rationale-free execution route selected for a root turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_route: Option<ExecutionRouteDecision>,
+    pub execution_route: Option<ExecutionRouteSummary>,
     /// Current model-loop iteration, starting at `0` before the first call.
     pub iteration: u32,
     /// Effective model-loop cap for this turn, when bounded.
@@ -382,14 +382,13 @@ mod tests {
 
     #[test]
     fn progress_projection_round_trips_additive_fields() {
-        // Pins: turn progress exposes responsiveness state without a separate taxonomy.
+        // Pins: durable/public turn progress exposes only the typed route and strategy,
+        // never the classifier's free-form rationale.
         let progress = TurnProgress {
             turn_id: "turn-123".to_string(),
             phase: TurnPhase::Tooling,
-            execution_route: Some(ExecutionRouteDecision::Routed {
-                mode: crate::types::execution_planning::ExecutionMode::Act,
-                reason:
-                    crate::types::execution_planning::ExecutionRouteReason::BoundedInteractiveWork,
+            execution_route: Some(ExecutionRouteSummary::Execute {
+                strategy: crate::types::execution_planning::ExecutionStrategy::Inline,
             }),
             iteration: 2,
             max_turns: Some(6),
@@ -402,7 +401,16 @@ mod tests {
         };
 
         let json = serde_json::to_string(&progress).expect("serialize turn progress");
-        assert!(json.contains("\"mode\":\"act\""));
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("parse serialized turn progress");
+        assert_eq!(
+            value.pointer("/execution_route"),
+            Some(&serde_json::json!({
+                "decision": "execute",
+                "strategy": "inline"
+            }))
+        );
+        assert_eq!(value.pointer("/execution_route/rationale"), None);
         assert!(json.contains("\"iteration\":2"));
         assert!(json.contains("\"max_turns\":6"));
         assert!(json.contains("\"tool_calls\":3"));

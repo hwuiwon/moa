@@ -1,29 +1,28 @@
 //! Deterministic turn cap and recent-target policy around model-assisted routing.
 
-use moa_core::{
-    config::SessionLimitsConfig,
-    types::execution_planning::{ExecutionMode, ExecutionRouteDecision},
-};
+use moa_core::config::SessionLimitsConfig;
 use moa_core::{
     events::Event, types::completion::ToolInvocation, types::events_stream::EventRecord,
     types::tools::ToolContent, types::tools::ToolOutput,
 };
 
+/// Closed model-loop classes that receive turn and tool budgets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ModelLoopClass {
+    /// One root response with no tools.
+    Respond,
+    /// One bounded root Execute/Inline loop.
+    InlineExecute,
+    /// One bounded delegated worker Inline loop.
+    WorkerInline,
+}
+
 /// Returns the effective model-loop cap for a selected turn class.
 pub(crate) fn effective_turn_cap(
     request_max_turns: Option<u32>,
-    route: &ExecutionRouteDecision,
+    class: ModelLoopClass,
     session_limits: &SessionLimitsConfig,
 ) -> usize {
-    if matches!(
-        route,
-        ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Run,
-            ..
-        }
-    ) {
-        return 0;
-    }
     let hard_cap = session_limits.max_turns as usize;
     if let Some(request_cap) = request_max_turns {
         let request_cap = (request_cap as usize).max(1);
@@ -38,39 +37,25 @@ pub(crate) fn effective_turn_cap(
         return usize::MAX;
     }
 
-    let class_cap = match route {
-        ExecutionRouteDecision::NeedsInput { .. }
-        | ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Respond,
-            ..
-        } => session_limits.simple_max_turns as usize,
-        ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Act,
-            ..
-        } => session_limits.standard_max_turns as usize,
-        ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Run,
-            ..
-        } => 0,
+    let class_cap = match class {
+        ModelLoopClass::Respond => session_limits.simple_max_turns as usize,
+        ModelLoopClass::InlineExecute | ModelLoopClass::WorkerInline => {
+            session_limits.standard_max_turns as usize
+        }
     };
     class_cap.max(1).min(hard_cap)
 }
 
 /// Returns the effective tool-call cap for a selected turn class.
 pub(crate) fn effective_tool_cap(
-    route: &ExecutionRouteDecision,
+    class: ModelLoopClass,
     session_limits: &SessionLimitsConfig,
 ) -> usize {
-    match route {
-        ExecutionRouteDecision::NeedsInput { .. }
-        | ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Respond | ExecutionMode::Run,
-            ..
-        } => 0,
-        ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Act,
-            ..
-        } => session_limits.max_tool_calls as usize,
+    match class {
+        ModelLoopClass::Respond => 0,
+        ModelLoopClass::InlineExecute | ModelLoopClass::WorkerInline => {
+            session_limits.max_tool_calls as usize
+        }
     }
 }
 
@@ -523,19 +508,15 @@ mod tests {
     use chrono::Utc;
     use moa_core::config::SessionLimitsConfig;
     use moa_core::{
-        events::Event,
-        types::channel::Attachment,
-        types::completion::ToolInvocation,
-        types::events_stream::EventRecord,
-        types::execution_planning::{ExecutionMode, ExecutionRouteDecision, ExecutionRouteReason},
-        types::identifiers::SessionId,
+        events::Event, types::channel::Attachment, types::completion::ToolInvocation,
+        types::events_stream::EventRecord, types::identifiers::SessionId,
         types::identifiers::ToolCallId,
     };
     use uuid::Uuid;
 
     use super::{
-        ToolBudgetDecision, ToolBudgetExhaustedReason, ToolBudgetState, ToolFingerprint,
-        effective_tool_cap, effective_turn_cap, has_recent_target, progress_cap,
+        ModelLoopClass, ToolBudgetDecision, ToolBudgetExhaustedReason, ToolBudgetState,
+        ToolFingerprint, effective_tool_cap, effective_turn_cap, has_recent_target, progress_cap,
     };
 
     fn limits() -> SessionLimitsConfig {
@@ -580,34 +561,6 @@ mod tests {
             id: Some(id.to_string()),
             name: name.to_string(),
             input,
-        }
-    }
-
-    fn respond() -> ExecutionRouteDecision {
-        ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Respond,
-            reason: ExecutionRouteReason::SimpleResponse,
-        }
-    }
-
-    fn act() -> ExecutionRouteDecision {
-        ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Act,
-            reason: ExecutionRouteReason::BoundedInteractiveWork,
-        }
-    }
-
-    fn run() -> ExecutionRouteDecision {
-        ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Run,
-            reason: ExecutionRouteReason::ExplicitRun,
-        }
-    }
-
-    fn needs_input() -> ExecutionRouteDecision {
-        ExecutionRouteDecision::NeedsInput {
-            reason: ExecutionRouteReason::PreflightInputMissing,
-            missing_inputs: vec!["target".to_string()],
         }
     }
 
@@ -679,27 +632,49 @@ mod tests {
 
     #[test]
     fn effective_turn_cap_applies_class_and_hard_limits() {
-        // Pins: class defaults are bounded by the global hard cap and never return zero turns.
+        // Pins: Respond, Inline Execute, and Worker Inline defaults are bounded by the
+        // global hard cap and never encode Durable or NeedsInput loop classes.
         let limits = limits();
-        assert_eq!(effective_turn_cap(None, &respond(), &limits), 1);
-        assert_eq!(effective_turn_cap(None, &act(), &limits), 4);
-        assert_eq!(effective_turn_cap(None, &run(), &limits), 0);
+        assert_eq!(
+            effective_turn_cap(None, ModelLoopClass::Respond, &limits),
+            1
+        );
+        assert_eq!(
+            effective_turn_cap(None, ModelLoopClass::InlineExecute, &limits),
+            4
+        );
+        assert_eq!(
+            effective_turn_cap(None, ModelLoopClass::WorkerInline, &limits),
+            4
+        );
 
         let tiny_hard_cap = SessionLimitsConfig {
             max_turns: 1,
             standard_max_turns: 4,
             ..limits
         };
-        assert_eq!(effective_turn_cap(None, &act(), &tiny_hard_cap), 1);
+        assert_eq!(
+            effective_turn_cap(None, ModelLoopClass::InlineExecute, &tiny_hard_cap),
+            1
+        );
     }
 
     #[test]
     fn effective_turn_cap_bounds_explicit_request_caps() {
         // Pins: explicit workflow/request caps continue to work but cannot exceed the hard cap.
         let limits = limits();
-        assert_eq!(effective_turn_cap(Some(3), &act(), &limits), 3);
-        assert_eq!(effective_turn_cap(Some(30), &act(), &limits), 8);
-        assert_eq!(effective_turn_cap(Some(0), &act(), &limits), 1);
+        assert_eq!(
+            effective_turn_cap(Some(3), ModelLoopClass::InlineExecute, &limits),
+            3
+        );
+        assert_eq!(
+            effective_turn_cap(Some(30), ModelLoopClass::InlineExecute, &limits),
+            8
+        );
+        assert_eq!(
+            effective_turn_cap(Some(0), ModelLoopClass::InlineExecute, &limits),
+            1
+        );
     }
 
     #[test]
@@ -711,19 +686,31 @@ mod tests {
             standard_max_turns: 4,
             ..limits()
         };
-        assert_eq!(effective_turn_cap(None, &act(), &limits), usize::MAX);
-        assert_eq!(effective_turn_cap(Some(5), &act(), &limits), 5);
+        assert_eq!(
+            effective_turn_cap(None, ModelLoopClass::InlineExecute, &limits),
+            usize::MAX
+        );
+        assert_eq!(
+            effective_turn_cap(Some(5), ModelLoopClass::InlineExecute, &limits),
+            5
+        );
         assert_eq!(progress_cap(usize::MAX), None);
     }
 
     #[test]
     fn effective_tool_cap_uses_selected_class() {
-        // Pins: direct/clarification turns do not receive tool budget; work turns do.
+        // Pins: Respond receives no tool budget while both root and worker Inline loops
+        // retain the existing bounded work budget.
         let limits = limits();
-        assert_eq!(effective_tool_cap(&needs_input(), &limits), 0);
-        assert_eq!(effective_tool_cap(&respond(), &limits), 0);
-        assert_eq!(effective_tool_cap(&act(), &limits), 12);
-        assert_eq!(effective_tool_cap(&run(), &limits), 0);
+        assert_eq!(effective_tool_cap(ModelLoopClass::Respond, &limits), 0);
+        assert_eq!(
+            effective_tool_cap(ModelLoopClass::InlineExecute, &limits),
+            12
+        );
+        assert_eq!(
+            effective_tool_cap(ModelLoopClass::WorkerInline, &limits),
+            12
+        );
     }
 
     #[test]

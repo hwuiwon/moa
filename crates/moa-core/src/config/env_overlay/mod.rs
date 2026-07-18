@@ -1552,7 +1552,7 @@ mod tests {
 
     #[test]
     fn from_iter_applies_every_execution_resource_override() {
-        // Pins: every v1 execution default has exactly one flat MOA_EXECUTION_* override.
+        // Pins: every execution default has exactly one flat MOA_EXECUTION_* override.
         let overlay = MoaEnvOverlay::from_iter(env_pairs([
             ("MOA_EXECUTION_PLANNER_REPAIR_ATTEMPTS", "2"),
             ("MOA_EXECUTION_REPEATED_FAILURE_LIMIT", "4"),

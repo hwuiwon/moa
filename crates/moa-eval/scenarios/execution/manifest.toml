@@ -1,16 +1,16 @@
 schema_version = 1
 
 [routing]
-path = "routing-v1.jsonl"
-sha256 = "31fe4606d214d91c2cdb409fb5951c90a3719be0ea6c15d54ca95f7bbab40997"
+path = "routing.jsonl"
+sha256 = "29fca27b177271f85c94893f561ca969bb97ba11c24428adf329a6f4672c59d1"
 count = 320
 
 [contract]
-path = "contract-recorded-v1.jsonl"
+path = "contract-recorded.jsonl"
 sha256 = "8b13618517ef66b33ab612fd9fe0e2028ad039e5b84cf222e39e8946a0589e1d"
 count = 80
 
 [task_quality]
-path = "task-quality-v1.jsonl"
-sha256 = "f6cc1c7a84ae17c83ca769e3b2118338f924946bfc1bc6f1eb3ee22c2f79254c"
+path = "task-quality.jsonl"
+sha256 = "fe8944e7fa06746bb785cc009aa6a73a7c415a642aeaec451c8bd44bdabe0291"
 count = 20

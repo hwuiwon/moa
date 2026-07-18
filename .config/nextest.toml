@@ -122,7 +122,10 @@ default-filter = '''
 binary(/^execution_run_service_e2e$/)
   & (
       test(/respond_simple_question_uses_no_tools_planner_or_run_service_e2e/)
-      | test(/act_executes_bounded_tool_loop_without_run_service_e2e/)
+      | test(/execute_inline_runs_bounded_tool_loop_without_durable_run_service_e2e/)
+      | test(/execute_inline_uses_instruction_only_skill_without_durable_run_service_e2e/)
+      | test(/execute_inline_upgrades_once_to_durable_with_preserved_evidence_service_e2e/)
+      | test(/non_root_continuations_cannot_enter_or_upgrade_to_durable_service_e2e/)
       | test(/no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e/)
       | test(/completion_gate_missing_company_service_e2e/)
       | test(/duplicate_plan_stops_replan_service_e2e/)

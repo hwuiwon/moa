@@ -354,7 +354,7 @@ AS $$
     SELECT moa.execution_uuid_v5(
         '7b83c5c2-5cf7-5fa0-8eb6-2d7c6e0f1d11'::UUID,
         moa.execution_audit_preimage(
-            'moa.execution.route-audit.v1',
+            'moa.execution.route-audit',
             ARRAY[
                 lower(tenant_id::TEXT),
                 lower(contact_id::TEXT),
@@ -382,7 +382,7 @@ AS $$
     SELECT moa.execution_uuid_v5(
         '7b83c5c2-5cf7-5fa0-8eb6-2d7c6e0f1d11'::UUID,
         moa.execution_audit_preimage(
-            'moa.execution.planner-audit.v1',
+            'moa.execution.planner-audit',
             ARRAY[
                 lower(tenant_id::TEXT),
                 lower(contact_id::TEXT),
@@ -409,7 +409,7 @@ AS $$
     SELECT moa.execution_uuid_v5(
         '7b83c5c2-5cf7-5fa0-8eb6-2d7c6e0f1d11'::UUID,
         moa.execution_audit_preimage(
-            'moa.execution.compile-audit.v1',
+            'moa.execution.compile-audit',
             ARRAY[
                 lower(tenant_id::TEXT),
                 lower(contact_id::TEXT),
@@ -423,8 +423,7 @@ $$;
 CREATE OR REPLACE FUNCTION moa.execution_route_provenance_is_valid(
     stage TEXT,
     decision TEXT,
-    mode TEXT,
-    reason TEXT,
+    strategy TEXT,
     provenance JSONB
 ) RETURNS BOOLEAN
 LANGUAGE plpgsql
@@ -495,29 +494,19 @@ BEGIN
     route_valid := CASE source_kind
         WHEN 'classifier' THEN
             stage = 'initial' AND (
-                (decision = 'needs_input' AND mode IS NULL
-                    AND reason = 'preflight_input_missing')
-                OR (decision = 'routed' AND mode = 'respond'
-                    AND reason = 'simple_response')
-                OR (decision = 'routed' AND mode = 'act'
-                    AND reason = 'bounded_interactive_work')
-                OR (decision = 'routed' AND mode = 'run' AND reason IN (
-                    'explicit_run','bulk_collection','durable_or_resumable',
-                    'high_fanout','approval_or_signal'
-                ))
+                (decision = 'needs_input' AND strategy IS NULL)
+                OR (decision = 'respond' AND strategy IS NULL)
+                OR (decision = 'execute' AND strategy IN ('inline','durable'))
             )
         WHEN 'blank_objective' THEN
-            stage = 'initial' AND decision = 'needs_input' AND mode IS NULL
-                AND reason = 'preflight_input_missing'
+            stage = 'initial' AND decision = 'needs_input' AND strategy IS NULL
         WHEN 'selected_execution_template' THEN
-            stage = 'initial' AND decision = 'routed' AND mode = 'run'
-                AND reason = 'selected_execution_template'
-        WHEN 'act_escalation' THEN
-            stage = 'act_escalation' AND decision = 'routed' AND mode = 'run'
-                AND reason = 'act_escalation'
+            stage = 'initial' AND decision = 'execute' AND strategy = 'durable'
+        WHEN 'durable_upgrade' THEN
+            stage = 'durable_upgrade' AND decision = 'execute' AND strategy = 'durable'
         ELSE FALSE
     END;
-    IF NOT route_valid THEN
+    IF route_valid IS NOT TRUE THEN
         RETURN FALSE;
     END IF;
 
@@ -540,7 +529,7 @@ BEGIN
     IF classifier_outcome NOT IN (
            'accepted','provider_error','stream_error','oversized',
            'schema_rejected','invalid_decision','low_confidence',
-           'context_forced_act'
+           'context_forced_inline'
        )
        OR jsonb_typeof(provenance -> 'provider_model') <> 'string'
        OR octet_length(provenance ->> 'provider_model') NOT BETWEEN 1 AND 128
@@ -550,9 +539,9 @@ BEGIN
     END IF;
     collected := classifier_outcome IN (
         'accepted','oversized','schema_rejected','invalid_decision',
-        'low_confidence','context_forced_act'
+        'low_confidence','context_forced_inline'
     );
-    parsed := classifier_outcome IN ('accepted','low_confidence','context_forced_act');
+    parsed := classifier_outcome IN ('accepted','low_confidence','context_forced_inline');
     IF collected <> (provenance ->> 'response_hash' IS NOT NULL)
        OR (
            provenance ->> 'response_hash' IS NOT NULL
@@ -574,8 +563,7 @@ BEGIN
        OR (
            classifier_outcome <> 'accepted'
            AND NOT (
-               decision = 'routed' AND mode = 'act'
-               AND reason = 'bounded_interactive_work'
+               decision = 'execute' AND strategy = 'inline'
            )
        ) THEN
         RETURN FALSE;
@@ -657,16 +645,11 @@ BEGIN
            OR NOT moa.execution_json_object_has_exact_keys(
                payload,
                ARRAY[
-                   'kind','stage','decision','mode','reason','provenance','accepted_at'
+                   'kind','stage','decision','strategy','provenance','accepted_at'
                ]
            )
-           OR payload ->> 'stage' NOT IN ('initial','act_escalation')
-           OR payload ->> 'decision' NOT IN ('needs_input','routed')
-           OR payload ->> 'reason' NOT IN (
-               'preflight_input_missing','simple_response','bounded_interactive_work',
-               'explicit_run','bulk_collection','durable_or_resumable','high_fanout',
-               'approval_or_signal','selected_execution_template','act_escalation'
-           )
+           OR payload ->> 'stage' NOT IN ('initial','durable_upgrade')
+           OR payload ->> 'decision' NOT IN ('respond','execute','needs_input')
            OR jsonb_typeof(payload -> 'provenance') <> 'object'
            OR jsonb_typeof(payload -> 'accepted_at') <> 'string' THEN
             RETURN FALSE;
@@ -675,8 +658,7 @@ BEGIN
         RETURN moa.execution_route_provenance_is_valid(
             payload ->> 'stage',
             payload ->> 'decision',
-            payload ->> 'mode',
-            payload ->> 'reason',
+            payload ->> 'strategy',
             payload -> 'provenance'
         );
     END IF;
@@ -909,11 +891,7 @@ BEGIN
     kind := provenance ->> 'kind';
     IF kind = 'generated_plan' THEN
         IF NOT moa.execution_json_object_has_exact_keys(
-               provenance, ARRAY['kind','route_reason','planner']
-           )
-           OR provenance ->> 'route_reason' NOT IN (
-               'explicit_run','bulk_collection','durable_or_resumable',
-               'high_fanout','approval_or_signal','act_escalation'
+               provenance, ARRAY['kind','planner']
            )
            OR jsonb_typeof(provenance -> 'planner') <> 'object' THEN
             RETURN FALSE;
@@ -944,11 +922,10 @@ BEGIN
         RETURN moa.execution_json_object_has_exact_keys(
                    provenance,
                    ARRAY[
-                       'kind','route_reason','skill_template_ref',
+                       'kind','skill_template_ref',
                        'skill_template_revision_uid'
                    ]
                )
-           AND provenance ->> 'route_reason' = 'selected_execution_template'
            AND moa.execution_skill_ref_is_canonical(
                provenance ->> 'skill_template_ref'
            )
@@ -959,12 +936,11 @@ BEGIN
         RETURN moa.execution_json_object_has_exact_keys(
                    provenance,
                    ARRAY[
-                       'kind','route_reason','skill_template_ref',
+                       'kind','skill_template_ref',
                        'skill_template_revision_uid','experiment_run_uid',
                        'score_run_id','trial_uid'
                    ]
                )
-           AND provenance ->> 'route_reason' = 'explicit_run'
            AND moa.execution_skill_ref_is_canonical(
                provenance ->> 'skill_template_ref'
            )
@@ -1262,8 +1238,6 @@ ALTER TABLE moa.execution_run
         )
     ) STORED,
     ADD COLUMN source_kind TEXT,
-    ADD COLUMN route_mode TEXT,
-    ADD COLUMN route_reason TEXT,
     ADD COLUMN skill_template_ref TEXT,
     ADD COLUMN skill_template_revision_uid UUID,
     ADD COLUMN terminal_reason TEXT;
@@ -1294,8 +1268,6 @@ ALTER TABLE moa.execution_template_admission
 
 UPDATE moa.execution_run
 SET source_kind = source_provenance ->> 'kind',
-    route_mode = 'run',
-    route_reason = source_provenance ->> 'route_reason',
     skill_template_ref = CASE
         WHEN source_provenance ->> 'kind' IN (
             'skill_template','experiment_template'
@@ -1319,8 +1291,6 @@ SET source_kind = source_provenance ->> 'kind',
 
 ALTER TABLE moa.execution_run
     ALTER COLUMN source_kind SET NOT NULL,
-    ALTER COLUMN route_mode SET NOT NULL,
-    ALTER COLUMN route_reason SET NOT NULL,
     ADD CONSTRAINT execution_run_normalized_scope_key
         UNIQUE (run_uid, tenant_id, contact_scope_id),
     ADD CONSTRAINT execution_run_source_kind_check CHECK (
@@ -1328,31 +1298,17 @@ ALTER TABLE moa.execution_run
             'generated_plan','skill_template','experiment_template'
         )
     ),
-    ADD CONSTRAINT execution_run_route_mode_check CHECK (route_mode = 'run'),
-    ADD CONSTRAINT execution_run_route_reason_check CHECK (
-        route_reason IN (
-            'preflight_input_missing','simple_response','bounded_interactive_work',
-            'explicit_run','bulk_collection','durable_or_resumable','high_fanout',
-            'approval_or_signal','selected_execution_template','act_escalation'
-        )
-    ),
     ADD CONSTRAINT execution_run_source_route_template_check CHECK (
         CASE source_kind
             WHEN 'generated_plan' THEN
-                route_reason IN (
-                    'explicit_run','bulk_collection','durable_or_resumable',
-                    'high_fanout','approval_or_signal','act_escalation'
-                )
-                AND skill_template_ref IS NULL
+                skill_template_ref IS NULL
                 AND skill_template_revision_uid IS NULL
             WHEN 'skill_template' THEN
-                route_reason = 'selected_execution_template'
-                AND skill_template_ref IS NOT NULL
+                skill_template_ref IS NOT NULL
                 AND skill_template_revision_uid IS NOT NULL
                 AND moa.execution_skill_ref_is_canonical(skill_template_ref)
             WHEN 'experiment_template' THEN
-                route_reason = 'explicit_run'
-                AND skill_template_ref IS NOT NULL
+                skill_template_ref IS NOT NULL
                 AND skill_template_revision_uid IS NOT NULL
                 AND moa.execution_skill_ref_is_canonical(skill_template_ref)
             ELSE FALSE
@@ -1424,8 +1380,6 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     IF NEW.source_kind IS DISTINCT FROM OLD.source_kind
-       OR NEW.route_mode IS DISTINCT FROM OLD.route_mode
-       OR NEW.route_reason IS DISTINCT FROM OLD.route_reason
        OR NEW.skill_template_ref IS DISTINCT FROM OLD.skill_template_ref
        OR NEW.skill_template_revision_uid IS DISTINCT FROM OLD.skill_template_revision_uid THEN
         RAISE EXCEPTION 'execution run normalized source fields are immutable';
@@ -1459,8 +1413,7 @@ FOR EACH ROW EXECUTE FUNCTION moa.enforce_execution_run_normalized_update();
 CREATE OR REPLACE FUNCTION moa.execution_route_audit_row_is_valid(
     stage TEXT,
     decision TEXT,
-    mode TEXT,
-    reason TEXT,
+    strategy TEXT,
     source TEXT,
     classifier_outcome TEXT,
     provider_model TEXT,
@@ -1482,8 +1435,7 @@ AS $$
     SELECT moa.execution_route_provenance_is_valid(
         stage,
         decision,
-        mode,
-        reason,
+        strategy,
         jsonb_build_object(
             'source', source,
             'classifier_outcome', classifier_outcome,
@@ -1597,8 +1549,7 @@ CREATE TABLE moa.execution_route_audit (
     originating_sequence BIGINT NOT NULL CHECK (originating_sequence >= 0),
     stage TEXT NOT NULL,
     decision TEXT NOT NULL,
-    mode TEXT,
-    reason TEXT NOT NULL,
+    strategy TEXT,
     source TEXT NOT NULL,
     classifier_outcome TEXT NOT NULL,
     provider_model VARCHAR(128),
@@ -1626,7 +1577,7 @@ CREATE TABLE moa.execution_route_audit (
     ),
     CONSTRAINT execution_route_audit_matrix_check CHECK (
         moa.execution_route_audit_row_is_valid(
-            stage, decision, mode, reason, source, classifier_outcome,
+            stage, decision, strategy, source, classifier_outcome,
             provider_model, prompt_version, objective_hash, response_hash,
             confidence_bps, missing_input_count, input_tokens_uncached,
             input_tokens_cache_write, input_tokens_cache_read, output_tokens,
@@ -1988,8 +1939,6 @@ SELECT
     r.initial_plan_hash,
     r.active_plan_hash,
     r.plan_revision,
-    r.route_mode,
-    r.route_reason,
     r.source_kind,
     r.skill_template_ref,
     r.skill_template_revision_uid,
@@ -2169,7 +2118,11 @@ ALTER TABLE analytics.clickhouse_export_state
     );
 
 CREATE TABLE analytics.clickhouse_schema_upgrade_state (
-    upgrade_key TEXT PRIMARY KEY,
+    upgrade_key TEXT NOT NULL,
+    generation BIGINT NOT NULL DEFAULT 1,
+    database_uuid UUID NOT NULL,
+    run_table_uuid UUID NOT NULL,
+    task_table_uuid UUID NOT NULL,
     stage TEXT NOT NULL DEFAULT 'pending',
     upgrade_version TIMESTAMPTZ NOT NULL,
     export_version_floor TIMESTAMPTZ NOT NULL,
@@ -2184,8 +2137,22 @@ CREATE TABLE analytics.clickhouse_schema_upgrade_state (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
+    CONSTRAINT clickhouse_schema_upgrade_state_pkey PRIMARY KEY (
+        upgrade_key, generation
+    ),
+    CONSTRAINT clickhouse_schema_upgrade_table_generation_key UNIQUE (
+        upgrade_key, run_table_uuid, task_table_uuid
+    ),
     CONSTRAINT clickhouse_schema_upgrade_key_check CHECK (
-        upgrade_key = 'execution_dimensions_v2'
+        upgrade_key = 'execution_dimensions'
+    ),
+    CONSTRAINT clickhouse_schema_upgrade_generation_check CHECK (
+        generation > 0
+    ),
+    CONSTRAINT clickhouse_schema_upgrade_identity_check CHECK (
+        database_uuid <> '00000000-0000-0000-0000-000000000000'
+        AND run_table_uuid <> '00000000-0000-0000-0000-000000000000'
+        AND task_table_uuid <> '00000000-0000-0000-0000-000000000000'
     ),
     CONSTRAINT clickhouse_schema_upgrade_stage_check CHECK (
         stage IN (
@@ -2242,12 +2209,60 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    old_rank SMALLINT :=
-        analytics.execution_upgrade_stage_rank(OLD.stage);
-    new_rank SMALLINT :=
-        analytics.execution_upgrade_stage_rank(NEW.stage);
+    previous_generation BIGINT;
+    previous_database_uuid UUID;
+    previous_run_table_uuid UUID;
+    previous_task_table_uuid UUID;
+    previous_export_version_floor TIMESTAMPTZ;
+    old_rank SMALLINT;
+    new_rank SMALLINT;
 BEGIN
+    IF TG_OP = 'INSERT' THEN
+        SELECT generation, database_uuid, run_table_uuid, task_table_uuid,
+               export_version_floor
+        INTO previous_generation, previous_database_uuid, previous_run_table_uuid,
+             previous_task_table_uuid, previous_export_version_floor
+        FROM analytics.clickhouse_schema_upgrade_state
+        WHERE upgrade_key = NEW.upgrade_key
+        ORDER BY generation DESC
+        LIMIT 1;
+
+        IF NOT FOUND THEN
+            IF NEW.generation <> 1 THEN
+                RAISE EXCEPTION
+                    'first execution analytics bootstrap generation must be 1';
+            END IF;
+        ELSE
+            IF NEW.generation <> previous_generation + 1 THEN
+                RAISE EXCEPTION
+                    'execution analytics bootstrap generations must be contiguous';
+            END IF;
+            IF NEW.database_uuid <> previous_database_uuid THEN
+                RAISE EXCEPTION
+                    'execution analytics ClickHouse database identity is immutable across generations';
+            END IF;
+            IF NEW.run_table_uuid = previous_run_table_uuid
+               OR NEW.task_table_uuid = previous_task_table_uuid THEN
+                RAISE EXCEPTION
+                    'execution analytics bootstrap generation requires both ClickHouse table identities to change';
+            END IF;
+            IF NEW.upgrade_version <= previous_export_version_floor
+               OR NEW.export_version_floor < previous_export_version_floor THEN
+                RAISE EXCEPTION
+                    'execution analytics bootstrap versions must advance across generations';
+            END IF;
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    old_rank := analytics.execution_upgrade_stage_rank(OLD.stage);
+    new_rank := analytics.execution_upgrade_stage_rank(NEW.stage);
+
     IF NEW.upgrade_key IS DISTINCT FROM OLD.upgrade_key
+       OR NEW.generation IS DISTINCT FROM OLD.generation
+       OR NEW.database_uuid IS DISTINCT FROM OLD.database_uuid
+       OR NEW.run_table_uuid IS DISTINCT FROM OLD.run_table_uuid
+       OR NEW.task_table_uuid IS DISTINCT FROM OLD.task_table_uuid
        OR NEW.upgrade_version IS DISTINCT FROM OLD.upgrade_version
        OR NEW.run_high_water_seq IS DISTINCT FROM OLD.run_high_water_seq
        OR NEW.run_high_water_id IS DISTINCT FROM OLD.run_high_water_id
@@ -2286,6 +2301,6 @@ END;
 $$;
 
 CREATE TRIGGER clickhouse_schema_upgrade_state_monotonic_guard
-BEFORE UPDATE ON analytics.clickhouse_schema_upgrade_state
+BEFORE INSERT OR UPDATE ON analytics.clickhouse_schema_upgrade_state
 FOR EACH ROW
 EXECUTE FUNCTION analytics.enforce_execution_upgrade_monotonicity();

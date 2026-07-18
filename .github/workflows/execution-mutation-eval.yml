@@ -42,11 +42,7 @@ jobs:
         with:
           name: execution-mutants
           if-no-files-found: error
-          path: |
-            target/execution-mutants/outcomes.json
-            target/execution-mutants/missed.txt
-            target/execution-mutants/report.json
-            target/execution-mutants/selected-mutants.txt
+          path: target/execution-mutants/
 
       - name: Stop compose stack
         if: always()

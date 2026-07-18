@@ -53,7 +53,12 @@ jobs:
           cargo run -p xtask --locked --features eval-tools -- execution-eval check \
             --report target/execution-eval/offline.json \
             --max-execution-false-completion-rate 0 \
-            --max-respond-on-run-rate 0
+            --max-respond-on-execute-rate 0 \
+            --max-contract-omission-rate 0 \
+            --max-weighted-routing-cost 0 \
+            --max-weighted-strategy-cost 0 \
+            --min-durable-strategy-recall 1 \
+            --min-pass-rate 1
 
       - name: Upload offline report
         if: always()

@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use moa_artifacts::execution_plan::CapabilityReference;
 use moa_eval::execution::{
-    ExecutionCapabilityCallObservationV1, ExecutionEvalCaseResultV1, ExecutionInvariantSpecV1,
+    ExecutionCapabilityCallObservation, ExecutionEvalCaseResult, ExecutionInvariantSpec,
     evaluate_invariants,
 };
 use moa_execution::state::{ExecutionRunStatus, ExecutionTaskStatus};
@@ -19,43 +19,43 @@ fn execution_invariants_evaluate_every_typed_variant_with_stable_ids_offline() {
         &[("issuer-a", ExecutionTaskStatus::Completed)],
     );
     let specs = vec![
-        ExecutionInvariantSpecV1::TerminalStatusIn {
+        ExecutionInvariantSpec::TerminalStatusIn {
             statuses: vec![ExecutionRunStatus::Partial],
         },
-        ExecutionInvariantSpecV1::MustNotComplete,
-        ExecutionInvariantSpecV1::TaskCount {
+        ExecutionInvariantSpec::MustNotComplete,
+        ExecutionInvariantSpec::TaskCount {
             node_id: "research".to_string(),
             exact: 1,
         },
-        ExecutionInvariantSpecV1::MapCoverage {
+        ExecutionInvariantSpec::MapCoverage {
             node_id: "research".to_string(),
             expected_keys: vec!["issuer-a".to_string(), "issuer-b".to_string()],
             require_all_when_completed: true,
         },
-        ExecutionInvariantSpecV1::CompletionCheckPassed {
+        ExecutionInvariantSpec::CompletionCheckPassed {
             check_id: "coverage-check".to_string(),
         },
-        ExecutionInvariantSpecV1::CompletionCheckFailed {
+        ExecutionInvariantSpec::CompletionCheckFailed {
             check_id: "coverage-check".to_string(),
         },
-        ExecutionInvariantSpecV1::TerminalGapContains {
+        ExecutionInvariantSpec::TerminalGapContains {
             text: "coverage is incomplete".to_string(),
         },
-        ExecutionInvariantSpecV1::BudgetWithinApproved,
-        ExecutionInvariantSpecV1::ProgressMatchesTasks,
-        ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-        ExecutionInvariantSpecV1::AllowedCapabilitiesOnly {
+        ExecutionInvariantSpec::BudgetWithinApproved,
+        ExecutionInvariantSpec::ProgressMatchesTasks,
+        ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+        ExecutionInvariantSpec::AllowedCapabilitiesOnly {
             references: vec![capability_ref()],
         },
-        ExecutionInvariantSpecV1::CompletedTaskKeysPreserved {
+        ExecutionInvariantSpec::CompletedTaskKeysPreserved {
             node_id: "research".to_string(),
             item_keys: vec!["issuer-a".to_string()],
         },
-        ExecutionInvariantSpecV1::SessionEventCountAtMost {
+        ExecutionInvariantSpec::SessionEventCountAtMost {
             event_kind: "progress".to_string(),
             max: 1,
         },
-        ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+        ExecutionInvariantSpec::NoRawTaskOutputEvents,
     ];
 
     let first = evaluate_invariants(&snapshot, &specs);
@@ -89,12 +89,12 @@ fn execution_false_completion_detects_impossible_and_strict_coverage_cases_offli
         ExecutionRunStatus::Completed,
         &[("issuer-a", ExecutionTaskStatus::Completed)],
     );
-    let strict_coverage = ExecutionInvariantSpecV1::MapCoverage {
+    let strict_coverage = ExecutionInvariantSpec::MapCoverage {
         node_id: "research".to_string(),
         expected_keys: vec!["issuer-a".to_string(), "issuer-b".to_string()],
         require_all_when_completed: true,
     };
-    let case = ExecutionEvalCaseResultV1::evaluate(
+    let case = ExecutionEvalCaseResult::evaluate(
         "silent-incomplete-completed",
         &completed,
         &[strict_coverage],
@@ -105,10 +105,10 @@ fn execution_false_completion_detects_impossible_and_strict_coverage_cases_offli
     assert!(case.execution_false_completion);
     assert!(!case.passed);
 
-    let must_not_complete = ExecutionEvalCaseResultV1::evaluate(
+    let must_not_complete = ExecutionEvalCaseResult::evaluate(
         "declared-impossible-completed",
         &completed,
-        &[ExecutionInvariantSpecV1::MustNotComplete],
+        &[ExecutionInvariantSpec::MustNotComplete],
         10,
     )
     .expect("case evaluation should succeed");
@@ -123,10 +123,10 @@ fn execution_partial_with_missing_coverage_degrades_honestly_offline() {
         ExecutionRunStatus::Partial,
         &[("issuer-a", ExecutionTaskStatus::Completed)],
     );
-    let case = ExecutionEvalCaseResultV1::evaluate(
+    let case = ExecutionEvalCaseResult::evaluate(
         "silent-incomplete-partial",
         &partial,
-        &[ExecutionInvariantSpecV1::MapCoverage {
+        &[ExecutionInvariantSpec::MapCoverage {
             node_id: "research".to_string(),
             expected_keys: vec!["issuer-a".to_string(), "issuer-b".to_string()],
             require_all_when_completed: true,
@@ -156,13 +156,13 @@ fn execution_budget_progress_effect_and_authorization_invariants_fail_exactly_of
         version: "1".to_string(),
     };
     snapshot.harness.capability_calls = vec![
-        ExecutionCapabilityCallObservationV1 {
+        ExecutionCapabilityCallObservation {
             logical_invocation_id: "logical-1".to_string(),
             reference: forbidden.clone(),
             item_key: Some("issuer-a".to_string()),
             replayed: false,
         },
-        ExecutionCapabilityCallObservationV1 {
+        ExecutionCapabilityCallObservation {
             logical_invocation_id: "logical-1".to_string(),
             reference: forbidden,
             item_key: Some("issuer-a".to_string()),
@@ -172,10 +172,10 @@ fn execution_budget_progress_effect_and_authorization_invariants_fail_exactly_of
     let results = evaluate_invariants(
         &snapshot,
         &[
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpecV1::AllowedCapabilitiesOnly {
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpec::AllowedCapabilitiesOnly {
                 references: vec![capability_ref()],
             },
         ],

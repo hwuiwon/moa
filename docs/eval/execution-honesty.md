@@ -12,7 +12,7 @@ execution false completion. Reports retain both rates.
 
 ## Source Of Truth
 
-`ExecutionEvalSnapshotV1` is a bounded read model over production state. Its
+`ExecutionEvalSnapshot` is a bounded read model over production state. Its
 inputs are the same scheduling projection, ordered task records, normalized
 planning audits, and session events used to operate the run. The service tests
 collect these through `ExecutionRepository` and the normal session event API.
@@ -24,7 +24,7 @@ budget totals, task identity and status, planning outcomes, bounded event
 counts, and fixture-provided logical capability-call evidence. It excludes raw
 task outputs, prompts, full event bodies, credentials, and raw transcripts.
 
-`ExecutionEvalReportV1` is strict and versioned. Unknown fields fail parsing.
+`ExecutionEvalReport` is strict and versioned. Unknown fields fail parsing.
 Case rows contain stable IDs, typed invariant results, contract scores, route
 provenance, observed status, counts, cost, latency, and hashes of terminal
 outputs or final responses. They do not contain those outputs or responses.
@@ -65,28 +65,40 @@ contradictions globally.
 Ordinary user turns make at most one bounded auxiliary-model classifier call.
 The classifier receives the objective and bounded structural signals, has no
 tools, retrieval, or native web access, uses temperature zero, and may emit at
-most 256 output tokens. Its strict JSON result selects `respond`, `act`, `run`,
-or `needs_input` with a closed reason, confidence basis points, and bounded
-missing-input list.
+most 256 output tokens. Its strict JSON result selects Respond, Execute, or
+NeedsInput with a bounded free-form rationale, confidence basis points, and
+bounded missing-input list. Execute must also supply exactly one explicit
+internal strategy: Inline or Durable. The rationale is not scored for exact
+wording, never selects the strategy, and remains ephemeral to the active turn.
 
 The router does not search the user text for phrases. It does not retry, repair,
 recurse, or invoke the planner. Provider failure, collection failure, oversized
-or malformed output, an invalid label/reason pair, or insufficient confidence
-falls back to `act`. Attachments or a recent target also prevent a classifier
-from choosing context-free `respond` or `needs_input`. Uncertainty therefore
-cannot fabricate a direct answer or start an expensive durable run.
+or malformed output, an invalid label/strategy/rationale shape, or insufficient confidence
+falls back to Execute/Inline. Attachments or a recent target also prevent a
+classifier from choosing context-free Respond or NeedsInput. Uncertainty
+therefore cannot fabricate a direct answer or start expensive durable work.
 
 Trusted typed paths remain deterministic: blank input requests clarification;
-an exact pinned template and validated Act escalation choose `run`; internal
-execution synthesis chooses `respond`. Route audits persist only redacted
-provenance: source and outcome, model and prompt version, hashes, confidence,
-usage, cost, and duration.
+an exact pinned template chooses Execute/Durable; internal execution synthesis
+chooses Respond. Only an initial root Execute/Inline turn may make one typed,
+evidence-preserving upgrade to Durable without reclassification or downgrade.
+Production grants that authority only through the workflow-owned
+`request_durable_execution` control tool, which is injected only for the
+eligible turn and must be called alone; arbitrary tool results are not upgrade
+signals.
+Route audits persist only redacted typed provenance: route and strategy, source
+and outcome, model and prompt version, hashes, confidence, usage, cost, and
+duration. They do not persist classifier rationale.
 
-The routing corpus is scored with asymmetric cost. `Respond` on a true `Run`
-case is the catastrophic error and has a much higher cost than conservative
-`Act`. Near-boundary Act recall, escalation recall and evidence preservation,
-NeedsInput errors, classifier fallback, tokens, cost, and latency are reported
-separately from ordinary accuracy.
+The corpus labels public route and internal strategy separately. Public-route
+cost compares Respond, Execute, and NeedsInput; Respond on a true Execute case
+is the catastrophic error. Strategy cost is computed only where both expected
+and observed routes are Execute and compares Inline with Durable. The report
+separately records weighted routing cost, weighted strategy cost,
+Respond-on-Execute rate, near-boundary Inline recall, Durable strategy recall,
+upgrade recall/evidence preservation, NeedsInput errors, classifier fallback,
+tokens, cost, and latency. A public-route miss is never counted as a strategy
+miss.
 
 ## Evaluation Lanes
 
@@ -114,7 +126,11 @@ cargo run -p xtask --locked --features eval-tools -- execution-eval run-offline 
 cargo run -p xtask --locked --features eval-tools -- execution-eval check \
   --report target/execution-eval/offline.json \
   --max-execution-false-completion-rate 0 \
-  --max-respond-on-run-rate 0
+  --max-respond-on-execute-rate 0 \
+  --max-weighted-routing-cost 0 \
+  --max-weighted-strategy-cost 0 \
+  --min-near-boundary-inline-recall 1 \
+  --min-durable-strategy-recall 1
 ```
 
 Build the exact fixture binary and run the bounded service lane:
@@ -142,17 +158,25 @@ Run the mutation gate with:
 scripts/run-execution-mutation-eval.sh
 ```
 
-It previews a nonempty, explicit mutant set and writes cargo-mutants evidence
-and a strict report under `target/execution-mutants/`. Timeouts are not counted
-as caught mutants.
+It previews nonempty, explicit routing, workflow-control, and execution-runtime
+mutant sets, runs each against its owning focused test lane, and writes per-lane
+selection, mutation, and report logs; an append-only phase ledger; a final
+status with both lane and cargo-mutants exit codes; and score evidence plus one
+stable aggregate report under `target/execution-mutants/`. CI uploads the
+complete tree even when a lane fails before aggregation. Each nonempty
+`selected-mutants.txt` is persisted before that lane starts mutation execution,
+so baseline and configuration failures retain the exact attempted selection.
+The aggregate score must meet the configured threshold; timeouts are not
+counted as caught mutants.
 
 ## Live Sampling And Calibration
 
 The live corpus contains 20 cases and every case runs five times with
 independent session and run IDs. The report records `pass_at_1`, `pass_all_k`,
 binary variance, cost per success, task-count ratio, contract score, execution
-invariants, weighted routing cost, and classifier fallback telemetry. The
-complete S&P 500 query must never route to `respond` in any repetition.
+invariants, separate weighted public-route and internal-strategy costs, and
+classifier fallback telemetry. The complete S&P 500 query must never route to
+Respond in any repetition.
 
 Before any provider call, the lane forecasts the whole 20-by-5 batch through
 the existing eval cost ledger. It refuses to start unless the forecast fits an

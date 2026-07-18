@@ -20,17 +20,17 @@ use serde_json::Value;
 use crate::{Error, Result};
 
 /// Domain separator for immutable capability-catalog hashes.
-pub const CATALOG_HASH_DOMAIN: &str = "moa.execution.catalog.v1";
+pub const CATALOG_HASH_DOMAIN: &str = "moa.execution.catalog";
 /// Domain separator for immutable plan hashes.
-pub const PLAN_HASH_DOMAIN: &str = "moa.execution.plan.v1";
+pub const PLAN_HASH_DOMAIN: &str = "moa.execution.plan";
 /// Domain separator for plan-amendment hashes.
-pub const AMENDMENT_HASH_DOMAIN: &str = "moa.execution.amendment.v1";
+pub const AMENDMENT_HASH_DOMAIN: &str = "moa.execution.amendment";
 /// Domain separator for semantic plan-amendment operation fingerprints.
-pub const AMENDMENT_OPERATIONS_HASH_DOMAIN: &str = "moa.execution.amendment-operations.v1";
+pub const AMENDMENT_OPERATIONS_HASH_DOMAIN: &str = "moa.execution.amendment-operations";
 /// Domain separator for normalized execution-failure hashes.
-pub const FAILURE_HASH_DOMAIN: &str = "moa.execution.failure.v1";
+pub const FAILURE_HASH_DOMAIN: &str = "moa.execution.failure";
 /// Domain separator for structured task-output hashes.
-pub const TASK_OUTPUT_HASH_DOMAIN: &str = "moa.execution.task-output.v1";
+pub const TASK_OUTPUT_HASH_DOMAIN: &str = "moa.execution.task-output";
 
 /// A 32-byte BLAKE3 digest serialized as 64 lowercase hexadecimal characters.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -117,7 +117,7 @@ pub struct ExecutionAuthorizationEnvelope {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionCapabilityCatalog {
-    /// Capability-catalog schema version, which must be `1` for v1.
+    /// Capability-catalog schema version, which must be `1`.
     pub schema_version: u32,
     /// Sorted, duplicate-free governed capabilities.
     pub capabilities: Vec<ExecutionCapability>,
@@ -126,7 +126,7 @@ pub struct ExecutionCapabilityCatalog {
 }
 
 impl ExecutionCapabilityCatalog {
-    /// Builds a deterministic v1 catalog from invocable capabilities.
+    /// Builds a deterministic catalog from invocable capabilities.
     pub fn build(capabilities: Vec<ExecutionCapability>) -> Result<Self> {
         let mut keyed = capabilities
             .into_iter()
@@ -500,7 +500,7 @@ mod tests {
         ExecutionCapability {
             reference: CapabilityReference {
                 name: name.to_string(),
-                version: "implementation-v1".to_string(),
+                version: "implementation".to_string(),
             },
             description: format!("{name} description"),
             input_schema: json!({"type": "object"}),

@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use moa_eval_core::{EvalError, Result};
 use serde::{Deserialize, Serialize};
 
-use super::report::ExecutionJudgeCalibrationStatusV1;
+use super::report::ExecutionJudgeCalibrationStatus;
 
 /// Required number of adjudicated calibration items.
 pub const EXECUTION_CALIBRATION_ITEM_COUNT: usize = 100;
@@ -13,7 +13,7 @@ pub const EXECUTION_CALIBRATION_ITEM_COUNT: usize = 100;
 /// One two-labeler, adjudicated, and judge-scored calibration row.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionCalibrationItemV1 {
+pub struct ExecutionCalibrationItem {
     /// Stable calibration case identifier.
     pub case_id: String,
     /// First independent human label.
@@ -29,17 +29,17 @@ pub struct ExecutionCalibrationItemV1 {
 /// Strict checked calibration artifact.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionCalibrationArtifactV1 {
+pub struct ExecutionCalibrationArtifact {
     /// Artifact schema version, fixed at `1`.
     pub schema_version: u8,
     /// Exact 100-item calibration set.
-    pub items: Vec<ExecutionCalibrationItemV1>,
+    pub items: Vec<ExecutionCalibrationItem>,
 }
 
 /// Deterministic calibration metrics and threshold verdict.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionCalibrationReportV1 {
+pub struct ExecutionCalibrationReport {
     /// Exact item count.
     pub item_count: u64,
     /// Raw agreement between the two human labelers.
@@ -49,13 +49,13 @@ pub struct ExecutionCalibrationReportV1 {
     /// Judge accuracy against adjudicated human labels.
     pub judge_accuracy: f64,
     /// Closed calibration status used by execution reports.
-    pub status: ExecutionJudgeCalibrationStatusV1,
+    pub status: ExecutionJudgeCalibrationStatus,
 }
 
 /// Validates and scores one complete execution-judge calibration artifact.
 pub fn score_execution_calibration(
-    artifact: &ExecutionCalibrationArtifactV1,
-) -> Result<ExecutionCalibrationReportV1> {
+    artifact: &ExecutionCalibrationArtifact,
+) -> Result<ExecutionCalibrationReport> {
     if artifact.schema_version != 1 || artifact.items.len() != EXECUTION_CALIBRATION_ITEM_COUNT {
         return Err(invalid_config(format!(
             "execution calibration requires schema version 1 and exactly {EXECUTION_CALIBRATION_ITEM_COUNT} items"
@@ -91,11 +91,11 @@ pub fn score_execution_calibration(
         .count() as f64
         / count;
     let status = if agreement >= 0.90 && cohens_kappa >= 0.80 && judge_accuracy >= 0.85 {
-        ExecutionJudgeCalibrationStatusV1::Calibrated
+        ExecutionJudgeCalibrationStatus::Calibrated
     } else {
-        ExecutionJudgeCalibrationStatusV1::Rejected
+        ExecutionJudgeCalibrationStatus::Rejected
     };
-    Ok(ExecutionCalibrationReportV1 {
+    Ok(ExecutionCalibrationReport {
         item_count: EXECUTION_CALIBRATION_ITEM_COUNT as u64,
         labeler_agreement: agreement,
         cohens_kappa,

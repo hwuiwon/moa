@@ -18,8 +18,16 @@ faithfulness; reader/agent answer quality requires a separate execution lane.
 Durable-run contract fidelity, false-completion prevention, recovery, routing,
 and cost are owned by the
 [Execution Honesty Evaluation](eval/execution-honesty.md). Its typed
-`ExecutionEvalReportV1` is the only eval report in this repository that claims
+`ExecutionEvalReport` is the only eval report in this repository that claims
 execution success from persisted run/task state.
+
+Execution routing evaluation separates two boundaries. Public-route errors
+compare Respond, Execute, and NeedsInput and feed weighted routing cost plus the
+catastrophic Respond-on-Execute rate. Internal-strategy errors are scored only
+when both expected and observed routes are Execute; they compare Inline and
+Durable and feed weighted strategy cost, near-boundary Inline recall, Durable
+strategy recall, and one-way-upgrade evidence metrics. A route error is never
+relabelled as a strategy error.
 
 Retrieval-affecting changes additionally gate on the offline
 [Golden Retrieval Set](eval/golden-retrieval-set.md) before any live sweep:
@@ -118,7 +126,7 @@ Every run emits a `ScoreCard` with:
 runner observes a nonblank response and zero error events. It is a transport and
 response-delivery health signal. It does not prove requirement coverage,
 capability execution, or durable-run completion; those claims require the typed
-execution snapshot and invariants in `ExecutionEvalReportV1`.
+execution snapshot and invariants in `ExecutionEvalReport`.
 
 ## Budgets
 

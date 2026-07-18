@@ -48,7 +48,7 @@ pub struct SkillDefinition {
     /// Optional reusable execution-plan template for this skill.
     ///
     /// Instruction-only skills remain valid. When present, this plan uses the
-    /// canonical v1 execution DSL and is compiled into an immutable run
+    /// canonical execution DSL and is compiled into an immutable run
     /// snapshot before execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_plan: Option<ExecutionPlanTemplate>,

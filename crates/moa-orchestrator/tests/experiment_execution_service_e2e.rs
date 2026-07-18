@@ -15,9 +15,9 @@ use moa_artifacts::reference::ArtifactRef;
 use moa_core::events::Event;
 use moa_core::types::action_policy::ActionRuleScope;
 use moa_core::types::execution_planning::{
-    ExecutionAuditReportV1, ExecutionCompileOutcome, ExecutionCompileSource,
-    ExecutionPlanningAuditPayloadV1, ExecutionRouteReason, ExecutionRunAdmissionStatus,
-    ExecutionSourceProvenanceV1, PinnedExecutionTemplateRef,
+    ExecutionAuditReport, ExecutionCompileOutcome, ExecutionCompileSource,
+    ExecutionPlanningAuditPayload, ExecutionRunAdmissionStatus, ExecutionSourceProvenance,
+    PinnedExecutionTemplateRef,
 };
 use moa_core::types::identifiers::ModelId;
 use moa_core::types::session::SessionStatus;
@@ -27,7 +27,7 @@ use moa_core::wire::experiments::{
 };
 use moa_execution::state::{ExecutionTaskId, ExecutionTaskStatus};
 use moa_execution::wire::{
-    ExecutionPlanningContextSnapshotV1, ExecutionRunRequest, planning_context_hash,
+    ExecutionPlanningContextSnapshot, ExecutionRunRequest, planning_context_hash,
 };
 use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentTarget,
@@ -302,7 +302,7 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
     assert_eq!(audit.session_id, Some(session_id));
     assert_eq!(audit.originating_sequence, Some(objective_sequence));
     let final_plan_hash = {
-        let ExecutionPlanningAuditPayloadV1::Compile {
+        let ExecutionPlanningAuditPayload::Compile {
             source,
             operation_key,
             run_uid,
@@ -329,9 +329,9 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
             .clone()
             .context("accepted experiment compile omitted final plan hash")?;
         assert_hex_hash("final plan", &final_plan_hash);
-        let report: ExecutionAuditReportV1 = serde_json::from_str(validation_report)
+        let report: ExecutionAuditReport = serde_json::from_str(validation_report)
             .context("decode strict experiment compiler report")?;
-        let ExecutionAuditReportV1::Compiler {
+        let ExecutionAuditReport::Compiler {
             violations,
             omitted_violations,
             full_report_hash,
@@ -402,7 +402,7 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
         request
             .response_format
             .as_ref()
-            .is_none_or(|format| format.name != "generated_execution_candidate_v1")
+            .is_none_or(|format| format.name != "generated_execution_candidate")
     }));
 
     assert_canonical_planning_and_provenance(
@@ -554,12 +554,11 @@ async fn assert_canonical_planning_and_provenance(
     assert_eq!(row.3, expected_plan_hash);
     assert_eq!(row.5, *run_input);
 
-    let provenance: ExecutionSourceProvenanceV1 =
+    let provenance: ExecutionSourceProvenance =
         serde_json::from_value(row.4).context("decode exact execution source provenance")?;
     assert_eq!(
         provenance,
-        ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+        ExecutionSourceProvenance::ExperimentTemplate {
             skill_template_ref: exact_template.skill_ref.clone(),
             skill_template_revision_uid: exact_template.revision_uid,
             experiment_run_uid,
@@ -568,7 +567,7 @@ async fn assert_canonical_planning_and_provenance(
         }
     );
 
-    let snapshot: ExecutionPlanningContextSnapshotV1 =
+    let snapshot: ExecutionPlanningContextSnapshot =
         serde_json::from_value(row.6).context("decode immutable planning-context snapshot")?;
     snapshot
         .validate()

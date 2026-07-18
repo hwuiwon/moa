@@ -10,12 +10,11 @@ use moa_artifacts::execution_plan::{
 use moa_core::{
     types::contact::ContactId,
     types::execution_planning::{
-        ExecutionCompileOutcome, ExecutionCompileSource, ExecutionMode, ExecutionPlannerCallKind,
-        ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
-        ExecutionRouteClassifierOutcome, ExecutionRouteDecisionKind, ExecutionRouteProvenanceV1,
-        ExecutionRouteReason, ExecutionRouteSource, ExecutionRouteStage, ExecutionRouteUsageV1,
-        ExecutionSourceProvenanceV1, route_provenance_semantically_equal,
-        validate_planning_audit_envelope,
+        ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
+        ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload,
+        ExecutionRouteClassifierOutcome, ExecutionRouteKind, ExecutionRouteProvenance,
+        ExecutionRouteSource, ExecutionRouteStage, ExecutionRouteUsage, ExecutionSourceProvenance,
+        ExecutionStrategy, route_provenance_semantically_equal, validate_planning_audit_envelope,
     },
     types::identifiers::{SessionId, TenantId, UserId},
 };
@@ -39,13 +38,13 @@ use crate::{
     },
     replan::failure_fingerprint,
     state::{
-        ExecutionNodeStatus, ExecutionProjection, ExecutionRouteFields, ExecutionRunStatus,
-        ExecutionSourceKind, ExecutionTaskId, ExecutionTaskProjection, ExecutionTaskStatus,
-        ExecutionTerminalCause, ExecutionTerminalEvidence, ExecutionTerminalReason,
-        FailureFingerprintInput, LogicalTask, LogicalTaskKind, TerminalProjection, WaitingReason,
+        ExecutionNodeStatus, ExecutionProjection, ExecutionRunStatus, ExecutionSourceKind,
+        ExecutionTaskId, ExecutionTaskProjection, ExecutionTaskStatus, ExecutionTerminalCause,
+        ExecutionTerminalEvidence, ExecutionTerminalReason, FailureFingerprintInput, LogicalTask,
+        LogicalTaskKind, TerminalProjection, WaitingReason,
     },
     wire::{
-        ExecutionActionReviewResolution, ExecutionPlanningContextSnapshotV1,
+        ExecutionActionReviewResolution, ExecutionPlanningContextSnapshot,
         ExecutionTerminalDelivery, PinnedInstructionSkill, execution_terminal_delivery_from_state,
     },
 };
@@ -186,7 +185,7 @@ pub struct NewExecutionRun {
     /// Sorted exact instruction-skill revisions available to task-local agents.
     pub pinned_instruction_skills: Vec<PinnedInstructionSkill>,
     /// Skill-template or generated-plan provenance.
-    pub source_provenance: ExecutionSourceProvenanceV1,
+    pub source_provenance: ExecutionSourceProvenance,
     /// Structured run input.
     pub input: Value,
     /// Initial status, which must be queued or awaiting confirmation.
@@ -239,11 +238,9 @@ pub struct ExecutionRunRecord {
     /// Sorted exact persisted instruction-skill revisions.
     pub pinned_instruction_skills: Vec<PinnedInstructionSkill>,
     /// Skill-template or generated-plan provenance.
-    pub source_provenance: ExecutionSourceProvenanceV1,
+    pub source_provenance: ExecutionSourceProvenance,
     /// Normalized source cohort persisted by V000337.
     pub source_kind: ExecutionSourceKind,
-    /// Normalized run-producing route fields persisted by V000337.
-    pub route: ExecutionRouteFields,
     /// Exact pinned skill-template reference for template-backed runs.
     pub skill_template_ref: Option<String>,
     /// Exact pinned skill-template revision for template-backed runs.
@@ -306,7 +303,7 @@ pub struct ExecutionRunRecord {
 #[derive(Clone, Debug)]
 pub struct NewExecutionPlanningContext {
     /// Exact immutable snapshot whose canonical bytes are hashed.
-    pub snapshot: ExecutionPlanningContextSnapshotV1,
+    pub snapshot: ExecutionPlanningContextSnapshot,
     /// Domain-separated hash of the canonical snapshot bytes.
     pub planning_context_hash: ExecutionHash,
 }
@@ -317,7 +314,7 @@ pub struct ExecutionPlanningContextRecord {
     /// Durable planning-context identifier.
     pub planning_context_uid: Uuid,
     /// Exact immutable snapshot.
-    pub snapshot: ExecutionPlanningContextSnapshotV1,
+    pub snapshot: ExecutionPlanningContextSnapshot,
     /// Domain-separated hash of the canonical snapshot bytes.
     pub planning_context_hash: ExecutionHash,
     /// Database-owned creation timestamp.
@@ -340,14 +337,12 @@ pub enum PlanningContextWriteOutcome {
 pub struct RouteAuditEvidence {
     /// Deterministic UUIDv5 audit identifier.
     pub audit_uid: Uuid,
-    /// Needs-input or routed decision.
-    pub decision: ExecutionRouteDecisionKind,
-    /// Selected mode, absent exactly for needs-input.
-    pub mode: Option<ExecutionMode>,
-    /// Exact closed route reason.
-    pub reason: ExecutionRouteReason,
+    /// Respond, Execute, or NeedsInput decision.
+    pub decision: ExecutionRouteKind,
+    /// Selected strategy, present exactly for Execute.
+    pub strategy: Option<ExecutionStrategy>,
     /// Redacted trusted-bypass or classifier provenance.
-    pub provenance: ExecutionRouteProvenanceV1,
+    pub provenance: ExecutionRouteProvenance,
     /// First durable acceptance timestamp.
     pub accepted_at: DateTime<Utc>,
 }
@@ -1151,15 +1146,14 @@ impl ExecutionRepository {
     pub async fn write_route_audit(
         &self,
         scope: ExecutionScope,
-        envelope: &ExecutionPlanningAuditEnvelopeV1,
+        envelope: &ExecutionPlanningAuditEnvelope,
     ) -> Result<RouteAuditWriteOutcome> {
         validate_audit_scope(scope, envelope)?;
         let (
-            ExecutionPlanningAuditPayloadV1::Route {
+            ExecutionPlanningAuditPayload::Route {
                 stage,
                 decision,
-                mode,
-                reason,
+                strategy,
                 provenance,
                 accepted_at,
             },
@@ -1200,8 +1194,7 @@ impl ExecutionRepository {
             .bind(originating_sequence_db)
             .bind(route_stage_label(*stage))
             .bind(route_decision_label(*decision))
-            .bind(mode.map(execution_mode_label))
-            .bind(execution_route_reason_label(*reason))
+            .bind(strategy.map(execution_strategy_label))
             .bind(route_source_label(provenance.source))
             .bind(route_classifier_outcome_label(
                 provenance.classifier_outcome,
@@ -1254,8 +1247,7 @@ impl ExecutionRepository {
             if persisted.audit_uid == audit_uid
                 && persisted.stage == *stage
                 && persisted.evidence.decision == *decision
-                && persisted.evidence.mode == *mode
-                && persisted.evidence.reason == *reason
+                && persisted.evidence.strategy == *strategy
                 && route_provenance_semantically_equal(&persisted.evidence.provenance, provenance)
             {
                 RouteAuditWriteOutcome::Replayed(persisted.evidence)
@@ -1271,11 +1263,11 @@ impl ExecutionRepository {
     pub async fn write_planner_call_audit(
         &self,
         scope: ExecutionScope,
-        envelope: &ExecutionPlanningAuditEnvelopeV1,
+        envelope: &ExecutionPlanningAuditEnvelope,
     ) -> Result<PlannerCallAuditWriteOutcome> {
         validate_audit_scope(scope, envelope)?;
         let (
-            ExecutionPlanningAuditPayloadV1::PlannerCall {
+            ExecutionPlanningAuditPayload::PlannerCall {
                 call_kind,
                 call_ordinal,
                 run_uid,
@@ -1373,10 +1365,10 @@ impl ExecutionRepository {
     pub async fn write_compile_audit(
         &self,
         scope: ExecutionScope,
-        envelope: &ExecutionPlanningAuditEnvelopeV1,
+        envelope: &ExecutionPlanningAuditEnvelope,
     ) -> Result<CompileAuditWriteOutcome> {
         validate_audit_scope(scope, envelope)?;
-        let ExecutionPlanningAuditPayloadV1::Compile {
+        let ExecutionPlanningAuditPayload::Compile {
             source,
             operation_key,
             run_uid,
@@ -1493,8 +1485,6 @@ impl ExecutionRepository {
             .bind(pinned_skills_value)
             .bind(source_provenance_value)
             .bind(source_fields.kind.as_str())
-            .bind("run")
-            .bind(source_fields.route_reason_label)
             .bind(source_fields.skill_template_ref)
             .bind(source_fields.skill_template_revision_uid)
             .bind(new_run.input)
@@ -4713,75 +4703,34 @@ fn validate_new_run(scope: ExecutionScope, new_run: &NewExecutionRun) -> Result<
 
 struct NormalizedSourceFields<'a> {
     kind: ExecutionSourceKind,
-    route_reason_label: &'static str,
     skill_template_ref: Option<&'a str>,
     skill_template_revision_uid: Option<Uuid>,
 }
 
-fn normalized_source_fields(
-    provenance: &ExecutionSourceProvenanceV1,
-) -> NormalizedSourceFields<'_> {
+fn normalized_source_fields(provenance: &ExecutionSourceProvenance) -> NormalizedSourceFields<'_> {
     match provenance {
-        ExecutionSourceProvenanceV1::GeneratedPlan { route_reason, .. } => NormalizedSourceFields {
+        ExecutionSourceProvenance::GeneratedPlan { .. } => NormalizedSourceFields {
             kind: ExecutionSourceKind::GeneratedPlan,
-            route_reason_label: execution_route_reason_label(*route_reason),
             skill_template_ref: None,
             skill_template_revision_uid: None,
         },
-        ExecutionSourceProvenanceV1::SkillTemplate {
-            route_reason,
+        ExecutionSourceProvenance::SkillTemplate {
             skill_template_ref,
             skill_template_revision_uid,
         } => NormalizedSourceFields {
             kind: ExecutionSourceKind::SkillTemplate,
-            route_reason_label: execution_route_reason_label(*route_reason),
             skill_template_ref: Some(skill_template_ref.as_str()),
             skill_template_revision_uid: Some(*skill_template_revision_uid),
         },
-        ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason,
+        ExecutionSourceProvenance::ExperimentTemplate {
             skill_template_ref,
             skill_template_revision_uid,
             ..
         } => NormalizedSourceFields {
             kind: ExecutionSourceKind::ExperimentTemplate,
-            route_reason_label: execution_route_reason_label(*route_reason),
             skill_template_ref: Some(skill_template_ref.as_str()),
             skill_template_revision_uid: Some(*skill_template_revision_uid),
         },
-    }
-}
-
-const fn execution_route_reason_label(reason: ExecutionRouteReason) -> &'static str {
-    match reason {
-        ExecutionRouteReason::SimpleResponse => "simple_response",
-        ExecutionRouteReason::BoundedInteractiveWork => "bounded_interactive_work",
-        ExecutionRouteReason::PreflightInputMissing => "preflight_input_missing",
-        ExecutionRouteReason::ExplicitRun => "explicit_run",
-        ExecutionRouteReason::BulkCollection => "bulk_collection",
-        ExecutionRouteReason::DurableOrResumable => "durable_or_resumable",
-        ExecutionRouteReason::HighFanout => "high_fanout",
-        ExecutionRouteReason::ApprovalOrSignal => "approval_or_signal",
-        ExecutionRouteReason::SelectedExecutionTemplate => "selected_execution_template",
-        ExecutionRouteReason::ActEscalation => "act_escalation",
-    }
-}
-
-fn execution_route_reason_from_str(value: &str) -> Result<ExecutionRouteReason> {
-    match value {
-        "simple_response" => Ok(ExecutionRouteReason::SimpleResponse),
-        "bounded_interactive_work" => Ok(ExecutionRouteReason::BoundedInteractiveWork),
-        "preflight_input_missing" => Ok(ExecutionRouteReason::PreflightInputMissing),
-        "explicit_run" => Ok(ExecutionRouteReason::ExplicitRun),
-        "bulk_collection" => Ok(ExecutionRouteReason::BulkCollection),
-        "durable_or_resumable" => Ok(ExecutionRouteReason::DurableOrResumable),
-        "high_fanout" => Ok(ExecutionRouteReason::HighFanout),
-        "approval_or_signal" => Ok(ExecutionRouteReason::ApprovalOrSignal),
-        "selected_execution_template" => Ok(ExecutionRouteReason::SelectedExecutionTemplate),
-        "act_escalation" => Ok(ExecutionRouteReason::ActEscalation),
-        _ => Err(Error::InvalidRepositoryData {
-            message: format!("unknown execution route reason `{value}`"),
-        }),
     }
 }
 
@@ -4790,7 +4739,7 @@ const fn route_source_label(source: ExecutionRouteSource) -> &'static str {
         ExecutionRouteSource::Classifier => "classifier",
         ExecutionRouteSource::BlankObjective => "blank_objective",
         ExecutionRouteSource::SelectedExecutionTemplate => "selected_execution_template",
-        ExecutionRouteSource::ActEscalation => "act_escalation",
+        ExecutionRouteSource::DurableUpgrade => "durable_upgrade",
     }
 }
 
@@ -4799,7 +4748,7 @@ fn route_source_from_str(value: &str) -> Result<ExecutionRouteSource> {
         "classifier" => Ok(ExecutionRouteSource::Classifier),
         "blank_objective" => Ok(ExecutionRouteSource::BlankObjective),
         "selected_execution_template" => Ok(ExecutionRouteSource::SelectedExecutionTemplate),
-        "act_escalation" => Ok(ExecutionRouteSource::ActEscalation),
+        "durable_upgrade" => Ok(ExecutionRouteSource::DurableUpgrade),
         _ => Err(Error::InvalidRepositoryData {
             message: format!("unknown execution route source `{value}`"),
         }),
@@ -4816,7 +4765,7 @@ const fn route_classifier_outcome_label(outcome: ExecutionRouteClassifierOutcome
         ExecutionRouteClassifierOutcome::SchemaRejected => "schema_rejected",
         ExecutionRouteClassifierOutcome::InvalidDecision => "invalid_decision",
         ExecutionRouteClassifierOutcome::LowConfidence => "low_confidence",
-        ExecutionRouteClassifierOutcome::ContextForcedAct => "context_forced_act",
+        ExecutionRouteClassifierOutcome::ContextForcedInline => "context_forced_inline",
     }
 }
 
@@ -4830,7 +4779,7 @@ fn route_classifier_outcome_from_str(value: &str) -> Result<ExecutionRouteClassi
         "schema_rejected" => Ok(ExecutionRouteClassifierOutcome::SchemaRejected),
         "invalid_decision" => Ok(ExecutionRouteClassifierOutcome::InvalidDecision),
         "low_confidence" => Ok(ExecutionRouteClassifierOutcome::LowConfidence),
-        "context_forced_act" => Ok(ExecutionRouteClassifierOutcome::ContextForcedAct),
+        "context_forced_inline" => Ok(ExecutionRouteClassifierOutcome::ContextForcedInline),
         _ => Err(Error::InvalidRepositoryData {
             message: format!("unknown execution route classifier outcome `{value}`"),
         }),
@@ -4861,9 +4810,9 @@ impl PersistedPlannerAudit {
     fn semantically_matches(
         &self,
         audit_uid: Uuid,
-        envelope: &ExecutionPlanningAuditEnvelopeV1,
+        envelope: &ExecutionPlanningAuditEnvelope,
     ) -> bool {
-        let ExecutionPlanningAuditPayloadV1::PlannerCall {
+        let ExecutionPlanningAuditPayload::PlannerCall {
             call_kind,
             call_ordinal,
             run_uid,
@@ -4909,9 +4858,9 @@ impl PersistedCompileAudit {
     fn semantically_matches(
         &self,
         audit_uid: Uuid,
-        envelope: &ExecutionPlanningAuditEnvelopeV1,
+        envelope: &ExecutionPlanningAuditEnvelope,
     ) -> bool {
-        let ExecutionPlanningAuditPayloadV1::Compile {
+        let ExecutionPlanningAuditPayload::Compile {
             source,
             operation_key,
             run_uid,
@@ -4941,7 +4890,7 @@ impl PersistedCompileAudit {
 
 fn validate_audit_scope(
     scope: ExecutionScope,
-    envelope: &ExecutionPlanningAuditEnvelopeV1,
+    envelope: &ExecutionPlanningAuditEnvelope,
 ) -> Result<()> {
     validate_planning_audit_envelope(envelope).map_err(|error| Error::InvalidRepositoryInput {
         message: error.to_string(),
@@ -4966,7 +4915,7 @@ fn route_audit_uid(
     stage: ExecutionRouteStage,
 ) -> Result<Uuid> {
     execution_audit_uid(
-        "moa.execution.route-audit.v1",
+        "moa.execution.route-audit",
         &[
             Some(tenant_id.0.to_string()),
             contact_id.map(|value| value.0.to_string()),
@@ -4989,7 +4938,7 @@ fn planner_audit_uid(
     call_ordinal: u8,
 ) -> Result<Uuid> {
     execution_audit_uid(
-        "moa.execution.planner-audit.v1",
+        "moa.execution.planner-audit",
         &[
             Some(tenant_id.0.to_string()),
             contact_id.map(|value| value.0.to_string()),
@@ -5010,7 +4959,7 @@ fn compile_audit_uid(
     operation_key: &str,
 ) -> Result<Uuid> {
     execution_audit_uid(
-        "moa.execution.compile-audit.v1",
+        "moa.execution.compile-audit",
         &[
             Some(tenant_id.0.to_string()),
             contact_id.map(|value| value.0.to_string()),
@@ -5041,13 +4990,11 @@ fn route_audit_from_row(row: &PgRow) -> Result<PersistedRouteAudit> {
     let audit_uid: Uuid = row.try_get("audit_uid").map_err(row_error)?;
     let decision =
         route_decision_from_str(&row.try_get::<String, _>("decision").map_err(row_error)?)?;
-    let mode = row
-        .try_get::<Option<String>, _>("mode")
+    let strategy = row
+        .try_get::<Option<String>, _>("strategy")
         .map_err(row_error)?
-        .map(|value| execution_mode_from_str(&value))
+        .map(|value| execution_strategy_from_str(&value))
         .transpose()?;
-    let reason =
-        execution_route_reason_from_str(&row.try_get::<String, _>("reason").map_err(row_error)?)?;
     let confidence_bps = row
         .try_get::<Option<i16>, _>("confidence_bps")
         .map_err(row_error)?
@@ -5069,9 +5016,8 @@ fn route_audit_from_row(row: &PgRow) -> Result<PersistedRouteAudit> {
         evidence: RouteAuditEvidence {
             audit_uid,
             decision,
-            mode,
-            reason,
-            provenance: ExecutionRouteProvenanceV1 {
+            strategy,
+            provenance: ExecutionRouteProvenance {
                 source: route_source_from_str(
                     &row.try_get::<String, _>("source").map_err(row_error)?,
                 )?,
@@ -5085,7 +5031,7 @@ fn route_audit_from_row(row: &PgRow) -> Result<PersistedRouteAudit> {
                 response_hash: row.try_get("response_hash").map_err(row_error)?,
                 confidence_bps,
                 missing_input_count,
-                usage: ExecutionRouteUsageV1 {
+                usage: ExecutionRouteUsage {
                     input_tokens_uncached: required_u64(row, "input_tokens_uncached")?,
                     input_tokens_cache_write: required_u64(row, "input_tokens_cache_write")?,
                     input_tokens_cache_read: required_u64(row, "input_tokens_cache_read")?,
@@ -5159,52 +5105,52 @@ fn compile_audit_from_row(row: &PgRow) -> Result<PersistedCompileAudit> {
 const fn route_stage_label(stage: ExecutionRouteStage) -> &'static str {
     match stage {
         ExecutionRouteStage::Initial => "initial",
-        ExecutionRouteStage::ActEscalation => "act_escalation",
+        ExecutionRouteStage::DurableUpgrade => "durable_upgrade",
     }
 }
 
 fn route_stage_from_str(value: &str) -> Result<ExecutionRouteStage> {
     match value {
         "initial" => Ok(ExecutionRouteStage::Initial),
-        "act_escalation" => Ok(ExecutionRouteStage::ActEscalation),
+        "durable_upgrade" => Ok(ExecutionRouteStage::DurableUpgrade),
         _ => Err(Error::InvalidRepositoryData {
             message: format!("unknown execution route stage `{value}`"),
         }),
     }
 }
 
-const fn route_decision_label(decision: ExecutionRouteDecisionKind) -> &'static str {
+const fn route_decision_label(decision: ExecutionRouteKind) -> &'static str {
     match decision {
-        ExecutionRouteDecisionKind::NeedsInput => "needs_input",
-        ExecutionRouteDecisionKind::Routed => "routed",
+        ExecutionRouteKind::Respond => "respond",
+        ExecutionRouteKind::Execute => "execute",
+        ExecutionRouteKind::NeedsInput => "needs_input",
     }
 }
 
-fn route_decision_from_str(value: &str) -> Result<ExecutionRouteDecisionKind> {
+fn route_decision_from_str(value: &str) -> Result<ExecutionRouteKind> {
     match value {
-        "needs_input" => Ok(ExecutionRouteDecisionKind::NeedsInput),
-        "routed" => Ok(ExecutionRouteDecisionKind::Routed),
+        "respond" => Ok(ExecutionRouteKind::Respond),
+        "execute" => Ok(ExecutionRouteKind::Execute),
+        "needs_input" => Ok(ExecutionRouteKind::NeedsInput),
         _ => Err(Error::InvalidRepositoryData {
             message: format!("unknown execution route decision `{value}`"),
         }),
     }
 }
 
-const fn execution_mode_label(mode: ExecutionMode) -> &'static str {
-    match mode {
-        ExecutionMode::Respond => "respond",
-        ExecutionMode::Act => "act",
-        ExecutionMode::Run => "run",
+const fn execution_strategy_label(strategy: ExecutionStrategy) -> &'static str {
+    match strategy {
+        ExecutionStrategy::Inline => "inline",
+        ExecutionStrategy::Durable => "durable",
     }
 }
 
-fn execution_mode_from_str(value: &str) -> Result<ExecutionMode> {
+fn execution_strategy_from_str(value: &str) -> Result<ExecutionStrategy> {
     match value {
-        "respond" => Ok(ExecutionMode::Respond),
-        "act" => Ok(ExecutionMode::Act),
-        "run" => Ok(ExecutionMode::Run),
+        "inline" => Ok(ExecutionStrategy::Inline),
+        "durable" => Ok(ExecutionStrategy::Durable),
         _ => Err(Error::InvalidRepositoryData {
-            message: format!("unknown execution mode `{value}`"),
+            message: format!("unknown execution strategy `{value}`"),
         }),
     }
 }
@@ -5371,19 +5317,19 @@ fn row_error(error: sqlx::Error) -> Error {
 const INSERT_ROUTE_AUDIT_SQL: &str = r#"
     INSERT INTO moa.execution_route_audit (
         audit_uid, tenant_id, contact_id, session_id, originating_sequence,
-        stage, decision, mode, reason, source, classifier_outcome,
+        stage, decision, strategy, source, classifier_outcome,
         provider_model, prompt_version, objective_hash, response_hash,
         confidence_bps, missing_input_count, input_tokens_uncached,
         input_tokens_cache_write, input_tokens_cache_read, output_tokens,
         cost_microusd, duration_micros, accepted_at, created_at
     )
     VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $24
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+        $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $23
     )
     ON CONFLICT DO NOTHING
     RETURNING
-        audit_uid, stage, decision, mode, reason, source, classifier_outcome,
+        audit_uid, stage, decision, strategy, source, classifier_outcome,
         provider_model, prompt_version, objective_hash, response_hash,
         confidence_bps, missing_input_count, input_tokens_uncached,
         input_tokens_cache_write, input_tokens_cache_read, output_tokens,
@@ -5392,7 +5338,7 @@ const INSERT_ROUTE_AUDIT_SQL: &str = r#"
 
 const LOAD_ROUTE_AUDIT_SQL: &str = r#"
     SELECT
-        audit_uid, stage, decision, mode, reason, source, classifier_outcome,
+        audit_uid, stage, decision, strategy, source, classifier_outcome,
         provider_model, prompt_version, objective_hash, response_hash,
         confidence_bps, missing_input_count, input_tokens_uncached,
         input_tokens_cache_write, input_tokens_cache_read, output_tokens,
@@ -5502,16 +5448,16 @@ const CREATE_RUN_SQL: &str = r#"
         planning_context_uid, planning_context_hash, owner_user_id,
         goal_contract, initial_plan, active_plan, initial_plan_hash, active_plan_hash,
         capability_catalog, authorization_envelope, pinned_instruction_skills,
-        source_provenance, source_kind, route_mode, route_reason,
-        skill_template_ref, skill_template_revision_uid, input, status,
+        source_provenance, source_kind, skill_template_ref,
+        skill_template_revision_uid, input, status,
         budget_max_cost_microusd, budget_max_tokens, budget_max_tasks,
         budget_max_tool_calls, budget_max_retrieved_bytes, budget_deadline_at,
         progress_total_tasks, idempotency_key
     )
     VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-        $26, $27, $28, $29, $30, $31, $32
+        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
+        $24, $25, $26, $27, $28, $29, $30
     )
     ON CONFLICT (
         tenant_id,
@@ -6148,26 +6094,10 @@ fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
         }
     };
     let waiting_reasons: Value = row.try_get("waiting_reasons").map_err(row_error)?;
-    let source_provenance: ExecutionSourceProvenanceV1 =
+    let source_provenance: ExecutionSourceProvenance =
         serde_json::from_value(row.try_get("source_provenance").map_err(row_error)?)?;
     let source_kind = ExecutionSourceKind::from_str(
         &row.try_get::<String, _>("source_kind").map_err(row_error)?,
-    )?;
-    let route_mode = match row
-        .try_get::<String, _>("route_mode")
-        .map_err(row_error)?
-        .as_str()
-    {
-        "run" => ExecutionMode::Run,
-        value => {
-            return Err(Error::InvalidRepositoryData {
-                message: format!("unknown execution route mode `{value}`"),
-            });
-        }
-    };
-    let route_reason = execution_route_reason_from_str(
-        &row.try_get::<String, _>("route_reason")
-            .map_err(row_error)?,
     )?;
     let status =
         ExecutionRunStatus::from_str(&row.try_get::<String, _>("status").map_err(row_error)?)?;
@@ -6222,10 +6152,6 @@ fn run_from_row(row: &PgRow) -> Result<ExecutionRunRecord> {
         pinned_instruction_skills: serde_json::from_value(pinned_skills)?,
         source_provenance,
         source_kind,
-        route: ExecutionRouteFields {
-            mode: route_mode,
-            reason: route_reason,
-        },
         skill_template_ref: row.try_get("skill_template_ref").map_err(row_error)?,
         skill_template_revision_uid: row
             .try_get("skill_template_revision_uid")
@@ -6337,4 +6263,107 @@ fn estimate_from_row(row: &PgRow, prefix: &str) -> Result<ExecutionEstimate> {
         tool_calls: required_u64(row, &format!("{prefix}_tool_calls"))?,
         retrieved_bytes: required_u64(row, &format!("{prefix}_retrieved_bytes"))?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_route_repository_parsers_accept_exact_current_values() {
+        // Pins: repository reconstruction accepts every value in the normalized
+        // decision, strategy, source, stage, and classifier-outcome contract.
+        for (value, expected) in [
+            ("respond", ExecutionRouteKind::Respond),
+            ("execute", ExecutionRouteKind::Execute),
+            ("needs_input", ExecutionRouteKind::NeedsInput),
+        ] {
+            assert_eq!(
+                route_decision_from_str(value).expect("current decision should parse"),
+                expected
+            );
+        }
+        for (value, expected) in [
+            ("inline", ExecutionStrategy::Inline),
+            ("durable", ExecutionStrategy::Durable),
+        ] {
+            assert_eq!(
+                execution_strategy_from_str(value).expect("current strategy should parse"),
+                expected
+            );
+        }
+        for (value, expected) in [
+            ("initial", ExecutionRouteStage::Initial),
+            ("durable_upgrade", ExecutionRouteStage::DurableUpgrade),
+        ] {
+            assert_eq!(
+                route_stage_from_str(value).expect("current stage should parse"),
+                expected
+            );
+        }
+        for (value, expected) in [
+            ("classifier", ExecutionRouteSource::Classifier),
+            ("blank_objective", ExecutionRouteSource::BlankObjective),
+            (
+                "selected_execution_template",
+                ExecutionRouteSource::SelectedExecutionTemplate,
+            ),
+            ("durable_upgrade", ExecutionRouteSource::DurableUpgrade),
+        ] {
+            assert_eq!(
+                route_source_from_str(value).expect("current source should parse"),
+                expected
+            );
+        }
+        for (value, expected) in [
+            ("not_called", ExecutionRouteClassifierOutcome::NotCalled),
+            ("accepted", ExecutionRouteClassifierOutcome::Accepted),
+            (
+                "provider_error",
+                ExecutionRouteClassifierOutcome::ProviderError,
+            ),
+            ("stream_error", ExecutionRouteClassifierOutcome::StreamError),
+            ("oversized", ExecutionRouteClassifierOutcome::Oversized),
+            (
+                "schema_rejected",
+                ExecutionRouteClassifierOutcome::SchemaRejected,
+            ),
+            (
+                "invalid_decision",
+                ExecutionRouteClassifierOutcome::InvalidDecision,
+            ),
+            (
+                "low_confidence",
+                ExecutionRouteClassifierOutcome::LowConfidence,
+            ),
+            (
+                "context_forced_inline",
+                ExecutionRouteClassifierOutcome::ContextForcedInline,
+            ),
+        ] {
+            assert_eq!(
+                route_classifier_outcome_from_str(value)
+                    .expect("current classifier outcome should parse"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn execution_route_repository_parsers_reject_removed_values() {
+        // Pins: the breaking cutover does not translate any removed route value.
+        for value in ["routed", "act", "run"] {
+            assert!(route_decision_from_str(value).is_err(), "accepted {value}");
+        }
+        for value in ["respond", "act", "run"] {
+            assert!(
+                execution_strategy_from_str(value).is_err(),
+                "accepted {value}"
+            );
+        }
+        let removed_upgrade = ["act", "_escalation"].concat();
+        assert!(route_stage_from_str(&removed_upgrade).is_err());
+        assert!(route_source_from_str(&removed_upgrade).is_err());
+        assert!(route_classifier_outcome_from_str(&["context_forced_", "act"].concat()).is_err());
+    }
 }

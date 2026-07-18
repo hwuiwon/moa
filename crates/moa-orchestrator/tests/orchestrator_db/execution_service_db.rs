@@ -8,7 +8,7 @@ use moa_artifacts::execution_plan::{
 use moa_core::{
     events::ExecutionTaskResultsRef,
     types::{
-        execution_planning::{ExecutionRouteReason, ExecutionSourceProvenanceV1},
+        execution_planning::ExecutionSourceProvenance,
         identifiers::{SessionId, TenantId, UserId},
     },
 };
@@ -32,7 +32,7 @@ use moa_execution::{
         LogicalTask, LogicalTaskKind, TerminalProjection,
     },
     wire::{
-        EXECUTION_TERMINAL_MAX_CITATION_IDS, ExecutionPlanningContextSnapshotV1,
+        EXECUTION_TERMINAL_MAX_CITATION_IDS, ExecutionPlanningContextSnapshot,
         planning_context_hash,
     },
 };
@@ -68,7 +68,7 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
         max_retrieved_bytes: Some(1_000),
         deadline_at: Some(Utc::now() + Duration::hours(1)),
     };
-    let planning_snapshot = ExecutionPlanningContextSnapshotV1 {
+    let planning_snapshot = ExecutionPlanningContextSnapshot {
         schema_version: 1,
         tenant_id,
         contact_id: None,
@@ -136,8 +136,7 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
                 catalog,
                 authorization,
                 pinned_instruction_skills: Vec::new(),
-                source_provenance: ExecutionSourceProvenanceV1::SkillTemplate {
-                    route_reason: ExecutionRouteReason::SelectedExecutionTemplate,
+                source_provenance: ExecutionSourceProvenance::SkillTemplate {
                     skill_template_ref: "skill://execution-lineage".to_string(),
                     skill_template_revision_uid: Uuid::now_v7(),
                 },
@@ -369,11 +368,11 @@ async fn execution_service_rows_require_parent_session_and_keep_authorization_im
             planning_context_uid, planning_context_hash, owner_user_id, goal_contract,
             initial_plan, active_plan, initial_plan_hash, active_plan_hash,
             capability_catalog, authorization_envelope, pinned_instruction_skills,
-            source_provenance, source_kind, route_mode, route_reason, input, status
+            source_provenance, source_kind, input, status
         ) VALUES ($1, $2, NULL, 0, $3, $4, 'owner', '{}'::JSONB, '{}'::JSONB, '{}'::JSONB,
                   $4, $4, '{}'::JSONB, '{}'::JSONB, '[]'::JSONB,
-                  '{"kind":"generated_plan","route_reason":"explicit_run"}'::JSONB,
-                  'generated_plan', 'run', 'explicit_run', '{}'::JSONB, 'queued')
+                  '{"kind":"generated_plan"}'::JSONB,
+                  'generated_plan', '{}'::JSONB, 'queued')
         "#,
     )
     .bind(run_uid)
@@ -397,13 +396,13 @@ async fn execution_service_rows_require_parent_session_and_keep_authorization_im
             planning_context_uid, planning_context_hash, owner_user_id, goal_contract,
             initial_plan, active_plan, initial_plan_hash, active_plan_hash,
             capability_catalog, authorization_envelope, pinned_instruction_skills,
-            source_provenance, source_kind, route_mode, route_reason,
+            source_provenance, source_kind,
             input, status, queued_at
         ) VALUES ($1, $2, $3, 0, $4, $5, 'owner', '{}'::JSONB, '{}'::JSONB, '{}'::JSONB,
                   $5, $5, '{"schema_version":1}'::JSONB,
                   '{"capability_refs":[],"skill_refs":[]}'::JSONB, '[]'::JSONB,
-                  '{"kind":"generated_plan","route_reason":"explicit_run"}'::JSONB,
-                  'generated_plan', 'run', 'explicit_run', '{}'::JSONB, 'queued', NOW())
+                  '{"kind":"generated_plan"}'::JSONB,
+                  'generated_plan', '{}'::JSONB, 'queued', NOW())
         "#,
     )
     .bind(run_uid)

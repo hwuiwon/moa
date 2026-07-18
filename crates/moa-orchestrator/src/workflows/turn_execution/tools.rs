@@ -4,11 +4,9 @@ use std::{collections::HashMap, time::Instant};
 
 use moa_core::wire::turn::TurnPhase;
 use moa_core::{
-    types::completion::ToolCallContent,
     types::completion::ToolInvocation,
-    types::execution_planning::{
-        ActEscalationSignal, ExecutionPlanningEvidence, ExecutionRouteReason,
-    },
+    types::completion::{CompletionRequest, ToolCallContent},
+    types::execution_planning::{DurableUpgradeSignal, ExecutionPlanningEvidence},
     types::identifiers::{SessionId, ToolCallId},
     types::session::SessionMeta,
     types::tools::ToolOutput,
@@ -27,7 +25,10 @@ use crate::tool_invocation::governed::{
     append_cached_tool_result, invoke_governed_tool,
     record_segment_tool_use as record_governed_segment_tool_use,
 };
-use crate::turn::util::{TurnEvidence, stable_tool_call_id};
+use crate::turn::util::{
+    DURABLE_UPGRADE_CONTROL_TOOL_NAME, TurnEvidence, blocked_canary_message, stable_tool_call_id,
+    tool_input_leaks_canary,
+};
 use crate::turn_driver::progress as driver_progress;
 use crate::workflows::errors::moa_error_to_handler_error;
 use crate::workflows::turn_events::{
@@ -104,75 +105,106 @@ async fn handle_delegation_tool(
 #[derive(Clone, Debug)]
 pub(super) enum ToolDispatchOutcome {
     Completed,
-    ActEscalation(ActEscalationSignal),
-    ActEscalationUnsupported(String),
+    DurableUpgrade(DurableUpgradeSignal),
+    DurableUpgradeUnsupported(String),
     Cancelled,
     ToolBudgetExceeded(ToolBudgetExhausted),
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum ActToolResultRoute {
-    Continue,
-    Escalate(ActEscalationSignal),
-    Unsupported(String),
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DiscoveredExecutionShape {
-    reason: ExecutionRouteReason,
-    summary: String,
-    value: serde_json::Value,
+struct DurableUpgradeToolInput {
+    rationale: String,
+    evidence: Vec<ExecutionPlanningEvidence>,
 }
 
-fn reevaluate_act_tool_result(
-    objective: &str,
-    origin_allows_run: bool,
-    invocation: &ToolInvocation,
-    output: &ToolOutput,
-) -> ActToolResultRoute {
-    if !origin_allows_run || output.is_error {
-        return ActToolResultRoute::Continue;
-    }
-    let Some(shape) = output
-        .structured
-        .as_ref()
-        .and_then(|structured| structured.get("execution_shape"))
-    else {
-        return ActToolResultRoute::Continue;
-    };
-    let discovered = match serde_json::from_value::<DiscoveredExecutionShape>(shape.clone()) {
-        Ok(discovered) => discovered,
-        Err(error) => {
-            return ActToolResultRoute::Unsupported(format!(
-                "invalid structured execution-shape evidence: {error}"
-            ));
+/// Returns the strict provider schema for the workflow-owned Durable-upgrade control tool.
+pub(super) fn durable_upgrade_tool_schema() -> serde_json::Value {
+    serde_json::json!({
+        "name": DURABLE_UPGRADE_CONTROL_TOOL_NAME,
+        "description": "Request the one-way transition from bounded Inline work to a durable execution plan after the current turn has discovered concrete evidence that the remaining work needs durability, resumability, approval or signal handling, or broad fan-out. Call this control by itself.",
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["rationale", "evidence"],
+            "properties": {
+                "rationale": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 240,
+                    "description": "One short sentence explaining why the discovered work now needs Durable execution."
+                },
+                "evidence": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["source", "summary", "value"],
+                        "properties": {
+                            "source": {"type": "string", "description": "Stable label for the already-observed source."},
+                            "summary": {"type": "string", "description": "Concise summary of the observed fact."},
+                            "value": {"description": "Structured evidence already gathered during this Inline turn."}
+                        }
+                    }
+                }
+            }
         }
+    })
+}
+
+/// Installs the authoritative workflow control schema only for an eligible root Inline turn.
+pub(super) fn configure_durable_upgrade_tool_schema(
+    request: &mut CompletionRequest,
+    allowed: bool,
+) {
+    request.tools.retain(|schema| {
+        schema
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|name| name != DURABLE_UPGRADE_CONTROL_TOOL_NAME)
+    });
+    if allowed {
+        request.tools.push(durable_upgrade_tool_schema());
+    }
+}
+
+fn durable_upgrade_signal_from_control_call(
+    objective: &str,
+    durable_upgrade_allowed: bool,
+    active_canary: Option<&str>,
+    tool_calls: &[&ToolCallContent],
+) -> Result<Option<DurableUpgradeSignal>, String> {
+    let upgrade_calls = tool_calls
+        .iter()
+        .filter(|call| call.invocation.name == DURABLE_UPGRADE_CONTROL_TOOL_NAME)
+        .collect::<Vec<_>>();
+    let Some(tool_call) = upgrade_calls.first() else {
+        return Ok(None);
     };
-    if !matches!(
-        discovered.reason,
-        ExecutionRouteReason::BulkCollection
-            | ExecutionRouteReason::DurableOrResumable
-            | ExecutionRouteReason::HighFanout
-            | ExecutionRouteReason::ApprovalOrSignal
-    ) {
-        return ActToolResultRoute::Unsupported(
-            "tool result execution_shape reason is not a newly discovered run shape".to_string(),
+    if !durable_upgrade_allowed {
+        return Err("Durable upgrade is not available for this turn".to_string());
+    }
+    if upgrade_calls.len() != 1 || tool_calls.len() != 1 {
+        return Err(
+            "the Durable-upgrade control must be the only tool call in its model response"
+                .to_string(),
         );
     }
-    let signal = ActEscalationSignal {
-        objective: objective.to_string(),
-        reason: discovered.reason,
-        evidence: vec![ExecutionPlanningEvidence {
-            source: format!("tool:{}", invocation.name),
-            summary: discovered.summary,
-            value: discovered.value,
-        }],
-    };
-    match signal.validate() {
-        Ok(()) => ActToolResultRoute::Escalate(signal),
-        Err(error) => ActToolResultRoute::Unsupported(error.to_string()),
+    if tool_input_leaks_canary(active_canary, &tool_call.invocation.input)
+        .map_err(|_| "Durable-upgrade control security screening failed".to_string())?
+    {
+        return Err(blocked_canary_message(DURABLE_UPGRADE_CONTROL_TOOL_NAME));
     }
+    let input =
+        serde_json::from_value::<DurableUpgradeToolInput>(tool_call.invocation.input.clone())
+            .map_err(|_| "invalid Durable-upgrade control input".to_string())?;
+    Ok(Some(DurableUpgradeSignal {
+        objective: objective.to_string(),
+        rationale: input.rationale,
+        evidence: input.evidence,
+    }))
 }
 
 /// Number of cache serves of one file after which the notice escalates to a STOP.
@@ -324,7 +356,7 @@ pub(super) struct RootToolContext<'a> {
     /// Skills injected into this turn's manifest, used to detect which the model engaged.
     pub(super) selected_skills: &'a [String],
     pub(super) objective: &'a str,
-    pub(super) act_escalation_allowed: bool,
+    pub(super) durable_upgrade_allowed: bool,
     pub(super) turn_evidence: &'a mut TurnEvidence,
     /// Per-turn `file_read` result memory shared across this turn's model-loop iterations.
     pub(super) file_read_cache: &'a mut FileReadTurnCache,
@@ -339,6 +371,29 @@ pub(super) async fn dispatch_response_tool_calls(
     tool_calls: &[&ToolCallContent],
     last_summary: &mut Option<String>,
 ) -> Result<ToolDispatchOutcome, HandlerError> {
+    match durable_upgrade_signal_from_control_call(
+        tool_context.objective,
+        tool_context.durable_upgrade_allowed,
+        tool_context.active_canary,
+        tool_calls,
+    ) {
+        Ok(Some(signal)) => {
+            if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
+                *last_summary = Some(reason);
+                return Ok(ToolDispatchOutcome::Cancelled);
+            }
+            let invocation = &tool_calls[0].invocation;
+            if let Some(exhaustion) =
+                record_tool_budget(ctx, tool_budget, invocation, false).await?
+            {
+                return Ok(ToolDispatchOutcome::ToolBudgetExceeded(exhaustion));
+            }
+            return Ok(ToolDispatchOutcome::DurableUpgrade(signal));
+        }
+        Ok(None) => {}
+        Err(message) => return Ok(ToolDispatchOutcome::DurableUpgradeUnsupported(message)),
+    }
+
     for (index, tool_call) in tool_calls.iter().enumerate() {
         if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
             *last_summary = Some(reason);
@@ -354,7 +409,7 @@ pub(super) async fn dispatch_response_tool_calls(
         {
             return Ok(ToolDispatchOutcome::ToolBudgetExceeded(exhaustion));
         }
-        match handle_tool_call(
+        handle_tool_call(
             workflow,
             ctx,
             &mut tool_context,
@@ -362,16 +417,7 @@ pub(super) async fn dispatch_response_tool_calls(
             index,
             tool_call,
         )
-        .await?
-        {
-            ActToolResultRoute::Continue => {}
-            ActToolResultRoute::Escalate(signal) => {
-                return Ok(ToolDispatchOutcome::ActEscalation(signal));
-            }
-            ActToolResultRoute::Unsupported(message) => {
-                return Ok(ToolDispatchOutcome::ActEscalationUnsupported(message));
-            }
-        }
+        .await?;
     }
     Ok(ToolDispatchOutcome::Completed)
 }
@@ -408,7 +454,7 @@ async fn handle_tool_call(
     allowed_tools: &std::collections::BTreeSet<String>,
     index: usize,
     tool_call: &ToolCallContent,
-) -> Result<ActToolResultRoute, HandlerError> {
+) -> Result<(), HandlerError> {
     driver_progress::set_phase(ctx, TurnPhase::Tooling);
     let meta = tool_context.meta;
     let session_id = tool_context.session_id;
@@ -439,12 +485,7 @@ async fn handle_tool_call(
         tool_context
             .turn_evidence
             .record_tool_result(&tool_call.invocation, &cached_output);
-        return Ok(reevaluate_act_tool_result(
-            tool_context.objective,
-            tool_context.act_escalation_allowed,
-            &tool_call.invocation,
-            &cached_output,
-        ));
+        return Ok(());
     }
 
     let turn_evidence = &mut *tool_context.turn_evidence;
@@ -467,7 +508,7 @@ async fn handle_tool_call(
     )
     .await?;
 
-    let (invocation, output) = match outcome {
+    match outcome {
         GovernedInvocationOutcome::Completed(result) => {
             turn_evidence.record_tool_result(&result.invocation, &result.output);
             tool_context
@@ -484,10 +525,9 @@ async fn handle_tool_call(
                 selected_skills,
             )
             .await?;
-            (result.invocation, result.output)
         }
         GovernedInvocationOutcome::Delegation { tool_id, .. } => {
-            let output = handle_delegation_tool(
+            handle_delegation_tool(
                 workflow,
                 ctx,
                 DelegationToolRequest {
@@ -500,62 +540,90 @@ async fn handle_tool_call(
                 turn_evidence,
             )
             .await?;
-            (tool_call.invocation.clone(), output)
         }
-    };
-    Ok(reevaluate_act_tool_result(
-        tool_context.objective,
-        tool_context.act_escalation_allowed,
-        &invocation,
-        &output,
-    ))
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use moa_core::types::completion::ToolInvocation;
+    use moa_core::types::completion::{CompletionRequest, ToolCallContent, ToolInvocation};
     use moa_core::types::tools::ToolOutput;
     use serde_json::json;
 
-    use super::{ActToolResultRoute, reevaluate_act_tool_result};
+    use super::{
+        DURABLE_UPGRADE_CONTROL_TOOL_NAME, configure_durable_upgrade_tool_schema,
+        durable_upgrade_signal_from_control_call,
+    };
+
+    fn control_call(input: serde_json::Value) -> ToolCallContent {
+        ToolCallContent {
+            invocation: ToolInvocation {
+                id: Some("durable-upgrade".to_string()),
+                name: DURABLE_UPGRADE_CONTROL_TOOL_NAME.to_string(),
+                input,
+            },
+            provider_metadata: None,
+        }
+    }
 
     #[test]
-    fn qualifying_structured_act_result_escalates_with_bounded_preserved_evidence() {
-        // Pins: a trusted structured run-shape fact becomes one bounded signal with the root objective intact.
-        let objective = "Inspect the affected tenant accounts";
-        let invocation = ToolInvocation {
-            id: Some("discover-shape".to_string()),
-            name: "tenant_inventory".to_string(),
-            input: json!({"tenant": "acme"}),
-        };
-        let discovered = json!({"account_count": 420, "batch_key": "tenant:acme"});
-        let output = ToolOutput {
-            content: Vec::new(),
-            is_error: false,
-            structured: Some(json!({
-                "execution_shape": {
-                    "reason": "high_fanout",
-                    "summary": "inventory contains 420 independently processable accounts",
-                    "value": discovered
-                }
-            })),
-            duration: Duration::ZERO,
-            truncated: false,
-            original_output_tokens: None,
-            artifact: None,
-        };
+    fn root_inline_control_schema_replaces_conflicts_and_is_removed_when_ineligible() {
+        // Pins: configured external schemas cannot shadow the workflow-owned control name,
+        // and turns without root-Inline authority never expose the control to the model.
+        let mut request = CompletionRequest::new("investigate");
+        request.tools.push(json!({
+            "name": DURABLE_UPGRADE_CONTROL_TOOL_NAME,
+            "description": "untrusted conflicting schema",
+            "input_schema": {}
+        }));
+        configure_durable_upgrade_tool_schema(&mut request, true);
+        let controls = request
+            .tools
+            .iter()
+            .filter(|schema| {
+                schema.get("name").and_then(serde_json::Value::as_str)
+                    == Some(DURABLE_UPGRADE_CONTROL_TOOL_NAME)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(controls.len(), 1);
+        assert_ne!(
+            controls[0]
+                .get("description")
+                .and_then(serde_json::Value::as_str),
+            Some("untrusted conflicting schema")
+        );
 
-        let ActToolResultRoute::Escalate(signal) =
-            reevaluate_act_tool_result(objective, true, &invocation, &output)
-        else {
-            panic!("qualifying Act result should emit an escalation signal");
-        };
+        configure_durable_upgrade_tool_schema(&mut request, false);
+        assert!(request.tools.iter().all(|schema| {
+            schema.get("name").and_then(serde_json::Value::as_str)
+                != Some(DURABLE_UPGRADE_CONTROL_TOOL_NAME)
+        }));
+    }
+
+    #[test]
+    fn workflow_control_builds_byte_exact_durable_upgrade_signal() {
+        // Pins: only the workflow-owned control turns already-gathered structured evidence
+        // into a signal, while the server supplies the byte-identical root objective.
+        let objective = "Inspect the affected tenant accounts";
+        let discovered = json!({"account_count": 420, "batch_key": "tenant:acme"});
+        let call = control_call(json!({
+            "rationale": "The discovered account workflow must continue durably.",
+            "evidence": [{
+                "source": "tool:tenant_inventory",
+                "summary": "inventory contains 420 independently processable accounts",
+                "value": discovered
+            }]
+        }));
+        let signal = durable_upgrade_signal_from_control_call(objective, true, None, &[&call])
+            .expect("valid workflow control should parse")
+            .expect("workflow control should produce a signal");
         assert_eq!(signal.objective, objective);
         assert_eq!(
-            signal.reason,
-            moa_core::types::execution_planning::ExecutionRouteReason::HighFanout
+            signal.rationale,
+            "The discovered account workflow must continue durably."
         );
         assert_eq!(signal.evidence.len(), 1);
         assert_eq!(signal.evidence[0].source, "tool:tenant_inventory");
@@ -564,38 +632,95 @@ mod tests {
             "inventory contains 420 independently processable accounts"
         );
         assert_eq!(signal.evidence[0].value, discovered);
-        signal.validate().expect("emitted evidence must be bounded");
     }
 
     #[test]
-    fn ordinary_or_non_user_act_results_never_escalate() {
-        // Pins: ordinary tool output and forbidden origins remain in Act even when text mentions fan-out.
-        let invocation = ToolInvocation {
-            id: None,
-            name: "search".to_string(),
-            input: json!({"query": "fan out"}),
+    fn arbitrary_tool_calls_cannot_masquerade_as_durable_control() {
+        // Pins: a built-in, MCP, cached, or fixture tool cannot trigger control flow merely by
+        // returning or accepting an `execution_shape`-like object.
+        let external = ToolCallContent {
+            invocation: ToolInvocation {
+                id: Some("external".to_string()),
+                name: "tenant_inventory".to_string(),
+                input: json!({"execution_shape": {"strategy": "durable"}}),
+            },
+            provider_metadata: None,
         };
-        let ordinary = ToolOutput::text("hundreds of matches", Duration::ZERO);
         assert_eq!(
-            reevaluate_act_tool_result("investigate", true, &invocation, &ordinary),
-            ActToolResultRoute::Continue
+            durable_upgrade_signal_from_control_call("investigate", true, None, &[&external]),
+            Ok(None)
         );
+    }
 
-        let structured = ToolOutput::json(
-            "shape",
-            json!({
-                "execution_shape": {
-                    "reason": "high_fanout",
-                    "summary": "many independent items",
-                    "value": {"count": 500}
-                }
-            }),
-            Duration::ZERO,
+    #[test]
+    fn durable_control_rejects_malformed_mixed_and_unauthorized_calls() {
+        // Pins: the control is strict, root-Inline-only, and cannot be mixed with side effects.
+        let malformed = control_call(json!({"rationale": "Needs durability."}));
+        assert!(
+            durable_upgrade_signal_from_control_call("investigate", true, None, &[&malformed])
+                .is_err()
         );
-        assert_eq!(
-            reevaluate_act_tool_result("investigate", false, &invocation, &structured),
-            ActToolResultRoute::Continue
+        let valid = control_call(json!({
+            "rationale": "The remaining work needs durable execution.",
+            "evidence": [{"source": "tool:probe", "summary": "500 items", "value": {"count": 500}}]
+        }));
+        assert!(
+            durable_upgrade_signal_from_control_call("investigate", false, None, &[&valid])
+                .is_err()
         );
+        let external = ToolCallContent {
+            invocation: ToolInvocation {
+                id: Some("external".to_string()),
+                name: "external_write".to_string(),
+                input: json!({}),
+            },
+            provider_metadata: None,
+        };
+        assert!(
+            durable_upgrade_signal_from_control_call(
+                "investigate",
+                true,
+                None,
+                &[&valid, &external],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn durable_control_blocks_canaries_and_sanitizes_invalid_input() {
+        // Pins: the workflow-owned control receives the same canary protection as governed
+        // tools, and malformed model input never persists attacker-controlled values in errors.
+        let active_canary = "moa_canary_active_secret";
+        for leaked in [active_canary, "moa_canary_unrelated_marker"] {
+            let call = control_call(json!({
+                "rationale": format!("Leaked marker: {leaked}"),
+                "evidence": [{"source": "tool:probe", "summary": "500 items", "value": {"count": 500}}]
+            }));
+            let error = durable_upgrade_signal_from_control_call(
+                "investigate",
+                true,
+                Some(active_canary),
+                &[&call],
+            )
+            .expect_err("protected canary leakage must block the control");
+            assert_eq!(
+                error,
+                "Tool request_durable_execution blocked because it leaked a protected canary token."
+            );
+            assert!(!error.contains(leaked));
+        }
+
+        let secret = "customer-secret-must-not-enter-history";
+        let malformed = control_call(json!({
+            "rationale": "The work needs durability.",
+            "evidence": secret
+        }));
+        let error =
+            durable_upgrade_signal_from_control_call("investigate", true, None, &[&malformed])
+                .expect_err("malformed input must be rejected");
+        assert_eq!(error, "invalid Durable-upgrade control input");
+        assert!(!error.contains(secret));
     }
 
     use super::{ESCALATED_SERVE_THRESHOLD, FileReadTurnCache};

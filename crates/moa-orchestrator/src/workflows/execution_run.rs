@@ -16,8 +16,8 @@ use moa_core::{
     types::{
         completion::{CompletionRequest, CompletionStream},
         execution_planning::{
-            EXECUTION_REPORT_MAX_BYTES, ExecutionPlanningAuditEnvelopeV1,
-            ExecutionPlanningAuditPayloadV1,
+            EXECUTION_REPORT_MAX_BYTES, ExecutionPlanningAuditEnvelope,
+            ExecutionPlanningAuditPayload,
         },
         identifiers::ModelId,
         model::ModelCapabilities,
@@ -41,7 +41,7 @@ use moa_execution::{
         ExecutionTerminalCause, ScheduleDecision, TerminalProjection, WaitingReason,
     },
     wire::{
-        ExecutionAmendmentRequest, ExecutionMutationResponse, ExecutionPlanningContextSnapshotV1,
+        ExecutionAmendmentRequest, ExecutionMutationResponse, ExecutionPlanningContextSnapshot,
         ExecutionRunRequest, ExecutionRunWakeRequest, ExecutionRunWorkflowRequest,
         ExecutionTaskWorkflowRequest, ExecutionTerminalDelivery, execution_progress_from_run,
     },
@@ -501,7 +501,7 @@ impl LLMProvider for RestateAmendmentPlannerProvider<'_> {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct PreparedAmendmentPlanning {
-    context: ExecutionPlanningContextSnapshotV1,
+    context: ExecutionPlanningContextSnapshot,
     evidence: AmendmentPlanningEvidence,
     remaining_budget: moa_artifacts::execution_plan::ExecutionBudgetLimit,
     now: chrono::DateTime<chrono::Utc>,
@@ -719,9 +719,9 @@ fn bounded_failure_evidence(reason: &str, evidence: &Value) -> Result<Value, Han
 }
 
 fn narrow_amendment_context(
-    mut context: ExecutionPlanningContextSnapshotV1,
+    mut context: ExecutionPlanningContextSnapshot,
     available_tool_names: &BTreeSet<String>,
-) -> moa_execution::Result<ExecutionPlanningContextSnapshotV1> {
+) -> moa_execution::Result<ExecutionPlanningContextSnapshot> {
     use moa_execution::capability::CapabilitySource;
 
     let retained_refs = context
@@ -763,10 +763,10 @@ fn narrow_authorized_capability_refs(
 async fn persist_amendment_audit(
     repository: &ExecutionRepository,
     scope: ExecutionScope,
-    envelope: ExecutionPlanningAuditEnvelopeV1,
+    envelope: ExecutionPlanningAuditEnvelope,
 ) -> Result<(), HandlerError> {
     match &envelope.payload {
-        ExecutionPlanningAuditPayloadV1::PlannerCall { .. } => {
+        ExecutionPlanningAuditPayload::PlannerCall { .. } => {
             let result = repository
                 .write_planner_call_audit(scope, &envelope)
                 .await
@@ -780,7 +780,7 @@ async fn persist_amendment_audit(
                 .into());
             }
         }
-        ExecutionPlanningAuditPayloadV1::Compile { .. } => {
+        ExecutionPlanningAuditPayload::Compile { .. } => {
             let result = repository
                 .write_compile_audit(scope, &envelope)
                 .await
@@ -794,7 +794,7 @@ async fn persist_amendment_audit(
                 .into());
             }
         }
-        ExecutionPlanningAuditPayloadV1::Route { .. } => {
+        ExecutionPlanningAuditPayload::Route { .. } => {
             return Err(TerminalError::new_with_code(
                 422,
                 "execution amendment planning produced a route audit",
@@ -1714,9 +1714,7 @@ mod tests {
     };
     use moa_core::types::{
         action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
-        execution_planning::{
-            ExecutionRouteReason, ExecutionSourceProvenanceV1, GeneratedPlanPlannerProvenanceV1,
-        },
+        execution_planning::{ExecutionSourceProvenance, GeneratedPlanPlannerProvenance},
         identifiers::{ModelId, SessionId, TenantId, UserId},
         model::ModelCapabilities,
         tools::IdempotencyClass,
@@ -1741,9 +1739,8 @@ mod tests {
             TerminalProjection,
         },
         wire::{
-            ExecutionAmendmentRequest, ExecutionMutationResponse,
-            ExecutionPlanningContextSnapshotV1, ExecutionRunRequest, ExecutionRunWorkflowRequest,
-            planning_context_hash,
+            ExecutionAmendmentRequest, ExecutionMutationResponse, ExecutionPlanningContextSnapshot,
+            ExecutionRunRequest, ExecutionRunWorkflowRequest, planning_context_hash,
         },
     };
     use moa_providers::ScriptedProvider;
@@ -1793,7 +1790,7 @@ mod tests {
             )
         });
         let compiled_plan = compiled.plan;
-        let planning_snapshot = ExecutionPlanningContextSnapshotV1 {
+        let planning_snapshot = ExecutionPlanningContextSnapshot {
             schema_version: 1,
             tenant_id,
             contact_id: None,
@@ -1838,11 +1835,10 @@ mod tests {
                     catalog,
                     authorization,
                     pinned_instruction_skills: Vec::new(),
-                    source_provenance: ExecutionSourceProvenanceV1::GeneratedPlan {
-                        route_reason: ExecutionRouteReason::ExplicitRun,
-                        planner: GeneratedPlanPlannerProvenanceV1 {
+                    source_provenance: ExecutionSourceProvenance::GeneratedPlan {
+                        planner: GeneratedPlanPlannerProvenance {
                             model: "scripted-confirmed-replan".to_string(),
-                            prompt_version: "confirmed-replan-v1".to_string(),
+                            prompt_version: "confirmed-replan".to_string(),
                             candidate_hash: "a".repeat(64),
                             compiler_report_hash: "b".repeat(64),
                             final_plan_hash: compiled_plan.plan_hash.to_string(),
@@ -2313,7 +2309,7 @@ mod tests {
                 .collect(),
             skill_refs: Vec::new(),
         };
-        let source = ExecutionPlanningContextSnapshotV1 {
+        let source = ExecutionPlanningContextSnapshot {
             schema_version: 1,
             tenant_id: TenantId::new(),
             contact_id: None,

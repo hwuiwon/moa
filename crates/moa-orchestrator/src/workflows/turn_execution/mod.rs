@@ -48,9 +48,10 @@ use moa_core::{
     types::context::ContextMessage,
     types::events_stream::EventRecord,
     types::execution_planning::{
-        ExecutionMode, ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
-        ExecutionRouteDecision, ExecutionRouteDecisionKind, ExecutionRouteStage,
-        ExecutionRouteUsageV1, ExecutionRoutingResultV1, execution_planning_dedupe_key,
+        AdmittedDurableUpgrade, DurableUpgradeSignal, DurableUpgradeTransitionError,
+        ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload, ExecutionRouteDecision,
+        ExecutionRouteStage, ExecutionRouteUsage, ExecutionRoutingResult, ExecutionStrategy,
+        durable_upgrade_transition, execution_planning_dedupe_key,
     },
     types::identifiers::{ModelId, SessionId},
     types::model::ModelCapabilities,
@@ -85,7 +86,8 @@ use self::segments::{
     run_post_outcome_assessment,
 };
 use self::tools::{
-    FileReadTurnCache, RootToolContext, ToolDispatchOutcome, dispatch_response_tool_calls,
+    FileReadTurnCache, RootToolContext, ToolDispatchOutcome, configure_durable_upgrade_tool_schema,
+    dispatch_response_tool_calls,
 };
 
 use crate::objects::session::SessionClient;
@@ -96,7 +98,7 @@ use crate::services::{
 };
 use crate::turn::util::{
     TurnEvidence, allowed_tool_names, annotate_unresolved_verification,
-    ensure_delegation_tool_schemas, exclude_execution_lifecycle_tool_schemas, response_tool_calls,
+    ensure_delegation_tool_schemas, exclude_reserved_control_tool_schemas, response_tool_calls,
     summarize_response_text, turn_outcome_for_response,
 };
 use crate::turn_driver::{
@@ -110,7 +112,8 @@ use crate::workflows::turn_events::{
 };
 use crate::workflows::turn_progress::{self, SUMMARY_CALLING_MODEL, SUMMARY_WORKING};
 use crate::workflows::turn_responsiveness::{
-    ToolBudgetExhausted, ToolBudgetState, has_recent_target as recent_events_have_target,
+    ModelLoopClass, ToolBudgetExhausted, ToolBudgetState,
+    has_recent_target as recent_events_have_target,
 };
 
 #[derive(Clone, Debug)]
@@ -124,9 +127,9 @@ struct BodyOutcome {
 struct RunOnceContext<'a> {
     session_id: SessionId,
     turn_id: TurnId,
-    execution_mode: ExecutionMode,
+    loop_class: ModelLoopClass,
     objective: &'a str,
-    act_escalation_allowed: bool,
+    durable_upgrade_allowed: bool,
     execution_synthesis_instruction: Option<&'a str>,
 }
 
@@ -164,9 +167,51 @@ impl LLMProvider for RestateExecutionModelProvider<'_> {
 #[derive(Clone, Debug)]
 enum TurnIterationOutcome {
     Core(CoreTurnOutcome),
-    ActEscalation(moa_core::types::execution_planning::ActEscalationSignal),
-    ActEscalationUnsupported(String),
+    DurableUpgrade(DurableUpgradeSignal),
+    DurableUpgradeUnsupported(String),
     ToolBudgetExceeded(ToolBudgetExhausted),
+}
+
+struct DurableUpgradeGuard {
+    has_root_user_origin: bool,
+    initial_route: ExecutionRouteDecision,
+    consumed: bool,
+}
+
+impl DurableUpgradeGuard {
+    fn new(
+        request: &RunTurnRequest,
+        originating_user_sequence_num: u64,
+        initial_route: &ExecutionRouteDecision,
+    ) -> Self {
+        Self {
+            has_root_user_origin: has_user_message_origin(request, originating_user_sequence_num),
+            initial_route: initial_route.clone(),
+            consumed: false,
+        }
+    }
+
+    fn allows_tool_signal(&self) -> bool {
+        self.has_root_user_origin
+            && !self.consumed
+            && self.initial_route.strategy() == Some(ExecutionStrategy::Inline)
+    }
+
+    fn consume(
+        &mut self,
+        originating_objective: &str,
+        signal: DurableUpgradeSignal,
+    ) -> Result<AdmittedDurableUpgrade, DurableUpgradeTransitionError> {
+        let admitted = durable_upgrade_transition(
+            originating_objective,
+            &self.initial_route,
+            self.has_root_user_origin,
+            self.consumed,
+            signal,
+        )?;
+        self.consumed = true;
+        Ok(admitted)
+    }
 }
 
 /// Restate workflow surface for durable turn execution.
@@ -261,7 +306,7 @@ async fn execute_turn_inside_workflow(
         load_recent_target_events(ctx, workflow.session_store.clone(), session_id).await?;
     let has_recent_target = recent_events_have_target(&recent_target_events, user_sequence_num);
     let execution_synthesis_turn = is_execution_synthesis_turn(request);
-    let route_model = ModelId::new(
+    let classifier_model = ModelId::new(
         workflow
             .config
             .models
@@ -278,10 +323,9 @@ async fn execute_turn_inside_workflow(
             ExecutionRoutingInput {
                 objective: &request.user_message,
                 execution_template: request.execution_template.as_ref(),
-                escalation: None,
                 attachment_count: request.attachments.len(),
                 has_recent_target,
-                route_model: &route_model,
+                classifier_model: &classifier_model,
             },
         )
         .await?;
@@ -289,9 +333,8 @@ async fn execute_turn_inside_workflow(
         Some(result)
     };
     let route = if execution_synthesis_turn {
-        ExecutionRouteDecision::Routed {
-            mode: ExecutionMode::Respond,
-            reason: moa_core::types::execution_planning::ExecutionRouteReason::SimpleResponse,
+        ExecutionRouteDecision::Respond {
+            rationale: "This turn synthesizes the completed durable execution.".to_string(),
         }
     } else {
         route_result
@@ -300,17 +343,21 @@ async fn execute_turn_inside_workflow(
             .decision
             .clone()
     };
+    let durable_route = matches!(
+        &route,
+        ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Durable,
+            ..
+        }
+    );
     if !has_user_message_origin(request, user_sequence_num)
-        && (request.execution_template.is_some()
-            || matches!(
-                route,
-                ExecutionRouteDecision::Routed {
-                    mode: ExecutionMode::Run,
-                    ..
-                }
-            ))
+        && (request.execution_template.is_some() || durable_route)
     {
-        return Err(TerminalError::new_with_code(409, "run_requires_user_message_origin").into());
+        return Err(TerminalError::new_with_code(
+            409,
+            "durable_execution_requires_user_message_origin",
+        )
+        .into());
     }
     if request.trigger == TurnTrigger::UserMessage {
         let route_audit = route_audit_envelope(
@@ -326,6 +373,41 @@ async fn execute_turn_inside_workflow(
         .await?;
         persist_planning_audit(workflow, ctx, route_audit).await?;
     }
+
+    match &route {
+        ExecutionRouteDecision::NeedsInput { missing_inputs, .. } => {
+            driver_progress::initialize_non_loop_progress(ctx, route.clone());
+            let message =
+                append_clarification_response(ctx, session_id, &meta, missing_inputs).await?;
+            return Ok(BodyOutcome {
+                kind: TurnOutcomeKind::Completed,
+                message,
+                post_outcome_assessment: None,
+            });
+        }
+        ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Durable,
+            ..
+        } => {
+            driver_progress::initialize_non_loop_progress(ctx, route.clone());
+            return execute_durable_admission(
+                workflow,
+                ctx,
+                request,
+                &meta,
+                session_id,
+                user_sequence_num,
+                None,
+            )
+            .await;
+        }
+        ExecutionRouteDecision::Respond { .. }
+        | ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Inline,
+            ..
+        } => {}
+    }
+
     let session_limits = workflow.session_limits();
     let loop_plan = driver_model_loop::root_loop_plan(
         driver_model_loop::RootLoopPlanRequest {
@@ -333,8 +415,10 @@ async fn execute_turn_inside_workflow(
             request_max_turns: request.max_turns,
         },
         session_limits,
-    );
+    )
+    .ok_or_else(|| TerminalError::new("execution route did not select a model loop"))?;
     let max_turns = loop_plan.max_turns;
+    let loop_class = loop_plan.class;
     let mut tool_budget = loop_plan.tool_budget();
     driver_progress::initialize_loop_progress(
         ctx,
@@ -342,35 +426,11 @@ async fn execute_turn_inside_workflow(
         loop_plan.max_turns,
         loop_plan.max_tool_calls,
     );
-    if let ExecutionRouteDecision::NeedsInput { missing_inputs, .. } = &route {
-        let message = append_clarification_response(ctx, session_id, &meta, missing_inputs).await?;
-        return Ok(BodyOutcome {
-            kind: TurnOutcomeKind::Completed,
-            message,
-            post_outcome_assessment: None,
-        });
-    }
-    let ExecutionRouteDecision::Routed { mode, reason } = route else {
-        return Err(TerminalError::new("execution route remained unresolved").into());
-    };
-    if mode == ExecutionMode::Run {
-        return execute_run_admission(
-            workflow,
-            ctx,
-            request,
-            &meta,
-            session_id,
-            user_sequence_num,
-            reason,
-            None,
-        )
-        .await;
-    }
+    let mut durable_upgrade_guard = DurableUpgradeGuard::new(request, user_sequence_num, &route);
 
     let mut last_summary = None;
     let mut turn_evidence = TurnEvidence::default();
-    // Per-turn file_read result memory, shared across every model-loop iteration of
-    // this turn so a repeated identical read is served from context with a notice.
+    // Per-turn file_read memory serves repeated identical reads from context with a notice.
     let mut file_read_cache = FileReadTurnCache::default();
 
     for turn_number in 1..=max_turns {
@@ -408,10 +468,9 @@ async fn execute_turn_inside_workflow(
                             RunOnceContext {
                                 session_id,
                                 turn_id,
-                                execution_mode: mode,
+                                loop_class,
                                 objective: &request.user_message,
-                                act_escalation_allowed: mode == ExecutionMode::Act
-                                    && has_user_message_origin(request, user_sequence_num),
+                                durable_upgrade_allowed: durable_upgrade_guard.allows_tool_signal(),
                                 execution_synthesis_instruction: execution_synthesis_turn
                                     .then_some(request.user_message.as_str()),
                             },
@@ -432,10 +491,9 @@ async fn execute_turn_inside_workflow(
                     turn_number as i64,
                     &turn_latency_snapshot,
                 );
-                // Persist the per-turn coordination/replay/latency summary (gated) so the
-                // conversation-cost analyzer and deterministic coordination tests can read it
-                // from the durable log. Snapshots are taken before this append, so it does not
-                // count itself.
+                // Persist gated per-turn coordination/replay/latency for cost analysis and tests.
+                // Snapshots are taken before this append so the telemetry record cannot count
+                // itself.
                 maybe_append_turn_metrics(
                     ctx,
                     session_id,
@@ -459,74 +517,44 @@ async fn execute_turn_inside_workflow(
 
         match turn_outcome {
             TurnIterationOutcome::Core(CoreTurnOutcome::Continue) => continue,
-            TurnIterationOutcome::ActEscalation(signal) => {
-                if !has_user_message_origin(request, user_sequence_num)
-                    || signal.objective.as_bytes() != request.user_message.as_bytes()
-                {
-                    return Err(TerminalError::new_with_code(
-                        409,
-                        "run_requires_user_message_origin",
-                    )
-                    .into());
-                }
-                let mut escalation_route = route_execution(
-                    &route_provider,
-                    ExecutionRoutingInput {
-                        objective: &request.user_message,
-                        execution_template: None,
-                        escalation: Some(&signal),
-                        attachment_count: request.attachments.len(),
-                        has_recent_target,
-                        route_model: &route_model,
-                    },
-                )
-                .await?;
-                apply_route_cost(&mut escalation_route)?;
+            TurnIterationOutcome::DurableUpgrade(signal) => {
+                let admitted = match durable_upgrade_guard.consume(&request.user_message, signal) {
+                    Ok(admitted) => admitted,
+                    Err(DurableUpgradeTransitionError::InvalidSignal(error)) => {
+                        return durable_upgrade_unsupported_body(
+                            ctx,
+                            session_id,
+                            &meta,
+                            error.to_string(),
+                        )
+                        .await;
+                    }
+                    Err(error) => return Err(durable_upgrade_rejection(error)),
+                };
                 let route_audit = route_audit_envelope(
                     ctx,
                     &meta,
                     session_id,
                     user_sequence_num,
-                    &escalation_route,
-                    ExecutionRouteStage::ActEscalation,
+                    &admitted.routing,
+                    ExecutionRouteStage::DurableUpgrade,
                 )
                 .await?;
                 persist_planning_audit(workflow, ctx, route_audit).await?;
-                let ExecutionRouteDecision::Routed {
-                    mode: ExecutionMode::Run,
-                    reason,
-                } = escalation_route.decision
-                else {
-                    return Err(TerminalError::new(
-                        "Act escalation did not produce a terminal Run route",
-                    )
-                    .into());
-                };
-                return execute_run_admission(
+                driver_progress::set_execution_route(ctx, &admitted.routing.decision);
+                return execute_durable_admission(
                     workflow,
                     ctx,
                     request,
                     &meta,
                     session_id,
                     user_sequence_num,
-                    reason,
-                    Some(signal),
+                    Some(admitted.signal),
                 )
                 .await;
             }
-            TurnIterationOutcome::ActEscalationUnsupported(message) => {
-                let message = append_zero_cost_assistant_response(
-                    ctx,
-                    session_id,
-                    &meta,
-                    format!("Execution escalation is unsupported: {message}"),
-                )
-                .await?;
-                return Ok(BodyOutcome {
-                    kind: TurnOutcomeKind::Completed,
-                    message,
-                    post_outcome_assessment: None,
-                });
+            TurnIterationOutcome::DurableUpgradeUnsupported(message) => {
+                return durable_upgrade_unsupported_body(ctx, session_id, &meta, message).await;
             }
             TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled) => {
                 let post_outcome_assessment = capture_current_active_segment_assessment(
@@ -617,7 +645,37 @@ async fn execute_turn_inside_workflow(
     })
 }
 
-fn apply_route_cost(result: &mut ExecutionRoutingResultV1) -> Result<(), HandlerError> {
+fn durable_upgrade_rejection(rejection: DurableUpgradeTransitionError) -> HandlerError {
+    let code = match &rejection {
+        DurableUpgradeTransitionError::InvalidSignal(_) => 422,
+        DurableUpgradeTransitionError::NotAuthorized
+        | DurableUpgradeTransitionError::AlreadyConsumed
+        | DurableUpgradeTransitionError::ObjectiveChanged => 409,
+    };
+    TerminalError::new_with_code(code, rejection.to_string()).into()
+}
+
+async fn durable_upgrade_unsupported_body(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    meta: &SessionMeta,
+    message: String,
+) -> Result<BodyOutcome, HandlerError> {
+    let message = append_zero_cost_assistant_response(
+        ctx,
+        session_id,
+        meta,
+        format!("Durable execution upgrade is unsupported: {message}"),
+    )
+    .await?;
+    Ok(BodyOutcome {
+        kind: TurnOutcomeKind::Completed,
+        message,
+        post_outcome_assessment: None,
+    })
+}
+
+fn apply_route_cost(result: &mut ExecutionRoutingResult) -> Result<(), HandlerError> {
     let Some(model) = result.provenance.provider_model.as_deref() else {
         return Ok(());
     };
@@ -627,7 +685,7 @@ fn apply_route_cost(result: &mut ExecutionRoutingResultV1) -> Result<(), Handler
     Ok(())
 }
 
-fn token_usage_from_route(usage: ExecutionRouteUsageV1) -> Result<TokenUsage, HandlerError> {
+fn token_usage_from_route(usage: ExecutionRouteUsage) -> Result<TokenUsage, HandlerError> {
     let convert = |value, field| {
         usize::try_from(value).map_err(|_| {
             HandlerError::from(TerminalError::new_with_code(
@@ -652,39 +710,30 @@ async fn route_audit_envelope(
     meta: &SessionMeta,
     session_id: SessionId,
     originating_sequence: u64,
-    route: &ExecutionRoutingResultV1,
+    route: &ExecutionRoutingResult,
     stage: ExecutionRouteStage,
-) -> Result<ExecutionPlanningAuditEnvelopeV1, HandlerError> {
-    let accepted_at = durable_utc_now(ctx, "execution_route_accepted_at").await?;
-    let (decision, mode, reason) = match &route.decision {
-        ExecutionRouteDecision::NeedsInput { reason, .. } => {
-            (ExecutionRouteDecisionKind::NeedsInput, None, *reason)
-        }
-        ExecutionRouteDecision::Routed { mode, reason } => {
-            (ExecutionRouteDecisionKind::Routed, Some(*mode), *reason)
-        }
+) -> Result<ExecutionPlanningAuditEnvelope, HandlerError> {
+    let accepted_at_operation = match stage {
+        ExecutionRouteStage::Initial => "execution_route_initial_accepted_at",
+        ExecutionRouteStage::DurableUpgrade => "execution_route_durable_upgrade_accepted_at",
     };
-    Ok(ExecutionPlanningAuditEnvelopeV1 {
-        schema_version: 1,
-        tenant_id: meta.tenant_id,
-        contact_id: meta.contact.as_ref().map(|contact| contact.contact_id),
-        session_id: Some(session_id),
-        originating_sequence: Some(originating_sequence),
-        payload: ExecutionPlanningAuditPayloadV1::Route {
-            stage,
-            decision,
-            mode,
-            reason,
-            provenance: route.provenance.clone(),
-            accepted_at,
-        },
-    })
+    let accepted_at = durable_utc_now(ctx, accepted_at_operation).await?;
+    Ok(ExecutionPlanningAuditEnvelope::route(
+        meta.tenant_id,
+        meta.contact.as_ref().map(|contact| contact.contact_id),
+        session_id,
+        originating_sequence,
+        stage,
+        &route.decision,
+        route.provenance.clone(),
+        accepted_at,
+    ))
 }
 
 async fn persist_planning_audit(
     workflow: &TurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
-    envelope: ExecutionPlanningAuditEnvelopeV1,
+    envelope: ExecutionPlanningAuditEnvelope,
 ) -> Result<(), HandlerError> {
     let scope = envelope.contact_id.map_or(
         ExecutionScope::Tenant {
@@ -697,11 +746,11 @@ async fn persist_planning_audit(
     );
     let durable_step_suffix = execution_planning_dedupe_key(&envelope)
         .map_err(|error| TerminalError::new_with_code(422, error.to_string()))?
-        .strip_prefix("execution-planning-v1:")
+        .strip_prefix("execution-planning:")
         .unwrap_or("audit")
         .to_string();
     match &envelope.payload {
-        ExecutionPlanningAuditPayloadV1::Route { .. } => {
+        ExecutionPlanningAuditPayload::Route { .. } => {
             let pool = workflow.session_store.pool().clone();
             let audit = envelope.clone();
             let result = ctx
@@ -720,7 +769,7 @@ async fn persist_planning_audit(
                 return Err(planning_audit_conflict());
             }
         }
-        ExecutionPlanningAuditPayloadV1::PlannerCall { .. } => {
+        ExecutionPlanningAuditPayload::PlannerCall { .. } => {
             let pool = workflow.session_store.pool().clone();
             let audit = envelope.clone();
             let result = ctx
@@ -739,7 +788,7 @@ async fn persist_planning_audit(
                 return Err(planning_audit_conflict());
             }
         }
-        ExecutionPlanningAuditPayloadV1::Compile { .. } => {
+        ExecutionPlanningAuditPayload::Compile { .. } => {
             let pool = workflow.session_store.pool().clone();
             let audit = envelope;
             let result = ctx
@@ -775,18 +824,21 @@ fn execution_audit_error(error: moa_execution::Error) -> HandlerError {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn execute_run_admission(
+async fn execute_durable_admission(
     workflow: &TurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
     request: &RunTurnRequest,
     meta: &SessionMeta,
     session_id: SessionId,
     originating_user_sequence_num: u64,
-    route_reason: moa_core::types::execution_planning::ExecutionRouteReason,
-    escalation: Option<moa_core::types::execution_planning::ActEscalationSignal>,
+    durable_upgrade: Option<DurableUpgradeSignal>,
 ) -> Result<BodyOutcome, HandlerError> {
     if !has_user_message_origin(request, originating_user_sequence_num) {
-        return Err(TerminalError::new_with_code(409, "run_requires_user_message_origin").into());
+        return Err(TerminalError::new_with_code(
+            409,
+            "durable_execution_requires_user_message_origin",
+        )
+        .into());
     }
     let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
     let planning_call = ctx
@@ -822,12 +874,11 @@ async fn execute_run_admission(
             objective: request.user_message.clone(),
             context: planning_context.snapshot.clone(),
             execution_template: request.execution_template.clone(),
-            escalation,
+            durable_upgrade,
             planner_model: ModelId::new(planner_model),
             config: workflow.config.execution.clone(),
             now: planning_now,
         },
-        route_reason,
     )
     .await
     .map_err(crate::workflows::errors::moa_error_to_handler_error)?;
@@ -1037,11 +1088,12 @@ async fn run_once_inside_workflow(
         driver_segments::insert_active_segment_metadata(&mut request, segment);
         record_selected_segment_skills(ctx, session_id, &request.metadata).await?;
     }
-    if turn_context.execution_mode == ExecutionMode::Respond {
+    if turn_context.loop_class == ModelLoopClass::Respond {
         request.tools.clear();
     } else {
         ensure_delegation_tool_schemas(&mut request);
-        exclude_execution_lifecycle_tool_schemas(&mut request);
+        exclude_reserved_control_tool_schemas(&mut request);
+        configure_durable_upgrade_tool_schema(&mut request, turn_context.durable_upgrade_allowed);
     }
     request.metadata.insert(
         DEFER_BRAIN_RESPONSE_METADATA_KEY.to_string(),
@@ -1134,7 +1186,7 @@ async fn run_once_inside_workflow(
             trusted_sandbox_manifest: trusted_sandbox_manifest.as_ref(),
             selected_skills: &selected_skills,
             objective: turn_context.objective,
-            act_escalation_allowed: turn_context.act_escalation_allowed,
+            durable_upgrade_allowed: turn_context.durable_upgrade_allowed,
             turn_evidence,
             file_read_cache,
         },
@@ -1146,11 +1198,11 @@ async fn run_once_inside_workflow(
     .await?
     {
         ToolDispatchOutcome::Completed => {}
-        ToolDispatchOutcome::ActEscalation(signal) => {
-            return Ok(TurnIterationOutcome::ActEscalation(signal));
+        ToolDispatchOutcome::DurableUpgrade(signal) => {
+            return Ok(TurnIterationOutcome::DurableUpgrade(signal));
         }
-        ToolDispatchOutcome::ActEscalationUnsupported(message) => {
-            return Ok(TurnIterationOutcome::ActEscalationUnsupported(message));
+        ToolDispatchOutcome::DurableUpgradeUnsupported(message) => {
+            return Ok(TurnIterationOutcome::DurableUpgradeUnsupported(message));
         }
         ToolDispatchOutcome::Cancelled => {
             return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
@@ -1352,8 +1404,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_requires_user_message_origin_for_every_run_admission_path() {
-        // Pins: only a persisted user-message turn with a nonzero event sequence may start Run.
+    fn durable_upgrade_guard_is_root_inline_byte_exact_and_single_use() {
+        // Pins: only an initial root Execute/Inline turn can consume one bounded Durable
+        // upgrade for its byte-identical persisted objective; a second transition is rejected.
         let mut request = RunTurnRequest {
             session_id: "session-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -1365,7 +1418,7 @@ mod tests {
                 acting_on_behalf_of: None,
             },
             contact: None,
-            user_message: "Run the report".to_string(),
+            user_message: "Inspect every account".to_string(),
             attachments: Vec::new(),
             model: None,
             max_turns: None,
@@ -1373,8 +1426,47 @@ mod tests {
             child_signal_id: None,
             execution_template: None,
         };
-        assert!(has_user_message_origin(&request, 1));
-        assert!(!has_user_message_origin(&request, 0));
+        let inline_route = ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Inline,
+            rationale: "The inspection can begin in a bounded interactive loop.".to_string(),
+        };
+        let signal = moa_core::types::execution_planning::DurableUpgradeSignal {
+            objective: request.user_message.clone(),
+            rationale: "The discovered account workflow must continue durably.".to_string(),
+            evidence: vec![
+                moa_core::types::execution_planning::ExecutionPlanningEvidence {
+                    source: "tool:inventory".to_string(),
+                    summary: "500 independent accounts".to_string(),
+                    value: json!({"count": 500}),
+                },
+            ],
+        };
+        let mut guard = DurableUpgradeGuard::new(&request, 1, &inline_route);
+        assert!(guard.allows_tool_signal());
+        assert_eq!(
+            guard
+                .consume(&request.user_message, signal.clone())
+                .expect("authorized first transition should produce a route")
+                .routing
+                .decision,
+            ExecutionRouteDecision::Execute {
+                strategy: ExecutionStrategy::Durable,
+                rationale: signal.rationale.clone(),
+            }
+        );
+        assert!(!guard.allows_tool_signal());
+        assert_eq!(
+            guard.consume(&request.user_message, signal.clone()),
+            Err(DurableUpgradeTransitionError::AlreadyConsumed)
+        );
+
+        let mut changed_objective_guard = DurableUpgradeGuard::new(&request, 1, &inline_route);
+        let mut changed = signal.clone();
+        changed.objective.push(' ');
+        assert_eq!(
+            changed_objective_guard.consume(&request.user_message, changed),
+            Err(DurableUpgradeTransitionError::ObjectiveChanged)
+        );
 
         for trigger in [
             TurnTrigger::WorkerResults,
@@ -1382,8 +1474,21 @@ mod tests {
             TurnTrigger::ExecutionSynthesis,
         ] {
             request.trigger = trigger;
-            assert!(!has_user_message_origin(&request, 1));
+            assert!(
+                !DurableUpgradeGuard::new(&request, 1, &inline_route).allows_tool_signal(),
+                "system trigger must not gain Durable-upgrade authority: {trigger:?}"
+            );
         }
+
+        request.trigger = TurnTrigger::UserMessage;
+        let durable_route = ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Durable,
+            rationale: "The account workflow must run durably.".to_string(),
+        };
+        assert!(
+            !DurableUpgradeGuard::new(&request, 1, &durable_route).allows_tool_signal(),
+            "an initially Durable route cannot transition back through Inline"
+        );
     }
 
     #[test]
@@ -1402,9 +1507,9 @@ mod tests {
     }
 
     #[test]
-    fn provider_tool_list_excludes_execution_lifecycle_tools() {
-        // Pins: external execution-run controls cannot enter the root model's
-        // provider-visible tool list.
+    fn provider_tool_list_excludes_reserved_controls() {
+        // Pins: operator lifecycle tools and the workflow-owned Durable control cannot enter
+        // a provider request unless the root Inline workflow injects its authoritative schema.
         let mut request = moa_core::types::completion::CompletionRequest::new("work");
         request.tools = [
             "execution_runs_list",
@@ -1413,13 +1518,14 @@ mod tests {
             "execution_run_cancel",
             "execution_review_decide",
             "execution_signal",
+            "request_durable_execution",
             "file_read",
         ]
         .into_iter()
         .map(|name| json!({"name": name, "input_schema": {"type": "object"}}))
         .collect();
 
-        crate::turn::util::exclude_execution_lifecycle_tool_schemas(&mut request);
+        crate::turn::util::exclude_reserved_control_tool_schemas(&mut request);
 
         assert_eq!(
             crate::turn::util::allowed_tool_names(&request),

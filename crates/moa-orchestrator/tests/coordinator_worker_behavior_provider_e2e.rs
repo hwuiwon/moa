@@ -27,11 +27,11 @@ use moa_core::{
     types::events_stream::EventRange,
     types::events_stream::EventRecord,
     types::execution_planning::{
-        ExecutionAuditReportV1, ExecutionCompileOutcome, ExecutionCompileSource, ExecutionMode,
-        ExecutionPlannerCallKind, ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelopeV1,
-        ExecutionPlanningAuditPayloadV1, ExecutionRouteDecisionKind, ExecutionRouteReason,
-        ExecutionRouteStage, ExecutionRunAdmissionStatus, ExecutionRunStarted,
-        ExecutionSourceProvenanceV1, GeneratedPlanPlannerProvenanceV1, execution_planning_hash,
+        ExecutionAuditReport, ExecutionCompileOutcome, ExecutionCompileSource,
+        ExecutionPlannerCallKind, ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope,
+        ExecutionPlanningAuditPayload, ExecutionRouteKind, ExecutionRouteStage,
+        ExecutionRunAdmissionStatus, ExecutionRunStarted, ExecutionSourceProvenance,
+        ExecutionStrategy, GeneratedPlanPlannerProvenance, execution_planning_hash,
         validate_planning_audit_envelope,
     },
     types::identifiers::ModelId,
@@ -1282,17 +1282,16 @@ fn spawn_supplementary_orchestrator(
 
 async fn supplementary_planning_audits(
     harness: &SupplementaryLiveHarness,
-) -> Result<Vec<ExecutionPlanningAuditEnvelopeV1>> {
+) -> Result<Vec<ExecutionPlanningAuditEnvelope>> {
     load_execution_planning_audits(&test_database_url(), harness.session.session_id).await
 }
 
 fn assert_audit_scope(
-    audit: &ExecutionPlanningAuditEnvelopeV1,
+    audit: &ExecutionPlanningAuditEnvelope,
     harness: &SupplementaryLiveHarness,
     originating_sequence: u64,
 ) -> Result<()> {
-    validate_planning_audit_envelope(audit)
-        .context("persisted planning audit must be strict v1")?;
+    validate_planning_audit_envelope(audit).context("persisted planning audit must be strict")?;
     ensure!(audit.schema_version == 1, "planning audit schema drifted");
     ensure!(
         audit.tenant_id == harness.session.identity.tenant_id,
@@ -1328,11 +1327,10 @@ async fn assert_ambiguous_mode_selection(
         .expect("ambiguous route audit must retain its exact scope");
     assert!(matches!(
         &audits[0].payload,
-        ExecutionPlanningAuditPayloadV1::Route {
+        ExecutionPlanningAuditPayload::Route {
             stage: ExecutionRouteStage::Initial,
-            decision: ExecutionRouteDecisionKind::Routed,
-            mode: Some(ExecutionMode::Act),
-            reason: ExecutionRouteReason::BoundedInteractiveWork,
+            decision: ExecutionRouteKind::Execute,
+            strategy: Some(ExecutionStrategy::Inline),
             ..
         }
     ));
@@ -1376,9 +1374,9 @@ async fn assert_ambiguous_mode_selection(
 }
 
 fn empty_compiler_report_hash(report_json: &str, label: &str) -> Result<String> {
-    let report: ExecutionAuditReportV1 = serde_json::from_str(report_json)
+    let report: ExecutionAuditReport = serde_json::from_str(report_json)
         .with_context(|| format!("{label} must deserialize as a strict audit report"))?;
-    let ExecutionAuditReportV1::Compiler {
+    let ExecutionAuditReport::Compiler {
         violations,
         omitted_violations,
         full_report_hash,
@@ -1573,7 +1571,7 @@ fn validate_generated_plan_hash_chain(
     evidence: &GeneratedPlanHashEvidence,
     initial_plan_hash: &str,
     active_plan_hash: &str,
-    provenance: &ExecutionSourceProvenanceV1,
+    provenance: &ExecutionSourceProvenance,
 ) -> Result<()> {
     ensure!(
         evidence.planner_candidate_hash == evidence.expected_planner_candidate_hash,
@@ -1595,10 +1593,9 @@ fn validate_generated_plan_hash_chain(
         evidence.final_plan_hash == active_plan_hash,
         "compiler final plan hash must equal persisted active plan hash"
     );
-    let ExecutionSourceProvenanceV1::GeneratedPlan {
-        route_reason: ExecutionRouteReason::ExplicitRun,
+    let ExecutionSourceProvenance::GeneratedPlan {
         planner:
-            GeneratedPlanPlannerProvenanceV1 {
+            GeneratedPlanPlannerProvenance {
                 candidate_hash,
                 compiler_report_hash,
                 final_plan_hash,
@@ -1635,11 +1632,10 @@ fn generated_plan_hash_chain_rejects_cross_surface_drift() {
         compiler_report_hash: "b".repeat(64),
         final_plan_hash: "c".repeat(64),
     };
-    let provenance = ExecutionSourceProvenanceV1::GeneratedPlan {
-        route_reason: ExecutionRouteReason::ExplicitRun,
-        planner: GeneratedPlanPlannerProvenanceV1 {
+    let provenance = ExecutionSourceProvenance::GeneratedPlan {
+        planner: GeneratedPlanPlannerProvenance {
             model: "fixture-model".to_string(),
-            prompt_version: "execution-planner-v1".to_string(),
+            prompt_version: "execution-planner".to_string(),
             candidate_hash: evidence.planner_candidate_hash.clone(),
             compiler_report_hash: evidence.planner_report_hash.clone(),
             final_plan_hash: evidence.final_plan_hash.clone(),
@@ -1689,11 +1685,10 @@ async fn assert_generated_plan_audits_and_authorization(
     ensure!(
         matches!(
             &audits[0].payload,
-            ExecutionPlanningAuditPayloadV1::Route {
+            ExecutionPlanningAuditPayload::Route {
                 stage: ExecutionRouteStage::Initial,
-                decision: ExecutionRouteDecisionKind::Routed,
-                mode: Some(ExecutionMode::Run),
-                reason: ExecutionRouteReason::ExplicitRun,
+                decision: ExecutionRouteKind::Execute,
+                strategy: Some(ExecutionStrategy::Durable),
                 ..
             }
         ),
@@ -1702,7 +1697,7 @@ async fn assert_generated_plan_audits_and_authorization(
 
     let (planner_candidate_json, planner_report, planner_candidate_hash, planner_duration_micros) =
         match &audits[1].payload {
-            ExecutionPlanningAuditPayloadV1::PlannerCall {
+            ExecutionPlanningAuditPayload::PlannerCall {
                 call_kind: ExecutionPlannerCallKind::InitialPlan,
                 call_ordinal: 0,
                 run_uid: None,
@@ -1721,7 +1716,7 @@ async fn assert_generated_plan_audits_and_authorization(
                     "planner model must be set"
                 );
                 ensure!(
-                    prompt_version == "execution-planner-v1",
+                    prompt_version == "execution-planner",
                     "planner prompt version drifted"
                 );
                 (
@@ -1746,7 +1741,7 @@ async fn assert_generated_plan_audits_and_authorization(
 
     let (compile_candidate_hash, compile_report, final_plan_hash, compile_duration_micros) =
         match &audits[2].payload {
-            ExecutionPlanningAuditPayloadV1::Compile {
+            ExecutionPlanningAuditPayload::Compile {
                 source: ExecutionCompileSource::GeneratedPlan,
                 operation_key,
                 run_uid: None,
@@ -1798,7 +1793,7 @@ async fn assert_generated_plan_audits_and_authorization(
         .context("deserialize canonical generated execution candidate")?;
     validate_generated_candidate_quality(&candidate, GENERATED_PLAN_QUALITY_PROMPT)?;
     let expected_planner_candidate_hash = execution_planning_hash(
-        "moa.execution.planner-candidate.v1",
+        "moa.execution.planner-candidate",
         planner_candidate_json.as_bytes(),
     );
     let compile_preimage = SupplementaryInitialCompileCandidate {
@@ -1810,7 +1805,7 @@ async fn assert_generated_plan_audits_and_authorization(
         run_input: &candidate.run_input,
     };
     let expected_compiler_candidate_hash = execution_planning_hash(
-        "moa.execution.compile-candidate.v1",
+        "moa.execution.compile-candidate",
         &artifact_canonical_json_bytes(&compile_preimage)
             .context("canonicalize supplementary compiler preimage")?,
     );
@@ -1914,8 +1909,8 @@ fn validate_generated_plan_event_order(events: &[EventRecord]) -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1, local Restate/Postgres, and a supported provider API key"]
-async fn coordinator_ambiguous_mode_selection_pins_typed_act_route_provider_e2e() -> Result<()> {
-    // Pins: difficult but bounded work remains Act with its stable typed reason and no run planning.
+async fn coordinator_ambiguous_selection_pins_execute_inline_route_provider_e2e() -> Result<()> {
+    // Pins: difficult but bounded work remains Execute/Inline with its typed reason and no planning.
     let harness = SupplementaryLiveHarness::start("ambiguous-mode-selection").await?;
     let turn_id = harness
         .start_turn(AMBIGUOUS_MODE_SELECTION_PROMPT, 3)

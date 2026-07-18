@@ -3,8 +3,8 @@
 use chrono::Utc;
 use moa_core::types::{
     execution_planning::{
-        ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlanningAuditEnvelopeV1,
-        ExecutionPlanningAuditPayloadV1, bounded_audit_report, canonical_json_bytes,
+        ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlanningAuditEnvelope,
+        ExecutionPlanningAuditPayload, bounded_audit_report, canonical_json_bytes,
     },
     experience::{
         LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
@@ -68,14 +68,14 @@ fn compiler_report() -> String {
         .expect("canonical compiler report is UTF-8")
 }
 
-fn audit(tenant_id: TenantId, operation_key: &str) -> ExecutionPlanningAuditEnvelopeV1 {
-    ExecutionPlanningAuditEnvelopeV1 {
+fn audit(tenant_id: TenantId, operation_key: &str) -> ExecutionPlanningAuditEnvelope {
+    ExecutionPlanningAuditEnvelope {
         schema_version: 1,
         tenant_id,
         contact_id: None,
         session_id: None,
         originating_sequence: None,
-        payload: ExecutionPlanningAuditPayloadV1::Compile {
+        payload: ExecutionPlanningAuditPayload::Compile {
             source: ExecutionCompileSource::SkillRegression,
             operation_key: operation_key.to_string(),
             run_uid: None,

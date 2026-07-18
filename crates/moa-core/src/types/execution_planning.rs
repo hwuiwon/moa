@@ -20,63 +20,82 @@ pub const EXECUTION_REPORT_MAX_BYTES: usize = 262_144;
 pub const EXECUTION_AUDIT_ENVELOPE_MAX_BYTES: usize = 4_194_304;
 /// Maximum number of retained violations in a bounded audit report.
 pub const EXECUTION_AUDIT_MAX_VIOLATIONS: usize = 256;
+/// Maximum UTF-8 bytes accepted for one execution-route rationale.
+pub const EXECUTION_ROUTE_RATIONALE_MAX_BYTES: usize = 240;
 
-/// Stable execution mode selected for one root user turn.
+/// Internal execution strategy selected for an Execute route.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutionMode {
-    /// Produce one model response without tools or planning.
-    Respond,
+pub enum ExecutionStrategy {
     /// Run the bounded interactive model/tool loop.
-    Act,
+    Inline,
     /// Compile or instantiate and detach a durable execution run.
-    Run,
+    Durable,
 }
 
-/// Stable primary reason for one execution-routing decision.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionRouteReason {
-    /// The request needs only a direct response.
-    SimpleResponse,
-    /// The request is bounded interactive work.
-    BoundedInteractiveWork,
-    /// Required preflight information is missing.
-    PreflightInputMissing,
-    /// The user explicitly requested durable run execution.
-    ExplicitRun,
-    /// The request spans a bulk collection.
-    BulkCollection,
-    /// The work must survive or resume across process lifetimes.
-    DurableOrResumable,
-    /// The work has execution-run-shaped fan-out.
-    HighFanout,
-    /// The work requires an approval or external signal wait.
-    ApprovalOrSignal,
-    /// The caller selected one exact pinned execution template.
-    SelectedExecutionTemplate,
-    /// A bounded Act turn discovered run-shaped work.
-    ActEscalation,
+/// Returns whether a route rationale is bounded, trimmed, non-empty, and single-line.
+#[must_use]
+pub fn execution_route_rationale_is_valid(rationale: &str) -> bool {
+    !rationale.is_empty()
+        && rationale.trim() == rationale
+        && rationale.len() <= EXECUTION_ROUTE_RATIONALE_MAX_BYTES
+        && !rationale.chars().any(char::is_control)
 }
 
 /// Final execution-routing outcome, including preflight clarification.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionRouteDecision {
+    /// Produce one model response without tools or planning.
+    Respond {
+        /// Bounded human-readable explanation of the decision.
+        rationale: String,
+    },
+    /// Execute authorized work using a deterministic internal strategy.
+    Execute {
+        /// Authoritative internal execution strategy.
+        strategy: ExecutionStrategy,
+        /// Bounded human-readable explanation that never controls execution.
+        rationale: String,
+    },
     /// Routing cannot proceed until missing input is supplied.
     NeedsInput {
-        /// Stable reason for the input request.
-        reason: ExecutionRouteReason,
+        /// Bounded human-readable explanation of the missing-input decision.
+        rationale: String,
         /// Bounded concrete inputs the caller must supply.
         missing_inputs: Vec<String>,
     },
-    /// The turn was assigned one execution mode.
-    Routed {
-        /// Selected execution mode.
-        mode: ExecutionMode,
-        /// Stable primary routing reason.
-        reason: ExecutionRouteReason,
-    },
+}
+
+impl ExecutionRouteDecision {
+    /// Returns the redacted scalar route kind for audit and metrics.
+    #[must_use]
+    pub const fn kind(&self) -> ExecutionRouteKind {
+        match self {
+            Self::Respond { .. } => ExecutionRouteKind::Respond,
+            Self::Execute { .. } => ExecutionRouteKind::Execute,
+            Self::NeedsInput { .. } => ExecutionRouteKind::NeedsInput,
+        }
+    }
+
+    /// Returns the bounded human-readable rationale carried by this decision.
+    #[must_use]
+    pub fn rationale(&self) -> &str {
+        match self {
+            Self::Respond { rationale }
+            | Self::Execute { rationale, .. }
+            | Self::NeedsInput { rationale, .. } => rationale,
+        }
+    }
+
+    /// Returns the authoritative internal strategy present only for Execute.
+    #[must_use]
+    pub const fn strategy(&self) -> Option<ExecutionStrategy> {
+        match self {
+            Self::Execute { strategy, .. } => Some(*strategy),
+            Self::Respond { .. } | Self::NeedsInput { .. } => None,
+        }
+    }
 }
 
 /// Trusted or model-assisted source of one execution route.
@@ -89,8 +108,8 @@ pub enum ExecutionRouteSource {
     BlankObjective,
     /// Exact trusted execution-template invocation.
     SelectedExecutionTemplate,
-    /// Validated typed escalation from an Act turn.
-    ActEscalation,
+    /// Validated one-way upgrade from Inline to Durable execution.
+    DurableUpgrade,
 }
 
 /// Closed outcome of the optional execution-route classifier call.
@@ -109,18 +128,18 @@ pub enum ExecutionRouteClassifierOutcome {
     Oversized,
     /// The collected response did not match the strict response schema.
     SchemaRejected,
-    /// The response label, reason, or missing-input fields were inconsistent.
+    /// The response label, strategy, rationale, or missing-input fields were inconsistent.
     InvalidDecision,
     /// A risky classifier decision did not meet its confidence threshold.
     LowConfidence,
-    /// Existing attachments or a recent target required bounded Act context.
-    ContextForcedAct,
+    /// Existing attachments or a recent target required bounded Inline context.
+    ContextForcedInline,
 }
 
 /// Normalized token usage retained for one execution-route classifier call.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionRouteUsageV1 {
+pub struct ExecutionRouteUsage {
     /// Uncached provider input tokens.
     pub input_tokens_uncached: u64,
     /// Provider input tokens used to populate a prompt cache.
@@ -131,7 +150,7 @@ pub struct ExecutionRouteUsageV1 {
     pub output_tokens: u64,
 }
 
-impl ExecutionRouteUsageV1 {
+impl ExecutionRouteUsage {
     /// Returns whether every normalized usage counter is zero.
     #[must_use]
     pub const fn is_zero(self) -> bool {
@@ -145,7 +164,7 @@ impl ExecutionRouteUsageV1 {
 /// Redacted provenance for one final execution-routing decision.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionRouteProvenanceV1 {
+pub struct ExecutionRouteProvenance {
     /// Trusted bypass or classifier source.
     pub source: ExecutionRouteSource,
     /// Closed outcome of the optional classifier call.
@@ -163,7 +182,7 @@ pub struct ExecutionRouteProvenanceV1 {
     /// Number of bounded missing-input entries returned to the caller.
     pub missing_input_count: u8,
     /// Normalized provider token usage.
-    pub usage: ExecutionRouteUsageV1,
+    pub usage: ExecutionRouteUsage,
     /// Classifier cost in micro-US-dollars, computed at the provider-owning boundary.
     pub cost_microusd: u64,
     /// Measured classifier call duration.
@@ -173,14 +192,14 @@ pub struct ExecutionRouteProvenanceV1 {
 /// Final execution route plus its redacted provenance.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionRoutingResultV1 {
+pub struct ExecutionRoutingResult {
     /// Selected route or bounded clarification.
     pub decision: ExecutionRouteDecision,
     /// Redacted route provenance and optional classifier measurements.
-    pub provenance: ExecutionRouteProvenanceV1,
+    pub provenance: ExecutionRouteProvenance,
 }
 
-/// Bounded evidence gathered by an Act turn before escalation.
+/// Bounded evidence gathered by an Inline turn before a Durable upgrade.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlanningEvidence {
@@ -192,22 +211,29 @@ pub struct ExecutionPlanningEvidence {
     pub value: Value,
 }
 
-/// Typed request to escalate a bounded Act turn into a durable run.
+/// Typed request to upgrade a bounded Inline turn into Durable execution.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ActEscalationSignal {
-    /// Exact user-derived run objective.
+pub struct DurableUpgradeSignal {
+    /// Exact user-derived Durable execution objective.
     pub objective: String,
-    /// Stable run-shaped reason discovered by Act.
-    pub reason: ExecutionRouteReason,
+    /// Bounded explanation of the Durable execution shape discovered Inline.
+    pub rationale: String,
     /// Bounded structured evidence already gathered by the turn.
     pub evidence: Vec<ExecutionPlanningEvidence>,
 }
 
-impl ActEscalationSignal {
+impl DurableUpgradeSignal {
     /// Validates all deterministic evidence bounds without truncation.
     pub fn validate(&self) -> Result<(), ExecutionPlanningContractError> {
-        ensure_bytes("objective", &self.objective, 4_096)?;
+        ensure_nonempty_bytes("objective", &self.objective, 4_096)?;
+        ensure_route_rationale("rationale", &self.rationale)?;
+        if self.evidence.is_empty() {
+            return Err(ExecutionPlanningContractError::InvalidField {
+                field: "evidence".to_string(),
+                message: "must contain at least one observation".to_string(),
+            });
+        }
         if self.evidence.len() > 32 {
             return Err(ExecutionPlanningContractError::BoundExceeded {
                 field: "evidence".to_string(),
@@ -216,8 +242,8 @@ impl ActEscalationSignal {
             });
         }
         for (index, evidence) in self.evidence.iter().enumerate() {
-            ensure_bytes(&format!("evidence[{index}].source"), &evidence.source, 256)?;
-            ensure_bytes(
+            ensure_nonempty_bytes(&format!("evidence[{index}].source"), &evidence.source, 256)?;
+            ensure_nonempty_bytes(
                 &format!("evidence[{index}].summary"),
                 &evidence.summary,
                 4_096,
@@ -241,6 +267,85 @@ impl ActEscalationSignal {
         }
         Ok(())
     }
+}
+
+/// Deterministic rejection from the one-way Inline-to-Durable transition.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum DurableUpgradeTransitionError {
+    /// The transition did not originate from an initial root user Execute/Inline turn.
+    #[error("Durable upgrade requires an initial root Execute/Inline user turn")]
+    NotAuthorized,
+    /// The initial Inline turn already consumed its only transition.
+    #[error("Durable upgrade was already consumed")]
+    AlreadyConsumed,
+    /// The signal changed the byte-exact originating objective.
+    #[error("Durable upgrade objective differs from the persisted user objective")]
+    ObjectiveChanged,
+    /// The typed signal exceeded a deterministic contract bound.
+    #[error("{0}")]
+    InvalidSignal(ExecutionPlanningContractError),
+}
+
+/// Validated one-way upgrade handed from the root Inline turn to Durable planning.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedDurableUpgrade {
+    /// Trusted Durable route produced by the transition.
+    pub routing: ExecutionRoutingResult,
+    /// Byte-exact objective, rationale, and evidence admitted by the transition.
+    pub signal: DurableUpgradeSignal,
+}
+
+/// Applies the pure one-way Inline-to-Durable transition used by production turns and evals.
+pub fn durable_upgrade_transition(
+    originating_objective: &str,
+    initial_route: &ExecutionRouteDecision,
+    has_root_user_origin: bool,
+    already_consumed: bool,
+    signal: DurableUpgradeSignal,
+) -> Result<AdmittedDurableUpgrade, DurableUpgradeTransitionError> {
+    if already_consumed {
+        return Err(DurableUpgradeTransitionError::AlreadyConsumed);
+    }
+    if !has_root_user_origin
+        || !matches!(
+            initial_route,
+            ExecutionRouteDecision::Execute {
+                strategy: ExecutionStrategy::Inline,
+                ..
+            }
+        )
+    {
+        return Err(DurableUpgradeTransitionError::NotAuthorized);
+    }
+    if signal.objective.as_bytes() != originating_objective.as_bytes() {
+        return Err(DurableUpgradeTransitionError::ObjectiveChanged);
+    }
+    signal
+        .validate()
+        .map_err(DurableUpgradeTransitionError::InvalidSignal)?;
+    let routing = ExecutionRoutingResult {
+        decision: ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Durable,
+            rationale: signal.rationale.clone(),
+        },
+        provenance: ExecutionRouteProvenance {
+            source: ExecutionRouteSource::DurableUpgrade,
+            classifier_outcome: ExecutionRouteClassifierOutcome::NotCalled,
+            provider_model: None,
+            prompt_version: None,
+            objective_hash: execution_planning_hash(
+                "moa.execution.route-objective",
+                originating_objective.as_bytes(),
+            ),
+            response_hash: None,
+            confidence_bps: None,
+            missing_input_count: 0,
+            usage: ExecutionRouteUsage::default(),
+            cost_microusd: 0,
+            duration_micros: 0,
+        },
+    };
+    Ok(AdmittedDurableUpgrade { routing, signal })
 }
 
 /// Exact pinned execution-template revision selected by a caller.
@@ -269,18 +374,47 @@ pub struct ExecutionTemplateInvocation {
 pub enum ExecutionRouteStage {
     /// Initial root-turn route.
     Initial,
-    /// Typed Act-to-Run escalation route.
-    ActEscalation,
+    /// One-way Inline-to-Durable upgrade route.
+    DurableUpgrade,
 }
 
-/// Closed route-decision category stored in audit history.
+/// Closed route-decision category stored in audit history and metrics.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutionRouteDecisionKind {
-    /// Missing input prevented routing.
+pub enum ExecutionRouteKind {
+    /// Produce one direct response.
+    Respond,
+    /// Execute authorized work.
+    Execute,
+    /// Request concrete missing input.
     NeedsInput,
-    /// A concrete execution mode was selected.
-    Routed,
+}
+
+/// Rationale-free execution route exposed through durable and public progress surfaces.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionRouteSummary {
+    /// Produce one direct response.
+    Respond,
+    /// Execute authorized work using the selected internal strategy.
+    Execute {
+        /// Authoritative internal execution strategy.
+        strategy: ExecutionStrategy,
+    },
+    /// Request concrete missing input.
+    NeedsInput,
+}
+
+impl From<&ExecutionRouteDecision> for ExecutionRouteSummary {
+    fn from(decision: &ExecutionRouteDecision) -> Self {
+        match decision {
+            ExecutionRouteDecision::Respond { .. } => Self::Respond,
+            ExecutionRouteDecision::Execute { strategy, .. } => Self::Execute {
+                strategy: *strategy,
+            },
+            ExecutionRouteDecision::NeedsInput { .. } => Self::NeedsInput,
+        }
+    }
 }
 
 /// Closed planner-call category stored in audit history.
@@ -349,10 +483,10 @@ pub enum ExecutionCompileOutcome {
     Rejected,
 }
 
-/// Recursively strict v1 execution-planning audit event.
+/// Recursively strict execution-planning audit event.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionPlanningAuditEnvelopeV1 {
+pub struct ExecutionPlanningAuditEnvelope {
     /// Audit schema version, fixed at `1`.
     pub schema_version: u8,
     /// Tenant that owns this audit record.
@@ -367,25 +501,57 @@ pub struct ExecutionPlanningAuditEnvelopeV1 {
     /// Originating persisted user-event sequence for session-bound records.
     pub originating_sequence: Option<u64>,
     /// Closed route, planner-call, or compiler payload.
-    pub payload: ExecutionPlanningAuditPayloadV1,
+    pub payload: ExecutionPlanningAuditPayload,
 }
 
-/// Closed v1 execution-planning audit payload.
+impl ExecutionPlanningAuditEnvelope {
+    /// Builds a route-audit envelope by deriving decision and strategy from one typed route.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the normalized route audit keeps its ownership and identity tuple explicit"
+    )]
+    #[must_use]
+    pub fn route(
+        tenant_id: TenantId,
+        contact_id: Option<ContactId>,
+        session_id: SessionId,
+        originating_sequence: u64,
+        stage: ExecutionRouteStage,
+        decision: &ExecutionRouteDecision,
+        provenance: ExecutionRouteProvenance,
+        accepted_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            tenant_id,
+            contact_id,
+            session_id: Some(session_id),
+            originating_sequence: Some(originating_sequence),
+            payload: ExecutionPlanningAuditPayload::Route {
+                stage,
+                decision: decision.kind(),
+                strategy: decision.strategy(),
+                provenance,
+                accepted_at,
+            },
+        }
+    }
+}
+
+/// Closed execution-planning audit payload.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ExecutionPlanningAuditPayloadV1 {
+pub enum ExecutionPlanningAuditPayload {
     /// One trusted or model-assisted routing decision.
     Route {
-        /// Initial or Act-escalation route stage.
+        /// Initial route or one-way Durable-upgrade stage.
         stage: ExecutionRouteStage,
-        /// Needs-input or routed outcome.
-        decision: ExecutionRouteDecisionKind,
-        /// Selected execution mode for routed decisions.
-        mode: Option<ExecutionMode>,
-        /// Stable primary route reason.
-        reason: ExecutionRouteReason,
+        /// Redacted public route decision.
+        decision: ExecutionRouteKind,
+        /// Internal strategy, present exactly for Execute decisions.
+        strategy: Option<ExecutionStrategy>,
         /// Redacted trusted-bypass or classifier provenance.
-        provenance: ExecutionRouteProvenanceV1,
+        provenance: ExecutionRouteProvenance,
         /// Durable acceptance timestamp.
         accepted_at: DateTime<Utc>,
     },
@@ -444,11 +610,11 @@ pub enum ExecutionPlanningAuditPayloadV1 {
 /// Bounded audit report attached to planner and compiler records.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ExecutionAuditReportV1 {
+pub enum ExecutionAuditReport {
     /// Strict-schema violations.
     Schema {
         /// Sorted retained violations.
-        violations: Vec<ExecutionAuditViolationV1>,
+        violations: Vec<ExecutionAuditViolation>,
         /// Number of sorted violations omitted after the fixed cap.
         omitted_violations: u32,
         /// Hash of the complete sorted unbounded report.
@@ -457,7 +623,7 @@ pub enum ExecutionAuditReportV1 {
     /// Pure compiler violations.
     Compiler {
         /// Sorted retained violations.
-        violations: Vec<ExecutionAuditViolationV1>,
+        violations: Vec<ExecutionAuditViolation>,
         /// Number of sorted violations omitted after the fixed cap.
         omitted_violations: u32,
         /// Hash of the complete sorted unbounded report.
@@ -479,7 +645,7 @@ pub enum ExecutionAuditReportV1 {
 /// One bounded schema or compiler violation.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionAuditViolationV1 {
+pub struct ExecutionAuditViolation {
     /// Stable violation code.
     pub code: String,
     /// JSON Pointer-like violation path.
@@ -509,15 +675,15 @@ pub enum ExecutionRunAdmissionStatus {
 /// Fixed methodology for the displayed execution admission estimate.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutionEstimateMethodologyV1 {
+pub enum ExecutionEstimateMethodology {
     /// Retry- and fan-out-inclusive compiler worst case.
-    ConservativeWorstCaseV1,
+    ConservativeWorstCase,
 }
 
 /// Exact compiler estimate displayed before execution confirmation.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionAdmissionEstimateV1 {
+pub struct ExecutionAdmissionEstimate {
     /// Worst-case cost in micro-US-dollars.
     pub cost_microusd: u64,
     /// Worst-case model tokens.
@@ -533,13 +699,13 @@ pub struct ExecutionAdmissionEstimateV1 {
 /// Evidence required to confirm an above-threshold admitted run.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionConfirmationEvidenceV1 {
+pub struct ExecutionConfirmationEvidence {
     /// Exact active plan hash shown to the owning user.
     pub active_plan_hash: String,
     /// Exact compiler estimate shown to the owning user.
-    pub estimate: ExecutionAdmissionEstimateV1,
+    pub estimate: ExecutionAdmissionEstimate,
     /// Fixed estimate methodology.
-    pub methodology: ExecutionEstimateMethodologyV1,
+    pub methodology: ExecutionEstimateMethodology,
 }
 
 /// Minimal durable payload published after a committed run admission.
@@ -555,7 +721,7 @@ pub struct ExecutionRunStarted {
     /// Queued or awaiting-confirmation admission status.
     pub status: ExecutionRunAdmissionStatus,
     /// Required only for awaiting-confirmation admissions.
-    pub confirmation: Option<ExecutionConfirmationEvidenceV1>,
+    pub confirmation: Option<ExecutionConfirmationEvidence>,
 }
 
 impl ExecutionRunStarted {
@@ -598,7 +764,7 @@ impl ExecutionRunStarted {
 /// Exact generated-plan planner provenance.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct GeneratedPlanPlannerProvenanceV1 {
+pub struct GeneratedPlanPlannerProvenance {
     /// Non-empty provider model identifier.
     pub model: String,
     /// Non-empty planner prompt version.
@@ -616,18 +782,14 @@ pub struct GeneratedPlanPlannerProvenanceV1 {
 /// Closed source provenance persisted for every admitted execution run.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ExecutionSourceProvenanceV1 {
+pub enum ExecutionSourceProvenance {
     /// One-off strict generated plan.
     GeneratedPlan {
-        /// Stable run-shaped routing reason.
-        route_reason: ExecutionRouteReason,
         /// Exact accepted planner/compiler provenance.
-        planner: GeneratedPlanPlannerProvenanceV1,
+        planner: GeneratedPlanPlannerProvenance,
     },
     /// Exact pinned skill execution template.
     SkillTemplate {
-        /// Fixed selected-template route reason.
-        route_reason: ExecutionRouteReason,
         /// Byte-identical canonical skill artifact reference.
         skill_template_ref: String,
         /// Exact pinned skill revision UUID.
@@ -635,8 +797,6 @@ pub enum ExecutionSourceProvenanceV1 {
     },
     /// Exact pinned execution template invoked by a behavior-lab experiment.
     ExperimentTemplate {
-        /// Fixed explicit-run route reason.
-        route_reason: ExecutionRouteReason,
         /// Byte-identical canonical skill artifact reference.
         skill_template_ref: String,
         /// Exact pinned skill revision UUID.
@@ -651,7 +811,7 @@ pub enum ExecutionSourceProvenanceV1 {
     },
 }
 
-impl ExecutionSourceProvenanceV1 {
+impl ExecutionSourceProvenance {
     /// Validates the exact generated-plan, skill-template, and experiment-template cohorts.
     pub fn validate(
         &self,
@@ -659,24 +819,7 @@ impl ExecutionSourceProvenanceV1 {
     ) -> Result<(), ExecutionPlanningContractError> {
         validate_hash("committed_plan_hash", committed_plan_hash)?;
         match self {
-            Self::GeneratedPlan {
-                route_reason,
-                planner,
-            } => {
-                if !matches!(
-                    route_reason,
-                    ExecutionRouteReason::ExplicitRun
-                        | ExecutionRouteReason::BulkCollection
-                        | ExecutionRouteReason::DurableOrResumable
-                        | ExecutionRouteReason::HighFanout
-                        | ExecutionRouteReason::ApprovalOrSignal
-                        | ExecutionRouteReason::ActEscalation
-                ) {
-                    return Err(ExecutionPlanningContractError::InvalidField {
-                        field: "route_reason".to_string(),
-                        message: "generated_plan requires a run-shaped route reason".to_string(),
-                    });
-                }
+            Self::GeneratedPlan { planner } => {
                 ensure_nonempty_bytes("planner.model", &planner.model, 128)?;
                 ensure_nonempty_bytes("planner.prompt_version", &planner.prompt_version, 64)?;
                 validate_hash("planner.candidate_hash", &planner.candidate_hash)?;
@@ -700,29 +843,13 @@ impl ExecutionSourceProvenanceV1 {
                 }
             }
             Self::SkillTemplate {
-                route_reason,
-                skill_template_ref,
-                ..
+                skill_template_ref, ..
             } => {
-                if *route_reason != ExecutionRouteReason::SelectedExecutionTemplate {
-                    return Err(ExecutionPlanningContractError::InvalidField {
-                        field: "route_reason".to_string(),
-                        message: "skill_template requires selected_execution_template".to_string(),
-                    });
-                }
                 ensure_nonempty_bytes("skill_template_ref", skill_template_ref, 535)?;
             }
             Self::ExperimentTemplate {
-                route_reason,
-                skill_template_ref,
-                ..
+                skill_template_ref, ..
             } => {
-                if *route_reason != ExecutionRouteReason::ExplicitRun {
-                    return Err(ExecutionPlanningContractError::InvalidField {
-                        field: "route_reason".to_string(),
-                        message: "experiment_template requires explicit_run".to_string(),
-                    });
-                }
                 ensure_nonempty_bytes("skill_template_ref", skill_template_ref, 535)?;
             }
         }
@@ -744,12 +871,12 @@ pub enum ExecutionPlanningAuditWriteResult {
     /// The record was inserted.
     Applied {
         /// First persisted envelope.
-        envelope: ExecutionPlanningAuditEnvelopeV1,
+        envelope: ExecutionPlanningAuditEnvelope,
     },
     /// The exact semantic record already existed.
     Replayed {
         /// First persisted envelope with its original measurements.
-        envelope: ExecutionPlanningAuditEnvelopeV1,
+        envelope: ExecutionPlanningAuditEnvelope,
     },
     /// The logical key already exists with a different semantic payload.
     Conflict,
@@ -793,14 +920,14 @@ pub fn execution_planning_hash(domain: &str, bytes: &[u8]) -> String {
 
 /// Builds the exact planning-audit dedupe key from its producer-owned logical tuple.
 pub fn execution_planning_dedupe_key(
-    envelope: &ExecutionPlanningAuditEnvelopeV1,
+    envelope: &ExecutionPlanningAuditEnvelope,
 ) -> Result<String, ExecutionPlanningContractError> {
     let tenant = envelope.tenant_id.to_string();
     let contact = envelope.contact_id.map(|id| id.to_string());
     let session = envelope.session_id.map(|id| id.to_string());
     let origin = envelope.originating_sequence.map(|value| value.to_string());
     let fields = match &envelope.payload {
-        ExecutionPlanningAuditPayloadV1::Route { stage, .. } => vec![
+        ExecutionPlanningAuditPayload::Route { stage, .. } => vec![
             Some("route".to_string()),
             Some(tenant),
             contact,
@@ -808,7 +935,7 @@ pub fn execution_planning_dedupe_key(
             origin,
             Some(canonical_enum_string(stage)?),
         ],
-        ExecutionPlanningAuditPayloadV1::PlannerCall {
+        ExecutionPlanningAuditPayload::PlannerCall {
             call_kind,
             call_ordinal,
             run_uid,
@@ -825,7 +952,7 @@ pub fn execution_planning_dedupe_key(
             Some(canonical_enum_string(call_kind)?),
             Some(call_ordinal.to_string()),
         ],
-        ExecutionPlanningAuditPayloadV1::Compile {
+        ExecutionPlanningAuditPayload::Compile {
             source,
             operation_key,
             ..
@@ -862,16 +989,16 @@ fn dedupe_key_from_fields(
         }
     }
     Ok(format!(
-        "execution-planning-v1:{}",
-        execution_planning_hash("moa.execution.planning-audit-dedupe.v1", &bytes)
+        "execution-planning:{}",
+        execution_planning_hash("moa.execution.planning-audit-dedupe", &bytes)
     ))
 }
 
 /// Returns whether two audit envelopes are semantically equal for idempotent replay.
 #[must_use]
 pub fn planning_audit_semantically_equal(
-    left: &ExecutionPlanningAuditEnvelopeV1,
-    right: &ExecutionPlanningAuditEnvelopeV1,
+    left: &ExecutionPlanningAuditEnvelope,
+    right: &ExecutionPlanningAuditEnvelope,
 ) -> bool {
     if left.schema_version != right.schema_version
         || left.tenant_id != right.tenant_id
@@ -883,29 +1010,27 @@ pub fn planning_audit_semantically_equal(
     }
     match (&left.payload, &right.payload) {
         (
-            ExecutionPlanningAuditPayloadV1::Route {
+            ExecutionPlanningAuditPayload::Route {
                 stage: left_stage,
                 decision: left_decision,
-                mode: left_mode,
-                reason: left_reason,
+                strategy: left_strategy,
                 provenance: left_provenance,
                 ..
             },
-            ExecutionPlanningAuditPayloadV1::Route {
+            ExecutionPlanningAuditPayload::Route {
                 stage: right_stage,
                 decision: right_decision,
-                mode: right_mode,
-                reason: right_reason,
+                strategy: right_strategy,
                 provenance: right_provenance,
                 ..
             },
         ) => {
-            (left_stage, left_decision, left_mode, left_reason)
-                == (right_stage, right_decision, right_mode, right_reason)
+            (left_stage, left_decision, left_strategy)
+                == (right_stage, right_decision, right_strategy)
                 && route_provenance_semantically_equal(left_provenance, right_provenance)
         }
         (
-            ExecutionPlanningAuditPayloadV1::PlannerCall {
+            ExecutionPlanningAuditPayload::PlannerCall {
                 call_kind: left_kind,
                 call_ordinal: left_ordinal,
                 run_uid: left_run,
@@ -918,7 +1043,7 @@ pub fn planning_audit_semantically_equal(
                 compiler_report: left_report,
                 ..
             },
-            ExecutionPlanningAuditPayloadV1::PlannerCall {
+            ExecutionPlanningAuditPayload::PlannerCall {
                 call_kind: right_kind,
                 call_ordinal: right_ordinal,
                 run_uid: right_run,
@@ -957,7 +1082,7 @@ pub fn planning_audit_semantically_equal(
             )
         }
         (
-            ExecutionPlanningAuditPayloadV1::Compile {
+            ExecutionPlanningAuditPayload::Compile {
                 source: left_source,
                 operation_key: left_key,
                 run_uid: left_run,
@@ -968,7 +1093,7 @@ pub fn planning_audit_semantically_equal(
                 validation_report: left_report,
                 ..
             },
-            ExecutionPlanningAuditPayloadV1::Compile {
+            ExecutionPlanningAuditPayload::Compile {
                 source: right_source,
                 operation_key: right_key,
                 run_uid: right_run,
@@ -1006,7 +1131,7 @@ pub fn planning_audit_semantically_equal(
 
 /// Validates one strict planning-audit envelope and all outcome-specific fields.
 pub fn validate_planning_audit_envelope(
-    envelope: &ExecutionPlanningAuditEnvelopeV1,
+    envelope: &ExecutionPlanningAuditEnvelope,
 ) -> Result<(), ExecutionPlanningContractError> {
     if envelope.schema_version != 1 {
         return Err(ExecutionPlanningContractError::InvalidField {
@@ -1022,11 +1147,10 @@ pub fn validate_planning_audit_envelope(
         });
     }
     match &envelope.payload {
-        ExecutionPlanningAuditPayloadV1::Route {
+        ExecutionPlanningAuditPayload::Route {
             stage,
             decision,
-            mode,
-            reason,
+            strategy,
             provenance,
             ..
         } => {
@@ -1036,9 +1160,9 @@ pub fn validate_planning_audit_envelope(
                     message: "route records must be session-bound".to_string(),
                 });
             }
-            validate_route_audit(*stage, *decision, *mode, *reason, provenance)?;
+            validate_route_audit(*stage, *decision, *strategy, provenance)?;
         }
-        ExecutionPlanningAuditPayloadV1::PlannerCall {
+        ExecutionPlanningAuditPayload::PlannerCall {
             call_kind,
             call_ordinal,
             run_uid,
@@ -1115,7 +1239,7 @@ pub fn validate_planning_audit_envelope(
                 )?;
                 validate_canonical_document("payload.candidate_json", candidate)?;
                 let expected = execution_planning_hash(
-                    "moa.execution.planner-candidate.v1",
+                    "moa.execution.planner-candidate",
                     candidate.as_bytes(),
                 );
                 if candidate_hash.as_deref() != Some(expected.as_str()) {
@@ -1145,16 +1269,16 @@ pub fn validate_planning_audit_envelope(
                     (
                         ExecutionPlannerOutcome::SchemaRejected
                             | ExecutionPlannerOutcome::ImmutableGoalChanged,
-                        ExecutionAuditReportV1::Schema { .. }
+                        ExecutionAuditReport::Schema { .. }
                     ) | (
                         ExecutionPlannerOutcome::Accepted
                             | ExecutionPlannerOutcome::NeedsInput
                             | ExecutionPlannerOutcome::Unsupported
                             | ExecutionPlannerOutcome::CompilerRejected,
-                        ExecutionAuditReportV1::Compiler { .. }
+                        ExecutionAuditReport::Compiler { .. }
                     ) | (
                         ExecutionPlannerOutcome::Oversized,
-                        ExecutionAuditReportV1::Oversized { .. }
+                        ExecutionAuditReport::Oversized { .. }
                     )
                 );
                 if !valid_kind {
@@ -1173,7 +1297,7 @@ pub fn validate_planning_audit_envelope(
                 });
             }
         }
-        ExecutionPlanningAuditPayloadV1::Compile {
+        ExecutionPlanningAuditPayload::Compile {
             source,
             run_uid,
             plan_revision,
@@ -1229,7 +1353,7 @@ pub fn validate_planning_audit_envelope(
             )?;
             if !matches!(
                 validate_canonical_report("payload.validation_report", validation_report)?,
-                ExecutionAuditReportV1::Compiler { .. }
+                ExecutionAuditReport::Compiler { .. }
             ) {
                 return Err(ExecutionPlanningContractError::InvalidField {
                     field: "payload.validation_report".to_string(),
@@ -1256,8 +1380,8 @@ pub fn validate_planning_audit_envelope(
 /// same provider result through a different local timing path.
 #[must_use]
 pub fn route_provenance_semantically_equal(
-    left: &ExecutionRouteProvenanceV1,
-    right: &ExecutionRouteProvenanceV1,
+    left: &ExecutionRouteProvenance,
+    right: &ExecutionRouteProvenance,
 ) -> bool {
     left.source == right.source
         && left.classifier_outcome == right.classifier_outcome
@@ -1273,69 +1397,48 @@ pub fn route_provenance_semantically_equal(
 
 fn validate_route_audit(
     stage: ExecutionRouteStage,
-    decision: ExecutionRouteDecisionKind,
-    mode: Option<ExecutionMode>,
-    reason: ExecutionRouteReason,
-    provenance: &ExecutionRouteProvenanceV1,
+    decision: ExecutionRouteKind,
+    strategy: Option<ExecutionStrategy>,
+    provenance: &ExecutionRouteProvenance,
 ) -> Result<(), ExecutionPlanningContractError> {
     let route_matches_source = match provenance.source {
         ExecutionRouteSource::Classifier => {
             stage == ExecutionRouteStage::Initial
                 && matches!(
-                    (decision, mode, reason),
+                    (decision, strategy),
                     (
-                        ExecutionRouteDecisionKind::NeedsInput,
-                        None,
-                        ExecutionRouteReason::PreflightInputMissing
-                    ) | (
-                        ExecutionRouteDecisionKind::Routed,
-                        Some(ExecutionMode::Respond),
-                        ExecutionRouteReason::SimpleResponse
-                    ) | (
-                        ExecutionRouteDecisionKind::Routed,
-                        Some(ExecutionMode::Act),
-                        ExecutionRouteReason::BoundedInteractiveWork
-                    ) | (
-                        ExecutionRouteDecisionKind::Routed,
-                        Some(ExecutionMode::Run),
-                        ExecutionRouteReason::ExplicitRun
-                            | ExecutionRouteReason::BulkCollection
-                            | ExecutionRouteReason::DurableOrResumable
-                            | ExecutionRouteReason::HighFanout
-                            | ExecutionRouteReason::ApprovalOrSignal
-                    )
+                        ExecutionRouteKind::NeedsInput | ExecutionRouteKind::Respond,
+                        None
+                    ) | (ExecutionRouteKind::Execute, Some(_))
                 )
         }
         ExecutionRouteSource::BlankObjective => {
             matches!(
-                (stage, decision, mode, reason),
+                (stage, decision, strategy),
                 (
                     ExecutionRouteStage::Initial,
-                    ExecutionRouteDecisionKind::NeedsInput,
-                    None,
-                    ExecutionRouteReason::PreflightInputMissing
+                    ExecutionRouteKind::NeedsInput,
+                    None
                 )
             )
         }
         ExecutionRouteSource::SelectedExecutionTemplate => {
             matches!(
-                (stage, decision, mode, reason),
+                (stage, decision, strategy),
                 (
                     ExecutionRouteStage::Initial,
-                    ExecutionRouteDecisionKind::Routed,
-                    Some(ExecutionMode::Run),
-                    ExecutionRouteReason::SelectedExecutionTemplate
+                    ExecutionRouteKind::Execute,
+                    Some(ExecutionStrategy::Durable)
                 )
             )
         }
-        ExecutionRouteSource::ActEscalation => {
+        ExecutionRouteSource::DurableUpgrade => {
             matches!(
-                (stage, decision, mode, reason),
+                (stage, decision, strategy),
                 (
-                    ExecutionRouteStage::ActEscalation,
-                    ExecutionRouteDecisionKind::Routed,
-                    Some(ExecutionMode::Run),
-                    ExecutionRouteReason::ActEscalation
+                    ExecutionRouteStage::DurableUpgrade,
+                    ExecutionRouteKind::Execute,
+                    Some(ExecutionStrategy::Durable)
                 )
             )
         }
@@ -1343,10 +1446,9 @@ fn validate_route_audit(
     if !route_matches_source {
         return Err(ExecutionPlanningContractError::InvalidField {
             field: "payload".to_string(),
-            message: "route stage, decision, mode, reason, and source are inconsistent".to_string(),
+            message: "route stage, decision, strategy, and source are inconsistent".to_string(),
         });
     }
-
     validate_hash(
         "payload.provenance.objective_hash",
         &provenance.objective_hash,
@@ -1363,7 +1465,7 @@ fn validate_route_audit(
             message: "must be within 0..=10000".to_string(),
         });
     }
-    let needs_input = decision == ExecutionRouteDecisionKind::NeedsInput;
+    let needs_input = decision == ExecutionRouteKind::NeedsInput;
     if needs_input != (1..=8).contains(&provenance.missing_input_count) {
         return Err(ExecutionPlanningContractError::InvalidField {
             field: "payload.provenance.missing_input_count".to_string(),
@@ -1417,7 +1519,7 @@ fn validate_route_audit(
             | ExecutionRouteClassifierOutcome::SchemaRejected
             | ExecutionRouteClassifierOutcome::InvalidDecision
             | ExecutionRouteClassifierOutcome::LowConfidence
-            | ExecutionRouteClassifierOutcome::ContextForcedAct
+            | ExecutionRouteClassifierOutcome::ContextForcedInline
     );
     if collected != provenance.response_hash.is_some() {
         return Err(ExecutionPlanningContractError::InvalidField {
@@ -1435,7 +1537,7 @@ fn validate_route_audit(
         provenance.classifier_outcome,
         ExecutionRouteClassifierOutcome::Accepted
             | ExecutionRouteClassifierOutcome::LowConfidence
-            | ExecutionRouteClassifierOutcome::ContextForcedAct
+            | ExecutionRouteClassifierOutcome::ContextForcedInline
     );
     if parsed != provenance.confidence_bps.is_some()
         || (provenance.classifier_outcome == ExecutionRouteClassifierOutcome::InvalidDecision
@@ -1448,17 +1550,13 @@ fn validate_route_audit(
     }
     if provenance.classifier_outcome != ExecutionRouteClassifierOutcome::Accepted
         && !matches!(
-            (decision, mode, reason),
-            (
-                ExecutionRouteDecisionKind::Routed,
-                Some(ExecutionMode::Act),
-                ExecutionRouteReason::BoundedInteractiveWork
-            )
+            (decision, strategy),
+            (ExecutionRouteKind::Execute, Some(ExecutionStrategy::Inline))
         )
     {
         return Err(ExecutionPlanningContractError::InvalidField {
             field: "payload.provenance.classifier_outcome".to_string(),
-            message: "non-accepted classifier outcomes must conservatively route to Act"
+            message: "non-accepted classifier outcomes must conservatively Execute Inline"
                 .to_string(),
         });
     }
@@ -1468,8 +1566,8 @@ fn validate_route_audit(
 /// Sorts, bounds, and hashes a complete violation vector for one audit report.
 pub fn bounded_audit_report(
     compiler: bool,
-    mut violations: Vec<ExecutionAuditViolationV1>,
-) -> Result<ExecutionAuditReportV1, ExecutionPlanningContractError> {
+    mut violations: Vec<ExecutionAuditViolation>,
+) -> Result<ExecutionAuditReport, ExecutionPlanningContractError> {
     for violation in &violations {
         ensure_bytes("violation.code", &violation.code, 64)?;
         ensure_bytes("violation.path", &violation.path, 512)?;
@@ -1481,9 +1579,9 @@ pub fn bounded_audit_report(
         "violations": violations,
     }))?;
     let domain = if compiler {
-        "moa.execution.compiler-report.v1"
+        "moa.execution.compiler-report"
     } else {
-        "moa.execution.schema-report.v1"
+        "moa.execution.schema-report"
     };
     let full_report_hash = execution_planning_hash(domain, &preimage);
     let omitted = violations
@@ -1497,13 +1595,13 @@ pub fn bounded_audit_report(
             observed: omitted,
         })?;
     Ok(if compiler {
-        ExecutionAuditReportV1::Compiler {
+        ExecutionAuditReport::Compiler {
             violations,
             omitted_violations,
             full_report_hash,
         }
     } else {
-        ExecutionAuditReportV1::Schema {
+        ExecutionAuditReport::Schema {
             violations,
             omitted_violations,
             full_report_hash,
@@ -1538,6 +1636,21 @@ fn ensure_nonempty_bytes(
         });
     }
     ensure_bytes(field, value, limit)
+}
+
+fn ensure_route_rationale(
+    field: &str,
+    rationale: &str,
+) -> Result<(), ExecutionPlanningContractError> {
+    if !execution_route_rationale_is_valid(rationale) {
+        return Err(ExecutionPlanningContractError::InvalidField {
+            field: field.to_string(),
+            message: format!(
+                "must be trimmed, non-empty, single-line, and at most {EXECUTION_ROUTE_RATIONALE_MAX_BYTES} UTF-8 bytes"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn validate_hash(field: &str, value: &str) -> Result<(), ExecutionPlanningContractError> {
@@ -1600,11 +1713,11 @@ fn validate_canonical_document(
 fn validate_canonical_report(
     field: &str,
     document: &str,
-) -> Result<ExecutionAuditReportV1, ExecutionPlanningContractError> {
+) -> Result<ExecutionAuditReport, ExecutionPlanningContractError> {
     let value = validate_canonical_document(field, document)?;
     serde_json::from_value(value).map_err(|error| ExecutionPlanningContractError::InvalidField {
         field: field.to_string(),
-        message: format!("must match ExecutionAuditReportV1: {error}"),
+        message: format!("must match ExecutionAuditReport: {error}"),
     })
 }
 
@@ -1612,20 +1725,323 @@ fn validate_canonical_report(
 mod tests {
     use super::*;
 
-    fn accepted_classifier_provenance() -> ExecutionRouteProvenanceV1 {
-        ExecutionRouteProvenanceV1 {
+    fn accepted_classifier_provenance() -> ExecutionRouteProvenance {
+        ExecutionRouteProvenance {
             source: ExecutionRouteSource::Classifier,
             classifier_outcome: ExecutionRouteClassifierOutcome::Accepted,
             provider_model: Some("route-model".to_string()),
-            prompt_version: Some("execution-router-v1".to_string()),
+            prompt_version: Some("execution-router".to_string()),
             objective_hash: "a".repeat(64),
             response_hash: Some("b".repeat(64)),
             confidence_bps: Some(9_500),
             missing_input_count: 0,
-            usage: ExecutionRouteUsageV1::default(),
+            usage: ExecutionRouteUsage::default(),
             cost_microusd: 0,
             duration_micros: 1,
         }
+    }
+
+    fn route_provenance(
+        source: ExecutionRouteSource,
+        needs_input: bool,
+    ) -> ExecutionRouteProvenance {
+        if source == ExecutionRouteSource::Classifier {
+            let mut provenance = accepted_classifier_provenance();
+            provenance.missing_input_count = u8::from(needs_input);
+            provenance
+        } else {
+            ExecutionRouteProvenance {
+                source,
+                classifier_outcome: ExecutionRouteClassifierOutcome::NotCalled,
+                provider_model: None,
+                prompt_version: None,
+                objective_hash: "a".repeat(64),
+                response_hash: None,
+                confidence_bps: None,
+                missing_input_count: u8::from(needs_input),
+                usage: ExecutionRouteUsage::default(),
+                cost_microusd: 0,
+                duration_micros: 0,
+            }
+        }
+    }
+
+    #[test]
+    fn execution_route_direct_variants_have_exact_serde_shapes() {
+        // Pins: the public route stays closed while Execute carries an explicit strategy and
+        // every route carries an open, bounded rationale.
+        let cases = [
+            (
+                ExecutionRouteDecision::Respond {
+                    rationale: "The request only asks for an explanation.".to_string(),
+                },
+                serde_json::json!({
+                    "decision": "respond",
+                    "rationale": "The request only asks for an explanation."
+                }),
+            ),
+            (
+                ExecutionRouteDecision::Execute {
+                    strategy: ExecutionStrategy::Inline,
+                    rationale: "This industry-specific task fits one bounded turn.".to_string(),
+                },
+                serde_json::json!({
+                    "decision": "execute",
+                    "strategy": "inline",
+                    "rationale": "This industry-specific task fits one bounded turn."
+                }),
+            ),
+            (
+                ExecutionRouteDecision::NeedsInput {
+                    rationale: "The target jurisdiction is required before work can begin."
+                        .to_string(),
+                    missing_inputs: vec!["objective".to_string()],
+                },
+                serde_json::json!({
+                    "decision": "needs_input",
+                    "rationale": "The target jurisdiction is required before work can begin.",
+                    "missing_inputs": ["objective"]
+                }),
+            ),
+        ];
+        for (decision, expected) in cases {
+            assert_eq!(
+                serde_json::to_value(&decision).expect("route decision should serialize"),
+                expected.clone()
+            );
+            assert_eq!(
+                serde_json::from_value::<ExecutionRouteDecision>(expected)
+                    .expect("route decision shape should deserialize"),
+                decision
+            );
+        }
+        for removed in [
+            serde_json::json!({"decision":"routed","mode":"respond","rationale":"explain"}),
+            serde_json::json!({"decision":"execute","rationale":"work"}),
+            serde_json::json!({"decision":"respond","strategy":"inline","rationale":"explain"}),
+        ] {
+            assert!(serde_json::from_value::<ExecutionRouteDecision>(removed).is_err());
+        }
+    }
+
+    #[test]
+    fn execution_route_rationale_is_open_but_bounded() {
+        // Pins: unfamiliar domain explanations are accepted without becoming control values.
+        let arbitrary = "The refinery inspection spans shifts and must resume after approvals.";
+        assert!(execution_route_rationale_is_valid(arbitrary));
+        assert!(!execution_route_rationale_is_valid(""));
+        assert!(!execution_route_rationale_is_valid(" leading whitespace"));
+        assert!(!execution_route_rationale_is_valid("two\nlines"));
+        assert!(!execution_route_rationale_is_valid(&"x".repeat(241)));
+
+        let inline = ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Inline,
+            rationale: arbitrary.to_string(),
+        };
+        let durable = ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Durable,
+            rationale: arbitrary.to_string(),
+        };
+        assert_eq!(inline.strategy(), Some(ExecutionStrategy::Inline));
+        assert_eq!(durable.strategy(), Some(ExecutionStrategy::Durable));
+        assert_eq!(inline.rationale(), durable.rationale());
+    }
+
+    #[test]
+    fn durable_upgrade_transition_carries_validated_signal_to_planning() {
+        // Pins: the production transition owns validation and hands the exact admitted evidence
+        // to Durable planning instead of returning route metadata alone.
+        let objective = "Inspect every affected tenant account";
+        let signal = DurableUpgradeSignal {
+            objective: objective.to_string(),
+            rationale: "The discovered work must resume across many tenant accounts.".to_string(),
+            evidence: vec![ExecutionPlanningEvidence {
+                source: "tool:tenant_inventory".to_string(),
+                summary: "inventory contains 420 independently processable accounts".to_string(),
+                value: serde_json::json!({"account_count": 420}),
+            }],
+        };
+        let initial_route = ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Inline,
+            rationale: "The investigation can begin with one bounded probe.".to_string(),
+        };
+
+        let admitted =
+            durable_upgrade_transition(objective, &initial_route, true, false, signal.clone())
+                .expect("valid root Inline upgrade should be admitted");
+        assert_eq!(admitted.signal, signal);
+        assert_eq!(
+            admitted.routing.decision.strategy(),
+            Some(ExecutionStrategy::Durable)
+        );
+        assert_eq!(
+            admitted.routing.provenance.source,
+            ExecutionRouteSource::DurableUpgrade
+        );
+    }
+
+    #[test]
+    fn durable_upgrade_signal_requires_meaningful_evidence() {
+        // Pins: the workflow control cannot upgrade a turn without at least one concrete,
+        // attributable observation for Durable planning to preserve.
+        let signal = DurableUpgradeSignal {
+            objective: "Inspect every affected tenant account".to_string(),
+            rationale: "The discovered work must resume across many tenant accounts.".to_string(),
+            evidence: Vec::new(),
+        };
+        assert!(matches!(
+            signal.validate(),
+            Err(ExecutionPlanningContractError::InvalidField { ref field, .. })
+                if field == "evidence"
+        ));
+
+        for (source, summary, field) in [
+            ("", "420 accounts were found", "evidence[0].source"),
+            ("tool:tenant_inventory", "", "evidence[0].summary"),
+        ] {
+            let signal = DurableUpgradeSignal {
+                objective: "Inspect every affected tenant account".to_string(),
+                rationale: "The discovered work must resume across many tenant accounts."
+                    .to_string(),
+                evidence: vec![ExecutionPlanningEvidence {
+                    source: source.to_string(),
+                    summary: summary.to_string(),
+                    value: serde_json::json!({"account_count": 420}),
+                }],
+            };
+            assert!(matches!(
+                signal.validate(),
+                Err(ExecutionPlanningContractError::InvalidField { field: ref actual, .. })
+                    if actual == field
+            ));
+        }
+    }
+
+    #[test]
+    fn execution_route_audit_matrix_uses_only_typed_fields() {
+        // Pins: persisted route validation has one closed decision/strategy/source/stage matrix
+        // and never relies on or retains classifier rationale text.
+        let legal = [
+            (
+                ExecutionRouteStage::Initial,
+                ExecutionRouteKind::Respond,
+                None,
+                ExecutionRouteSource::Classifier,
+            ),
+            (
+                ExecutionRouteStage::Initial,
+                ExecutionRouteKind::Execute,
+                Some(ExecutionStrategy::Inline),
+                ExecutionRouteSource::Classifier,
+            ),
+            (
+                ExecutionRouteStage::Initial,
+                ExecutionRouteKind::Execute,
+                Some(ExecutionStrategy::Durable),
+                ExecutionRouteSource::Classifier,
+            ),
+            (
+                ExecutionRouteStage::Initial,
+                ExecutionRouteKind::NeedsInput,
+                None,
+                ExecutionRouteSource::Classifier,
+            ),
+            (
+                ExecutionRouteStage::Initial,
+                ExecutionRouteKind::NeedsInput,
+                None,
+                ExecutionRouteSource::BlankObjective,
+            ),
+            (
+                ExecutionRouteStage::Initial,
+                ExecutionRouteKind::Execute,
+                Some(ExecutionStrategy::Durable),
+                ExecutionRouteSource::SelectedExecutionTemplate,
+            ),
+            (
+                ExecutionRouteStage::DurableUpgrade,
+                ExecutionRouteKind::Execute,
+                Some(ExecutionStrategy::Durable),
+                ExecutionRouteSource::DurableUpgrade,
+            ),
+        ];
+        let stages = [
+            ExecutionRouteStage::Initial,
+            ExecutionRouteStage::DurableUpgrade,
+        ];
+        let decisions = [
+            ExecutionRouteKind::Respond,
+            ExecutionRouteKind::Execute,
+            ExecutionRouteKind::NeedsInput,
+        ];
+        let strategies = [
+            None,
+            Some(ExecutionStrategy::Inline),
+            Some(ExecutionStrategy::Durable),
+        ];
+        let sources = [
+            ExecutionRouteSource::Classifier,
+            ExecutionRouteSource::BlankObjective,
+            ExecutionRouteSource::SelectedExecutionTemplate,
+            ExecutionRouteSource::DurableUpgrade,
+        ];
+        for stage in stages {
+            for decision in decisions {
+                for strategy in strategies {
+                    for source in sources {
+                        let expected = legal.contains(&(stage, decision, strategy, source));
+                        assert_eq!(
+                            validate_route_audit(
+                                stage,
+                                decision,
+                                strategy,
+                                &route_provenance(
+                                    source,
+                                    decision == ExecutionRouteKind::NeedsInput,
+                                ),
+                            )
+                            .is_ok(),
+                            expected,
+                            "unexpected matrix result for {stage:?}/{decision:?}/{strategy:?}/{source:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn execution_route_audit_constructor_derives_decision_and_strategy() {
+        // Pins: all route producers share one typed derivation of persisted decision and strategy.
+        let decision = ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Durable,
+            rationale: "The work must survive an approval handoff.".to_string(),
+        };
+        let envelope = ExecutionPlanningAuditEnvelope::route(
+            TenantId::from(Uuid::from_u128(1)),
+            None,
+            SessionId(Uuid::from_u128(2)),
+            3,
+            ExecutionRouteStage::Initial,
+            &decision,
+            accepted_classifier_provenance(),
+            Utc::now(),
+        );
+        assert!(matches!(
+            envelope.payload,
+            ExecutionPlanningAuditPayload::Route {
+                decision: ExecutionRouteKind::Execute,
+                strategy: Some(ExecutionStrategy::Durable),
+                ..
+            }
+        ));
+        assert!(
+            serde_json::to_value(envelope)
+                .expect("route audit should serialize")
+                .pointer("/payload/rationale")
+                .is_none(),
+            "persisted route-audit payload must omit classifier rationale"
+        );
     }
 
     fn planner_call_envelope(
@@ -1633,21 +2049,21 @@ mod tests {
         candidate_hash: Option<String>,
         candidate_json: Option<String>,
         compiler_report: Option<String>,
-    ) -> ExecutionPlanningAuditEnvelopeV1 {
-        ExecutionPlanningAuditEnvelopeV1 {
+    ) -> ExecutionPlanningAuditEnvelope {
+        ExecutionPlanningAuditEnvelope {
             schema_version: 1,
             tenant_id: TenantId::from(Uuid::nil()),
             contact_id: None,
             session_id: Some(SessionId(Uuid::nil())),
             originating_sequence: Some(1),
-            payload: ExecutionPlanningAuditPayloadV1::PlannerCall {
+            payload: ExecutionPlanningAuditPayload::PlannerCall {
                 call_kind: ExecutionPlannerCallKind::InitialPlan,
                 call_ordinal: 0,
                 run_uid: None,
                 plan_revision: None,
                 outcome,
                 provider_model: "planner-model".to_string(),
-                prompt_version: "execution-planner-v1".to_string(),
+                prompt_version: "execution-planner".to_string(),
                 candidate_hash,
                 candidate_json,
                 compiler_report,
@@ -1657,7 +2073,7 @@ mod tests {
         }
     }
 
-    fn canonical_report(report: &ExecutionAuditReportV1) -> String {
+    fn canonical_report(report: &ExecutionAuditReport) -> String {
         String::from_utf8(canonical_json_bytes(report).expect("canonicalize audit report"))
             .expect("canonical audit report should be UTF-8")
     }
@@ -1665,17 +2081,17 @@ mod tests {
     fn compile_envelope(
         source: ExecutionCompileSource,
         session_bound: bool,
-    ) -> ExecutionPlanningAuditEnvelopeV1 {
+    ) -> ExecutionPlanningAuditEnvelope {
         let report = canonical_report(
             &bounded_audit_report(true, Vec::new()).expect("empty compiler report"),
         );
-        ExecutionPlanningAuditEnvelopeV1 {
+        ExecutionPlanningAuditEnvelope {
             schema_version: 1,
             tenant_id: TenantId::from(Uuid::from_u128(1)),
             contact_id: None,
             session_id: session_bound.then(|| SessionId(Uuid::from_u128(2))),
             originating_sequence: session_bound.then_some(3),
-            payload: ExecutionPlanningAuditPayloadV1::Compile {
+            payload: ExecutionPlanningAuditPayload::Compile {
                 source,
                 operation_key: match source {
                     ExecutionCompileSource::ExperimentTemplate => format!(
@@ -1724,11 +2140,10 @@ mod tests {
     fn execution_source_provenance_rejects_cross_cohort_fields_and_hash_drift() {
         // Pins: generated and skill-template source cohorts stay closed and plan-hash bound.
         let hash = "a".repeat(64);
-        let provenance = ExecutionSourceProvenanceV1::GeneratedPlan {
-            route_reason: ExecutionRouteReason::ExplicitRun,
-            planner: GeneratedPlanPlannerProvenanceV1 {
+        let provenance = ExecutionSourceProvenance::GeneratedPlan {
+            planner: GeneratedPlanPlannerProvenance {
                 model: "planner-model".to_string(),
-                prompt_version: "execution-planner-v1".to_string(),
+                prompt_version: "execution-planner".to_string(),
                 candidate_hash: "b".repeat(64),
                 compiler_report_hash: "c".repeat(64),
                 final_plan_hash: hash.clone(),
@@ -1738,30 +2153,24 @@ mod tests {
         assert_eq!(provenance.validate(&hash), Ok(()));
         assert!(provenance.validate(&"d".repeat(64)).is_err());
 
-        let skill = ExecutionSourceProvenanceV1::SkillTemplate {
-            route_reason: ExecutionRouteReason::SelectedExecutionTemplate,
+        let skill = ExecutionSourceProvenance::SkillTemplate {
             skill_template_ref: "skill://durable-report".to_string(),
             skill_template_revision_uid: Uuid::from_u128(1),
         };
         assert_eq!(skill.validate(&hash), Ok(()));
-        let wrong_skill_route = ExecutionSourceProvenanceV1::SkillTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
-            skill_template_ref: "skill://durable-report".to_string(),
-            skill_template_revision_uid: Uuid::from_u128(1),
-        };
-        assert!(matches!(
-            wrong_skill_route.validate(&hash),
-            Err(ExecutionPlanningContractError::InvalidField { field, .. })
-                if field == "route_reason"
-        ));
+        let mut stale = serde_json::to_value(skill).expect("skill provenance should serialize");
+        stale["route_rationale"] = serde_json::json!("Sensitive classifier output");
+        assert!(
+            serde_json::from_value::<ExecutionSourceProvenance>(stale).is_err(),
+            "persisted source provenance must reject the removed rationale field"
+        );
     }
 
     #[test]
     fn experiment_template_source_provenance_has_exact_uuid_and_null_serde_shape() {
         // Pins: run provenance carries every experiment identity and writes an explicit null
         // trial field, while trial provenance writes its exact UUID and no extra keys.
-        let run = ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+        let run = ExecutionSourceProvenance::ExperimentTemplate {
             skill_template_ref: "skill://durable-report".to_string(),
             skill_template_revision_uid: Uuid::from_u128(1),
             experiment_run_uid: Uuid::from_u128(2),
@@ -1770,7 +2179,6 @@ mod tests {
         };
         let run_json = serde_json::json!({
             "kind": "experiment_template",
-            "route_reason": "explicit_run",
             "skill_template_ref": "skill://durable-report",
             "skill_template_revision_uid": "00000000-0000-0000-0000-000000000001",
             "experiment_run_uid": "00000000-0000-0000-0000-000000000002",
@@ -1782,14 +2190,13 @@ mod tests {
             run_json
         );
         assert_eq!(
-            serde_json::from_value::<ExecutionSourceProvenanceV1>(run_json.clone())
+            serde_json::from_value::<ExecutionSourceProvenance>(run_json.clone())
                 .expect("explicit-null run provenance should deserialize"),
             run
         );
 
         let trial_uid = Uuid::from_u128(4);
-        let trial = ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+        let trial = ExecutionSourceProvenance::ExperimentTemplate {
             skill_template_ref: "skill://durable-report".to_string(),
             skill_template_revision_uid: Uuid::from_u128(1),
             experiment_run_uid: Uuid::from_u128(2),
@@ -1803,19 +2210,18 @@ mod tests {
             trial_json
         );
         assert_eq!(
-            serde_json::from_value::<ExecutionSourceProvenanceV1>(trial_json)
+            serde_json::from_value::<ExecutionSourceProvenance>(trial_json)
                 .expect("UUID-valued trial provenance should deserialize"),
             trial
         );
     }
 
     #[test]
-    fn experiment_template_source_provenance_rejects_shape_and_route_drift() {
+    fn experiment_template_source_provenance_rejects_shape_and_empty_reference() {
         // Pins: the experiment cohort cannot omit explicit trial nullability, add a reserved
         // cross-cohort field, use the skill route, or carry an empty template reference.
         let hash = "a".repeat(64);
-        let valid = ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+        let valid = ExecutionSourceProvenance::ExperimentTemplate {
             skill_template_ref: "skill://durable-report".to_string(),
             skill_template_revision_uid: Uuid::from_u128(1),
             experiment_run_uid: Uuid::from_u128(2),
@@ -1831,7 +2237,7 @@ mod tests {
             .expect("provenance should be an object")
             .remove("trial_uid");
         assert!(
-            serde_json::from_value::<ExecutionSourceProvenanceV1>(missing_trial).is_err(),
+            serde_json::from_value::<ExecutionSourceProvenance>(missing_trial).is_err(),
             "trial_uid must be explicitly present as a UUID or null"
         );
 
@@ -1839,26 +2245,11 @@ mod tests {
             serde_json::to_value(&valid).expect("valid provenance should serialize");
         cross_cohort["planner"] = serde_json::json!({});
         assert!(
-            serde_json::from_value::<ExecutionSourceProvenanceV1>(cross_cohort).is_err(),
+            serde_json::from_value::<ExecutionSourceProvenance>(cross_cohort).is_err(),
             "experiment provenance must reject reserved cross-cohort fields"
         );
 
-        let wrong_route = ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason: ExecutionRouteReason::SelectedExecutionTemplate,
-            skill_template_ref: "skill://durable-report".to_string(),
-            skill_template_revision_uid: Uuid::from_u128(1),
-            experiment_run_uid: Uuid::from_u128(2),
-            score_run_id: Uuid::from_u128(3),
-            trial_uid: None,
-        };
-        assert!(matches!(
-            wrong_route.validate(&hash),
-            Err(ExecutionPlanningContractError::InvalidField { field, .. })
-                if field == "route_reason"
-        ));
-
-        let empty_ref = ExecutionSourceProvenanceV1::ExperimentTemplate {
-            route_reason: ExecutionRouteReason::ExplicitRun,
+        let empty_ref = ExecutionSourceProvenance::ExperimentTemplate {
             skill_template_ref: String::new(),
             skill_template_revision_uid: Uuid::from_u128(1),
             experiment_run_uid: Uuid::from_u128(2),
@@ -1876,17 +2267,15 @@ mod tests {
     fn execution_planning_planner_call_nullability_matrix_is_strict() {
         // Pins: every planner outcome retains exactly the candidate/report cohort allowed by Task 7.
         let candidate_json = "{}".to_string();
-        let candidate_hash = execution_planning_hash(
-            "moa.execution.planner-candidate.v1",
-            candidate_json.as_bytes(),
-        );
+        let candidate_hash =
+            execution_planning_hash("moa.execution.planner-candidate", candidate_json.as_bytes());
         let compiler_report = canonical_report(
             &bounded_audit_report(true, Vec::new()).expect("empty compiler report"),
         );
         let schema_report = canonical_report(
             &bounded_audit_report(
                 false,
-                vec![ExecutionAuditViolationV1 {
+                vec![ExecutionAuditViolation {
                     code: "schema".to_string(),
                     path: "/".to_string(),
                     message: "invalid".to_string(),
@@ -1895,15 +2284,15 @@ mod tests {
             .expect("schema report"),
         );
         let raw_hash = execution_planning_hash(
-            "moa.execution.planner-response.v1",
+            "moa.execution.planner-response",
             b"invalid provider response",
         );
-        let oversized_report = canonical_report(&ExecutionAuditReportV1::Oversized {
+        let oversized_report = canonical_report(&ExecutionAuditReport::Oversized {
             field: ExecutionOversizedAuditField::Candidate,
             limit_bytes: EXECUTION_CANDIDATE_MAX_BYTES as u64,
             observed_bytes: EXECUTION_CANDIDATE_MAX_BYTES as u64 + 1,
             content_hash: execution_planning_hash(
-                "moa.execution.oversized-content.v1",
+                "moa.execution.oversized-content",
                 b"oversized provider response",
             ),
         });
@@ -1933,7 +2322,7 @@ mod tests {
             Some(candidate_json.clone()),
             Some(schema_report.clone()),
         );
-        if let ExecutionPlanningAuditPayloadV1::PlannerCall {
+        if let ExecutionPlanningAuditPayload::PlannerCall {
             call_kind,
             call_ordinal,
             ..
@@ -2012,7 +2401,7 @@ mod tests {
         ));
 
         let mut amendment = compile_envelope(ExecutionCompileSource::Amendment, true);
-        if let ExecutionPlanningAuditPayloadV1::Compile {
+        if let ExecutionPlanningAuditPayload::Compile {
             operation_key,
             run_uid,
             plan_revision,
@@ -2027,8 +2416,7 @@ mod tests {
         }
         assert_eq!(validate_planning_audit_envelope(&amendment), Ok(()));
 
-        if let ExecutionPlanningAuditPayloadV1::Compile { operation_key, .. } =
-            &mut amendment.payload
+        if let ExecutionPlanningAuditPayload::Compile { operation_key, .. } = &mut amendment.payload
         {
             *operation_key = "run:wrong:8:amendment:hash".to_string();
         }
@@ -2043,39 +2431,36 @@ mod tests {
     fn execution_route_and_planning_audit_semantic_replay_ignores_only_measurements() {
         // Pins: commit-before-result replay preserves the first timestamp and duration only.
         let tenant_id = TenantId::from(Uuid::nil());
-        let mut first = ExecutionPlanningAuditEnvelopeV1 {
+        let mut first = ExecutionPlanningAuditEnvelope {
             schema_version: 1,
             tenant_id,
             contact_id: None,
             session_id: None,
             originating_sequence: None,
-            payload: ExecutionPlanningAuditPayloadV1::Route {
+            payload: ExecutionPlanningAuditPayload::Route {
                 stage: ExecutionRouteStage::Initial,
-                decision: ExecutionRouteDecisionKind::Routed,
-                mode: Some(ExecutionMode::Respond),
-                reason: ExecutionRouteReason::SimpleResponse,
+                decision: ExecutionRouteKind::Respond,
+                strategy: None,
                 provenance: accepted_classifier_provenance(),
                 accepted_at: Utc::now(),
             },
         };
         let mut replay = first.clone();
-        if let ExecutionPlanningAuditPayloadV1::Route { accepted_at, .. } = &mut replay.payload {
+        if let ExecutionPlanningAuditPayload::Route { accepted_at, .. } = &mut replay.payload {
             *accepted_at += chrono::Duration::seconds(1);
         }
-        if let ExecutionPlanningAuditPayloadV1::Route { provenance, .. } = &mut replay.payload {
+        if let ExecutionPlanningAuditPayload::Route { provenance, .. } = &mut replay.payload {
             provenance.duration_micros += 1;
         }
         assert!(planning_audit_semantically_equal(&first, &replay));
-        if let ExecutionPlanningAuditPayloadV1::Route { reason, .. } = &mut first.payload {
-            *reason = ExecutionRouteReason::BoundedInteractiveWork;
+        if let ExecutionPlanningAuditPayload::Route { provenance, .. } = &mut first.payload {
+            provenance.cost_microusd += 1;
         }
         assert!(!planning_audit_semantically_equal(&first, &replay));
 
         let candidate_json = "{}".to_string();
-        let candidate_hash = execution_planning_hash(
-            "moa.execution.planner-candidate.v1",
-            candidate_json.as_bytes(),
-        );
+        let candidate_hash =
+            execution_planning_hash("moa.execution.planner-candidate", candidate_json.as_bytes());
         let compiler_report = canonical_report(
             &bounded_audit_report(true, Vec::new()).expect("empty compiler report"),
         );
@@ -2086,7 +2471,7 @@ mod tests {
             Some(compiler_report),
         );
         let mut accepted_replay = accepted.clone();
-        if let ExecutionPlanningAuditPayloadV1::PlannerCall {
+        if let ExecutionPlanningAuditPayload::PlannerCall {
             duration_micros,
             created_at,
             ..
@@ -2099,14 +2484,14 @@ mod tests {
             &accepted,
             &accepted_replay
         ));
-        if let ExecutionPlanningAuditPayloadV1::PlannerCall {
+        if let ExecutionPlanningAuditPayload::PlannerCall {
             compiler_report, ..
         } = &mut accepted_replay.payload
         {
             *compiler_report = Some(canonical_report(
                 &bounded_audit_report(
                     true,
-                    vec![ExecutionAuditViolationV1 {
+                    vec![ExecutionAuditViolation {
                         code: "changed".to_string(),
                         path: "/plan".to_string(),
                         message: "different report".to_string(),
@@ -2126,14 +2511,14 @@ mod tests {
         // Pins: bounded audit evidence remains deterministic without dropping full-report identity.
         let violations = (0..300)
             .rev()
-            .map(|index| ExecutionAuditViolationV1 {
+            .map(|index| ExecutionAuditViolation {
                 code: format!("code-{index:03}"),
                 path: format!("/nodes/{index}"),
                 message: "invalid".to_string(),
             })
             .collect();
         let report = bounded_audit_report(true, violations).expect("bound compiler report");
-        let ExecutionAuditReportV1::Compiler {
+        let ExecutionAuditReport::Compiler {
             violations,
             omitted_violations,
             full_report_hash,
@@ -2150,17 +2535,16 @@ mod tests {
     #[test]
     fn execution_planning_audit_dedupe_key_pins_nullable_framing() {
         // Pins: null and empty tuple fields cannot collide in durable planning-audit dedupe keys.
-        let mut envelope = ExecutionPlanningAuditEnvelopeV1 {
+        let mut envelope = ExecutionPlanningAuditEnvelope {
             schema_version: 1,
             tenant_id: TenantId::from(Uuid::nil()),
             contact_id: None,
             session_id: Some(SessionId(Uuid::nil())),
             originating_sequence: Some(1),
-            payload: ExecutionPlanningAuditPayloadV1::Route {
+            payload: ExecutionPlanningAuditPayload::Route {
                 stage: ExecutionRouteStage::Initial,
-                decision: ExecutionRouteDecisionKind::Routed,
-                mode: Some(ExecutionMode::Respond),
-                reason: ExecutionRouteReason::SimpleResponse,
+                decision: ExecutionRouteKind::Respond,
+                strategy: None,
                 provenance: accepted_classifier_provenance(),
                 accepted_at: Utc::now(),
             },
@@ -2169,7 +2553,7 @@ mod tests {
         envelope.contact_id = Some(ContactId(Uuid::nil()));
         let empty_key = execution_planning_dedupe_key(&envelope).expect("contact route key");
         assert_ne!(null_key, empty_key);
-        assert!(null_key.starts_with("execution-planning-v1:"));
-        assert_eq!(null_key.len(), "execution-planning-v1:".len() + 64);
+        assert!(null_key.starts_with("execution-planning:"));
+        assert_eq!(null_key.len(), "execution-planning:".len() + 64);
     }
 }

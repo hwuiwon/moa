@@ -9,7 +9,7 @@ use moa_core::{
     types::{
         completion::{CompletionRequest, JsonResponseFormat, NativeWebSearchPolicy},
         context::ContextMessage,
-        execution_planning::{ActEscalationSignal, ExecutionTemplateInvocation},
+        execution_planning::{DurableUpgradeSignal, ExecutionTemplateInvocation},
         identifiers::ModelId,
     },
 };
@@ -17,15 +17,15 @@ use moa_execution::{
     compiler::CanonicalExecutionPlan,
     repository::{CompileAuditWriteOutcome, PlannerCallAuditWriteOutcome},
     state::{ExecutionProjection, ExecutionTaskId},
-    wire::ExecutionPlanningContextSnapshotV1,
+    wire::ExecutionPlanningContextSnapshot,
 };
 use moa_observability::{record_execution_compile_duration, record_execution_planner_call};
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Stable v1 execution-planner prompt identifier.
-pub const EXECUTION_PLANNER_PROMPT_VERSION: &str = "execution-planner-v1";
+/// Stable execution-planner prompt identifier.
+pub const EXECUTION_PLANNER_PROMPT_VERSION: &str = "execution-planner";
 /// Fixed maximum collected planner output tokens.
 pub const EXECUTION_PLANNER_MAX_OUTPUT_TOKENS: usize = 32_768;
 const EXECUTION_PLANNER_PROMPT: &str = include_str!("../prompts/execution_planner.txt");
@@ -36,11 +36,11 @@ pub struct ExecutionPlanningRequest {
     /// Byte-identical persisted user-message text.
     pub objective: String,
     /// Immutable session-derived planning authority and capability snapshot.
-    pub context: ExecutionPlanningContextSnapshotV1,
+    pub context: ExecutionPlanningContextSnapshot,
     /// Explicit exact template invocation, when present.
     pub execution_template: Option<ExecutionTemplateInvocation>,
-    /// Bounded evidence from an Act-to-Run escalation.
-    pub escalation: Option<ActEscalationSignal>,
+    /// Bounded evidence from one Inline-to-Durable upgrade.
+    pub durable_upgrade: Option<DurableUpgradeSignal>,
     /// Auxiliary provider model selected by server configuration.
     pub planner_model: ModelId,
     /// Tenant-independent compiler and estimate settings.
@@ -73,7 +73,7 @@ pub struct ExecutionAmendmentPlanningRequest {
     /// Active base plan revision.
     pub base_plan_revision: u64,
     /// Persisted original planning context, optionally narrowed for live revocation.
-    pub context: ExecutionPlanningContextSnapshotV1,
+    pub context: ExecutionPlanningContextSnapshot,
     /// Immutable goal and run evidence.
     pub evidence: AmendmentPlanningEvidence,
     /// Resource envelope remaining before amendment acceptance.
@@ -96,7 +96,7 @@ struct FrozenInitialPrompt<'a> {
     pinned_instruction_skills: &'a [moa_execution::wire::PinnedInstructionSkill],
     execution_templates: &'a [moa_execution::wire::PinnedExecutionTemplate],
     budget: &'a moa_artifacts::execution_plan::ExecutionBudgetLimit,
-    escalation: Option<&'a ActEscalationSignal>,
+    durable_upgrade: Option<&'a DurableUpgradeSignal>,
 }
 
 /// Constructs the exact no-tools, no-native-search strict initial planner request.
@@ -111,11 +111,11 @@ pub fn initial_completion_request(
         pinned_instruction_skills: &request.context.pinned_instruction_skills,
         execution_templates: &request.context.execution_templates,
         budget: &request.context.budget,
-        escalation: request.escalation.as_ref(),
+        durable_upgrade: request.durable_upgrade.as_ref(),
     };
     strict_request::<GeneratedExecutionCandidate>(
         request.planner_model.clone(),
-        "generated_execution_candidate_v1",
+        "generated_execution_candidate",
         "Generate one strict immutable execution goal and supported execution plan.",
         format!(
             "{EXECUTION_PLANNER_PROMPT}\n\n<frozen_planning_context>{}</frozen_planning_context>",
@@ -175,7 +175,7 @@ pub fn amendment_completion_request(
     }
     strict_request::<GeneratedAmendmentCandidate>(
         request.planner_model.clone(),
-        "generated_amendment_candidate_v1",
+        "generated_amendment_candidate",
         "Generate one strict restricted execution-plan amendment.",
         prompt,
     )

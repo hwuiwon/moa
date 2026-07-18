@@ -10,7 +10,7 @@ use serde_json::Value;
 /// Expected normalized text for one requirement or constraint.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct TextExpectationV1 {
+pub struct TextExpectation {
     /// Stable expectation identifier.
     pub expectation_id: String,
     /// Normalized terms that must all be present.
@@ -24,7 +24,7 @@ pub struct TextExpectationV1 {
 /// Expected structured deliverable semantics.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeliverableExpectationV1 {
+pub struct DeliverableExpectation {
     /// Stable expectation identifier.
     pub expectation_id: String,
     /// Exact terminal-output JSON pointer.
@@ -36,7 +36,7 @@ pub struct DeliverableExpectationV1 {
 /// Expected independent map-coverage semantics.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct CoverageExpectationV1 {
+pub struct CoverageExpectation {
     /// Stable expectation identifier.
     pub expectation_id: String,
     /// Stable map node identifier.
@@ -50,7 +50,7 @@ pub struct CoverageExpectationV1 {
 /// Closed completion-check category used for structural matching.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CompletionCheckKindExpectationV1 {
+pub enum CompletionCheckKindExpectation {
     /// Validate terminal deliverable schemas.
     OutputSchema,
     /// Require declared nodes to complete.
@@ -66,11 +66,11 @@ pub enum CompletionCheckKindExpectationV1 {
 /// Expected completion-check kind and linked gold semantics.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct CompletionCheckExpectationV1 {
+pub struct CompletionCheckExpectation {
     /// Stable expectation identifier.
     pub expectation_id: String,
     /// Expected closed completion-check category.
-    pub kind: CompletionCheckKindExpectationV1,
+    pub kind: CompletionCheckKindExpectation,
     /// Gold requirement expectation IDs linked by the check.
     pub requirement_expectation_ids: Vec<String>,
     /// Gold constraint expectation IDs linked by the check.
@@ -80,7 +80,7 @@ pub struct CompletionCheckExpectationV1 {
 /// Exact expected value at one run-input JSON pointer.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct RunInputExpectationV1 {
+pub struct RunInputExpectation {
     /// Stable expectation identifier.
     pub expectation_id: String,
     /// RFC 6901 pointer into `GeneratedExecutionCandidate.run_input`.
@@ -92,25 +92,25 @@ pub struct RunInputExpectationV1 {
 /// Human-authored expected contract entries grouped by production goal category.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionContractExpectationsV1 {
+pub struct ExecutionContractExpectations {
     /// Expected user requirements.
-    pub requirements: Vec<TextExpectationV1>,
+    pub requirements: Vec<TextExpectation>,
     /// Expected immutable constraints.
-    pub constraints: Vec<TextExpectationV1>,
+    pub constraints: Vec<TextExpectation>,
     /// Expected structured deliverables.
-    pub deliverables: Vec<DeliverableExpectationV1>,
+    pub deliverables: Vec<DeliverableExpectation>,
     /// Expected independent universes.
-    pub coverage: Vec<CoverageExpectationV1>,
+    pub coverage: Vec<CoverageExpectation>,
     /// Expected completion gates.
-    pub completion_checks: Vec<CompletionCheckExpectationV1>,
+    pub completion_checks: Vec<CompletionCheckExpectation>,
     /// Expected structured run inputs.
-    pub run_input: Vec<RunInputExpectationV1>,
+    pub run_input: Vec<RunInputExpectation>,
 }
 
 /// One strict recorded planner candidate and its gold contract.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionContractCaseV1 {
+pub struct ExecutionContractCase {
     /// Case schema version, fixed at `1`.
     pub schema_version: u8,
     /// Stable unique case identifier.
@@ -118,7 +118,7 @@ pub struct ExecutionContractCaseV1 {
     /// Strict production planner response envelope.
     pub candidate: GeneratedExecutionCandidate,
     /// Human-authored deterministic expectations.
-    pub expected: ExecutionContractExpectationsV1,
+    pub expected: ExecutionContractExpectations,
     /// Stable corpus grouping labels.
     pub tags: Vec<String>,
 }
@@ -126,7 +126,7 @@ pub struct ExecutionContractCaseV1 {
 /// Precision, recall, and F1 with exact category counts.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ContractCategoryMetricsV1 {
+pub struct ContractCategoryMetrics {
     /// Number of gold entries.
     pub expected_count: u64,
     /// Number of generated entries.
@@ -144,9 +144,9 @@ pub struct ContractCategoryMetricsV1 {
 /// One category's metrics and stable matching diagnostics.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionContractCategoryScoreV1 {
+pub struct ExecutionContractCategoryScore {
     /// Exact category metrics.
-    pub metrics: ContractCategoryMetricsV1,
+    pub metrics: ContractCategoryMetrics,
     /// Gold expectation ID to generated entry ID.
     pub matches: BTreeMap<String, String>,
     /// Gold expectation IDs that were not matched.
@@ -158,21 +158,21 @@ pub struct ExecutionContractCategoryScoreV1 {
 /// Complete deterministic contract-fidelity score for one case.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionContractScoreV1 {
+pub struct ExecutionContractScore {
     /// Stable corpus case identifier.
     pub case_id: String,
     /// Requirement matching score.
-    pub requirements: ExecutionContractCategoryScoreV1,
+    pub requirements: ExecutionContractCategoryScore,
     /// Constraint matching score.
-    pub constraints: ExecutionContractCategoryScoreV1,
+    pub constraints: ExecutionContractCategoryScore,
     /// Deliverable matching score.
-    pub deliverables: ExecutionContractCategoryScoreV1,
+    pub deliverables: ExecutionContractCategoryScore,
     /// Coverage matching score.
-    pub coverage: ExecutionContractCategoryScoreV1,
+    pub coverage: ExecutionContractCategoryScore,
     /// Completion-check matching score.
-    pub completion_checks: ExecutionContractCategoryScoreV1,
+    pub completion_checks: ExecutionContractCategoryScore,
     /// Run-input predicate score.
-    pub run_input: ExecutionContractCategoryScoreV1,
+    pub run_input: ExecutionContractCategoryScore,
     /// Mean F1 across categories carrying gold or generated entries.
     pub macro_f1: f64,
     /// Whether at least one required gold entry was omitted.
@@ -180,7 +180,7 @@ pub struct ExecutionContractScoreV1 {
 }
 
 /// Scores one recorded candidate with maximum one-to-one matching per category.
-pub fn score_contract_case(case: &ExecutionContractCaseV1) -> Result<ExecutionContractScoreV1> {
+pub fn score_contract_case(case: &ExecutionContractCase) -> Result<ExecutionContractScore> {
     validate_contract_case(case)?;
     let goal = &case.candidate.goal;
     let requirements = score_text(
@@ -224,7 +224,7 @@ pub fn score_contract_case(case: &ExecutionContractCaseV1) -> Result<ExecutionCo
     let contract_omission = categories
         .iter()
         .any(|score| score.metrics.matched_count < score.metrics.expected_count);
-    Ok(ExecutionContractScoreV1 {
+    Ok(ExecutionContractScore {
         case_id: case.case_id.clone(),
         requirements,
         constraints,
@@ -238,7 +238,7 @@ pub fn score_contract_case(case: &ExecutionContractCaseV1) -> Result<ExecutionCo
 }
 
 /// Validates one contract case independently of corpus-level counts.
-pub(crate) fn validate_contract_case(case: &ExecutionContractCaseV1) -> Result<()> {
+pub(crate) fn validate_contract_case(case: &ExecutionContractCase) -> Result<()> {
     if case.schema_version != 1 || case.case_id.trim().is_empty() {
         return Err(invalid_config(format!(
             "execution contract case `{}` has an invalid version or ID",
@@ -333,9 +333,9 @@ pub(crate) fn validate_contract_case(case: &ExecutionContractCaseV1) -> Result<(
 }
 
 fn score_text(
-    expected: &[TextExpectationV1],
+    expected: &[TextExpectation],
     actual: &[(&str, &str)],
-) -> Result<ExecutionContractCategoryScoreV1> {
+) -> Result<ExecutionContractCategoryScore> {
     let edges = expected
         .iter()
         .map(|gold| {
@@ -358,7 +358,7 @@ fn score_text(
     )
 }
 
-fn score_deliverables(case: &ExecutionContractCaseV1) -> Result<ExecutionContractCategoryScoreV1> {
+fn score_deliverables(case: &ExecutionContractCase) -> Result<ExecutionContractCategoryScore> {
     let expected = &case.expected.deliverables;
     let actual = &case.candidate.goal.deliverables;
     let edges = expected
@@ -384,7 +384,7 @@ fn score_deliverables(case: &ExecutionContractCaseV1) -> Result<ExecutionContrac
     )
 }
 
-fn score_coverage(case: &ExecutionContractCaseV1) -> Result<ExecutionContractCategoryScoreV1> {
+fn score_coverage(case: &ExecutionContractCase) -> Result<ExecutionContractCategoryScore> {
     let expected = &case.expected.coverage;
     let actual = &case.candidate.goal.coverage;
     let edges = expected
@@ -414,10 +414,10 @@ fn score_coverage(case: &ExecutionContractCaseV1) -> Result<ExecutionContractCat
 }
 
 fn score_completion_checks(
-    case: &ExecutionContractCaseV1,
+    case: &ExecutionContractCase,
     requirement_matches: &BTreeMap<String, String>,
     constraint_matches: &BTreeMap<String, String>,
-) -> Result<ExecutionContractCategoryScoreV1> {
+) -> Result<ExecutionContractCategoryScore> {
     let expected = &case.expected.completion_checks;
     let actual = &case.candidate.goal.completion_checks;
     let edges =
@@ -452,7 +452,7 @@ fn score_completion_checks(
     )
 }
 
-fn score_run_input(case: &ExecutionContractCaseV1) -> Result<ExecutionContractCategoryScoreV1> {
+fn score_run_input(case: &ExecutionContractCase) -> Result<ExecutionContractCategoryScore> {
     let expected = &case.expected.run_input;
     let matches = expected
         .iter()
@@ -471,7 +471,7 @@ fn score_run_input(case: &ExecutionContractCaseV1) -> Result<ExecutionContractCa
         .collect::<Vec<_>>();
     let count = usize_to_u64(expected.len(), "run-input expectation count")?;
     let matched = usize_to_u64(matches.len(), "matched run-input expectation count")?;
-    Ok(ExecutionContractCategoryScoreV1 {
+    Ok(ExecutionContractCategoryScore {
         metrics: metrics(count, count, matched),
         matches,
         missing_expectation_ids,
@@ -483,7 +483,7 @@ fn category_score(
     expected_ids: Vec<&str>,
     actual_ids: Vec<&str>,
     edges: Vec<Vec<usize>>,
-) -> Result<ExecutionContractCategoryScoreV1> {
+) -> Result<ExecutionContractCategoryScore> {
     let matched_actual = maximum_one_to_one(&edges, actual_ids.len());
     let mut matches = BTreeMap::new();
     for (actual_index, expected_index) in matched_actual.iter().enumerate() {
@@ -511,7 +511,7 @@ fn category_score(
     let expected_count = usize_to_u64(expected_ids.len(), "contract expected count")?;
     let actual_count = usize_to_u64(actual_ids.len(), "contract actual count")?;
     let matched_count = usize_to_u64(matches.len(), "contract matched count")?;
-    Ok(ExecutionContractCategoryScoreV1 {
+    Ok(ExecutionContractCategoryScore {
         metrics: metrics(expected_count, actual_count, matched_count),
         matches,
         missing_expectation_ids,
@@ -551,7 +551,7 @@ fn augment(
     false
 }
 
-fn text_matches(expectation: &TextExpectationV1, actual: &str) -> bool {
+fn text_matches(expectation: &TextExpectation, actual: &str) -> bool {
     let actual = normalize_text(actual);
     expectation
         .all_terms
@@ -584,17 +584,13 @@ fn normalize_text(value: &str) -> String {
         .join(" ")
 }
 
-fn completion_kind(kind: &CompletionCheckKind) -> CompletionCheckKindExpectationV1 {
+fn completion_kind(kind: &CompletionCheckKind) -> CompletionCheckKindExpectation {
     match kind {
-        CompletionCheckKind::OutputSchema => CompletionCheckKindExpectationV1::OutputSchema,
-        CompletionCheckKind::RequiredNodes { .. } => {
-            CompletionCheckKindExpectationV1::RequiredNodes
-        }
-        CompletionCheckKind::MapCoverage { .. } => CompletionCheckKindExpectationV1::MapCoverage,
-        CompletionCheckKind::Citations { .. } => CompletionCheckKindExpectationV1::Citations,
-        CompletionCheckKind::AgentVerifier { .. } => {
-            CompletionCheckKindExpectationV1::AgentVerifier
-        }
+        CompletionCheckKind::OutputSchema => CompletionCheckKindExpectation::OutputSchema,
+        CompletionCheckKind::RequiredNodes { .. } => CompletionCheckKindExpectation::RequiredNodes,
+        CompletionCheckKind::MapCoverage { .. } => CompletionCheckKindExpectation::MapCoverage,
+        CompletionCheckKind::Citations { .. } => CompletionCheckKindExpectation::Citations,
+        CompletionCheckKind::AgentVerifier { .. } => CompletionCheckKindExpectation::AgentVerifier,
     }
 }
 
@@ -616,7 +612,7 @@ fn string_set(value: &Value) -> Option<BTreeSet<String>> {
         .collect()
 }
 
-fn metrics(expected: u64, actual: u64, matched: u64) -> ContractCategoryMetricsV1 {
+fn metrics(expected: u64, actual: u64, matched: u64) -> ContractCategoryMetrics {
     let precision = defined_ratio(matched, actual, expected == 0);
     let recall = defined_ratio(matched, expected, actual == 0);
     let f1 = if precision + recall == 0.0 {
@@ -624,7 +620,7 @@ fn metrics(expected: u64, actual: u64, matched: u64) -> ContractCategoryMetricsV
     } else {
         2.0 * precision * recall / (precision + recall)
     };
-    ContractCategoryMetricsV1 {
+    ContractCategoryMetrics {
         expected_count: expected,
         actual_count: actual,
         matched_count: matched,
@@ -644,7 +640,7 @@ fn defined_ratio(numerator: u64, denominator: u64, empty_is_perfect: bool) -> f6
 
 fn validate_text_expectations<'a>(
     category: &str,
-    expectations: &'a [TextExpectationV1],
+    expectations: &'a [TextExpectation],
 ) -> Result<BTreeSet<&'a str>> {
     let ids = validate_expectation_ids(
         category,

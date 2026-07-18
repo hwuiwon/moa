@@ -1,7 +1,7 @@
 //! Readers for normalized execution-planning audits used by integration tests.
 
 use anyhow::{Context, Result};
-use moa_core::types::execution_planning::ExecutionPlanningAuditEnvelopeV1;
+use moa_core::types::execution_planning::ExecutionPlanningAuditEnvelope;
 use moa_core::types::identifiers::SessionId;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -10,7 +10,7 @@ use sqlx::PgPool;
 pub async fn load_execution_planning_audits(
     postgres_url: &str,
     session_id: SessionId,
-) -> Result<Vec<ExecutionPlanningAuditEnvelopeV1>> {
+) -> Result<Vec<ExecutionPlanningAuditEnvelope>> {
     let pool = PgPool::connect(postgres_url)
         .await
         .context("connect normalized execution-audit reader")?;
@@ -32,8 +32,7 @@ pub async fn load_execution_planning_audits(
                         'kind', 'route',
                         'stage', stage,
                         'decision', decision,
-                        'mode', mode,
-                        'reason', reason,
+                        'strategy', strategy,
                         'provenance', jsonb_build_object(
                             'source', source,
                             'classifier_outcome', classifier_outcome,

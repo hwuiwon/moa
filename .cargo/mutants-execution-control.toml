@@ -1,0 +1,15 @@
+# Workflow-control mutants run only the moa-orchestrator unit tests that own the
+# authoritative Durable-upgrade schema and parser trust boundary.
+test_tool = "nextest"
+test_package = ["moa-orchestrator"]
+additional_cargo_test_args = [
+  "-E",
+  "package(moa-orchestrator) & test(/durable_control|workflow_control|root_inline_control|arbitrary_tool_calls/)",
+  "--no-tests=fail",
+]
+minimum_test_timeout = 120.0
+timeout_multiplier = 3.0
+build_timeout_multiplier = 3.0
+cap_lints = true
+gitignore = true
+copy_vcs = false

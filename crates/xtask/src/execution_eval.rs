@@ -5,10 +5,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use moa_core::types::execution_planning::ExecutionRouteKind;
 use moa_eval::execution::{
-    ExecutionEvalCaseResultV1, ExecutionEvalComparisonConfigV1, ExecutionEvalLaneV1,
-    ExecutionEvalReportV1, ExecutionJudgeCalibrationStatusV1, compare_execution_eval_reports,
-    load_execution_corpus, mutation_report_from_outcomes, score_contract_case, score_routing_cases,
+    ExecutionEvalCaseResult, ExecutionEvalComparisonConfig, ExecutionEvalLane, ExecutionEvalReport,
+    ExecutionJudgeCalibrationStatus, compare_execution_eval_reports, load_execution_corpus,
+    mutation_report_from_outcomes, score_contract_case, score_routing_cases,
 };
 
 const DEFAULT_MANIFEST: &str = "crates/moa-eval/scenarios/execution/manifest.toml";
@@ -47,7 +48,7 @@ fn run_offline(options: OfflineOptions) -> Result<()> {
     let mut cases = routing
         .cases
         .iter()
-        .map(|result| ExecutionEvalCaseResultV1 {
+        .map(|result| ExecutionEvalCaseResult {
             case_id: format!("routing:{}", result.case_id),
             passed: result.passed,
             contract_omission: None,
@@ -55,7 +56,8 @@ fn run_offline(options: OfflineOptions) -> Result<()> {
             impossible_case: false,
             execution_false_completion: false,
             observed_run_status: None,
-            observed_route: None,
+            observed_route: Some(route_kind(result.observed_label)),
+            observed_strategy: result.observed_strategy,
             route_provenance: None,
             invariants: Vec::new(),
             cost_microusd: 0,
@@ -67,7 +69,7 @@ fn run_offline(options: OfflineOptions) -> Result<()> {
         .collect::<Vec<_>>();
     for contract_case in &corpus.contract_cases {
         let score = score_contract_case(contract_case).map_err(anyhow::Error::from)?;
-        cases.push(ExecutionEvalCaseResultV1 {
+        cases.push(ExecutionEvalCaseResult {
             case_id: format!("contract:{}", contract_case.case_id),
             passed: !score.contract_omission,
             contract_omission: Some(score.contract_omission),
@@ -76,6 +78,7 @@ fn run_offline(options: OfflineOptions) -> Result<()> {
             execution_false_completion: false,
             observed_run_status: None,
             observed_route: None,
+            observed_strategy: None,
             route_provenance: None,
             invariants: Vec::new(),
             cost_microusd: 0,
@@ -86,12 +89,12 @@ fn run_offline(options: OfflineOptions) -> Result<()> {
             final_response_hash: None,
         });
     }
-    let mut report = ExecutionEvalReportV1::new(
-        ExecutionEvalLaneV1::OfflinePr,
+    let mut report = ExecutionEvalReport::new(
+        ExecutionEvalLane::OfflinePr,
         manifest_hashes(&corpus.manifest),
         vec![0],
         1,
-        ExecutionJudgeCalibrationStatusV1::Unavailable,
+        ExecutionJudgeCalibrationStatus::Unavailable,
         None,
         cases,
     )
@@ -100,17 +103,17 @@ fn run_offline(options: OfflineOptions) -> Result<()> {
     report.validate().map_err(anyhow::Error::from)?;
     write_json(&options.output, &report)?;
     println!(
-        "wrote execution offline eval: output={} cases={} passed={} respond_on_run_rate={:.6}",
+        "wrote execution offline eval: output={} cases={} passed={} respond_on_execute_rate={:.6}",
         options.output.display(),
         report.metrics.total_cases,
         report.metrics.passed_cases,
-        report.metrics.respond_on_run_rate.unwrap_or_default()
+        report.metrics.respond_on_execute_rate.unwrap_or_default()
     );
     Ok(())
 }
 
 fn check(options: CheckOptions) -> Result<()> {
-    let report: ExecutionEvalReportV1 = read_json(&options.report)?;
+    let report: ExecutionEvalReport = read_json(&options.report)?;
     report.validate().map_err(anyhow::Error::from)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -141,8 +144,10 @@ fn check(options: CheckOptions) -> Result<()> {
     {
         bail!("execution false-completion gate failed");
     }
-    if report.metrics.respond_on_run_rate.unwrap_or_default() > options.max_respond_on_run_rate {
-        bail!("Respond-on-Run routing gate failed");
+    if report.metrics.respond_on_execute_rate.unwrap_or_default()
+        > options.max_respond_on_execute_rate
+    {
+        bail!("Respond-on-Execute routing gate failed");
     }
     if report.metrics.contract_omission_rate.unwrap_or_default()
         > options.max_contract_omission_rate
@@ -153,10 +158,23 @@ fn check(options: CheckOptions) -> Result<()> {
     {
         bail!("weighted routing-cost gate failed");
     }
-    if report.metrics.near_boundary_act_recall.unwrap_or_default()
-        < options.min_near_boundary_act_recall
+    if report.metrics.weighted_strategy_cost.unwrap_or_default()
+        > options.max_weighted_strategy_cost
     {
-        bail!("near-boundary Act recall gate failed");
+        bail!("weighted strategy-cost gate failed");
+    }
+    if report
+        .metrics
+        .near_boundary_inline_recall
+        .unwrap_or_default()
+        < options.min_near_boundary_inline_recall
+    {
+        bail!("near-boundary Inline recall gate failed");
+    }
+    if report.metrics.durable_strategy_recall.unwrap_or_default()
+        < options.min_durable_strategy_recall
+    {
+        bail!("Durable strategy recall gate failed");
     }
     let pass_rate = if report.metrics.total_cases == 0 {
         0.0
@@ -167,23 +185,24 @@ fn check(options: CheckOptions) -> Result<()> {
         bail!("execution case pass-rate gate failed");
     }
     println!(
-        "execution eval check passed: report={} cases={} false_completions=0 respond_on_run_rate={:.6}",
+        "execution eval check passed: report={} cases={} false_completions=0 respond_on_execute_rate={:.6} durable_strategy_recall={:.6}",
         options.report.display(),
         report.metrics.total_cases,
-        report.metrics.respond_on_run_rate.unwrap_or_default()
+        report.metrics.respond_on_execute_rate.unwrap_or_default(),
+        report.metrics.durable_strategy_recall.unwrap_or_default()
     );
     Ok(())
 }
 
 fn compare(options: CompareOptions) -> Result<()> {
-    let baseline: ExecutionEvalReportV1 = read_json(&options.baseline)?;
-    let candidate: ExecutionEvalReportV1 = read_json(&options.candidate)?;
+    let baseline: ExecutionEvalReport = read_json(&options.baseline)?;
+    let candidate: ExecutionEvalReport = read_json(&options.candidate)?;
     let comparison = compare_execution_eval_reports(
         &baseline,
         &candidate,
-        ExecutionEvalComparisonConfigV1 {
+        ExecutionEvalComparisonConfig {
             practical_pass_rate_regression: options.practical_pass_rate_regression,
-            ..ExecutionEvalComparisonConfigV1::default()
+            ..ExecutionEvalComparisonConfig::default()
         },
     )
     .map_err(anyhow::Error::from)?;
@@ -227,7 +246,7 @@ fn mutation_report(options: MutationOptions) -> Result<()> {
 }
 
 fn manifest_hashes(
-    manifest: &moa_eval::execution::ExecutionCorpusManifestV1,
+    manifest: &moa_eval::execution::ExecutionCorpusManifest,
 ) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("contract".to_string(), manifest.contract.sha256.clone()),
@@ -237,6 +256,14 @@ fn manifest_hashes(
             manifest.task_quality.sha256.clone(),
         ),
     ])
+}
+
+const fn route_kind(label: moa_eval::execution::ExecutionRoutingLabel) -> ExecutionRouteKind {
+    match label {
+        moa_eval::execution::ExecutionRoutingLabel::Respond => ExecutionRouteKind::Respond,
+        moa_eval::execution::ExecutionRoutingLabel::Execute => ExecutionRouteKind::Execute,
+        moa_eval::execution::ExecutionRoutingLabel::NeedsInput => ExecutionRouteKind::NeedsInput,
+    }
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -286,10 +313,12 @@ struct CheckOptions {
     report: PathBuf,
     manifest: PathBuf,
     max_execution_false_completion_rate: f64,
-    max_respond_on_run_rate: f64,
+    max_respond_on_execute_rate: f64,
     max_contract_omission_rate: f64,
     max_weighted_routing_cost: f64,
-    min_near_boundary_act_recall: f64,
+    max_weighted_strategy_cost: f64,
+    min_near_boundary_inline_recall: f64,
+    min_durable_strategy_recall: f64,
     min_pass_rate: f64,
 }
 
@@ -298,10 +327,12 @@ impl CheckOptions {
         let mut report = None;
         let mut manifest = None;
         let mut max_execution_false_completion_rate = 0.0;
-        let mut max_respond_on_run_rate = 0.0;
+        let mut max_respond_on_execute_rate = 0.0;
         let mut max_contract_omission_rate = 0.0;
-        let mut max_weighted_routing_cost = f64::INFINITY;
-        let mut min_near_boundary_act_recall = 0.0;
+        let mut max_weighted_routing_cost = 0.0;
+        let mut max_weighted_strategy_cost = 0.0;
+        let mut min_near_boundary_inline_recall = 0.0;
+        let mut min_durable_strategy_recall = 0.0;
         let mut min_pass_rate = 1.0;
         let mut args = args.peekable();
         while let Some(arg) = args.next() {
@@ -311,8 +342,8 @@ impl CheckOptions {
                 "--max-execution-false-completion-rate" => {
                     max_execution_false_completion_rate = next_rate(&mut args, &arg)?;
                 }
-                "--max-respond-on-run-rate" => {
-                    max_respond_on_run_rate = next_rate(&mut args, &arg)?;
+                "--max-respond-on-execute-rate" => {
+                    max_respond_on_execute_rate = next_rate(&mut args, &arg)?;
                 }
                 "--max-contract-omission-rate" => {
                     max_contract_omission_rate = next_rate(&mut args, &arg)?;
@@ -320,8 +351,14 @@ impl CheckOptions {
                 "--max-weighted-routing-cost" => {
                     max_weighted_routing_cost = next_nonnegative(&mut args, &arg)?;
                 }
-                "--min-near-boundary-act-recall" => {
-                    min_near_boundary_act_recall = next_rate(&mut args, &arg)?;
+                "--max-weighted-strategy-cost" => {
+                    max_weighted_strategy_cost = next_nonnegative(&mut args, &arg)?;
+                }
+                "--min-near-boundary-inline-recall" => {
+                    min_near_boundary_inline_recall = next_rate(&mut args, &arg)?;
+                }
+                "--min-durable-strategy-recall" => {
+                    min_durable_strategy_recall = next_rate(&mut args, &arg)?;
                 }
                 "--min-pass-rate" => min_pass_rate = next_rate(&mut args, &arg)?,
                 other => bail!("unknown check argument `{other}`"),
@@ -331,10 +368,12 @@ impl CheckOptions {
             report: report.context("check requires --report <path>")?,
             manifest: manifest.unwrap_or_else(|| PathBuf::from(DEFAULT_MANIFEST)),
             max_execution_false_completion_rate,
-            max_respond_on_run_rate,
+            max_respond_on_execute_rate,
             max_contract_omission_rate,
             max_weighted_routing_cost,
-            min_near_boundary_act_recall,
+            max_weighted_strategy_cost,
+            min_near_boundary_inline_recall,
+            min_durable_strategy_recall,
             min_pass_rate,
         })
     }

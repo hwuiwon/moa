@@ -10,7 +10,7 @@ use moa_artifacts::reference::ArtifactRef;
 use moa_core::events::Event;
 use moa_core::types::action_policy::{ActionPolicyEffect, ActionRuleScope};
 use moa_core::types::events_stream::{EventRange, EventRecord};
-use moa_core::types::execution_planning::{ExecutionMode, ExecutionRouteReason};
+use moa_core::types::execution_planning::{ExecutionRouteKind, ExecutionStrategy};
 use moa_core::types::execution_planning::{ExecutionRunStarted, ExecutionTemplateInvocation};
 use moa_core::types::identifiers::{SessionId, TenantId};
 use moa_core::types::session::SessionStatus;
@@ -36,24 +36,72 @@ pub(crate) const SERVICE_TIMEOUT: Duration = Duration::from_secs(90);
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Stable system-prompt fragment used to target the pre-mode classifier request.
 pub(crate) const ROUTE_CLASSIFIER_MATCH: &str =
-    "You classify one user turn into MOA's execution mode.";
+    "You classify one user turn into MOA's public execution decision.";
+/// Stable direct-response rationale emitted by scripted route fixtures.
+pub(crate) const RESPOND_ROUTE_RATIONALE: &str =
+    "The request only requires a direct explanatory response.";
+/// Stable bounded-inline rationale emitted by scripted route fixtures.
+pub(crate) const INLINE_ROUTE_RATIONALE: &str =
+    "The requested work fits a bounded interactive execution loop.";
+/// Stable durable rationale emitted by scripted route fixtures.
+pub(crate) const DURABLE_ROUTE_RATIONALE: &str =
+    "The requested workflow should persist as a durable execution.";
+/// Stable clarification rationale emitted by scripted route fixtures.
+pub(crate) const NEEDS_INPUT_ROUTE_RATIONALE: &str =
+    "A concrete target is required before work can begin.";
+/// Typed route shape used by scripted service fixtures without constraining rationale prose.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RouteFixture {
+    /// Direct response.
+    Respond,
+    /// Bounded inline execution.
+    Inline,
+    /// Initial durable execution.
+    Durable,
+    /// Missing-input clarification.
+    NeedsInput,
+}
+
+impl RouteFixture {
+    /// Returns the explicit strategy carried by the fixture route.
+    pub(crate) const fn strategy(self) -> Option<ExecutionStrategy> {
+        match self {
+            Self::Respond | Self::NeedsInput => None,
+            Self::Inline => Some(ExecutionStrategy::Inline),
+            Self::Durable => Some(ExecutionStrategy::Durable),
+        }
+    }
+
+    /// Returns the bounded sentence asserted by the fixture.
+    pub(crate) const fn rationale(self) -> &'static str {
+        match self {
+            Self::Respond => RESPOND_ROUTE_RATIONALE,
+            Self::Inline => INLINE_ROUTE_RATIONALE,
+            Self::Durable => DURABLE_ROUTE_RATIONALE,
+            Self::NeedsInput => NEEDS_INPUT_ROUTE_RATIONALE,
+        }
+    }
+}
 
 /// Builds one strict scripted response for the production route classifier.
 pub(crate) fn route_classifier_completion(
-    mode: ExecutionMode,
-    reason: ExecutionRouteReason,
+    decision: ExecutionRouteKind,
+    fixture: RouteFixture,
 ) -> Value {
-    let label = match mode {
-        ExecutionMode::Respond => "respond",
-        ExecutionMode::Act => "act",
-        ExecutionMode::Run => "run",
+    let label = match decision {
+        ExecutionRouteKind::Respond => "respond",
+        ExecutionRouteKind::Execute => "execute",
+        ExecutionRouteKind::NeedsInput => "needs_input",
     };
+    let strategy = fixture.strategy();
+    let rationale = fixture.rationale();
     json!({
         "match": ROUTE_CLASSIFIER_MATCH,
         "completion": {
             "content": json!({
                 "label": label,
-                "reason": reason,
+                "strategy": strategy,
+                "rationale": rationale,
                 "confidence_bps": 10_000,
                 "missing_inputs": []
             }).to_string(),
@@ -64,7 +112,7 @@ pub(crate) fn route_classifier_completion(
 
 /// Builds one strict scripted clarification response for the production route classifier.
 pub(crate) fn route_classifier_needs_input_completion(
-    reason: ExecutionRouteReason,
+    fixture: RouteFixture,
     missing_inputs: &[&str],
 ) -> Value {
     json!({
@@ -72,7 +120,8 @@ pub(crate) fn route_classifier_needs_input_completion(
         "completion": {
             "content": json!({
                 "label": "needs_input",
-                "reason": reason,
+                "strategy": null,
+                "rationale": fixture.rationale(),
                 "confidence_bps": 10_000,
                 "missing_inputs": missing_inputs
             }).to_string(),

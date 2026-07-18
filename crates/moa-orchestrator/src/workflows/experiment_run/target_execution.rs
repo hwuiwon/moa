@@ -16,10 +16,10 @@ use moa_core::{
         contact::{ContactId, ContactRef, ContactVerificationState},
         events_stream::EventRecord,
         execution_planning::{
-            ExecutionAuditViolationV1, ExecutionCompileOutcome, ExecutionCompileSource,
-            ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1,
-            ExecutionRouteReason, ExecutionSourceProvenanceV1, PinnedExecutionTemplateRef,
-            bounded_audit_report, canonical_json_bytes, execution_planning_hash,
+            ExecutionAuditViolation, ExecutionCompileOutcome, ExecutionCompileSource,
+            ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload,
+            ExecutionSourceProvenance, PinnedExecutionTemplateRef, bounded_audit_report,
+            canonical_json_bytes, execution_planning_hash,
         },
     },
     wire::session_store::AppendEventRequest,
@@ -45,7 +45,7 @@ const EXECUTION_TARGET_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 const EXECUTION_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const EXPERIMENT_EXECUTION_SESSION_NAMESPACE: Uuid =
     Uuid::from_u128(0xc2a6_731c_2d80_5d4a_9d10_2d20_1283_c6ec);
-const EXPERIMENT_EXECUTION_SESSION_DOMAIN: &str = "moa.experiment.execution-session.v1";
+const EXPERIMENT_EXECUTION_SESSION_DOMAIN: &str = "moa.experiment.execution-session";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct EffectiveExecutionSession {
@@ -57,8 +57,8 @@ struct EffectiveExecutionSession {
 struct CompiledExperimentTemplate {
     compiled: Option<moa_execution::CompiledExecution>,
     run_input: Value,
-    audit: ExecutionPlanningAuditEnvelopeV1,
-    source_provenance: ExecutionSourceProvenanceV1,
+    audit: ExecutionPlanningAuditEnvelope,
+    source_provenance: ExecutionSourceProvenance,
 }
 
 #[allow(
@@ -613,7 +613,7 @@ enum ExperimentCompileClassification {
 }
 
 struct ExperimentTemplateCompileRequest<'a> {
-    context: &'a moa_execution::wire::ExecutionPlanningContextSnapshotV1,
+    context: &'a moa_execution::wire::ExecutionPlanningContextSnapshot,
     requested: &'a PinnedExecutionTemplateRef,
     objective: String,
     input: Value,
@@ -680,7 +680,7 @@ fn compile_experiment_template(
     let candidate_bytes = artifact_canonical_json_bytes(&candidate_preimage)
         .map_err(|error| TerminalError::new(error.to_string()))?;
     let candidate_hash =
-        execution_planning_hash("moa.execution.compile-candidate.v1", &candidate_bytes);
+        execution_planning_hash("moa.execution.compile-candidate", &candidate_bytes);
     let config = OrchestratorCtx::current_config();
     let started_at = Instant::now();
     let outcome = compile(CompileExecutionRequest {
@@ -717,13 +717,13 @@ fn compile_experiment_template(
     Ok(CompiledExperimentTemplate {
         compiled: outcome.compiled,
         run_input: candidate.run_input,
-        audit: ExecutionPlanningAuditEnvelopeV1 {
+        audit: ExecutionPlanningAuditEnvelope {
             schema_version: 1,
             tenant_id: context.tenant_id,
             contact_id: context.contact_id,
             session_id: Some(context.session_id),
             originating_sequence: Some(context.originating_user_sequence_num),
-            payload: ExecutionPlanningAuditPayloadV1::Compile {
+            payload: ExecutionPlanningAuditPayload::Compile {
                 source: ExecutionCompileSource::ExperimentTemplate,
                 operation_key,
                 run_uid: None,
@@ -750,9 +750,8 @@ fn experiment_template_source_provenance(
     skill_template_revision_uid: Uuid,
     experiment_run_uid: Uuid,
     score_run_id: Uuid,
-) -> ExecutionSourceProvenanceV1 {
-    ExecutionSourceProvenanceV1::ExperimentTemplate {
-        route_reason: ExecutionRouteReason::ExplicitRun,
+) -> ExecutionSourceProvenance {
+    ExecutionSourceProvenance::ExperimentTemplate {
         skill_template_ref,
         skill_template_revision_uid,
         experiment_run_uid,
@@ -798,11 +797,11 @@ fn classify_experiment_compile(
 
 fn compiler_audit_report(
     report: &ExecutionValidationReport,
-) -> Result<moa_core::types::execution_planning::ExecutionAuditReportV1, HandlerError> {
+) -> Result<moa_core::types::execution_planning::ExecutionAuditReport, HandlerError> {
     let violations = report
         .issues
         .iter()
-        .map(|issue| ExecutionAuditViolationV1 {
+        .map(|issue| ExecutionAuditViolation {
             code: issue.code.clone(),
             path: issue.path.clone(),
             message: issue.message.clone(),
@@ -815,7 +814,7 @@ fn compiler_audit_report(
 async fn persist_compile_audit(
     ctx: &WorkflowContext<'_>,
     scope: ActionRuleScope,
-    audit: ExecutionPlanningAuditEnvelopeV1,
+    audit: ExecutionPlanningAuditEnvelope,
     pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
     let execution_scope = match scope {
@@ -974,8 +973,7 @@ mod tests {
                 Uuid::from_u128(2),
                 Uuid::from_u128(3),
             ),
-            ExecutionSourceProvenanceV1::ExperimentTemplate {
-                route_reason: ExecutionRouteReason::ExplicitRun,
+            ExecutionSourceProvenance::ExperimentTemplate {
                 skill_template_ref: "skill://durable-report".to_string(),
                 skill_template_revision_uid: Uuid::from_u128(1),
                 experiment_run_uid: Uuid::from_u128(2),

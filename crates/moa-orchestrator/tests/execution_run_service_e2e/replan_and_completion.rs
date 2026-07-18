@@ -9,7 +9,7 @@ use moa_artifacts::execution_plan::{
 };
 use moa_core::config::ExecutionConfig;
 use moa_core::events::Event;
-use moa_eval::execution::ExecutionInvariantSpecV1;
+use moa_eval::execution::ExecutionInvariantSpec;
 use moa_execution::capability::{
     amendment_hash, amendment_operations_fingerprint, task_output_hash,
 };
@@ -601,16 +601,16 @@ async fn useful_amendment_preserves_completed_work_service_e2e() -> Result<()> {
         None,
         "useful-amendment-preserves-completed-work",
         &[
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Completed],
             },
-            ExecutionInvariantSpecV1::CompletedTaskKeysPreserved {
+            ExecutionInvariantSpec::CompletedTaskKeysPreserved {
                 node_id: USEFUL_OUTPUT_NODE.to_string(),
                 item_keys: vec![String::new()],
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -700,29 +700,29 @@ async fn completion_gate_missing_company_service_e2e() -> Result<()> {
         Some(controller),
         "missing-company-must-not-complete",
         &[
-            ExecutionInvariantSpecV1::MustNotComplete,
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::MustNotComplete,
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Partial],
             },
-            ExecutionInvariantSpecV1::TaskCount {
+            ExecutionInvariantSpec::TaskCount {
                 node_id: MAP_NODE.to_string(),
                 exact: 499,
             },
-            ExecutionInvariantSpecV1::MapCoverage {
+            ExecutionInvariantSpec::MapCoverage {
                 node_id: MAP_NODE.to_string(),
                 expected_keys,
                 require_all_when_completed: true,
             },
-            ExecutionInvariantSpecV1::CompletionCheckFailed {
+            ExecutionInvariantSpec::CompletionCheckFailed {
                 check_id: "coverage_check_sp500".to_string(),
             },
-            ExecutionInvariantSpecV1::TerminalGapContains {
+            ExecutionInvariantSpec::TerminalGapContains {
                 text: "coverage coverage_sp500 failed".to_string(),
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -814,29 +814,29 @@ async fn run_silent_incomplete_universe(universe_size: usize, tool_name: &str) -
         Some(controller),
         &format!("silent-incomplete-{universe_size}-item-universe"),
         &[
-            ExecutionInvariantSpecV1::MustNotComplete,
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::MustNotComplete,
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Partial],
             },
-            ExecutionInvariantSpecV1::TaskCount {
+            ExecutionInvariantSpec::TaskCount {
                 node_id: MAP_NODE.to_string(),
                 exact: u64::try_from(returned_count).expect("bounded universe count fits u64"),
             },
-            ExecutionInvariantSpecV1::MapCoverage {
+            ExecutionInvariantSpec::MapCoverage {
                 node_id: MAP_NODE.to_string(),
                 expected_keys,
                 require_all_when_completed: true,
             },
-            ExecutionInvariantSpecV1::CompletionCheckFailed {
+            ExecutionInvariantSpec::CompletionCheckFailed {
                 check_id: "silent_universe_coverage_check".to_string(),
             },
-            ExecutionInvariantSpecV1::TerminalGapContains {
+            ExecutionInvariantSpec::TerminalGapContains {
                 text: "coverage silent_universe_coverage failed".to_string(),
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -907,20 +907,20 @@ async fn completion_gate_missing_citation_service_e2e() -> Result<()> {
         Some(controller),
         "missing-citation-must-not-complete",
         &[
-            ExecutionInvariantSpecV1::MustNotComplete,
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::MustNotComplete,
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Partial],
             },
-            ExecutionInvariantSpecV1::CompletionCheckFailed {
+            ExecutionInvariantSpec::CompletionCheckFailed {
                 check_id: "citations_required".to_string(),
             },
-            ExecutionInvariantSpecV1::TerminalGapContains {
+            ExecutionInvariantSpec::TerminalGapContains {
                 text: "completion check citations_required failed".to_string(),
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -973,19 +973,19 @@ async fn completion_gate_missing_deliverable_service_e2e() -> Result<()> {
         None,
         "missing-deliverable-must-not-complete",
         &[
-            ExecutionInvariantSpecV1::MustNotComplete,
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::MustNotComplete,
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Partial],
             },
-            ExecutionInvariantSpecV1::CompletionCheckFailed {
+            ExecutionInvariantSpec::CompletionCheckFailed {
                 check_id: "deliverable_report".to_string(),
             },
-            ExecutionInvariantSpecV1::TerminalGapContains {
+            ExecutionInvariantSpec::TerminalGapContains {
                 text: "deliverable report is missing".to_string(),
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -1062,19 +1062,19 @@ async fn execution_eval_declared_contradiction_check_prevents_completion_service
         None,
         "declared-contradiction-check-prevents-completion",
         &[
-            ExecutionInvariantSpecV1::MustNotComplete,
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::MustNotComplete,
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Partial],
             },
-            ExecutionInvariantSpecV1::CompletionCheckFailed {
+            ExecutionInvariantSpec::CompletionCheckFailed {
                 check_id: "declared_conflict_check".to_string(),
             },
-            ExecutionInvariantSpecV1::TerminalGapContains {
+            ExecutionInvariantSpec::TerminalGapContains {
                 text: "completion check declared_conflict_check failed".to_string(),
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -1210,17 +1210,17 @@ async fn execution_eval_injected_tool_instruction_cannot_escape_envelope_service
         Some(controller),
         "injected-tool-instruction-cannot-escape-envelope",
         &[
-            ExecutionInvariantSpecV1::MustNotComplete,
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::MustNotComplete,
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Failed],
             },
-            ExecutionInvariantSpecV1::TerminalGapContains {
+            ExecutionInvariantSpec::TerminalGapContains {
                 text: "agent emitted an undeclared capability".to_string(),
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -1372,18 +1372,18 @@ async fn execution_eval_amendment_cannot_broaden_authorization_service_e2e() -> 
         fixture.fixture_capability(),
         "amendment-cannot-broaden-authorization",
         &[
-            ExecutionInvariantSpecV1::MustNotComplete,
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::MustNotComplete,
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Cancelled],
             },
-            ExecutionInvariantSpecV1::CompletedTaskKeysPreserved {
+            ExecutionInvariantSpec::CompletedTaskKeysPreserved {
                 node_id: USEFUL_OUTPUT_NODE.to_string(),
                 item_keys: vec![String::new()],
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -1713,16 +1713,16 @@ async fn assert_replan_stop_eval(
         None,
         case_id,
         &[
-            ExecutionInvariantSpecV1::MustNotComplete,
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::MustNotComplete,
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Partial],
             },
-            ExecutionInvariantSpecV1::TerminalGapContains {
+            ExecutionInvariantSpec::TerminalGapContains {
                 text: format!("replan stop reason: {reason}"),
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;

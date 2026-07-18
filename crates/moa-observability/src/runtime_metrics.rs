@@ -15,9 +15,9 @@ use moa_core::{
     types::action_policy::ActionPolicyEffect,
     types::action_policy::ActionReviewStatus,
     types::execution_planning::{
-        ExecutionCompileOutcome, ExecutionCompileSource, ExecutionMode, ExecutionPlannerCallKind,
-        ExecutionPlannerOutcome, ExecutionRouteClassifierOutcome, ExecutionRouteDecisionKind,
-        ExecutionRouteReason, ExecutionRouteSource,
+        ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlannerCallKind,
+        ExecutionPlannerOutcome, ExecutionRouteClassifierOutcome, ExecutionRouteKind,
+        ExecutionRouteSource, ExecutionStrategy,
     },
     types::identifiers::ModelId,
     types::identifiers::TenantId,
@@ -968,9 +968,8 @@ pub fn record_session_event_load(event_count: u64) {
 
 /// Records one durably applied execution route and its bounded classifier outcome.
 pub fn record_execution_route(
-    decision: ExecutionRouteDecisionKind,
-    mode: Option<ExecutionMode>,
-    reason: ExecutionRouteReason,
+    decision: ExecutionRouteKind,
+    strategy: Option<ExecutionStrategy>,
     source: ExecutionRouteSource,
     outcome: ExecutionRouteClassifierOutcome,
     duration_micros: u64,
@@ -978,8 +977,7 @@ pub fn record_execution_route(
     counter!(
         "moa_execution_routes_total",
         "decision" => execution_route_decision(decision),
-        "mode" => mode.map_or("none", execution_mode),
-        "reason" => execution_route_reason(reason),
+        "strategy" => strategy.map_or("none", execution_strategy),
         "source" => execution_route_source(source),
         "classifier_outcome" => execution_route_classifier_outcome(outcome)
     )
@@ -1829,18 +1827,18 @@ fn register_metric_descriptions() {
     );
 }
 
-const fn execution_mode(mode: ExecutionMode) -> &'static str {
-    match mode {
-        ExecutionMode::Respond => "respond",
-        ExecutionMode::Act => "act",
-        ExecutionMode::Run => "run",
+const fn execution_strategy(strategy: ExecutionStrategy) -> &'static str {
+    match strategy {
+        ExecutionStrategy::Inline => "inline",
+        ExecutionStrategy::Durable => "durable",
     }
 }
 
-const fn execution_route_decision(decision: ExecutionRouteDecisionKind) -> &'static str {
+const fn execution_route_decision(decision: ExecutionRouteKind) -> &'static str {
     match decision {
-        ExecutionRouteDecisionKind::NeedsInput => "needs_input",
-        ExecutionRouteDecisionKind::Routed => "routed",
+        ExecutionRouteKind::Respond => "respond",
+        ExecutionRouteKind::Execute => "execute",
+        ExecutionRouteKind::NeedsInput => "needs_input",
     }
 }
 
@@ -1849,7 +1847,7 @@ const fn execution_route_source(source: ExecutionRouteSource) -> &'static str {
         ExecutionRouteSource::Classifier => "classifier",
         ExecutionRouteSource::BlankObjective => "blank_objective",
         ExecutionRouteSource::SelectedExecutionTemplate => "selected_execution_template",
-        ExecutionRouteSource::ActEscalation => "act_escalation",
+        ExecutionRouteSource::DurableUpgrade => "durable_upgrade",
     }
 }
 
@@ -1865,22 +1863,7 @@ const fn execution_route_classifier_outcome(
         ExecutionRouteClassifierOutcome::SchemaRejected => "schema_rejected",
         ExecutionRouteClassifierOutcome::InvalidDecision => "invalid_decision",
         ExecutionRouteClassifierOutcome::LowConfidence => "low_confidence",
-        ExecutionRouteClassifierOutcome::ContextForcedAct => "context_forced_act",
-    }
-}
-
-const fn execution_route_reason(reason: ExecutionRouteReason) -> &'static str {
-    match reason {
-        ExecutionRouteReason::SimpleResponse => "simple_response",
-        ExecutionRouteReason::BoundedInteractiveWork => "bounded_interactive_work",
-        ExecutionRouteReason::PreflightInputMissing => "preflight_input_missing",
-        ExecutionRouteReason::ExplicitRun => "explicit_run",
-        ExecutionRouteReason::BulkCollection => "bulk_collection",
-        ExecutionRouteReason::DurableOrResumable => "durable_or_resumable",
-        ExecutionRouteReason::HighFanout => "high_fanout",
-        ExecutionRouteReason::ApprovalOrSignal => "approval_or_signal",
-        ExecutionRouteReason::SelectedExecutionTemplate => "selected_execution_template",
-        ExecutionRouteReason::ActEscalation => "act_escalation",
+        ExecutionRouteClassifierOutcome::ContextForcedInline => "context_forced_inline",
     }
 }
 
@@ -2491,9 +2474,8 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             register_metric_descriptions();
             record_execution_route(
-                ExecutionRouteDecisionKind::Routed,
-                Some(ExecutionMode::Run),
-                ExecutionRouteReason::ExplicitRun,
+                ExecutionRouteKind::Execute,
+                Some(ExecutionStrategy::Durable),
                 ExecutionRouteSource::Classifier,
                 ExecutionRouteClassifierOutcome::Accepted,
                 5_000,
@@ -2638,10 +2620,20 @@ mod tests {
             .filter(|line| line.starts_with("moa_execution_"))
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(execution_series.contains("decision=\"execute\""));
+        assert!(execution_series.contains("strategy=\"durable\""));
+        let route_series = rendered
+            .lines()
+            .filter(|line| line.starts_with("moa_execution_routes_total{"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !route_series.contains("{reason=") && !route_series.contains(",reason="),
+            "free-form route rationale must never become a metrics label"
+        );
         for label in [
             "decision=",
-            "mode=",
-            "reason=",
+            "strategy=",
             "call=",
             "outcome=",
             "classifier_outcome=",
@@ -2672,6 +2664,7 @@ mod tests {
             "user_text=",
             "gap=",
             "error=",
+            "mode=",
         ] {
             assert!(
                 !execution_series.contains(forbidden),

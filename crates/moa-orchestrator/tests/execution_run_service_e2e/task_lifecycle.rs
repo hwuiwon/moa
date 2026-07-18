@@ -13,13 +13,11 @@ use moa_core::{
     events::Event,
     types::{
         action_policy::{ActionPolicyEffect, ActionReviewStatus},
-        execution_planning::{
-            ExecutionRouteReason, ExecutionSourceProvenanceV1, GeneratedPlanPlannerProvenanceV1,
-        },
+        execution_planning::{ExecutionSourceProvenance, GeneratedPlanPlannerProvenance},
         identifiers::{SessionId, TenantId},
     },
 };
-use moa_eval::execution::ExecutionInvariantSpecV1;
+use moa_eval::execution::ExecutionInvariantSpec;
 use moa_execution::{
     capability::{ExecutionCapability, ExecutionEstimate},
     compiler::{CompileExecutionRequest, CompiledExecution, compile},
@@ -131,17 +129,17 @@ async fn reservation_budget_rejection_dispatches_zero_service_e2e() -> Result<()
         &run.request,
         "reservation-budget-rejection-zero-dispatch",
         &[
-            ExecutionInvariantSpecV1::MustNotComplete,
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::MustNotComplete,
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Failed],
             },
-            ExecutionInvariantSpecV1::TerminalGapContains {
+            ExecutionInvariantSpec::TerminalGapContains {
                 text: "execution task reservation rejected: BudgetExceeded".to_string(),
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -216,17 +214,17 @@ async fn elapsed_deadline_dispatches_zero_service_e2e() -> Result<()> {
         &run.request,
         "elapsed-deadline-zero-dispatch",
         &[
-            ExecutionInvariantSpecV1::MustNotComplete,
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::MustNotComplete,
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Failed],
             },
-            ExecutionInvariantSpecV1::TerminalGapContains {
+            ExecutionInvariantSpec::TerminalGapContains {
                 text: "execution task reservation rejected: DeadlineElapsed".to_string(),
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -327,13 +325,13 @@ async fn execution_eval_rate_limit_reuses_task_identity_service_e2e() -> Result<
         Some(controller),
         "rate-limit-reuses-task-identity",
         &[
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Completed],
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -403,14 +401,14 @@ async fn execution_eval_wrong_schema_is_invalid_output_service_e2e() -> Result<(
         Some(controller),
         "wrong-schema-is-invalid-output",
         &[
-            ExecutionInvariantSpecV1::MustNotComplete,
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::MustNotComplete,
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Failed],
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -937,10 +935,10 @@ async fn stale_generation_is_audit_only_service_e2e() -> Result<()> {
         &run.request,
         "stale-generation-write-is-fenced",
         &[
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -1022,13 +1020,13 @@ async fn duplicate_completion_does_not_double_account_service_e2e() -> Result<()
         &run.request,
         "duplicate-completion-is-idempotent",
         &[
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Completed],
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoDuplicateLogicalEffects,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoDuplicateLogicalEffects,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -1403,12 +1401,11 @@ fn lifecycle_plan_with_output_schema(
     }
 }
 
-fn generated_source(final_plan_hash: &str) -> ExecutionSourceProvenanceV1 {
-    ExecutionSourceProvenanceV1::GeneratedPlan {
-        route_reason: ExecutionRouteReason::ExplicitRun,
-        planner: GeneratedPlanPlannerProvenanceV1 {
+fn generated_source(final_plan_hash: &str) -> ExecutionSourceProvenance {
+    ExecutionSourceProvenance::GeneratedPlan {
+        planner: GeneratedPlanPlannerProvenance {
             model: "scripted-fixture".to_string(),
-            prompt_version: "task-lifecycle-service-e2e-v1".to_string(),
+            prompt_version: "task-lifecycle-service-e2e".to_string(),
             candidate_hash: "a".repeat(64),
             compiler_report_hash: "b".repeat(64),
             final_plan_hash: final_plan_hash.to_string(),

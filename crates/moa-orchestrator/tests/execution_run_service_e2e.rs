@@ -31,9 +31,9 @@ use moa_core::{
     config::ExecutionConfig,
     events::Event,
     types::execution_planning::{
-        ExecutionAdmissionEstimateV1, ExecutionConfirmationEvidenceV1,
-        ExecutionEstimateMethodologyV1, ExecutionRouteReason, ExecutionRunAdmissionStatus,
-        ExecutionRunStarted, ExecutionSourceProvenanceV1, GeneratedPlanPlannerProvenanceV1,
+        ExecutionAdmissionEstimate, ExecutionConfirmationEvidence, ExecutionEstimateMethodology,
+        ExecutionRunAdmissionStatus, ExecutionRunStarted, ExecutionSourceProvenance,
+        GeneratedPlanPlannerProvenance,
     },
     types::{
         contact::SessionActorRef,
@@ -58,7 +58,7 @@ use moa_execution::{
     wire::{
         ExecutionCancelRequest, ExecutionConfirmRequest, ExecutionMutationResponse,
         ExecutionPlanningContextRequest, ExecutionPlanningContextResponse,
-        ExecutionPlanningContextSnapshotV1, ExecutionRunRequest, ExecutionStartRequest,
+        ExecutionPlanningContextSnapshot, ExecutionRunRequest, ExecutionStartRequest,
         ExecutionStartResponse, ExecutionStatusResponse, ExecutionTaskWorkflowRequest,
         planning_context_hash,
     },
@@ -245,7 +245,7 @@ async fn create_test_planning_context(
     authorization: ExecutionAuthorizationEnvelope,
     budget: ExecutionBudgetLimit,
 ) -> Result<(uuid::Uuid, ExecutionHash)> {
-    let snapshot = ExecutionPlanningContextSnapshotV1 {
+    let snapshot = ExecutionPlanningContextSnapshot {
         schema_version: 1,
         tenant_id,
         contact_id: None,
@@ -283,12 +283,11 @@ async fn create_test_planning_context(
     }
 }
 
-fn test_source_provenance(final_plan_hash: &str) -> ExecutionSourceProvenanceV1 {
-    ExecutionSourceProvenanceV1::GeneratedPlan {
-        route_reason: ExecutionRouteReason::ExplicitRun,
-        planner: GeneratedPlanPlannerProvenanceV1 {
+fn test_source_provenance(final_plan_hash: &str) -> ExecutionSourceProvenance {
+    ExecutionSourceProvenance::GeneratedPlan {
+        planner: GeneratedPlanPlannerProvenance {
             model: "scripted-fixture".to_string(),
-            prompt_version: "execution-run-service-e2e-v1".to_string(),
+            prompt_version: "execution-run-service-e2e".to_string(),
             candidate_hash: "a".repeat(64),
             compiler_report_hash: "b".repeat(64),
             final_plan_hash: final_plan_hash.to_string(),
@@ -692,16 +691,16 @@ async fn run_wake_handoff_case(mode: &str) -> Result<()> {
                     originating_user_sequence_num,
                     plan_revision: run.plan_revision,
                     status: ExecutionRunAdmissionStatus::AwaitingConfirmation,
-                    confirmation: Some(ExecutionConfirmationEvidenceV1 {
+                    confirmation: Some(ExecutionConfirmationEvidence {
                         active_plan_hash: run.active_plan_hash.to_string(),
-                        estimate: ExecutionAdmissionEstimateV1 {
+                        estimate: ExecutionAdmissionEstimate {
                             cost_microusd: run.active_plan.estimate.cost_microusd,
                             tokens: run.active_plan.estimate.tokens,
                             tasks: run.active_plan.estimate.tasks,
                             tool_calls: run.active_plan.estimate.tool_calls,
                             retrieved_bytes: run.active_plan.estimate.retrieved_bytes,
                         },
-                        methodology: ExecutionEstimateMethodologyV1::ConservativeWorstCaseV1,
+                        methodology: ExecutionEstimateMethodology::ConservativeWorstCase,
                     }),
                 },
                 approved_budget: run.approved_budget.clone(),

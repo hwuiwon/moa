@@ -226,7 +226,7 @@ async fn seed_execution_analytics_fixture(
              (run_uid, tenant_id, session_id, originating_user_sequence_num, planning_context_uid, \
               planning_context_hash, owner_user_id, goal_contract, initial_plan, active_plan, \
               initial_plan_hash, active_plan_hash, capability_catalog, authorization_envelope, \
-              source_provenance, source_kind, route_mode, route_reason, skill_template_ref, \
+              source_provenance, source_kind, skill_template_ref, \
               skill_template_revision_uid, input, status, progress_total_tasks) \
          VALUES ($1, $2, $3, 1, $4, $5, 'user-1', \
                  '{\"requirements\":[{\"id\":\"r1\"},{\"id\":\"r2\"}], \
@@ -234,11 +234,9 @@ async fn seed_execution_analytics_fixture(
                  '{}'::JSONB, '{}'::JSONB, $6, $6, '{}'::JSONB, '{}'::JSONB, \
                  jsonb_build_object( \
                     'kind', 'skill_template', \
-                    'route_reason', 'selected_execution_template', \
                     'skill_template_ref', 'skill://billing-flow', \
                     'skill_template_revision_uid', lower($7::TEXT)), \
-                 'skill_template', 'run', 'selected_execution_template', \
-                 'skill://billing-flow', $7, '{}'::JSONB, 'queued', 1)",
+                 'skill_template', 'skill://billing-flow', $7, '{}'::JSONB, 'queued', 1)",
     )
     .bind(fixture.run_uid)
     .bind(tenant)
@@ -321,16 +319,20 @@ async fn seed_completed_execution_upgrade_state(
 ) -> TestResult<()> {
     sqlx::query(
         "INSERT INTO analytics.clickhouse_schema_upgrade_state ( \
-             upgrade_key, stage, upgrade_version, export_version_floor, \
+             upgrade_key, database_uuid, run_table_uuid, task_table_uuid, \
+             stage, upgrade_version, export_version_floor, \
              run_high_water_seq, run_high_water_id, task_high_water_seq, task_high_water_id, \
              run_page_seq, run_page_id, task_page_seq, task_page_id, completed_at \
          ) VALUES ( \
-             'execution_dimensions_v2', 'complete', $1, $1, \
+             'execution_dimensions', $3, $4, $5, 'complete', $1, $1, \
              0, $2, 0, $2, 0, $2, 0, $2, NOW() \
          )",
     )
     .bind(export_version_floor)
     .bind(Uuid::nil())
+    .bind(Uuid::from_u128(1))
+    .bind(Uuid::from_u128(2))
+    .bind(Uuid::from_u128(3))
     .execute(pool)
     .await?;
     for table in ["dim_execution_runs", "dim_execution_tasks"] {
@@ -357,8 +359,6 @@ struct ExecutionRunFact {
     initial_plan_hash: String,
     active_plan_hash: String,
     plan_revision: i64,
-    route_mode: String,
-    route_reason: String,
     source_kind: String,
     skill_template_ref: Option<String>,
     skill_template_revision_uid: Option<Uuid>,
@@ -443,8 +443,6 @@ fn assert_execution_run_parity(actual: &DimExecutionRunRow, expected: &Execution
     assert_eq!(actual.initial_plan_hash, expected.initial_plan_hash);
     assert_eq!(actual.active_plan_hash, expected.active_plan_hash);
     assert_eq!(actual.plan_revision, exact_u64(expected.plan_revision));
-    assert_eq!(actual.route_mode, expected.route_mode);
-    assert_eq!(actual.route_reason, expected.route_reason);
     assert_eq!(actual.source_kind, expected.source_kind);
     assert_eq!(actual.skill_template_ref, expected.skill_template_ref);
     assert_eq!(
@@ -791,7 +789,7 @@ async fn execution_analytics_export_matches_postgres_facts_field_for_field_db() 
         .await?;
     let run_fact: ExecutionRunFact = sqlx::query_as(
         "SELECT run_uid, tenant_id, contact_id, session_id, initial_plan_hash, active_plan_hash, \
-                plan_revision, route_mode, route_reason, source_kind, skill_template_ref, \
+                plan_revision, source_kind, skill_template_ref, \
                 skill_template_revision_uid, status, terminal_reason, requirement_count, \
                 satisfied_requirement_count, completion_check_count, logical_task_count, \
                 queued_at, started_at, queue_to_start_ms, completed_at, duration_ms, \

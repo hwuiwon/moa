@@ -13,10 +13,10 @@ use moa_core::{
     error::{MoaError, Result},
     traits::LLMProvider,
     types::execution_planning::{
-        ExecutionAuditReportV1, ExecutionAuditViolationV1, ExecutionCompileOutcome,
+        ExecutionAuditReport, ExecutionAuditViolation, ExecutionCompileOutcome,
         ExecutionCompileSource, ExecutionPlannerCallKind, ExecutionPlannerOutcome,
-        ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1, ExecutionRouteDecision,
-        ExecutionRouteReason, ExecutionSourceProvenanceV1, GeneratedPlanPlannerProvenanceV1,
+        ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload, ExecutionRouteDecision,
+        ExecutionSourceProvenance, ExecutionStrategy, GeneratedPlanPlannerProvenance,
         bounded_audit_report, canonical_json_bytes, execution_planning_hash,
     },
 };
@@ -40,10 +40,10 @@ pub use response::{
     ExecutionPlanningResult, ExecutionPlanningResultKind,
 };
 pub use routing::{
-    EXECUTION_ROUTER_HIGH_RISK_CONFIDENCE_BPS, EXECUTION_ROUTER_MAX_OUTPUT_TOKENS,
-    EXECUTION_ROUTER_PROMPT_VERSION, EXECUTION_ROUTER_RESPONSE_MAX_BYTES,
-    EXECUTION_ROUTER_RUN_CONFIDENCE_BPS, ExecutionRouteClassifierLabelV1,
-    ExecutionRouteClassifierOutputV1, ExecutionRoutingInput, record_applied_route_audit,
+    EXECUTION_ROUTER_DURABLE_CONFIDENCE_BPS, EXECUTION_ROUTER_HIGH_RISK_CONFIDENCE_BPS,
+    EXECUTION_ROUTER_MAX_OUTPUT_TOKENS, EXECUTION_ROUTER_PROMPT_VERSION,
+    EXECUTION_ROUTER_RESPONSE_MAX_BYTES, ExecutionRouteClassifierLabel,
+    ExecutionRouteClassifierOutput, ExecutionRoutingInput, record_applied_route_audit,
     route_execution,
 };
 
@@ -63,7 +63,6 @@ enum ClassifiedCompileOutcome {
 pub async fn plan_execution(
     provider: &dyn LLMProvider,
     request: ExecutionPlanningRequest,
-    route_reason: ExecutionRouteReason,
 ) -> Result<ExecutionPlanningResult> {
     request
         .context
@@ -80,7 +79,7 @@ pub async fn plan_execution(
     if let Some(invocation) = request.execution_template.clone() {
         return instantiate_template(&request, invocation).await;
     }
-    plan_generated(provider, request, route_reason).await
+    plan_generated(provider, request).await
 }
 
 async fn instantiate_template(
@@ -171,8 +170,7 @@ async fn instantiate_template(
                 kind: ExecutionPlanningResultKind::Ready(Box::new(AdmittedExecutionPlan {
                     compiled: compiled_plan,
                     run_input: candidate.run_input,
-                    source_provenance: ExecutionSourceProvenanceV1::SkillTemplate {
-                        route_reason: ExecutionRouteReason::SelectedExecutionTemplate,
+                    source_provenance: ExecutionSourceProvenance::SkillTemplate {
                         skill_template_ref: canonical_ref,
                         skill_template_revision_uid: template.revision_uid,
                     },
@@ -196,7 +194,6 @@ async fn instantiate_template(
 async fn plan_generated(
     provider: &dyn LLMProvider,
     request: ExecutionPlanningRequest,
-    route_reason: ExecutionRouteReason,
 ) -> Result<ExecutionPlanningResult> {
     let initial_request = request::initial_completion_request(&request)
         .map_err(|error| MoaError::SerializationError(error.to_string()))?;
@@ -235,7 +232,6 @@ async fn plan_generated(
     if first.classification == ClassifiedCompileOutcome::Accepted {
         return admitted_generated(
             &request,
-            route_reason,
             *candidate,
             candidate_hash,
             model,
@@ -279,7 +275,7 @@ async fn plan_generated(
     if canonical_string(&repaired.goal)? != immutable_goal_json {
         let report = bounded_audit_report(
             false,
-            vec![ExecutionAuditViolationV1 {
+            vec![ExecutionAuditViolation {
                 code: "immutable_goal_changed".to_string(),
                 path: "/goal".to_string(),
                 message: "repair must preserve the complete immutable goal contract".to_string(),
@@ -322,7 +318,6 @@ async fn plan_generated(
     if second.classification == ClassifiedCompileOutcome::Accepted {
         return admitted_generated(
             &request,
-            route_reason,
             *repaired,
             repaired_hash,
             repaired_model,
@@ -336,7 +331,7 @@ async fn plan_generated(
 
 struct ProviderCall {
     parsed: ParsedProviderCall,
-    audit: ExecutionPlanningAuditEnvelopeV1,
+    audit: ExecutionPlanningAuditEnvelope,
 }
 
 enum ParsedProviderCall {
@@ -385,10 +380,10 @@ async fn call_initial_provider(
     let raw = response.text;
     let duration = duration_micros(started);
     if raw.len() > EXECUTION_PLANNER_CANDIDATE_MAX_BYTES {
-        let raw_hash = execution_planning_hash("moa.execution.planner-response.v1", raw.as_bytes());
+        let raw_hash = execution_planning_hash("moa.execution.planner-response", raw.as_bytes());
         let content_hash =
-            execution_planning_hash("moa.execution.oversized-content.v1", raw.as_bytes());
-        let report = ExecutionAuditReportV1::Oversized {
+            execution_planning_hash("moa.execution.oversized-content", raw.as_bytes());
+        let report = ExecutionAuditReport::Oversized {
             field: moa_core::types::execution_planning::ExecutionOversizedAuditField::Candidate,
             limit_bytes: EXECUTION_PLANNER_CANDIDATE_MAX_BYTES as u64,
             observed_bytes: u64::try_from(raw.len()).map_err(|_| {
@@ -418,10 +413,10 @@ async fn call_initial_provider(
         Ok(candidate) => candidate,
         Err(_) => {
             let raw_hash =
-                execution_planning_hash("moa.execution.planner-response.v1", raw.as_bytes());
+                execution_planning_hash("moa.execution.planner-response", raw.as_bytes());
             let report = bounded_audit_report(
                 false,
-                vec![ExecutionAuditViolationV1 {
+                vec![ExecutionAuditViolation {
                     code: "invalid_generated_execution_candidate".to_string(),
                     path: "/".to_string(),
                     message: "provider response does not match GeneratedExecutionCandidate"
@@ -453,10 +448,8 @@ async fn call_initial_provider(
             "canonical planner candidate exceeds the byte cap".to_string(),
         ));
     }
-    let candidate_hash = execution_planning_hash(
-        "moa.execution.planner-candidate.v1",
-        candidate_json.as_bytes(),
-    );
+    let candidate_hash =
+        execution_planning_hash("moa.execution.planner-candidate", candidate_json.as_bytes());
     Ok(ProviderCall {
         parsed: ParsedProviderCall::Candidate {
             candidate: Box::new(candidate),
@@ -526,7 +519,7 @@ fn compile_candidate(
         run_input: &candidate.run_input,
     };
     let candidate_hash = execution_planning_hash(
-        "moa.execution.compile-candidate.v1",
+        "moa.execution.compile-candidate",
         &artifact_canonical_json_bytes(&preimage)
             .map_err(|error| MoaError::SerializationError(error.to_string()))?,
     );
@@ -617,11 +610,11 @@ fn classify_validation_report(
     }
 }
 
-fn compiler_audit_report(report: &ExecutionValidationReport) -> Result<ExecutionAuditReportV1> {
+fn compiler_audit_report(report: &ExecutionValidationReport) -> Result<ExecutionAuditReport> {
     let violations = report
         .issues
         .iter()
-        .map(|issue| ExecutionAuditViolationV1 {
+        .map(|issue| ExecutionAuditViolation {
             code: issue.code.clone(),
             path: issue.path.clone(),
             message: issue.message.clone(),
@@ -630,20 +623,20 @@ fn compiler_audit_report(report: &ExecutionValidationReport) -> Result<Execution
     bounded_audit_report(true, violations).map_err(contract_error)
 }
 
-fn report_hash(report: &ExecutionAuditReportV1) -> &str {
+fn report_hash(report: &ExecutionAuditReport) -> &str {
     match report {
-        ExecutionAuditReportV1::Schema {
+        ExecutionAuditReport::Schema {
             full_report_hash, ..
         }
-        | ExecutionAuditReportV1::Compiler {
+        | ExecutionAuditReport::Compiler {
             full_report_hash, ..
         } => full_report_hash,
-        ExecutionAuditReportV1::Oversized { content_hash, .. } => content_hash,
+        ExecutionAuditReport::Oversized { content_hash, .. } => content_hash,
     }
 }
 
 fn replace_planner_audit_after_compile(
-    audit: &mut ExecutionPlanningAuditEnvelopeV1,
+    audit: &mut ExecutionPlanningAuditEnvelope,
     compiled: &CandidateCompile,
     candidate_json: &str,
 ) -> Result<()> {
@@ -653,10 +646,8 @@ fn replace_planner_audit_after_compile(
         ClassifiedCompileOutcome::Unsupported => ExecutionPlannerOutcome::Unsupported,
         ClassifiedCompileOutcome::Rejected => ExecutionPlannerOutcome::CompilerRejected,
     };
-    let candidate_hash = execution_planning_hash(
-        "moa.execution.planner-candidate.v1",
-        candidate_json.as_bytes(),
-    );
+    let candidate_hash =
+        execution_planning_hash("moa.execution.planner-candidate", candidate_json.as_bytes());
     set_planner_audit(
         audit,
         outcome,
@@ -668,13 +659,13 @@ fn replace_planner_audit_after_compile(
 }
 
 fn set_planner_audit(
-    audit: &mut ExecutionPlanningAuditEnvelopeV1,
+    audit: &mut ExecutionPlanningAuditEnvelope,
     outcome: ExecutionPlannerOutcome,
     candidate_hash: Option<String>,
     candidate_json: Option<String>,
     compiler_report: Option<String>,
 ) {
-    let ExecutionPlanningAuditPayloadV1::PlannerCall {
+    let ExecutionPlanningAuditPayload::PlannerCall {
         outcome: stored_outcome,
         candidate_hash: stored_hash,
         candidate_json: stored_candidate,
@@ -704,14 +695,14 @@ fn planner_audit(
     candidate_json: Option<String>,
     compiler_report: Option<String>,
     duration_micros: u64,
-) -> ExecutionPlanningAuditEnvelopeV1 {
-    ExecutionPlanningAuditEnvelopeV1 {
+) -> ExecutionPlanningAuditEnvelope {
+    ExecutionPlanningAuditEnvelope {
         schema_version: 1,
         tenant_id: request.context.tenant_id,
         contact_id: request.context.contact_id,
         session_id: Some(request.context.session_id),
         originating_sequence: Some(request.context.originating_user_sequence_num),
-        payload: ExecutionPlanningAuditPayloadV1::PlannerCall {
+        payload: ExecutionPlanningAuditPayload::PlannerCall {
             call_kind,
             call_ordinal,
             run_uid: None,
@@ -733,20 +724,20 @@ fn compile_audit(
     compiled: &CandidateCompile,
     source: ExecutionCompileSource,
     operation_key: String,
-) -> ExecutionPlanningAuditEnvelopeV1 {
+) -> ExecutionPlanningAuditEnvelope {
     let outcome = match compiled.classification {
         ClassifiedCompileOutcome::Accepted => ExecutionCompileOutcome::Accepted,
         ClassifiedCompileOutcome::NeedsInput => ExecutionCompileOutcome::NeedsInput,
         ClassifiedCompileOutcome::Unsupported => ExecutionCompileOutcome::Unsupported,
         ClassifiedCompileOutcome::Rejected => ExecutionCompileOutcome::Rejected,
     };
-    ExecutionPlanningAuditEnvelopeV1 {
+    ExecutionPlanningAuditEnvelope {
         schema_version: 1,
         tenant_id: request.context.tenant_id,
         contact_id: request.context.contact_id,
         session_id: Some(request.context.session_id),
         originating_sequence: Some(request.context.originating_user_sequence_num),
-        payload: ExecutionPlanningAuditPayloadV1::Compile {
+        payload: ExecutionPlanningAuditPayload::Compile {
             source,
             operation_key,
             run_uid: None,
@@ -765,19 +756,14 @@ fn compile_audit(
     }
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "admission keeps the compiled result and its exact provenance cohort explicit"
-)]
 fn admitted_generated(
     request: &ExecutionPlanningRequest,
-    route_reason: ExecutionRouteReason,
     candidate: GeneratedExecutionCandidate,
     candidate_hash: String,
     model: String,
     compiled: CandidateCompile,
     repair_attempts: u8,
-    audits: Vec<ExecutionPlanningAuditEnvelopeV1>,
+    audits: Vec<ExecutionPlanningAuditEnvelope>,
 ) -> Result<ExecutionPlanningResult> {
     let compiled_plan = compiled
         .outcome
@@ -788,9 +774,8 @@ fn admitted_generated(
         kind: ExecutionPlanningResultKind::Ready(Box::new(AdmittedExecutionPlan {
             compiled: compiled_plan,
             run_input: candidate.run_input,
-            source_provenance: ExecutionSourceProvenanceV1::GeneratedPlan {
-                route_reason,
-                planner: GeneratedPlanPlannerProvenanceV1 {
+            source_provenance: ExecutionSourceProvenance::GeneratedPlan {
+                planner: GeneratedPlanPlannerProvenance {
                     model,
                     prompt_version: EXECUTION_PLANNER_PROMPT_VERSION.to_string(),
                     candidate_hash,
@@ -807,7 +792,7 @@ fn admitted_generated(
 
 fn terminal_provider_result(
     parsed: ParsedProviderCall,
-    audits: Vec<ExecutionPlanningAuditEnvelopeV1>,
+    audits: Vec<ExecutionPlanningAuditEnvelope>,
 ) -> ExecutionPlanningResult {
     match parsed {
         ParsedProviderCall::Unsupported(message) => unsupported(message, audits),
@@ -817,7 +802,7 @@ fn terminal_provider_result(
 
 fn classified_terminal(
     classification: ClassifiedCompileOutcome,
-    audits: Vec<ExecutionPlanningAuditEnvelopeV1>,
+    audits: Vec<ExecutionPlanningAuditEnvelope>,
 ) -> ExecutionPlanningResult {
     match classification {
         ClassifiedCompileOutcome::NeedsInput => ExecutionPlanningResult {
@@ -839,7 +824,7 @@ fn classified_terminal(
 
 fn unsupported(
     message: impl Into<String>,
-    audits: Vec<ExecutionPlanningAuditEnvelopeV1>,
+    audits: Vec<ExecutionPlanningAuditEnvelope>,
 ) -> ExecutionPlanningResult {
     ExecutionPlanningResult {
         kind: ExecutionPlanningResultKind::Unsupported {
@@ -871,16 +856,16 @@ fn contract_error(
     MoaError::ValidationError(error.to_string())
 }
 
-/// Returns whether a rejected pinned template may safely fall back to bounded Act.
+/// Returns whether a rejected pinned template may safely fall back to Inline Execute.
 #[must_use]
-pub fn pinned_template_may_fallback_to_act(
+pub fn pinned_template_may_fallback_to_inline(
     independent_route: &ExecutionRouteDecision,
     report: &ExecutionValidationReport,
 ) -> bool {
     if !matches!(
         independent_route,
-        ExecutionRouteDecision::Routed {
-            mode: moa_core::types::execution_planning::ExecutionMode::Act,
+        ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Inline,
             ..
         }
     ) {
@@ -989,7 +974,7 @@ pub async fn plan_amendment(
 
 struct AmendmentProviderCall {
     parsed: ParsedAmendmentCall,
-    audit: ExecutionPlanningAuditEnvelopeV1,
+    audit: ExecutionPlanningAuditEnvelope,
 }
 
 enum ParsedAmendmentCall {
@@ -1037,15 +1022,15 @@ async fn call_amendment_provider(
     let raw = response.text;
     let duration = duration_micros(started);
     if raw.len() > EXECUTION_PLANNER_CANDIDATE_MAX_BYTES {
-        let raw_hash = execution_planning_hash("moa.execution.planner-response.v1", raw.as_bytes());
-        let report = ExecutionAuditReportV1::Oversized {
+        let raw_hash = execution_planning_hash("moa.execution.planner-response", raw.as_bytes());
+        let report = ExecutionAuditReport::Oversized {
             field: moa_core::types::execution_planning::ExecutionOversizedAuditField::Candidate,
             limit_bytes: EXECUTION_PLANNER_CANDIDATE_MAX_BYTES as u64,
             observed_bytes: u64::try_from(raw.len()).map_err(|_| {
                 MoaError::ValidationError("planner response length does not fit u64".to_string())
             })?,
             content_hash: execution_planning_hash(
-                "moa.execution.oversized-content.v1",
+                "moa.execution.oversized-content",
                 raw.as_bytes(),
             ),
         };
@@ -1071,7 +1056,7 @@ async fn call_amendment_provider(
         Err(_) => {
             let report = bounded_audit_report(
                 false,
-                vec![ExecutionAuditViolationV1 {
+                vec![ExecutionAuditViolation {
                     code: "invalid_generated_amendment_candidate".to_string(),
                     path: "/".to_string(),
                     message: "provider response does not match GeneratedAmendmentCandidate"
@@ -1090,7 +1075,7 @@ async fn call_amendment_provider(
                     ExecutionPlannerOutcome::SchemaRejected,
                     response.model.to_string(),
                     Some(execution_planning_hash(
-                        "moa.execution.planner-response.v1",
+                        "moa.execution.planner-response",
                         raw.as_bytes(),
                     )),
                     None,
@@ -1101,10 +1086,8 @@ async fn call_amendment_provider(
         }
     };
     let candidate_json = canonical_string(&candidate)?;
-    let candidate_hash = execution_planning_hash(
-        "moa.execution.planner-candidate.v1",
-        candidate_json.as_bytes(),
-    );
+    let candidate_hash =
+        execution_planning_hash("moa.execution.planner-candidate", candidate_json.as_bytes());
     Ok(AmendmentProviderCall {
         parsed: ParsedAmendmentCall::Candidate {
             candidate,
@@ -1179,7 +1162,7 @@ fn compile_amendment_candidate(
         amendment: &candidate.amendment,
     };
     let compile_candidate_hash = execution_planning_hash(
-        "moa.execution.compile-candidate.v1",
+        "moa.execution.compile-candidate",
         &artifact_canonical_json_bytes(&preimage)
             .map_err(|error| MoaError::SerializationError(error.to_string()))?,
     );
@@ -1221,14 +1204,14 @@ fn amendment_planner_audit(
     candidate_json: Option<String>,
     compiler_report: Option<String>,
     duration_micros: u64,
-) -> ExecutionPlanningAuditEnvelopeV1 {
-    ExecutionPlanningAuditEnvelopeV1 {
+) -> ExecutionPlanningAuditEnvelope {
+    ExecutionPlanningAuditEnvelope {
         schema_version: 1,
         tenant_id: request.context.tenant_id,
         contact_id: request.context.contact_id,
         session_id: Some(request.context.session_id),
         originating_sequence: Some(request.context.originating_user_sequence_num),
-        payload: ExecutionPlanningAuditPayloadV1::PlannerCall {
+        payload: ExecutionPlanningAuditPayload::PlannerCall {
             call_kind,
             call_ordinal,
             run_uid: Some(request.run_uid),
@@ -1246,7 +1229,7 @@ fn amendment_planner_audit(
 }
 
 fn replace_amendment_planner_audit_after_compile(
-    audit: &mut ExecutionPlanningAuditEnvelopeV1,
+    audit: &mut ExecutionPlanningAuditEnvelope,
     compiled: &AmendmentCompile,
     candidate_json: &str,
 ) -> Result<()> {
@@ -1255,7 +1238,7 @@ fn replace_amendment_planner_audit_after_compile(
         audit,
         outcome,
         Some(execution_planning_hash(
-            "moa.execution.planner-candidate.v1",
+            "moa.execution.planner-candidate",
             candidate_json.as_bytes(),
         )),
         Some(candidate_json.to_string()),
@@ -1276,14 +1259,14 @@ fn planner_outcome(classification: ClassifiedCompileOutcome) -> ExecutionPlanner
 fn amendment_compile_audit(
     request: &ExecutionAmendmentPlanningRequest,
     compiled: &AmendmentCompile,
-) -> ExecutionPlanningAuditEnvelopeV1 {
-    ExecutionPlanningAuditEnvelopeV1 {
+) -> ExecutionPlanningAuditEnvelope {
+    ExecutionPlanningAuditEnvelope {
         schema_version: 1,
         tenant_id: request.context.tenant_id,
         contact_id: request.context.contact_id,
         session_id: Some(request.context.session_id),
         originating_sequence: Some(request.context.originating_user_sequence_num),
-        payload: ExecutionPlanningAuditPayloadV1::Compile {
+        payload: ExecutionPlanningAuditPayload::Compile {
             source: ExecutionCompileSource::Amendment,
             operation_key: format!(
                 "run:{}:{}:amendment:{}",
@@ -1314,7 +1297,7 @@ fn admitted_amendment(
     candidate: GeneratedAmendmentCandidate,
     candidate_hash: String,
     compiled: AmendmentCompile,
-    audits: Vec<ExecutionPlanningAuditEnvelopeV1>,
+    audits: Vec<ExecutionPlanningAuditEnvelope>,
 ) -> Result<ExecutionAmendmentPlanningResult> {
     let plan = compiled.outcome.plan.ok_or_else(|| {
         MoaError::ValidationError("accepted amendment compile omitted plan".to_string())
@@ -1331,7 +1314,7 @@ fn admitted_amendment(
 
 fn amendment_terminal_provider(
     parsed: ParsedAmendmentCall,
-    audits: Vec<ExecutionPlanningAuditEnvelopeV1>,
+    audits: Vec<ExecutionPlanningAuditEnvelope>,
 ) -> ExecutionAmendmentPlanningResult {
     match parsed {
         ParsedAmendmentCall::Unsupported(message) => amendment_unsupported(message, audits),
@@ -1343,7 +1326,7 @@ fn amendment_terminal_provider(
 
 fn amendment_classified_terminal(
     classification: ClassifiedCompileOutcome,
-    audits: Vec<ExecutionPlanningAuditEnvelopeV1>,
+    audits: Vec<ExecutionPlanningAuditEnvelope>,
 ) -> ExecutionAmendmentPlanningResult {
     match classification {
         ClassifiedCompileOutcome::NeedsInput => ExecutionAmendmentPlanningResult {
@@ -1366,7 +1349,7 @@ fn amendment_classified_terminal(
 
 fn amendment_unsupported(
     message: impl Into<String>,
-    audits: Vec<ExecutionPlanningAuditEnvelopeV1>,
+    audits: Vec<ExecutionPlanningAuditEnvelope>,
 ) -> ExecutionAmendmentPlanningResult {
     ExecutionAmendmentPlanningResult {
         kind: ExecutionAmendmentPlanningResultKind::Unsupported {
@@ -1382,10 +1365,10 @@ mod tests {
 
     #[test]
     fn execution_planning_pinned_template_fallback_is_gap_closed() {
-        // Pins: Act fallback is disallowed for every authority/input/execution-shape gap.
-        let act = ExecutionRouteDecision::Routed {
-            mode: moa_core::types::execution_planning::ExecutionMode::Act,
-            reason: ExecutionRouteReason::BoundedInteractiveWork,
+        // Pins: Inline fallback is disallowed for every authority/input/execution-shape gap.
+        let inline = ExecutionRouteDecision::Execute {
+            strategy: ExecutionStrategy::Inline,
+            rationale: "This request can finish in a bounded interactive loop.".to_string(),
         };
         let structural = ExecutionValidationReport {
             issues: vec![moa_execution::ExecutionValidationIssue {
@@ -1395,7 +1378,7 @@ mod tests {
                 message: "invalid".to_string(),
             }],
         };
-        assert!(pinned_template_may_fallback_to_act(&act, &structural));
+        assert!(pinned_template_may_fallback_to_inline(&inline, &structural));
         for code in [
             "invalid_run_input",
             "capability_not_in_catalog",
@@ -1415,7 +1398,7 @@ mod tests {
                 }],
             };
             assert!(
-                !pinned_template_may_fallback_to_act(&act, &report),
+                !pinned_template_may_fallback_to_inline(&inline, &report),
                 "{code}"
             );
         }

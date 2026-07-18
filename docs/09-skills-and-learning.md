@@ -46,9 +46,10 @@ package to a minimal skill artifact that points at `SKILL.md`.
 
 ## Execution-Plan Templates
 
-A skill is open-ended and agent-mediated: the context pipeline selects it,
-materializes its package, and `act` decides how to use its instructions and
-capabilities. Instruction-only skills remain valid. A skill may also declare an
+A skill is an optional execution input, not a route or an admission gate. The
+context pipeline may select and materialize it for Inline Execute, while a
+Durable `Agent` node may use an explicitly declared skill reference. Custom
+instruction-only skills remain valid in both paths. A skill may also declare an
 optional `execution_plan` in `skill.moa.yaml`; this is a pinned reusable plan
 template, not a second skill type.
 
@@ -60,13 +61,14 @@ instructions; labels and canvas layout belong in non-semantic `ui` metadata.
 Visual editors round-trip the same artifact document and preserve stable node
 IDs.
 
-When `run` selects a high-confidence published skill template, it pins the
-artifact revision, template hash, and input, then compiles an immutable run
-snapshot without a planning-model call. A one-off generated plan instead stores
-its planner model/prompt, candidate JSON, compiler report, capability-catalog
-snapshot, and canonical hash. It is not a skill artifact and is never
-auto-published. Both sources enter the same `ExecutionRun` runtime and
-`moa.execution_run`/`moa.execution_task` persistence.
+When routing selects Execute/Durable and a high-confidence published skill
+template matches, admission pins the artifact revision, template hash, and
+input, then compiles an immutable run snapshot without a planning-model call. A
+one-off generated plan instead stores its planner model/prompt, candidate JSON,
+compiler report, capability-catalog snapshot, and canonical hash. It is not a
+skill artifact and is never auto-published. Both sources enter the same
+`ExecutionRun` runtime and `moa.execution_run`/`moa.execution_task`
+persistence.
 
 `Agent` nodes may activate instruction-only skills and reason freely within
 their declared skill references, capability references, turns, and resource
@@ -79,12 +81,12 @@ Skill-template changes use normal artifact revisions: generated or
 experiment-derived improvements first become draft skill revisions plus
 `LearningCandidateType::Skill` rows. A live run never mutates or publishes a
 skill. Skills without an `execution_plan` retain identical ranking and context
-injection and remain usable in `act` and in plan `Agent` nodes.
+injection and remain usable in Inline Execute and in Durable `Agent` nodes.
 
 ## Execution Capability Catalog
 
 One read-only execution capability catalog feeds planners, compilers, builders,
-`act`, and run nodes. It is tenant-authorized and deterministically ordered.
+Inline Execute, and Durable nodes. It is tenant-authorized and deterministically ordered.
 Every entry includes a stable reference/version, description, input/output
 schemas, action/risk and idempotency classes, execution class, source
 provenance, authorization metadata, and optional cost estimate.
@@ -134,15 +136,21 @@ hand under `.moa/skills/<skill>/...` before the first hand tool executes.
 | Resources | scripts, references, assets | only when needed for execution |
 
 The skill manifest is budgeted and sorted deterministically for cache stability.
-In `act`, the coordinator can activate `SKILL.md`, invoke its governed actions,
-or use a conversational `Worker` for interactive delegation. Worker remains a
-bounded child-agent primitive, not a bulk DAG scheduler. If the request's shape
-requires durable fan-out, joins, reviews, or recovery, `TurnExecution` selects
-or escalates to `run`; the execution compiler and runtime own that graph.
+In Inline Execute, the coordinator can activate `SKILL.md`, invoke its governed
+actions, or use a conversational `Worker` for interactive delegation. Worker
+remains a bounded child-agent primitive, not a bulk DAG scheduler. If an
+initial root Inline turn discovers durable fan-out, joins, reviews, or recovery,
+it may call the workflow-owned `request_durable_execution` control tool for one
+typed, evidence-preserving upgrade to Durable. The tool is available only to
+that eligible turn, must be called alone, and cannot be replaced by arbitrary
+tool-result data. The turn cannot classify again or downgrade; the execution
+compiler and `ExecutionTask` runtime own the graph, with no application fan-out
+cap below the approved run budget.
 
-Skill selection alone does not select `run`. A published template is used only
-after mode routing chooses `run` and the template matches with high confidence.
-Otherwise a strict one-off plan is compiled from the current capability catalog.
+Skill selection alone does not choose Execute or Durable. A published template
+is used only after routing chooses Execute/Durable and the template matches with
+high confidence. Otherwise a strict one-off plan is compiled from the current
+capability catalog.
 
 ## Skill Ranking
 

@@ -1,8 +1,7 @@
-//! Deterministic service coverage for Respond, Act, template, and generated-plan routing.
+//! Deterministic service coverage for Respond, Execute, template, and generated-plan routing.
 //!
-//! Instruction-skill activation in conversational Act mode remains pinned by
-//! `integration/agent_artifacts_e2e::support_agent_selects_refund_skill_without_starting_execution_run`;
-//! this module adds the non-duplicative task-local Agent half.
+//! This module pins instruction-only skill activation independently in the bounded Inline loop
+//! and inside a Durable Agent task so skill shape cannot become a hidden routing contract.
 
 use anyhow::{Context, Result};
 use moa_artifacts::document::ArtifactKind;
@@ -12,14 +11,18 @@ use moa_artifacts::execution_plan::{
     ExecutionRequirement, GeneratedExecutionCandidate, RetryPolicy,
 };
 use moa_artifacts::reference::ArtifactRef;
-use moa_core::events::Event;
+use moa_core::events::{
+    Event, ExecutionRunEvidenceRef, ExecutionSynthesisRequested, ExecutionTaskResultsRef,
+    ExecutionTerminalSummary,
+};
+use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::execution_planning::{
-    ExecutionMode, ExecutionRouteReason, ExecutionRunAdmissionStatus, ExecutionSourceProvenanceV1,
+    ExecutionRouteKind, ExecutionRunAdmissionStatus, ExecutionSourceProvenance, ExecutionStrategy,
     ExecutionTemplateInvocation, PinnedExecutionTemplateRef,
 };
 use moa_core::types::session::SessionStatus;
-use moa_core::wire::turn::TurnOutcomeKind;
-use moa_eval::execution::ExecutionInvariantSpecV1;
+use moa_core::wire::turn::{RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnTrigger};
+use moa_eval::execution::ExecutionInvariantSpec;
 use moa_execution::{
     repository::{ExecutionRepository, ExecutionScope},
     state::{ExecutionRunStatus, ExecutionTaskStatus},
@@ -30,7 +33,7 @@ use moa_test_support::{
 };
 use serde_json::{Value, json};
 
-use crate::evaluation::{assert_execution_eval_case, assert_non_run_eval};
+use crate::evaluation::{assert_execution_eval_case, assert_non_durable_eval};
 use crate::execution_execution_support::assertions::{
     JournalRequestRole, assert_completed_terminal, assert_generated_plan_audits,
     assert_initial_route, assert_no_execution_lifecycle_events, assert_no_planner_or_compile,
@@ -38,7 +41,7 @@ use crate::execution_execution_support::assertions::{
     journal_requests, journal_roles, planning_audits, sole_event_sequence,
 };
 use crate::execution_execution_support::fixtures::{
-    SERVICE_TIMEOUT, await_active_execution_progress, await_execution_terminal,
+    RouteFixture, SERVICE_TIMEOUT, await_active_execution_progress, await_execution_terminal,
     await_run_started_event, await_session_settled, await_turn_outcome, execution_run_request,
     list_execution_tasks, publish_skill, raw_events, route_classifier_completion,
     seed_allow_policy, start_turn, start_turn_in_session,
@@ -46,19 +49,24 @@ use crate::execution_execution_support::fixtures::{
 
 const RESPOND_OBJECTIVE: &str = "What is a DAG?";
 const RESPOND_FINAL: &str = "A DAG is a directed acyclic graph.";
-const ACT_OBJECTIVE: &str = "Investigate the unusual failure and explain it";
-const ACT_TOOL_NAME: &str = "inspect_fixture_failure";
-const ACT_TOOL_RESULT: &str = "fixture-analysis-complete";
-const ACT_FINAL: &str = "The fixture analysis found the bounded cause.";
+const INLINE_OBJECTIVE: &str = "Investigate the unusual failure and explain it";
+const INLINE_TOOL_NAME: &str = "inspect_fixture_failure";
+const INLINE_TOOL_RESULT: &str = "fixture-analysis-complete";
+const INLINE_FINAL: &str = "The fixture analysis found the bounded cause.";
 const SYNTHESIS_MATCH: &str = "Synthesize the final user response for execution run";
 const TEMPLATE_SKILL_NAME: &str = "service-template-report";
 const TEMPLATE_FINAL: &str = "The pinned template produced the requested report.";
-const RESEARCH_AGENT_SENTINEL: &str = "NO_SKILL_RESEARCH_AGENT_V1";
+const RESEARCH_AGENT_SENTINEL: &str = "NO_SKILL_RESEARCH_AGENT";
 const RESEARCH_FINAL: &str = "The durable no-skill research run completed.";
 const INSTRUCTION_SKILL_NAME: &str = "agent-task-research";
 const INSTRUCTION_SKILL_SENTINEL: &str = "AGENT_TASK_SKILL_SENTINEL_42";
-const INSTRUCTION_AGENT_SENTINEL: &str = "USE_PINNED_AGENT_TASK_SKILL_V1";
+const INSTRUCTION_AGENT_SENTINEL: &str = "USE_PINNED_AGENT_TASK_SKILL";
 const INSTRUCTION_FINAL: &str = "The pinned instruction skill completed inside the Agent task.";
+const INLINE_INSTRUCTION_OBJECTIVE: &str =
+    "Use the agent-task-research instruction skill to inspect this bounded case";
+const INLINE_INSTRUCTION_FINAL: &str =
+    "The instruction-only skill guided the bounded Inline result.";
+const INSTRUCTION_SKILL_PATH: &str = ".moa/skills/agent-task-research/SKILL.md";
 const PLANNER_MATCH: &str = "<frozen_planning_context>";
 
 #[tokio::test]
@@ -69,8 +77,8 @@ async fn respond_simple_question_uses_no_tools_planner_or_run_service_e2e() -> R
         json!({
             "default": text_completion(RESPOND_FINAL),
             "keyed": [route_classifier_completion(
-                ExecutionMode::Respond,
-                ExecutionRouteReason::SimpleResponse,
+                ExecutionRouteKind::Respond,
+                RouteFixture::Respond,
             )]
         }),
         FixtureCapabilityOptions::default(),
@@ -89,11 +97,7 @@ async fn respond_simple_question_uses_no_tools_planner_or_run_service_e2e() -> R
 
     let events = raw_events(test.client(), started.session_id).await?;
     let audits = planning_audits(&fixture.postgres_url, started.session_id).await?;
-    assert_initial_route(
-        &audits,
-        ExecutionMode::Respond,
-        ExecutionRouteReason::SimpleResponse,
-    );
+    assert_initial_route(&audits, ExecutionRouteKind::Respond, None);
     assert_no_planner_or_compile(&audits);
     assert_eq!(
         event_count(&events, |event| matches!(event, Event::ToolCall { .. })),
@@ -104,12 +108,7 @@ async fn respond_simple_question_uses_no_tools_planner_or_run_service_e2e() -> R
         0
     );
     assert_no_execution_lifecycle_events(&events);
-    assert_non_run_eval(
-        &audits,
-        &events,
-        ExecutionMode::Respond,
-        ExecutionRouteReason::SimpleResponse,
-    );
+    assert_non_durable_eval(&audits, &events, ExecutionRouteKind::Respond, None);
     assert_eq!(final_brain_response(&events)?, RESPOND_FINAL);
 
     let requests = journal_requests(fixture.scripted_requests()?)?;
@@ -122,7 +121,7 @@ async fn respond_simple_question_uses_no_tools_planner_or_run_service_e2e() -> R
             .response_format
             .as_ref()
             .map(|format| format.name.as_str()),
-        Some("execution_route_classifier_v1")
+        Some("execution_route_classifier")
     );
     assert!(requests.iter().all(|request| request.tools.is_empty()));
     assert!(requests[1].response_format.is_none());
@@ -131,24 +130,24 @@ async fn respond_simple_question_uses_no_tools_planner_or_run_service_e2e() -> R
 
 #[tokio::test]
 #[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
-async fn act_executes_bounded_tool_loop_without_run_service_e2e() -> Result<()> {
-    // Pins: Act uses the governed MCP path once, then completes conversationally without a run.
+async fn execute_inline_runs_bounded_tool_loop_without_durable_run_service_e2e() -> Result<()> {
+    // Pins: Execute/Inline uses the governed MCP path once, then completes without a run.
     let fixture = OrchestratorTestFixture::with_execution_fixture(
         json!({
             "default": text_completion("unexpected scripted fallback"),
             "keyed": [
                 route_classifier_completion(
-                    ExecutionMode::Act,
-                    ExecutionRouteReason::BoundedInteractiveWork,
+                    ExecutionRouteKind::Execute,
+                    RouteFixture::Inline,
                 ),
-                keyed_completion(ACT_TOOL_RESULT, text_completion(ACT_FINAL)),
+                keyed_completion(INLINE_TOOL_RESULT, text_completion(INLINE_FINAL)),
                 keyed_completion(
-                    ACT_OBJECTIVE,
+                    INLINE_OBJECTIVE,
                     json!({
                         "content": "",
                         "tool_calls": [{
-                            "name": ACT_TOOL_NAME,
-                            "id": "act-fixture-tool-call",
+                            "name": INLINE_TOOL_NAME,
+                            "id": "inline-fixture-tool-call",
                             "input": {"query": "unusual failure"}
                         }]
                     })
@@ -157,7 +156,7 @@ async fn act_executes_bounded_tool_loop_without_run_service_e2e() -> Result<()> 
         }),
         FixtureCapabilityOptions {
             tools: vec![FixtureCapabilityTool {
-                name: ACT_TOOL_NAME.to_string(),
+                name: INLINE_TOOL_NAME.to_string(),
                 description: "Inspect one deterministic fixture failure".to_string(),
                 input_schema: json!({
                     "type": "object",
@@ -167,7 +166,7 @@ async fn act_executes_bounded_tool_loop_without_run_service_e2e() -> Result<()> 
                 }),
                 item_key_pointer: None,
                 outcomes: vec![FixtureCapabilityOutcome::Success {
-                    output: json!({"result": ACT_TOOL_RESULT}),
+                    output: json!({"result": INLINE_TOOL_RESULT}),
                 }],
             }],
             orchestrator_env: Vec::new(),
@@ -175,34 +174,34 @@ async fn act_executes_bounded_tool_loop_without_run_service_e2e() -> Result<()> 
     )
     .await?;
     let test = fixture.isolated().await;
-    let session_id = test.create_session("act-tool-loop").await?;
+    let session_id = test.create_session("execute-inline-tool-loop").await?;
     let session = test.client().get_session(session_id).await?;
-    seed_allow_policy(&fixture, test.client(), session.tenant_id, ACT_TOOL_NAME).await?;
-    let started = start_turn_in_session(&test, session_id, ACT_OBJECTIVE, None).await?;
+    seed_allow_policy(&fixture, test.client(), session.tenant_id, INLINE_TOOL_NAME).await?;
+    let started = start_turn_in_session(&test, session_id, INLINE_OBJECTIVE, None).await?;
 
     let controller = fixture
         .fixture_capability()
         .context("execution fixture omitted capability controller")?;
     let calls = tokio::select! {
         calls = controller.wait_for_calls(1, SERVICE_TIMEOUT) => {
-            calls.context("wait for bounded Act fixture call")?
+            calls.context("wait for bounded Inline fixture call")?
         }
         outcome = await_turn_outcome(test.client(), &started) => {
-            let outcome = outcome.context("await Act outcome before fixture call")?;
+            let outcome = outcome.context("await Inline outcome before fixture call")?;
             anyhow::bail!(
-                "Act turn reached terminal outcome before invoking `{ACT_TOOL_NAME}`: {outcome:?}"
+                "Inline turn reached terminal outcome before invoking `{INLINE_TOOL_NAME}`: {outcome:?}"
             );
         }
     };
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].capability, ACT_TOOL_NAME);
+    assert_eq!(calls[0].capability, INLINE_TOOL_NAME);
     assert_eq!(calls[0].item_key, "");
     assert_eq!(calls[0].input, json!({"query": "unusual failure"}));
     controller.release(1);
 
     let outcome = await_turn_outcome(test.client(), &started).await?;
     assert_eq!(outcome.kind, TurnOutcomeKind::Completed);
-    assert_eq!(outcome.message, ACT_FINAL);
+    assert_eq!(outcome.message, INLINE_FINAL);
     assert_eq!(controller.calls().len(), 1);
     assert_eq!(controller.transport_attempts().len(), 1);
 
@@ -210,8 +209,8 @@ async fn act_executes_bounded_tool_loop_without_run_service_e2e() -> Result<()> 
     let audits = planning_audits(&fixture.postgres_url, started.session_id).await?;
     assert_initial_route(
         &audits,
-        ExecutionMode::Act,
-        ExecutionRouteReason::BoundedInteractiveWork,
+        ExecutionRouteKind::Execute,
+        Some(ExecutionStrategy::Inline),
     );
     assert_no_planner_or_compile(&audits);
     assert_eq!(
@@ -228,16 +227,16 @@ async fn act_executes_bounded_tool_loop_without_run_service_e2e() -> Result<()> 
     assert!(events.iter().any(|record| matches!(
         &record.event,
         Event::ToolCall { tool_name, input, .. }
-            if tool_name == ACT_TOOL_NAME && input == &json!({"query": "unusual failure"})
+            if tool_name == INLINE_TOOL_NAME && input == &json!({"query": "unusual failure"})
     )));
     assert_no_execution_lifecycle_events(&events);
-    assert_non_run_eval(
+    assert_non_durable_eval(
         &audits,
         &events,
-        ExecutionMode::Act,
-        ExecutionRouteReason::BoundedInteractiveWork,
+        ExecutionRouteKind::Execute,
+        Some(ExecutionStrategy::Inline),
     );
-    assert_eq!(final_brain_response(&events)?, ACT_FINAL);
+    assert_eq!(final_brain_response(&events)?, INLINE_FINAL);
 
     let requests = journal_requests(fixture.scripted_requests()?)?;
     assert_eq!(
@@ -253,13 +252,158 @@ async fn act_executes_bounded_tool_loop_without_run_service_e2e() -> Result<()> 
             .response_format
             .as_ref()
             .map(|format| format.name.as_str()),
-        Some("execution_route_classifier_v1")
+        Some("execution_route_classifier")
     );
     assert!(
         requests[1..]
             .iter()
             .all(|request| request.response_format.is_none())
     );
+    assert!(requests[1..].iter().all(|request| {
+        request
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("Pinned instruction skills:"))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
+async fn execute_inline_uses_instruction_only_skill_without_durable_run_service_e2e() -> Result<()>
+{
+    // Pins: selecting and reading an instruction-only skill changes Inline guidance without
+    // changing Execute/Inline into Durable execution or invoking the planner.
+    let fixture = OrchestratorTestFixture::with_execution_fixture(
+        json!({
+            "default": text_completion("unexpected scripted fallback"),
+            "keyed": [
+                route_classifier_completion(
+                    ExecutionRouteKind::Execute,
+                    RouteFixture::Inline,
+                ),
+                keyed_completion(
+                    INSTRUCTION_SKILL_SENTINEL,
+                    text_completion(INLINE_INSTRUCTION_FINAL)
+                ),
+                keyed_completion(
+                    INLINE_INSTRUCTION_OBJECTIVE,
+                    json!({
+                        "content": "",
+                        "tool_calls": [{
+                            "name": "file_read",
+                            "id": "inline-instruction-skill-read",
+                            "input": {"path": INSTRUCTION_SKILL_PATH}
+                        }]
+                    })
+                )
+            ]
+        }),
+        FixtureCapabilityOptions::default(),
+    )
+    .await?;
+    let test = fixture.isolated().await;
+    let session_id = test
+        .create_session("execute-inline-instruction-skill")
+        .await?;
+    let session = test.client().get_session(session_id).await?;
+    let published = publish_skill(
+        &fixture,
+        test.client(),
+        session.tenant_id,
+        INSTRUCTION_SKILL_NAME,
+        instruction_skill_source(),
+        instruction_skill_markdown(),
+    )
+    .await?;
+    assert_eq!(
+        published.skill_ref,
+        ArtifactRef::artifact(ArtifactKind::Skill, INSTRUCTION_SKILL_NAME).to_string()
+    );
+    let started =
+        start_turn_in_session(&test, session_id, INLINE_INSTRUCTION_OBJECTIVE, None).await?;
+
+    let outcome = await_turn_outcome(test.client(), &started).await?;
+    assert_eq!(outcome.kind, TurnOutcomeKind::Completed);
+    assert_eq!(outcome.message, INLINE_INSTRUCTION_FINAL);
+    assert_eq!(
+        await_session_settled(test.client(), started.session_id).await?,
+        SessionStatus::Paused
+    );
+
+    let events = raw_events(test.client(), started.session_id).await?;
+    let audits = planning_audits(&fixture.postgres_url, started.session_id).await?;
+    assert_initial_route(
+        &audits,
+        ExecutionRouteKind::Execute,
+        Some(ExecutionStrategy::Inline),
+    );
+    assert_no_planner_or_compile(&audits);
+    assert_eq!(
+        event_count(&events, |event| matches!(event, Event::ToolCall { .. })),
+        1
+    );
+    assert_eq!(
+        event_count(&events, |event| matches!(
+            event,
+            Event::ToolResult { success: true, .. }
+        )),
+        1
+    );
+    assert!(events.iter().any(|record| matches!(
+        &record.event,
+        Event::ToolCall { tool_name, input, .. }
+            if tool_name == "file_read" && input == &json!({"path": INSTRUCTION_SKILL_PATH})
+    )));
+    assert_no_execution_lifecycle_events(&events);
+    assert_non_durable_eval(
+        &audits,
+        &events,
+        ExecutionRouteKind::Execute,
+        Some(ExecutionStrategy::Inline),
+    );
+    assert_eq!(final_brain_response(&events)?, INLINE_INSTRUCTION_FINAL);
+
+    let requests = journal_requests(fixture.scripted_requests()?)?;
+    assert_eq!(
+        journal_roles(&requests),
+        vec![
+            JournalRequestRole::Normal,
+            JournalRequestRole::Normal,
+            JournalRequestRole::Normal,
+        ]
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                request
+                    .response_format
+                    .as_ref()
+                    .is_some_and(|format| format.name == "execution_route_classifier")
+            })
+            .count(),
+        1
+    );
+    let inline_request = &requests[1];
+    assert!(
+        serde_json::to_string(&inline_request.tools)?.contains("file_read"),
+        "selected instruction skill did not make its declared file_read capability available"
+    );
+    let inline_context = inline_request
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(inline_context.contains(INSTRUCTION_SKILL_NAME));
+    let post_read_context = requests[2]
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(post_read_context.contains(INSTRUCTION_SKILL_SENTINEL));
     Ok(())
 }
 
@@ -348,8 +492,8 @@ async fn published_skill_template_starts_without_plan_generation_service_e2e() -
     let audits = planning_audits(&fixture.postgres_url, started.session_id).await?;
     assert_initial_route(
         &audits,
-        ExecutionMode::Run,
-        ExecutionRouteReason::SelectedExecutionTemplate,
+        ExecutionRouteKind::Execute,
+        Some(ExecutionStrategy::Durable),
     );
     assert_skill_template_audits(&audits);
     assert_eq!(
@@ -377,7 +521,7 @@ async fn published_skill_template_starts_without_plan_generation_service_e2e() -
         request
             .response_format
             .as_ref()
-            .is_none_or(|format| format.name != "generated_execution_candidate_v1")
+            .is_none_or(|format| format.name != "generated_execution_candidate")
     }));
     Ok(())
 }
@@ -393,8 +537,8 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
             "default": text_completion("unexpected scripted fallback"),
             "keyed": [
                 route_classifier_completion(
-                    ExecutionMode::Run,
-                    ExecutionRouteReason::ExplicitRun,
+                    ExecutionRouteKind::Execute,
+                    RouteFixture::Durable,
                 ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion(RESEARCH_FINAL)),
                 keyed_completion(
@@ -459,8 +603,8 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
     let audits = planning_audits(&fixture.postgres_url, started.session_id).await?;
     assert_initial_route(
         &audits,
-        ExecutionMode::Run,
-        ExecutionRouteReason::ExplicitRun,
+        ExecutionRouteKind::Execute,
+        Some(ExecutionStrategy::Durable),
     );
     assert_generated_plan_audits(&audits);
     assert_eq!(final_brain_response(&events)?, RESEARCH_FINAL);
@@ -472,16 +616,16 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
         None,
         "generated-run-executes-and-synthesizes",
         &[
-            ExecutionInvariantSpecV1::TerminalStatusIn {
+            ExecutionInvariantSpec::TerminalStatusIn {
                 statuses: vec![ExecutionRunStatus::Completed],
             },
-            ExecutionInvariantSpecV1::TaskCount {
+            ExecutionInvariantSpec::TaskCount {
                 node_id: "research".to_string(),
                 exact: 1,
             },
-            ExecutionInvariantSpecV1::BudgetWithinApproved,
-            ExecutionInvariantSpecV1::ProgressMatchesTasks,
-            ExecutionInvariantSpecV1::NoRawTaskOutputEvents,
+            ExecutionInvariantSpec::BudgetWithinApproved,
+            ExecutionInvariantSpec::ProgressMatchesTasks,
+            ExecutionInvariantSpec::NoRawTaskOutputEvents,
         ],
     )
     .await?;
@@ -502,7 +646,7 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
             .response_format
             .as_ref()
             .map(|format| format.name.as_str()),
-        Some("generated_execution_candidate_v1")
+        Some("generated_execution_candidate")
     );
     Ok(())
 }
@@ -524,8 +668,8 @@ async fn instruction_only_skill_is_available_inside_agent_task_service_e2e() -> 
             "default": text_completion("unexpected scripted fallback"),
             "keyed": [
                 route_classifier_completion(
-                    ExecutionMode::Run,
-                    ExecutionRouteReason::ExplicitRun,
+                    ExecutionRouteKind::Execute,
+                    RouteFixture::Durable,
                 ),
                 keyed_completion(SYNTHESIS_MATCH, text_completion(INSTRUCTION_FINAL)),
                 keyed_completion(
@@ -586,8 +730,8 @@ async fn instruction_only_skill_is_available_inside_agent_task_service_e2e() -> 
     let audits = planning_audits(&fixture.postgres_url, started.session_id).await?;
     assert_initial_route(
         &audits,
-        ExecutionMode::Run,
-        ExecutionRouteReason::ExplicitRun,
+        ExecutionRouteKind::Execute,
+        Some(ExecutionStrategy::Durable),
     );
     assert_generated_plan_audits(&audits);
     assert_eq!(final_brain_response(&events)?, INSTRUCTION_FINAL);
@@ -614,6 +758,212 @@ async fn instruction_only_skill_is_available_inside_agent_task_service_e2e() -> 
             .any(|message| message.content.contains(INSTRUCTION_SKILL_SENTINEL))
     );
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
+async fn non_root_continuations_cannot_enter_or_upgrade_to_durable_service_e2e() -> Result<()> {
+    // Pins: worker-result and child-signal continuations cannot honor a Durable classifier
+    // decision, while execution synthesis bypasses routing; none may persist route/upgrade audits
+    // or admit a run.
+    const CONTINUATION_OBJECTIVE: &str =
+        "Start durable execution for this internally generated continuation";
+    const SYNTHESIS_FINAL: &str = "The internal continuation stayed bounded.";
+    let fixture = OrchestratorTestFixture::with_execution_fixture(
+        json!({
+            "default": text_completion(SYNTHESIS_FINAL),
+            "keyed": [route_classifier_completion(
+                ExecutionRouteKind::Execute,
+                RouteFixture::Durable,
+            )]
+        }),
+        FixtureCapabilityOptions::default(),
+    )
+    .await?;
+    let test = fixture.isolated().await;
+
+    for trigger in [TurnTrigger::WorkerResults, TurnTrigger::ChildSignal] {
+        let session_id = test
+            .create_session(&format!("non-root-durable-{trigger:?}"))
+            .await?;
+        let session = test.client().get_session(session_id).await?;
+        let turn_id = uuid::Uuid::now_v7().to_string();
+        let outcome: TurnOutcome = test
+            .client()
+            .post_call(
+                &format!("/TurnExecution/{turn_id}/run"),
+                &RunTurnRequest {
+                    session_id: session_id.to_string(),
+                    turn_id,
+                    identity: fixture_identity(&session)?,
+                    contact: None,
+                    user_message: CONTINUATION_OBJECTIVE.to_string(),
+                    attachments: Vec::new(),
+                    model: None,
+                    max_turns: Some(1),
+                    trigger,
+                    child_signal_id: None,
+                    execution_template: None,
+                },
+            )
+            .await?;
+        assert_eq!(outcome.kind, TurnOutcomeKind::Failed);
+        assert!(
+            outcome
+                .message
+                .contains("durable_execution_requires_user_message_origin"),
+            "non-root Durable rejection lost its stable reason: {outcome:?}"
+        );
+        let events = raw_events(test.client(), session_id).await?;
+        assert_no_execution_lifecycle_events(&events);
+        assert!(
+            planning_audits(&fixture.postgres_url, session_id)
+                .await?
+                .is_empty(),
+            "non-root continuation persisted a route or Durable-upgrade audit"
+        );
+    }
+
+    let synthesis_session_id = test.create_session("non-root-execution-synthesis").await?;
+    let synthesis_session = test.client().get_session(synthesis_session_id).await?;
+    let synthesis_turn_id = uuid::Uuid::now_v7().to_string();
+    let synthesis_origin = test
+        .client()
+        .append_event(
+            synthesis_session_id,
+            Event::UserMessage {
+                text: CONTINUATION_OBJECTIVE.to_string(),
+                attachments: Vec::new(),
+            },
+        )
+        .await?;
+    let synthesis_run_uid = uuid::Uuid::now_v7();
+    let synthesis_terminal = ExecutionTerminalSummary {
+        run_uid: synthesis_run_uid,
+        originating_user_sequence_num: synthesis_origin,
+        output: Some(json!({"result": "bounded synthesis fixture"})),
+        output_hash: [0; 32],
+        citation_ids: Vec::new(),
+        failures: Vec::new(),
+        gaps: Vec::new(),
+        task_results: ExecutionTaskResultsRef::ExecutionTaskTable {
+            run_uid: synthesis_run_uid,
+        },
+    };
+    test.client()
+        .append_event(
+            synthesis_session_id,
+            Event::ExecutionSynthesisRequested(ExecutionSynthesisRequested {
+                run_uid: synthesis_run_uid,
+                originating_user_sequence_num: synthesis_origin,
+                turn_id: synthesis_turn_id.clone(),
+                terminal: synthesis_terminal,
+                run_evidence: ExecutionRunEvidenceRef::ExecutionRun {
+                    run_uid: synthesis_run_uid,
+                },
+            }),
+        )
+        .await?;
+    let synthesis: TurnOutcome = test
+        .client()
+        .post_call(
+            &format!("/TurnExecution/{synthesis_turn_id}/run"),
+            &RunTurnRequest {
+                session_id: synthesis_session_id.to_string(),
+                turn_id: synthesis_turn_id.clone(),
+                identity: fixture_identity(&synthesis_session)?,
+                contact: None,
+                user_message: CONTINUATION_OBJECTIVE.to_string(),
+                attachments: Vec::new(),
+                model: None,
+                max_turns: Some(1),
+                trigger: TurnTrigger::ExecutionSynthesis,
+                child_signal_id: None,
+                execution_template: None,
+            },
+        )
+        .await?;
+    assert_eq!(synthesis.kind, TurnOutcomeKind::Completed);
+    assert_eq!(synthesis.message, SYNTHESIS_FINAL);
+    let synthesis_events = raw_events(test.client(), synthesis_session_id).await?;
+    assert_eq!(
+        synthesis_events
+            .iter()
+            .filter(|record| matches!(
+                record.event,
+                Event::ExecutionRunStarted(_)
+                    | Event::ExecutionProgress(_)
+                    | Event::ExecutionInputRequired(_)
+                    | Event::ExecutionCompleted(_)
+                    | Event::ExecutionFailed { .. }
+                    | Event::ExecutionCancelled(_)
+            ))
+            .count(),
+        0,
+        "execution synthesis continuation admitted or advanced a Durable run"
+    );
+    assert_eq!(
+        synthesis_events
+            .iter()
+            .filter(|record| matches!(
+                &record.event,
+                Event::ExecutionSynthesisRequested(requested)
+                    if requested.run_uid == synthesis_run_uid
+                        && requested.originating_user_sequence_num == synthesis_origin
+                        && requested.turn_id == synthesis_turn_id
+            ))
+            .count(),
+        1,
+        "execution synthesis fixture lost its exact durable trigger"
+    );
+    assert!(
+        planning_audits(&fixture.postgres_url, synthesis_session_id)
+            .await?
+            .is_empty(),
+        "execution synthesis persisted a route or Durable-upgrade audit"
+    );
+
+    let requests = journal_requests(fixture.scripted_requests()?)?;
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                request
+                    .response_format
+                    .as_ref()
+                    .is_some_and(|format| format.name == "execution_route_classifier")
+            })
+            .count(),
+        2,
+        "only worker-result and child-signal continuations may reach the classifier"
+    );
+    assert!(requests.iter().all(|request| {
+        request
+            .response_format
+            .as_ref()
+            .is_none_or(|format| format.name != "generated_execution_candidate")
+    }));
+    Ok(())
+}
+
+fn fixture_identity(meta: &moa_core::types::session::SessionMeta) -> Result<Identity> {
+    let moa_core::types::contact::SessionActorRef::Identity { id } = meta
+        .created_by
+        .as_ref()
+        .context("fixture session omitted its owning identity")?
+    else {
+        anyhow::bail!(
+            "fixture session owner is not an identity: {:?}",
+            meta.created_by
+        );
+    };
+    Ok(Identity {
+        identity_type: IdentityType::Operator,
+        id: *id,
+        tenant_id: meta.tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    })
 }
 
 fn text_completion(content: impl Into<String>) -> Value {
@@ -787,7 +1137,7 @@ Use the exact structured input supplied to the pinned execution template.
 
 fn instruction_skill_source() -> String {
     format!(
-        "api_version: moa.artifact/v1\nkind: skill\nmetadata:\n  name: {INSTRUCTION_SKILL_NAME}\n  description: Agent task research instructions for deterministic service verification.\n  tags: [agent-task-research, deterministic]\nstatus: draft\ndefinition:\n  type: skill\n  spec:\n    instructions:\n      path: SKILL.md\n    inputs: {{\"type\":\"object\"}}\n    outputs: {{\"type\":\"object\"}}\n"
+        "api_version: moa.artifact/v1\nkind: skill\nmetadata:\n  name: {INSTRUCTION_SKILL_NAME}\n  description: Agent task research instructions for deterministic service verification.\n  tags: [agent-task-research, deterministic]\nstatus: draft\ndefinition:\n  type: skill\n  spec:\n    instructions:\n      path: SKILL.md\n    inputs: {{\"type\":\"object\"}}\n    outputs: {{\"type\":\"object\"}}\n    allowed_tools: [file_read]\n"
     )
 }
 
@@ -795,6 +1145,7 @@ fn instruction_skill_markdown() -> &'static str {
     r#"---
 name: agent-task-research
 description: Agent task research instructions for deterministic service verification.
+allowed-tools: file_read
 metadata:
   moa-tags: "agent-task-research,deterministic"
 ---
@@ -808,22 +1159,17 @@ Return a concise structured research result for the task input.
 }
 
 fn assert_persisted_skill_template_provenance(
-    actual: &ExecutionSourceProvenanceV1,
+    actual: &ExecutionSourceProvenance,
     expected_skill_ref: &str,
     expected_revision_uid: uuid::Uuid,
 ) -> Result<()> {
-    let ExecutionSourceProvenanceV1::SkillTemplate {
-        route_reason,
+    let ExecutionSourceProvenance::SkillTemplate {
         skill_template_ref,
         skill_template_revision_uid,
     } = actual
     else {
         anyhow::bail!("persisted execution source is not a skill template: {actual:?}");
     };
-    anyhow::ensure!(
-        *route_reason == ExecutionRouteReason::SelectedExecutionTemplate,
-        "persisted skill-template route reason mismatch: {route_reason:?}"
-    );
     anyhow::ensure!(
         skill_template_ref == expected_skill_ref,
         "persisted canonical skill ref mismatch; expected {expected_skill_ref:?}, actual {skill_template_ref:?}"
@@ -875,7 +1221,7 @@ fn assert_generated_execution_event_order(events: &[moa_core::types::events_stre
 #[cfg(test)]
 mod tests {
     use moa_artifacts::document::{ArtifactDefinition, ArtifactDocument};
-    use moa_core::types::execution_planning::{ExecutionRouteReason, ExecutionSourceProvenanceV1};
+    use moa_core::types::execution_planning::ExecutionSourceProvenance;
 
     use super::{
         INSTRUCTION_SKILL_NAME, TEMPLATE_SKILL_NAME, assert_persisted_skill_template_provenance,
@@ -903,8 +1249,7 @@ mod tests {
 
         let revision_uid = uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
             .expect("parse deterministic template revision");
-        let provenance = ExecutionSourceProvenanceV1::SkillTemplate {
-            route_reason: ExecutionRouteReason::SelectedExecutionTemplate,
+        let provenance = ExecutionSourceProvenance::SkillTemplate {
             skill_template_ref: "skill://service-template-report".to_string(),
             skill_template_revision_uid: revision_uid,
         };

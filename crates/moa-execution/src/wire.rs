@@ -15,7 +15,7 @@ use moa_core::events::{
 };
 use moa_core::types::{
     contact::ContactId,
-    execution_planning::{ExecutionSourceProvenanceV1, PinnedExecutionTemplateRef},
+    execution_planning::{ExecutionSourceProvenance, PinnedExecutionTemplateRef},
     identifiers::{SessionId, TenantId, UserId},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -33,13 +33,13 @@ use crate::{
     },
 };
 
-const CURSOR_PREFIX: &str = "v1:";
+const CURSOR_PREFIX: &str = "cursor:";
 const BASE64_URL_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-const PLANNING_CONTEXT_HASH_DOMAIN: &str = "moa.execution.planning-context.v1";
-const ORIGINATING_USER_EVENT_HASH_DOMAIN: &str = "moa.execution.originating-user-event.v1";
-const TEMPLATE_ADMISSION_OPERATION_DOMAIN: &str = "moa.execution.template-admission-operation.v1";
-const TEMPLATE_ADMISSION_REQUEST_DOMAIN: &str = "moa.execution.template-admission-request.v1";
+const PLANNING_CONTEXT_HASH_DOMAIN: &str = "moa.execution.planning-context";
+const ORIGINATING_USER_EVENT_HASH_DOMAIN: &str = "moa.execution.originating-user-event";
+const TEMPLATE_ADMISSION_OPERATION_DOMAIN: &str = "moa.execution.template-admission-operation";
+const TEMPLATE_ADMISSION_REQUEST_DOMAIN: &str = "moa.execution.template-admission-request";
 const TEMPLATE_ADMISSION_OPERATION_NAMESPACE: Uuid =
     Uuid::from_u128(0x8fc5_e5a4_2e5c_58dd_95d0_aad9_0d59_ae6d);
 /// Maximum UTF-8 bytes accepted for an external execution-template admission key.
@@ -206,7 +206,7 @@ fn append_nullable_frame(output: &mut Vec<u8>, value: Option<&[u8]>) -> Result<(
 /// Immutable authority and capability snapshot used by planning and admission.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionPlanningContextSnapshotV1 {
+pub struct ExecutionPlanningContextSnapshot {
     /// Planning-context schema version, fixed at `1`.
     pub schema_version: u8,
     /// Owning tenant.
@@ -242,12 +242,12 @@ pub struct ExecutionPlanningContextResponse {
     /// Domain-separated hash of the canonical snapshot bytes.
     pub planning_context_hash: String,
     /// Exact immutable snapshot.
-    pub snapshot: ExecutionPlanningContextSnapshotV1,
+    pub snapshot: ExecutionPlanningContextSnapshot,
     /// Whether this call inserted the snapshot rather than replaying the origin.
     pub created: bool,
 }
 
-impl ExecutionPlanningContextSnapshotV1 {
+impl ExecutionPlanningContextSnapshot {
     /// Validates snapshot version, hashes, deterministic pin ordering, and authorization closure.
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != 1 {
@@ -321,9 +321,7 @@ impl ExecutionPlanningContextSnapshotV1 {
 }
 
 /// Computes the canonical domain-separated hash of one immutable planning snapshot.
-pub fn planning_context_hash(
-    snapshot: &ExecutionPlanningContextSnapshotV1,
-) -> Result<ExecutionHash> {
+pub fn planning_context_hash(snapshot: &ExecutionPlanningContextSnapshot) -> Result<ExecutionHash> {
     snapshot.validate()?;
     let bytes = moa_artifacts::canonical::canonical_json_bytes(snapshot)
         .map_err(artifact_contract_error)?;
@@ -383,7 +381,7 @@ pub struct ExecutionStartRequest {
     /// Structured input consumed by the plan.
     pub run_input: Value,
     /// Closed source and compiler provenance.
-    pub source_provenance: ExecutionSourceProvenanceV1,
+    pub source_provenance: ExecutionSourceProvenance,
 }
 
 /// Parent-scoped identifier for one execution run.
@@ -572,10 +570,6 @@ pub struct ExecutionRunSummary {
     pub status: ExecutionRunStatus,
     /// Normalized source cohort.
     pub source_kind: ExecutionSourceKind,
-    /// Persisted run-producing route mode.
-    pub route_mode: moa_core::types::execution_planning::ExecutionMode,
-    /// Persisted bounded route reason.
-    pub route_reason: moa_core::types::execution_planning::ExecutionRouteReason,
     /// Exact pinned skill-template reference, when template-backed.
     pub skill_template_ref: Option<String>,
     /// Exact pinned skill-template revision, when template-backed.
@@ -1007,17 +1001,17 @@ pub struct ExecutionTaskWorkflowRequest {
     pub session_id: SessionId,
 }
 
-/// Encodes a cursor as canonical JSON in URL-safe unpadded base64 with a `v1:` prefix.
+/// Encodes a cursor as canonical JSON in URL-safe unpadded base64.
 pub fn encode_cursor<T: Serialize + ?Sized>(cursor: &T) -> Result<String> {
     let bytes = crate::capability::canonical_json_bytes(cursor)?;
     Ok(format!("{CURSOR_PREFIX}{}", encode_base64_url(&bytes)))
 }
 
-/// Decodes and strictly deserializes one versioned URL-safe cursor.
+/// Decodes and strictly deserializes one URL-safe cursor.
 pub fn decode_cursor<T: DeserializeOwned>(cursor: &str) -> Result<T> {
     let encoded = cursor
         .strip_prefix(CURSOR_PREFIX)
-        .ok_or_else(|| invalid_cursor("missing v1 prefix"))?;
+        .ok_or_else(|| invalid_cursor("missing cursor prefix"))?;
     let bytes = decode_base64_url(encoded)?;
     serde_json::from_slice(&bytes).map_err(|error| invalid_cursor(&error.to_string()))
 }
@@ -1087,8 +1081,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cursor_round_trip_is_versioned_url_safe_and_strict() {
-        // Pins: public cursors are canonical v1 URL-safe base64 and malformed data is rejected.
+    fn cursor_round_trip_is_url_safe_and_strict() {
+        // Pins: public cursors are canonical URL-safe base64 and malformed data is rejected.
         let cursor = ExecutionTaskCursor {
             node_id: "screen/company".to_string(),
             item_key: "A+B/C=".to_string(),
@@ -1096,7 +1090,7 @@ mod tests {
         };
 
         let encoded = encode_cursor(&cursor).expect("cursor should encode");
-        assert!(encoded.starts_with("v1:"));
+        assert!(encoded.starts_with("cursor:"));
         assert!(!encoded.contains('+'));
         assert!(!encoded.contains('/'));
         assert!(!encoded.contains('='));
@@ -1104,8 +1098,8 @@ mod tests {
             decode_cursor::<ExecutionTaskCursor>(&encoded).expect("cursor should decode"),
             cursor
         );
-        assert!(decode_cursor::<ExecutionTaskCursor>("v2:e30").is_err());
-        assert!(decode_cursor::<ExecutionTaskCursor>("v1:***").is_err());
+        assert!(decode_cursor::<ExecutionTaskCursor>("legacy:e30").is_err());
+        assert!(decode_cursor::<ExecutionTaskCursor>("cursor:***").is_err());
     }
 
     #[test]
@@ -1290,13 +1284,13 @@ mod tests {
             )
             .expect("derive operation UID")
             .to_string(),
-            "9c276d94-b495-527b-a6fe-b2120ff9cbb8"
+            "c0b18db9-d980-547a-8573-139727f8e848"
         );
         assert_eq!(
             execution_template_admission_request_fingerprint(&request)
                 .expect("fingerprint admission")
                 .to_string(),
-            "74ea254536e9cfbf46621e9665ca39cda5b4c21098595f263a9d9d83ed38b470"
+            "d47df13812a5a947579cb5e33bf05a7b6ad2496ccd7be68d75d17446ece6d444"
         );
     }
 

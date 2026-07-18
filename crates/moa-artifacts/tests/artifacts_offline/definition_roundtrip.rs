@@ -608,7 +608,7 @@ definition:
 #[test]
 fn prompt_examples_parse_as_skill_execution_plans() {
     // Pins: docs skill examples stay executable by the canonical parser; the converted
-    // examples each keep a v1 execution plan, and the agent-mediated example stays plan-less.
+    // examples each keep an execution plan, and the agent-mediated example stays plan-less.
     let execution_plan_examples: [(&str, &str); 6] = [
         (
             "damaged-food-order",

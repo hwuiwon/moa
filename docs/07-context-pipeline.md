@@ -143,9 +143,12 @@ without loading the full package body.
 
 The manifest also states whether a published revision carries a pinned
 `execution_plan` template and its stable reference/hash. Instruction-only
-skills remain fully valid and selectable. A template marker does not start a
-run by itself; routing chooses `run`, and the compiler validates the instantiated
-snapshot against the current capability catalog and budget.
+skills remain fully valid and selectable in Inline Execute and in Durable
+`Agent` nodes. Skills are optional execution inputs: selection, absence, or a
+template marker never chooses a public route or gates admission. Only an
+Execute/Durable decision may instantiate the template, after which the compiler
+validates the immutable snapshot against the current capability catalog and
+budget.
 
 The selected manifest is not part of the stable prefix because query keywords
 and tenant-level learning can legitimately change which skills are shown for one
@@ -153,34 +156,43 @@ turn.
 
 ## Execution Routing And Planning
 
-Execution-mode routing happens after context compilation and is not retrieval
-routing. A cheap deterministic gate returns `respond`, `act`, or `run` plus a
-stable reason. Simple requests use one no-tool `respond`; bounded work uses the
-existing tool loop in `act`; explicit bulk, multi-entity, resumable,
-long-running, approval-bearing, or high-fan-out work uses `run`. Open-ended hard
-work may stay in `act`, and `act` may escalate after gathering evidence.
+Execution routing happens after context compilation and is not retrieval or
+skill routing. `TurnExecution` selects exactly one public route: Respond,
+Execute, or NeedsInput. Execute carries its internal strategy from an explicit
+classifier or trusted-route field: Inline for bounded interactive
+work and Durable when the work must persist independently. A classifier may
+also return one trimmed, single-line, free-form rationale of at most 240 UTF-8
+bytes. That explanation remains local to the active turn, is not persisted, and
+is never interpreted to select a strategy. Classifier uncertainty falls back
+to Execute/Inline.
 
-`respond` and `act` make no execution-planning call. For `run`, a selected
-high-confidence skill template is instantiated without a model planning call.
-Otherwise `ExecutionPlanner` gives the auxiliary model only the immutable user
-goal, selected skill metadata, current governed capability catalog, resource
-budget, and strict output schema. It first preserves scope, definitions, time
-range, universe, output form, evidence expectations, and exclusions as stable
-goal-contract requirement IDs, then emits only the exact seven-node acyclic
-DSL. One repair call may receive compiler violations; an invalid second
-candidate becomes a typed missing-input or unsupported result rather than a
-silent direct answer.
+Respond and Execute/Inline make no execution-planning call. For
+Execute/Durable, a selected high-confidence skill template is instantiated
+without a model planning call. Otherwise `ExecutionPlanner` gives the auxiliary
+model only the immutable user goal, selected skill metadata, current governed
+capability catalog, resource budget, and strict output schema. It first
+preserves scope, definitions, time range, universe, output form, evidence
+expectations, and exclusions as stable goal-contract requirement IDs, then
+emits only the exact seven-node acyclic DSL. One repair call may receive
+compiler violations; an invalid second candidate becomes a typed missing-input
+or unsupported result rather than a silent direct answer.
 
 `ExecutionCompiler` validates capability/schema references, dependencies,
 non-recursive maps, reducer bounds, authorization metadata, data bindings,
 worst-case resources, completion coverage, and amendments. Planner provenance,
-candidate JSON, compiler report, route reason, and final canonical hash are
-persisted. One-off compiled snapshots are not skills and are never
-auto-published.
+candidate JSON, compiler report, typed route source, and final canonical hash
+are persisted. Classifier rationale is not. One-off compiled snapshots are not
+skills and are never auto-published.
 
-Conversational `Worker` remains an interactive delegation tool in `act`, not a
-bulk graph scheduler. `ExecutionRun` materializes map items as stable tasks and
-submits all ready work without an application fan-out cap.
+Only an initial root Execute/Inline turn may make one evidence-preserving,
+one-way upgrade to Durable through the workflow-owned
+`request_durable_execution` control tool. That tool is available only to the
+eligible turn, must be called alone, and cannot be synthesized from an ordinary
+tool result. The transition does not classify again and cannot downgrade.
+Conversational `Worker` remains an interactive Inline delegation tool, not a
+bulk graph scheduler. `ExecutionRun` materializes map items as stable
+`ExecutionTask` rows and submits all ready work without an application fan-out
+cap.
 
 ## Memory Retrieval
 

@@ -11,15 +11,14 @@ use moa_artifacts::execution_plan::{
 };
 use moa_core::types::{
     execution_planning::{
-        ExecutionMode, ExecutionPlannerCallKind, ExecutionPlannerOutcome,
-        ExecutionPlanningAuditEnvelopeV1, ExecutionPlanningAuditPayloadV1, ExecutionRouteReason,
-        ExecutionSourceProvenanceV1,
+        ExecutionPlannerCallKind, ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope,
+        ExecutionPlanningAuditPayload, ExecutionSourceProvenance,
     },
     identifiers::{SessionId, TenantId, UserId},
 };
 use moa_eval::execution::{
-    ExecutionEvalSnapshotV1, ExecutionHarnessEvidenceV1, ExecutionSessionEventSummaryV1,
-    ExecutionTaskKindSummaryV1, ExecutionTaskResultClassV1,
+    ExecutionEvalSnapshot, ExecutionHarnessEvidence, ExecutionSessionEventSummary,
+    ExecutionTaskKindSummary, ExecutionTaskResultClass,
 };
 use moa_execution::{
     ExecutionAuthorizationEnvelope, ExecutionCapabilityCatalog, ExecutionEstimate, ExecutionHash,
@@ -28,10 +27,9 @@ use moa_execution::{
     compiler::CanonicalExecutionPlan,
     repository::{ExecutionRunRecord, ExecutionSchedulingSnapshot, ExecutionTaskRecord},
     state::{
-        ExecutionNodeStatus, ExecutionProjection, ExecutionRouteFields, ExecutionRunStatus,
-        ExecutionSourceKind, ExecutionTaskId, ExecutionTaskProjection, ExecutionTaskStatus,
-        ExecutionTerminalCause, ExecutionTerminalEvidence, ExecutionTerminalReason,
-        LogicalTaskKind,
+        ExecutionNodeStatus, ExecutionProjection, ExecutionRunStatus, ExecutionSourceKind,
+        ExecutionTaskId, ExecutionTaskProjection, ExecutionTaskStatus, ExecutionTerminalCause,
+        ExecutionTerminalEvidence, ExecutionTerminalReason, LogicalTaskKind,
     },
 };
 use serde_json::{Value, json};
@@ -48,17 +46,14 @@ fn execution_snapshot_redacts_task_payloads_and_normalizes_audits_offline() {
         &[("issuer-a", ExecutionTaskStatus::Completed)],
     );
 
-    let snapshot = ExecutionEvalSnapshotV1::from_parts(runtime, records, audits, harness)
+    let snapshot = ExecutionEvalSnapshot::from_parts(runtime, records, audits, harness)
         .expect("matching runtime state should produce a redacted eval snapshot");
 
     assert_eq!(snapshot.tasks.len(), 1);
-    assert_eq!(
-        snapshot.tasks[0].kind,
-        ExecutionTaskKindSummaryV1::Capability
-    );
+    assert_eq!(snapshot.tasks[0].kind, ExecutionTaskKindSummary::Capability);
     assert_eq!(
         snapshot.tasks[0].result_class,
-        Some(ExecutionTaskResultClassV1::Completed)
+        Some(ExecutionTaskResultClass::Completed)
     );
     assert_eq!(snapshot.tasks[0].citation_count, 1);
     assert!(snapshot.run.terminal_output_hash.is_some());
@@ -90,7 +85,7 @@ fn execution_snapshot_rejects_projection_task_disagreement_offline() {
     );
     records[0].generation = 2;
 
-    let error = ExecutionEvalSnapshotV1::from_parts(runtime, records, audits, harness)
+    let error = ExecutionEvalSnapshot::from_parts(runtime, records, audits, harness)
         .expect_err("generation disagreement must be rejected");
 
     assert!(
@@ -108,7 +103,7 @@ fn execution_snapshot_rejects_missing_task_rows_and_unbounded_evidence_offline()
         ExecutionRunStatus::Completed,
         &[("issuer-a", ExecutionTaskStatus::Completed)],
     );
-    let error = ExecutionEvalSnapshotV1::from_parts(runtime, Vec::new(), audits, harness)
+    let error = ExecutionEvalSnapshot::from_parts(runtime, Vec::new(), audits, harness)
         .expect_err("missing complete task rows must be rejected");
     assert!(error.to_string().contains("complete task rows contain 0"));
 
@@ -117,7 +112,7 @@ fn execution_snapshot_rejects_missing_task_rows_and_unbounded_evidence_offline()
         &[("issuer-a", ExecutionTaskStatus::Completed)],
     );
     harness.final_response = Some("x".repeat(1_048_577));
-    let error = ExecutionEvalSnapshotV1::from_parts(runtime, records, audits, harness)
+    let error = ExecutionEvalSnapshot::from_parts(runtime, records, audits, harness)
         .expect_err("unbounded final response evidence must be rejected");
     assert!(error.to_string().contains("final response exceeds"));
 }
@@ -125,9 +120,9 @@ fn execution_snapshot_rejects_missing_task_rows_and_unbounded_evidence_offline()
 pub(super) fn eval_snapshot(
     run_status: ExecutionRunStatus,
     task_statuses: &[(&str, ExecutionTaskStatus)],
-) -> ExecutionEvalSnapshotV1 {
+) -> ExecutionEvalSnapshot {
     let (runtime, records, audits, harness) = runtime_parts(run_status, task_statuses);
-    ExecutionEvalSnapshotV1::from_parts(runtime, records, audits, harness)
+    ExecutionEvalSnapshot::from_parts(runtime, records, audits, harness)
         .expect("test runtime state should produce a valid eval snapshot")
 }
 
@@ -144,8 +139,8 @@ fn runtime_parts(
 ) -> (
     ExecutionSchedulingSnapshot,
     Vec<ExecutionTaskRecord>,
-    Vec<ExecutionPlanningAuditEnvelopeV1>,
-    ExecutionHarnessEvidenceV1,
+    Vec<ExecutionPlanningAuditEnvelope>,
+    ExecutionHarnessEvidence,
 ) {
     let run_uid = Uuid::from_u128(0x18f8_f1f3_6a67_c90a_7f8f_2f2f_57f5_c111);
     let tenant_id = TenantId::from(Uuid::from_u128(0x28f8_f1f3_6a67_c90a_7f8f_2f2f_57f5_c222));
@@ -212,16 +207,11 @@ fn runtime_parts(
             skill_refs: Vec::new(),
         },
         pinned_instruction_skills: Vec::new(),
-        source_provenance: ExecutionSourceProvenanceV1::SkillTemplate {
-            route_reason: ExecutionRouteReason::SelectedExecutionTemplate,
+        source_provenance: ExecutionSourceProvenance::SkillTemplate {
             skill_template_ref: "skill://execution-eval".to_string(),
             skill_template_revision_uid: Uuid::from_u128(0x58f8_f1f3_6a67_c90a_7f8f_2f2f_57f5_c555),
         },
         source_kind: ExecutionSourceKind::SkillTemplate,
-        route: ExecutionRouteFields {
-            mode: ExecutionMode::Run,
-            reason: ExecutionRouteReason::SelectedExecutionTemplate,
-        },
         skill_template_ref: Some("skill://execution-eval".to_string()),
         skill_template_revision_uid: Some(Uuid::from_u128(
             0x58f8_f1f3_6a67_c90a_7f8f_2f2f_57f5_c555,
@@ -273,20 +263,20 @@ fn runtime_parts(
         },
         projection,
     };
-    let audits = vec![ExecutionPlanningAuditEnvelopeV1 {
+    let audits = vec![ExecutionPlanningAuditEnvelope {
         schema_version: 1,
         tenant_id,
         contact_id: None,
         session_id: Some(session_id),
         originating_sequence: Some(1),
-        payload: ExecutionPlanningAuditPayloadV1::PlannerCall {
+        payload: ExecutionPlanningAuditPayload::PlannerCall {
             call_kind: ExecutionPlannerCallKind::InitialPlan,
             call_ordinal: 0,
             run_uid: None,
             plan_revision: None,
             outcome: ExecutionPlannerOutcome::Accepted,
             provider_model: "scripted-planner".to_string(),
-            prompt_version: "execution-planner-v1".to_string(),
+            prompt_version: "execution-planner".to_string(),
             candidate_hash: Some("a".repeat(64)),
             candidate_json: Some(RAW_AUDIT_SECRET.to_string()),
             compiler_report: Some("raw compiler report".to_string()),
@@ -294,8 +284,8 @@ fn runtime_parts(
             created_at: now,
         },
     }];
-    let harness = ExecutionHarnessEvidenceV1 {
-        session_events: ExecutionSessionEventSummaryV1 {
+    let harness = ExecutionHarnessEvidence {
+        session_events: ExecutionSessionEventSummary {
             run_started: 1,
             progress: usize_to_u64(task_statuses.len()),
             input_required: 0,

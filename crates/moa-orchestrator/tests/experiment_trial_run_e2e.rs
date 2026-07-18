@@ -1250,7 +1250,7 @@ fn expected_execution_trial_session_id(
 ) -> SessionId {
     let namespace = Uuid::parse_str("c2a6731c-2d80-5d4a-9d10-2d201283c6ec")
         .expect("Task 9 execution Session namespace should parse");
-    let mut name = b"moa.experiment.execution-session.v1".to_vec();
+    let mut name = b"moa.experiment.execution-session".to_vec();
     for value in [
         tenant_id.to_string(),
         experiment_run_uid.to_string(),
