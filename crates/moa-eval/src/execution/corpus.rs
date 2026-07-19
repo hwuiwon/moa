@@ -16,7 +16,7 @@ use moa_core::types::execution_planning::{ExecutionRouteClassifierOutcome, Execu
 
 /// Current schema version for the execution corpus manifest.
 pub const EXECUTION_CORPUS_MANIFEST_SCHEMA_VERSION: u8 = 1;
-const ROUTING_CASE_COUNT: usize = 320;
+const ROUTING_CASE_COUNT: usize = 328;
 const CONTRACT_CASE_COUNT_MIN: usize = 80;
 
 /// One checked-in corpus file declared by the execution manifest.
@@ -50,7 +50,7 @@ pub struct ExecutionCorpusManifest {
 pub struct ExecutionCorpus {
     /// Strict checked-in manifest.
     pub manifest: ExecutionCorpusManifest,
-    /// Exactly 320 labeled routing cases.
+    /// Exactly 328 labeled routing cases.
     pub routing_cases: Vec<ExecutionRoutingCase>,
     /// At least 80 strict recorded contract cases.
     pub contract_cases: Vec<ExecutionContractCase>,
@@ -224,7 +224,7 @@ fn validate_routing_corpus(
                 .iter()
                 .any(|tag| tag == "sp500-ai-five-year-screen");
     }
-    let required = [("respond", 60_usize), ("execute", 240), ("needs_input", 20)];
+    let required = [("respond", 60_usize), ("execute", 248), ("needs_input", 20)];
     for (label, minimum) in required {
         if labels.get(label).copied().unwrap_or_default() != minimum {
             return Err(invalid_config(format!(
@@ -232,7 +232,7 @@ fn validate_routing_corpus(
             )));
         }
     }
-    for (strategy, expected) in [("inline", 140_usize), ("durable", 100_usize)] {
+    for (strategy, expected) in [("inline", 144_usize), ("durable", 104_usize)] {
         if strategies.get(strategy).copied().unwrap_or_default() != expected {
             return Err(invalid_config(format!(
                 "execution routing corpus requires exactly {expected} `{strategy}` strategy cases"

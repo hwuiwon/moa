@@ -94,6 +94,12 @@ pub(crate) fn initialize_non_loop_progress(
     initialize_loop_progress(ctx, Some(execution_route), 0, 0);
 }
 
+/// Updates the model-loop cap exposed in progress snapshots after a mid-turn
+/// escalation, so the reported denominator matches the cap now in force.
+pub(crate) fn set_max_turns(ctx: &WorkflowContext<'_>, max_turns: usize) {
+    ctx.set(TurnStateKey::MAX_TURNS, Json::from(progress_cap(max_turns)));
+}
+
 /// Stores the current model-loop iteration using the progress DTO cap.
 pub(crate) fn set_iteration(ctx: &WorkflowContext<'_>, turn_number: usize) {
     ctx.set(

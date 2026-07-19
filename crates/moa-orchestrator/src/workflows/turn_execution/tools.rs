@@ -49,12 +49,14 @@ struct DelegationToolRequest<'a> {
     trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
 }
 
+/// Executes one root-coordinator delegation tool call, returning whether it
+/// successfully spawned a new worker (used by the model loop to escalate the turn cap).
 async fn handle_delegation_tool(
     workflow: &TurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
     request: DelegationToolRequest<'_>,
     turn_evidence: &mut TurnEvidence,
-) -> Result<ToolOutput, HandlerError> {
+) -> Result<bool, HandlerError> {
     let DelegationToolRequest {
         meta,
         session_id,
@@ -72,6 +74,10 @@ async fn handle_delegation_tool(
             TerminalError::new(format!("unsupported delegation tool {}", invocation.name)).into(),
         );
     };
+    let is_spawn = matches!(
+        tool,
+        moa_core::types::worker::tool_schema::DelegationTool::Spawn(_)
+    );
 
     let span = tool_dispatch_span(&invocation.name);
     turn_progress::maybe_emit(
@@ -99,7 +105,7 @@ async fn handle_delegation_tool(
     if !output.is_error {
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;
     }
-    Ok(output)
+    Ok(is_spawn && !output.is_error)
 }
 
 #[derive(Clone, Debug)]
@@ -360,6 +366,9 @@ pub(super) struct RootToolContext<'a> {
     pub(super) turn_evidence: &'a mut TurnEvidence,
     /// Per-turn `file_read` result memory shared across this turn's model-loop iterations.
     pub(super) file_read_cache: &'a mut FileReadTurnCache,
+    /// Latched on when this turn successfully spawns a worker, so the model loop can
+    /// escalate its turn cap for the remaining delegation, wait, and synthesis work.
+    pub(super) delegated_worker: &'a mut bool,
 }
 
 pub(super) async fn dispatch_response_tool_calls(
@@ -527,7 +536,7 @@ async fn handle_tool_call(
             .await?;
         }
         GovernedInvocationOutcome::Delegation { tool_id, .. } => {
-            handle_delegation_tool(
+            let spawned_worker = handle_delegation_tool(
                 workflow,
                 ctx,
                 DelegationToolRequest {
@@ -540,6 +549,9 @@ async fn handle_tool_call(
                 turn_evidence,
             )
             .await?;
+            if spawned_worker {
+                *tool_context.delegated_worker = true;
+            }
         }
     }
     Ok(())
@@ -555,8 +567,23 @@ mod tests {
 
     use super::{
         DURABLE_UPGRADE_CONTROL_TOOL_NAME, configure_durable_upgrade_tool_schema,
-        durable_upgrade_signal_from_control_call,
+        durable_upgrade_signal_from_control_call, durable_upgrade_tool_schema,
     };
+
+    #[test]
+    fn durable_upgrade_tool_schema_compiles_to_openai_strict_compatible() {
+        // Pins: the durable-upgrade control tool schema, after provider
+        // compilation, satisfies OpenAI strict mode (its accept-any-value
+        // `evidence.value` property must gain an explicit type). A violation
+        // here 400s every live coordinator turn that offers the tool —
+        // scripted-provider lanes cannot catch it.
+        let compiled = moa_providers::compile_for_openai_strict(&durable_upgrade_tool_schema());
+        let violations = moa_providers::openai_strict_violations(&compiled["input_schema"]);
+        assert!(
+            violations.is_empty(),
+            "durable-upgrade tool schema violates OpenAI strict mode: {violations:?}"
+        );
+    }
 
     fn control_call(input: serde_json::Value) -> ToolCallContent {
         ToolCallContent {

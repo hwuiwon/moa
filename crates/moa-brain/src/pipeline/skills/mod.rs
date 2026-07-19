@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    config::SkillBudgetConfig, error::Result, traits::ContextProcessor, traits::SegmentStore,
-    traits::SessionStore, traits::StageApply, types::agent::AgentSkillPolicy,
+    config::SkillBudgetConfig, error::Result, traits::ContextProcessor, traits::EmbeddingProvider,
+    traits::SegmentStore, traits::SessionStore, traits::StageApply, types::agent::AgentSkillPolicy,
     types::agent::AgentSkillPolicyMode, types::context::ContextMessage,
     types::context::ExcludedItem, types::context::ProcessorOutput, types::context::WorkingContext,
     types::memory::SkillMetadata,
@@ -41,6 +41,7 @@ pub struct SkillInjector {
     source: SkillSource,
     session_store: Option<Arc<dyn SessionStore>>,
     segment_store: Option<Arc<dyn SegmentStore>>,
+    embedder: Option<Arc<dyn EmbeddingProvider>>,
     budget_config: SkillBudgetConfig,
 }
 
@@ -94,6 +95,7 @@ impl SkillInjector {
             source: SkillSource::Registry(pool),
             session_store: None,
             segment_store: None,
+            embedder: None,
             budget_config: SkillBudgetConfig::default(),
         }
     }
@@ -105,6 +107,7 @@ impl SkillInjector {
             source: SkillSource::Static(skills),
             session_store: None,
             segment_store: None,
+            embedder: None,
             budget_config: SkillBudgetConfig::default(),
         }
     }
@@ -121,6 +124,17 @@ impl SkillInjector {
         self
     }
 
+    /// Configures the embedder used to rank skills by semantic query relevance.
+    ///
+    /// When set, the manifest ranks a tenant's skills by cosine similarity between
+    /// the turn query and each skill's stored identity embedding, falling back to
+    /// lexical keyword overlap per skill without an embedding row. When unset,
+    /// ranking is lexical only.
+    pub fn with_embedder(mut self, embedder: Arc<dyn EmbeddingProvider>) -> Self {
+        self.embedder = Some(embedder);
+        self
+    }
+
     /// Overrides the manifest budgeting controls.
     pub fn with_budget_config(mut self, budget_config: SkillBudgetConfig) -> Self {
         self.budget_config = budget_config;
@@ -132,6 +146,16 @@ impl SkillInjector {
             SkillSource::Registry(pool) => registry::load_skills(pool, ctx).await,
             #[cfg(test)]
             SkillSource::Static(skills) => Ok(skills.clone()),
+        }
+    }
+
+    /// Returns the registry pool backing this injector, or `None` for a static
+    /// test source (which has no Postgres pool to run embedding lookups against).
+    fn registry_pool(&self) -> Option<&PgPool> {
+        match &self.source {
+            SkillSource::Registry(pool) => Some(pool),
+            #[cfg(test)]
+            SkillSource::Static(_) => None,
         }
     }
 
@@ -187,19 +211,28 @@ impl ContextProcessor for SkillInjector {
         let budget = self.compute_budget(ctx.model_capabilities.context_window);
         let policy = agent_skill_policy(ctx)?;
         let policy_filtered = filter_skills_by_agent_policy(skills, &policy);
+        let max_visible = policy
+            .max_visible
+            .and_then(|limit| usize::try_from(limit).ok());
+        // Semantic relevance for ranking. Computed only when the manifest would
+        // truncate (ranking cannot otherwise change the alphabetized emission),
+        // and degrades to an empty map — pure lexical ranking — when no embedder
+        // is configured or the lookup cannot run.
+        let embedding_similarities = self
+            .skill_embedding_similarities(ctx, &policy_filtered.skills, &budget, max_visible)
+            .await;
         let ranked = rank_skills(
             &policy_filtered.skills,
             &query_keywords,
             &budget,
             &resolution_rates,
             &task_strategy_rates,
+            &embedding_similarities,
         );
         let selection = select_skills_within_budget_and_limit(
             &ranked,
             budget.max_manifest_chars,
-            policy
-                .max_visible
-                .and_then(|limit| usize::try_from(limit).ok()),
+            max_visible,
             &pinned_skill_names(&policy),
         );
         let manifest = format_skill_manifest(&selection.selected);
@@ -585,6 +618,7 @@ mod tests {
             &static_skills,
             &[],
             &sizing_budget,
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
         );

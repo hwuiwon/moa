@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, Utc};
 use moa_core::{config::MemoryDigestConfig, types::identifiers::StoragePartitionId};
+use moa_memory_types::FactCategory;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
@@ -13,18 +14,6 @@ use crate::consolidate::{Error, Result};
 
 /// Version of the deterministic digest renderer stored with every row.
 pub const DIGEST_RENDER_VERSION: u32 = 1;
-
-/// Predicate names treated as preference-like by the v1 digest ordering.
-pub const PREFERENCE_PREDICATES: &[&str] = &[
-    "response_style",
-    "prefers",
-    "prefer",
-    "should use",
-    "uses response style",
-    "uses as editor",
-    "uses editor",
-    "private_repository",
-];
 
 const DEFAULT_DECAY_FLOOR: f64 = 0.1;
 const EPSILON: f64 = 1e-9;
@@ -63,6 +52,11 @@ pub struct DigestFact {
     pub valid_from: DateTime<Utc>,
     /// Current confidence.
     pub confidence: Option<f64>,
+    /// Coarse fact category assigned by extraction. Preference-category facts
+    /// lead the standing digest; every other category follows. Sourced from the
+    /// stored structured field, never re-derived from predicate prose.
+    #[serde(default)]
+    pub category: FactCategory,
 }
 
 /// Rendered digest payload ready for storage.
@@ -99,7 +93,7 @@ pub fn render_digest(
         .collect::<Vec<_>>();
     ordered.sort_by_key(|fact| {
         (
-            !is_preference_predicate(&fact.predicate),
+            fact.category != FactCategory::Preference,
             std::cmp::Reverse(fact.valid_from),
             fact.uid,
         )
@@ -207,16 +201,6 @@ pub(crate) async fn rebuild_storage_digests(
         stats.digests_rebuilt += 1;
     }
     Ok(stats)
-}
-
-fn is_preference_predicate(predicate: &str) -> bool {
-    let normalized = predicate.trim().to_ascii_lowercase().replace('_', " ");
-    PREFERENCE_PREDICATES
-        .iter()
-        .any(|candidate| normalized == candidate.replace('_', " "))
-        || normalized.contains("prefer")
-        || normalized.contains("response style")
-        || normalized.contains("should use")
 }
 
 fn confidence_above_floor(confidence: Option<f64>) -> bool {
@@ -392,6 +376,7 @@ fn digest_fact_row_from_sql(row: sqlx::postgres::PgRow) -> Result<DigestFactRow>
     let subject = property_text(&properties, "subject")?;
     let predicate = property_text(&properties, "predicate")?;
     let object = property_text(&properties, "object")?;
+    let category = property_category(&properties);
     Ok(DigestFactRow {
         user_id: row.try_get("user_id")?,
         scope: row.try_get("scope")?,
@@ -402,8 +387,21 @@ fn digest_fact_row_from_sql(row: sqlx::postgres::PgRow) -> Result<DigestFactRow>
             object,
             valid_from: row.try_get("valid_from")?,
             confidence: row.try_get("confidence")?,
+            category,
         },
     })
+}
+
+/// Reads the structured fact category from stored node properties, degrading a
+/// missing or unrecognized value to [`FactCategory::Other`] so digest ordering
+/// never fails on an absent field.
+fn property_category(properties: &Option<Value>) -> FactCategory {
+    properties
+        .as_ref()
+        .and_then(|properties| properties.get("category"))
+        .cloned()
+        .and_then(|value| serde_json::from_value::<FactCategory>(value).ok())
+        .unwrap_or_default()
 }
 
 fn property_text(properties: &Option<Value>, key: &str) -> Result<String> {
@@ -431,10 +429,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn renderer_orders_preference_predicates_first_newest_within_tier() {
-        // Pins: preference facts lead the standing digest, newest first within each tier.
-        let old_preference = fact("00000000-0000-8000-8000-000000000002", "prefers", 1);
-        let new_preference = fact("00000000-0000-8000-8000-000000000003", "response_style", 3);
+    fn renderer_orders_preference_category_first_newest_within_tier() {
+        // Pins: preference-category facts lead the standing digest, newest first,
+        // and the newest non-preference fact still sorts after every preference.
+        // Ordering keys on the structured category, not on predicate wording.
+        let old_preference = preference_fact("00000000-0000-8000-8000-000000000002", 1);
+        let new_preference = preference_fact("00000000-0000-8000-8000-000000000003", 3);
         let newer_non_preference = fact("00000000-0000-8000-8000-000000000001", "deploys_to", 5);
 
         let rendered = render_digest(
@@ -564,6 +564,14 @@ mod tests {
             object: "rust examples".to_string(),
             valid_from: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap() + Duration::days(day),
             confidence: Some(0.9),
+            category: FactCategory::Other,
+        }
+    }
+
+    fn preference_fact(uid: &str, day: i64) -> DigestFact {
+        DigestFact {
+            category: FactCategory::Preference,
+            ..fact(uid, "noted", day)
         }
     }
 

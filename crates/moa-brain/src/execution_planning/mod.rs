@@ -341,7 +341,10 @@ enum ParsedProviderCall {
         candidate_hash: String,
         model: String,
     },
+    /// Planner-authored terminal verdict whose message is safe to surface.
     Unsupported(String),
+    /// Provider/transport failure whose raw message must not reach a user.
+    ProviderFailure(String),
 }
 
 async fn call_initial_provider(
@@ -480,7 +483,7 @@ fn provider_error_call(
     message: String,
 ) -> ProviderCall {
     ProviderCall {
-        parsed: ParsedProviderCall::Unsupported(message),
+        parsed: ParsedProviderCall::ProviderFailure(message),
         audit: planner_audit(
             request,
             call_kind,
@@ -796,6 +799,7 @@ fn terminal_provider_result(
 ) -> ExecutionPlanningResult {
     match parsed {
         ParsedProviderCall::Unsupported(message) => unsupported(message, audits),
+        ParsedProviderCall::ProviderFailure(message) => provider_failure(message, audits),
         ParsedProviderCall::Candidate { .. } => unsupported("invalid planner state", audits),
     }
 }
@@ -828,6 +832,19 @@ fn unsupported(
 ) -> ExecutionPlanningResult {
     ExecutionPlanningResult {
         kind: ExecutionPlanningResultKind::Unsupported {
+            message: message.into(),
+        },
+        audits,
+    }
+}
+
+/// Wraps a raw provider/transport failure so callers can keep it out of user text.
+fn provider_failure(
+    message: impl Into<String>,
+    audits: Vec<ExecutionPlanningAuditEnvelope>,
+) -> ExecutionPlanningResult {
+    ExecutionPlanningResult {
+        kind: ExecutionPlanningResultKind::ProviderFailure {
             message: message.into(),
         },
         audits,
@@ -983,7 +1000,10 @@ enum ParsedAmendmentCall {
         candidate_json: String,
         candidate_hash: String,
     },
+    /// Planner-authored terminal verdict whose message is safe to surface.
     Unsupported(String),
+    /// Provider/transport failure whose raw message must not reach a user.
+    ProviderFailure(String),
 }
 
 async fn call_amendment_provider(
@@ -1117,7 +1137,7 @@ fn amendment_provider_error(
     message: String,
 ) -> AmendmentProviderCall {
     AmendmentProviderCall {
-        parsed: ParsedAmendmentCall::Unsupported(message),
+        parsed: ParsedAmendmentCall::ProviderFailure(message),
         audit: amendment_planner_audit(
             request,
             call_kind,
@@ -1318,6 +1338,9 @@ fn amendment_terminal_provider(
 ) -> ExecutionAmendmentPlanningResult {
     match parsed {
         ParsedAmendmentCall::Unsupported(message) => amendment_unsupported(message, audits),
+        ParsedAmendmentCall::ProviderFailure(message) => {
+            amendment_provider_failure(message, audits)
+        }
         ParsedAmendmentCall::Candidate { .. } => {
             amendment_unsupported("invalid amendment planner state", audits)
         }
@@ -1353,6 +1376,19 @@ fn amendment_unsupported(
 ) -> ExecutionAmendmentPlanningResult {
     ExecutionAmendmentPlanningResult {
         kind: ExecutionAmendmentPlanningResultKind::Unsupported {
+            message: message.into(),
+        },
+        audits,
+    }
+}
+
+/// Wraps a raw amendment provider/transport failure so callers can keep it out of user text.
+fn amendment_provider_failure(
+    message: impl Into<String>,
+    audits: Vec<ExecutionPlanningAuditEnvelope>,
+) -> ExecutionAmendmentPlanningResult {
+    ExecutionAmendmentPlanningResult {
+        kind: ExecutionAmendmentPlanningResultKind::ProviderFailure {
             message: message.into(),
         },
         audits,

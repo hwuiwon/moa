@@ -132,18 +132,22 @@ impl RuntimeDeps {
         validate_lineage_journal_startup(config.as_ref())?;
         let lineage = build_lineage_sink(config.as_ref(), background_pool.clone()).await?;
         let retrieval_embedder = build_retrieval_embedder(config.as_ref());
+        // Reused for skill-manifest ranking; the retriever moves the original.
+        let skill_embedder = retrieval_embedder.clone();
         let graph_memory_retriever = build_graph_memory_retriever(
             config.as_ref(),
             pool.clone(),
             retrieval_embedder,
             lineage.handle.clone(),
         );
-        let skill_injector = Arc::new(
-            SkillInjector::new(pool.clone())
-                .with_session_store(session_store.clone())
-                .with_segment_store(session_store.clone())
-                .with_budget_config(config.skill_budget.clone()),
-        );
+        let mut skill_injector = SkillInjector::new(pool.clone())
+            .with_session_store(session_store.clone())
+            .with_segment_store(session_store.clone())
+            .with_budget_config(config.skill_budget.clone());
+        if let Some(embedder) = skill_embedder {
+            skill_injector = skill_injector.with_embedder(embedder);
+        }
+        let skill_injector = Arc::new(skill_injector);
         let tool_schemas = Arc::new(tool_router.tool_schemas());
         let channel_adapters = build_channel_adapters(config.as_ref(), runtime_cache.clone())?;
         moa_memory_ingest::install_runtime_with_config(background_pool.clone(), config.as_ref())

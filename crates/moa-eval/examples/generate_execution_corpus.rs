@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(root.join("routing.jsonl"), &routing)?;
     fs::write(root.join("contract-recorded.jsonl"), &contract)?;
     let manifest = format!(
-        "schema_version = 1\n\n[routing]\npath = \"routing.jsonl\"\nsha256 = \"{}\"\ncount = 320\n\n[contract]\npath = \"contract-recorded.jsonl\"\nsha256 = \"{}\"\ncount = 80\n\n[task_quality]\npath = \"task-quality.jsonl\"\nsha256 = \"{}\"\ncount = 20\n",
+        "schema_version = 1\n\n[routing]\npath = \"routing.jsonl\"\nsha256 = \"{}\"\ncount = 328\n\n[contract]\npath = \"contract-recorded.jsonl\"\nsha256 = \"{}\"\ncount = 80\n\n[task_quality]\npath = \"task-quality.jsonl\"\nsha256 = \"{}\"\ncount = 20\n",
         sha256(&routing),
         sha256(&contract),
         sha256(&task_quality),
@@ -60,7 +60,7 @@ fn sha256(bytes: &[u8]) -> String {
 }
 
 fn routing_cases() -> Vec<ExecutionRoutingCase> {
-    let mut cases = Vec::with_capacity(320);
+    let mut cases = Vec::with_capacity(328);
     for index in 0..60 {
         cases.push(route_case(
             format!("respond-{index:03}"),
@@ -198,6 +198,54 @@ fn routing_cases() -> Vec<ExecutionRoutingCase> {
         }
         cases.push(case);
     }
+    // Enumerated parallel-workstream requests that forward-reference user material not yet
+    // provided must still route to Execute/Durable: the coordinator delegates one worker per
+    // workstream now (building the framework for any blocked workstream) instead of answering
+    // directly or asking for the pending inputs. Pins the model-driven regression from the live
+    // 100-session sweep (sessions S044/S072) at the deterministic routing boundary.
+    for (suffix, objective) in parallel_workstream_forward_reference_cases() {
+        let mut case = route_case(
+            format!("execute-durable-parallel-forward-ref-{suffix}"),
+            objective.to_string(),
+            ExecutionRoutingLabel::Execute,
+            Some(ExecutionStrategy::Durable),
+            response_fixture(
+                ExecutionRouteClassifierLabel::Execute,
+                Some(ExecutionStrategy::Durable),
+                9_500,
+                Vec::new(),
+            ),
+            ExecutionRouteClassifierOutcome::Accepted,
+        );
+        case.tags
+            .push("parallel-workstream-forward-reference".to_string());
+        case.tags.push(suffix.to_string());
+        cases.push(case);
+    }
+    // Borderline requests that a covering installed skill should carry to
+    // Execute/Inline rather than stalling in NeedsInput: the skill supplies its own
+    // guidance for identifying missing inputs without blocking. Pins the model-driven
+    // regression from the live sweep (session S016) at the deterministic routing
+    // boundary, with the covering skills offered as the router's coverage hint.
+    for (suffix, objective, skills) in skill_coverage_cases() {
+        let mut case = route_case(
+            format!("execute-inline-skill-coverage-{suffix}"),
+            objective.to_string(),
+            ExecutionRoutingLabel::Execute,
+            Some(ExecutionStrategy::Inline),
+            response_fixture(
+                ExecutionRouteClassifierLabel::Execute,
+                Some(ExecutionStrategy::Inline),
+                9_000,
+                Vec::new(),
+            ),
+            ExecutionRouteClassifierOutcome::Accepted,
+        );
+        case.available_skills = skills.iter().map(|skill| (*skill).to_string()).collect();
+        case.tags.push("skill-coverage".to_string());
+        case.tags.push(suffix.to_string());
+        cases.push(case);
+    }
     for index in 0..20 {
         let mut case = route_case(
             format!("needs-input-{index:03}"),
@@ -218,6 +266,58 @@ fn routing_cases() -> Vec<ExecutionRoutingCase> {
     cases
 }
 
+/// Borderline objectives paired with the installed skills that plausibly cover them.
+/// Each must route to Execute/Inline instead of NeedsInput because a covering skill
+/// carries its own guidance for gathering any missing inputs without blocking.
+fn skill_coverage_cases() -> [(&'static str, &'static str, &'static [&'static str]); 4] {
+    [
+        (
+            "refund-policy-summary",
+            "Summarize our refund policy into five plain-language bullets.",
+            &["refund-triage", "policy-drafting", "customer-comms"],
+        ),
+        (
+            "onboarding-checklist",
+            "Turn our onboarding guide into a checklist a new hire can follow.",
+            &["employee-onboarding", "doc-formatting"],
+        ),
+        (
+            "incident-postmortem",
+            "Draft a postmortem for last night's outage from what we discussed.",
+            &["incident-review", "postmortem-writing", "timeline-builder"],
+        ),
+        (
+            "invoice-reconciliation",
+            "Reconcile this month's invoices against the purchase orders.",
+            &["invoice-reconciliation", "finance-ops"],
+        ),
+    ]
+}
+
+/// Enumerated parallel-workstream objectives whose workstreams forward-reference user
+/// material that has not been provided yet. Each must route to Execute/Durable so the
+/// coordinator delegates a worker per workstream instead of responding or asking for input.
+fn parallel_workstream_forward_reference_cases() -> [(&'static str, &'static str); 4] {
+    [
+        (
+            "soc2-evidence-gaps",
+            "Split the SOC 2 audit prep into parallel workstreams: one worker assesses the evidence gaps from the control list I will share, another drafts the remediation timeline, and another maps owner assignments, then combine them into one readiness memo.",
+        ),
+        (
+            "handoff-mapping",
+            "Run these in parallel: one worker maps the team handoffs from the notes I will paste, one worker builds the RACI matrix, and one worker lists the escalation paths, and give me a single coordination plan.",
+        ),
+        (
+            "vendor-review",
+            "1) One worker reviews the vendor security questionnaire responses from the spreadsheet I will attach, 2) another benchmarks pricing across the shortlisted vendors, 3) another summarizes the contract red flags, then synthesize a recommendation.",
+        ),
+        (
+            "launch-readiness",
+            "In parallel, have one worker assess the launch blockers from the checklist I will send, one worker draft the go-to-market brief, and one worker prepare the rollback plan, and merge them into a launch-readiness summary.",
+        ),
+    ]
+}
+
 fn route_case(
     case_id: String,
     objective: String,
@@ -232,6 +332,7 @@ fn route_case(
         objective,
         attachment_count: 0,
         has_recent_target: false,
+        available_skills: Vec::new(),
         classifier,
         expected_classifier_outcome,
         expected_label,

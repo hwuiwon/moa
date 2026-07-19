@@ -65,8 +65,21 @@ pub struct RetrievalRequest {
     pub query_embedding: Vec<f32>,
     /// Request memory scope used for sidecar RLS GUCs.
     pub scope: MemoryScope,
-    /// Optional graph node label allowlist.
+    /// Optional HARD graph node label allowlist.
+    ///
+    /// Only ever set from structured, explicit input (a scope plan's
+    /// `label_filter`). Candidates whose label is not in this list are dropped
+    /// by every retrieval leg. A planner-inferred label guess must NOT populate
+    /// this field — use [`Self::label_boost`] instead so a wrong guess degrades
+    /// ranking rather than silently excluding the answer.
     pub label_filter: Option<Vec<NodeLabel>>,
+    /// Optional SOFT planner-inferred label hint.
+    ///
+    /// Candidates whose label matches receive a bounded additive ranking boost
+    /// (`RankingWeights::label_hint_boost`), but candidates with other labels
+    /// are still retrieved and ranked. This is the low-risk home for the
+    /// keyword-guessed label the planner infers from query wording.
+    pub label_boost: Option<Vec<NodeLabel>>,
     /// Maximum PII class visible to the caller.
     pub max_pii_class: PiiClass,
     /// Number of final candidates to return.

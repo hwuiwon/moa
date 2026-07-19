@@ -772,8 +772,21 @@ fn record_remember_metrics(elapsed: Duration, result: &Result<Uuid, FastError>) 
     metrics::counter!("moa_fast_remember_total", "outcome" => outcome).increment(1);
 }
 
+/// Maximum number of facts one `memory_remember` invocation may store.
+const MAX_REMEMBER_BATCH: usize = 32;
+
+/// Reason surfaced when a contact-scoped item is requested on a session that has
+/// no contact; the item is rejected rather than silently widened to tenant scope.
+const CONTACT_SCOPE_WITHOUT_CONTACT_REASON: &str =
+    "contact-scoped memory requires a contact on this session";
+
 #[derive(Debug, Deserialize, Serialize)]
-struct RememberToolInput {
+struct RememberBatchInput {
+    items: Vec<RememberItemInput>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RememberItemInput {
     text: String,
     #[serde(default)]
     label: Option<String>,
@@ -781,6 +794,15 @@ struct RememberToolInput {
     scope: Option<String>,
     #[serde(default)]
     supersedes_specific: Option<Uuid>,
+}
+
+/// Outcome of one item inside a batched remember call.
+#[derive(Debug)]
+enum RememberOutcome {
+    /// The fact was written; carries the new graph node id.
+    Stored(Uuid),
+    /// The fact was not written; carries a short human-readable reason.
+    Rejected(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -808,33 +830,161 @@ async fn execute_remember_tool(
     input: &Value,
     started: Instant,
 ) -> Result<ToolOutput, FastError> {
-    let params: RememberToolInput = serde_json::from_value(input.clone())?;
-    let label = parse_node_label(params.label.as_deref())?;
-    if requested_contact_scope_without_contact(session, params.scope.as_deref()) {
-        return Ok(contact_scope_without_contact_output(started));
+    let batch: RememberBatchInput = serde_json::from_value(input.clone())?;
+    validate_remember_batch_len(batch.items.len())?;
+
+    // One runtime context per requested scope is reused across items so a large
+    // batch does not rebuild the graph/vector/PII stack per fact. Item failures
+    // are recorded and never abort the remaining items.
+    let mut scope_ctxs: std::collections::HashMap<String, (FastPathCtx, Uuid, Option<Uuid>)> =
+        std::collections::HashMap::new();
+    let mut outcomes = Vec::with_capacity(batch.items.len());
+    for item in &batch.items {
+        outcomes.push(remember_one_item(session, item, &mut scope_ctxs).await);
     }
-    let scope = requested_write_scope(params.scope.as_deref());
-    let (ctx, tenant_id, contact_id) = runtime_ctx_for_scope(session, &scope).await?;
+    Ok(batch_remember_output(&outcomes, started))
+}
+
+fn validate_remember_batch_len(len: usize) -> Result<(), FastError> {
+    if len == 0 {
+        return Err(FastError::Invalid(
+            "remember requires at least one item".to_string(),
+        ));
+    }
+    if len > MAX_REMEMBER_BATCH {
+        return Err(FastError::Invalid(format!(
+            "remember accepts at most {MAX_REMEMBER_BATCH} items per call, got {len}"
+        )));
+    }
+    Ok(())
+}
+
+/// Writes one batch item, returning a per-item outcome instead of erroring so a
+/// single bad item never aborts the rest of the batch.
+async fn remember_one_item(
+    session: &SessionMeta,
+    item: &RememberItemInput,
+    scope_ctxs: &mut std::collections::HashMap<String, (FastPathCtx, Uuid, Option<Uuid>)>,
+) -> RememberOutcome {
+    let label = match parse_node_label(item.label.as_deref()) {
+        Ok(label) => label,
+        Err(error) => return RememberOutcome::Rejected(remember_item_reason(&error)),
+    };
+    if requested_contact_scope_without_contact(session, item.scope.as_deref()) {
+        return RememberOutcome::Rejected(CONTACT_SCOPE_WITHOUT_CONTACT_REASON.to_string());
+    }
+    let scope = requested_write_scope(item.scope.as_deref());
+    let (ctx, tenant_id, contact_id) = match scoped_ctx_for(session, &scope, scope_ctxs).await {
+        Ok(triple) => triple,
+        Err(error) => return RememberOutcome::Rejected(remember_item_reason(&error)),
+    };
     let actor_id = actor_id_from_session(session);
-    let uid = fast_remember(
+    match fast_remember(
         FastRememberRequest {
             tenant_id,
             contact_id,
             scope,
-            text: params.text,
+            text: item.text.clone(),
             label,
-            supersedes_specific: params.supersedes_specific,
+            supersedes_specific: item.supersedes_specific,
             actor_id,
             actor_kind: "user".to_string(),
         },
         &ctx,
     )
-    .await?;
-    Ok(ToolOutput::json(
-        format!("Remembered graph memory node {uid}"),
-        json!({ "uid": uid, "operation": "remember" }),
-        started.elapsed(),
-    ))
+    .await
+    {
+        Ok(uid) => RememberOutcome::Stored(uid),
+        Err(error) => RememberOutcome::Rejected(remember_item_reason(&error)),
+    }
+}
+
+/// Returns the scope's runtime context, building and caching it on first use.
+async fn scoped_ctx_for(
+    session: &SessionMeta,
+    scope: &str,
+    scope_ctxs: &mut std::collections::HashMap<String, (FastPathCtx, Uuid, Option<Uuid>)>,
+) -> Result<(FastPathCtx, Uuid, Option<Uuid>), FastError> {
+    if let Some(existing) = scope_ctxs.get(scope) {
+        return Ok(existing.clone());
+    }
+    let built = runtime_ctx_for_scope(session, scope).await?;
+    scope_ctxs.insert(scope.to_string(), built.clone());
+    Ok(built)
+}
+
+/// Maps a fast-path error to a short per-item rejection reason for batch results.
+fn remember_item_reason(error: &FastError) -> String {
+    match error {
+        FastError::Invalid(message) => message.clone(),
+        FastError::PiiClassificationUnavailable { .. } => {
+            "privacy classification unavailable".to_string()
+        }
+        FastError::ConfiguredEmbedderUnavailable => {
+            "configured ingestion embedder unavailable".to_string()
+        }
+        FastError::Timeout(operation) => format!("timed out during {operation}"),
+        _ => "memory storage unavailable".to_string(),
+    }
+}
+
+/// Builds the single tool result reporting every item's outcome.
+///
+/// Partial success (at least one stored) is a successful result. When every item
+/// is rejected the result is marked as an error and carries the standard "do not
+/// retry this turn" guidance, matching the single-fact environmental-failure
+/// contract so the turn loop does not re-run the tool.
+fn batch_remember_output(outcomes: &[RememberOutcome], started: Instant) -> ToolOutput {
+    let total = outcomes.len();
+    let stored = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, RememberOutcome::Stored(_)))
+        .count();
+    let rejected = total - stored;
+
+    let results: Vec<Value> = outcomes
+        .iter()
+        .enumerate()
+        .map(|(index, outcome)| match outcome {
+            RememberOutcome::Stored(uid) => {
+                json!({ "index": index, "status": "stored", "uid": uid })
+            }
+            RememberOutcome::Rejected(reason) => {
+                json!({ "index": index, "status": "rejected", "reason": reason })
+            }
+        })
+        .collect();
+
+    let mut summary = format!("Remembered {stored} of {total} fact(s).");
+    if rejected > 0 {
+        let details: Vec<String> = outcomes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, outcome)| match outcome {
+                RememberOutcome::Rejected(reason) => Some(format!("index {index}: {reason}")),
+                RememberOutcome::Stored(_) => None,
+            })
+            .collect();
+        summary.push_str(&format!(" Rejected {rejected} ({}).", details.join("; ")));
+    }
+
+    let data = json!({
+        "operation": "remember",
+        "stored": stored,
+        "rejected": rejected,
+        "results": results,
+    });
+
+    if stored == 0 {
+        summary.push_str(
+            " Do not retry this memory tool in this turn; continue using the current session context.",
+        );
+        let mut output = ToolOutput::json(summary, data, started.elapsed());
+        output.is_error = true;
+        output
+    } else {
+        ToolOutput::json(summary, data, started.elapsed())
+    }
 }
 
 async fn execute_forget_tool(
@@ -879,13 +1029,15 @@ async fn execute_supersede_tool(
     started: Instant,
 ) -> Result<ToolOutput, FastError> {
     let params: SupersedeToolInput = serde_json::from_value(input.clone())?;
-    let remember = RememberToolInput {
-        text: params.new_text,
-        label: params.label,
-        scope: params.scope,
-        supersedes_specific: Some(params.old_uid),
+    let batch = RememberBatchInput {
+        items: vec![RememberItemInput {
+            text: params.new_text,
+            label: params.label,
+            scope: params.scope,
+            supersedes_specific: Some(params.old_uid),
+        }],
     };
-    execute_remember_tool(session, &serde_json::to_value(remember)?, started).await
+    execute_remember_tool(session, &serde_json::to_value(batch)?, started).await
 }
 
 async fn runtime_ctx_for_scope(
@@ -918,13 +1070,6 @@ fn requested_contact_scope_without_contact(
 
 fn requested_write_scope(requested_scope: Option<&str>) -> String {
     requested_scope.unwrap_or("tenant").to_string()
-}
-
-fn contact_scope_without_contact_output(started: Instant) -> ToolOutput {
-    ToolOutput::error(
-        "Contact-scoped memory was not written because this session has no contact. Do not retry this memory write in this turn; continue using the current session context or ask the user to identify the contact.",
-        started.elapsed(),
-    )
 }
 
 fn memory_tool_failure_output(tool_name: &str, error: &FastError, started: Instant) -> ToolOutput {
@@ -1278,6 +1423,111 @@ mod tests {
             output.content.iter().any(
                 |content| matches!(content, ToolContent::Text { text } if text.contains("Do not retry this memory tool in this turn"))
             )
+        );
+    }
+
+    #[test]
+    fn batch_remember_output_reports_each_item_and_flags_all_rejected() {
+        // Pins: a batched remember result reports one entry per item with its
+        // outcome; partial success stays a success, and an all-rejected batch is
+        // an error carrying the "do not retry this turn" guidance so the turn
+        // loop does not re-run the tool (batch-remember pacing fix, 2026-07-18).
+        let partial = batch_remember_output(
+            &[
+                RememberOutcome::Stored(Uuid::from_u128(1)),
+                RememberOutcome::Rejected("empty text".to_string()),
+            ],
+            Instant::now(),
+        );
+        assert!(!partial.is_error, "partial success is not an error");
+        let data = partial.structured.expect("structured payload");
+        assert_eq!(data["stored"], 1);
+        assert_eq!(data["rejected"], 1);
+        assert_eq!(data["results"][0]["status"], "stored");
+        assert_eq!(data["results"][0]["index"], 0);
+        assert_eq!(
+            data["results"][0]["uid"],
+            json!(Uuid::from_u128(1).to_string())
+        );
+        assert_eq!(data["results"][1]["status"], "rejected");
+        assert_eq!(data["results"][1]["index"], 1);
+        assert_eq!(data["results"][1]["reason"], "empty text");
+
+        let all_rejected = batch_remember_output(
+            &[
+                RememberOutcome::Rejected("a".to_string()),
+                RememberOutcome::Rejected("b".to_string()),
+            ],
+            Instant::now(),
+        );
+        assert!(all_rejected.is_error, "an all-rejected batch is an error");
+        assert!(
+            all_rejected
+                .to_text()
+                .contains("Do not retry this memory tool in this turn")
+        );
+        assert_eq!(all_rejected.structured.expect("payload")["stored"], 0);
+    }
+
+    #[tokio::test]
+    async fn execute_remember_batch_rejects_each_bad_item_without_aborting() {
+        // Pins: one invalid item never aborts the rest — every item is processed
+        // and reported independently. Uses items that fail before any runtime is
+        // needed (unknown label, contact scope without a contact) so the fan-in
+        // aggregation is exercised offline.
+        let session = SessionMeta {
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
+            contact: None,
+            ..SessionMeta::default()
+        };
+        let input = json!({
+            "items": [
+                { "text": "first", "label": "NotALabel" },
+                { "text": "second", "scope": "contact" },
+                { "text": "third", "label": "AlsoNotALabel" }
+            ]
+        });
+
+        let output = execute_remember_tool(&session, &input, Instant::now())
+            .await
+            .expect("batch execution should return per-item results, not error out");
+
+        assert!(
+            output.is_error,
+            "every item rejected marks the batch failed"
+        );
+        let data = output.structured.expect("structured payload");
+        assert_eq!(data["stored"], 0);
+        assert_eq!(data["rejected"], 3);
+        let results = data["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 3, "all items are reported, none aborted");
+        assert_eq!(results[0]["status"], "rejected");
+        assert_eq!(results[1]["status"], "rejected");
+        assert_eq!(results[1]["reason"], CONTACT_SCOPE_WITHOUT_CONTACT_REASON);
+        assert_eq!(results[2]["status"], "rejected");
+    }
+
+    #[tokio::test]
+    async fn execute_remember_batch_rejects_empty_and_oversized() {
+        // Pins: batch size is bounded — an empty item list and a list over the
+        // per-call cap are both rejected before any write is attempted.
+        let session = SessionMeta::default();
+
+        let empty = execute_remember_tool(&session, &json!({ "items": [] }), Instant::now()).await;
+        assert!(matches!(empty, Err(FastError::Invalid(_))), "empty batch");
+
+        let oversized_items: Vec<Value> = (0..=MAX_REMEMBER_BATCH)
+            .map(|index| json!({ "text": format!("fact {index}") }))
+            .collect();
+        let oversized = execute_remember_tool(
+            &session,
+            &json!({ "items": oversized_items }),
+            Instant::now(),
+        )
+        .await;
+        assert!(
+            matches!(oversized, Err(FastError::Invalid(_))),
+            "batch over the cap of {MAX_REMEMBER_BATCH} is rejected"
         );
     }
 }

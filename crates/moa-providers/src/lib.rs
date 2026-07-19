@@ -32,6 +32,7 @@ pub use core::models::{
 };
 pub use core::pacer::PacerConfig;
 pub use core::router::ModelRouter;
+pub use core::schema::{compile_for_openai_strict, openai_strict_violations};
 #[cfg(any(test, feature = "mock-embedding"))]
 pub use embedding::MockEmbedding;
 pub use embedding::{

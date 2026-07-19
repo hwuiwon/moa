@@ -219,6 +219,7 @@ fn request_for_policy(query_text: &str) -> RetrievalRequest {
             tenant_id: TenantId::new(),
         },
         label_filter: None,
+        label_boost: None,
         max_pii_class: PiiClass::Restricted,
         k_final: RETRIEVAL_EVAL_FINAL_K,
         use_reranker: false,

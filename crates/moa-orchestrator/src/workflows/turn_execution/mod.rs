@@ -77,7 +77,9 @@ use moa_observability::{
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
-use self::event_queries::{load_recent_target_events, load_session_meta};
+use self::event_queries::{
+    load_available_skill_names, load_recent_target_events, load_session_meta,
+};
 use self::guardrails::{evaluate_input_guardrail, visible_response_after_output_guardrail};
 use self::implementation::TurnExecutionImpl;
 use self::request::{BuiltTurnRequest, build_request_inside_workflow};
@@ -112,8 +114,7 @@ use crate::workflows::turn_events::{
 };
 use crate::workflows::turn_progress::{self, SUMMARY_CALLING_MODEL, SUMMARY_WORKING};
 use crate::workflows::turn_responsiveness::{
-    ModelLoopClass, ToolBudgetExhausted, ToolBudgetState,
-    has_recent_target as recent_events_have_target,
+    ModelLoopClass, ToolBudgetExhausted, ToolBudgetState, recent_target_digest,
 };
 
 #[derive(Clone, Debug)]
@@ -304,7 +305,7 @@ async fn execute_turn_inside_workflow(
 
     let recent_target_events =
         load_recent_target_events(ctx, workflow.session_store.clone(), session_id).await?;
-    let has_recent_target = recent_events_have_target(&recent_target_events, user_sequence_num);
+    let recent_target_digest = recent_target_digest(&recent_target_events, user_sequence_num);
     let execution_synthesis_turn = is_execution_synthesis_turn(request);
     let classifier_model = ModelId::new(
         workflow
@@ -318,13 +319,17 @@ async fn execute_turn_inside_workflow(
     let route_result = if execution_synthesis_turn {
         None
     } else {
+        let available_skill_names =
+            load_available_skill_names(ctx, workflow.session_store.pool().clone(), meta.tenant_id)
+                .await?;
         let mut result = route_execution(
             &route_provider,
             ExecutionRoutingInput {
                 objective: &request.user_message,
                 execution_template: request.execution_template.as_ref(),
                 attachment_count: request.attachments.len(),
-                has_recent_target,
+                recent_target_digest: &recent_target_digest,
+                available_skill_names: &available_skill_names,
                 classifier_model: &classifier_model,
             },
         )
@@ -417,9 +422,11 @@ async fn execute_turn_inside_workflow(
         session_limits,
     )
     .ok_or_else(|| TerminalError::new("execution route did not select a model loop"))?;
-    let max_turns = loop_plan.max_turns;
     let loop_class = loop_plan.class;
     let mut tool_budget = loop_plan.tool_budget();
+    // Once this turn spawns a worker, its model-loop cap escalates one-way to the higher
+    // delegation cap so spawning, waiting on, and synthesizing workers fits in one turn.
+    let mut turn_cap = loop_plan.turn_cap_escalation();
     driver_progress::initialize_loop_progress(
         ctx,
         loop_plan.route.clone(),
@@ -433,7 +440,15 @@ async fn execute_turn_inside_workflow(
     // Per-turn file_read memory serves repeated identical reads from context with a notice.
     let mut file_read_cache = FileReadTurnCache::default();
 
-    for turn_number in 1..=max_turns {
+    let mut turn_number: usize = 0;
+    let final_max_turns = loop {
+        turn_number += 1;
+        let effective_max_turns = turn_cap.effective_max_turns();
+        if turn_number > effective_max_turns {
+            break effective_max_turns;
+        }
+        // Reset per iteration; run_once latches it on when this iteration spawns a worker.
+        let mut delegated_this_turn = false;
         driver_progress::set_iteration(ctx, turn_number);
         if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
             return Ok(BodyOutcome {
@@ -478,6 +493,7 @@ async fn execute_turn_inside_workflow(
                             &mut turn_evidence,
                             &mut tool_budget,
                             &mut file_read_cache,
+                            &mut delegated_this_turn,
                         )
                         .instrument(turn_root_span.clone())
                         .await
@@ -514,6 +530,12 @@ async fn execute_turn_inside_workflow(
         emit_turn_replay_summary(&turn_root_span, turn_number as i64, &turn_snapshot);
         let turn_coordination_snapshot = turn_coordination_counters.snapshot();
         emit_turn_coordination_summary(&turn_root_span, &turn_coordination_snapshot);
+
+        // Latch the one-way delegation escalation and refresh the reported cap the first
+        // time this turn spawns a worker, so later iterations use the higher cap.
+        if delegated_this_turn && turn_cap.record_delegation() {
+            driver_progress::set_max_turns(ctx, turn_cap.effective_max_turns());
+        }
 
         match turn_outcome {
             TurnIterationOutcome::Core(CoreTurnOutcome::Continue) => continue,
@@ -616,16 +638,14 @@ async fn execute_turn_inside_workflow(
                 });
             }
         }
-    }
+    };
 
-    emit_turn_cap_exceeded(ctx, session_id, max_turns).await?;
+    emit_turn_cap_exceeded(ctx, session_id, final_max_turns).await?;
     let (message, sequence_num) = append_zero_cost_assistant_response_with_sequence(
         ctx,
         session_id,
         &meta,
-        format!(
-            "MOA stopped because this turn reached the model-loop turn cap ({max_turns}). Narrow the scope or ask MOA to continue."
-        ),
+        turn_cap_reached_message(final_max_turns),
     )
     .await?;
     record_last_response_sequence(ctx, sequence_num);
@@ -823,6 +843,42 @@ fn execution_audit_error(error: moa_execution::Error) -> HandlerError {
     TerminalError::new(format!("execution planning audit failed: {error}")).into()
 }
 
+/// Fixed user-safe reply for a planner provider/transport failure.
+///
+/// Deliberately opaque: the raw provider detail is recorded only in the durable
+/// error event and never surfaced to the user.
+const PLANNING_PROVIDER_FAILURE_USER_MESSAGE: &str =
+    "I hit an internal error while planning this work. Please try again.";
+
+/// Durable outcome for a planner provider/transport failure.
+struct PlanningProviderFailure {
+    /// Operator-facing durable error carrying the raw provider detail.
+    error_event: Event,
+    /// Bounded, user-safe assistant reply.
+    user_message: String,
+    /// Terminal turn status for the failure.
+    outcome: TurnOutcomeKind,
+}
+
+/// Separates a planner provider failure into an operator-facing durable error and a
+/// bounded user-safe reply.
+///
+/// The raw provider `detail` flows only into the recoverable [`Event::Error`]; the user
+/// reply is the fixed [`PLANNING_PROVIDER_FAILURE_USER_MESSAGE`]. The turn is reported
+/// [`TurnOutcomeKind::Failed`] to match how the inline model loop surfaces a bubbled
+/// provider failure (see `implementation.rs`, which maps a handler error to
+/// `TurnOutcomeKind::Failed`), because an infrastructure error is not a completed turn.
+fn planning_provider_failure_outcome(detail: &str) -> PlanningProviderFailure {
+    PlanningProviderFailure {
+        error_event: Event::Error {
+            message: format!("execution planning provider failure: {detail}"),
+            recoverable: true,
+        },
+        user_message: PLANNING_PROVIDER_FAILURE_USER_MESSAGE.to_string(),
+        outcome: TurnOutcomeKind::Failed,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_durable_admission(
     workflow: &TurnExecutionImpl,
@@ -897,10 +953,28 @@ async fn execute_durable_admission(
             });
         }
         ExecutionPlanningResultKind::Unsupported { message } => {
+            // Planner-authored verdict text is safe to surface directly.
             let message =
                 append_zero_cost_assistant_response(ctx, session_id, meta, message).await?;
             return Ok(BodyOutcome {
                 kind: TurnOutcomeKind::Completed,
+                message,
+                post_outcome_assessment: None,
+            });
+        }
+        ExecutionPlanningResultKind::ProviderFailure { message } => {
+            // Infrastructure failure, not a semantic verdict: record the raw provider
+            // detail in a durable recoverable error for operators, reply with a bounded
+            // user-safe message (never the raw string), and fail the turn to match the
+            // inline model loop.
+            let failure = planning_provider_failure_outcome(&message);
+            record_session_error("execution_planning_provider_failure");
+            append_session_event(ctx, session_id, failure.error_event).await?;
+            let message =
+                append_zero_cost_assistant_response(ctx, session_id, meta, failure.user_message)
+                    .await?;
+            return Ok(BodyOutcome {
+                kind: failure.outcome,
                 message,
                 post_outcome_assessment: None,
             });
@@ -1030,6 +1104,7 @@ async fn ingest_deferred_session_turn(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_once_inside_workflow(
     workflow: &TurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
@@ -1038,6 +1113,7 @@ async fn run_once_inside_workflow(
     turn_evidence: &mut TurnEvidence,
     tool_budget: &mut ToolBudgetState,
     file_read_cache: &mut FileReadTurnCache,
+    delegated_this_turn: &mut bool,
 ) -> Result<TurnIterationOutcome, HandlerError> {
     let session_id = turn_context.session_id;
     let turn_id = turn_context.turn_id;
@@ -1189,6 +1265,7 @@ async fn run_once_inside_workflow(
             durable_upgrade_allowed: turn_context.durable_upgrade_allowed,
             turn_evidence,
             file_read_cache,
+            delegated_worker: delegated_this_turn,
         },
         &allowed_tools,
         tool_budget,
@@ -1330,6 +1407,16 @@ fn selected_skill_names(
     names
 }
 
+/// Builds the user-facing message shown when a turn stops at its model-loop cap.
+///
+/// `max_turns` is the cap actually in force, which is the higher delegation cap when
+/// the turn escalated after spawning a worker.
+fn turn_cap_reached_message(max_turns: usize) -> String {
+    format!(
+        "MOA stopped because this turn reached the model-loop turn cap ({max_turns}). Narrow the scope or ask MOA to continue."
+    )
+}
+
 async fn emit_turn_cap_exceeded(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
@@ -1402,6 +1489,26 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn turn_cap_reached_message_states_the_effective_cap() {
+        // Pins: the cap-stop message reports the cap actually in force, so an escalated
+        // delegation turn tells the user the delegation cap (12), not the base cap (6).
+        let escalated = driver_model_loop::TurnCapEscalation::new(6, 12);
+        let base_message = turn_cap_reached_message(escalated.effective_max_turns());
+        assert!(
+            base_message.contains("(6)"),
+            "a non-delegated turn reports the base cap: {base_message}"
+        );
+
+        let mut escalated = escalated;
+        escalated.record_delegation();
+        let delegation_message = turn_cap_reached_message(escalated.effective_max_turns());
+        assert!(
+            delegation_message.contains("(12)"),
+            "an escalated turn reports the delegation cap: {delegation_message}"
+        );
+    }
 
     #[test]
     fn durable_upgrade_guard_is_root_inline_byte_exact_and_single_use() {
@@ -1531,5 +1638,35 @@ mod tests {
             crate::turn::util::allowed_tool_names(&request),
             BTreeSet::from(["file_read".to_string()])
         );
+    }
+
+    #[test]
+    fn planning_provider_failure_keeps_raw_detail_out_of_the_user_reply() {
+        // Pins: a durable planner provider failure records the raw provider detail in a
+        // recoverable Error event, replies with a fixed user-safe message that never leaks
+        // the provider string, and fails the turn — so the raw "provider error: ..." string
+        // can never become the assistant's answer.
+        let detail = "Terminal error [500]: validation error: Responses requests require at \
+                      least one non-system message";
+        let failure = planning_provider_failure_outcome(detail);
+
+        assert_eq!(failure.outcome, TurnOutcomeKind::Failed);
+        assert_eq!(failure.user_message, PLANNING_PROVIDER_FAILURE_USER_MESSAGE);
+        assert!(!failure.user_message.contains(detail));
+        assert!(!failure.user_message.to_lowercase().contains("provider"));
+        assert!(!failure.user_message.contains("validation error"));
+        match failure.error_event {
+            Event::Error {
+                message,
+                recoverable,
+            } => {
+                assert!(recoverable, "planner provider failure is user-retryable");
+                assert!(
+                    message.contains(detail),
+                    "durable error must retain the raw provider detail for operators"
+                );
+            }
+            other => panic!("expected Event::Error, got {other:?}"),
+        }
     }
 }

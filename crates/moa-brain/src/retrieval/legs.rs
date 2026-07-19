@@ -1881,6 +1881,7 @@ mod tests {
                 tenant_id: TenantId::from(Uuid::from_u128(0x100)),
             },
             label_filter: None,
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 4,
             use_reranker: false,

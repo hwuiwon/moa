@@ -577,12 +577,33 @@ async fn plan_and_apply_waiting_replan(
         ExecutionAmendmentPlanningResultKind::Ready { amendment, .. } => amendment,
         ExecutionAmendmentPlanningResultKind::NeedsInput { message }
         | ExecutionAmendmentPlanningResultKind::Unsupported { message } => {
+            // Planner-authored verdict text is safe to carry into the replan-stop reason.
             return finalize_amendment_planner_stop(
                 repository,
                 scope,
                 request.run_uid,
                 plan_revision,
                 message,
+            )
+            .await;
+        }
+        ExecutionAmendmentPlanningResultKind::ProviderFailure { message } => {
+            // Infrastructure failure, not a semantic verdict: the raw provider string must not
+            // reach the user-surfaced replan-stop gaps. Record the detail for operators (the
+            // persisted planner audit already carries the ProviderError outcome) and stop the
+            // replan with a bounded, user-safe description.
+            tracing::error!(
+                run_uid = %request.run_uid,
+                plan_revision,
+                detail = %message,
+                "amendment planner provider failure"
+            );
+            return finalize_amendment_planner_stop(
+                repository,
+                scope,
+                request.run_uid,
+                plan_revision,
+                "an internal error interrupted amendment planning".to_string(),
             )
             .await;
         }

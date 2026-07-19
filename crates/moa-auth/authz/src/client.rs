@@ -325,7 +325,7 @@ impl FgaClient {
             return Ok(());
         }
         let body = response.text().await.unwrap_or_default();
-        if is_idempotent_tuple_error(status.as_u16(), &body) {
+        if is_idempotent_tuple_error(&body) {
             tracing::debug!(
                 status = status.as_u16(),
                 "FGA tuple operation was already converged"
@@ -366,12 +366,53 @@ fn body_for_tuple_op(model_id: &str, op: TupleOp, wire: serde_json::Value) -> se
     }
 }
 
-fn is_idempotent_tuple_error(status: u16, body: &str) -> bool {
-    if status != 400 && status != 409 {
+/// Structured OpenFGA REST error body.
+///
+/// OpenFGA reports write failures as a JSON object carrying a machine `code`
+/// and a human `message`. Both fields are required for classification, so a
+/// body missing either fails to deserialize and is treated as a real failure.
+#[derive(Debug, Deserialize)]
+struct FgaErrorBody {
+    /// Machine-readable OpenFGA error code.
+    code: String,
+    /// Human-readable OpenFGA error message.
+    message: String,
+}
+
+/// OpenFGA error code returned for tuple `Write` failures.
+///
+/// OpenFGA (through at least v1.x) reuses this single code for the idempotent
+/// no-ops we can safely swallow — re-writing an existing tuple and deleting a
+/// missing tuple — *and* for genuinely invalid writes such as an unknown type
+/// or relation. It exposes no finer-grained code to distinguish them, so a
+/// match on the code alone is insufficient and the message must be inspected.
+const FGA_INVALID_WRITE_INPUT_CODE: &str = "write_failed_due_to_invalid_input";
+
+/// Returns true when an OpenFGA `/write` error body means the store already
+/// matches the requested state, so the outbox row can be marked converged.
+///
+/// Classification is driven entirely by the structured error `code` and
+/// message, never by the HTTP status or loose substring matching: only a
+/// [`FGA_INVALID_WRITE_INPUT_CODE`] error whose message is one of OpenFGA's two
+/// stable idempotent phrases counts. A structured "this tuple already exists" /
+/// "this tuple does not exist" signal means the store is in the desired state
+/// whatever envelope carried it, so keying off the body alone also avoids the
+/// outbox looping forever should OpenFGA ever move these errors off HTTP 400.
+/// Any parse failure, unexpected code, or unrecognized message fails closed
+/// (treated as a real failure) so a dropped tuple write is never swallowed.
+fn is_idempotent_tuple_error(body: &str) -> bool {
+    let Ok(error) = serde_json::from_str::<FgaErrorBody>(body) else {
+        return false;
+    };
+    if error.code != FGA_INVALID_WRITE_INPUT_CODE {
         return false;
     }
-    let lowercase = body.to_lowercase();
-    lowercase.contains("already exists") || lowercase.contains("does not exist")
+    // Narrow within the shared invalid-input code on OpenFGA's stable message
+    // prefixes; genuinely invalid writes reuse the same code with a different
+    // message and must not be swallowed.
+    let message = error.message.to_lowercase();
+    message.contains("cannot write a tuple which already exists")
+        || message.contains("cannot delete a tuple which does not exist")
 }
 
 #[cfg(test)]
@@ -380,33 +421,49 @@ mod tests {
 
     #[test]
     fn idempotent_tuple_error_swallows_converged_write_and_delete_conflicts() {
-        // Pins: a duplicate write (400 "already exists") and a missing-tuple delete
-        // (409 "does not exist") are treated as already-converged so the outbox can
-        // mark the row succeeded; any other status/body is a real failure that must
-        // surface, otherwise a failed FGA write would be silently dropped.
+        // Pins: OpenFGA's duplicate-write and delete-nonexistent errors are the
+        // only bodies treated as already-converged so the outbox can mark the row
+        // succeeded. Classification is structural — the machine `code` plus the
+        // stable idempotent message — so a genuinely invalid write that reuses the
+        // same code, an unexpected code, a missing field, or an unparseable body
+        // all surface as real failures. Otherwise a dropped FGA write would be
+        // silently swallowed on a wording change.
+
+        // Real OpenFGA duplicate-write body: converged, safe to swallow.
+        let duplicate = r#"{"code":"write_failed_due_to_invalid_input","message":"cannot write a tuple which already exists: user: 'operator:a', relation: 'member', object: 'tenant:b': invalid write input"}"#;
+        // Real OpenFGA delete-nonexistent body: converged, safe to swallow.
+        let delete_missing = r#"{"code":"write_failed_due_to_invalid_input","message":"cannot delete a tuple which does not exist: user: 'operator:a', relation: 'member', object: 'tenant:b': invalid write input"}"#;
+        // Same invalid-input code, but a genuinely invalid write (unknown type):
+        // must NOT be swallowed even though the code matches.
+        let invalid_write = r#"{"code":"write_failed_due_to_invalid_input","message":"type 'nonexistent' not found"}"#;
+        // A different structured code is never idempotent.
+        let other_code =
+            r#"{"code":"validation_error","message":"invalid authorization model id"}"#;
+
         let cases = [
-            // Converged: re-applying an existing tuple.
-            (400, "cannot write a tuple which already exists", true),
-            (409, "cannot write a tuple which already exists", true),
-            // Converged: deleting a tuple that is already gone.
-            (400, "cannot delete a tuple which does not exist", true),
-            (409, "tuple does not exist", true),
-            // Case-insensitive matching on the FGA message.
-            (400, "Tuple ALREADY EXISTS", true),
-            // Right status but a genuinely different error must not be swallowed.
-            (400, "invalid authorization model id", false),
-            (409, "write conflict on transaction", false),
-            // Non-conflict statuses are never idempotent, even with matching text.
-            (500, "already exists", false),
-            (200, "already exists", false),
-            (404, "does not exist", false),
+            (duplicate, true),
+            (delete_missing, true),
+            // Same code, non-idempotent message: real failure.
+            (invalid_write, false),
+            // Different code: real failure.
+            (other_code, false),
+            // Fail closed on bodies that cannot be parsed as a structured error.
+            ("cannot write a tuple which already exists", false),
+            // Missing the `code` field: cannot classify, fail closed.
+            (
+                r#"{"message":"cannot write a tuple which already exists"}"#,
+                false,
+            ),
+            // Matching code but missing the `message` field: fail closed.
+            (r#"{"code":"write_failed_due_to_invalid_input"}"#, false),
+            ("", false),
         ];
 
-        for (status, body, expected) in cases {
+        for (body, expected) in cases {
             assert_eq!(
-                is_idempotent_tuple_error(status, body),
+                is_idempotent_tuple_error(body),
                 expected,
-                "status={status} body={body:?} should map to {expected}"
+                "body={body:?} should map to {expected}"
             );
         }
     }

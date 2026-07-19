@@ -35,6 +35,7 @@ fn response_case(
         objective: "Evaluate the supplied work exactly".to_string(),
         attachment_count: 0,
         has_recent_target: false,
+        available_skills: Vec::new(),
         classifier: ExecutionRoutingClassifierFixture::Response {
             output: ExecutionRouteClassifierOutput {
                 label: observed_label,
@@ -68,8 +69,8 @@ async fn execution_routing_scores_decision_strategy_and_upgrade_separately_offli
         .await
         .expect("scripted routing corpus should score");
 
-    assert_eq!(metrics.total_cases, 320);
-    assert_eq!(metrics.passed_cases, 320);
+    assert_eq!(metrics.total_cases, 328);
+    assert_eq!(metrics.passed_cases, 328);
     assert_eq!(metrics.weighted_routing_cost_total, 0);
     assert_eq!(metrics.weighted_strategy_cost_total, 0);
     assert_eq!(metrics.respond_on_execute_count, 0);
@@ -96,7 +97,7 @@ async fn execution_routing_scores_decision_strategy_and_upgrade_separately_offli
             .get("context_forced_inline"),
         Some(&8)
     );
-    assert_eq!(metrics.classifier_fallback_rate, 32.0 / 280.0);
+    assert_eq!(metrics.classifier_fallback_rate, 32.0 / 288.0);
     let upgrades = metrics
         .cases
         .iter()

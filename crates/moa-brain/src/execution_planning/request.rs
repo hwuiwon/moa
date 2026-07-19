@@ -103,6 +103,36 @@ struct FrozenInitialPrompt<'a> {
 pub fn initial_completion_request(
     request: &ExecutionPlanningRequest,
 ) -> Result<CompletionRequest, serde_json::Error> {
+    build_initial_request(request, None)
+}
+
+/// Constructs the sole permitted initial-plan repair request from frozen first-call inputs.
+pub fn initial_repair_completion_request(
+    request: &ExecutionPlanningRequest,
+    original_candidate_json: &str,
+    immutable_goal_json: &str,
+    compiler_report_json: &str,
+) -> Result<CompletionRequest, serde_json::Error> {
+    build_initial_request(
+        request,
+        Some((
+            original_candidate_json,
+            immutable_goal_json,
+            compiler_report_json,
+        )),
+    )
+}
+
+/// Builds one initial or repair planner request sharing the same cacheable system prompt.
+///
+/// The static planner instructions stay in the leading `system` message so provider
+/// prompt caching can reuse them; the per-turn frozen context and the optional repair
+/// evidence travel together in one `user` message, keeping the request at exactly one
+/// system and one user turn.
+fn build_initial_request(
+    request: &ExecutionPlanningRequest,
+    repair: Option<(&str, &str, &str)>,
+) -> Result<CompletionRequest, serde_json::Error> {
     let frozen = FrozenInitialPrompt {
         schema_version: 1,
         objective: &request.objective,
@@ -113,29 +143,22 @@ pub fn initial_completion_request(
         budget: &request.context.budget,
         durable_upgrade: request.durable_upgrade.as_ref(),
     };
+    let mut user_payload = format!(
+        "<frozen_planning_context>{}</frozen_planning_context>",
+        serde_json::to_string(&frozen)?
+    );
+    if let Some((original_candidate_json, immutable_goal_json, compiler_report_json)) = repair {
+        user_payload.push_str(&format!(
+            "\nRepair the candidate exactly once. Preserve immutable_goal byte-for-byte after canonicalization. Do not discover new authority or capabilities.\n<original_candidate>{original_candidate_json}</original_candidate>\n<immutable_goal>{immutable_goal_json}</immutable_goal>\n<compiler_report>{compiler_report_json}</compiler_report>"
+        ));
+    }
     strict_request::<GeneratedExecutionCandidate>(
         request.planner_model.clone(),
         "generated_execution_candidate",
         "Generate one strict immutable execution goal and supported execution plan.",
-        format!(
-            "{EXECUTION_PLANNER_PROMPT}\n\n<frozen_planning_context>{}</frozen_planning_context>",
-            serde_json::to_string(&frozen)?
-        ),
+        EXECUTION_PLANNER_PROMPT.to_string(),
+        user_payload,
     )
-}
-
-/// Constructs the sole permitted initial-plan repair request from frozen first-call inputs.
-pub fn initial_repair_completion_request(
-    request: &ExecutionPlanningRequest,
-    original_candidate_json: &str,
-    immutable_goal_json: &str,
-    compiler_report_json: &str,
-) -> Result<CompletionRequest, serde_json::Error> {
-    let mut completion = initial_completion_request(request)?;
-    completion.messages.push(ContextMessage::user(format!(
-        "Repair the candidate exactly once. Preserve immutable_goal byte-for-byte after canonicalization. Do not discover new authority or capabilities.\n<original_candidate>{original_candidate_json}</original_candidate>\n<immutable_goal>{immutable_goal_json}</immutable_goal>\n<compiler_report>{compiler_report_json}</compiler_report>"
-    )));
-    Ok(completion)
 }
 
 /// Constructs a strict amendment request over persisted, revision-fenced run state.
@@ -164,12 +187,15 @@ pub fn amendment_completion_request(
         authorization: &request.context.authorization,
         remaining_budget: &request.remaining_budget,
     };
-    let mut prompt = format!(
-        "{EXECUTION_PLANNER_PROMPT}\n\nGenerate only a restricted plan amendment. The goal is immutable.\n<frozen_amendment_context>{}</frozen_amendment_context>",
+    let system_prompt = format!(
+        "{EXECUTION_PLANNER_PROMPT}\n\nGenerate only a restricted plan amendment. The goal is immutable."
+    );
+    let mut user_payload = format!(
+        "<frozen_amendment_context>{}</frozen_amendment_context>",
         serde_json::to_string(&frozen)?
     );
     if let Some((candidate, report)) = repair {
-        prompt.push_str(&format!(
+        user_payload.push_str(&format!(
             "\nRepair exactly once without new discovery.\n<original_amendment>{candidate}</original_amendment>\n<compiler_report>{report}</compiler_report>"
         ));
     }
@@ -177,7 +203,8 @@ pub fn amendment_completion_request(
         request.planner_model.clone(),
         "generated_amendment_candidate",
         "Generate one strict restricted execution-plan amendment.",
-        prompt,
+        system_prompt,
+        user_payload,
     )
 }
 
@@ -214,16 +241,27 @@ pub fn record_applied_planning_audit(result: &impl AppliedPlanningAuditMetric) {
     result.record_if_applied();
 }
 
+/// Builds one no-tools strict planner request from a cacheable system prompt and a
+/// per-turn user payload.
+///
+/// The static planner instructions live in the leading `system` message so provider
+/// prompt caching can reuse them across turns, while the per-turn frozen context and
+/// objective travel in a `user` message. Every provider adapter rejects a system-only
+/// request, so at least one non-system message is mandatory here.
 fn strict_request<T: schemars::JsonSchema>(
     model: ModelId,
     schema_name: &str,
     description: &str,
-    prompt: String,
+    system_prompt: String,
+    user_payload: String,
 ) -> Result<CompletionRequest, serde_json::Error> {
     let schema = serde_json::to_value(schema_for!(T))?;
     Ok(CompletionRequest {
         model: Some(model),
-        messages: vec![ContextMessage::system(prompt)],
+        messages: vec![
+            ContextMessage::system(system_prompt),
+            ContextMessage::user(user_payload),
+        ],
         tools: Vec::new(),
         max_output_tokens: Some(EXECUTION_PLANNER_MAX_OUTPUT_TOKENS),
         temperature: None,

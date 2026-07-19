@@ -35,7 +35,8 @@ higher-priority instruction and mention the conflict only when it changes the an
 - Ask a clarifying question only when the answer cannot be inferred, discovered safely, or handled \
 by choosing a conventional default.
 - When the user asks you to remember, ingest, update, or forget knowledge, actually use the \
-matching memory tool before confirming.
+matching memory tool before confirming. When several related facts are involved, store them in a \
+single batched memory call rather than one call per fact.
 - When delegating work, plan subtasks as a dependency graph: spawn independent ready nodes in \
 parallel, wait only for dependencies that are needed by downstream nodes, then synthesize results \
 back into the coordinator response. Keep the graph in your reasoning/task text; do not require \
@@ -47,6 +48,12 @@ investigating incidents with several suspected causes, or checking several optio
 or workstreams in parallel. If the request names three or more independent areas and asks for a \
 synthesis, spawn the ready worker nodes before the final synthesis instead of only describing the \
 plan.
+- When the user enumerates independent workstreams (a numbered list, phrasing like \"one worker does \
+X, another does Y\", or \"in parallel\"), spawn one worker per workstream now rather than answering \
+directly or waiting for inputs. A workstream that is blocked on material the user has not provided \
+yet is still delegated: instruct that worker to build the framework, template, or checklist it can \
+prepare without the pending material, and have the final synthesis name the inputs still needed to \
+complete it.
 - Do not spawn artificial workers for pure policy questions, status checks with no active worker, \
 small single-answer tasks, or conceptual explanations of how delegation should behave.
 - Keep work scoped to the user request and preserve errors, decisions, and validation results in \
@@ -254,5 +261,51 @@ mod tests {
         assert!(content.contains("relevant tests"));
         assert!(content.contains("3 attempts"));
         assert!(content.contains(".venv"));
+    }
+
+    #[tokio::test]
+    async fn identity_prompt_includes_parallel_workstream_delegation_policy() {
+        // Pins: the coordinator prompt keeps the delegation policy for enumerated
+        // parallel workstreams, including delegating a workstream that forward-references
+        // user material not yet provided instead of answering directly or waiting. A prompt
+        // refactor that drops this guidance regresses sessions like S044/S072.
+        let session = SessionMeta {
+            id: SessionId::new(),
+            tenant_id: TenantId::new(),
+            channel: Channel::Chat,
+            model: ModelId::new("claude-sonnet-4-6"),
+            ..SessionMeta::default()
+        };
+        let capabilities = ModelCapabilities {
+            model_id: ModelId::new("claude-sonnet-4-6"),
+            context_window: 200_000,
+            max_output: 8_192,
+            supports_tools: true,
+            supports_vision: true,
+            supports_prefix_caching: true,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 3.0,
+                output_per_mtok: 15.0,
+                cached_input_per_mtok: Some(0.3),
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
+            },
+            native_tools: Vec::new(),
+        };
+        let mut ctx = WorkingContext::new(&session, capabilities);
+
+        IdentityProcessor::default()
+            .process(&mut ctx)
+            .await
+            .unwrap();
+
+        let content = &ctx.messages[0].content;
+        assert!(content.contains("enumerates independent workstreams"));
+        assert!(content.contains("spawn one worker per workstream now"));
+        assert!(content.contains("blocked on material the user has not provided"));
+        assert!(content.contains("framework, template, or checklist"));
+        assert!(content.contains("name the inputs still needed"));
     }
 }

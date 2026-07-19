@@ -188,6 +188,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
             contact_id,
         },
         label_filter: None,
+        label_boost: None,
         max_pii_class: PiiClass::Restricted,
         k_final: 5,
         use_reranker: false,

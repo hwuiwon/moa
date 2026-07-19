@@ -1357,7 +1357,7 @@ mod tests {
         assert_eq!(
             first,
             SessionId(
-                Uuid::parse_str("919cd404-071e-5b08-a14a-66246a19e048")
+                Uuid::parse_str("84d778fa-591d-544f-89aa-b14f415ef956")
                     .expect("Task 9 golden Session id")
             )
         );

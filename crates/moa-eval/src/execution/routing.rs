@@ -96,6 +96,11 @@ pub struct ExecutionRoutingCase {
     pub attachment_count: usize,
     /// Whether recent bounded session metadata identifies a concrete target.
     pub has_recent_target: bool,
+    /// Installed-skill names offered to the router as a coverage hint. Empty for
+    /// cases that do not exercise skill coverage; omitted from serialized JSONL
+    /// when empty so only skill-coverage cases carry the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_skills: Vec<String>,
     /// Deterministic scripted classifier behavior.
     pub classifier: ExecutionRoutingClassifierFixture,
     /// Exact classifier or trusted-bypass outcome expected from production routing.
@@ -351,13 +356,22 @@ pub async fn score_routing_cases(
             })?;
             (admitted.routing, Some(admitted.signal.evidence))
         } else {
+            // The case's boolean recent-target dimension maps to a representative digest;
+            // the digest no longer gates routing (only attachments do), so this exercises
+            // the prompt path without changing corpus outcomes.
+            let recent_target_digest = if case.has_recent_target {
+                "user: continue the earlier request\ntool bash: {\"cmd\":\"cargo test\"}"
+            } else {
+                ""
+            };
             let routed = route_execution(
                 &provider,
                 ExecutionRoutingInput {
                     objective: &case.objective,
                     execution_template: None,
                     attachment_count: case.attachment_count,
-                    has_recent_target: case.has_recent_target,
+                    recent_target_digest,
+                    available_skill_names: &case.available_skills,
                     classifier_model: &model,
                 },
             )

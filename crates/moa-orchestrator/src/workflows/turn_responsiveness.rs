@@ -3,7 +3,6 @@
 use moa_core::config::SessionLimitsConfig;
 use moa_core::{
     events::Event, types::completion::ToolInvocation, types::events_stream::EventRecord,
-    types::tools::ToolContent, types::tools::ToolOutput,
 };
 
 /// Closed model-loop classes that receive turn and tool budgets.
@@ -46,6 +45,29 @@ pub(crate) fn effective_turn_cap(
     class_cap.max(1).min(hard_cap)
 }
 
+/// Returns the effective model-loop cap for a turn that has delegated to a worker.
+///
+/// Delegation escalation is one-way: it raises the per-turn loop budget to
+/// `max_model_turns_delegation` (bounded by the global hard cap) so a coordinator
+/// can spawn workers, wait for them, and synthesize their results within one turn.
+/// It never lowers the cap, so a larger explicit request cap or class cap is
+/// preserved.
+pub(crate) fn effective_delegation_turn_cap(
+    request_max_turns: Option<u32>,
+    class: ModelLoopClass,
+    session_limits: &SessionLimitsConfig,
+) -> usize {
+    let base = effective_turn_cap(request_max_turns, class, session_limits);
+    let hard_cap = session_limits.max_turns as usize;
+    let delegation = (session_limits.max_model_turns_delegation as usize).max(1);
+    let delegation = if hard_cap == 0 {
+        delegation
+    } else {
+        delegation.min(hard_cap)
+    };
+    base.max(delegation)
+}
+
 /// Returns the effective tool-call cap for a selected turn class.
 pub(crate) fn effective_tool_cap(
     class: ModelLoopClass,
@@ -73,15 +95,58 @@ pub(crate) fn progress_count(count: usize) -> u32 {
     count.min(u32::MAX as usize) as u32
 }
 
-/// Returns whether recent persisted events contain a concrete target for a vague follow-up.
-pub(crate) fn has_recent_target(
+/// Maximum bytes for the recent-target digest handed to the execution router.
+const RECENT_TARGET_DIGEST_MAX_BYTES: usize = 640;
+/// Maximum number of lines included in the recent-target digest.
+const RECENT_TARGET_DIGEST_MAX_ENTRIES: usize = 12;
+/// Maximum bytes for one rendered field (snippet, path, or tool arguments).
+const RECENT_TARGET_FIELD_MAX_BYTES: usize = 120;
+/// Maximum attachment names listed for one user message.
+const RECENT_TARGET_MAX_ATTACHMENTS: usize = 4;
+
+/// Builds a compact, deterministic digest of recent conversation context.
+///
+/// This digest is the only channel by which prior conversation reaches the
+/// execution router, so the router LLM — not a keyword heuristic — can judge
+/// whether a terse follow-up ("fix it", "the pricing page we discussed") has a
+/// concrete recent referent. It renders the most recent relevant events as a
+/// bounded, newline-joined mini-transcript: user and assistant message snippets,
+/// tool names with a compact rendering of their arguments, worker task text,
+/// segment summaries, and memory paths. Deliberately plain — it hands the model
+/// the recent context verbatim (bounded) and lets it decide what is a referent,
+/// rather than pre-judging targets with the kind of keyword allowlist this router
+/// change exists to remove. It runs on every turn with no LLM calls, omits tool
+/// result bodies so it never dumps raw tool output, and is bounded in both entry
+/// count and total bytes. Events at or after `current_user_sequence_num` are
+/// excluded so the current request cannot count as its own referent.
+pub(crate) fn recent_target_digest(
     recent_events: &[EventRecord],
     current_user_sequence_num: u64,
-) -> bool {
-    recent_events
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut used_bytes = 0usize;
+    // Walk newest-first so byte/entry truncation keeps the freshest context,
+    // then present chronologically for the reader.
+    for record in recent_events
         .iter()
+        .rev()
         .filter(|record| record.sequence_num < current_user_sequence_num)
-        .any(|record| event_has_target_signal(&record.event))
+    {
+        if lines.len() >= RECENT_TARGET_DIGEST_MAX_ENTRIES {
+            break;
+        }
+        let Some(line) = digest_line(&record.event) else {
+            continue;
+        };
+        let separator = usize::from(!lines.is_empty());
+        if used_bytes + separator + line.len() > RECENT_TARGET_DIGEST_MAX_BYTES {
+            break;
+        }
+        used_bytes += separator + line.len();
+        lines.push(line);
+    }
+    lines.reverse();
+    lines.join("\n")
 }
 
 /// Per-turn state for enforcing tool dispatch caps and repeated-call loops.
@@ -307,200 +372,93 @@ fn canonical_json(value: &serde_json::Value) -> String {
     }
 }
 
-fn event_has_target_signal(event: &Event) -> bool {
+/// Renders one recent event as a compact digest line, or `None` when the event
+/// carries nothing worth surfacing.
+///
+/// Only the event types loaded by the recent-target event query are handled
+/// explicitly; every other variant is elided by the catch-all arm. Tool result
+/// bodies are omitted on purpose so the digest never dumps raw tool output.
+fn digest_line(event: &Event) -> Option<String> {
     match event {
         Event::UserMessage { text, attachments } => {
-            !attachments.is_empty() || text_has_target_signal(text)
+            let mut line = format!(
+                "user: {}",
+                field(text).unwrap_or_else(|| "(no text)".to_string())
+            );
+            let names = attachments
+                .iter()
+                .filter_map(|attachment| field(&attachment.name))
+                .take(RECENT_TARGET_MAX_ATTACHMENTS)
+                .collect::<Vec<_>>();
+            if !names.is_empty() {
+                line.push_str(&format!(" [attachments: {}]", names.join(", ")));
+            }
+            Some(line)
         }
-        Event::BrainResponse { text, .. } | Event::WorkerMessageSent { text, .. } => {
-            text_has_target_signal(text)
+        Event::BrainResponse { text, .. } => {
+            field(text).map(|snippet| format!("assistant: {snippet}"))
+        }
+        Event::WorkerMessageSent { text, .. } => {
+            field(text).map(|snippet| format!("worker message: {snippet}"))
+        }
+        Event::WorkerSpawned { task, .. } => {
+            field(task).map(|snippet| format!("worker task: {snippet}"))
         }
         Event::ToolCall {
             tool_name, input, ..
-        } => tool_name_implies_target(tool_name) || json_has_target_signal(input, 0),
-        Event::ToolResult { output, .. } => tool_output_has_target(output),
-        Event::ToolError {
-            tool_name, error, ..
-        } => tool_name_implies_target(tool_name) || text_has_target_signal(error),
-        Event::WorkerSpawned { task, .. } => text_has_target_signal(task),
-        Event::SegmentStarted { task_summary, .. }
-        | Event::SegmentCompleted { task_summary, .. } => {
-            task_summary.as_deref().is_some_and(text_has_target_signal)
-        }
-        Event::MemoryRead { path, .. } | Event::MemoryWrite { path, .. } => !path.trim().is_empty(),
-        Event::MemoryIngest {
-            source_path,
-            affected_pages,
-            ..
         } => {
-            !source_path.trim().is_empty()
-                || affected_pages.iter().any(|page| !page.trim().is_empty())
+            let name = field(tool_name).unwrap_or_else(|| "tool".to_string());
+            Some(format!("tool {name}: {}", compact_json(input)))
         }
-        _ => false,
+        Event::ToolError { tool_name, .. } => Some(format!(
+            "tool {} failed",
+            field(tool_name).unwrap_or_else(|| "tool".to_string())
+        )),
+        // The tool call already names what was operated on, and the result body is
+        // the raw-dump risk, so tool results contribute nothing to the digest.
+        Event::ToolResult { .. } => None,
+        Event::SegmentStarted { task_summary, .. }
+        | Event::SegmentCompleted { task_summary, .. } => task_summary
+            .as_deref()
+            .and_then(field)
+            .map(|summary| format!("segment: {summary}")),
+        Event::MemoryRead { path, .. } => field(path).map(|path| format!("memory read: {path}")),
+        Event::MemoryWrite { path, .. } => field(path).map(|path| format!("memory write: {path}")),
+        Event::MemoryIngest { source_path, .. } => {
+            field(source_path).map(|path| format!("memory ingest: {path}"))
+        }
+        _ => None,
     }
 }
 
-fn tool_name_implies_target(tool_name: &str) -> bool {
-    let tool_name = tool_name.to_ascii_lowercase();
-    contains_any(
-        &tool_name,
-        &[
-            "bash", "edit", "file", "git", "patch", "repo", "shell", "worker", "tool",
-        ],
-    )
+/// Collapses interior whitespace and truncates a string to one bounded field,
+/// returning `None` when the string is blank.
+fn field(text: &str) -> Option<String> {
+    let collapsed = collapse_whitespace(text);
+    (!collapsed.is_empty()).then(|| truncate_field(&collapsed))
 }
 
-fn contains_any(text: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| text.contains(needle))
+/// Renders a JSON value (a tool's arguments) as compact, bounded text.
+fn compact_json(value: &serde_json::Value) -> String {
+    truncate_field(&collapse_whitespace(&value.to_string()))
 }
 
-fn tool_output_has_target(output: &ToolOutput) -> bool {
-    output.artifact.is_some()
-        || output.content.iter().any(|content| match content {
-            ToolContent::Text { text } => text_has_target_signal(text),
-            ToolContent::Json { data } => json_has_target_signal(data, 0),
-        })
-        || output
-            .structured
-            .as_ref()
-            .is_some_and(|data| json_has_target_signal(data, 0))
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn json_has_target_signal(value: &serde_json::Value, depth: usize) -> bool {
-    if depth > 3 {
-        return false;
+/// Truncates on a UTF-8 char boundary, appending an ellipsis when text is cut.
+fn truncate_field(text: &str) -> String {
+    if text.len() <= RECENT_TARGET_FIELD_MAX_BYTES {
+        return text.to_string();
     }
-    match value {
-        serde_json::Value::String(text) => text_has_target_signal(text),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .any(|value| json_has_target_signal(value, depth + 1)),
-        serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
-            targetish_json_key(key) || json_has_target_signal(value, depth + 1)
-        }),
-        _ => false,
+    let mut end = RECENT_TARGET_FIELD_MAX_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
     }
-}
-
-fn targetish_json_key(key: &str) -> bool {
-    matches!(
-        key.to_ascii_lowercase().as_str(),
-        "branch"
-            | "file"
-            | "filename"
-            | "files"
-            | "message_id"
-            | "object"
-            | "path"
-            | "paths"
-            | "pr"
-            | "repo"
-            | "repository"
-            | "resource"
-            | "target"
-            | "uri"
-            | "url"
-    )
-}
-
-fn text_has_target_signal(text: &str) -> bool {
-    let text = text.trim();
-    !text.is_empty()
-        && (text.contains("```")
-            || text.contains("http://")
-            || text.contains("https://")
-            || text.split_whitespace().any(token_has_target_signal))
-}
-
-fn token_has_target_signal(raw_token: &str) -> bool {
-    let token = raw_token.trim_matches(|ch: char| {
-        matches!(
-            ch,
-            '"' | '\''
-                | '`'
-                | ','
-                | ';'
-                | ':'
-                | '.'
-                | '('
-                | ')'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '<'
-                | '>'
-        )
-    });
-    let token = token
-        .split_once(':')
-        .map_or(token, |(before_line_suffix, line_suffix)| {
-            if line_suffix.chars().all(|ch| ch.is_ascii_digit()) {
-                before_line_suffix
-            } else {
-                token
-            }
-        });
-    if token.len() < 3 {
-        return false;
-    }
-
-    let lower = token.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "cargo.toml"
-            | "dockerfile"
-            | "go.mod"
-            | "makefile"
-            | "package.json"
-            | "pyproject.toml"
-            | "readme"
-            | "tsconfig.json"
-    ) {
-        return true;
-    }
-    if lower.contains("::") {
-        return true;
-    }
-    if lower.contains('/') || lower.contains('\\') {
-        return lower != "and/or";
-    }
-
-    let Some((_, extension)) = lower.rsplit_once('.') else {
-        return false;
-    };
-    matches!(
-        extension,
-        "c" | "cc"
-            | "cpp"
-            | "cs"
-            | "css"
-            | "go"
-            | "h"
-            | "hpp"
-            | "html"
-            | "java"
-            | "js"
-            | "json"
-            | "jsx"
-            | "kt"
-            | "lock"
-            | "md"
-            | "php"
-            | "proto"
-            | "py"
-            | "rb"
-            | "rs"
-            | "sh"
-            | "sql"
-            | "swift"
-            | "toml"
-            | "ts"
-            | "tsx"
-            | "txt"
-            | "yaml"
-            | "yml"
-    )
+    let mut truncated = text[..end].to_string();
+    truncated.push('…');
+    truncated
 }
 
 #[cfg(test)]
@@ -515,8 +473,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ModelLoopClass, ToolBudgetDecision, ToolBudgetExhaustedReason, ToolBudgetState,
-        ToolFingerprint, effective_tool_cap, effective_turn_cap, has_recent_target, progress_cap,
+        ModelLoopClass, RECENT_TARGET_DIGEST_MAX_BYTES, RECENT_TARGET_DIGEST_MAX_ENTRIES,
+        ToolBudgetDecision, ToolBudgetExhaustedReason, ToolBudgetState, ToolFingerprint,
+        effective_delegation_turn_cap, effective_tool_cap, effective_turn_cap, progress_cap,
+        recent_target_digest,
     };
 
     fn limits() -> SessionLimitsConfig {
@@ -565,69 +525,152 @@ mod tests {
     }
 
     #[test]
-    fn recent_target_detector_ignores_current_sequence() {
-        // Pins: a vague current request cannot count as its own target after append.
+    fn recent_target_digest_excludes_current_and_orders_chronologically() {
+        // Pins: the current request is never its own referent, and prior events render
+        // oldest-first so the router reads them in conversation order.
         let events = vec![
             record(
                 10,
                 Event::UserMessage {
-                    text: "hello".to_string(),
+                    text: "start from crates/moa-core/src/lib.rs".to_string(),
                     attachments: Vec::new(),
                 },
             ),
             record(
                 11,
+                Event::ToolCall {
+                    tool_id: ToolCallId(Uuid::now_v7()),
+                    provider_tool_use_id: None,
+                    provider_thought_signature: None,
+                    tool_name: "bash".to_string(),
+                    input: serde_json::json!({ "cmd": "cargo test" }),
+                    hand_id: None,
+                },
+            ),
+            record(
+                12,
                 Event::UserMessage {
-                    text: "fix crates/moa-core/src/lib.rs".to_string(),
-                    attachments: vec![attachment("lib.rs")],
+                    text: "now fix it".to_string(),
+                    attachments: Vec::new(),
                 },
             ),
         ];
 
-        assert!(!has_recent_target(&events, 11));
+        let digest = recent_target_digest(&events, 12);
+        assert_eq!(
+            digest.lines().collect::<Vec<_>>(),
+            vec![
+                "user: start from crates/moa-core/src/lib.rs",
+                "tool bash: {\"cmd\":\"cargo test\"}",
+            ]
+        );
+        assert!(
+            !digest.contains("now fix it"),
+            "the current request must not be part of its own digest"
+        );
     }
 
     #[test]
-    fn recent_target_detector_finds_prior_attachment_and_path() {
-        // Pins: concrete prior files keep follow-up edits on the normal execution path.
-        let attachment_events = vec![record(
-            7,
-            Event::UserMessage {
-                text: "please inspect this".to_string(),
-                attachments: vec![attachment("report.md")],
-            },
-        )];
-        assert!(has_recent_target(&attachment_events, 8));
+    fn recent_target_digest_renders_referents_without_manufacturing_from_a_bare_fence() {
+        // Pins: tool arguments carry concrete file paths and URLs to the router verbatim,
+        // a bare code fence in user prose manufactures no target (it stays inside the
+        // snippet the router judges), attachments are named, and the builder is deterministic.
+        let events = vec![
+            record(
+                1,
+                Event::UserMessage {
+                    text: "review this ```code``` and the pricing page".to_string(),
+                    attachments: vec![attachment("report.md")],
+                },
+            ),
+            record(
+                2,
+                Event::ToolCall {
+                    tool_id: ToolCallId(Uuid::now_v7()),
+                    provider_tool_use_id: None,
+                    provider_thought_signature: None,
+                    tool_name: "file_read".to_string(),
+                    input: serde_json::json!({ "path": "crates/moa-brain/src/lib.rs" }),
+                    hand_id: None,
+                },
+            ),
+            record(
+                3,
+                Event::ToolCall {
+                    tool_id: ToolCallId(Uuid::now_v7()),
+                    provider_tool_use_id: None,
+                    provider_thought_signature: None,
+                    tool_name: "http_get".to_string(),
+                    input: serde_json::json!({ "url": "https://example.com/pricing" }),
+                    hand_id: None,
+                },
+            ),
+            record(
+                4,
+                Event::WorkerSpawned {
+                    worker_id: "child-1".to_string(),
+                    path: "/root/research".to_string(),
+                    task: "summarize the findings".to_string(),
+                    budget_tokens: 512,
+                },
+            ),
+        ];
 
-        let path_events = vec![record(
-            7,
-            Event::UserMessage {
-                text: "please inspect crates/moa-orchestrator/src/workflows/turn_execution.rs"
-                    .to_string(),
-                attachments: Vec::new(),
-            },
-        )];
-        assert!(has_recent_target(&path_events, 8));
+        let digest = recent_target_digest(&events, 100);
+        assert_eq!(
+            digest,
+            recent_target_digest(&events, 100),
+            "digest must be deterministic for a fixed event list"
+        );
+        assert!(
+            digest.contains(
+                "user: review this ```code``` and the pricing page [attachments: report.md]"
+            ),
+            "user snippet and attachment names must render without a manufactured target: {digest}"
+        );
+        assert!(
+            digest.contains("tool file_read: {\"path\":\"crates/moa-brain/src/lib.rs\"}"),
+            "tool arguments carry the concrete path verbatim: {digest}"
+        );
+        assert!(
+            digest.contains("tool http_get: {\"url\":\"https://example.com/pricing\"}"),
+            "tool arguments carry the concrete URL verbatim: {digest}"
+        );
+        assert!(
+            digest.contains("worker task: summarize the findings"),
+            "worker task text surfaces as a snippet: {digest}"
+        );
+        assert!(digest.len() <= RECENT_TARGET_DIGEST_MAX_BYTES);
+        assert!(digest.lines().count() <= RECENT_TARGET_DIGEST_MAX_ENTRIES);
     }
 
     #[test]
-    fn recent_target_detector_finds_prior_tool_target() {
-        // Pins: recent tool work is a target-bearing context for terse follow-ups.
-        let events = vec![record(
-            4,
-            Event::ToolCall {
-                tool_id: ToolCallId(Uuid::now_v7()),
-                provider_tool_use_id: None,
-                provider_thought_signature: None,
-                tool_name: "file_read".to_string(),
-                input: serde_json::json!({
-                    "path": "crates/moa-orchestrator/src/workflows/turn_execution.rs"
-                }),
-                hand_id: None,
-            },
-        )];
+    fn recent_target_digest_keeps_newest_events_within_bounds() {
+        // Pins: with more relevant events than fit, the digest retains the newest ones
+        // and stays within the entry and byte caps.
+        let events = (1..=40u64)
+            .map(|seq| {
+                record(
+                    seq,
+                    Event::UserMessage {
+                        text: format!("message number {seq} about crates/moa-core/src/f{seq}.rs"),
+                        attachments: Vec::new(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
 
-        assert!(has_recent_target(&events, 5));
+        let digest = recent_target_digest(&events, 1000);
+        assert!(digest.lines().count() <= RECENT_TARGET_DIGEST_MAX_ENTRIES);
+        assert!(digest.len() <= RECENT_TARGET_DIGEST_MAX_BYTES);
+        assert!(
+            digest.contains("message number 40"),
+            "the newest event must be retained: {digest}"
+        );
+        assert!(
+            !digest.contains("message number 1 "),
+            "the oldest events must be dropped once the cap is reached: {digest}"
+        );
     }
 
     #[test]
@@ -695,6 +738,58 @@ mod tests {
             5
         );
         assert_eq!(progress_cap(usize::MAX), None);
+    }
+
+    #[test]
+    fn delegation_turn_cap_raises_base_without_lowering() {
+        // Pins: once a turn delegates, the loop budget escalates to
+        // max_model_turns_delegation (bounded by the hard cap), never drops below a
+        // larger base cap, and preserves unlimited global semantics.
+        let limits = SessionLimitsConfig {
+            max_turns: 50,
+            simple_max_turns: 1,
+            standard_max_turns: 6,
+            max_model_turns_delegation: 12,
+            max_tool_calls: 30,
+            ..SessionLimitsConfig::default()
+        };
+        // The sweep drives an explicit request cap of 6; delegation escalates it to 12.
+        assert_eq!(
+            effective_turn_cap(Some(6), ModelLoopClass::InlineExecute, &limits),
+            6
+        );
+        assert_eq!(
+            effective_delegation_turn_cap(Some(6), ModelLoopClass::InlineExecute, &limits),
+            12
+        );
+        // A class-default standard turn escalates from 6 to 12 as well.
+        assert_eq!(
+            effective_delegation_turn_cap(None, ModelLoopClass::InlineExecute, &limits),
+            12
+        );
+        // Escalation is bounded by the global hard cap.
+        let tight = SessionLimitsConfig {
+            max_turns: 8,
+            ..limits.clone()
+        };
+        assert_eq!(
+            effective_delegation_turn_cap(None, ModelLoopClass::InlineExecute, &tight),
+            8
+        );
+        // A larger explicit request cap is never lowered to the delegation cap.
+        assert_eq!(
+            effective_delegation_turn_cap(Some(20), ModelLoopClass::InlineExecute, &limits),
+            20
+        );
+        // Unlimited global semantics survive delegation.
+        let unlimited = SessionLimitsConfig {
+            max_turns: 0,
+            ..limits
+        };
+        assert_eq!(
+            effective_delegation_turn_cap(None, ModelLoopClass::InlineExecute, &unlimited),
+            usize::MAX
+        );
     }
 
     #[test]

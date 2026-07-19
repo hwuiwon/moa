@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use moa_core::config::MoaConfig;
+use moa_memory_types::{FactCategory, FactEdgeLabel};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -12,13 +13,17 @@ use crate::{
 };
 
 /// Version for the LLM extraction prompt and recorded extraction fixtures.
-pub const EXTRACTION_PROMPT_VERSION: &str = "v3";
+pub const EXTRACTION_PROMPT_VERSION: &str = "v4";
 
 /// Prompt versions whose recorded fixtures remain valid for replay.
 ///
-/// v3 only adds the optional `event_time` output key on top of v2, so v2
-/// fixtures replay correctly — their facts simply carry no event time.
-pub const COMPATIBLE_PROMPT_VERSIONS: &[&str] = &["v2", "v3"];
+/// Each version only adds optional output keys on top of the previous one, so
+/// older fixtures replay correctly — their facts simply carry the conservative
+/// defaults for the keys they predate. v3 added the optional `event_time` key
+/// over v2; v4 added the `category`, `edge_label`, and `functional` structured
+/// keys over v3. v2/v3 fixtures therefore load with `category = other`,
+/// `edge_label = relates_to`, and `functional = false` until re-recorded.
+pub const COMPATIBLE_PROMPT_VERSIONS: &[&str] = &["v2", "v3", "v4"];
 
 const EXTRACTION_SYSTEM_PROMPT: &str = r#"You extract durable, declarative facts from transcripts.
 Skip questions, requests, speculation, small talk, transient scheduling commentary, and provenance-only details like "last sprint" or "per the platform decision".
@@ -28,24 +33,39 @@ For each fact return one JSON object with keys:
 - predicate: concise relation phrase
 - object: concise noun phrase or value
 - summary: one sentence restating the fact
-- scope: "contact" or "tenant" using the rubric below
+- scope: "contact" or "tenant" using the scope rubric below
 - confidence: number from 0.0 to 1.0
+- category: one of "preference", "identity", "relationship", "event", "other" using the category rubric below
+- edge_label: one of "depends_on", "owned_by", "relates_to" using the edge rubric below
+- functional: true when the predicate holds at most one value per subject at a time (a newer value replaces the older one), false when the subject can hold several values at once
 - event_time: OPTIONAL; include only when the transcript states when the fact became true, as an ISO 8601 date or timestamp (e.g. "2025-08-01"). Omit the key when the transcript gives no time.
 Use this scope rubric:
 scope = "contact" when the fact is about the speaker personally: preferences ("I prefer", "my setup", "for my work"), personal state, individual habits, or anything phrased in first person about themselves.
 scope = "tenant" when the fact is about shared systems or team agreements: "we decided", "the team", "our service", infrastructure, ownership, processes that apply to everyone inside the tenant.
 When genuinely ambiguous, choose "contact".
-Few-shot scope examples:
+Use this category rubric:
+category = "preference" for a standing choice, setting, default, or working/response style.
+category = "identity" for a durable attribute of who or what the subject is (role, location, type, configuration value).
+category = "relationship" for a link between entities such as ownership, dependency, or membership.
+category = "event" for a time-bound occurrence.
+category = "other" when none of the above fit.
+Use this edge rubric (it describes how the subject relates to the object):
+edge_label = "depends_on" when the subject depends on, uses, requires, calls, or is built on the object.
+edge_label = "owned_by" when the subject is owned, maintained, or stewarded by the object.
+edge_label = "relates_to" for any other relationship, including when the subject owns the object.
+Few-shot examples:
 Transcript: user: I prefer Linear for bug triage.
-Fact: {"subject":"contact","predicate":"prefers","object":"Linear for bug triage","summary":"The contact prefers Linear for bug triage.","scope":"contact","confidence":0.95}
+Fact: {"subject":"contact","predicate":"prefers","object":"Linear for bug triage","summary":"The contact prefers Linear for bug triage.","scope":"contact","confidence":0.95,"category":"preference","edge_label":"relates_to","functional":false}
 Transcript: user: For my work, repo/control-plane is my default repo.
-Fact: {"subject":"contact","predicate":"uses as default repository","object":"repo/control-plane","summary":"The contact uses repo/control-plane as their default repository.","scope":"contact","confidence":0.92}
+Fact: {"subject":"contact","predicate":"uses as default repository","object":"repo/control-plane","summary":"The contact uses repo/control-plane as their default repository.","scope":"contact","confidence":0.92,"category":"preference","edge_label":"depends_on","functional":true}
 Transcript: user: We decided the API gateway runs on port 8443.
-Fact: {"subject":"API gateway","predicate":"runs on port","object":"8443","summary":"The API gateway runs on port 8443.","scope":"tenant","confidence":0.94}
+Fact: {"subject":"API gateway","predicate":"runs on port","object":"8443","summary":"The API gateway runs on port 8443.","scope":"tenant","confidence":0.94,"category":"identity","edge_label":"relates_to","functional":true}
 Transcript: user: Our team owns the billing reconciler service.
-Fact: {"subject":"team","predicate":"owns","object":"billing reconciler service","summary":"The team owns the billing reconciler service.","scope":"tenant","confidence":0.93}
+Fact: {"subject":"team","predicate":"owns","object":"billing reconciler service","summary":"The team owns the billing reconciler service.","scope":"tenant","confidence":0.93,"category":"relationship","edge_label":"relates_to","functional":false}
+Transcript: user: checkout-service depends on lib-auth.
+Fact: {"subject":"checkout-service","predicate":"depends on","object":"lib-auth","summary":"checkout-service depends on lib-auth.","scope":"tenant","confidence":0.9,"category":"relationship","edge_label":"depends_on","functional":false}
 Transcript (sent 2026-03-10): user: I moved to Denver last August.
-Fact: {"subject":"contact","predicate":"lives in","object":"Denver","summary":"The contact lives in Denver.","scope":"contact","confidence":0.9,"event_time":"2025-08-01"}
+Fact: {"subject":"contact","predicate":"lives in","object":"Denver","summary":"The contact lives in Denver.","scope":"contact","confidence":0.9,"category":"identity","edge_label":"relates_to","functional":true,"event_time":"2025-08-01"}
 Return a JSON array and nothing else."#;
 
 /// Fact extractor backed by the configured provider model.
@@ -99,6 +119,9 @@ struct ModelExtractedFact {
     summary: String,
     scope: String,
     confidence: Option<f64>,
+    category: FactCategory,
+    edge_label: FactEdgeLabel,
+    functional: bool,
     event_time: Option<String>,
     source_chunk: usize,
 }
@@ -139,6 +162,9 @@ impl ModelFactExtractionClient {
                         summary: fact.summary,
                         scope: fact.scope,
                         confidence: fact.confidence,
+                        category: parse_structured_enum(&fact.category),
+                        edge_label: parse_structured_enum(&fact.edge_label),
+                        functional: fact.functional,
                         event_time: fact.event_time,
                         source_chunk: chunk.index,
                     }),
@@ -184,6 +210,16 @@ struct ParsedModelExtractedFact {
     scope: String,
     #[serde(default)]
     confidence: Option<f64>,
+    // Structured semantics emitted by the v4 prompt. `category` and `edge_label`
+    // deserialize as raw strings (like `scope`) rather than straight into their
+    // enums so an absent or unrecognized value degrades to the conservative
+    // default instead of failing the whole chunk parse and dropping every fact.
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    edge_label: String,
+    #[serde(default)]
+    functional: bool,
     #[serde(default)]
     event_time: Option<String>,
 }
@@ -243,6 +279,9 @@ fn provider_fact_into_extracted(fact: ModelExtractedFact) -> Result<ExtractedFac
         scope_hint,
         confidence,
         event_time: parse_event_time(fact.event_time.as_deref()),
+        category: fact.category,
+        edge_label: fact.edge_label,
+        functional: fact.functional,
     };
     let hash = fact_hash(&extracted)?;
     extracted.uid = fact_uid_from_hash(&hash);
@@ -251,6 +290,24 @@ fn provider_fact_into_extracted(fact: ModelExtractedFact) -> Result<ExtractedFac
 
 fn clamp_confidence(confidence: f64) -> f64 {
     confidence.clamp(0.0, 1.0)
+}
+
+/// Maps a model-emitted controlled-vocabulary string onto its structured enum,
+/// degrading to the type's conservative default when the value is empty or not
+/// a recognized variant.
+///
+/// This parses a fixed enum vocabulary the model is instructed to emit; it is
+/// not prose keyword matching. Deserializing through the enum's own serde
+/// mapping keeps the accepted spellings in one place — the enum definition.
+fn parse_structured_enum<T>(raw: &str) -> T
+where
+    T: Default + serde::de::DeserializeOwned,
+{
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return T::default();
+    }
+    serde_json::from_value(serde_json::Value::String(normalized)).unwrap_or_default()
 }
 
 /// Parses a model-provided event time as an RFC 3339 timestamp or plain date.
@@ -273,7 +330,7 @@ pub(crate) fn parse_event_time(value: Option<&str>) -> Option<chrono::DateTime<c
 }
 
 pub(crate) fn normalize_extracted_fact(mut fact: ExtractedFact) -> ExtractedFact {
-    if is_user_scoped_fact(&fact) {
+    if subject_is_requesting_individual(&fact) {
         fact.scope_hint = ExtractedFactScopeHint::Contact;
     }
     fact
@@ -301,20 +358,20 @@ pub(crate) fn should_keep_extracted_fact(fact: &ExtractedFact) -> bool {
         || predicate == "follows")
 }
 
-fn is_user_scoped_fact(fact: &ExtractedFact) -> bool {
+/// Structural scope backstop: a fact whose subject is the requesting individual
+/// is contact-scoped by construction, whatever scope the model returned — a
+/// statement about one person cannot be tenant-shared memory.
+///
+/// This is deliberately the ONLY scope correction. It keys on subject identity
+/// alone, never on predicate/object/summary phrasing. An earlier version instead
+/// matched a whitelist of predicate phrases ("contact email", "response style",
+/// "prefers", "switched to", ...) tuned to the eval corpus; it silently
+/// overrode the model's structured scope and mis-scoped any production fact that
+/// happened to contain those substrings. The model's `scope` is now trusted for
+/// everything except this structural case.
+fn subject_is_requesting_individual(fact: &ExtractedFact) -> bool {
     let subject = normalize_filter_text(&fact.subject);
-    let predicate = normalize_filter_text(&fact.predicate);
-    let object = normalize_filter_text(&fact.object);
-    let summary = normalize_filter_text(&fact.summary);
-    subject == "user"
-        || subject.starts_with("user ")
-        || predicate.contains("contact email")
-        || predicate.contains("response style")
-        || predicate.contains("private repository")
-        || predicate == "prefers"
-        || predicate == "should use"
-        || predicate.contains("switched to")
-        || (summary.starts_with("user ") && object.starts_with("repo "))
+    subject == "user" || subject == "contact" || subject.starts_with("user ")
 }
 
 fn normalize_filter_text(text: &str) -> String {
@@ -404,9 +461,10 @@ mod tests {
     #[test]
     fn extraction_prompt_contains_few_shot_pairs_contact_default_and_event_time() {
         // Pins: the extraction prompt makes ambiguous scope privacy-preserving,
-        // keeps the few-shot examples explicit, and asks for an optional
-        // event_time only when the transcript states one.
-        assert_eq!(EXTRACTION_PROMPT_VERSION, "v3");
+        // keeps the few-shot examples explicit, asks for an optional event_time
+        // only when the transcript states one, and requests the structured
+        // category/edge_label/functional keys downstream now consumes.
+        assert_eq!(EXTRACTION_PROMPT_VERSION, "v4");
         assert!(EXTRACTION_SYSTEM_PROMPT.contains("When genuinely ambiguous, choose \"contact\"."));
         assert!(EXTRACTION_SYSTEM_PROMPT.contains("I prefer Linear for bug triage"));
         assert!(EXTRACTION_SYSTEM_PROMPT.contains("For my work, repo/control-plane"));
@@ -414,6 +472,10 @@ mod tests {
         assert!(EXTRACTION_SYSTEM_PROMPT.contains("Our team owns the billing reconciler service"));
         assert!(EXTRACTION_SYSTEM_PROMPT.contains("event_time: OPTIONAL"));
         assert!(EXTRACTION_SYSTEM_PROMPT.contains("I moved to Denver last August"));
+        assert!(EXTRACTION_SYSTEM_PROMPT.contains("Use this category rubric:"));
+        assert!(EXTRACTION_SYSTEM_PROMPT.contains("Use this edge rubric"));
+        assert!(EXTRACTION_SYSTEM_PROMPT.contains("\"category\":\"preference\""));
+        assert!(EXTRACTION_SYSTEM_PROMPT.contains("\"edge_label\":\"depends_on\""));
     }
 
     #[test]
@@ -471,6 +533,60 @@ mod tests {
         assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::Contact);
         assert_eq!(facts[0].confidence, Some(0.91));
         assert_eq!(facts[0].event_time, None);
+        // Structured keys absent from this response degrade to conservative
+        // defaults rather than failing the parse.
+        assert_eq!(facts[0].category, FactCategory::Other);
+        assert_eq!(facts[0].edge_label, FactEdgeLabel::RelatesTo);
+        assert!(!facts[0].functional);
+    }
+
+    #[tokio::test]
+    async fn model_extractor_parses_structured_category_edge_and_functional() {
+        // Pins: the model's structured category/edge_label/functional keys reach
+        // ExtractedFact through their own enum vocabulary.
+        let extractor = extractor_for_response(
+            r#"[{"subject":"checkout-service","predicate":"depends on","object":"lib-auth","summary":"checkout-service depends on lib-auth.","scope":"tenant","confidence":0.9,"category":"relationship","edge_label":"depends_on","functional":false}]"#,
+            12,
+        );
+
+        let facts = extractor.extract(&[chunk()]).await.expect("extract facts");
+
+        assert_eq!(facts[0].category, FactCategory::Relationship);
+        assert_eq!(facts[0].edge_label, FactEdgeLabel::DependsOn);
+        assert!(!facts[0].functional);
+    }
+
+    #[tokio::test]
+    async fn model_extractor_degrades_unknown_structured_values_to_defaults() {
+        // Pins: an unrecognized category/edge_label value degrades to the
+        // conservative default instead of failing the whole chunk parse and
+        // dropping the fact.
+        let extractor = extractor_for_response(
+            r#"[{"subject":"api gateway","predicate":"runs on port","object":"8443","summary":"api gateway runs on port 8443.","scope":"tenant","confidence":0.9,"category":"bogus","edge_label":"sideways","functional":true}]"#,
+            12,
+        );
+
+        let facts = extractor.extract(&[chunk()]).await.expect("extract facts");
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].category, FactCategory::Other);
+        assert_eq!(facts[0].edge_label, FactEdgeLabel::RelatesTo);
+        assert!(facts[0].functional);
+    }
+
+    #[tokio::test]
+    async fn model_extractor_trusts_model_tenant_scope_despite_preference_wording() {
+        // Pins: the removed phrase whitelist no longer overrides scope. A
+        // tenant-scoped fact whose predicate contains "prefers" stays tenant
+        // because its subject is not the requesting individual.
+        let extractor = extractor_for_response(
+            r#"[{"subject":"platform team","predicate":"prefers","object":"blue-green deploys","summary":"The platform team prefers blue-green deploys.","scope":"tenant","confidence":0.9,"category":"preference","edge_label":"relates_to","functional":false}]"#,
+            12,
+        );
+
+        let facts = extractor.extract(&[chunk()]).await.expect("extract facts");
+
+        assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::Tenant);
     }
 
     #[tokio::test]

@@ -23,7 +23,10 @@ use tracing::Instrument;
 
 use crate::delegation::storage_user_id;
 use crate::services::{
-    action_policy::{ActionPolicyClient, PrepareActionReviewRequest, PreparedActionReview},
+    action_policy::{
+        ActionPolicyClient, PrepareActionReviewRequest, PreparedActionReview,
+        PreparedActionReviewResponse,
+    },
     action_reviews::{ActionReviewsClient, RequestActionReview},
     session_store::RestateSessionStoreClient,
     tool_executor::{ExecutionTaskToolCallRequest, ToolExecutorClient},
@@ -117,6 +120,8 @@ impl GovernedInvocationResult {
 pub(crate) enum GovernedInvocationDisposition {
     /// Tool was not in the model's allowed tool set for the turn.
     Disallowed,
+    /// Model-authored input failed the tool's schema validation.
+    InvalidInput,
     /// Action policy denied the tool call.
     Denied,
     /// Admin-review payload was blocked before persistence by canary screening.
@@ -190,6 +195,22 @@ pub(crate) async fn invoke_governed_tool(
     .call()
     .await?
     .into_inner();
+
+    let prepared_action = match prepared_action {
+        PreparedActionReviewResponse::Prepared(prepared) => *prepared,
+        PreparedActionReviewResponse::InvalidInput { reason } => {
+            let output = invalid_input_output(&invocation, &reason);
+            append_synthetic_tool_result(ctx, &request, &invocation, &output).await?;
+            return Ok(GovernedInvocationOutcome::Completed(Box::new(
+                completed_result(
+                    request.tool_id,
+                    invocation,
+                    output,
+                    GovernedInvocationDisposition::InvalidInput,
+                ),
+            )));
+        }
+    };
 
     if matches!(prepared_action.effect, ActionPolicyEffect::Deny) {
         let output = denied_action_output(&prepared_action, &invocation);
@@ -433,6 +454,15 @@ fn tool_call_request(
             GovernedInvocationOrigin::ExecutionTask { .. } => None,
         },
     }
+}
+
+/// Builds the synthetic error result for model-authored input that failed the
+/// tool's schema validation, phrased so the model corrects and retries.
+fn invalid_input_output(invocation: &ToolInvocation, reason: &str) -> ToolOutput {
+    denied_tool_output(format!(
+        "Tool {} rejected invalid input: {reason}. Correct the arguments and call the tool again.",
+        invocation.name
+    ))
 }
 
 fn denied_action_output(

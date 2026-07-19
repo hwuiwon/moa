@@ -6,6 +6,7 @@ use moa_core::{
 };
 use moa_memory_graph::PiiClass;
 use moa_memory_pii::PiiSpan;
+use moa_memory_types::{FactCategory, FactEdgeLabel};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -79,6 +80,20 @@ pub struct ExtractedFact {
     /// of the fact identity hash.
     #[serde(default)]
     pub event_time: Option<DateTime<Utc>>,
+    /// Coarse semantic category assigned by extraction, consumed by digest
+    /// ordering. Emitted once at extraction time so downstream never re-derives
+    /// the kind from predicate prose. Not part of the fact identity hash.
+    #[serde(default)]
+    pub category: FactCategory,
+    /// Graph edge label assigned by extraction for the fact-to-object edge,
+    /// consumed by slow-path ingestion. Not part of the fact identity hash.
+    #[serde(default)]
+    pub edge_label: FactEdgeLabel,
+    /// Whether the predicate is single-valued (functional): when true, a newer
+    /// object for the same subject and predicate supersedes the older one in the
+    /// background contradiction sweep. Not part of the fact identity hash.
+    #[serde(default)]
+    pub functional: bool,
 }
 
 /// A fact after PII classification.
@@ -291,6 +306,12 @@ fn extracted_fact_from_summary(source_chunk: usize, summary: String) -> Extracte
         scope_hint,
         confidence: None,
         event_time: None,
+        // The deterministic scaffold extracts no structured semantics; it emits
+        // the conservative defaults so downstream never treats a fallback fact
+        // as functional, preference-categorized, or specially edged.
+        category: FactCategory::Other,
+        edge_label: FactEdgeLabel::RelatesTo,
+        functional: false,
     }
 }
 

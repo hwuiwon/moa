@@ -47,19 +47,32 @@ impl BuiltInTool for MemoryRememberTool {
     }
 
     fn description(&self) -> &'static str {
-        "Synchronously remember a fact, decision, or lesson in graph memory."
+        "Synchronously remember facts, decisions, or lessons in graph memory. Accepts multiple facts per call: batch every related fact the user asks you to remember into one invocation instead of calling once per fact."
     }
 
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "text": { "type": "string", "description": "Free-form fact text to remember." },
-                "label": { "type": "string", "enum": ["Fact", "Decision", "Lesson", "Entity", "Concept", "Incident", "Source"], "default": "Fact" },
-                "scope": { "type": "string", "enum": ["tenant", "contact"], "default": "tenant" },
-                "supersedes_specific": { "type": "string", "description": "Optional UUID of the graph node this fact explicitly supersedes." }
+                "items": {
+                    "type": "array",
+                    "description": "One or more facts to remember in a single call. Batch related facts together here rather than issuing a separate call per fact.",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string", "description": "Free-form fact text to remember." },
+                            "label": { "type": "string", "enum": ["Fact", "Decision", "Lesson", "Entity", "Concept", "Incident", "Source"], "default": "Fact" },
+                            "scope": { "type": "string", "enum": ["tenant", "contact"], "default": "tenant" },
+                            "supersedes_specific": { "type": "string", "description": "Optional UUID of the graph node this fact explicitly supersedes." }
+                        },
+                        "required": ["text"],
+                        "additionalProperties": false
+                    }
+                }
             },
-            "required": ["text"],
+            "required": ["items"],
             "additionalProperties": false
         })
     }

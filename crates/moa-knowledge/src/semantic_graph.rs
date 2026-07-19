@@ -113,6 +113,26 @@ pub enum SemanticEntityKind {
 }
 
 impl SemanticEntityKind {
+    /// Every entity kind variant, in declaration order.
+    ///
+    /// The model-backed extractor derives its closed JSON-schema `enum` list and
+    /// its per-kind prompt guidance from this array, so a new variant is a
+    /// compile-time signal to extend both rather than a silently unlisted kind.
+    pub const ALL: &'static [Self] = &[
+        Self::Product,
+        Self::Feature,
+        Self::Action,
+        Self::Procedure,
+        Self::Step,
+        Self::Requirement,
+        Self::Setting,
+        Self::Error,
+        Self::Plan,
+        Self::Integration,
+        Self::Policy,
+        Self::TroubleshootingSymptom,
+    ];
+
     /// Returns the stable identifier used in graph properties.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -177,6 +197,25 @@ pub enum SemanticRelationKind {
 }
 
 impl SemanticRelationKind {
+    /// Every relation kind variant, in declaration order.
+    ///
+    /// The model-backed extractor derives its closed JSON-schema `enum` list and
+    /// its per-kind prompt guidance from this array, so a new variant is a
+    /// compile-time signal to extend both rather than a silently unlisted kind.
+    pub const ALL: &'static [Self] = &[
+        Self::PartOf,
+        Self::Answers,
+        Self::Requires,
+        Self::AppliesTo,
+        Self::Configures,
+        Self::Troubleshoots,
+        Self::Causes,
+        Self::NextStep,
+        Self::AlternativeTo,
+        Self::Mentions,
+        Self::EvidencedBy,
+    ];
+
     /// Returns the stable identifier used in graph properties.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -359,7 +398,10 @@ fn insert_entity(
         });
 }
 
-fn clean_entity_name(name: &str) -> String {
+/// Normalizes an entity name: trims surrounding punctuation and caps the span at
+/// eight whitespace-separated tokens. Shared with the model-backed extractor so
+/// both extraction paths produce identical canonical names and slugs.
+pub(crate) fn clean_entity_name(name: &str) -> String {
     name.trim()
         .trim_matches(|ch: char| ch.is_ascii_punctuation())
         .split_whitespace()

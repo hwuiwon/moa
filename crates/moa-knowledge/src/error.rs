@@ -49,6 +49,12 @@ pub enum Error {
     /// A repository operation failed.
     #[error("knowledge repository failed: {0}")]
     Repository(String),
+    /// A model-backed semantic graph extraction call, timeout, or parse failed.
+    ///
+    /// The ingestion pipeline treats this as a per-chunk signal to fall back to
+    /// the deterministic keyword extractor, so it never aborts a sync run.
+    #[error("semantic graph model extraction failed: {0}")]
+    ModelExtraction(String),
     /// An embedding provider returned a different number of vectors than inputs,
     /// violating the provider cardinality contract. The whole batch is rejected
     /// rather than silently zipped (which would drop or misalign chunks).

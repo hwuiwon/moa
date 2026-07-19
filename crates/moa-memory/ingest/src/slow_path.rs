@@ -22,7 +22,7 @@ use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, NodeLabel, NodeWriteIntent, PostgresGraphStore,
 };
 use moa_memory_pii::{PiiClassifier, PiiResult, PiiSpan, redact_text, redaction_replacement};
-use moa_memory_types::normalize_entity_name;
+use moa_memory_types::{FactEdgeLabel, normalize_entity_name};
 use moa_memory_vector::{VectorStore, VectorStoreFactory};
 use restate_sdk::prelude::*;
 use serde_json::json;
@@ -458,6 +458,9 @@ fn redact_fact(fact: &ExtractedFact, result: &PiiResult) -> ExtractedFact {
         scope_hint: fact.scope_hint,
         confidence: fact.confidence,
         event_time: fact.event_time,
+        category: fact.category,
+        edge_label: fact.edge_label,
+        functional: fact.functional,
     };
     match fact_hash(&redacted) {
         Ok(hash) => redacted.uid = fact_uid_from_hash(&hash),
@@ -977,6 +980,13 @@ fn node_intent(
             "source_chunk": extracted.source_chunk,
             "fact_hash": hex_bytes(hash),
             "pii_class": fact.classified.pii_class.as_str(),
+            // Structured extraction semantics persisted for downstream lifecycle
+            // passes: digest ordering reads `category`, the contradiction sweep
+            // reads `functional`. `edge_label` is stored for provenance; the edge
+            // itself is written from the same field at ingestion time.
+            "category": extracted.category,
+            "edge_label": extracted.edge_label,
+            "functional": extracted.functional,
         }),
         pii_class: fact.classified.pii_class,
         confidence: Some(extracted_confidence(extracted)),
@@ -1202,7 +1212,7 @@ async fn write_fact_entity_edges_in_conn(
             fact_uid,
             entities.object.resolved.uid,
             "object",
-            &fact.classified.fact.predicate,
+            fact.classified.fact.edge_label,
             entities.object.resolved.alias_mention.as_deref(),
         ),
     )
@@ -1240,12 +1250,12 @@ fn fact_entity_edge_intent(
     fact_uid: uuid::Uuid,
     entity_uid: uuid::Uuid,
     role: &str,
-    predicate: &str,
+    edge_label: FactEdgeLabel,
     alias_mention: Option<&str>,
 ) -> EdgeWriteIntent {
     EdgeWriteIntent {
         uid: uuid::Uuid::now_v7(),
-        label: fact_object_edge_label(predicate),
+        label: fact_object_edge_label(edge_label),
         start_uid: fact_uid,
         end_uid: entity_uid,
         valid_from: turn.finalized_at,
@@ -1258,23 +1268,18 @@ fn fact_entity_edge_intent(
     }
 }
 
-fn fact_object_edge_label(predicate: &str) -> EdgeLabel {
-    let normalized = normalize_entity_name(predicate);
-    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
-    if tokens
-        .iter()
-        .any(|token| matches!(*token, "depends" | "uses" | "requires" | "calls" | "built"))
-        || normalized == "require runbook"
-    {
-        return EdgeLabel::DependsOn;
+/// Maps the extraction-assigned edge label onto the stored graph edge label.
+///
+/// Extraction decides the fact-to-object relationship once as a structured
+/// field; this is a total mapping over that controlled vocabulary, never a
+/// re-parse of predicate prose. Unrecognized inputs cannot occur because
+/// [`FactEdgeLabel`] already collapses unknown values to `RelatesTo`.
+fn fact_object_edge_label(edge_label: FactEdgeLabel) -> EdgeLabel {
+    match edge_label {
+        FactEdgeLabel::DependsOn => EdgeLabel::DependsOn,
+        FactEdgeLabel::OwnedBy => EdgeLabel::OwnedBy,
+        FactEdgeLabel::RelatesTo => EdgeLabel::RelatesTo,
     }
-    if (tokens.contains(&"owned") && tokens.contains(&"by"))
-        || (tokens.contains(&"belongs") && tokens.contains(&"to"))
-        || (tokens.contains(&"maintained") && tokens.contains(&"by"))
-    {
-        return EdgeLabel::OwnedBy;
-    }
-    EdgeLabel::RelatesTo
 }
 
 fn entity_edge_properties(
@@ -1503,6 +1508,7 @@ mod tests {
     };
     use moa_memory_graph::{EdgeLabel, PiiClass};
     use moa_memory_pii::{PiiCategory, PiiClassifier, PiiResult, PiiSpan, classify_heuristic};
+    use moa_memory_types::{FactCategory, FactEdgeLabel};
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
@@ -1647,6 +1653,9 @@ mod tests {
             scope_hint: ExtractedFactScopeHint::Contact,
             confidence: Some(0.9),
             event_time: None,
+            category: FactCategory::Other,
+            edge_label: FactEdgeLabel::RelatesTo,
+            functional: false,
         };
         let hash = fact_hash(&fact).expect("fact hashes");
         fact.uid = crate::fact_uid_from_hash(&hash);
@@ -1776,6 +1785,9 @@ mod tests {
             scope_hint: ExtractedFactScopeHint::Contact,
             confidence: Some(0.9),
             event_time: None,
+            category: FactCategory::Other,
+            edge_label: FactEdgeLabel::RelatesTo,
+            functional: false,
         };
         let hash = fact_hash(&fact).expect("fact hashes");
         fact.uid = crate::fact_uid_from_hash(&hash);
@@ -1935,28 +1947,22 @@ mod tests {
     }
 
     #[test]
-    fn predicate_mapping_covers_every_generator_predicate() {
-        // Pins: every predicate emitted by the memory eval generator has an intentional edge label.
-        let cases = [
-            ("cache_backend_conflict", EdgeLabel::RelatesTo),
-            ("contact_email", EdgeLabel::RelatesTo),
-            ("depends_on", EdgeLabel::DependsOn),
-            ("deploy_target", EdgeLabel::RelatesTo),
-            ("on_call_primary", EdgeLabel::RelatesTo),
-            ("owned_by", EdgeLabel::OwnedBy),
-            ("private_repository", EdgeLabel::RelatesTo),
-            ("require_runbook", EdgeLabel::DependsOn),
-            ("response_style", EdgeLabel::RelatesTo),
-        ];
-
-        for (predicate, expected) in cases {
-            assert_eq!(fact_object_edge_label(predicate), expected, "{predicate}");
-        }
+    fn structured_edge_label_maps_totally_onto_storage_label() {
+        // Pins: the fact-to-object edge label comes from extraction's structured
+        // FactEdgeLabel, mapped one-to-one onto the storage EdgeLabel. Edge typing
+        // is no longer re-derived from predicate prose.
         assert_eq!(
-            fact_object_edge_label("uses contact email"),
+            fact_object_edge_label(FactEdgeLabel::DependsOn),
             EdgeLabel::DependsOn
         );
-        assert_eq!(fact_object_edge_label("is owned by"), EdgeLabel::OwnedBy);
+        assert_eq!(
+            fact_object_edge_label(FactEdgeLabel::OwnedBy),
+            EdgeLabel::OwnedBy
+        );
+        assert_eq!(
+            fact_object_edge_label(FactEdgeLabel::RelatesTo),
+            EdgeLabel::RelatesTo
+        );
     }
 
     #[test]
@@ -1981,7 +1987,7 @@ mod tests {
             fact_uid,
             entity_uid,
             "object",
-            "depends_on",
+            FactEdgeLabel::DependsOn,
             Some("Lib Foo"),
         );
 
@@ -2038,6 +2044,9 @@ mod tests {
             scope_hint: ExtractedFactScopeHint::Contact,
             confidence: Some(0.93),
             event_time: None,
+            category: FactCategory::Other,
+            edge_label: FactEdgeLabel::RelatesTo,
+            functional: false,
         };
         let hash = fact_hash(&fact).expect("fact hashes");
         fact.uid = crate::fact_uid_from_hash(&hash);

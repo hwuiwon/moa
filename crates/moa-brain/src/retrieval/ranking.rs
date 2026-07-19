@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
 ///
-/// Bumped to 15 when the vestigial `abstain_below_window_evidence` and
-/// `rerank_window` fields were dropped from [`RankingConfig`]; rotating the
-/// version invalidates cache fingerprints computed against the old shape.
-pub const RANKING_PIPELINE_VERSION: u32 = 15;
+/// Bumped to 16 when the soft `label_hint_boost` weight was added to
+/// [`RankingWeights`] so a planner-inferred label hint contributes a bounded
+/// ranking boost instead of a hard retrieval filter; rotating the version
+/// invalidates cache fingerprints computed against the old shape.
+pub const RANKING_PIPELINE_VERSION: u32 = 16;
 
 /// Weights used by the FeatureV1 deterministic scorer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,6 +32,14 @@ pub struct RankingWeights {
     pub overlap: f64,
     /// Rescue bonus for candidates only graph expansion found.
     pub graph_rescue: f64,
+    /// Bounded additive boost for candidates whose label matches a
+    /// planner-inferred label hint carried in `RetrievalRequest.label_boost`.
+    ///
+    /// Applied as a soft ranking signal, never as a filter: a hinted label
+    /// lifts a candidate over otherwise-equal noise, but candidates with other
+    /// labels are still retrieved and ranked. A scope-plan-supplied
+    /// `label_filter` remains a separate hard filter.
+    pub label_hint_boost: f64,
     /// Outcome-derived quality prior contribution.
     pub quality: f64,
     /// Additive score for contact-scoped rows.
@@ -52,6 +61,7 @@ impl Default for RankingWeights {
             subject_match: 0.5,
             overlap: 0.35,
             graph_rescue: 0.6,
+            label_hint_boost: 0.15,
             quality: 0.6,
             scope_user: 0.2,
             scope_tenant: 0.1,
@@ -111,6 +121,7 @@ impl From<&MemoryRankingWeights> for RankingWeights {
             subject_match: value.subject_match,
             overlap: value.overlap,
             graph_rescue: value.graph_rescue,
+            label_hint_boost: value.label_hint_boost,
             quality: value.quality,
             scope_user: value.scope_user,
             scope_tenant: value.scope_tenant,

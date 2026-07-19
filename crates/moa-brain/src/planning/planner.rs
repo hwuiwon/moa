@@ -84,7 +84,11 @@ impl PlannedQuery {
             query_text: query_text.into(),
             query_embedding,
             scope: self.scope,
-            label_filter: self.label_hint,
+            // A planner-inferred label hint is a keyword guess, so it becomes a
+            // SOFT ranking boost, never a hard filter. Callers with structured,
+            // explicit label intent (a scope plan) set `label_filter` directly.
+            label_filter: None,
+            label_boost: self.label_hint,
             max_pii_class,
             k_final,
             use_reranker,
@@ -518,8 +522,8 @@ mod tests {
     use chrono::{DateTime, Utc};
 
     use super::{
-        NodeLabel, PlannedQuery, Strategy, classify_strategy, infer_label_hint, parse_temporal,
-        should_skip_graph_expansion_for_direct_lookup,
+        NodeLabel, PiiClass, PlannedQuery, Strategy, classify_strategy, infer_label_hint,
+        parse_temporal, should_skip_graph_expansion_for_direct_lookup,
     };
     use moa_core::types::identifiers::TenantId;
     use moa_memory_types::MemoryScope;
@@ -610,6 +614,39 @@ mod tests {
         assert_eq!(
             infer_label_hint("show auth outage incidents", &[]),
             Some(vec![NodeLabel::Incident])
+        );
+    }
+
+    #[test]
+    fn planner_label_hint_becomes_soft_boost_not_hard_filter() {
+        // Pins: a planner-inferred label hint routes to the SOFT `label_boost`
+        // and never populates the HARD `label_filter`, so a wrong keyword guess
+        // (here "outage" forcing Incident) can no longer exclude an answer
+        // stored under a different label from any retrieval leg.
+        let scope = MemoryScope::Tenant {
+            tenant_id: TenantId::new(),
+        };
+        let planned = PlannedQuery {
+            strategy: Strategy::Both,
+            seeds: Vec::new(),
+            label_hint: Some(vec![NodeLabel::Incident]),
+            scope,
+            temporal_filter: None,
+        };
+
+        let request = planned.into_retrieval_request(
+            "what did we learn from the auth outage?",
+            vec![0.0_f32; 4],
+            PiiClass::None,
+            5,
+            false,
+        );
+
+        assert_eq!(request.label_filter, None, "hint must not be a hard filter");
+        assert_eq!(
+            request.label_boost,
+            Some(vec![NodeLabel::Incident]),
+            "hint must survive as a soft ranking boost"
         );
     }
 

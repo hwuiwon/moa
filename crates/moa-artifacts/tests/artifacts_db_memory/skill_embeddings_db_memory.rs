@@ -2,7 +2,7 @@
 
 use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::registry::{
-    ArtifactRegistry, NewArtifactDraft, NewArtifactFile, NewSkillEmbedding,
+    ArtifactRegistry, MissingSkillEmbedding, NewArtifactDraft, NewArtifactFile, NewSkillEmbedding,
 };
 use moa_artifacts::validation::validate_for_status;
 use moa_core::{
@@ -70,6 +70,29 @@ fn digest(text: &str) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     hasher.finalize().to_vec()
+}
+
+/// Writes one skill's identity embedding into the named vector space at version 1.
+async fn set_embedding(
+    registry: &ArtifactRegistry,
+    row: &MissingSkillEmbedding,
+    embedding: &[f32],
+    model: &str,
+) -> Result<()> {
+    registry
+        .set_skill_embedding(NewSkillEmbedding {
+            artifact_uid: row.artifact_uid,
+            revision_uid: row.revision_uid,
+            storage_partition_id: row.storage_partition_id.as_deref(),
+            user_id: row.user_id.as_deref(),
+            embedding,
+            model,
+            model_version: 1,
+            source_hash: &digest(&row.name),
+            observed_artifact_updated_at: row.artifact_updated_at,
+        })
+        .await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -440,6 +463,123 @@ async fn skill_backfill_reselects_model_mismatched_rows_db_memory() -> Result<()
             .collect::<Vec<_>>(),
         vec![row.artifact_uid],
         "a model-mismatched row re-selects under the active model",
+    );
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn nearest_named_skill_embeddings_scoped_resolves_names_filters_model_and_limits_db_memory()
+-> Result<()> {
+    // Pins: the skill-manifest ranker's NN read resolves each neighbor to its
+    // current published skill name in one query (the artifact join), orders by
+    // ascending cosine distance, honors the model_scope vector-space filter, and
+    // caps at the requested limit — the behaviors the manifest ranking depends on.
+    // Mutation guards: dropping the artifact-name join fails the name assertions;
+    // dropping the model predicate makes the other-space skill appear under
+    // model-x; dropping ORDER BY / LIMIT breaks the ordering / limit assertions.
+    // (The join's `valid_to IS NULL` / `kind = 'skill'` guard mirrors the
+    // already-pinned `published_skill_name_for_artifact` and needs an artifact
+    // retire path this registry does not expose, so it is not exercised here.)
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let registry = ArtifactRegistry::new(store.pool().clone());
+    let tenant = TenantId::from(Uuid::now_v7());
+    let scope = ActionRuleScope::Tenant { tenant_id: tenant };
+    let name_near = format!("near-{}", Uuid::now_v7());
+    let name_far = format!("far-{}", Uuid::now_v7());
+    let name_other = format!("other-{}", Uuid::now_v7());
+
+    publish_skill(&registry, &scope, &name_near, "near skill").await?;
+    publish_skill(&registry, &scope, &name_far, "far skill").await?;
+    publish_skill(&registry, &scope, &name_other, "other-space skill").await?;
+
+    let listed = registry
+        .list_skills_missing_embedding("model-x", 1, 10)
+        .await?;
+    let row_of = |name: &str| {
+        listed
+            .iter()
+            .find(|row| row.name == name)
+            .expect("published skill listed")
+            .clone()
+    };
+    let near = row_of(&name_near);
+    let far = row_of(&name_far);
+    let other = row_of(&name_other);
+    let storage_partition = near
+        .storage_partition_id
+        .clone()
+        .expect("tenant-scoped skill has a storage partition");
+
+    // near shares the probe's direction and far is orthogonal, both in model-x;
+    // other shares the probe direction but lives in the model-y space.
+    set_embedding(&registry, &near, &one_hot(0), "model-x").await?;
+    set_embedding(&registry, &far, &one_hot(1), "model-x").await?;
+    set_embedding(&registry, &other, &one_hot(0), "model-y").await?;
+
+    // model-x scope: both x-space skills resolve to their names, near-first; the
+    // y-space skill is excluded even though it shares the probe direction.
+    let scoped = registry
+        .nearest_named_skill_embeddings_scoped(
+            &storage_partition,
+            &one_hot(0),
+            10,
+            Some(("model-x", 1)),
+        )
+        .await?;
+    assert_eq!(
+        scoped
+            .iter()
+            .map(|n| n.skill_name.clone())
+            .collect::<Vec<_>>(),
+        vec![name_near.clone(), name_far.clone()],
+        "neighbors resolve to current published names, near-first, y-space excluded",
+    );
+    assert!(
+        scoped[0].distance < 1e-3,
+        "the near skill shares the probe direction (~0 distance)",
+    );
+    assert!(
+        scoped[1].distance > scoped[0].distance,
+        "the orthogonal skill ranks strictly after the near skill",
+    );
+
+    // The limit caps the result at the single nearest neighbor.
+    let limited = registry
+        .nearest_named_skill_embeddings_scoped(
+            &storage_partition,
+            &one_hot(0),
+            1,
+            Some(("model-x", 1)),
+        )
+        .await?;
+    assert_eq!(
+        limited
+            .iter()
+            .map(|n| n.skill_name.clone())
+            .collect::<Vec<_>>(),
+        vec![name_near.clone()],
+        "the limit caps the neighbor set to the single nearest skill",
+    );
+
+    // model-y scope returns only the y-space skill — the filter selects the space.
+    let other_space = registry
+        .nearest_named_skill_embeddings_scoped(
+            &storage_partition,
+            &one_hot(0),
+            10,
+            Some(("model-y", 1)),
+        )
+        .await?;
+    assert_eq!(
+        other_space
+            .iter()
+            .map(|n| n.skill_name.clone())
+            .collect::<Vec<_>>(),
+        vec![name_other.clone()],
+        "the model_scope selects only skills in the requested vector space",
     );
 
     moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await

@@ -45,6 +45,53 @@ pub fn normalize_entity_name(name: &str) -> String {
     }
 }
 
+/// Coarse semantic category emitted once by fact extraction.
+///
+/// Extraction is the single place that decides a fact's category; downstream
+/// consumers (for example digest ordering) read this structured value instead
+/// of re-deriving the kind from predicate prose. Keeping the decision at
+/// extraction time means it generalizes with the extraction prompt rather than
+/// through hardcoded keyword lists tuned to a fixed corpus. Absent or
+/// unrecognized values deserialize to [`FactCategory::Other`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactCategory {
+    /// A standing user or tenant preference.
+    Preference,
+    /// A durable identity attribute of the subject.
+    Identity,
+    /// A relationship between entities (ownership, dependency, membership).
+    Relationship,
+    /// A time-bound occurrence.
+    Event,
+    /// Anything extraction could not confidently categorize; the conservative
+    /// default.
+    #[default]
+    Other,
+}
+
+/// Semantic graph edge label emitted by extraction for a fact's object
+/// relationship.
+///
+/// Extraction chooses the relationship once; slow-path ingestion maps it onto
+/// the storage edge label without re-parsing predicate text. This deliberately
+/// exposes only the object-relationship labels extraction is allowed to assign;
+/// absent or unrecognized values deserialize to the generic
+/// [`FactEdgeLabel::RelatesTo`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactEdgeLabel {
+    /// Dependency relationship (the subject depends on, uses, requires, calls,
+    /// or is built on the object).
+    DependsOn,
+    /// Ownership or stewardship relationship (the object owns, maintains, or is
+    /// responsible for the subject).
+    OwnedBy,
+    /// Generic semantic relationship; the conservative default.
+    #[default]
+    RelatesTo,
+}
+
 /// Runtime graph-memory scope.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -133,7 +180,39 @@ impl From<MemoryScope> for RlsContext {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_entity_name;
+    use super::{FactCategory, FactEdgeLabel, normalize_entity_name};
+
+    #[test]
+    fn fact_category_wire_form_and_defaults_are_stable() {
+        // Pins: the category persisted in node properties round-trips through the
+        // exact snake_case strings downstream reads, and absent/unknown values
+        // deserialize to Other so a missing field never mis-orders digests.
+        assert_eq!(
+            serde_json::to_value(FactCategory::Preference).unwrap(),
+            serde_json::json!("preference")
+        );
+        assert_eq!(FactCategory::default(), FactCategory::Other);
+        assert_eq!(
+            serde_json::from_value::<FactCategory>(serde_json::json!("relationship")).unwrap(),
+            FactCategory::Relationship
+        );
+        assert!(serde_json::from_value::<FactCategory>(serde_json::json!("bogus")).is_err());
+    }
+
+    #[test]
+    fn fact_edge_label_wire_form_and_default_are_stable() {
+        // Pins: extraction edge labels serialize to the strings slow-path stores
+        // and the default is the conservative generic relationship.
+        assert_eq!(
+            serde_json::to_value(FactEdgeLabel::DependsOn).unwrap(),
+            serde_json::json!("depends_on")
+        );
+        assert_eq!(
+            serde_json::to_value(FactEdgeLabel::OwnedBy).unwrap(),
+            serde_json::json!("owned_by")
+        );
+        assert_eq!(FactEdgeLabel::default(), FactEdgeLabel::RelatesTo);
+    }
 
     #[test]
     fn entity_name_normalization_blocks_case_and_punctuation_variants() {

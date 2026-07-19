@@ -869,6 +869,7 @@ async fn retrieve_wixqa_output(
             query_embedding,
             scope: memory_scope.clone(),
             label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: top_k,
             use_reranker,

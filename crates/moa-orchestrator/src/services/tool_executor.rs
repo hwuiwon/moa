@@ -1555,7 +1555,7 @@ mod tests {
         let executor = ToolExecutorImpl::new(router);
 
         let mut request = tool_request("memory_remember");
-        request.input = serde_json::json!({ "text": "the sky is blue" });
+        request.input = serde_json::json!({ "items": [{ "text": "the sky is blue" }] });
 
         let output = executor
             .execute_buffered(&SessionMeta::default(), &request)
@@ -1569,9 +1569,26 @@ mod tests {
             calls.as_slice(),
             &[(
                 "memory_remember".to_string(),
-                serde_json::json!({ "text": "the sky is blue" })
+                serde_json::json!({ "items": [{ "text": "the sky is blue" }] })
             )],
             "the wired executor must receive the memory-write call via router dispatch"
+        );
+    }
+
+    #[test]
+    fn memory_remember_batch_schema_compiles_to_openai_strict_compatible() {
+        // Pins: the batched memory_remember input schema (an items array of
+        // facts), after provider compilation, satisfies OpenAI strict mode.
+        // A violation here 400s every live turn that offers the tool; scripted
+        // and offline lanes cannot catch it (batch-remember change, 2026-07-18).
+        use moa_core::traits::BuiltInTool;
+
+        let schema = moa_hands::tools::memory::MemoryRememberTool.input_schema();
+        let compiled = moa_providers::compile_for_openai_strict(&schema);
+        let violations = moa_providers::openai_strict_violations(&compiled);
+        assert!(
+            violations.is_empty(),
+            "memory_remember batch schema violates OpenAI strict mode: {violations:?}"
         );
     }
 

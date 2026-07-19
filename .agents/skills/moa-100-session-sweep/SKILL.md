@@ -43,10 +43,11 @@ pass at current HEAD and should fire only on a regression.
 - `F-RAW-LEAK` (fail): the final reply reproduces a contiguous chunk (>= 120 chars, tune with
   `RAW_LEAK_MIN_CHARS`) of a worker's terminal/result payload verbatim instead of synthesizing it.
 - `F-DELEGATE` (partial): an expected-worker case spawned no workers.
-- `F-QUALITY` (partial): workers were spawned but the run emitted **no** `WorkerResultBundle`,
-  regardless of whether delegation was expected. Bundled results are **not** compared against total
-  `WorkerSpawned` — the model may spawn extra workers beyond the auto-delegation run, and each
-  bundle already carries one result per tracked run worker, so that comparison is a false positive.
+- `F-QUALITY` (partial): a spawned worker never delivered a terminal
+  `WorkerNotificationDelivered` back to the parent (fan-in dropped a worker), regardless of
+  whether delegation was expected. The pre-2026-07-14 `WorkerResultBundle` event was removed with
+  the dynamic-execution rework — the coordinator now synthesizes from terminal notifications, so
+  bundle counts in reports are expected to be zero at current HEAD.
 - `F-SKILL-INJECT` (partial): an expected-skill case had no persisted segment skill evidence.
 
 ## Re-run Candidates (flaky signatures)
@@ -59,10 +60,11 @@ counts as a fail. Before treating a marked fail as a regression, re-run that ses
 `MOA_SWEEP_IDS`. Signatures: `stale-worker-timeout` (a stale worker hangs fan-in until timeout),
 `canary-session_search-false-positive` (canary guardrail trips on `session_search`),
 `loop-detector-memory_remember-false-positive` (tool-loop detector trips on repeated
-`memory_remember`), `turn-cap-memory-store-pacing` (a multi-fact memory-store persona paces one
-`memory_remember` per model turn and exhausts the 6-turn budget; harness defects in this chain
-were fixed 2026-07-12 — activation path in the skill manifest, corrective file_read misses,
-per-turn read cache exempt from loop detection — the residual is stochastic model pacing).
+`memory_remember`), `turn-cap-memory-store-pacing` (RESOLVED 2026-07-18: root cause was the runner not passing
+`MOA_PII_SERVICE_URL` to the ephemeral orchestrator — the privacy classifier abstained, every
+memory write failed closed, and the model burned its turn budget retrying; the runner now wires
+the sidecar and `memory_remember` is batch-capable, so this signature firing again means a real
+regression, not a flake).
 
 ## Runner Requirements
 

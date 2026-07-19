@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use moa_memory_types::{FactCategory, FactEdgeLabel};
+
 use crate::{
     ExtractedFact, ExtractedFactScopeHint, FactExtractor, IngestError, Result, TurnChunk,
     fact_hash, fact_uid_from_hash,
@@ -43,6 +45,18 @@ pub struct RecordedFact {
     /// Optional extraction confidence.
     #[serde(default)]
     pub confidence: Option<f64>,
+    /// Coarse fact category recorded by the extractor. Absent in fixtures
+    /// recorded before prompt v4, which replay as [`FactCategory::Other`].
+    #[serde(default)]
+    pub category: FactCategory,
+    /// Fact-to-object edge label recorded by the extractor. Absent in fixtures
+    /// recorded before prompt v4, which replay as [`FactEdgeLabel::RelatesTo`].
+    #[serde(default)]
+    pub edge_label: FactEdgeLabel,
+    /// Whether the predicate is single-valued. Absent in fixtures recorded
+    /// before prompt v4, which replay as `false`.
+    #[serde(default)]
+    pub functional: bool,
     /// Optional stated event time recorded by the extractor.
     #[serde(default)]
     pub event_time: Option<chrono::DateTime<chrono::Utc>>,
@@ -71,6 +85,9 @@ impl From<&ExtractedFact> for RecordedFact {
             summary: fact.summary.clone(),
             scope_hint: fact.scope_hint,
             confidence: fact.confidence,
+            category: fact.category,
+            edge_label: fact.edge_label,
+            functional: fact.functional,
             event_time: fact.event_time,
         }
     }
@@ -156,6 +173,9 @@ impl RecordedFact {
             scope_hint: self.scope_hint,
             confidence: self.confidence.map(|value| value.clamp(0.0, 1.0)),
             event_time: self.event_time,
+            category: self.category,
+            edge_label: self.edge_label,
+            functional: self.functional,
         };
         let hash = fact_hash(&fact)?;
         fact.uid = fact_uid_from_hash(&hash);
@@ -208,6 +228,9 @@ mod tests {
                 summary: "auth uses JWT".to_string(),
                 scope_hint: ExtractedFactScopeHint::Tenant,
                 confidence: Some(0.87),
+                category: FactCategory::Other,
+                edge_label: FactEdgeLabel::RelatesTo,
+                functional: false,
                 event_time: None,
             }],
         };
@@ -226,6 +249,49 @@ mod tests {
         assert_eq!(facts[0].confidence, Some(0.87));
         let hash = fact_hash(&facts[0]).expect("hash replayed fact");
         assert_eq!(facts[0].uid, fact_uid_from_hash(&hash));
+    }
+
+    #[tokio::test]
+    async fn recorded_extractor_replays_structured_category_edge_and_functional() {
+        // Pins: recorded structured semantics survive replay so re-recorded v4
+        // fixtures drive digest ordering, edge typing, and the contradiction
+        // sweep exactly as live extraction would.
+        let chunk = TurnChunk {
+            index: 3,
+            text: "user: checkout-service depends on lib-auth".to_string(),
+            token_estimate: 6,
+        };
+        let key = chunk_hash(&chunk.text);
+        let record = ExtractionFixtureRecord {
+            chunk_hash: key.clone(),
+            model: "command-test".to_string(),
+            prompt_version: EXTRACTION_PROMPT_VERSION.to_string(),
+            facts: vec![RecordedFact {
+                subject: "checkout-service".to_string(),
+                predicate: "depends on".to_string(),
+                object: "lib-auth".to_string(),
+                summary: "checkout-service depends on lib-auth.".to_string(),
+                scope_hint: ExtractedFactScopeHint::Tenant,
+                confidence: Some(0.9),
+                category: FactCategory::Relationship,
+                edge_label: FactEdgeLabel::DependsOn,
+                functional: false,
+                event_time: None,
+            }],
+        };
+        let extractor = RecordedFactExtractor::new(
+            MapStore {
+                records: BTreeMap::from([(key, record)]),
+            },
+            "cargo run -p xtask --features eval-tools -- record-memory-extractions --corpus target/memory-eval/pr-natural",
+        );
+
+        let facts = extractor.extract(&[chunk]).await.expect("replay facts");
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].category, FactCategory::Relationship);
+        assert_eq!(facts[0].edge_label, FactEdgeLabel::DependsOn);
+        assert!(!facts[0].functional);
     }
 
     #[tokio::test]
@@ -248,6 +314,9 @@ mod tests {
                 summary: "The user prefers Linear.".to_string(),
                 scope_hint: ExtractedFactScopeHint::Contact,
                 confidence: Some(0.9),
+                category: FactCategory::Other,
+                edge_label: FactEdgeLabel::RelatesTo,
+                functional: false,
                 event_time: None,
             }],
         };
@@ -266,7 +335,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("prompt_version v1; expected one of v2, v3"),
+                .contains("prompt_version v1; expected one of v2, v3, v4"),
             "{error}"
         );
     }
@@ -292,6 +361,9 @@ mod tests {
                 summary: "auth uses JWT".to_string(),
                 scope_hint: ExtractedFactScopeHint::Tenant,
                 confidence: Some(0.9),
+                category: FactCategory::Other,
+                edge_label: FactEdgeLabel::RelatesTo,
+                functional: false,
                 event_time: None,
             }],
         };
@@ -332,6 +404,9 @@ mod tests {
                 summary: "The standardization occurred during last sprint.".to_string(),
                 scope_hint: ExtractedFactScopeHint::Tenant,
                 confidence: Some(0.8),
+                category: FactCategory::Other,
+                edge_label: FactEdgeLabel::RelatesTo,
+                functional: false,
                 event_time: None,
             }],
         };
@@ -367,6 +442,9 @@ mod tests {
                 summary: "User 04 should use repo/control-plane.".to_string(),
                 scope_hint: ExtractedFactScopeHint::Tenant,
                 confidence: Some(0.8),
+                category: FactCategory::Other,
+                edge_label: FactEdgeLabel::RelatesTo,
+                functional: false,
                 event_time: None,
             }],
         };

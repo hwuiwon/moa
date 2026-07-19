@@ -28,6 +28,13 @@ pub struct SessionLimitsConfig {
     pub simple_max_turns: u32,
     /// Maximum model loop iterations for requests classified as standard.
     pub standard_max_turns: u32,
+    /// Maximum model loop iterations once a standard turn has delegated to at
+    /// least one worker. Spawning workers, waiting for them, and synthesizing
+    /// their results legitimately needs more turns than a non-delegating turn, so
+    /// after the first successful worker spawn this cap replaces the base cap for
+    /// the remainder of that turn. Escalation is one-way and never lowers the base
+    /// cap. Bounded by `max_turns`.
+    pub max_model_turns_delegation: u32,
     /// Maximum tool calls allowed within one turn. `0` disables tool calls.
     pub max_tool_calls: u32,
     /// Number of identical consecutive turn fingerprints that triggers a loop pause. `0` disables detection.
@@ -80,6 +87,7 @@ impl Default for SessionLimitsConfig {
             max_turns: 50,
             simple_max_turns: 1,
             standard_max_turns: 6,
+            max_model_turns_delegation: 12,
             max_tool_calls: 30,
             loop_detection_threshold: 3,
             progress_first_delay_ms: 8_000,

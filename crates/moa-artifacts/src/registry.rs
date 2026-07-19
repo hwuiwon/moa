@@ -20,7 +20,9 @@ mod revisions;
 mod skill_embeddings;
 
 pub use revisions::{RollbackApplication, insert_published_revision};
-pub use skill_embeddings::{MissingSkillEmbedding, NewSkillEmbedding, SkillEmbeddingNeighbor};
+pub use skill_embeddings::{
+    MissingSkillEmbedding, NamedSkillEmbeddingNeighbor, NewSkillEmbedding, SkillEmbeddingNeighbor,
+};
 
 /// Maximum size, in bytes, accepted for a single stored artifact package file.
 ///

@@ -2,9 +2,13 @@
 
 `manifest.toml` pins the byte hashes and record counts for three JSONL files:
 
-- `routing.jsonl` contains 320 adjudicated route cases and scripted provider
+- `routing.jsonl` contains 328 adjudicated route cases and scripted provider
   behavior that drives the production async classifier without a live model:
-  60 Respond, 240 Execute (140 Inline and 100 Durable), and 20 NeedsInput.
+  60 Respond, 248 Execute (144 Inline and 104 Durable), and 20 NeedsInput.
+  Four Execute/Durable cases pin enumerated parallel workstreams that
+  forward-reference not-yet-provided user material to Act rather than clarify.
+  Four Execute/Inline cases carry covering installed skills (`available_skills`)
+  so borderline requests route to Act rather than clarify (session S016).
 - `contract-recorded.jsonl` contains 80 strict planner candidates paired
   with independently stated goal-contract expectations.
 - `task-quality.jsonl` contains 20 paid-lane cases with exact public-route

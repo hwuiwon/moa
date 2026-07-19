@@ -329,7 +329,7 @@ impl Default for KnowledgeChunkingConfig {
 }
 
 /// Tenant knowledge semantic graph extraction controls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KnowledgeSemanticConfig {
     /// Emit deterministic generic proper-noun entities when the domain-specific
@@ -339,14 +339,36 @@ pub struct KnowledgeSemanticConfig {
     /// calls) and cheap, and without it the graph retrieval leg never fires on
     /// non-domain corpora because no entity nodes exist to seed traversal.
     pub generic_entities: bool,
+    /// Model-backed semantic graph extraction settings.
+    pub model_extraction: KnowledgeSemanticModelConfig,
 }
 
 impl Default for KnowledgeSemanticConfig {
     fn default() -> Self {
         Self {
             generic_entities: true,
+            model_extraction: KnowledgeSemanticModelConfig::default(),
         }
     }
+}
+
+/// Model-backed tenant knowledge semantic graph extraction controls.
+///
+/// The surface is deliberately just provider selection: enable the path and pick
+/// the model. Extraction bounds (per-chunk caps, request timeout) are constants
+/// in the extractor, matching how the deterministic extractor bounds itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct KnowledgeSemanticModelConfig {
+    /// Whether the model-backed extractor is the production semantic extractor.
+    ///
+    /// Defaults to `false`: the deterministic keyword extractor is the sole
+    /// extractor unless this is enabled and a provider resolves. When enabled the
+    /// model becomes the production extractor for new or changed chunks and the
+    /// keyword ruleset stays the per-chunk fallback for failed model calls.
+    pub enabled: bool,
+    /// Model id used for extraction; empty resolves the config's default model.
+    pub model: String,
 }
 
 /// Tenant knowledge observability controls.

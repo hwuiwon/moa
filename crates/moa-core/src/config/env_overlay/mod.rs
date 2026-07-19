@@ -459,6 +459,8 @@ pub struct MoaEnvOverlay {
     pub session_limits_simple_max_turns: Option<u32>,
     /// `MOA_SESSION_LIMITS_STANDARD_MAX_TURNS`.
     pub session_limits_standard_max_turns: Option<u32>,
+    /// `MOA_SESSION_LIMITS_MAX_MODEL_TURNS_DELEGATION`.
+    pub session_limits_max_model_turns_delegation: Option<u32>,
     /// `MOA_SESSION_LIMITS_MAX_TOOL_CALLS`.
     pub session_limits_max_tool_calls: Option<u32>,
     /// `MOA_SESSION_LIMITS_LOOP_DETECTION_THRESHOLD`.

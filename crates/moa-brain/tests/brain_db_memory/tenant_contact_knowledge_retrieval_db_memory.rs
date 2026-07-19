@@ -101,6 +101,10 @@ async fn mock_tenant_and_contact_retrieval() {
 
     let session = contact_session(tenant_id, contact_id);
     let mut ctx = moa_core::types::context::WorkingContext::new(&session, capabilities());
+    ctx.insert_metadata(
+        "_moa.turn_id",
+        serde_json::json!(Uuid::now_v7().to_string()),
+    );
     ctx.append_message(ContextMessage::user(
         "Find the pto runbook answer and contact deployment preference answer",
     ));
@@ -226,6 +230,10 @@ async fn mock_tenant_and_contact_retrieval() {
     let tenant_session = tenant_only_session(tenant_id);
     let mut tenant_ctx =
         moa_core::types::context::WorkingContext::new(&tenant_session, capabilities());
+    tenant_ctx.insert_metadata(
+        "_moa.turn_id",
+        serde_json::json!(Uuid::now_v7().to_string()),
+    );
     tenant_ctx.append_message(ContextMessage::user("Find the pto runbook answer"));
     let tenant_lineage = Arc::new(CapturedLineage::default());
     let tenant_retriever = GraphMemoryRetriever::new_with_config(
@@ -935,6 +943,7 @@ fn tenant_chunk_request(tenant_id: TenantId, query: &str) -> RetrievalRequest {
         query_embedding: test_embedding(query),
         scope: tenant_memory_scope(tenant_id),
         label_filter: Some(vec![NodeLabel::Chunk]),
+        label_boost: None,
         max_pii_class: PiiClass::Restricted,
         k_final: 5,
         use_reranker: false,

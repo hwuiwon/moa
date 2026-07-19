@@ -4,8 +4,8 @@ use std::error::Error as StdError;
 
 use super::response::{ResponsesStreamError, token_usage_from_openai_usage};
 use super::tools::{
-    parse_tool_arguments, response_content_from_output, response_stop_reason,
-    response_text_from_output,
+    normalize_tool_call_input, parse_tool_arguments, response_content_from_output,
+    response_stop_reason, response_text_from_output,
 };
 use super::*;
 use crate::core::provider_tools::{web_search_completed_block, web_search_started_block};
@@ -48,6 +48,7 @@ pub(crate) async fn stream_responses_with_retry(
     mut span_recorder: LLMSpanRecorder,
     stream_timeouts: ProviderStreamTimeoutConfig,
     canonical_response_schema: Option<Value>,
+    canonical_tool_schemas: std::collections::HashMap<String, Value>,
 ) -> Result<CompletionResponse> {
     if request.text.is_some() {
         return create_response_with_retry(
@@ -62,6 +63,7 @@ pub(crate) async fn stream_responses_with_retry(
             guard,
             span_recorder,
             canonical_response_schema.as_ref(),
+            &canonical_tool_schemas,
         )
         .await;
     }
@@ -80,6 +82,7 @@ pub(crate) async fn stream_responses_with_retry(
                     started_at,
                     &mut span_recorder,
                     stream_timeouts,
+                    &canonical_tool_schemas,
                 )
                 .await
                 {
@@ -176,6 +179,7 @@ async fn create_response_with_retry(
     guard: &RateGuard,
     mut span_recorder: LLMSpanRecorder,
     canonical_response_schema: Option<&Value>,
+    canonical_tool_schemas: &std::collections::HashMap<String, Value>,
 ) -> Result<CompletionResponse> {
     let mut request = request.clone();
     request.stream = Some(false);
@@ -192,6 +196,7 @@ async fn create_response_with_retry(
                     started_at,
                     &mut span_recorder,
                     canonical_response_schema,
+                    canonical_tool_schemas,
                 )?;
                 if response.text.trim().is_empty()
                     && response.content.is_empty()
@@ -420,6 +425,7 @@ async fn consume_responses_stream_once(
     started_at: Instant,
     span_recorder: &mut LLMSpanRecorder,
     stream_timeouts: ProviderStreamTimeoutConfig,
+    canonical_tool_schemas: &std::collections::HashMap<String, Value>,
 ) -> std::result::Result<CompletionResponse, ResponsesStreamError> {
     let mut text = String::new();
     let mut content = Vec::new();
@@ -490,7 +496,7 @@ async fn consume_responses_stream_once(
                     continue;
                 }
 
-                let input = parse_tool_arguments(&event.arguments);
+                let mut input = parse_tool_arguments(&event.arguments);
                 let name = event
                     .name
                     .or_else(|| {
@@ -507,6 +513,7 @@ async fn consume_responses_stream_once(
                         emitted_content,
                         rate_limited: false,
                     })?;
+                normalize_tool_call_input(&name, &mut input, canonical_tool_schemas);
                 let call = CompletionContent::ToolCall(ToolCallContent {
                     invocation: ToolInvocation {
                         id: Some(event.item_id.clone()),
@@ -616,9 +623,19 @@ fn completion_response_from_response(
     started_at: Instant,
     span_recorder: &mut LLMSpanRecorder,
     canonical_response_schema: Option<&Value>,
+    canonical_tool_schemas: &std::collections::HashMap<String, Value>,
 ) -> Result<CompletionResponse> {
     let mut text = response_text_from_output(&response.output);
     let mut content = response_content_from_output(&response.output)?;
+    for block in &mut content {
+        if let CompletionContent::ToolCall(call) = block {
+            normalize_tool_call_input(
+                &call.invocation.name,
+                &mut call.invocation.input,
+                canonical_tool_schemas,
+            );
+        }
+    }
     if text.is_empty() {
         text = content
             .iter()

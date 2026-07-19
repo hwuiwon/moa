@@ -48,9 +48,9 @@ pub use execution::ExecutionConfig;
 pub use knowledge::{
     KnowledgeChunkingConfig, KnowledgeConfig, KnowledgeObservabilityConfig,
     KnowledgeParserDefaultsConfig, KnowledgeParsersConfig, KnowledgeProvidersConfig,
-    KnowledgeSemanticConfig, KnowledgeSyncConfig, LlamaParseKnowledgeParserConfig,
-    MergeKnowledgeProviderConfig, NangoKnowledgeProviderConfig, ReductoKnowledgeParserConfig,
-    UnstructuredKnowledgeParserConfig,
+    KnowledgeSemanticConfig, KnowledgeSemanticModelConfig, KnowledgeSyncConfig,
+    LlamaParseKnowledgeParserConfig, MergeKnowledgeProviderConfig, NangoKnowledgeProviderConfig,
+    ReductoKnowledgeParserConfig, UnstructuredKnowledgeParserConfig,
 };
 pub use learning::{
     EmbeddingBackfillConfig, LearningConfig, RecurrenceConfig, RegressionMonitorConfig,

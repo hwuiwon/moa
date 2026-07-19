@@ -736,9 +736,13 @@ async fn slow_path_multi_hop_facts_expand_through_shared_object_entity() {
     assert_eq!(owner_hit.seed, dependency_uid);
     assert_eq!(owner_hit.label, NodeLabel::Fact);
     assert_eq!(owner_hit.hop, 2);
+    // The deterministic extractor used by this harness emits no structured edge
+    // label, so both hops take the conservative RelatesTo default. Typed edges
+    // (DependsOn/OwnedBy) now come only from the model extractor's edge_label
+    // field; the reachability contract this test pins is unchanged.
     assert_eq!(
         owner_hit.edges,
-        vec![EdgeLabel::DependsOn, EdgeLabel::RelatesTo]
+        vec![EdgeLabel::RelatesTo, EdgeLabel::RelatesTo]
     );
 }
 

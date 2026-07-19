@@ -564,13 +564,13 @@ fn guardrail_script() -> serde_json::Value {
         "responses": [
             {
                 "completion": {
-                    "content": "BLOCK: jailbreak",
+                    "content": json!({ "decision": "block", "reason": "jailbreak" }).to_string(),
                     "tool_calls": []
                 }
             },
             {
                 "completion": {
-                    "content": "BLOCK: jailbreak",
+                    "content": json!({ "decision": "block", "reason": "jailbreak" }).to_string(),
                     "tool_calls": []
                 }
             },
@@ -588,7 +588,7 @@ fn guardrail_script() -> serde_json::Value {
             },
             {
                 "completion": {
-                    "content": "BLOCK: tone",
+                    "content": json!({ "decision": "block", "reason": "tone" }).to_string(),
                     "tool_calls": []
                 }
             },
@@ -600,7 +600,7 @@ fn guardrail_script() -> serde_json::Value {
             },
             {
                 "completion": {
-                    "content": "PASS",
+                    "content": json!({ "decision": "pass", "reason": "within policy" }).to_string(),
                     "tool_calls": []
                 }
             }

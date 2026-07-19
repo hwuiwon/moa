@@ -33,6 +33,31 @@ pub(super) async fn load_session_meta(
         .into_inner())
 }
 
+/// Loads the tenant's installed skill names as a cheap execution-routing coverage
+/// hint. Uses the names-only registry listing (a single visible-artifact query, no
+/// package file trees) so it does not add material latency to the per-turn routing
+/// path.
+pub(super) async fn load_available_skill_names(
+    ctx: &WorkflowContext<'_>,
+    pool: sqlx::PgPool,
+    tenant_id: moa_core::types::identifiers::TenantId,
+) -> Result<Vec<String>, HandlerError> {
+    Ok(ctx
+        .run(move || {
+            let pool = pool.clone();
+            async move {
+                moa_skills::registry::SkillRegistry::new(pool)
+                    .list_skill_names(tenant_id)
+                    .await
+                    .map(Json::from)
+                    .map_err(HandlerError::from)
+            }
+        })
+        .name("turn_execution_load_available_skill_names")
+        .await?
+        .into_inner())
+}
+
 async fn load_events_in_range(
     ctx: &WorkflowContext<'_>,
     store: Arc<PostgresSessionStore>,

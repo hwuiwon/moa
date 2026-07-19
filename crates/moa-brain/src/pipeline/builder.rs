@@ -120,6 +120,9 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
                     .with_snapshot_config(config.context_snapshot.clone()),
             )
         };
+    // Reused for skill-manifest ranking below; the graph-memory closure moves the
+    // original into the retriever, so capture a clone before that.
+    let skill_embedder = retrieval_embedder.clone();
     let graph_memory_retriever = shared_graph_memory_retriever.unwrap_or_else(|| {
         if retrieval_embedder.is_some() {
             build_graph_memory_retriever(
@@ -177,6 +180,11 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
             .with_budget_config(config.skill_budget.clone());
         let injector = if let Some(segment_store) = segment_store {
             injector.with_segment_store(segment_store)
+        } else {
+            injector
+        };
+        let injector = if let Some(embedder) = skill_embedder {
+            injector.with_embedder(embedder)
         } else {
             injector
         };

@@ -28,7 +28,16 @@ pub enum ExecutionPlanningResultKind {
     /// Structured input or user clarification is required.
     NeedsInput { message: String },
     /// The plan cannot be served without broadening the frozen contract.
+    ///
+    /// The `message` is planner-authored and safe to surface to the caller.
     Unsupported { message: String },
+    /// The planner provider or transport failed, so no semantic verdict exists.
+    ///
+    /// The `message` carries raw provider detail for durable diagnostics only and
+    /// must never be surfaced to a user. This is deliberately distinct from
+    /// [`ExecutionPlanningResultKind::Unsupported`], which is a semantic planning
+    /// verdict; an infrastructure failure is not.
+    ProviderFailure { message: String },
 }
 
 /// Planning result plus every provider/compiler audit record produced by the operation.
@@ -55,7 +64,15 @@ pub enum ExecutionAmendmentPlanningResultKind {
     /// Planning cannot proceed without caller input.
     NeedsInput { message: String },
     /// Planning cannot produce an authorized amendment.
+    ///
+    /// The `message` is planner-authored and safe to surface to the caller.
     Unsupported { message: String },
+    /// The amendment planner provider or transport failed, so no verdict exists.
+    ///
+    /// The `message` carries raw provider detail for durable diagnostics only and must
+    /// never be surfaced to a user. Kept distinct from
+    /// [`ExecutionAmendmentPlanningResultKind::Unsupported`], which is a semantic verdict.
+    ProviderFailure { message: String },
 }
 
 /// Amendment result plus ordered planner/compiler audit records.

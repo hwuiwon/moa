@@ -168,6 +168,7 @@ impl TenantRetriever {
             query_embedding: query.embedding.clone(),
             scope: self.scope.clone(),
             label_filter: Some(vec![NodeLabel::Fact]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
             use_reranker: false,

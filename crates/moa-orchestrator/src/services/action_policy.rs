@@ -85,13 +85,31 @@ pub struct PreparedActionReview {
     pub preview: ActionReviewPreview,
 }
 
+/// Outcome of preparing one tool invocation for action review.
+///
+/// Model-authored input that fails schema validation is a conversation-level
+/// mistake the model can correct, so it is returned as a value instead of a
+/// handler error (which Restate would retry even though the failure is
+/// deterministic).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum PreparedActionReviewResponse {
+    /// Policy evaluation completed; carry the prepared review.
+    Prepared(Box<PreparedActionReview>),
+    /// The invocation input failed schema validation.
+    InvalidInput {
+        /// Human-readable validation failure to surface to the model.
+        reason: String,
+    },
+}
+
 /// Restate service surface for tenant-scoped action-policy operations.
 #[restate_sdk::service]
 pub trait ActionPolicy {
     /// Evaluates policy for one tool invocation and prepares an action-review payload.
     async fn prepare_action_review(
         request: Json<PrepareActionReviewRequest>,
-    ) -> Result<Json<PreparedActionReview>, HandlerError>;
+    ) -> Result<Json<PreparedActionReviewResponse>, HandlerError>;
 
     /// Creates or updates a tenant action-policy rule in the authoritative store.
     async fn upsert_rule(request: Json<UpsertActionPolicyRuleRequest>) -> Result<(), HandlerError>;
@@ -119,7 +137,7 @@ impl ActionPolicy for ActionPolicyImpl {
         &self,
         ctx: Context<'_>,
         request: Json<PrepareActionReviewRequest>,
-    ) -> Result<Json<PreparedActionReview>, HandlerError> {
+    ) -> Result<Json<PreparedActionReviewResponse>, HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ActionPolicy", "prepare_action_review");
         let request = request.into_inner();
@@ -183,11 +201,17 @@ impl ActionPolicy for ActionPolicyImpl {
 async fn prepare_action_review_inner(
     router: Arc<ToolRouter>,
     request: PrepareActionReviewRequest,
-) -> Result<PreparedActionReview, HandlerError> {
-    let prepared = router
+) -> Result<PreparedActionReviewResponse, HandlerError> {
+    let prepared = match router
         .prepare_invocation(&request.session, &request.invocation)
         .await
-        .map_err(moa_error_to_handler_error)?;
+    {
+        Ok(prepared) => prepared,
+        Err(MoaError::ValidationError(reason)) => {
+            return Ok(PreparedActionReviewResponse::InvalidInput { reason });
+        }
+        Err(error) => return Err(moa_error_to_handler_error(error)),
+    };
     let base_policy = prepared.policy().clone();
     let agent_policy = agent_action_policy_effect(
         &request.session,
@@ -208,20 +232,22 @@ async fn prepare_action_review_inner(
         execution: request.execution_origin,
         idempotency_key: request.idempotency_key,
     };
-    Ok(PreparedActionReview {
-        effect,
-        reason,
-        matched_rule: base_policy.matched_rule.clone(),
-        input_summary: prepared.input_summary().to_string(),
-        envelope: prepared.envelope(
-            request.review_id,
-            &request.session,
-            request.tool_call_id,
-            request.worker_id,
-            origin,
-        ),
-        preview: prepared.review_preview(),
-    })
+    Ok(PreparedActionReviewResponse::Prepared(Box::new(
+        PreparedActionReview {
+            effect,
+            reason,
+            matched_rule: base_policy.matched_rule.clone(),
+            input_summary: prepared.input_summary().to_string(),
+            envelope: prepared.envelope(
+                request.review_id,
+                &request.session,
+                request.tool_call_id,
+                request.worker_id,
+                origin,
+            ),
+            preview: prepared.review_preview(),
+        },
+    )))
 }
 
 async fn require_tenant_admin(
@@ -350,9 +376,50 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        PrepareActionReviewRequest, action_origin_ref, agent_action_policy_effect,
-        prepare_action_review_inner,
+        PrepareActionReviewRequest, PreparedActionReviewResponse, action_origin_ref,
+        agent_action_policy_effect, prepare_action_review_inner,
     };
+
+    #[tokio::test]
+    async fn invalid_model_authored_tool_input_returns_value_not_handler_error() {
+        // Pins: schema-invalid tool input from the model comes back as the
+        // InvalidInput response value (so the turn can hand the model a
+        // correctable tool error) instead of a handler error that Restate
+        // retries forever on a deterministic failure.
+        let mut registry = ToolRegistry::default_local();
+        registry
+            .register_mcp_tool(
+                "github",
+                McpDiscoveredTool {
+                    name: "github_issue_create".to_string(),
+                    description: "create an issue".to_string(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["title"],
+                        "properties": {"title": {"type": "string"}}
+                    }),
+                },
+            )
+            .expect("MCP fixture should register");
+        let router = Arc::new(ToolRouter::new(registry, HashMap::new()));
+        let request = policy_request(
+            SessionMeta::default(),
+            ToolInvocation {
+                id: Some("invalid-input-call".to_string()),
+                name: "github_issue_create".to_string(),
+                input: json!({"title": 7}),
+            },
+            None,
+        );
+
+        let response = prepare_action_review_inner(router, request)
+            .await
+            .expect("validation failure must not be a handler error");
+        let PreparedActionReviewResponse::InvalidInput { reason } = response else {
+            panic!("expected InvalidInput, got {response:?}");
+        };
+        assert!(reason.contains("github_issue_create"), "reason: {reason}");
+    }
 
     #[tokio::test]
     async fn action_policy_root_and_execution_origins_have_exact_effect_parity() {
@@ -456,6 +523,12 @@ mod tests {
             let execution = prepare_action_review_inner(router.clone(), execution)
                 .await
                 .unwrap_or_else(|error| panic!("{label} execution preparation failed: {error:?}"));
+            let PreparedActionReviewResponse::Prepared(root) = root else {
+                panic!("{label} root preparation rejected input");
+            };
+            let PreparedActionReviewResponse::Prepared(execution) = execution else {
+                panic!("{label} execution preparation rejected input");
+            };
 
             assert_eq!(root.effect, expected, "{label} root effect changed");
             assert_eq!(

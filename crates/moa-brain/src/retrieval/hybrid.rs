@@ -1250,6 +1250,17 @@ fn apply_feature_ranking(
             node.name.clone_from(&chunk.text);
         }
         hit.score = ranker.score(hit.score, max_fused_score, &query_tokens, &node);
+        // Planner-inferred label hint: a bounded additive boost for candidates
+        // whose label matches, applied only after every leg already retrieved
+        // them. Non-matching labels keep their score, so a wrong keyword guess
+        // reorders instead of excluding the answer.
+        if req
+            .label_boost
+            .as_deref()
+            .is_some_and(|labels| labels.contains(&hit.node.label))
+        {
+            hit.score += config.weights.label_hint_boost;
+        }
         if hit.legs.lexical && !hit.legs.vector && !hit.legs.graph {
             hit.score += config.weights.overlap;
         }

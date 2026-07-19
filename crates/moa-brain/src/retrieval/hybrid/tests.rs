@@ -75,6 +75,7 @@ async fn reranker_reorders_candidates_when_enabled() {
         query_embedding: Vec::new(),
         scope: tenant_scope(),
         label_filter: None,
+        label_boost: None,
         max_pii_class: PiiClass::Restricted,
         k_final: 1,
         use_reranker: true,
@@ -125,6 +126,7 @@ async fn reranker_receives_hydrated_chunk_text_for_knowledge_hits() {
         query_embedding: Vec::new(),
         scope: tenant_scope(),
         label_filter: None,
+        label_boost: None,
         max_pii_class: PiiClass::Restricted,
         k_final: 1,
         use_reranker: true,
@@ -201,6 +203,7 @@ fn feature_ranker_rescues_lexical_non_vector_hit_over_vector_noise() {
             query_embedding: Vec::new(),
             scope: tenant_scope(),
             label_filter: None,
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 2,
             use_reranker: false,
@@ -215,6 +218,59 @@ fn feature_ranker_rescues_lexical_non_vector_hit_over_vector_noise() {
     );
 
     assert_eq!(hits[0].uid, lexical_uid);
+}
+
+#[test]
+fn label_boost_reorders_without_excluding_non_hinted() {
+    // Pins: a planner-inferred label hint (`label_boost`) lifts a hinted-label
+    // candidate over an otherwise-equal non-hinted candidate, yet the
+    // non-hinted candidate is still retained and ranked. The non-hinted hit is
+    // given the smaller uid so it wins the deterministic tie-break; only the
+    // boost can move the hinted hit ahead of it.
+    let reference_time = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+        .expect("test timestamp should parse")
+        .with_timezone(&Utc);
+    let non_hinted_uid = Uuid::from_u128(1);
+    let hinted_uid = Uuid::from_u128(2);
+
+    let mut non_hinted = hit(non_hinted_uid, "tenant", 1.0);
+    non_hinted.node.label = NodeLabel::Fact;
+    non_hinted.node.name = "auth outage record".to_string();
+    non_hinted.node.valid_from = reference_time;
+    non_hinted.node.last_accessed_at = reference_time;
+    let mut hinted = hit(hinted_uid, "tenant", 1.0);
+    hinted.node.label = NodeLabel::Lesson;
+    hinted.node.name = "auth outage record".to_string();
+    hinted.node.valid_from = reference_time;
+    hinted.node.last_accessed_at = reference_time;
+    let mut hits = vec![non_hinted, hinted];
+
+    rank_hydrated_hits(
+        &mut hits,
+        &RankingConfig::default(),
+        &RetrievalRequest {
+            seeds: Vec::new(),
+            query_text: "what did we learn from the auth outage?".to_string(),
+            query_embedding: Vec::new(),
+            scope: tenant_scope(),
+            label_filter: None,
+            label_boost: Some(vec![NodeLabel::Lesson]),
+            max_pii_class: PiiClass::Restricted,
+            k_final: 2,
+            use_reranker: false,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: Some(reference_time),
+            lineage: None,
+            disable_leg_timeouts: false,
+            disable_graph_expansion: false,
+            window_policy: crate::retrieval::EvidenceWindowPolicy::default(),
+        },
+    );
+
+    assert_eq!(hits.len(), 2, "non-hinted candidate must not be excluded");
+    assert_eq!(hits[0].uid, hinted_uid, "hinted label must rank first");
+    assert_eq!(hits[1].uid, non_hinted_uid);
 }
 
 #[test]
@@ -258,6 +314,7 @@ fn feature_ranker_rescue_skips_graph_lexical_neighbors() {
             query_embedding: Vec::new(),
             scope: tenant_scope(),
             label_filter: None,
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 2,
             use_reranker: false,
@@ -315,6 +372,7 @@ fn feature_ranker_rescues_graph_only_expansion_hit() {
             query_embedding: Vec::new(),
             scope: tenant_scope(),
             label_filter: None,
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 2,
             use_reranker: false,
@@ -374,6 +432,7 @@ fn anchored_rescue_preserves_vector_rank_one_over_graph_only_hit() {
             query_embedding: Vec::new(),
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 2,
             use_reranker: false,
@@ -458,6 +517,7 @@ fn source_graph_ranking_groups_chunks_and_reports_typed_graph_features() {
             query_embedding: Vec::new(),
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 3,
             use_reranker: false,
@@ -547,6 +607,7 @@ fn source_graph_preserves_vector_article_without_typed_graph_evidence() {
             query_embedding: Vec::new(),
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 2,
             use_reranker: false,
@@ -624,6 +685,7 @@ fn source_graph_keeps_original_order_when_top_article_is_unchanged() {
             query_embedding: Vec::new(),
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 3,
             use_reranker: false,
@@ -713,6 +775,7 @@ fn entity_local_search_keeps_original_order_when_top_article_is_unchanged() {
             query_embedding: Vec::new(),
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 3,
             use_reranker: false,
@@ -797,6 +860,7 @@ fn entity_local_source_object_ranking_preserves_vector_rank_one_with_semantic_pa
             query_embedding: Vec::new(),
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 2,
             use_reranker: false,
@@ -868,6 +932,7 @@ fn entity_local_source_object_ranking_ignores_disallowed_raw_paths() {
             query_embedding: Vec::new(),
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 2,
             use_reranker: false,
@@ -1615,6 +1680,7 @@ fn empty_corpus_request(k_final: usize, use_reranker: bool) -> RetrievalRequest 
         query_embedding: Vec::new(),
         scope: tenant_scope(),
         label_filter: None,
+        label_boost: None,
         max_pii_class: PiiClass::Restricted,
         k_final,
         use_reranker,
@@ -2000,6 +2066,7 @@ fn evidence_floor_drops_lexically_unsupported_hits_but_keeps_graph_hits() {
         query_embedding: Vec::new(),
         scope: tenant_scope(),
         label_filter: None,
+        label_boost: None,
         max_pii_class: PiiClass::Restricted,
         k_final: 4,
         use_reranker: false,
@@ -2117,6 +2184,7 @@ fn window_abstention_clears_low_evidence_windows_but_spares_supported_and_graph_
         query_embedding: Vec::new(),
         scope: tenant_scope(),
         label_filter: None,
+        label_boost: None,
         max_pii_class: PiiClass::Restricted,
         k_final: 4,
         use_reranker: false,
@@ -2178,6 +2246,7 @@ fn default_window_policy_never_abstains() {
         query_embedding: Vec::new(),
         scope: tenant_scope(),
         label_filter: None,
+        label_boost: None,
         max_pii_class: PiiClass::Restricted,
         k_final: 4,
         use_reranker: false,

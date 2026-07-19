@@ -300,7 +300,8 @@ async fn start_external_template_execution(
             objective: &request.objective,
             execution_template: Some(&invocation),
             attachment_count: 0,
-            has_recent_target: false,
+            recent_target_digest: "",
+            available_skill_names: &[],
             classifier_model: &classifier_model,
         },
     )
@@ -380,6 +381,14 @@ async fn start_external_template_execution(
         ExecutionPlanningResultKind::NeedsInput { message }
         | ExecutionPlanningResultKind::Unsupported { message } => {
             return Err(TerminalError::new_with_code(422, message).into());
+        }
+        ExecutionPlanningResultKind::ProviderFailure { .. } => {
+            // Template admission is deterministic (no planner provider call), so a provider
+            // failure is unreachable here; keep the raw provider detail out of the API
+            // response and rely on the persisted planner audit for diagnostics.
+            return Err(
+                TerminalError::new_with_code(500, "execution planning provider failure").into(),
+            );
         }
     };
 

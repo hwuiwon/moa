@@ -352,7 +352,11 @@ mod tests {
                 json!({ "path": "memory/fail.md" }),
             ),
             tool_result(failed_memory, false),
-            tool_call(fast_memory, "memory_remember", json!({ "text": "fact" })),
+            tool_call(
+                fast_memory,
+                "memory_remember",
+                json!({ "items": [{ "text": "fact" }] }),
+            ),
             tool_result(fast_memory, true),
         ];
 
@@ -365,7 +369,11 @@ mod tests {
         let remembered = tool_id(11);
         let failed = tool_id(12);
         let events = vec![
-            tool_call(remembered, "memory_remember", json!({ "text": "fact" })),
+            tool_call(
+                remembered,
+                "memory_remember",
+                json!({ "items": [{ "text": "fact" }] }),
+            ),
             tool_result(remembered, true),
             tool_call(failed, "memory_forget", json!({ "name": "fact" })),
             Event::ToolError {

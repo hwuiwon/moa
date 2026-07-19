@@ -1220,6 +1220,7 @@ mod tests {
     struct RecordedRetrievalRequest {
         scope: MemoryScope,
         label_filter: Option<Vec<NodeLabel>>,
+        label_boost: Option<Vec<NodeLabel>>,
         strategy: Option<Strategy>,
     }
 
@@ -1242,6 +1243,7 @@ mod tests {
                 .push(RecordedRetrievalRequest {
                     scope: req.scope.clone(),
                     label_filter: req.label_filter.clone(),
+                    label_boost: req.label_boost.clone(),
                     strategy: req.strategy,
                 });
             Ok(test_output(
@@ -1917,6 +1919,7 @@ mod tests {
                         NodeLabel::Chunk,
                         NodeLabel::ContactGroup,
                     ]),
+                    label_boost: None,
                     strategy: Some(Strategy::VectorFirst),
                 },
                 RecordedRetrievalRequest {
@@ -1925,6 +1928,7 @@ mod tests {
                         contact_id,
                     },
                     label_filter: None,
+                    label_boost: None,
                     strategy: Some(Strategy::Both),
                 },
             ],
@@ -1964,6 +1968,61 @@ mod tests {
             !memory_message
                 .content
                 .contains("cross contact memory should not leak")
+        );
+    }
+
+    #[tokio::test]
+    async fn scope_plan_label_filter_stays_hard_while_planner_hint_is_soft_boost() {
+        // Pins: a planner-inferred label hint ("outage" -> Incident) reaches the
+        // retriever as a SOFT `label_boost` on every scope and never as a hard
+        // `label_filter`, while a scope plan's structured label allowlist (the
+        // tenant-knowledge tier) stays a hard `label_filter`. This is the
+        // regression guard for "what did we learn from the auth outage?" no
+        // longer being force-filtered to Incident and dropping the Lesson answer.
+        let contact_id = ContactId::new();
+        let session = contact_session(contact_id, ContactVerificationState::Verified, Vec::new());
+        let tenant_scope = MemoryScope::Tenant {
+            tenant_id: session.tenant_id,
+        };
+        let contact_scope = MemoryScope::Contact {
+            tenant_id: session.tenant_id,
+            contact_id,
+        };
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let retriever = scripted_graph_memory_retriever(calls.clone(), HashMap::new());
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        ctx.append_message(moa_core::types::context::ContextMessage::user(
+            "What did we learn from the auth outage?",
+        ));
+
+        retriever
+            .process(&mut ctx)
+            .await
+            .expect("scripted retrieval should assemble context");
+
+        let calls = calls.lock().expect("scripted retriever calls lock").clone();
+        assert_eq!(
+            calls,
+            vec![
+                RecordedRetrievalRequest {
+                    scope: tenant_scope,
+                    label_filter: Some(vec![
+                        NodeLabel::Document,
+                        NodeLabel::Chunk,
+                        NodeLabel::ContactGroup,
+                    ]),
+                    label_boost: Some(vec![NodeLabel::Incident]),
+                    strategy: Some(Strategy::VectorFirst),
+                },
+                RecordedRetrievalRequest {
+                    scope: contact_scope,
+                    label_filter: None,
+                    label_boost: Some(vec![NodeLabel::Incident]),
+                    strategy: Some(Strategy::Both),
+                },
+            ],
+            "planner hint must be a soft boost on both scopes; only the scope \
+             plan may impose a hard label_filter"
         );
     }
 
@@ -2447,11 +2506,13 @@ mod tests {
                         NodeLabel::Chunk,
                         NodeLabel::ContactGroup,
                     ]),
+                    label_boost: None,
                     strategy: Some(Strategy::VectorFirst),
                 },
                 RecordedRetrievalRequest {
                     scope: contact_scope,
                     label_filter: None,
+                    label_boost: None,
                     strategy: Some(Strategy::Both),
                 },
             ]

@@ -47,10 +47,8 @@ use crate::{
     parser::DocumentParser,
     providers::RecordContentFetcher,
     repository::{DocumentVersionIngestionClaim, KnowledgeRepository},
-    semantic_graph::{
-        SEMANTIC_GRAPH_MODEL, SEMANTIC_GRAPH_PROMPT_VERSION, SEMANTIC_GRAPH_SCHEMA_VERSION,
-        SemanticGraphExtraction, extract_chunk_semantics,
-    },
+    semantic_graph::{SemanticGraphExtraction, extract_chunk_semantics},
+    semantic_graph_model::{ModelSemanticGraphExtractor, SemanticExtractionCacheIdentity},
 };
 
 /// Maximum objects fetched and tombstoned per source-selection prune page.
@@ -87,6 +85,7 @@ pub struct KnowledgeIngestionPipeline<R, P, E, G> {
     provider: String,
     parser_label: String,
     semantic_generic_entities: bool,
+    semantic_model_extractor: Option<Arc<ModelSemanticGraphExtractor>>,
     content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
 }
 

@@ -793,16 +793,14 @@ def analyze(
         and not case.get("cancel")
     ):
         failure_tags.append("F-DELEGATE")
-    # Regression guard for the fixed single-owner fan-in: whenever workers are spawned, the run
-    # must emit a WorkerResultBundle (the fix fills any stuck slot with a synthetic Failed terminal,
-    # so a bundle is always produced). A spawn with zero bundles means fan-in silently dropped —
-    # fires regardless of whether the harness expected delegation for this case.
-    #
-    # Do NOT compare bundled results against total WorkerSpawned: the model may spawn EXTRA workers
-    # beyond the auto-delegation run, and each bundle already carries exactly one result per tracked
-    # run worker (the bundle's `results` ARE the run's tracked set). Comparing to total spawns is a
-    # known false positive when extra workers exist.
-    if len(worker_spawns) > 0 and len(bundles) == 0 and not case.get("cancel"):
+    # Regression guard for single-owner fan-in. The dynamic-execution rework removed
+    # WorkerResultBundle (workers now flow through durable execution runs and the coordinator
+    # synthesizes from terminal notifications), so the guard is: every spawned worker must deliver
+    # a terminal WorkerNotificationDelivered back to the parent. A spawn without a terminal
+    # notification means fan-in silently dropped a worker — fires regardless of whether the
+    # harness expected delegation for this case. (Bundle counters remain in the report for
+    # comparison against pre-rework baselines; they are expected to be zero at current HEAD.)
+    if len(worker_spawns) > len(worker_terminal) and not case.get("cancel"):
         failure_tags.append("F-QUALITY")
     if case.get("expected_skills") and len(skills) == 0 and not case.get("cancel"):
         failure_tags.append("F-SKILL-INJECT")
@@ -1373,6 +1371,14 @@ def main():
     env = parse_env_file(ROOT / ".env.fga")
     env["MOA_DATABASE_URL"] = db_url
     env["MOA_MODELS_MAIN"] = SWEEP_MODEL
+    # Memory-store personas need the PII sidecar: without it the privacy
+    # classifier abstains, every fast-path memory write fails closed
+    # ("privacy classification unavailable"), and the model burns its turn
+    # budget retrying — the historic S085/S090 "pacing" flake.
+    env.setdefault(
+        "MOA_PII_SERVICE_URL",
+        os.environ.get("MOA_SWEEP_PII_SERVICE_URL", "http://127.0.0.1:10050"),
+    )
     log(f"created isolated database {db_name} from {template}")
     proc = None
     log_f = None

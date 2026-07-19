@@ -205,6 +205,7 @@ impl LLMProvider for OpenAIProvider {
             .as_ref()
             .filter(|format| format.strict)
             .map(|format| format.schema.clone());
+        let canonical_tool_schemas = super::tools::canonical_tool_input_schemas(&request.tools);
         let span_recorder = LLMSpanRecorder::new(
             "openai",
             resolved_model.clone(),
@@ -271,6 +272,7 @@ impl LLMProvider for OpenAIProvider {
                     span_recorder,
                     stream_timeouts,
                     canonical_response_schema,
+                    canonical_tool_schemas,
                 )
                 .await
             }

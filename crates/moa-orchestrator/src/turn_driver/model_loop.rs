@@ -4,7 +4,8 @@ use moa_core::config::SessionLimitsConfig;
 use moa_core::types::execution_planning::{ExecutionRouteDecision, ExecutionStrategy};
 
 use crate::workflows::turn_responsiveness::{
-    ModelLoopClass, ToolBudgetState, effective_tool_cap, effective_turn_cap,
+    ModelLoopClass, ToolBudgetState, effective_delegation_turn_cap, effective_tool_cap,
+    effective_turn_cap,
 };
 
 /// Inputs for planning one root session turn loop.
@@ -32,8 +33,11 @@ pub(crate) struct TurnLoopPlan {
     pub(crate) route: Option<ExecutionRouteDecision>,
     /// Exact model-loop class used to derive caps and tool visibility.
     pub(crate) class: ModelLoopClass,
-    /// Effective model-loop cap.
+    /// Effective model-loop cap before any worker delegation.
     pub(crate) max_turns: usize,
+    /// Effective model-loop cap once this turn has delegated to a worker. Always
+    /// greater than or equal to `max_turns`.
+    pub(crate) delegation_max_turns: usize,
     /// Effective tool-call cap.
     pub(crate) max_tool_calls: usize,
     loop_detection_threshold: u32,
@@ -43,6 +47,52 @@ impl TurnLoopPlan {
     /// Creates a fresh per-turn tool budget state for this plan.
     pub(crate) fn tool_budget(&self) -> ToolBudgetState {
         ToolBudgetState::new(self.max_tool_calls, self.loop_detection_threshold)
+    }
+
+    /// Creates a fresh one-way delegation cap escalation for this turn.
+    pub(crate) fn turn_cap_escalation(&self) -> TurnCapEscalation {
+        TurnCapEscalation::new(self.max_turns, self.delegation_max_turns)
+    }
+}
+
+/// One-way escalation of a turn's model-loop cap after it delegates to a worker.
+///
+/// A turn starts bounded by the base cap. The first successful worker spawn latches
+/// the escalation on, so the remainder of that turn is bounded by the higher
+/// delegation cap. The escalation never reverses, so the effective cap is monotonic
+/// non-decreasing across a turn's model-loop iterations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TurnCapEscalation {
+    base_max_turns: usize,
+    delegation_max_turns: usize,
+    delegated: bool,
+}
+
+impl TurnCapEscalation {
+    /// Creates a non-delegated escalation bounded by the base cap.
+    pub(crate) fn new(base_max_turns: usize, delegation_max_turns: usize) -> Self {
+        Self {
+            base_max_turns,
+            delegation_max_turns,
+            delegated: false,
+        }
+    }
+
+    /// Latches the delegation escalation on, returning whether this call transitioned
+    /// it (`true` only on the first delegation of the turn).
+    pub(crate) fn record_delegation(&mut self) -> bool {
+        let transitioned = !self.delegated;
+        self.delegated = true;
+        transitioned
+    }
+
+    /// Returns the model-loop cap in force for the current iteration.
+    pub(crate) fn effective_max_turns(&self) -> usize {
+        if self.delegated {
+            self.delegation_max_turns
+        } else {
+            self.base_max_turns
+        }
     }
 }
 
@@ -91,11 +141,14 @@ fn loop_plan(
     session_limits: &SessionLimitsConfig,
 ) -> TurnLoopPlan {
     let max_turns = effective_turn_cap(request_max_turns, class, session_limits);
+    let delegation_max_turns =
+        effective_delegation_turn_cap(request_max_turns, class, session_limits);
     let max_tool_calls = effective_tool_cap(class, session_limits);
     TurnLoopPlan {
         route,
         class,
         max_turns,
+        delegation_max_turns,
         max_tool_calls,
         loop_detection_threshold: session_limits.loop_detection_threshold,
     }
@@ -106,7 +159,10 @@ mod tests {
     use moa_core::config::SessionLimitsConfig;
     use moa_core::types::execution_planning::{ExecutionRouteDecision, ExecutionStrategy};
 
-    use super::{RootLoopPlanRequest, WorkerLoopPlanRequest, root_loop_plan, worker_loop_plan};
+    use super::{
+        RootLoopPlanRequest, TurnCapEscalation, WorkerLoopPlanRequest, root_loop_plan,
+        worker_loop_plan,
+    };
 
     #[test]
     fn root_respond_and_inline_execute_use_their_bounded_loop_classes() {
@@ -147,6 +203,61 @@ mod tests {
         ));
         assert_eq!(inline.max_turns, limits.standard_max_turns as usize);
         assert_eq!(inline.max_tool_calls, limits.max_tool_calls as usize);
+    }
+
+    #[test]
+    fn inline_execute_plan_carries_base_and_delegation_caps() {
+        // Pins: a root Inline Execute turn plans both its base loop cap and the higher
+        // delegation cap that applies once it spawns a worker.
+        let limits = SessionLimitsConfig::default();
+        let plan = root_loop_plan(
+            RootLoopPlanRequest {
+                route: &ExecutionRouteDecision::Execute {
+                    strategy: ExecutionStrategy::Inline,
+                    rationale: "The work fits a bounded interactive loop.".to_string(),
+                },
+                request_max_turns: None,
+            },
+            &limits,
+        )
+        .expect("Execute/Inline should construct a root loop");
+        assert_eq!(plan.max_turns, limits.standard_max_turns as usize);
+        assert_eq!(
+            plan.delegation_max_turns,
+            limits.max_model_turns_delegation as usize
+        );
+        assert!(plan.delegation_max_turns > plan.max_turns);
+    }
+
+    #[test]
+    fn turn_cap_escalation_is_one_way_and_never_lowers() {
+        // Pins: a turn that delegates continues past the base cap up to the delegation
+        // cap; a turn that never delegates stays at the base cap; the escalation
+        // latches on once and never reverses.
+        let mut escalation = TurnCapEscalation::new(6, 12);
+        assert_eq!(escalation.effective_max_turns(), 6);
+
+        assert!(
+            escalation.record_delegation(),
+            "the first delegation must transition the cap"
+        );
+        assert_eq!(escalation.effective_max_turns(), 12);
+        assert!(
+            !escalation.record_delegation(),
+            "a later delegation must not re-transition the already-escalated cap"
+        );
+        assert_eq!(
+            escalation.effective_max_turns(),
+            12,
+            "the escalated cap never lowers back to the base"
+        );
+
+        let undelegated = TurnCapEscalation::new(6, 12);
+        assert_eq!(
+            undelegated.effective_max_turns(),
+            6,
+            "a turn with no worker spawn stays bounded by the base cap"
+        );
     }
 
     #[test]

@@ -36,6 +36,9 @@ pub const EXECUTION_ROUTER_DURABLE_CONFIDENCE_BPS: u16 = 8_000;
 
 const EXECUTION_ROUTER_MAX_MISSING_INPUTS: usize = 8;
 const EXECUTION_ROUTER_MAX_MISSING_INPUT_BYTES: usize = 256;
+/// Maximum installed-skill names serialized into the classifier prompt as a
+/// coverage hint. Bounds the per-turn user message regardless of tenant size.
+pub const EXECUTION_ROUTER_MAX_SKILL_NAMES: usize = 24;
 const EXECUTION_ROUTER_PROMPT: &str = include_str!("../prompts/execution_router.txt");
 const ROUTER_STAGE_METADATA_KEY: &str = "moa.pipeline.stage";
 const OPENAI_REASONING_EFFORT_METADATA_KEY: &str = "_moa.openai.reasoning_effort";
@@ -49,8 +52,18 @@ pub struct ExecutionRoutingInput<'a> {
     pub execution_template: Option<&'a ExecutionTemplateInvocation>,
     /// Number of attachments supplied on the current user turn.
     pub attachment_count: usize,
-    /// Whether bounded session metadata identifies a recent target.
-    pub has_recent_target: bool,
+    /// Compact, possibly empty digest of recent target-bearing conversation
+    /// context. It is passed to the classifier prompt so the model — not a
+    /// keyword heuristic — can resolve terse follow-ups against a concrete
+    /// recent referent. It never gates routing on its own.
+    pub recent_target_digest: &'a str,
+    /// Names of the skills installed for the tenant, in a stable order and
+    /// possibly empty. Serialized into the classifier prompt as a coverage
+    /// hint so the model — not a keyword heuristic — can prefer execution when
+    /// an installed skill plausibly covers the request. It never gates routing
+    /// on its own, is bounded to [`EXECUTION_ROUTER_MAX_SKILL_NAMES`] before
+    /// serialization, and is treated by the prompt as untrusted data.
+    pub available_skill_names: &'a [String],
     /// Configured auxiliary model used for ordinary route classification.
     pub classifier_model: &'a ModelId,
 }
@@ -89,7 +102,8 @@ struct FrozenRoutingInput<'a> {
     schema_version: u8,
     objective: &'a str,
     attachment_count: usize,
-    has_recent_target: bool,
+    recent_target_digest: &'a str,
+    available_skill_names: &'a [String],
 }
 
 /// Selects one stable execution route with at most one classifier call.
@@ -203,10 +217,15 @@ pub async fn route_execution(
             duration_micros,
         ));
     }
+    // Attachments are a structured fact the classifier cannot see in the objective
+    // text, so a Respond/NeedsInput label is overridden to bounded Inline execution.
+    // Recent conversation context is NOT a hard override: it reaches the classifier
+    // as `recent_target_digest` in the prompt, and the model decides whether a terse
+    // follow-up has a concrete referent, so its Respond/NeedsInput label survives.
     if matches!(
         output.label,
         ExecutionRouteClassifierLabel::Respond | ExecutionRouteClassifierLabel::NeedsInput
-    ) && (input.attachment_count > 0 || input.has_recent_target)
+    ) && input.attachment_count > 0
     {
         return Ok(classifier_fallback_with_response(
             objective_hash,
@@ -266,10 +285,11 @@ pub fn record_applied_route_audit(result: &RouteAuditWriteOutcome) {
 
 fn classifier_request(input: &ExecutionRoutingInput<'_>) -> Result<CompletionRequest> {
     let frozen = FrozenRoutingInput {
-        schema_version: 1,
+        schema_version: 2,
         objective: input.objective,
         attachment_count: input.attachment_count,
-        has_recent_target: input.has_recent_target,
+        recent_target_digest: input.recent_target_digest,
+        available_skill_names: bounded_skill_names(input.available_skill_names),
     };
     let schema = serde_json::to_value(schema_for!(ExecutionRouteClassifierOutput))
         .map_err(|error| MoaError::SerializationError(error.to_string()))?;
@@ -459,6 +479,10 @@ fn decision_from_output(output: ExecutionRouteClassifierOutput) -> Option<Execut
     }
 }
 
+fn bounded_skill_names(names: &[String]) -> &[String] {
+    &names[..names.len().min(EXECUTION_ROUTER_MAX_SKILL_NAMES)]
+}
+
 fn objective_hash(objective: &str) -> String {
     execution_planning_hash("moa.execution.route-objective", objective.as_bytes())
 }
@@ -596,7 +620,8 @@ mod tests {
             objective,
             execution_template: None,
             attachment_count: 0,
-            has_recent_target: false,
+            recent_target_digest: "",
+            available_skill_names: &[],
             classifier_model: model,
         }
     }
@@ -704,6 +729,23 @@ mod tests {
                 .filter_map(|variant| variant.get("const").and_then(serde_json::Value::as_str))
                 .collect::<Vec<_>>(),
             vec!["respond", "execute", "needs_input"]
+        );
+    }
+
+    #[test]
+    fn execution_router_schema_compiles_to_openai_strict_compatible_offline() {
+        // Pins: the router response-format schema, after provider compilation,
+        // satisfies OpenAI strict mode (no oneOf, no $ref siblings, explicit
+        // types). A violation here 400s every live routing call and stalls
+        // turns in restate retry instead of reaching the deterministic
+        // fallback — scripted-provider lanes cannot catch it.
+        let schema = serde_json::to_value(schemars::schema_for!(ExecutionRouteClassifierOutput))
+            .expect("serialize route classifier schema");
+        let compiled = moa_providers::compile_for_openai_strict(&schema);
+        let violations = moa_providers::openai_strict_violations(&compiled);
+        assert!(
+            violations.is_empty(),
+            "router schema violates OpenAI strict mode: {violations:?}"
         );
     }
 
@@ -967,18 +1009,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execution_routing_context_prevents_respond_or_clarification_offline() {
-        // Pins: attachments and recent targets keep context-dependent work inside Inline Execute.
+    async fn execution_routing_attachments_force_inline_offline() {
+        // Pins: attachments are a structured fact the classifier cannot read in the
+        // objective text, so a Respond or NeedsInput label is overridden to bounded
+        // Inline execution.
         let model = classifier_model();
         let mut needs_input = output(ExecutionRouteClassifierLabel::NeedsInput, None, 9_500);
         needs_input.missing_inputs = vec!["target".to_string()];
-        for (classifier_output, attachment_count, has_recent_target) in [
-            (
-                output(ExecutionRouteClassifierLabel::Respond, None, 9_500),
-                1,
-                false,
-            ),
-            (needs_input, 0, true),
+        for classifier_output in [
+            output(ExecutionRouteClassifierLabel::Respond, None, 9_500),
+            needs_input,
         ] {
             let provider = ScriptedRouteProvider::new(ProviderBehavior::Response(response(
                 &classifier_output,
@@ -986,13 +1026,12 @@ mod tests {
             let result = route_execution(
                 &provider,
                 ExecutionRoutingInput {
-                    attachment_count,
-                    has_recent_target,
+                    attachment_count: 1,
                     ..routing_input("summarize this", &model)
                 },
             )
             .await
-            .expect("context-dependent route should classify");
+            .expect("attachment-bearing route should classify");
             assert_eq!(
                 result.provenance.classifier_outcome,
                 ExecutionRouteClassifierOutcome::ContextForcedInline
@@ -1005,6 +1044,125 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn execution_routing_recent_target_digest_does_not_force_inline_offline() {
+        // Pins: a recent-target digest is NOT a hard override. Unlike the old keyword
+        // bool, textual target context reaches the classifier as prompt content, so a
+        // confident Respond or NeedsInput label survives instead of being forced to Act.
+        // The digest travels in the dynamic user message, never the cached prompt prefix.
+        let model = classifier_model();
+        let digest =
+            "user: the pricing page we discussed\ntool file_read: {\"path\":\"pricing.md\"}";
+        let mut needs_input = output(ExecutionRouteClassifierLabel::NeedsInput, None, 9_500);
+        needs_input.missing_inputs = vec!["target".to_string()];
+        let cases = [
+            (
+                output(ExecutionRouteClassifierLabel::Respond, None, 9_500),
+                ExecutionRouteDecision::Respond {
+                    rationale: TEST_RATIONALE.to_string(),
+                },
+            ),
+            (
+                needs_input,
+                ExecutionRouteDecision::NeedsInput {
+                    rationale: TEST_RATIONALE.to_string(),
+                    missing_inputs: vec!["target".to_string()],
+                },
+            ),
+        ];
+        for (classifier_output, expected_decision) in cases {
+            let provider = ScriptedRouteProvider::new(ProviderBehavior::Response(response(
+                &classifier_output,
+            )));
+            let result = route_execution(
+                &provider,
+                ExecutionRoutingInput {
+                    attachment_count: 0,
+                    recent_target_digest: digest,
+                    ..routing_input("continue", &model)
+                },
+            )
+            .await
+            .expect("digest-bearing route should classify");
+            assert_eq!(
+                result.provenance.classifier_outcome,
+                ExecutionRouteClassifierOutcome::Accepted
+            );
+            assert_eq!(result.decision, expected_decision);
+            let requests = provider.requests();
+            assert!(
+                requests[0].messages[1].content.contains("pricing.md"),
+                "digest must reach the dynamic user message"
+            );
+            assert!(
+                !requests[0].messages[0].content.contains("pricing.md"),
+                "digest must not enter the cached system-prompt prefix"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_routing_serializes_bounded_skill_names_into_dynamic_message_offline() {
+        // Pins: installed-skill names reach the classifier as a coverage hint in the
+        // dynamic user message (never the cached system prefix), preserve caller order,
+        // and are capped at EXECUTION_ROUTER_MAX_SKILL_NAMES so tenant size cannot
+        // unbound the prompt.
+        let model = classifier_model();
+        let names = (0..(EXECUTION_ROUTER_MAX_SKILL_NAMES + 6))
+            .map(|index| format!("skill-{index:02}"))
+            .collect::<Vec<_>>();
+        let provider = ScriptedRouteProvider::new(ProviderBehavior::Response(response(&output(
+            ExecutionRouteClassifierLabel::Execute,
+            Some(ExecutionStrategy::Inline),
+            9_500,
+        ))));
+        let result = route_execution(
+            &provider,
+            ExecutionRoutingInput {
+                available_skill_names: &names,
+                ..routing_input("summarize our refund policy", &model)
+            },
+        )
+        .await
+        .expect("skill-name-bearing route should classify");
+        assert_eq!(
+            result.provenance.classifier_outcome,
+            ExecutionRouteClassifierOutcome::Accepted
+        );
+        let requests = provider.requests();
+        let dynamic = &requests[0].messages[1].content;
+        // First name is present, last kept name (index 23) is present, first dropped
+        // name (index 24) is absent: exactly EXECUTION_ROUTER_MAX_SKILL_NAMES kept in order.
+        assert!(dynamic.contains("\"skill-00\""));
+        assert!(dynamic.contains(&format!(
+            "\"skill-{:02}\"",
+            EXECUTION_ROUTER_MAX_SKILL_NAMES - 1
+        )));
+        assert!(!dynamic.contains(&format!(
+            "\"skill-{:02}\"",
+            EXECUTION_ROUTER_MAX_SKILL_NAMES
+        )));
+        assert!(dynamic.contains("available_skill_names"));
+        assert!(
+            !requests[0].messages[0].content.contains("skill-00"),
+            "skill names must not enter the cached system-prompt prefix"
+        );
+    }
+
+    #[test]
+    fn execution_router_prompt_carries_skill_coverage_guidance_offline() {
+        // Pins: the router prompt keeps the additive skill-coverage guidance (prefer
+        // execute when an installed skill covers the request) alongside the pre-existing
+        // digest guidance, and still treats the names as untrusted data.
+        assert!(EXECUTION_ROUTER_PROMPT.contains("available_skill_names"));
+        assert!(
+            EXECUTION_ROUTER_PROMPT
+                .contains("prefer execute with strategy inline over needs_input or respond")
+        );
+        assert!(EXECUTION_ROUTER_PROMPT.contains("gathering any missing inputs"));
+        assert!(EXECUTION_ROUTER_PROMPT.contains("recent_target_digest"));
     }
 
     #[tokio::test]

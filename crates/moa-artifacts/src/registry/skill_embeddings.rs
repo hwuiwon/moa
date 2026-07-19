@@ -60,6 +60,15 @@ pub struct SkillEmbeddingNeighbor {
     pub distance: f64,
 }
 
+/// A nearest skill-identity embedding resolved to its current published name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedSkillEmbeddingNeighbor {
+    /// Current published name of the nearest live skill.
+    pub skill_name: String,
+    /// Cosine distance from the probe in `[0, 2]` (0.0 = identical direction).
+    pub distance: f64,
+}
+
 /// Values written for one skill-identity embedding.
 #[derive(Debug, Clone)]
 pub struct NewSkillEmbedding<'a> {
@@ -363,6 +372,62 @@ impl ArtifactRegistry {
             .map(|row| {
                 Ok(SkillEmbeddingNeighbor {
                     artifact_uid: row.try_get("artifact_uid").map_err(map_sqlx_error)?,
+                    distance: row.try_get::<f64, _>("distance").map_err(map_sqlx_error)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Nearest skill-identity embeddings to `probe`, resolved to their current
+    /// published skill names, within one storage partition and optionally one
+    /// vector space, ordered by ascending cosine distance.
+    ///
+    /// This is the read the skill-manifest ranker uses to score a tenant's
+    /// skills by semantic relevance to the turn query in a single round-trip: it
+    /// folds the artifact-to-name resolution that
+    /// [`Self::published_skill_name_for_artifact`] performs per row into the
+    /// neighbor query, so ranking never fans out one query per candidate. Only
+    /// live skill artifacts (`kind = 'skill'`, not tombstoned) are returned, so a
+    /// stale embedding for a deleted skill never scores a name the ranker cannot
+    /// show. `model_scope` constrains neighbors to one embedder's vector space
+    /// exactly like [`Self::nearest_skill_embeddings_scoped`], and the
+    /// per-partition predicate scopes the scan to the tenant's small skill set.
+    pub async fn nearest_named_skill_embeddings_scoped(
+        &self,
+        storage_partition_id: &str,
+        probe: &[f32],
+        limit: usize,
+        model_scope: Option<(&str, i32)>,
+    ) -> Result<Vec<NamedSkillEmbeddingNeighbor>> {
+        let mut builder =
+            sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT a.name, (se.embedding <=> ");
+        builder.push_bind(HalfVector::from_f32_slice(probe));
+        // `ORDER BY distance` below resolves back to this distance expression,
+        // keeping the HNSW cosine index eligible; the join only resolves the name.
+        builder.push(
+            ") AS distance FROM moa.skill_embedding se \
+             JOIN moa.artifact a ON a.artifact_uid = se.artifact_uid \
+             WHERE se.storage_partition_id = ",
+        );
+        builder.push_bind(storage_partition_id.to_string());
+        builder.push(" AND a.kind = 'skill' AND a.valid_to IS NULL");
+        if let Some((model, version)) = model_scope {
+            builder.push(" AND se.embedding_model = ");
+            builder.push_bind(model.to_string());
+            builder.push(" AND se.embedding_model_version = ");
+            builder.push_bind(version);
+        }
+        builder.push(" ORDER BY distance ASC, a.name ASC LIMIT ");
+        builder.push_bind(limit as i64);
+        let rows = builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+        rows.iter()
+            .map(|row| {
+                Ok(NamedSkillEmbeddingNeighbor {
+                    skill_name: row.try_get("name").map_err(map_sqlx_error)?,
                     distance: row.try_get::<f64, _>("distance").map_err(map_sqlx_error)?,
                 })
             })

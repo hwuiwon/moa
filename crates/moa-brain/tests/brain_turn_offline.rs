@@ -99,6 +99,8 @@ async fn execution_planning_metrics_inputs_and_generated_candidate_use_one_stric
 #[tokio::test]
 async fn execution_planning_terminal_provider_outputs_never_repair() {
     // Pins: no trustworthy immutable goal means schema, size, and provider failures are terminal.
+    // A provider/transport failure resolves to the distinct ProviderFailure kind (its raw string
+    // must never reach a user), while planner-authored rejections stay Unsupported.
     let objective = "Prepare a durable report";
     let cases =
         [
@@ -126,10 +128,20 @@ async fn execution_planning_terminal_provider_outputs_never_repair() {
         .await
         .expect("terminal planner failure should remain typed");
 
-        assert!(matches!(
-            result.kind,
-            moa_brain::execution_planning::ExecutionPlanningResultKind::Unsupported { .. }
-        ));
+        match expected_outcome {
+            moa_core::types::execution_planning::ExecutionPlannerOutcome::ProviderError => {
+                assert!(matches!(
+                    result.kind,
+                    moa_brain::execution_planning::ExecutionPlanningResultKind::ProviderFailure { .. }
+                ));
+            }
+            _ => {
+                assert!(matches!(
+                    result.kind,
+                    moa_brain::execution_planning::ExecutionPlanningResultKind::Unsupported { .. }
+                ));
+            }
+        }
         assert_eq!(
             execution_planner_outcomes(&result.audits),
             vec![expected_outcome]
@@ -138,6 +150,63 @@ async fn execution_planning_terminal_provider_outputs_never_repair() {
         assert_eq!(requests.len(), 1);
         assert_initial_execution_planner_request(&requests[0]);
     }
+}
+
+#[tokio::test]
+async fn execution_planner_requests_always_carry_a_non_system_message() {
+    // Pins: every planner-built CompletionRequest (initial, repair, amendment, amendment repair)
+    // keeps the static instructions in a leading cacheable system message AND carries at least one
+    // non-system message — the request shape every provider adapter requires and that
+    // scripted-provider lanes cannot catch (a system-only request is rejected before it is sent).
+    fn assert_cacheable_system_then_non_system(
+        request: &moa_core::types::completion::CompletionRequest,
+    ) {
+        assert!(
+            matches!(
+                request.messages.first(),
+                Some(message)
+                    if message.role == moa_core::types::context::MessageRole::System
+            ),
+            "static planner instructions must lead in a cacheable system message"
+        );
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|message| message.role != moa_core::types::context::MessageRole::System),
+            "planner request must carry at least one non-system message"
+        );
+    }
+
+    let objective = "Prepare a durable report";
+    let initial = moa_brain::execution_planning::request::initial_completion_request(
+        &execution_planning_request(objective),
+    )
+    .expect("initial planner request builds");
+    assert_cacheable_system_then_non_system(&initial);
+
+    let repair = moa_brain::execution_planning::request::initial_repair_completion_request(
+        &execution_planning_request(objective),
+        "{}",
+        "{}",
+        "{}",
+    )
+    .expect("initial repair planner request builds");
+    assert_cacheable_system_then_non_system(&repair);
+
+    let amendment = moa_brain::execution_planning::request::amendment_completion_request(
+        &execution_amendment_planning_request(),
+        None,
+    )
+    .expect("amendment planner request builds");
+    assert_cacheable_system_then_non_system(&amendment);
+
+    let amendment_repair = moa_brain::execution_planning::request::amendment_completion_request(
+        &execution_amendment_planning_request(),
+        Some(("{}", "{}")),
+    )
+    .expect("amendment repair planner request builds");
+    assert_cacheable_system_then_non_system(&amendment_repair);
 }
 
 #[tokio::test]
@@ -238,6 +307,36 @@ async fn execution_planning_second_invalid_amendment_stops_without_third_call() 
 }
 
 #[tokio::test]
+async fn execution_planning_amendment_provider_failure_is_distinct_from_unsupported() {
+    // Pins: an amendment provider/transport failure resolves to the distinct ProviderFailure kind
+    // carrying the raw detail for diagnostics — never a planner-authored Unsupported verdict whose
+    // text is safe to surface — so the raw provider string cannot leak into a replan-stop gap.
+    let provider = ScriptedProvider::new(MockLlmProvider.capabilities());
+
+    let result = moa_brain::execution_planning::plan_amendment(
+        &provider,
+        execution_amendment_planning_request(),
+    )
+    .await
+    .expect("amendment provider failure should remain typed");
+
+    match result.kind {
+        moa_brain::execution_planning::ExecutionAmendmentPlanningResultKind::ProviderFailure {
+            message,
+        } => assert!(
+            message.contains("scripted provider ran out of queued responses"),
+            "provider failure must retain the raw provider detail for diagnostics"
+        ),
+        other => panic!("expected ProviderFailure, got {other:?}"),
+    }
+    assert_eq!(
+        execution_planner_outcomes(&result.audits),
+        vec![moa_core::types::execution_planning::ExecutionPlannerOutcome::ProviderError]
+    );
+    assert_eq!(provider.recorded_requests().len(), 1);
+}
+
+#[tokio::test]
 async fn execution_routing_respond_execute_use_classifier_while_pinned_template_skips_planner() {
     // Pins: ordinary routes use one strict classifier response while a pinned template remains a
     // zero-planner-call deterministic admission path.
@@ -274,7 +373,8 @@ async fn execution_routing_respond_execute_use_classifier_while_pinned_template_
                 objective,
                 execution_template: None,
                 attachment_count: 0,
-                has_recent_target: false,
+                recent_target_digest: "",
+                available_skill_names: &[],
                 classifier_model: &classifier_model,
             },
         )

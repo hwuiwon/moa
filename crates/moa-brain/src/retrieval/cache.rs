@@ -363,9 +363,13 @@ fn canonicalize(
         out.push_str(&seed.to_string());
         out.push(',');
     }
+    // Both label dimensions are keyed from the request itself: `label_boost`
+    // (soft ranking hint) and `label_filter` (hard leg filter) each change the
+    // result, so the key must track the request field that drives ranking
+    // rather than the plan's `label_hint` proxy it is derived from.
     out.push_str("|labels=");
-    let mut labels = planned
-        .label_hint
+    let mut labels = req
+        .label_boost
         .clone()
         .unwrap_or_default()
         .into_iter()
@@ -833,7 +837,10 @@ mod tests {
             query_text: query.to_string(),
             query_embedding: vec![0.0; 1024],
             scope: planned.scope.clone(),
-            label_filter: planned.label_hint.clone(),
+            // Mirror production: the planner-inferred hint rides as a soft
+            // boost, and only a scope plan would set the hard `label_filter`.
+            label_filter: None,
+            label_boost: planned.label_hint.clone(),
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
             use_reranker: false,

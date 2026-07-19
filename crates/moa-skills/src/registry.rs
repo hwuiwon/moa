@@ -151,6 +151,32 @@ impl SkillRegistry {
         Ok(packages.into_iter().map(|package| package.skill).collect())
     }
 
+    /// Returns the sorted, de-duplicated names of a tenant's published skills
+    /// without loading package file trees.
+    ///
+    /// Backed by a single visible-artifact listing query, so it is cheap enough
+    /// for latency-critical paths (such as execution routing) that only need a
+    /// coverage hint, unlike [`Self::list_for_pipeline`], which loads every
+    /// package's full file tree.
+    pub async fn list_skill_names(&self, tenant_id: TenantId) -> Result<Vec<String>> {
+        let scope = tenant_artifact_scope(tenant_id);
+        let registry = ArtifactRegistry::new(self.pool.clone());
+        let summaries = registry
+            .list_visible(
+                &scope,
+                Some(ArtifactKind::Skill),
+                Some(ArtifactStatus::Published),
+            )
+            .await?;
+        let mut names = summaries
+            .into_iter()
+            .map(|summary| summary.name)
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+
     /// Returns tenant skill metadata for learning and regression helpers.
     pub async fn list_for_pipeline(&self, tenant_id: TenantId) -> Result<Vec<SkillMetadata>> {
         let scope = tenant_artifact_scope(tenant_id);

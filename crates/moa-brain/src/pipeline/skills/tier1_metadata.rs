@@ -55,12 +55,21 @@ pub(super) fn rank_skills(
     budget: &ResolvedSkillBudget,
     resolution_rates: &HashMap<String, f64>,
     task_strategy_rates: &HashMap<String, TaskStrategySuccessRate>,
+    embedding_similarities: &HashMap<String, f64>,
 ) -> Vec<RankedSkill> {
     let mut ranked = skills
         .iter()
         .cloned()
         .map(|metadata| {
-            let keyword_overlap = keyword_overlap_score(query_keywords, &metadata);
+            // Semantic embedding similarity is the primary relevance term; it
+            // catches paraphrase matches lexical overlap misses. It degrades per
+            // skill: a skill with no embedding row (or an unavailable embedder,
+            // leaving the map empty) falls back to keyword overlap, so an empty
+            // map reproduces the old lexical behavior exactly.
+            let relevance = embedding_similarities
+                .get(&metadata.name)
+                .copied()
+                .unwrap_or_else(|| keyword_overlap_score(query_keywords, &metadata));
             let manifest_entry = format_manifest_entry(&metadata, budget);
             let global_rate = resolution_rates
                 .get(&metadata.name)
@@ -71,17 +80,17 @@ pub(super) fn rank_skills(
             let task_rate = rate.map(smoothed_task_rate).unwrap_or(0.0);
             let task_weight = rate.map(task_rate_weight).unwrap_or(0.0);
             let base_score = if task_weight > 0.0 {
-                (0.45 * keyword_overlap) + (0.45 * task_rate * task_weight) + (0.10 * global_rate)
+                (0.45 * relevance) + (0.45 * task_rate * task_weight) + (0.10 * global_rate)
             } else if !task_strategy_rates.is_empty() {
-                (0.60 * keyword_overlap) + (0.15 * global_rate)
+                (0.60 * relevance) + (0.15 * global_rate)
             } else if resolution_rates.contains_key(&metadata.name) {
-                (0.45 * keyword_overlap) + (0.55 * global_rate)
+                (0.45 * relevance) + (0.55 * global_rate)
             } else {
-                keyword_overlap
+                relevance
             };
             // A skill injected often under this fingerprint but rarely engaged is weak
             // negative-relevance evidence; subtract a small capped penalty so it can
-            // demote a skill without ever overpowering keyword relevance.
+            // demote a skill without ever overpowering the relevance term.
             let penalty = rate.map(unused_injection_penalty).unwrap_or(0.0);
             let score = (base_score - penalty).max(0.0);
 
@@ -106,8 +115,8 @@ const EFFECT_SCORE_WEIGHT: f64 = 0.25;
 
 /// Maximum score subtracted for an all-unused-injection skill under a fingerprint.
 ///
-/// Bounded well below the keyword-overlap term so a strongly relevant skill can
-/// never be buried by injection history alone.
+/// Bounded well below the relevance term so a strongly relevant skill can never
+/// be buried by injection history alone.
 const UNUSED_INJECTION_PENALTY_CAP: f64 = 0.15;
 
 /// Laplace-smoothed success rate blended with the attribution effect score.
@@ -298,6 +307,43 @@ fn normalized_inline_values(values: &[String]) -> Vec<String> {
     normalized
 }
 
+/// Reports whether the manifest would drop any skill under this budget/policy.
+///
+/// Emission is re-sorted alphabetically (see [`select_skills_within_budget_and_limit`]),
+/// so relevance ranking only changes the output when the full skill set does not
+/// fit — either the per-policy `max_visible` cap is exceeded, or the formatted
+/// entries overflow `max_manifest_chars`. When this returns `false` the whole set
+/// is emitted regardless of order, so callers skip the embedding relevance work
+/// entirely. Entry sizing mirrors [`select_skills_within_budget_and_limit`] so the
+/// predicate cannot disagree with the actual selection.
+pub(super) fn manifest_may_truncate(
+    skills: &[SkillMetadata],
+    budget: &ResolvedSkillBudget,
+    max_visible: Option<usize>,
+) -> bool {
+    if max_visible.is_some_and(|limit| skills.len() > limit) {
+        return true;
+    }
+    let mut chars_used = MANIFEST_PREAMBLE.chars().count() + MANIFEST_FOOTER.chars().count();
+    for skill in skills {
+        chars_used += format_manifest_entry(skill, budget).chars().count() + 1;
+        if chars_used > budget.max_manifest_chars {
+            return true;
+        }
+    }
+    false
+}
+
+/// Maps a pgvector cosine distance in `[0, 2]` to a `[0, 1]` relevance weight.
+///
+/// pgvector's `<=>` returns `1 - cosine_similarity`, so a smaller distance means
+/// a more similar skill. Clamping to `[0, 1]` keeps the term on the same scale as
+/// the lexical keyword-overlap score it replaces, so the existing blend weights
+/// carry over unchanged.
+pub(super) fn embedding_relevance_from_distance(distance: f64) -> f64 {
+    (1.0 - distance).clamp(0.0, 1.0)
+}
+
 fn keyword_overlap_score(query_keywords: &[String], metadata: &SkillMetadata) -> f64 {
     if query_keywords.is_empty() {
         return 0.0;
@@ -386,7 +432,14 @@ mod tests {
         // = 8/12; weight = min(10/5,1)*1.0 = 1.0; global defaults to the 0.5 prior when the
         // skill has no resolution row; no unused injections so the penalty is zero.
         let task_rates = HashMap::from([("branch-skill".to_string(), task_rate.clone())]);
-        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &task_rates);
+        let ranked = rank_skills(
+            &skills,
+            &[],
+            &budget,
+            &HashMap::new(),
+            &task_rates,
+            &HashMap::new(),
+        );
         assert!(
             (ranked[0].score - (0.45 * (8.0 / 12.0) + 0.10 * 0.5)).abs() < 1e-9,
             "task-conditioned branch: {}",
@@ -402,7 +455,14 @@ mod tests {
                 ..task_rate
             },
         )]);
-        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &other_rates);
+        let ranked = rank_skills(
+            &skills,
+            &[],
+            &budget,
+            &HashMap::new(),
+            &other_rates,
+            &HashMap::new(),
+        );
         assert!(
             (ranked[0].score - 0.15 * 0.5).abs() < 1e-9,
             "task-data-elsewhere branch: {}",
@@ -411,7 +471,14 @@ mod tests {
 
         // Branch 3: no task-conditioned data at all; a tenant resolution rate blends in.
         let resolution = HashMap::from([("branch-skill".to_string(), 0.9)]);
-        let ranked = rank_skills(&skills, &[], &budget, &resolution, &HashMap::new());
+        let ranked = rank_skills(
+            &skills,
+            &[],
+            &budget,
+            &resolution,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert!(
             (ranked[0].score - 0.55 * 0.9).abs() < 1e-9,
             "resolution-rate branch: {}",
@@ -419,7 +486,14 @@ mod tests {
         );
 
         // Branch 4: no outcome data anywhere falls back to pure keyword overlap.
-        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &HashMap::new());
+        let ranked = rank_skills(
+            &skills,
+            &[],
+            &budget,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(ranked[0].score, 0.0, "keyword-only branch");
     }
 
@@ -463,7 +537,14 @@ mod tests {
             ),
         ]);
 
-        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &task_rates);
+        let ranked = rank_skills(
+            &skills,
+            &[],
+            &budget,
+            &HashMap::new(),
+            &task_rates,
+            &HashMap::new(),
+        );
         assert_eq!(ranked[0].metadata.name, "clean-skill");
         assert_eq!(ranked[1].metadata.name, "erroring-skill");
     }
@@ -492,7 +573,14 @@ mod tests {
             },
         )]);
 
-        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &task_rates);
+        let ranked = rank_skills(
+            &skills,
+            &[],
+            &budget,
+            &HashMap::new(),
+            &task_rates,
+            &HashMap::new(),
+        );
         assert!(
             (ranked[0].score - (0.45 * 0.75 * 0.4 + 0.10 * 0.5 - 0.15 * 0.5)).abs() < 1e-9,
             "penalized score: {}",
@@ -511,7 +599,14 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
-        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &HashMap::new());
+        let ranked = rank_skills(
+            &skills,
+            &[],
+            &budget,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         let exact_budget = MANIFEST_PREAMBLE.chars().count()
             + MANIFEST_FOOTER.chars().count()
             + ranked
@@ -637,12 +732,20 @@ mod tests {
             &sizing_budget,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
         );
         let one_entry_cost = sized[0].manifest_entry.chars().count() + 1;
         let budget = resolved_budget(
             MANIFEST_PREAMBLE.chars().count() + MANIFEST_FOOTER.chars().count() + one_entry_cost,
         );
-        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &HashMap::new());
+        let ranked = rank_skills(
+            &skills,
+            &[],
+            &budget,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         let selection = select_skills_within_budget(&ranked, budget.max_manifest_chars);
 
         assert_eq!(selection.selected.len(), 1);
@@ -669,6 +772,7 @@ mod tests {
             &budget,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
         );
 
         assert_eq!(ranked[0].metadata.name, "alpha-auth");
@@ -687,7 +791,14 @@ mod tests {
             ("high-resolution".to_string(), 1.0),
         ]);
 
-        let ranked = rank_skills(&skills, &[], &budget, &resolution_rates, &HashMap::new());
+        let ranked = rank_skills(
+            &skills,
+            &[],
+            &budget,
+            &resolution_rates,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
 
         assert_eq!(ranked[0].metadata.name, "high-resolution");
     }
@@ -725,6 +836,7 @@ mod tests {
             &budget,
             &resolution_rates,
             &task_rates,
+            &HashMap::new(),
         );
 
         assert_eq!(ranked[0].metadata.name, "task-winner");
@@ -739,7 +851,14 @@ mod tests {
         ];
         let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
         let resolution_rates = HashMap::from([("zeta".to_string(), 1.0)]);
-        let ranked = rank_skills(&skills, &[], &budget, &resolution_rates, &HashMap::new());
+        let ranked = rank_skills(
+            &skills,
+            &[],
+            &budget,
+            &resolution_rates,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(ranked[0].metadata.name, "zeta");
         assert_eq!(ranked[1].metadata.name, "alpha");
 
@@ -749,6 +868,141 @@ mod tests {
         assert!(
             manifest.find("- alpha:").expect("alpha") < manifest.find("- zeta:").expect("zeta")
         );
+    }
+
+    #[test]
+    fn embedding_similarity_outranks_lexical_overlap_and_survives_truncation() {
+        // Pins: with an embedding map present, a semantically similar but lexically
+        // divergent skill outranks a lexically overlapping but semantically
+        // irrelevant one, and is the one kept when the budget admits a single
+        // entry. The query keyword "refund" lexically hits `billing-terms` (its
+        // description) but not `payment-reversal`; the embedding map inverts that.
+        let skills = vec![
+            test_skill("payment-reversal", "Undo a completed charge for a customer"),
+            test_skill("billing-terms", "Glossary of refund and dunning vocabulary"),
+        ];
+        let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
+        let embeddings = HashMap::from([
+            ("payment-reversal".to_string(), 0.92),
+            ("billing-terms".to_string(), 0.10),
+        ]);
+
+        let ranked = rank_skills(
+            &skills,
+            &["refund".to_string()],
+            &budget,
+            &HashMap::new(),
+            &HashMap::new(),
+            &embeddings,
+        );
+        assert_eq!(ranked[0].metadata.name, "payment-reversal");
+        assert_eq!(ranked[1].metadata.name, "billing-terms");
+
+        // Size the budget to admit exactly the top-ranked entry so truncation
+        // drops the lexical-only match; the semantic winner survives.
+        let budget_for_one = MANIFEST_PREAMBLE.chars().count()
+            + MANIFEST_FOOTER.chars().count()
+            + ranked[0].manifest_entry.chars().count()
+            + 1;
+        let selection = select_skills_within_budget(&ranked, budget_for_one);
+        assert_eq!(
+            selection
+                .selected
+                .iter()
+                .map(|skill| skill.metadata.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["payment-reversal"]
+        );
+    }
+
+    #[test]
+    fn embedding_map_absence_falls_back_to_lexical_order() {
+        // Pins: the embedding map is the only thing that reorders these two skills.
+        // "auth" lexically favors alpha-auth; an embedding map that favors beta-db
+        // flips the order, and dropping the map restores the lexical order — so an
+        // absent embedder reproduces the pre-embedding ranking exactly.
+        let skills = vec![
+            test_skill("alpha-auth", "Handle auth failures"),
+            test_skill("beta-db", "Handle database failures"),
+        ];
+        let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
+        let query = ["auth".to_string()];
+
+        let with_embeddings = rank_skills(
+            &skills,
+            &query,
+            &budget,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::from([
+                ("alpha-auth".to_string(), 0.0),
+                ("beta-db".to_string(), 0.9),
+            ]),
+        );
+        assert_eq!(with_embeddings[0].metadata.name, "beta-db");
+
+        let without = rank_skills(
+            &skills,
+            &query,
+            &budget,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(without[0].metadata.name, "alpha-auth");
+    }
+
+    #[test]
+    fn skill_without_embedding_row_falls_back_to_keyword_overlap() {
+        // Pins: a mixed map — one skill embedded, one not — ranks the unembedded
+        // skill by its keyword overlap, so a keyword-strong skill with no embedding
+        // row still outranks a weakly-embedded but lexically-irrelevant skill.
+        let skills = vec![
+            test_skill("embedded-weak", "Unrelated workflow"),
+            test_skill("keyword-strong", "Handle auth incidents"),
+        ];
+        let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
+        let embeddings = HashMap::from([("embedded-weak".to_string(), 0.05)]);
+
+        let ranked = rank_skills(
+            &skills,
+            &["auth".to_string()],
+            &budget,
+            &HashMap::new(),
+            &HashMap::new(),
+            &embeddings,
+        );
+        assert_eq!(ranked[0].metadata.name, "keyword-strong");
+        assert_eq!(ranked[1].metadata.name, "embedded-weak");
+    }
+
+    #[test]
+    fn manifest_truncation_gate_matches_selection_outcome() {
+        // Pins: manifest_may_truncate is false exactly when the whole set is
+        // emitted, and true when the budget or max_visible would drop a skill —
+        // the condition that decides whether embedding ranking can change output.
+        let skills = (0..4)
+            .map(|index| test_skill(&format!("skill-{index}"), &format!("Workflow {index}")))
+            .collect::<Vec<_>>();
+
+        let roomy = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
+        assert!(!super::manifest_may_truncate(&skills, &roomy, None));
+        assert!(super::manifest_may_truncate(&skills, &roomy, Some(2)));
+
+        let tight = resolved_budget(
+            MANIFEST_PREAMBLE.chars().count() + MANIFEST_FOOTER.chars().count() + 1,
+        );
+        assert!(super::manifest_may_truncate(&skills, &tight, None));
+    }
+
+    #[test]
+    fn cosine_distance_maps_to_clamped_relevance() {
+        // Pins: pgvector cosine distance in [0,2] maps onto a [0,1] relevance
+        // weight on the same scale as keyword overlap — identical direction is
+        // 1.0, an orthogonal/opposite vector clamps to 0.0.
+        assert!((super::embedding_relevance_from_distance(0.0) - 1.0).abs() < 1e-9);
+        assert!((super::embedding_relevance_from_distance(0.2) - 0.8).abs() < 1e-9);
+        assert_eq!(super::embedding_relevance_from_distance(1.5), 0.0);
     }
 
     #[test]

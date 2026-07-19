@@ -27,6 +27,7 @@ where
             provider: config.provider,
             parser_label: config.parser_label,
             semantic_generic_entities: true,
+            semantic_model_extractor: None,
             content_fetcher: None,
         }
     }
@@ -39,6 +40,22 @@ where
     #[must_use]
     pub fn with_semantic_generic_entities(mut self, enabled: bool) -> Self {
         self.semantic_generic_entities = enabled;
+        self
+    }
+
+    /// Attaches a model-backed semantic graph extractor as the production
+    /// extractor.
+    ///
+    /// When present it replaces the deterministic keyword ruleset for new or
+    /// changed chunks; the keyword ruleset remains the per-chunk fallback used
+    /// whenever a model call, timeout, or parse fails. Passing `None` keeps the
+    /// deterministic keyword extractor as the sole extractor.
+    #[must_use]
+    pub fn with_semantic_model_extractor(
+        mut self,
+        extractor: Option<Arc<ModelSemanticGraphExtractor>>,
+    ) -> Self {
+        self.semantic_model_extractor = extractor;
         self
     }
 

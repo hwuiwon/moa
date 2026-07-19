@@ -754,7 +754,12 @@ fn contradiction_groups(rows: &[LifecycleNodeRow]) -> Vec<Vec<LifecycleNodeRow>>
         ) else {
             continue;
         };
-        if !is_sweepable_contradiction_predicate(&predicate) {
+        // The deterministic sweep only supersedes single-valued (functional)
+        // predicates: a subject can hold at most one current object, so a newer
+        // object legitimately replaces the old one. Functionality is decided once
+        // at extraction time and persisted on the fact; a missing flag is treated
+        // as non-functional (conservative), never re-derived from predicate prose.
+        if !row.property_bool("functional").unwrap_or(false) {
             continue;
         }
         groups
@@ -786,14 +791,6 @@ fn contradiction_groups(rows: &[LifecycleNodeRow]) -> Vec<Vec<LifecycleNodeRow>>
             group
         })
         .collect()
-}
-
-fn is_sweepable_contradiction_predicate(predicate: &str) -> bool {
-    let normalized = predicate.trim().to_ascii_lowercase().replace('_', " ");
-    matches!(
-        normalized.as_str(),
-        "cache backend conflict" | "deploy target" | "on call primary"
-    )
 }
 
 /// Computes the anchored confidence-decay target for a single fact.
@@ -1099,6 +1096,13 @@ impl LifecycleNodeRow {
         crate::property_string(&self.properties, key)
     }
 
+    fn property_bool(&self, key: &str) -> Option<bool> {
+        self.properties
+            .as_ref()
+            .and_then(|properties| properties.get(key))
+            .and_then(Value::as_bool)
+    }
+
     fn properties_object(&self) -> serde_json::Map<String, Value> {
         self.properties
             .as_ref()
@@ -1281,8 +1285,10 @@ mod tests {
     }
 
     #[test]
-    fn contradiction_sweep_skips_broad_preference_predicates() {
-        // Pins: broad extraction verbs do not let unrelated user preferences supersede each other.
+    fn contradiction_sweep_skips_non_functional_preference_facts() {
+        // Pins: a non-functional predicate is not swept, so two distinct user
+        // preferences that share a subject and predicate never supersede each
+        // other. The gate is the stored functional flag, not the predicate text.
         let style = fact(FactSpec {
             uid_suffix: "00000000-0000-8000-8000-000000000001",
             tenant_id: Uuid::from_u128(0x100),
@@ -1293,6 +1299,7 @@ mod tests {
             predicate: "switched to",
             object: "step-by-step checklists",
             day_offset: 1,
+            functional: false,
         });
         let contact = fact(FactSpec {
             uid_suffix: "00000000-0000-8000-8000-000000000002",
@@ -1304,14 +1311,16 @@ mod tests {
             predicate: "switched to",
             object: "[EMAIL_REDACTED]",
             day_offset: 2,
+            functional: false,
         });
 
         assert!(contradiction_groups(&[style, contact]).is_empty());
     }
 
     #[test]
-    fn contradiction_sweep_skips_multi_value_dependency_and_owner_predicates() {
-        // Pins: corpus dependency and owner facts are multi-valued evidence, not v1 contradictions.
+    fn contradiction_sweep_skips_non_functional_dependency_and_owner_predicates() {
+        // Pins: multi-valued dependency and owner facts carry functional=false, so
+        // they stay as parallel evidence instead of superseding one another.
         let dependency_a = fact(FactSpec {
             uid_suffix: "00000000-0000-8000-8000-000000000001",
             tenant_id: Uuid::from_u128(0x100),
@@ -1322,6 +1331,7 @@ mod tests {
             predicate: "depends_on",
             object: "lib-auth",
             day_offset: 1,
+            functional: false,
         });
         let dependency_b = fact(FactSpec {
             uid_suffix: "00000000-0000-8000-8000-000000000002",
@@ -1333,6 +1343,7 @@ mod tests {
             predicate: "depends_on",
             object: "lib-ledger",
             day_offset: 2,
+            functional: false,
         });
         let owner_a = fact(FactSpec {
             uid_suffix: "00000000-0000-8000-8000-000000000003",
@@ -1344,6 +1355,7 @@ mod tests {
             predicate: "owned_by",
             object: "identity",
             day_offset: 1,
+            functional: false,
         });
         let owner_b = fact(FactSpec {
             uid_suffix: "00000000-0000-8000-8000-000000000004",
@@ -1355,9 +1367,50 @@ mod tests {
             predicate: "owned_by",
             object: "platform",
             day_offset: 2,
+            functional: false,
         });
 
         assert!(contradiction_groups(&[dependency_a, dependency_b, owner_a, owner_b]).is_empty());
+    }
+
+    #[test]
+    fn contradiction_sweep_supersedes_any_functional_predicate() {
+        // Pins: the sweep gate is the stored functional flag, not a fixed set of
+        // predicate strings. A functional predicate outside any former whitelist
+        // still forms a contradiction group when its objects differ.
+        let old = fact(FactSpec {
+            uid_suffix: "00000000-0000-8000-8000-000000000001",
+            tenant_id: Uuid::from_u128(0x100),
+            contact_id: Some(Uuid::from_u128(0x101)),
+            scope: "contact",
+            fact_hash: "editor-old",
+            subject: "User 07",
+            predicate: "default editor",
+            object: "vim",
+            day_offset: 1,
+            functional: true,
+        });
+        let new = fact(FactSpec {
+            uid_suffix: "00000000-0000-8000-8000-000000000002",
+            tenant_id: Uuid::from_u128(0x100),
+            contact_id: Some(Uuid::from_u128(0x101)),
+            scope: "contact",
+            fact_hash: "editor-new",
+            subject: "User 07",
+            predicate: "default editor",
+            object: "helix",
+            day_offset: 2,
+            functional: true,
+        });
+
+        let groups = contradiction_groups(&[old, new]);
+
+        assert_eq!(groups.len(), 1);
+        // Newest object wins; the day-2 helix fact leads the group.
+        assert_eq!(
+            groups[0][0].uid,
+            uuid("00000000-0000-8000-8000-000000000002")
+        );
     }
 
     fn uids(rows: &[LifecycleNodeRow]) -> Vec<Uuid> {
@@ -1382,6 +1435,7 @@ mod tests {
             predicate: "p",
             object: "o",
             day_offset,
+            functional: false,
         })
     }
 
@@ -1396,6 +1450,9 @@ mod tests {
             predicate: "cache_backend_conflict",
             object,
             day_offset,
+            // Single-valued predicate: extraction would flag it functional, so
+            // the sweep is eligible to supersede older objects.
+            functional: true,
         })
     }
 
@@ -1409,6 +1466,7 @@ mod tests {
         predicate: &'a str,
         object: &'a str,
         day_offset: i64,
+        functional: bool,
     }
 
     fn fact(spec: FactSpec<'_>) -> LifecycleNodeRow {
@@ -1429,6 +1487,7 @@ mod tests {
                 "subject": spec.subject,
                 "predicate": spec.predicate,
                 "object": spec.object,
+                "functional": spec.functional,
             })),
             last_accessed_at: base + Duration::days(spec.day_offset),
             has_embedding: false,

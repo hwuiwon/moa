@@ -2,8 +2,8 @@ schema_version = 1
 
 [routing]
 path = "routing.jsonl"
-sha256 = "29fca27b177271f85c94893f561ca969bb97ba11c24428adf329a6f4672c59d1"
-count = 320
+sha256 = "7a23d0068ba5e7bd66c08703c151cfea28f3af9782678a41eafae7061d737128"
+count = 328
 
 [contract]
 path = "contract-recorded.jsonl"

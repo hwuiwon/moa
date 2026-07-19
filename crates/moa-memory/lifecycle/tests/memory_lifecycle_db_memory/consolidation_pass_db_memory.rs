@@ -135,6 +135,7 @@ async fn consolidate_tenant_shares_one_snapshot_and_is_idempotent_db_memory() {
         "deploy pipeline",
         "prefers",
         "green builds",
+        false,
         now - Duration::days(1),
     )
     .await;
@@ -146,10 +147,12 @@ async fn consolidate_tenant_shares_one_snapshot_and_is_idempotent_db_memory() {
         "deploy pipeline",
         "prefers",
         "green builds",
+        false,
         now,
     )
     .await;
     // Two contradictory deploy-target facts: the newest supersedes the older one.
+    // deploy_target is single-valued, so extraction flags it functional.
     seed_spo_fact(
         pool,
         &storage_partition_id,
@@ -158,6 +161,7 @@ async fn consolidate_tenant_shares_one_snapshot_and_is_idempotent_db_memory() {
         "checkout-service",
         "deploy_target",
         "staging",
+        true,
         now - Duration::days(2),
     )
     .await;
@@ -169,6 +173,7 @@ async fn consolidate_tenant_shares_one_snapshot_and_is_idempotent_db_memory() {
         "checkout-service",
         "deploy_target",
         "production",
+        true,
         now - Duration::days(1),
     )
     .await;
@@ -319,6 +324,7 @@ async fn seed_spo_fact(
     subject: &str,
     predicate: &str,
     object: &str,
+    functional: bool,
     valid_from: DateTime<Utc>,
 ) -> Uuid {
     let uid = Uuid::now_v7();
@@ -327,6 +333,7 @@ async fn seed_spo_fact(
         "predicate": predicate,
         "object": object,
         "fact_hash": fact_hash,
+        "functional": functional,
     });
     insert_fact_row(
         pool,

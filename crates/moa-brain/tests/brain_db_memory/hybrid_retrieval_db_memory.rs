@@ -18,7 +18,7 @@ use moa_memory_ingest::{
     SessionTurn, fact_hash, fact_uid_from_hash, ingest_turn_direct_with_ctx,
 };
 use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
-use moa_memory_types::MemoryScope;
+use moa_memory_types::{FactCategory, FactEdgeLabel, MemoryScope};
 use moa_memory_vector::{PgvectorStore, TurbopufferStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use secrecy::SecretString;
@@ -197,6 +197,9 @@ fn scripted_user_fact(summary: &str) -> ExtractedFact {
         scope_hint: ExtractedFactScopeHint::Contact,
         confidence: Some(0.92),
         event_time: None,
+        category: FactCategory::Other,
+        edge_label: FactEdgeLabel::RelatesTo,
+        functional: false,
     };
     let hash = fact_hash(&fact).expect("scripted fact hashes");
     fact.uid = fact_uid_from_hash(&hash);
@@ -555,6 +558,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
         query_embedding: deterministic_vector(exact_text),
         scope,
         label_filter: Some(vec![NodeLabel::Fact]),
+        label_boost: None,
         max_pii_class: PiiClass::Restricted,
         k_final: 5,
         use_reranker: false,
@@ -603,6 +607,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
             use_reranker: false,
@@ -631,6 +636,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
             use_reranker: false,
@@ -736,6 +742,7 @@ async fn duplicate_crowding_keeps_distinct_supporting_knowledge_chunk() {
             query_embedding: deterministic_vector(query),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 3,
             use_reranker: false,
@@ -847,6 +854,7 @@ async fn parent_document_retrieval_hydrates_ordinal_adjacent_neighbors() {
             query_embedding: deterministic_vector(query),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
             use_reranker: false,
@@ -925,6 +933,9 @@ async fn reinforced_fact_survives_consolidation_while_idle_one_off_expires_from_
             scope_hint: ExtractedFactScopeHint::Contact,
             confidence: Some(0.92),
             event_time: None,
+            category: FactCategory::Other,
+            edge_label: FactEdgeLabel::RelatesTo,
+            functional: false,
         };
         let hash = fact_hash(&fact).expect("scripted fact hashes");
         fact.uid = fact_uid_from_hash(&hash);
@@ -1027,6 +1038,7 @@ async fn reinforced_fact_survives_consolidation_while_idle_one_off_expires_from_
         query_embedding: deterministic_vector(query),
         scope: contact_memory_scope(&storage_partition_id, user),
         label_filter: Some(vec![NodeLabel::Fact]),
+        label_boost: None,
         max_pii_class: PiiClass::Restricted,
         k_final: 25,
         use_reranker: false,
@@ -1159,6 +1171,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
                 query_embedding: deterministic_vector(summary),
                 scope: contact_memory_scope(&storage_partition_id, user_a),
                 label_filter: Some(vec![NodeLabel::Fact]),
+                label_boost: None,
                 max_pii_class: PiiClass::Restricted,
                 k_final: 25,
                 use_reranker: false,
@@ -1191,6 +1204,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
                 query_embedding: deterministic_vector(summary),
                 scope: contact_memory_scope(&storage_partition_id, user_b),
                 label_filter: Some(vec![NodeLabel::Fact]),
+                label_boost: None,
                 max_pii_class: PiiClass::Restricted,
                 k_final: 25,
                 use_reranker: false,
@@ -1261,6 +1275,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
         query_embedding: Vec::new(),
         scope: scope.clone(),
         label_filter: Some(vec![NodeLabel::Fact]),
+        label_boost: None,
         max_pii_class: PiiClass::Restricted,
         k_final: 5,
         use_reranker: false,
@@ -1291,6 +1306,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
         query_embedding: Vec::new(),
         scope,
         label_filter: Some(vec![NodeLabel::Fact]),
+        label_boost: None,
         max_pii_class: PiiClass::Restricted,
         k_final: 5,
         use_reranker: false,
@@ -1377,6 +1393,7 @@ async fn temporal_turbopuffer_as_of_uses_pgvector_without_calling_turbopuffer() 
             query_embedding: deterministic_vector(fact),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
             use_reranker: false,
@@ -1468,6 +1485,7 @@ async fn temporal_dual_read_as_of_uses_pgvector_without_calling_turbopuffer() {
             query_embedding: deterministic_vector(fact),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
             use_reranker: false,
@@ -1566,6 +1584,7 @@ async fn turbopuffer_backend_uses_bm25_for_lexical_candidates_db_memory() {
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
             use_reranker: false,
@@ -1656,6 +1675,7 @@ async fn turbopuffer_backend_keeps_postgres_lexical_for_fact_candidates_db_memor
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
             use_reranker: false,
@@ -1751,6 +1771,7 @@ async fn turbopuffer_bm25_error_falls_back_to_postgres_lexical_db_memory() {
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
             use_reranker: false,
@@ -1825,6 +1846,7 @@ async fn lexical_prefix_fallback_matches_word_prefix_when_primary_misses_db_memo
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
             use_reranker: false,
@@ -1917,6 +1939,7 @@ async fn lexical_fallback_matches_structured_predicate_in_properties_db_memory()
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
+            label_boost: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
             use_reranker: false,
