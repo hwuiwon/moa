@@ -1,5 +1,6 @@
 //! Embedding providers used by graph memory retrieval.
 
+mod cache;
 mod cohere;
 mod factory;
 mod gemini;
@@ -8,6 +9,7 @@ mod mock;
 mod openai;
 mod zeroentropy;
 
+pub use cache::CachedEmbeddingProvider;
 pub use cohere::{CohereEmbedding, CohereV4Embedder};
 pub use factory::{build_embedder_from_config, build_embedding_provider_from_config};
 pub use gemini::{EmbedderConstructionRole, GeminiEmbeddingEmbedder};

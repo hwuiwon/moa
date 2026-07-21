@@ -22,6 +22,7 @@ moa-observability = { workspace = true }
 eventsource-stream.workspace = true
 futures-util.workspace = true
 metrics.workspace = true
+moka.workspace = true
 opentelemetry.workspace = true
 reqwest.workspace = true
 serde.workspace = true

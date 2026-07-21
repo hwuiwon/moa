@@ -34,28 +34,37 @@ pub struct VectorStoreFactory {
     mrl_shortlist_dims: Option<usize>,
 }
 
+/// Index-accelerated Matryoshka shortlist prefix width.
+///
+/// The base migration builds the functional pgvector shortlist index on the
+/// 512-dim embedding prefix, so the truncated-prefix cascade is index-driven only
+/// at this width.
+const MRL_INDEX_PREFIX_DIMS: usize = 512;
+
+/// Returns the Matryoshka shortlist width for the pgvector cascade, or `None`.
+///
+/// The truncated-prefix shortlist auto-enables at the index-backed
+/// [`MRL_INDEX_PREFIX_DIMS`] width only for MRL-trained embedders (guarded by
+/// `VectorEmbedderConfig::supports_matryoshka`); every other embedder keeps the
+/// single-stage full-dim path, because a truncated prefix preserves neighbor
+/// ordering only for MRL-trained models. Non-MRL and deterministic test embedders
+/// therefore never take the cascade.
+fn matryoshka_shortlist_dims(config: &MoaConfig) -> Option<usize> {
+    config
+        .memory
+        .vector
+        .embedder
+        .supports_matryoshka()
+        .then_some(MRL_INDEX_PREFIX_DIMS)
+}
+
 impl VectorStoreFactory {
     /// Builds a vector store factory from shared MOA configuration.
     #[must_use]
     pub fn from_config(config: &MoaConfig) -> Self {
-        // Ignore an out-of-range shortlist width instead of failing construction:
-        // the store's `with_mrl_shortlist` applies the same guard, and a truncated
-        // prefix must be strictly shorter than the stored embedding to be meaningful.
-        let mrl_shortlist_dims = config
-            .memory
-            .vector
-            .mrl_shortlist_dims
-            .filter(|&dims| dims > 0 && dims < crate::VECTOR_DIMENSION);
-        if config.memory.vector.mrl_shortlist_dims.is_some() && mrl_shortlist_dims.is_none() {
-            tracing::warn!(
-                configured = config.memory.vector.mrl_shortlist_dims,
-                max = crate::VECTOR_DIMENSION,
-                "ignoring memory.vector.mrl_shortlist_dims outside (0, VECTOR_DIMENSION)"
-            );
-        }
         Self {
             turbopuffer: TurbopufferStore::from_config(config).ok().map(Arc::new),
-            mrl_shortlist_dims,
+            mrl_shortlist_dims: matryoshka_shortlist_dims(config),
         }
     }
 
@@ -642,6 +651,35 @@ mod tests {
                 storage_partition_id
             } if storage_partition_id == "w1"
         ));
+    }
+
+    #[test]
+    fn mrl_auto_enables_for_default_gemini_embedder() {
+        // Pins: a default (Gemini, MRL-trained) deployment auto-enables the
+        // index-backed 512-dim shortlist cascade with no explicit config.
+        assert_eq!(
+            super::matryoshka_shortlist_dims(&MoaConfig::default()),
+            Some(512)
+        );
+    }
+
+    #[test]
+    fn mrl_stays_off_for_non_mrl_embedders() {
+        // Pins: the capability gate keeps the cascade off for non-MRL providers and
+        // disabled selectors, so their truncated prefixes never gate retrieval.
+        for name in [
+            "cohere:embed-v4.0",
+            "openai:text-embedding-3-small",
+            "disabled",
+        ] {
+            let mut config = MoaConfig::default();
+            config.memory.vector.embedder.name = name.to_string();
+            assert_eq!(
+                super::matryoshka_shortlist_dims(&config),
+                None,
+                "{name} must not auto-enable the MRL cascade"
+            );
+        }
     }
 
     #[tokio::test]

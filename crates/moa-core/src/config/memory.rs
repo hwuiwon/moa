@@ -18,7 +18,23 @@ pub struct MemoryConfig {
     pub vector: MemoryVectorConfig,
     /// Standing memory digest rebuild and injection configuration.
     pub digest: MemoryDigestConfig,
+    /// Maximum number of vectors held in each in-process embedding cache.
+    ///
+    /// An embedding is a pure function of the model and text, so caching results by
+    /// a content digest lets re-ingestion and repeated queries skip the provider
+    /// call entirely — only cache misses reach the API. `0` disables the cache;
+    /// any positive value bounds it with LRU eviction. No TTL is needed because the
+    /// mapping is immutable. The runtime builds a few independent caches (ingestion,
+    /// retrieval, semantic search), each bounded by this value.
+    pub embedding_cache_capacity: u64,
 }
+
+/// Default embedding-cache capacity per instance.
+///
+/// At 1024-dim `f32` vectors (~4 KB each plus overhead) this bounds one cache to
+/// roughly 80 MB while covering typical re-ingestion and repeated-query working
+/// sets; a handful of independent caches stay well within a few hundred megabytes.
+pub const DEFAULT_EMBEDDING_CACHE_CAPACITY: u64 = 20_000;
 
 impl Default for MemoryConfig {
     fn default() -> Self {
@@ -29,6 +45,7 @@ impl Default for MemoryConfig {
             extraction: MemoryExtractionConfig::default(),
             vector: MemoryVectorConfig::default(),
             digest: MemoryDigestConfig::default(),
+            embedding_cache_capacity: DEFAULT_EMBEDDING_CACHE_CAPACITY,
         }
     }
 }
@@ -247,27 +264,6 @@ pub struct MemoryVectorConfig {
     pub embedder: VectorEmbedderConfig,
     /// Optional Turbopuffer backend configuration.
     pub turbopuffer: TurbopufferVectorConfig,
-    /// Matryoshka (MRL) truncated-dim shortlist width for the pgvector KNN cascade.
-    ///
-    /// `None` (the default) keeps the single-stage full-dim search. `Some(d)`
-    /// enables a two-stage cascade: a cheap shortlist ordered by the truncated
-    /// `d`-dim prefix, then an exact full-dim rescore. `d` must be less than
-    /// [`crate`]'s 1024-dim embedding width.
-    ///
-    /// Only enable this when the tenant's embedder is MRL-trained (e.g.
-    /// `gemini:gemini-embedding-2`) so that a truncated prefix preserves
-    /// semantic ordering -- that is the operator's responsibility; MOA does not
-    /// verify it. The functional shortlist index in the base migration is built
-    /// on a 512-dim prefix, so the shortlist stage is index-accelerated only when
-    /// this is set to `512`; any other value forces a sequential shortlist scan
-    /// unless the migration's index expression is updated to match.
-    ///
-    /// Default-on (`Some(512)`) was measured and DISCARDED on 2026-07-12: the
-    /// hermetic lane's pseudo-embeddings are not MRL-ordered, so the shortlist
-    /// discarded true neighbors (recall@4 0.976 -> 0.738, McNemar p ~= 0).
-    /// Enabling by default needs a live-lane paired sweep with the real
-    /// MRL-trained embedder plus a lane-aware exemption; until then: opt-in.
-    pub mrl_shortlist_dims: Option<usize>,
 }
 
 /// Turbopuffer graph-memory vector backend configuration.
@@ -333,14 +329,65 @@ impl Default for VectorEmbedderConfig {
     }
 }
 
+impl VectorEmbedderConfig {
+    /// Returns whether the configured embedder produces Matryoshka (MRL)-ordered
+    /// vectors, so a truncated dimension prefix preserves semantic ordering.
+    ///
+    /// Only genuinely MRL-trained models qualify: for those, a prefix subvector is
+    /// itself a valid coarse embedding, which is the precondition for the pgvector
+    /// truncated-prefix shortlist cascade. This gates auto-enabling that cascade so
+    /// it turns on for real MRL embedders (Gemini `gemini-embedding-2`) and stays
+    /// off for non-MRL providers and deterministic test embedders whose prefixes
+    /// carry no ordering. Other providers are conservatively excluded until a live
+    /// paired sweep validates their prefix ordering.
+    #[must_use]
+    pub fn supports_matryoshka(&self) -> bool {
+        let name = self.name.trim().to_ascii_lowercase();
+        name.strip_prefix("gemini:")
+            .is_some_and(|model| model.trim().contains("gemini-embedding"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::MemoryVectorConfig;
+    use super::{DEFAULT_EMBEDDING_CACHE_CAPACITY, MemoryConfig, MemoryVectorConfig};
 
     #[test]
-    fn memory_vector_config_defaults_disable_mrl_shortlist() {
-        // Pins: the Matryoshka cascade is opt-in. Default config keeps the
-        // single-stage full-dim pgvector path with no truncated-prefix shortlist.
-        assert_eq!(MemoryVectorConfig::default().mrl_shortlist_dims, None);
+    fn default_embedder_is_matryoshka_capable() {
+        // Pins: the default Gemini embedder is MRL-trained, so the capability gate
+        // auto-enables the truncated-prefix cascade for a default deployment.
+        assert!(MemoryVectorConfig::default().embedder.supports_matryoshka());
+    }
+
+    #[test]
+    fn non_gemini_embedders_are_not_matryoshka_capable() {
+        // Pins: the gate stays off for non-MRL providers, disabled selectors, and
+        // deterministic test embedders whose truncated prefixes carry no ordering.
+        for name in [
+            "cohere:embed-v4.0",
+            "openai:text-embedding-3-small",
+            "zeroentropy:zembed-1",
+            "disabled",
+            "mock-embedding-1024",
+        ] {
+            let mut vector = MemoryVectorConfig::default();
+            vector.embedder.name = name.to_string();
+            assert!(
+                !vector.embedder.supports_matryoshka(),
+                "{name} must not be treated as MRL-capable"
+            );
+        }
+    }
+
+    #[test]
+    fn embedding_cache_enabled_by_default() {
+        // Pins: the content-addressed embedding cache ships on with a bounded
+        // capacity so re-ingestion and repeated queries skip provider calls.
+        assert_eq!(
+            MemoryConfig::default().embedding_cache_capacity,
+            DEFAULT_EMBEDDING_CACHE_CAPACITY
+        );
+        // A default deployment ships with the cache enabled (positive capacity).
+        const { assert!(DEFAULT_EMBEDDING_CACHE_CAPACITY > 0) };
     }
 }

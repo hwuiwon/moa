@@ -18,6 +18,7 @@ use std::sync::Arc;
 use moa_core::traits::EmbeddingProvider;
 use moa_core::{config::MoaConfig, error::MoaError, error::Result};
 
+use super::cache::CachedEmbeddingProvider;
 use super::cohere::{COHERE_DEFAULT_MODEL, cohere_input_type_for_role};
 use super::gemini::GEMINI_V2_MODEL;
 #[cfg(test)]
@@ -224,6 +225,10 @@ fn apply_overrides<T: EmbeddingOverrides>(
 }
 
 /// Builds a vector-space embedder from the tenant memory embedder configuration.
+///
+/// The returned provider is wrapped in a bounded content-addressed cache
+/// (see [`with_embedding_cache`]) unless caching is disabled, so re-ingestion and
+/// repeated queries skip provider calls for text already embedded by this model.
 pub fn build_embedder_from_config(
     config: &MoaConfig,
     role: EmbedderConstructionRole,
@@ -231,9 +236,29 @@ pub fn build_embedder_from_config(
     let cfg = &config.memory.vector.embedder;
     let resolved = resolve_embedding_model(&cfg.name, "memory.vector.embedder.name")?
         .ok_or_else(|| MoaError::ConfigError("memory vector embedder is disabled".to_string()))?;
-    resolved
+    let provider = resolved
         .provider
-        .build(config, resolved.model, Some(cfg.output_dim), role)
+        .build(config, resolved.model, Some(cfg.output_dim), role)?;
+    Ok(with_embedding_cache(
+        provider,
+        config.memory.embedding_cache_capacity,
+    ))
+}
+
+/// Wraps an embedder in the in-process content-addressed cache, when enabled.
+///
+/// A `capacity` of `0` disables caching and returns the provider unchanged, so
+/// the cache is entirely opt-out. Because an embedding is a pure function of
+/// `(model, text)`, the cache never affects similarity-search results — it only
+/// removes redundant provider calls.
+fn with_embedding_cache(
+    provider: Arc<dyn EmbeddingProvider>,
+    capacity: u64,
+) -> Arc<dyn EmbeddingProvider> {
+    if capacity == 0 {
+        return provider;
+    }
+    Arc::new(CachedEmbeddingProvider::new(provider, capacity))
 }
 
 fn build_gemini_embedder(
@@ -272,7 +297,10 @@ pub fn build_embedding_provider_from_config(
         None,
         EmbedderConstructionRole::Retrieval,
     ) {
-        Ok(provider) => Ok(Some(provider)),
+        Ok(provider) => Ok(Some(with_embedding_cache(
+            provider,
+            config.memory.embedding_cache_capacity,
+        ))),
         Err(MoaError::MissingEnvironmentVariable(env_name)) => {
             tracing::warn!(
                 env = %env_name,

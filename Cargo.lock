@@ -4425,6 +4425,7 @@ dependencies = [
  "moa-memory-pii",
  "moa-observability",
  "moa-runtime-store",
+ "moka",
  "opentelemetry",
  "opentelemetry_sdk",
  "reqwest 0.13.4",

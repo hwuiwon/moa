@@ -81,8 +81,9 @@ impl PgvectorStore {
     /// that shortlist. `dims` values `>= VECTOR_DIMENSION` (or `0`) are ignored and
     /// leave the cascade disabled, since a prefix must be strictly shorter than the
     /// stored embedding. The shortlist is index-accelerated only when `dims`
-    /// matches the base migration's functional index width (512); see
-    /// [`MemoryVectorConfig::mrl_shortlist_dims`](moa_core::config::MemoryVectorConfig).
+    /// matches the base migration's functional index width (512). The factory
+    /// auto-selects this width for MRL-trained embedders; see
+    /// `VectorStoreFactory::from_config`.
     #[must_use]
     pub fn with_mrl_shortlist(mut self, dims: Option<usize>) -> Self {
         self.mrl_shortlist_dims = dims.filter(|&dims| dims > 0 && dims < VECTOR_DIMENSION);
