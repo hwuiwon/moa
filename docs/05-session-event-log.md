@@ -82,7 +82,7 @@ CREATE TABLE contact_channel_accounts (...);
 CREATE TABLE session_channel_bindings (...);
 
 CREATE TABLE events (
-    id UUID PRIMARY KEY,
+    id UUID NOT NULL,
     session_id UUID NOT NULL REFERENCES sessions(id),
     tenant_id UUID NOT NULL,
     contact_id UUID,
@@ -93,12 +93,9 @@ CREATE TABLE events (
     brain_id UUID,
     hand_id TEXT,
     token_count INTEGER,
-    search_vector TSVECTOR GENERATED ALWAYS AS (
-        setweight(to_tsvector('english', coalesce(event_type, '')), 'A') ||
-        setweight(to_tsvector('english', coalesce(payload::text, '')), 'B')
-    ) STORED,
+    PRIMARY KEY (id, session_id),
     UNIQUE(session_id, sequence_num)
-);
+) PARTITION BY HASH (session_id);
 
 CREATE TABLE task_segments (
     id UUID PRIMARY KEY,
@@ -143,7 +140,7 @@ sessions are backfilled to the built-in `agent://system-default` revision during
 the tenant-configurable agents migration; tenant-authored sessions should use an
 installed or explicitly selected agent revision instead.
 
-The event table uses a generated `tsvector` column and a GIN index for cross-session search. There is no separate application-side rollup writer for session counters; the trigger and generated columns own aggregate updates.
+The event table is HASH-partitioned on `session_id` across 16 child tables to spread append contention, which is why the primary key is `(id, session_id)`. There is no stored `search_vector` `tsvector` column or GIN index: the rare, admin-only cross-session search computes `to_tsvector` on the fly instead of taxing every hot-path append. There is no separate application-side rollup writer for session counters; the trigger and generated columns own aggregate updates.
 
 Context compilation preserves event provenance in-memory when replaying session
 history. Compiled context messages can carry the source event id, event sequence
@@ -282,7 +279,7 @@ the guarantee too.
 
 Dedupe state lives in a separate `session_event_dedupe(session_id, dedupe_key,
 sequence_num, created_at)` table whose primary key doubles as the uniqueness
-guard (migration `V000319`). It is kept off the hot, trigger-heavy, append-only
+guard (migration `V000318__session_event_dedupe.sql`). It is kept off the hot, trigger-heavy, append-only
 `events` table on purpose: adding a unique index to `events` would need a
 write-blocking, non-concurrent `CREATE UNIQUE INDEX` (refinery runs each
 migration in a transaction), which stalls writes during deploy. The dedupe path

@@ -8,65 +8,51 @@ MOA has exactly one workspace. Its canonical OpenFGA object id is
 `workspace:00000000-0000-0000-0000-000000000001`.
 
 Seed the first workspace admin through controlled ops by inserting the tuple
-into the authz outbox or by running an equivalent deployment migration:
+into the authz outbox or by running an equivalent deployment migration. Tuple
+identity is `(tuple_user, tuple_relation, tuple_object, model_version)`; set
+`model_version` to the current `MODEL_VERSION` from `moa-authz-schema`
+(`crates/moa-auth/authz-schema/src/lib.rs`), `5` at the time of writing:
 
 ```sql
 INSERT INTO authz_outbox
-    (idempotency_key, op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id)
+    (op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id)
 VALUES
     (
-        'write-workspace-00000000-0000-0000-0000-000000000001-admin-operator-<workspace-admin-operator-id>-v4',
         'write',
         'operator:<workspace-admin-operator-id>',
         'admin',
         'workspace:00000000-0000-0000-0000-000000000001',
-        4,
+        5,
         NULL
     )
-ON CONFLICT (idempotency_key) DO NOTHING;
+ON CONFLICT (tuple_user, tuple_relation, tuple_object, model_version) DO NOTHING;
 ```
 
 After a workspace admin exists, grant additional users workspace-admin access
-through the same controlled ops channel:
-
-```sql
-INSERT INTO authz_outbox
-    (idempotency_key, op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id)
-VALUES
-    (
-        'write-workspace-00000000-0000-0000-0000-000000000001-admin-operator-<workspace-admin-operator-id>-v4',
-        'write',
-        'operator:<workspace-admin-operator-id>',
-        'admin',
-        'workspace:00000000-0000-0000-0000-000000000001',
-        4,
-        NULL
-    )
-ON CONFLICT (idempotency_key) DO NOTHING;
-```
+through the same controlled ops channel with the same insert, substituting the
+new operator id.
 
 Attach a tenant to the workspace:
 
 ```sql
 INSERT INTO authz_outbox
-    (idempotency_key, op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id)
+    (op, tuple_user, tuple_relation, tuple_object, model_version, tenant_id)
 VALUES
     (
-        'write-tenant:<tenant-id>-workspace-workspace:00000000-0000-0000-0000-000000000001-v4',
         'write',
         'workspace:00000000-0000-0000-0000-000000000001',
         'workspace',
         'tenant:<tenant-id>',
-        4,
+        5,
         '<tenant-id>'::UUID
     )
-ON CONFLICT (idempotency_key) DO NOTHING;
+ON CONFLICT (tuple_user, tuple_relation, tuple_object, model_version) DO NOTHING;
 ```
 
 Normal tenant provisioning and tenant-admin setup paths enqueue the tenant
 attachment automatically. Existing tenants are backfilled by the workspace authz
-migration using the canonical workspace id and the current v4 authz model
-version. Every tenant should have exactly one current tenant-to-workspace tuple.
+migration using the canonical workspace id and the current `MODEL_VERSION`
+from `moa-authz-schema`. Every tenant should have exactly one current tenant-to-workspace tuple.
 
 The public authz administration route is intentionally limited to typed
 API-key tenant role grants and revocations. Do not use public HTTP routes to

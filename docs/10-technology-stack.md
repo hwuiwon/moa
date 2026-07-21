@@ -6,17 +6,23 @@ _Crates, services, build targets, and deployment dependencies._
 
 The root workspace package inventory comes from `cargo metadata --no-deps`:
 
-- Core/runtime: `moa-core`, `moa-brain`, `moa-execution`, `moa-db`, `moa-session`,
-  `moa-runtime-store`, `moa-edge`, `moa-orchestrator`, `moa-migrations`.
+- Core/runtime: `moa-core`, `moa-config` (the `MoaConfig` tree and `EnvOverlay`),
+  `moa-wire` (shared HTTP wire DTOs), `moa-brain`, `moa-execution`, `moa-db`,
+  `moa-session`, `moa-runtime-store`, `moa-edge`, `moa-orchestrator`,
+  `moa-migrations`.
 - Memory/knowledge: `moa-knowledge`, `moa-memory-graph`,
   `moa-memory-ingest`, `moa-memory-lifecycle`, `moa-memory-pii`,
-  `moa-memory-types`, `moa-memory-vector`.
+  `moa-memory-types`, `moa-memory-vector`,
+  `moa-retrieval` (hybrid graph-memory retrieval engine and query planner).
 - Auth/security/audit: `moa-authz`, `moa-authz-schema`,
   `moa-auth-providers`, `moa-auth-providers-auth0`, `moa-fga-bootstrap`,
-  `moa-ocsf`, `moa-security`.
+  `moa-ocsf`, `moa-security`, `moa-crypto` (envelope encryption and BYOK),
+  `moa-kms` (Postgres-backed key management),
+  `moa-dlp` (provider-egress PII tokenization).
 - Lineage/observability/analytics: `moa-lineage-core`,
   `moa-lineage-citation`, `moa-lineage-sink`,
-  `moa-lineage-audit`, `moa-observability`, `moa-analytics`.
+  `moa-lineage-audit`, `moa-observability`, `moa-analytics`,
+  `moa-analytics-export` (incremental Postgres-to-ClickHouse exporter).
 - Product domains: `moa-agents`, `moa-contacts`, `moa-artifacts`,
   `moa-experiments`, `moa-scoring`, `moa-messaging`, `moa-skills`.
 - Providers/tools/eval/dev: `moa-hands`, `moa-providers`,
@@ -53,8 +59,8 @@ Build-graph boundaries keep optional tooling out of ordinary builds:
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
 
-`moa-migrations` owns the central table-ownership manifest. The current 98
-table declarations resolve to 90 owned logical families, enforced by
+`moa-migrations` owns the central table-ownership manifest. The current 119
+table declarations resolve to 111 owned logical families, enforced by
 `cargo run -p xtask --locked -- check-migrations`.
 
 ## External Services

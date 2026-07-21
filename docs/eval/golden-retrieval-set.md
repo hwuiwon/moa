@@ -106,7 +106,10 @@ checked-in workflow alone.
 
 ## Lanes
 
-- Offline metrics unit lane: `moa-eval::memory_eval_metrics_offline`.
+- Offline metrics unit lane: the `memory_eval_metrics` module inside the
+  `moa-eval` `eval_offline` harness binary (run with
+  `cargo nextest run -p moa-eval -E 'binary(eval_offline)'` filtered to
+  `memory_eval_metrics`).
 - Hermetic end-to-end lane: memory-eval `_db_memory` runner tests (recorded
   embeddings + isolated schemas), see
   [Memory Eval Pipeline](memory-eval-pipeline.md).

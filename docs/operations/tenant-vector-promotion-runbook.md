@@ -29,7 +29,9 @@ Required environment:
 
 1. `moa.storage_partition_state.vector_backend_state` becomes `migrating` for the authenticated tenant.
 2. All rows from `moa.embeddings` for the tenant are copied to the
-   Turbopuffer namespace `moa-<env>-<tenant_id>` in batches of 256.
+   Turbopuffer namespace `moa-<env>-<storage-partition>` (f32 vectors; other
+   vector types use `moa-<env>-<vector-type>-<storage-partition>`) in batches
+   of 256.
 3. A deterministic sample is queried against both backends. Promotion requires
    at least `0.95` average top-K overlap.
 4. The tenant vector backend flips to `vector_backend='turbopuffer'` and

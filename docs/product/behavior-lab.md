@@ -159,13 +159,5 @@ cargo nextest run -p moa-orchestrator \
   --run-ignored ignored-only
 ```
 
-Live simulation provider checks require an explicit gate and credentials:
-
-```bash
-MOA_RUN_LIVE_SIMULATION_TESTS=1 cargo nextest run -p moa-orchestrator \
-  --test behavior_lab_simulation_e2e \
-  --features integration,provider-overrides \
-  --locked \
-  --run-ignored ignored-only \
-  live_behavior_lab_simulation_gate_requires_flag_and_provider_credentials
-```
+There is no live-provider simulation lane: these e2e tests run scripted
+provider fixtures only.

@@ -31,7 +31,7 @@ order:
 | 6 | `HistoryCompiler` | Frozen history | replayed events, checkpoints, recent turns, errors, checkpoint compaction |
 | 7 | `SkillInjector` | Dynamic tail | budgeted visible skill manifest ranked within pinned agent skill policy |
 | 8 | `DigestProcessor` | Dynamic tail | standing contact digest for contact sessions |
-| 9 | `MemoryRetriever` | Dynamic tail | tenant knowledge plus admitted contact memory filtered by pinned agent knowledge policy |
+| 9 | `GraphMemoryRetriever` | Dynamic tail | tenant knowledge plus admitted contact memory filtered by pinned agent knowledge policy |
 | 10 | `RuntimeContextProcessor` | Dynamic tail | current date, tenant, working directory, branch, and contact when present |
 
 History runs before the skill manifest, digest, and memory retrieval so those
@@ -196,7 +196,7 @@ cap.
 
 ## Memory Retrieval
 
-`MemoryRetriever` loads ranked graph hits through the graph, sidecar, and vector
+`GraphMemoryRetriever` loads ranked graph hits through the graph, sidecar, and vector
 memory crates, and assembles tenant knowledge chunks with admitted contact
 memory when graph memory is enabled. See
 `docs/15-architecture-policy.md` for the

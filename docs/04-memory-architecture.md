@@ -213,10 +213,11 @@ The memory processor runs after query rewriting and before history compilation. 
 It inserts ranked graph hits with labels, names, properties, provenance, and concise snippets. Memory content is inserted near the active turn so static prompt prefix caching remains stable.
 
 The post-fusion reranker stage is always present in runtime retrieval. Its
-default model selector is `noop`, which preserves fused candidate order. Setting
-`memory.retrieval.reranker_model` to `provider:model`, such as
-`cohere:rerank-v4.0-fast` or `zeroentropy:zerank-2`, switches the stage to a
-provider-backed reranker.
+default model selector is `cohere:rerank-v4.0-fast`; it falls back to `noop`,
+which preserves fused candidate order, with a warning when the provider API key
+is absent. Setting `memory.retrieval.reranker_model` to another
+`provider:model`, such as `zeroentropy:zerank-2`, or to `noop` switches the
+stage explicitly.
 
 For verified contact sessions, retrieval queries tenant knowledge and the
 canonical verified contact memory scope inside the tenant. Storage lineage and

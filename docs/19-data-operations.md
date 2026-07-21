@@ -270,7 +270,7 @@ relational purge):
 Retention inside ClickHouse: `turn_lineage` drops via table TTL
 (`clickhouse.lineage_ttl_days`, default 30); the analytics tables currently
 have no TTL — their Postgres sources are the retention authority until the
-events tiering phase (see the plan's north-star section).
+events tiering phase.
 
 ### Execution Analytics Bootstrap And Schema Drift Recovery
 

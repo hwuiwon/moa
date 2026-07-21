@@ -68,7 +68,7 @@ contact service enforces challenge creation, OTP-style completion, token
 upgrade, and session promotion. Low-assurance contact scopes can perform only
 the operations explicitly granted before verification.
 Contact-point lookup hashes use a separate 32-byte key from
-`MOA_CONTACT_POINT_HASH_KEY_HEX`; raw emails and phone numbers must not be
+`MOA_AUTH_CONTACT_TOKENS_CONTACT_POINT_HASH_KEY_HEX`; raw emails and phone numbers must not be
 stored in contact lookup columns.
 
 Tenant knowledge base content is tenant-public by design: synced documents are

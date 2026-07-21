@@ -104,9 +104,9 @@ default `segment_materialized_views_refresh` cron job every 15 minutes.
 ## ClickHouse Backend
 
 With `[clickhouse]` configured (`docs/schemas/clickhouse-analytics.md` is the
-schema contract, `docs/plans/clickhouse-analytics-read-models.md` the design):
+schema contract):
 
-- A leader-leased exporter in `moa-orchestrator` (`analytics_export/`)
+- A leader-leased exporter in the `moa-analytics-export` crate
   incrementally copies dimension rows, the `events_raw` stream (with
   exporter-stamped `turn_number`), and the Postgres-computed windowed facts
   (`turn_fact`, `tool_call_fact`) into ClickHouse on a poll interval

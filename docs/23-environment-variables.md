@@ -103,6 +103,9 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | Variable | Config path | Default | Description |
 |---|---|---|---|
 | `MOA_ANTHROPIC_API_KEY` | `providers.anthropic.api_key` | _empty_ | API key value loaded from runtime configuration **(secret)** |
+| `MOA_ANTHROPIC_CAPABILITIES_DATA_RESIDENCY` | `providers.anthropic.capabilities.data_residency` | _unset_ | Contractual data-residency region, or unset when none is asserted |
+| `MOA_ANTHROPIC_CAPABILITIES_PRIVATE_DEPLOYMENT` | `providers.anthropic.capabilities.private_deployment` | _unset_ | Whether the endpoint is a private or self-hosted deployment |
+| `MOA_ANTHROPIC_CAPABILITIES_ZERO_RETENTION` | `providers.anthropic.capabilities.zero_retention` | _unset_ | Whether the endpoint guarantees no training on or retention of requests |
 | `MOA_ANTHROPIC_MAX_CONCURRENT_REQUESTS` | `providers.anthropic.max_concurrent_requests` | _unset_ | In-flight concurrency ceiling for this provider account — the natural place to express the credential's tier |
 | `MOA_ANTHROPIC_MAX_INPUTS_PER_MIN` | `providers.anthropic.max_inputs_per_min` | _unset_ | Optional per-minute input-rate cap; `None` keeps the provider default |
 | `MOA_ANTHROPIC_MAX_REQUESTS_PER_MIN` | `providers.anthropic.max_requests_per_min` | _unset_ | Optional per-minute request-rate cap; `None` keeps the provider default |
@@ -111,10 +114,16 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_COHERE_MAX_INPUTS_PER_MIN` | `providers.cohere.max_inputs_per_min` | _unset_ | Optional per-minute input-rate cap; `None` keeps the provider default |
 | `MOA_COHERE_MAX_REQUESTS_PER_MIN` | `providers.cohere.max_requests_per_min` | _unset_ | Optional per-minute request-rate cap; `None` keeps the provider default |
 | `MOA_GOOGLE_API_KEY` | `providers.google.api_key` | _empty_ | API key value loaded from runtime configuration **(secret)** |
+| `MOA_GOOGLE_CAPABILITIES_DATA_RESIDENCY` | `providers.google.capabilities.data_residency` | _unset_ | Contractual data-residency region, or unset when none is asserted |
+| `MOA_GOOGLE_CAPABILITIES_PRIVATE_DEPLOYMENT` | `providers.google.capabilities.private_deployment` | _unset_ | Whether the endpoint is a private or self-hosted deployment |
+| `MOA_GOOGLE_CAPABILITIES_ZERO_RETENTION` | `providers.google.capabilities.zero_retention` | _unset_ | Whether the endpoint guarantees no training on or retention of requests |
 | `MOA_GOOGLE_MAX_CONCURRENT_REQUESTS` | `providers.google.max_concurrent_requests` | _unset_ | In-flight concurrency ceiling for this provider account — the natural place to express the credential's tier |
 | `MOA_GOOGLE_MAX_INPUTS_PER_MIN` | `providers.google.max_inputs_per_min` | _unset_ | Optional per-minute input-rate cap; `None` keeps the provider default |
 | `MOA_GOOGLE_MAX_REQUESTS_PER_MIN` | `providers.google.max_requests_per_min` | _unset_ | Optional per-minute request-rate cap; `None` keeps the provider default |
 | `MOA_OPENAI_API_KEY` | `providers.openai.api_key` | _empty_ | API key value loaded from runtime configuration **(secret)** |
+| `MOA_OPENAI_CAPABILITIES_DATA_RESIDENCY` | `providers.openai.capabilities.data_residency` | _unset_ | Contractual data-residency region, or unset when none is asserted |
+| `MOA_OPENAI_CAPABILITIES_PRIVATE_DEPLOYMENT` | `providers.openai.capabilities.private_deployment` | _unset_ | Whether the endpoint is a private or self-hosted deployment |
+| `MOA_OPENAI_CAPABILITIES_ZERO_RETENTION` | `providers.openai.capabilities.zero_retention` | _unset_ | Whether the endpoint guarantees no training on or retention of requests |
 | `MOA_OPENAI_MAX_CONCURRENT_REQUESTS` | `providers.openai.max_concurrent_requests` | _unset_ | In-flight concurrency ceiling for this provider account — the natural place to express the credential's tier |
 | `MOA_OPENAI_MAX_INPUTS_PER_MIN` | `providers.openai.max_inputs_per_min` | _unset_ | Optional per-minute input-rate cap; `None` keeps the provider default |
 | `MOA_OPENAI_MAX_REQUESTS_PER_MIN` | `providers.openai.max_requests_per_min` | _unset_ | Optional per-minute request-rate cap; `None` keeps the provider default |
@@ -122,6 +131,14 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_PROVIDERS_CONCURRENCY_DEFAULT_MAX_IN_FLIGHT` | `providers.concurrency.default_max_in_flight` | 16 | Fallback in-flight ceiling for any provider that sets no `max_concurrent_requests` of its own (`0` = unbounded) |
 | `MOA_PROVIDERS_CONCURRENCY_LEASE_TTL_MS` | `providers.concurrency.lease_ttl_ms` | 600000 | Global-scope lease time-to-live, in ms: the crash backstop for a held slot |
 | `MOA_PROVIDERS_CONCURRENCY_SCOPE` | `providers.concurrency.scope` | local | Whether the ceiling is enforced per process or shared across replicas |
+| `MOA_PROVIDERS_ROUTING_POLICY_ALLOWED_PROVIDERS` | `providers.routing_policy.allowed_providers` | _unset_ | Allowlist of provider ids; empty means no allowlist, non-empty restricts routing to exactly these providers |
+| `MOA_PROVIDERS_ROUTING_POLICY_DENIED_PROVIDERS` | `providers.routing_policy.denied_providers` | _unset_ | Denylist of provider ids that must never serve this deployment |
+| `MOA_PROVIDERS_ROUTING_POLICY_REQUIRE_PRIVATE_DEPLOYMENT` | `providers.routing_policy.require_private_deployment` | _unset_ | Require the selected provider to assert a private/self-hosted deployment |
+| `MOA_PROVIDERS_ROUTING_POLICY_REQUIRE_ZERO_RETENTION` | `providers.routing_policy.require_zero_retention` | _unset_ | Require the selected provider to assert zero request retention |
+| `MOA_PROVIDERS_ROUTING_POLICY_REQUIRED_RESIDENCY` | `providers.routing_policy.required_residency` | _unset_ | Require the selected provider to assert this data-residency class |
+| `MOA_PROVIDERS_STREAM_TIMEOUTS_FIRST_BYTE_MS` | `providers.stream_timeouts.first_byte_ms` | 30000 | Maximum wait for the first server-sent event, in milliseconds |
+| `MOA_PROVIDERS_STREAM_TIMEOUTS_IDLE_MS` | `providers.stream_timeouts.idle_ms` | 60000 | Maximum idle gap between server-sent events, in milliseconds |
+| `MOA_PROVIDERS_STREAM_TIMEOUTS_TOTAL_MS` | `providers.stream_timeouts.total_ms` | 300000 | Maximum wall-clock duration of the complete stream, in milliseconds |
 | `MOA_ZEROENTROPY_API_KEY` | `providers.zeroentropy.api_key` | _empty_ | API key value loaded from runtime configuration **(secret)** |
 | `MOA_ZEROENTROPY_MAX_CONCURRENT_REQUESTS` | `providers.zeroentropy.max_concurrent_requests` | _unset_ | In-flight concurrency ceiling for this provider account — the natural place to express the credential's tier |
 | `MOA_ZEROENTROPY_MAX_INPUTS_PER_MIN` | `providers.zeroentropy.max_inputs_per_min` | _unset_ | Optional per-minute input-rate cap; `None` keeps the provider default |
@@ -132,6 +149,7 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | Variable | Config path | Default | Description |
 |---|---|---|---|
 | `MOA_DATABASE_ADMIN_URL` | `database.admin_url` | _none_ | Optional direct/admin database URL for migrations and other session-sensitive flows |
+| `MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS` | `database.background_max_connections` | 2 | Maximum pool size reserved for process-owned background workers, separate from the foreground Restate handler pool |
 | `MOA_DATABASE_CONNECT_TIMEOUT_SECONDS` | `database.connect_timeout_seconds` | 10 | Pool acquire timeout, in seconds |
 | `MOA_DATABASE_MAX_CONNECTIONS` | `database.max_connections` | 20 | Maximum pool size for the shared Postgres client |
 | `MOA_DATABASE_NEON_API_KEY` | `database.neon.api_key` | _empty_ | Neon API key value loaded from runtime configuration **(secret)** |
@@ -228,6 +246,7 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | Variable | Config path | Default | Description |
 |---|---|---|---|
 | `MOA_SESSION_LIMITS_LOOP_DETECTION_THRESHOLD` | `session_limits.loop_detection_threshold` | 3 | Number of identical consecutive turn fingerprints that triggers a loop pause |
+| `MOA_SESSION_LIMITS_MAX_MODEL_TURNS_DELEGATION` | `session_limits.max_model_turns_delegation` | 12 | Maximum model loop iterations once a standard turn has delegated to at least one worker; replaces the base cap for the rest of that turn |
 | `MOA_SESSION_LIMITS_MAX_TOOL_CALLS` | `session_limits.max_tool_calls` | 30 | Maximum tool calls allowed within one turn |
 | `MOA_SESSION_LIMITS_MAX_TURNS` | `session_limits.max_turns` | 50 | Maximum completed turns per session before pausing |
 | `MOA_SESSION_LIMITS_PROGRESS_FIRST_DELAY_MS` | `session_limits.progress_first_delay_ms` | 8000 | Delay before the first durable progress update is eligible, in milliseconds |
@@ -297,6 +316,13 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_AUTH_CONTACT_TOKENS_UNVERIFIED_TTL_SECONDS` | `auth.contact_tokens.unverified_ttl_seconds` | 3600 | TTL for unverified contact tokens |
 | `MOA_AUTH_CONTACT_TOKENS_VERIFICATION_TTL_SECONDS` | `auth.contact_tokens.verification_ttl_seconds` | 600 | TTL for one-time verification challenges |
 | `MOA_AUTH_CONTACT_TOKENS_VERIFIED_TTL_SECONDS` | `auth.contact_tokens.verified_ttl_seconds` | 7200 | TTL for verified contact tokens, in seconds |
+| `MOA_AUTH_OAUTH_ACCESS_TOKEN_TTL_SECONDS` | `auth.oauth.access_token_ttl_seconds` | 3600 | Lifetime of an issued access token, in seconds |
+| `MOA_AUTH_OAUTH_AUTHORIZATION_CODE_TTL_SECONDS` | `auth.oauth.authorization_code_ttl_seconds` | 60 | Lifetime of a single-use authorization code, in seconds |
+| `MOA_AUTH_OAUTH_AUTHORIZATION_REQUEST_TTL_SECONDS` | `auth.oauth.authorization_request_ttl_seconds` | 300 | Lifetime of an unapproved authorization transaction, in seconds |
+| `MOA_AUTH_OAUTH_CLIENTS_JSON` | `auth.oauth.clients` | [] | JSON array of statically registered OAuth clients, validated and converged into Postgres at startup |
+| `MOA_AUTH_OAUTH_ISSUER` | `auth.oauth.issuer` | https://moa.local | Canonical authorization-server issuer URL |
+| `MOA_AUTH_OAUTH_REFRESH_TOKEN_TTL_SECONDS` | `auth.oauth.refresh_token_ttl_seconds` | 1209600 | Lifetime of an issued refresh token, in seconds |
+| `MOA_AUTH_OAUTH_RESOURCE` | `auth.oauth.resource` | https://moa.local/mcp | Exact RFC 8707 protected resource accepted by this server |
 | `MOA_AUTH_OIDC_AUDIENCE` | `auth.oidc.audience` | _empty_ | Expected token audience |
 | `MOA_AUTH_OIDC_ISSUER` | `auth.oidc.issuer` | _empty_ | OIDC issuer URL |
 | `MOA_AUTH_OIDC_JWKS_URL` | `auth.oidc.jwks_url` | _empty_ | JWKS endpoint URL |
@@ -325,17 +351,35 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | Variable | Config path | Default | Description |
 |---|---|---|---|
 | `MOA_TOKEN_VAULT_PROVIDER` | `token_vault.provider` | none | Selected token vault provider |
+| `MOA_TOKEN_VAULT_REFRESH_JSON` | `token_vault.refresh` | {} | JSON map of outbound OAuth refresh settings for the self-hosted Postgres vault, keyed by connection name |
+
+### `kms`
+
+| Variable | Config path | Default | Description |
+|---|---|---|---|
+| `MOA_KMS_ALLOW_EPHEMERAL` | `kms.allow_ephemeral` | false | Development/test opt-in permitting a non-durable (ephemeral) provider to back envelope encryption; `false` fails closed at boot |
+| `MOA_KMS_PROVIDER` | `kms.provider` | local | Selected key-management provider (`local` for dev/tests, `postgres` for persistent deployments) |
+| `MOA_KMS_REQUIRED_GENERATION` | `kms.required_generation` | primary | Generation this pod requires the database to have active before it is compatible and ready |
+| `MOA_KMS_ROOT_KEY_DIR` | `kms.root_key_dir` | /var/run/secrets/moa-kms/root-keys | Directory containing base64 root-key files named by generation |
 
 ### `compliance`
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
+| `MOA_LINEAGE_AUDIT_ROOT_SEED_HEX` | `compliance.lineage_audit_root_seed_hex` | _none_ | Optional 32-byte deployment root seed (hex or base64) deriving per-tenant audit-root signing keys |
 | `MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX` | `compliance.lineage_audit_signing_key_hex` | _none_ | Private key material used to verify lineage audit roots **(secret)** |
 | `MOA_LINEAGE_AUDIT_SIGNING_KEY_ID` | `compliance.lineage_audit_signing_key_id` | moa-lineage-audit-ops | Stable key identifier used for lineage audit-root signatures |
 | `MOA_PII_VAULT_SECRET_HEX` | `compliance.pii_vault_secret_hex` | _none_ | Optional secret used to compute PII-vault subject pseudonyms **(secret)** |
 | `MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX` | `compliance.privacy_approval_public_key_hex` | _none_ | Public key material used to verify signed privacy approval tokens **(secret)** |
 | `MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX` | `compliance.privacy_export_signing_key_hex` | _none_ | Private key material used to sign privacy export and lineage DSAR manifests **(secret)** |
 | `MOA_PRIVACY_EXPORT_SIGNING_KEY_ID` | `compliance.privacy_export_signing_key_id` | moa-privacy-export-ops | Stable key identifier recorded on privacy export manifests |
+| `MOA_REQUIRE_DUAL_CONTROL_FOR_ERASURE` | `compliance.require_dual_control_for_erasure` | false | When true, privacy erasure requires a four-eyes dual-control approval by a second, distinct tenant admin before it may execute |
+
+### `llm_dlp`
+
+| Variable | Config path | Default | Description |
+|---|---|---|---|
+| `MOA_LLM_DLP_TOKENIZE_ENABLED` | `llm_dlp.tokenize_enabled` | false | Tokenize restricted spans in outbound requests before they reach a provider, and detokenize the provider's response inside the trust boundary |
 
 ### `audit_security`
 
@@ -465,7 +509,19 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
+| `MOA_LEARNING_EMBEDDINGS_EXPERIENCE_BATCH_SIZE` | `learning.embeddings.experience_batch_size` | 128 | Maximum number of `experience_records` embedded per backfill tick |
+| `MOA_LEARNING_EMBEDDINGS_EXPERIENCE_LOOKBACK_DAYS` | `learning.embeddings.experience_lookback_days` | 30 | Only `experience_records` created within this many days are eligible for embedding backfill |
+| `MOA_LEARNING_EMBEDDINGS_SKILL_BATCH_SIZE` | `learning.embeddings.skill_batch_size` | 64 | Maximum number of published Skill artifacts embedded per backfill tick |
+| `MOA_LEARNING_RECURRENCE_CLUSTER_SIMILARITY` | `learning.recurrence.cluster_similarity` | 0.85 | Cosine-similarity threshold at which two exact-fingerprint groups merge into one semantic recurrence cluster |
+| `MOA_LEARNING_RECURRENCE_LOOKBACK_DAYS` | `learning.recurrence.lookback_days` | 30 | Lookback window, in days, over which recurring experiences are grouped |
+| `MOA_LEARNING_RECURRENCE_MAX_CANDIDATE_GROUPS` | `learning.recurrence.max_candidate_groups` | 200 | Upper bound on exact-fingerprint groups loaded per tenant per tick as clustering candidates |
+| `MOA_LEARNING_RECURRENCE_MIN_OCCURRENCES` | `learning.recurrence.min_occurrences` | 3 | Minimum resolved/partial experiences sharing one task fingerprint before recurrence dispatches distillation |
+| `MOA_LEARNING_RECURRENCE_REJECTION_COOLDOWN_DAYS` | `learning.recurrence.rejection_cooldown_days` | 30 | Suppression window, in days, after a reviewer rejects a fingerprint's candidate |
+| `MOA_LEARNING_RECURRENCE_RELAXED_MIN_TOOL_CALLS` | `learning.recurrence.relaxed_min_tool_calls` | 3 | Relaxed per-session tool-call floor applied to the recurrence exemplar |
+| `MOA_LEARNING_SEGMENTS_IDLE_GAP_MINUTES` | `learning.segments.idle_gap_minutes` | 30 | Idle gap, in minutes, that starts a new task segment when no LLM boundary signal is present |
+| `MOA_LEARNING_SKILLS_IMPROVE_ROUTE_SIMILARITY` | `learning.skills.improve_route_similarity` | 0.8 | Cosine-similarity floor at which filing-time routing improves the nearest existing skill instead of creating a new one |
 | `MOA_LEARNING_SKILLS_MIN_TOOL_CALLS` | `learning.skills.min_tool_calls` | 8 | Minimum tool-call count a segment must contain before it is eligible for skill distillation |
+| `MOA_LEARNING_SKILLS_PROPOSAL_DEDUP_SIMILARITY` | `learning.skills.proposal_dedup_similarity` | 0.85 | Cosine-similarity floor at which a new distilled experience is deduped into an open proposal as a sibling |
 
 ### `budgets`
 
@@ -496,7 +552,7 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 
 These `MOA_*` variables are **not** part of the typed overlay — they are read
 directly by test lanes, deploy scripts, or Docker Compose. They are allowlisted
-by the startup check (in `crates/moa-core/src/config/env_overlay.rs`) so they do
+by the startup check (in `crates/moa-config/src/env_overlay/mod.rs`) so they do
 not trip the unknown-variable audit. They do not affect application config.
 
 ### Approved prefixes
@@ -660,12 +716,12 @@ env:
 
 The overlay tables are produced from source, not hand-maintained. The
 `#[ignore]` dev test `dump_env_var_reference` in
-`crates/moa-core/src/config/env_overlay.rs` walks `EnvOverlay` and
+`crates/moa-config/src/env_overlay/mod.rs` walks `EnvOverlay` and
 `MoaConfig::default()` and prints `env_var | config_path | default` for every
 variable:
 
 ```bash
-cargo test -p moa-core dump_env_var_reference -- --ignored --nocapture
+cargo test -p moa-config dump_env_var_reference -- --ignored --nocapture
 ```
 
 Descriptions come from each config field's doc comment, resolved along the full

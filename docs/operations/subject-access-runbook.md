@@ -63,7 +63,6 @@ The tarball contains:
 - `relationships.jsonl`
 - `embeddings.jsonl`
 - `skills.jsonl`
-- `skill_addenda.jsonl`
 - `changelog.jsonl`
 - `README.md`
 - `manifest.json`

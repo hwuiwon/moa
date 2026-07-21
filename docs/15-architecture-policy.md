@@ -10,13 +10,14 @@ type instead of defining a lookalike.
 ### `moa-core`
 
 `moa-core` owns tenant primitives, platform RLS context, session/event DTOs,
-shared errors, config, and trait surfaces. It does not depend on the memory
-subsystem.
+shared errors, and trait surfaces. It does not depend on the memory
+subsystem. Runtime configuration (`MoaConfig`, its per-domain sub-configs, and
+the `EnvOverlay`) lives in the `moa-config` crate.
 
 Consumers import category-owned paths such as
 `moa_core::types::identifiers::TenantId`,
 `moa_core::types::session::SessionMeta`, `moa_core::events::Event`,
-`moa_core::config::MoaConfig`, and `moa_core::traits::SessionStore`. The crate
+and `moa_core::traits::SessionStore`. The crate
 root allowlist is exactly `MoaError`, `Result`, and `WORKSPACE_ID`; wildcard,
 prelude, and compatibility re-exports are forbidden. Domain-specific ports
 such as knowledge discovery and contact OTP delivery stay in their owning
@@ -24,7 +25,7 @@ domain crates rather than moving into `moa-core`.
 
 - IDs: `TenantId`, `StoragePartitionId` for storage partition internals, `UserId`, `SessionId`
 - Platform RLS context: `RlsContext`
-- Config and errors: `MoaConfig`, `MoaError`, `Result`
+- Errors: `MoaError`, `Result`
 - Session and event DTOs: `SessionMeta`, `SessionStatus`, `Event`,
   `EventRecord`, `EventStream`, `EventRange`, `EventFilter`
 - Trait surfaces: `BrainOrchestrator`, `SessionStore`, `BlobStore`,
@@ -54,18 +55,23 @@ governance, and retrieval boundaries without crate-local aliases or re-exports.
 |---|---|
 | `moa-auth/authz-schema` | OpenFGA object, relation, tuple, and model-version constants |
 | `moa-auth/authz` | OpenFGA client, authorization checks, transactional outbox, outbox poller |
-| `moa-auth/providers` | Local API-key auth, disabled auth, builtin approvals, null token vault, provider bundle construction |
+| `moa-auth/providers` | Local API-key auth, disabled auth, builtin approvals, null token vault, provider bundle construction, first-party OAuth 2.1 authorization server (`oauth_as`) |
 | `moa-auth/auth0` | Optional Auth0 and generic OIDC providers behind the `auth0` feature |
 | `moa-auth/fga-bootstrap` | OpenFGA bootstrap binary |
 
 ### Brain and retrieval
 
-`moa-brain` owns retrieval and context compilation:
+`moa-retrieval` owns retrieval:
 
-- `HybridRetriever`
+- `HybridRetriever` (`crates/moa-retrieval/src/retrieval/hybrid.rs`)
 - query planning DTOs
+
+`moa-brain` owns context compilation:
+
 - context processors and pipeline stages
-- reranker public surface used by retrieval
+
+The `Reranker` trait retrieval consumes lives in `moa-providers`. Shared wire
+DTOs for the public HTTP edge and orchestrator HTTP surface live in `moa-wire`.
 
 ### Placement Rules
 
@@ -80,7 +86,9 @@ governance, and retrieval boundaries without crate-local aliases or re-exports.
 | Embedding or vector-index type | `moa-memory/vector` |
 | Privacy classifier type | `moa-memory/pii` |
 | Ingestion pipeline DTO | `moa-memory/ingest` |
-| Retrieval or context pipeline type | `moa-brain` |
+| Retrieval type | `moa-retrieval` |
+| Context pipeline type | `moa-brain` |
+| Wire DTO for the HTTP surface | `moa-wire` |
 
 Anti-patterns:
 

@@ -1,8 +1,7 @@
 # ClickHouse Analytics Schema Contract
 
 _Source of truth for the tables shared by the analytics exporter
-(`moa-orchestrator`) and the analytics query backend (`moa-analytics`).
-See `docs/plans/clickhouse-analytics-read-models.md` for the design._
+(`moa-analytics-export`) and the analytics query backend (`moa-analytics`)._
 
 All tables live in the single configured database (`clickhouse.database`,
 default `moa`) — no separate `dims` database; dimension tables use a `dim_`
@@ -176,7 +175,7 @@ model_tier Nullable(String), ts DateTime64(6,'UTC'),
 export_version DateTime64(6,'UTC')`
 
 Row values must match the effective `tool_call_analytics` view logic
-(`V000001__session_baseline.sql:624`, from `V000008`, which adds the
+(`V000001__session_baseline.sql:396`, from `V000008`, which adds the
 constant `model_tier = 'main'`). `turn_number` is not a column of that view;
 the exporter stamps each tool call with its enclosing turn
 (`1 + count of earlier BrainResponses`, the same prefix function used for

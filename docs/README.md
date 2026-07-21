@@ -29,6 +29,7 @@ These docs describe the current MOA architecture as implemented in the Rust work
 | 20 | [Testing](20-testing.md) | Provider overrides and snapshot testing conventions |
 | 21 | [Tenant Knowledge Base](21-tenant-knowledge-base.md) | Linked-account ingestion, document parsing, and knowledge graph labels |
 | 22 | [Load And Chaos Testing](22-load-and-chaos-testing.md) | Load profiles, chaos scenarios, and staged validation |
+| 23 | [Environment Variables](23-environment-variables.md) | Runtime configuration reference for `MOA_*` variables and defaults |
 
 Supporting notes:
 

@@ -164,7 +164,7 @@ Run the boundary scanner after touching Restate handlers, workflows, runtime
 dependency wiring, domain repository seams, workspace crate dependencies,
 `moa-core` top-level re-exports, or central hotspot files such as
 `crates/moa-edge/src/routes.rs`,
-`crates/moa-core/src/config/env_overlay/mod.rs`, and
+`crates/moa-config/src/env_overlay/mod.rs`, and
 `crates/moa-orchestrator/src/workflows/turn_execution/mod.rs`:
 
 ```bash

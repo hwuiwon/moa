@@ -41,6 +41,11 @@ Self-hosted single-tenant deployments must work without Auth0 or any managed
 identity provider. `auth.provider = "disabled"` is only for isolated local
 tests and must not be exposed.
 
+MOA also ships a first-party OAuth 2.1 authorization server (authorization
+code + PKCE) in `crates/moa-auth/providers/src/oauth_as/`, exposed by
+`moa-edge` at `/oauth/authorize`, `/oauth/token`, `/oauth/introspect`, and
+`/oauth/revoke`.
+
 ## Authorization Rules
 
 Handlers that touch caller-owned data must call
@@ -94,7 +99,7 @@ deletes in the same transaction so stale FGA grants do not survive.
 |---|---|---|
 | `crates/moa-auth/authz-schema` | `moa-authz-schema` | OpenFGA object, relation, tuple, and model constants |
 | `crates/moa-auth/authz` | `moa-authz` | FGA client, `require_authz`, transactional outbox, poller |
-| `crates/moa-auth/providers` | `moa-auth-providers` | Local API keys, disabled auth, builtin approvals, null token vault |
+| `crates/moa-auth/providers` | `moa-auth-providers` | Local API keys, disabled auth, builtin approvals, null token vault, first-party OAuth 2.1 authorization server (`oauth_as`) |
 | `crates/moa-auth/auth0` | `moa-auth-providers-auth0` | Optional Auth0/OIDC, Token Vault, CIBA, and JWKS |
 | `crates/moa-auth/fga-bootstrap` | `moa-fga-bootstrap` | Idempotent OpenFGA store/model bootstrap |
 | `crates/moa-edge` | `moa-edge` | Public authn/proxy edge and identity header injection |

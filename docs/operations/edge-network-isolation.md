@@ -9,10 +9,13 @@ directly can impersonate any user or agent.
 
 ## Compose
 
-Restate ingress and orchestrator port 9080 are bound to the compose internal
-network only, never to host `0.0.0.0`. The default `docker-compose.yml` exposes
-only `moa-edge` publicly. If a developer needs localhost access for direct
-handler debugging, bind `127.0.0.1:10020:9080` in a developer-only override.
+Orchestrator handler port 9080 is bound to the compose internal network only.
+The default `docker-compose.yml` is a development stack, not an isolation
+boundary: it publishes Restate ingress, admin, and node ports on host ports
+`10010`/`10011`/`10012`, so anyone who can reach those host ports can call the
+trusted Restate ingress directly. Do not expose the compose stack to untrusted
+networks. If a developer needs localhost access for direct handler debugging,
+bind `127.0.0.1:10020:9080` in a developer-only override.
 
 ## Production / Kubernetes
 

@@ -149,22 +149,10 @@ override is blocked in production environments.
 
 ## Live And Billed Gates
 
-Live simulation provider tests are ignored by default and double-gated. Run
-them only with an explicit opt-in and provider credentials:
-
-```bash
-MOA_RUN_LIVE_SIMULATION_TESTS=1 cargo nextest run -p moa-orchestrator \
-  --test behavior_lab_simulation_e2e \
-  --features integration,provider-overrides \
-  --locked \
-  --run-ignored ignored-only \
-  live_behavior_lab_simulation_gate_requires_flag_and_provider_credentials
-```
-
-If `MOA_RUN_LIVE_SIMULATION_TESTS=1` is set but no `MOA_ANTHROPIC_API_KEY`,
-`MOA_OPENAI_API_KEY`, or `MOA_GOOGLE_API_KEY` is present, the test fails before any
-provider call. Do not put live or billed experiment checks in the default test
-lane.
+There is no live-provider simulation lane today:
+`behavior_lab_simulation_e2e` runs only against scripted provider fixtures via
+`MOA_PROVIDERS_OVERRIDE=scripted:<fixture>`. Do not put live or billed
+experiment checks in the default test lane.
 
 ## Authorization
 

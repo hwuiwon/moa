@@ -1241,7 +1241,7 @@ mod tests {
     /// Dumps every overlay variable with its config path and default, derived
     /// from `EnvOverlay` (serde field enumeration) and `MoaConfig::default()`,
     /// so the reference doc is never hand-transcribed. Run with:
-    /// `cargo test -p moa-core dump_env_var_reference -- --ignored --nocapture`.
+    /// `cargo test -p moa-config dump_env_var_reference -- --ignored --nocapture`.
     #[test]
     #[ignore = "dev tool: regenerates the env-var reference doc table"]
     fn dump_env_var_reference() {

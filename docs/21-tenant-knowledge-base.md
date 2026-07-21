@@ -29,7 +29,8 @@ the default retrieval path uses tenant knowledge only.
 | Graph labels, relational node/edge writes, SQL sidecars, and changelog rows | `moa-memory-graph` |
 | Embeddings and vector rows | `moa-memory-vector` |
 | Privacy classification and redaction | `moa-memory-pii` |
-| Retrieval fusion and context assembly | `moa-brain` |
+| Retrieval fusion and admission | `moa-retrieval` |
+| Context assembly | `moa-brain` |
 | Credential references and secret retrieval | `moa-security` through the `CredentialVault` trait |
 | Query-time citations, lineage, and audit sinks | `moa-lineage-*` |
 
@@ -148,7 +149,8 @@ account tokens, raw credential material, or unbounded raw source payloads.
 
 ## Retrieval Contract
 
-`moa-brain` owns retrieval assembly. When graph memory is enabled:
+`moa-retrieval` owns retrieval fusion and admission; `moa-brain` owns context
+assembly. When graph memory is enabled:
 
 - Contact sessions retrieve tenant knowledge and admitted contact memory.
 - Sessions without an admitted contact retrieve tenant knowledge only.

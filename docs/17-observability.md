@@ -16,7 +16,7 @@ session_turn
 
 | Span | Covers |
 |---|---|
-| `pipeline_compile` | Full context pipeline build. Processor spans such as `history_compiler` remain nested under it. |
+| `pipeline_compile` | Full context pipeline build. Processor spans such as `history` remain nested under it. |
 | `llm_call` | Provider request and streamed response lifetime, including TTFT. |
 | `tool_dispatch` | Tool-call coordination for the turn. Individual tools appear as spans such as `tool:file_read`. |
 | `event_persist` | Turn commit overhead: event writes, status updates, and post-turn store updates. |
@@ -38,17 +38,16 @@ Healthy trace shape:
 ```text
 session_turn
 ├── pipeline_compile
-│   ├── identity_processor
-│   ├── agent_instruction_processor
-│   ├── instruction_processor
-│   ├── tool_definition_processor
+│   ├── identity
+│   ├── agent_instructions
+│   ├── instructions
+│   ├── tools
 │   ├── query_rewrite
-│   ├── skill_injector
-│   ├── digest_processor
-│   ├── memory_retriever
-│   ├── history_compiler
-│   ├── runtime_context
-│   └── compactor
+│   ├── history
+│   ├── skills
+│   ├── memory_digest
+│   ├── graph_memory
+│   └── runtime_context
 ├── llm_call
 ├── tool_dispatch
 └── event_persist
@@ -233,10 +232,11 @@ When `[clickhouse]` is configured, two background flows carry their own
 metrics:
 
 - Lineage sink (rows to ClickHouse instead of Timescale):
-  `moa_lineage_compliance_chain_skipped_total` counts rows written without
-  `prev_hash` links because compliance chaining requires the Postgres backend
-  — a non-zero rate on a compliance tenant is a misconfiguration signal.
-- Analytics exporter (`moa-orchestrator/src/analytics_export/`):
+  `moa_lineage_written_total` counts durably written rows under either
+  backend. Compliance chaining requires the Postgres backend; the orchestrator
+  refuses to start with the ClickHouse backend while any compliance-enabled
+  tenant exists, so unchained compliance rows cannot occur.
+- Analytics exporter (`crates/moa-analytics-export/`):
   `moa_analytics_export_lag_seconds{table}` (gauge; freshness of each
   ClickHouse read model — the operative dashboard-staleness signal),
   `moa_analytics_export_rows_total{table}`,

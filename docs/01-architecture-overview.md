@@ -347,10 +347,8 @@ Core production bindings:
   `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`,
   `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy`
 - Workflows: `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`,
-  `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `TenantPurge`,
-  `TurnExecution`, `WorkerTurnExecution`
-
-Feature-gated bindings:
+  `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `SkillLearning`,
+  `TenantPurge`, `TurnExecution`, `WorkerTurnExecution`
 
 
 Internal application boundaries are in-process modules or domain crates behind
@@ -474,8 +472,8 @@ policy.
 | Optional checkpoints | Neon | branch manager for database checkpoints |
 | Security events | Postgres and S3 | OCSF v1.3 events in `security_events`, shipped to tenant audit buckets |
 
-The central migration inventory currently contains 98 `CREATE TABLE`
-statements covering 90 logical top-level table families. Every family has one
+The central migration inventory currently contains 119 `CREATE TABLE`
+statements covering 111 logical top-level table families. Every family has one
 owner in the `moa-migrations` ownership manifest, and
 `xtask check-migrations` rejects missing or stale ownership entries.
 

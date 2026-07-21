@@ -36,12 +36,7 @@ Core production Restate bindings:
 |---|---|
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
 | Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Eval`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
-| Workflow | `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `Consolidate`, `TurnExecution`, `WorkerTurnExecution`, `ExperimentRun`, `ExperimentTrialRun` |
-
-Feature-gated Restate bindings:
-
-| Feature | Additional bindings |
-|---|---|
+| Workflow | `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `Consolidate`, `SkillLearning`, `TurnExecution`, `WorkerTurnExecution`, `ExperimentRun`, `ExperimentTrialRun` |
 
 Internal application boundaries for action reviews, builtin async-authz
 challenges, learning review, experiments, privacy, provider routing, and memory
@@ -133,7 +128,7 @@ transition. Arbitrary tool-result payloads cannot trigger an upgrade.
 7. Apply turn outcome and update session status.
 8. Assess idle, cancelled, or completed segments and append `learning_log` entries.
 9. Derive experience records, attributions, and proposed learning candidates after assessment persistence.
-10. When skill learning is compiled, dispatch a detached `SkillLearning` workflow after experience persistence succeeds.
+10. Dispatch a detached `SkillLearning` workflow after experience persistence succeeds.
 
 The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries. Cancellation is delivered through a workflow promise; the workflow checks it at deterministic boundaries and races it against the in-flight LLM call. Awakeables are used for builtin async-authz challenges and worker result waits, not for tool action review or turn cancellation. Skill-learning proposal generation is intentionally detached: turn completion does not wait for a draft skill proposal, and generation failures are recorded as warning events rather than turn failures.
 
@@ -176,9 +171,10 @@ selects where the durable sink lands `turn_lineage` rows:
 Postgres always stays attached under both backends: `analytics.scores` (its
 rollups join OLTP experiment tables), lineage dead letters, and the compliance
 chain state do not move. Compliance hash chaining and `lineage verify` require
-the Postgres backend; when a compliance-enabled partition's rows land in
-ClickHouse the writer emits `moa_lineage_compliance_chain_skipped_total` and a
-warning, and rows carry only their per-row canonical `integrity_hash`.
+the Postgres backend; the orchestrator refuses to start with the ClickHouse
+lineage backend while any compliance-enabled tenant exists
+(`guard_compliance_backend`), rather than writing compliance rows without
+their hash-chain links.
 
 Locally, `docker compose --profile clickhouse up -d` starts a ClickHouse
 server on host port 10061; set `MOA_CLICKHOUSE_URL=http://clickhouse:8123`,
@@ -391,7 +387,7 @@ counter that invalidates stale delayed ticks after reconfiguration.
 
 ### Background Maintenance Jobs
 
-On boot, the orchestrator installs four periodic jobs via the `CronJob`
+On boot, the orchestrator installs eight periodic jobs via the `CronJob`
 virtual object:
 
 - `graph_memory_compact`: fires at HH:00 UTC every hour and invokes
@@ -401,6 +397,14 @@ virtual object:
   `GraphMemoryMaint/sync_vectors` with `limit = 512`.
 - `segment_materialized_views_refresh`: fires every 15 minutes and invokes
   `SessionStore/refresh_segment_materialized_views`.
+- `analytics_materialized_views_refresh`: fires every 15 minutes and invokes
+  `SessionStore/refresh_analytics_materialized_views`.
+- `skill_regression_monitor`: fires every 15 minutes and invokes
+  `SessionStore/monitor_skill_regressions`.
+- `task_recurrence_monitor`: fires every 15 minutes and invokes
+  `SessionStore/mine_task_recurrences`.
+- `learning_embeddings_backfill`: fires every 15 minutes and invokes
+  `SessionStore/backfill_learning_embeddings`.
 - `neon_prune_branches`: fires at 00:00, 06:00, 12:00, and 18:00 UTC and
   invokes `NeonMaint/prune_branches`. It is a no-op when `MOA_NEON_API_KEY` is
   unset.
@@ -436,7 +440,7 @@ The local compose stack still uses:
 - graph memory store, ingestion, and hybrid retrieval stack
 - the same context pipeline
 - the same tool router and permission store
-- the same draft skill proposal and review paths when skill learning is compiled
+- the same draft skill proposal and review paths
 
 Scheduling and recovery are Restate-managed in both local development and cloud
 deployments.

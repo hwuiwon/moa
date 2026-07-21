@@ -259,10 +259,11 @@ the extractor model:
 cargo run -p xtask --features eval-tools -- record-memory-extractions --corpus target/memory-eval/pr-natural
 ```
 
-The default fixture path is:
+The default fixture path is suffixed with the current
+`EXTRACTION_PROMPT_VERSION` (`v4`):
 
 ```bash
-crates/moa-eval/fixtures/memory/extractions-<corpus_id>-v2.jsonl
+crates/moa-eval/fixtures/memory/extractions-<corpus_id>-v4.jsonl
 ```
 
 Replay with no credentials required:
@@ -425,8 +426,10 @@ threshold can be recalibrated against real vectors.
 
 Object edges now carry deterministic typed labels for dependency and ownership
 predicates (`DEPENDS_ON`, `OWNED_BY`); subject attachment edges remain
-`RELATES_TO`. The ranking pipeline version is `8` because typed edges and graph
-candidate weighting change cacheable candidate pools.
+`RELATES_TO`. The ranking pipeline version was bumped because typed edges and
+graph candidate weighting change cacheable candidate pools; the current value
+is `16` (`RANKING_PIPELINE_VERSION` in
+`crates/moa-retrieval/src/retrieval/ranking.rs`).
 
 ## Nightly Live Lane
 

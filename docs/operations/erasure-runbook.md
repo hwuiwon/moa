@@ -44,6 +44,13 @@ The hosted privacy erase API verifies the token with `MOA_PRIVACY_APPROVAL_PUBLI
 non-dry-run erasures with matching candidates, it records the JTI in
 `moa.audit_jti_used` so the approval cannot be replayed.
 
+If the tenant opts into dual control by setting
+`ComplianceConfig.require_dual_control_for_erasure` (default `false`), the
+erase call additionally enforces a four-eyes gate: it consumes an approved
+`moa.dual_control_request` row (migration `V000344`) bound to this exact
+erasure request, approved by a distinct second admin. Without that approval,
+the erasure fails closed with 403.
+
 ## What gets erased
 
 For every active `moa.node_index` row in the authenticated tenant whose
@@ -85,7 +92,10 @@ no new changelog rows.
    or specified plus linked contacts.
 4. Generate a short-lived approval JWT with `op='erase'` and matching
    `tenant_id`.
-5. Call `POST /v1/privacy/erase` with `"dry_run": false`.
-6. Confirm `erased_count` matches the approved candidate count.
-7. Confirm a summary `op='erase'` changelog row exists for the subject.
-8. Confirm a second run with a fresh approval token returns `erased_count: 0`.
+5. If `require_dual_control_for_erasure` is enabled for the tenant, ensure a
+   second, distinct admin has approved the matching dual-control request
+   before the non-dry-run call.
+6. Call `POST /v1/privacy/erase` with `"dry_run": false`.
+7. Confirm `erased_count` matches the approved candidate count.
+8. Confirm a summary `op='erase'` changelog row exists for the subject.
+9. Confirm a second run with a fresh approval token returns `erased_count: 0`.
