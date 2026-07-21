@@ -9,7 +9,7 @@ use chrono::Duration;
 use moa_core::types::security::SensitivityClass;
 use moa_memory_graph::{EdgeLabel, GraphWalkScoring, NodeLabel};
 use moa_memory_ingest::{
-    DeterministicEntityMergeVerifier, IngestError, ScriptedFactExtractor, TurnChunk, extract_facts,
+    DeterministicEntityMergeVerifier, Error, ScriptedFactExtractor, TurnChunk, extract_facts,
     ingest_turn_direct_with_ctx,
 };
 use serde::Deserialize;
@@ -41,7 +41,7 @@ struct ExpectedFact {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct DurableIngestCounts {
+struct IngestCounts {
     graph_nodes: i64,
     graph_creates: i64,
     vectors: i64,
@@ -156,7 +156,7 @@ async fn slow_path_sealed_fact_and_entities_write_without_embeddings_db_memory()
     assert_eq!(report.failed, 0);
     assert_eq!(
         durable_ingest_counts(test_db.store().pool(), storage_partition_id).await,
-        DurableIngestCounts {
+        IngestCounts {
             graph_nodes: 3,
             graph_creates: 5,
             vectors: 0,
@@ -265,7 +265,7 @@ async fn duplicate_direct_ingest_attempt_skips_without_duplicate_durable_rows() 
     let after_first = durable_ingest_counts(test_db.store().pool(), storage_partition_id).await;
     assert_eq!(
         after_first,
-        DurableIngestCounts {
+        IngestCounts {
             graph_nodes: 3,
             graph_creates: 5,
             vectors: 1,
@@ -943,13 +943,13 @@ async fn slow_path_abstained_pii_writes_no_plaintext_or_derived_rows_db_memory()
     let source = std::error::Error::source(error.as_ref() as &(dyn std::error::Error + 'static))
         .expect("retryable handler error should preserve the ingestion error source");
     assert!(matches!(
-        source.downcast_ref::<IngestError>(),
-        Some(IngestError::PiiClassificationUnavailable { model_version })
+        source.downcast_ref::<Error>(),
+        Some(Error::PiiClassificationUnavailable { model_version })
             if model_version == "privacy-filter:test-fail-closed"
     ));
     assert_eq!(
         durable_ingest_counts(test_db.store().pool(), storage_partition_id).await,
-        DurableIngestCounts {
+        IngestCounts {
             graph_nodes: 0,
             graph_creates: 0,
             vectors: 0,
@@ -1005,8 +1005,8 @@ fn fact_uid_with_subject(rows: &[moa_memory_graph::NodeIndexRow], subject: &str)
         .expect("fact with expected subject should exist")
 }
 
-async fn durable_ingest_counts(pool: &PgPool, storage_partition_id: Uuid) -> DurableIngestCounts {
-    DurableIngestCounts {
+async fn durable_ingest_counts(pool: &PgPool, storage_partition_id: Uuid) -> IngestCounts {
+    IngestCounts {
         graph_nodes: count_storage_partition_rows(pool, storage_partition_id, "moa.node_index")
             .await,
         graph_creates: count_graph_create_rows(pool, storage_partition_id).await,

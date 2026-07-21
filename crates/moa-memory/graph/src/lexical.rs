@@ -4,7 +4,7 @@ use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use sqlx::PgPool;
 
-use crate::{GraphError, NodeIndexRow};
+use crate::{Error, NodeIndexRow};
 
 /// Thin lexical store for NER seed lookup through `name_tsv`.
 #[derive(Clone)]
@@ -48,11 +48,7 @@ impl LexicalStore {
     /// `0.55 * recency_decay + 0.35 * confidence + 0.10 * normalized_reference_count`,
     /// where recency decay is `1 / (1 + age_days)` and references are log-normalized up to
     /// 100 references.
-    pub async fn lookup_seeds(
-        &self,
-        name: &str,
-        limit: i64,
-    ) -> Result<Vec<NodeIndexRow>, GraphError> {
+    pub async fn lookup_seeds(&self, name: &str, limit: i64) -> Result<Vec<NodeIndexRow>, Error> {
         if limit <= 0 {
             return Ok(Vec::new());
         }

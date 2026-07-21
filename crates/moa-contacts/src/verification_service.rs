@@ -15,7 +15,7 @@ use crate::repository::{
     CreatedContactVerificationChallenge, consume_contact_verification_challenge,
     create_contact_verification_challenge,
 };
-use crate::{ContactError, Result};
+use crate::{Error, Result};
 
 /// Narrow outbound payload for one contact verification OTP.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,12 +80,12 @@ pub struct ContactVerificationStartCommand {
 }
 
 /// Coordinates persisted challenges with one injected OTP delivery implementation.
-pub struct ContactVerificationService<D> {
+pub struct ContactVerifier<D> {
     pool: sqlx::PgPool,
     delivery: D,
 }
 
-impl<D> ContactVerificationService<D>
+impl<D> ContactVerifier<D>
 where
     D: ContactOtpDelivery,
 {
@@ -163,7 +163,7 @@ where
 }
 
 /// Maps an outbound provider failure to the stable contact-service error contract.
-pub fn contact_delivery_error(error: MoaError) -> ContactError {
+pub fn contact_delivery_error(error: MoaError) -> Error {
     let error_kind = match &error {
         MoaError::ConfigError(_) | MoaError::MissingEnvironmentVariable(_) => "configuration",
         MoaError::ValidationError(_) => "validation",
@@ -180,18 +180,16 @@ pub fn contact_delivery_error(error: MoaError) -> ContactError {
     );
     match error {
         MoaError::ConfigError(_) | MoaError::MissingEnvironmentVariable(_) => {
-            ContactError::terminal(503, "contact delivery provider is not configured")
+            Error::terminal(503, "contact delivery provider is not configured")
         }
-        MoaError::ValidationError(_) => {
-            ContactError::terminal(400, "contact delivery request is invalid")
-        }
+        MoaError::ValidationError(_) => Error::terminal(400, "contact delivery request is invalid"),
         MoaError::RateLimited { .. } => {
-            ContactError::terminal(429, "contact delivery provider is rate limited")
+            Error::terminal(429, "contact delivery provider is rate limited")
         }
         MoaError::HttpStatus { status, .. } if (500..600).contains(&status) => {
-            ContactError::terminal(502, "contact delivery provider failed")
+            Error::terminal(502, "contact delivery provider failed")
         }
-        _ => ContactError::terminal(502, "contact delivery provider failed"),
+        _ => Error::terminal(502, "contact delivery provider failed"),
     }
 }
 

@@ -7,7 +7,7 @@ use moa_core::{
 };
 use uuid::Uuid;
 
-use crate::{ContactError, Result};
+use crate::{Error, Result};
 
 /// Persists a contact token grant for later revocation checks.
 pub async fn create_contact_token_grant(
@@ -47,7 +47,7 @@ pub async fn create_contact_token_grant(
     .bind(expires_at)
     .execute(&pool)
     .await
-    .map_err(|error| ContactError::database("insert contact token grant", error))?;
+    .map_err(|error| Error::database("insert contact token grant", error))?;
     Ok(())
 }
 
@@ -77,13 +77,10 @@ pub async fn ensure_contact_token_grant_active(
     .bind(claims.state.as_str())
     .fetch_one(pool)
     .await
-    .map_err(|error| ContactError::database("check contact token grant", error))?;
+    .map_err(|error| Error::database("check contact token grant", error))?;
     if active {
         Ok(())
     } else {
-        Err(ContactError::terminal(
-            401,
-            "contact token grant is not active",
-        ))
+        Err(Error::terminal(401, "contact token grant is not active"))
     }
 }

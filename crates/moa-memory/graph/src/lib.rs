@@ -19,7 +19,7 @@ pub mod write;
 
 pub use changelog::{ChangelogRecord, write_and_bump};
 pub use edge::{EdgeLabel, EdgeWriteIntent};
-pub use error::GraphError;
+pub use error::Error;
 pub use lexical::LexicalStore;
 pub use node::{
     ExistingSupersessionIntent, NodeContentUpdateIntent, NodeEmbeddingIntent, NodeExpiryIntent,
@@ -30,7 +30,7 @@ pub use store::PostgresGraphStore;
 pub use validity::push_validity_filter;
 
 /// Result type returned by graph-memory helpers.
-pub type Result<T> = std::result::Result<T, GraphError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// One path discovered while expanding graph retrieval seeds.
 #[derive(Debug, Clone, PartialEq)]
@@ -115,13 +115,13 @@ impl GraphTraversalDirection {
 }
 
 impl FromStr for GraphTraversalDirection {
-    type Err = GraphError;
+    type Err = Error;
 
     fn from_str(value: &str) -> Result<Self> {
         match value {
             "outgoing" => Ok(Self::Outgoing),
             "incoming" => Ok(Self::Incoming),
-            other => Err(GraphError::GraphQuery(format!(
+            other => Err(Error::GraphQuery(format!(
                 "unknown graph traversal direction `{other}`"
             ))),
         }
@@ -143,7 +143,7 @@ pub trait GraphStore: Send + Sync {
         _conn: &mut sqlx::PgConnection,
         _intent: NodeWriteIntent,
     ) -> Result<Uuid> {
-        Err(GraphError::Conflict(
+        Err(Error::Conflict(
             "caller-owned graph writes are not supported by this store".to_string(),
         ))
     }
@@ -159,7 +159,7 @@ pub trait GraphStore: Send + Sync {
     /// default implementation rejects the call for stores without relational
     /// reinforcement support.
     async fn reinforce_node(&self, _intent: NodeReinforcementIntent) -> Result<bool> {
-        Err(GraphError::Conflict(
+        Err(Error::Conflict(
             "node reinforcement is not supported by this store".to_string(),
         ))
     }

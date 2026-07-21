@@ -9,7 +9,7 @@ use moa_memory_vector::VectorStore;
 use sqlx::{PgConnection, PgPool};
 
 use crate::{
-    ExistingSupersessionIntent, GraphError, NodeContentUpdateIntent, NodeEmbeddingIntent,
+    Error, ExistingSupersessionIntent, NodeContentUpdateIntent, NodeEmbeddingIntent,
     NodeExpiryIntent, NodeWriteIntent,
 };
 
@@ -107,7 +107,7 @@ impl PostgresGraphStore {
         &self,
         conn: &mut PgConnection,
         intent: NodeWriteIntent,
-    ) -> Result<uuid::Uuid, GraphError> {
+    ) -> Result<uuid::Uuid, Error> {
         crate::write::create_node_in_conn(self, conn, intent).await
     }
 
@@ -115,33 +115,27 @@ impl PostgresGraphStore {
     pub async fn close_existing_node_with_supersession(
         &self,
         intent: ExistingSupersessionIntent,
-    ) -> Result<(), GraphError> {
+    ) -> Result<(), Error> {
         crate::write::close_existing_node_with_supersession(self, intent).await
     }
 
     /// Closes an active node without a replacement, at caller-provided instants.
-    pub async fn expire_node(&self, intent: NodeExpiryIntent) -> Result<bool, GraphError> {
+    pub async fn expire_node(&self, intent: NodeExpiryIntent) -> Result<bool, Error> {
         crate::write::expire_node(self, intent).await
     }
 
     /// Replaces a node's complete mutable content in place.
-    pub async fn update_node_content(
-        &self,
-        intent: NodeContentUpdateIntent,
-    ) -> Result<(), GraphError> {
+    pub async fn update_node_content(&self, intent: NodeContentUpdateIntent) -> Result<(), Error> {
         crate::write::update_node_content(self, intent).await
     }
 
     /// Attaches a vector embedding to an existing node.
-    pub async fn upsert_node_embedding(
-        &self,
-        intent: NodeEmbeddingIntent,
-    ) -> Result<(), GraphError> {
+    pub async fn upsert_node_embedding(&self, intent: NodeEmbeddingIntent) -> Result<(), Error> {
         crate::write::upsert_node_embedding(self, intent).await
     }
 
     /// Begins a scoped transaction when this store has an RLS context.
-    pub(crate) async fn begin(&self) -> Result<Option<ScopedConn<'_>>, GraphError> {
+    pub(crate) async fn begin(&self) -> Result<Option<ScopedConn<'_>>, Error> {
         let Some(scope) = &self.scope else {
             return Ok(None);
         };
@@ -151,7 +145,7 @@ impl PostgresGraphStore {
     }
 
     /// Begins a scoped transaction and fails when this store has no RLS context.
-    pub(crate) async fn begin_required(&self) -> Result<ScopedConn<'_>, GraphError> {
-        self.begin().await?.ok_or(GraphError::MissingScope)
+    pub(crate) async fn begin_required(&self) -> Result<ScopedConn<'_>, Error> {
+        self.begin().await?.ok_or(Error::MissingScope)
     }
 }

@@ -3,16 +3,16 @@
 use std::fs;
 use std::path::Path;
 
-use crate::error::{EvalError, Result};
+use crate::error::{Error, Result};
 use crate::types::{AgentConfig, TestSuite};
 
 /// Loads a test suite from a TOML file.
 pub fn load_suite(path: &Path) -> Result<TestSuite> {
-    let raw = fs::read_to_string(path).map_err(|source| EvalError::Io {
+    let raw = fs::read_to_string(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    let suite: TestSuite = toml::from_str(&raw).map_err(|source| EvalError::ParseToml {
+    let suite: TestSuite = toml::from_str(&raw).map_err(|source| Error::ParseToml {
         path: path.to_path_buf(),
         source,
     })?;
@@ -21,11 +21,11 @@ pub fn load_suite(path: &Path) -> Result<TestSuite> {
 
 /// Loads an agent config from a TOML file.
 pub fn load_agent_config(path: &Path) -> Result<AgentConfig> {
-    let raw = fs::read_to_string(path).map_err(|source| EvalError::Io {
+    let raw = fs::read_to_string(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    let config: AgentConfig = toml::from_str(&raw).map_err(|source| EvalError::ParseToml {
+    let config: AgentConfig = toml::from_str(&raw).map_err(|source| Error::ParseToml {
         path: path.to_path_buf(),
         source,
     })?;
@@ -34,7 +34,7 @@ pub fn load_agent_config(path: &Path) -> Result<AgentConfig> {
 
 fn validate_suite(path: &Path, suite: TestSuite) -> Result<TestSuite> {
     if suite.name.trim().is_empty() {
-        return Err(EvalError::InvalidConfig(format!(
+        return Err(Error::InvalidConfig(format!(
             "suite file {} is missing [suite].name",
             path.display()
         )));
@@ -44,7 +44,7 @@ fn validate_suite(path: &Path, suite: TestSuite) -> Result<TestSuite> {
 
 fn validate_agent_config(path: &Path, config: AgentConfig) -> Result<AgentConfig> {
     if config.name.trim().is_empty() {
-        return Err(EvalError::InvalidConfig(format!(
+        return Err(Error::InvalidConfig(format!(
             "agent config file {} is missing [agent].name",
             path.display()
         )));

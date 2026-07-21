@@ -18,7 +18,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::command::ServicePath;
-use super::{AgentRevisionVariantInput, MoaMcpServer, clamp_limit};
+use super::{AgentRevisionVariantInput, Server, clamp_limit};
 
 const EXPERIMENT_GENERATE_PLAN: ServicePath = ServicePath::new("/Experiments/generate_plan");
 const EXPERIMENT_LIST: ServicePath = ServicePath::new("/Experiments/list");
@@ -32,8 +32,8 @@ const EXPERIMENT_COMPARE: ServicePath = ServicePath::new("/Experiments/compare")
 const EXPERIMENT_PROPOSE: ServicePath = ServicePath::new("/Experiments/propose_improvements");
 
 /// Build the Behavior Lab experiment tool router.
-pub(super) fn router() -> rmcp::handler::server::router::tool::ToolRouter<MoaMcpServer> {
-    MoaMcpServer::experiments_router()
+pub(super) fn router() -> rmcp::handler::server::router::tool::ToolRouter<Server> {
+    Server::experiments_router()
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -126,7 +126,7 @@ struct ExperimentProposeInput {
 }
 
 #[tool_router(router = experiments_router)]
-impl MoaMcpServer {
+impl Server {
     /// Generate and store a draft experiment_plan artifact; validate and publish it separately.
     #[tool(annotations(
         read_only_hint = false,

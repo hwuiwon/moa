@@ -1,7 +1,7 @@
 //! Sentence-aware transcript chunking for slow-path ingestion.
 
 use crate::extract::{SessionTurn, TurnChunk};
-use crate::{IngestError, Result};
+use crate::{Error, Result};
 
 const APPROX_CHARS_PER_TOKEN: usize = 4;
 
@@ -17,11 +17,11 @@ pub fn chunk_turn(
     overlap_tokens: usize,
 ) -> Result<Vec<TurnChunk>> {
     if target_tokens == 0 {
-        return Err(IngestError::InvalidChunkTarget);
+        return Err(Error::InvalidChunkTarget);
     }
     let transcript = turn.transcript.trim();
     if transcript.is_empty() {
-        return Err(IngestError::EmptyTranscript);
+        return Err(Error::EmptyTranscript);
     }
 
     let target_chars = target_tokens.saturating_mul(APPROX_CHARS_PER_TOKEN).max(1);

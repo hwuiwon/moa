@@ -3,11 +3,11 @@
 use std::time::Duration;
 
 /// Result type returned by ingestion helper functions.
-pub type Result<T> = std::result::Result<T, IngestError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors returned by ingestion helper functions.
 #[derive(Debug, thiserror::Error)]
-pub enum IngestError {
+pub enum Error {
     /// The turn transcript is empty.
     #[error("turn transcript is empty")]
     EmptyTranscript,
@@ -72,7 +72,7 @@ pub enum IngestError {
     EntityResolution(String),
     /// Graph storage failed.
     #[error("graph: {0}")]
-    Graph(#[from] moa_memory_graph::GraphError),
+    Graph(#[from] moa_memory_graph::Error),
     /// JSON serialization or parsing failed.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),

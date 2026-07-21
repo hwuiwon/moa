@@ -7,7 +7,7 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::JsonObject;
 use serde_json::{Map, Value, json};
 
-use super::MoaMcpServer;
+use super::Server;
 
 #[derive(Clone, Copy)]
 enum DataKind {
@@ -50,7 +50,7 @@ impl ToolContract {
 }
 
 /// Replace terse macro-generated metadata with the complete model-facing contract.
-pub(super) fn enrich(router: &mut ToolRouter<MoaMcpServer>) {
+pub(super) fn enrich(router: &mut ToolRouter<Server>) {
     for route in router.map.values_mut() {
         let Some(contract) = contract_for(route.attr.name.as_ref()) else {
             continue;

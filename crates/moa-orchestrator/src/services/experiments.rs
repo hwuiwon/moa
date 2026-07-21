@@ -34,7 +34,7 @@ use moa_experiments::store::ExperimentStore;
 use moa_observability::record_experiment_learning_candidates;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_providers::ProviderRegistry;
-use moa_scoring::ScoringError;
+use moa_scoring::Error;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1119,12 +1119,12 @@ fn experiment_app_error_to_handler_error(error: ExperimentAppError) -> HandlerEr
     }
 }
 
-fn score_error_to_handler_error(error: ScoringError) -> HandlerError {
+fn score_error_to_handler_error(error: Error) -> HandlerError {
     match error {
-        ScoringError::IntegerTooLarge { .. } => {
+        Error::IntegerTooLarge { .. } => {
             TerminalError::new_with_code(400, error.to_string()).into()
         }
-        ScoringError::Sql(_) | ScoringError::ScoreRunMismatch { .. } => {
+        Error::Sql(_) | Error::ScoreRunMismatch { .. } => {
             TerminalError::new(error.to_string()).into()
         }
     }

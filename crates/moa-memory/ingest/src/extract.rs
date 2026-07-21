@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{IngestError, Result};
+use crate::{Error, Result};
 /// Maximum chunk length accepted by the checked deterministic extractor.
 pub const MAX_EXTRACT_CHUNK_CHARS: usize = 32_768;
 
@@ -188,7 +188,7 @@ pub fn extract_facts(chunks: &[TurnChunk]) -> Result<Vec<ExtractedFact>> {
     for chunk in chunks {
         let actual_chars = chunk.text.chars().count();
         if actual_chars > MAX_EXTRACT_CHUNK_CHARS {
-            return Err(IngestError::ChunkTooLarge {
+            return Err(Error::ChunkTooLarge {
                 index: chunk.index,
                 actual_chars,
                 max_chars: MAX_EXTRACT_CHUNK_CHARS,

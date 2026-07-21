@@ -70,9 +70,8 @@ use moa_orchestrator::services::knowledge::{
     KnowledgeWebhookVerifier, ParserWebhookVerifier, StaticKnowledgeProviders,
 };
 use moa_orchestrator::workflows::knowledge_sync_ingestion::{
-    KnowledgeSyncIngestionDurableSteps, KnowledgeSyncIngestionRequest,
-    KnowledgeSyncPageApplication, KnowledgeSyncPreparedRun, KnowledgeSyncProviderPage,
-    run_knowledge_sync_ingestion_workflow,
+    KnowledgeSyncIngestionRequest, KnowledgeSyncIngestionSteps, KnowledgeSyncPageApplication,
+    KnowledgeSyncPreparedRun, KnowledgeSyncProviderPage, run_knowledge_sync_ingestion_workflow,
 };
 use reqwest::header::HeaderMap;
 use restate_sdk::prelude::{HandlerError, TerminalError};
@@ -190,7 +189,7 @@ struct FakeFailCall {
 }
 
 #[async_trait]
-impl KnowledgeSyncIngestionDurableSteps for FakeKnowledgeSyncIngestionSteps {
+impl KnowledgeSyncIngestionSteps for FakeKnowledgeSyncIngestionSteps {
     async fn prepare_ingestion_run(
         &mut self,
         request: &KnowledgeSyncIngestionRequest,
@@ -405,7 +404,7 @@ impl DbKnowledgeAutoSyncSteps {
 }
 
 #[async_trait]
-impl KnowledgeSyncIngestionDurableSteps for DbKnowledgeAutoSyncSteps {
+impl KnowledgeSyncIngestionSteps for DbKnowledgeAutoSyncSteps {
     async fn prepare_ingestion_run(
         &mut self,
         request: &KnowledgeSyncIngestionRequest,

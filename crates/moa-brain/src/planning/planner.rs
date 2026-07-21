@@ -5,7 +5,7 @@ use std::sync::Arc;
 use chrono::{DateTime, NaiveDate, Utc};
 use moa_core::types::security::SensitivityClass;
 use moa_core::{error::MoaError, traits::EmbeddingProvider};
-use moa_memory_graph::{GraphError, GraphStore, NodeLabel};
+use moa_memory_graph::{Error, GraphStore, NodeLabel};
 use moa_memory_types::MemoryScope;
 use uuid::Uuid;
 
@@ -22,7 +22,7 @@ pub type Result<T> = std::result::Result<T, PlanError>;
 pub enum PlanError {
     /// Graph seed lookup failed.
     #[error("graph seed lookup failed: {0}")]
-    Graph(#[from] GraphError),
+    Graph(#[from] Error),
     /// Query embedding failed.
     #[error("query embedding failed: {0}")]
     Embed(#[from] MoaError),

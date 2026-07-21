@@ -13,13 +13,13 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{MoaMcpServer, clamp_limit, request_identity_and_headers, result, tenant_request};
+use super::{Server, clamp_limit, request_identity_and_headers, result, tenant_request};
 use crate::routes::dashboard::sessions::{decode_cursor, encode_cursor};
 use crate::routes::{analytics, lineage};
 
 /// Build the observation-domain tool router.
-pub(super) fn router() -> rmcp::handler::server::router::tool::ToolRouter<MoaMcpServer> {
-    MoaMcpServer::analytics_sessions_router()
+pub(super) fn router() -> rmcp::handler::server::router::tool::ToolRouter<Server> {
+    Server::analytics_sessions_router()
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -170,7 +170,7 @@ struct LearningCandidatesInput {
 }
 
 #[tool_router(router = analytics_sessions_router)]
-impl MoaMcpServer {
+impl Server {
     /// Return the curated analytics datasets, dimensions, measures, and operators.
     #[tool(annotations(
         read_only_hint = true,
@@ -207,10 +207,8 @@ impl MoaMcpServer {
         };
         match analytics::query(&self.state, request).await {
             Ok(response) => result::success("Completed analytics query.", &response),
-            Err(moa_analytics::AnalyticsError::Execution(error))
-            | Err(moa_analytics::AnalyticsError::ClickHouse(error)) => {
-                read_error("analytics query", error)
-            }
+            Err(moa_analytics::Error::Execution(error))
+            | Err(moa_analytics::Error::ClickHouse(error)) => read_error("analytics query", error),
             Err(error) => result::execution_error(error.to_string()),
         }
     }

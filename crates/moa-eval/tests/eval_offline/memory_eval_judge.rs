@@ -13,7 +13,7 @@ use moa_core::{
 use moa_eval::memory_eval::{
     AnswerJudge, DeterministicJudge, JudgeInput, PairwiseLlmJudge, PairwiseWinner, ProbeType,
 };
-use moa_eval_core::EvalError;
+use moa_eval_core::Error as EvalError;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 

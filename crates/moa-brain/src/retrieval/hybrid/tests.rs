@@ -38,7 +38,7 @@ fn lineage_sampling_is_deterministic_and_respects_rate_bounds() {
 
 use moa_core::types::security::SensitivityClass;
 use moa_core::{types::identifiers::TenantId, types::memory::RlsContext};
-use moa_memory_graph::GraphError;
+use moa_memory_graph::Error;
 use moa_memory_types::MemoryScope;
 use moa_providers::{RerankHit, Reranker};
 use serde_json::Value;
@@ -1466,10 +1466,10 @@ fn retrieval_error_classification_matches_fatal_transient_table() {
         moa_core::error::MoaError::StorageError("scope".to_string())
     )));
     assert!(is_fatal_retrieval_error(&RetrievalError::Graph(
-        GraphError::RlsDenied
+        Error::RlsDenied
     )));
     assert!(is_fatal_retrieval_error(&RetrievalError::Graph(
-        GraphError::MissingScope
+        Error::MissingScope
     )));
     assert!(is_fatal_retrieval_error(&RetrievalError::Vector(
         VectorError::TurbopufferBaaRequired {
@@ -1496,7 +1496,7 @@ fn retrieval_error_classification_matches_fatal_transient_table() {
         }
     )));
     assert!(!is_fatal_retrieval_error(&RetrievalError::Graph(
-        GraphError::GraphQuery("backend hiccup".to_string())
+        Error::GraphQuery("backend hiccup".to_string())
     )));
 }
 
@@ -2000,7 +2000,7 @@ impl GraphStore for EmptyGraph {
     async fn create_node(
         &self,
         _intent: moa_memory_graph::NodeWriteIntent,
-    ) -> std::result::Result<Uuid, GraphError> {
+    ) -> std::result::Result<Uuid, Error> {
         unreachable!("not used by retrieval tests")
     }
 
@@ -2008,15 +2008,11 @@ impl GraphStore for EmptyGraph {
         &self,
         _old_uid: Uuid,
         _intent: moa_memory_graph::NodeWriteIntent,
-    ) -> std::result::Result<Uuid, GraphError> {
+    ) -> std::result::Result<Uuid, Error> {
         unreachable!("not used by retrieval tests")
     }
 
-    async fn invalidate_node(
-        &self,
-        _uid: Uuid,
-        _reason: &str,
-    ) -> std::result::Result<(), GraphError> {
+    async fn invalidate_node(&self, _uid: Uuid, _reason: &str) -> std::result::Result<(), Error> {
         unreachable!("not used by retrieval tests")
     }
 
@@ -2024,18 +2020,18 @@ impl GraphStore for EmptyGraph {
         &self,
         _uid: Uuid,
         _redaction_marker: &str,
-    ) -> std::result::Result<(), GraphError> {
+    ) -> std::result::Result<(), Error> {
         unreachable!("not used by retrieval tests")
     }
 
     async fn create_edge(
         &self,
         _intent: moa_memory_graph::EdgeWriteIntent,
-    ) -> std::result::Result<Uuid, GraphError> {
+    ) -> std::result::Result<Uuid, Error> {
         unreachable!("not used by retrieval tests")
     }
 
-    async fn get_node(&self, _uid: Uuid) -> std::result::Result<Option<NodeIndexRow>, GraphError> {
+    async fn get_node(&self, _uid: Uuid) -> std::result::Result<Option<NodeIndexRow>, Error> {
         Ok(None)
     }
 
@@ -2045,7 +2041,7 @@ impl GraphStore for EmptyGraph {
         _hops: u8,
         _edge_filter: Option<&[moa_memory_graph::EdgeLabel]>,
         _as_of: Option<DateTime<Utc>>,
-    ) -> std::result::Result<Vec<NodeIndexRow>, GraphError> {
+    ) -> std::result::Result<Vec<NodeIndexRow>, Error> {
         Ok(Vec::new())
     }
 
@@ -2055,7 +2051,7 @@ impl GraphStore for EmptyGraph {
         _max_hops: u8,
         _as_of: Option<DateTime<Utc>>,
         _scoring: &moa_memory_graph::GraphWalkScoring,
-    ) -> std::result::Result<Vec<moa_memory_graph::GraphExpansionHit>, GraphError> {
+    ) -> std::result::Result<Vec<moa_memory_graph::GraphExpansionHit>, Error> {
         Ok(Vec::new())
     }
 
@@ -2064,7 +2060,7 @@ impl GraphStore for EmptyGraph {
         _name: &str,
         _limit: i64,
         _as_of: Option<DateTime<Utc>>,
-    ) -> std::result::Result<Vec<NodeIndexRow>, GraphError> {
+    ) -> std::result::Result<Vec<NodeIndexRow>, Error> {
         Ok(Vec::new())
     }
 }

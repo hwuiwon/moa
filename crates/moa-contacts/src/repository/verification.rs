@@ -10,7 +10,7 @@ use moa_core::{
 use uuid::Uuid;
 
 use crate::domain::{hash_verification_code, parse_contact_point_kind};
-use crate::{ContactError, Result};
+use crate::{Error, Result};
 
 use super::channel_accounts::upsert_verified_contact_point_channel_account;
 use super::contacts::{ensure_contact_in_tenant, insert_contact_point, load_contact_ref};
@@ -36,7 +36,7 @@ pub(crate) async fn create_contact_verification_challenge(
     let mut transaction = pool
         .begin()
         .await
-        .map_err(|error| ContactError::database("begin contact verification", error))?;
+        .map_err(|error| Error::database("begin contact verification", error))?;
     ensure_contact_in_tenant(&mut transaction, tenant_id, contact_id).await?;
     let contact_point = insert_contact_point(
         &mut transaction,
@@ -65,9 +65,7 @@ pub(crate) async fn create_contact_verification_challenge(
     .bind(tenant_id.0)
     .execute(&mut *transaction)
     .await
-    .map_err(|error| {
-        ContactError::database("close previous contact verification challenges", error)
-    })?;
+    .map_err(|error| Error::database("close previous contact verification challenges", error))?;
     sqlx::query(
         r#"
         INSERT INTO contact_verification_challenges
@@ -84,11 +82,11 @@ pub(crate) async fn create_contact_verification_challenge(
     .bind(expires_at)
     .execute(&mut *transaction)
     .await
-    .map_err(|error| ContactError::database("insert contact verification challenge", error))?;
+    .map_err(|error| Error::database("insert contact verification challenge", error))?;
     transaction
         .commit()
         .await
-        .map_err(|error| ContactError::database("commit contact verification", error))?;
+        .map_err(|error| Error::database("commit contact verification", error))?;
     Ok(CreatedContactVerificationChallenge {
         challenge_id,
         code,
@@ -108,7 +106,7 @@ pub async fn complete_contact_verification(
     let mut transaction = pool
         .begin()
         .await
-        .map_err(|error| ContactError::database("begin contact verification completion", error))?;
+        .map_err(|error| Error::database("begin contact verification completion", error))?;
     let challenge = sqlx::query(
         r#"
         SELECT c.contact_point_id, c.code_hash, c.expires_at, c.consumed_at, c.attempts,
@@ -124,25 +122,19 @@ pub async fn complete_contact_verification(
     .bind(tenant_id.0)
     .fetch_optional(&mut *transaction)
     .await
-    .map_err(|error| ContactError::database("load contact verification challenge", error))?
-    .ok_or_else(|| ContactError::terminal(404, "verification challenge not found"))?;
+    .map_err(|error| Error::database("load contact verification challenge", error))?
+    .ok_or_else(|| Error::terminal(404, "verification challenge not found"))?;
     let consumed_at = challenge.col::<Option<DateTime<Utc>>>("consumed_at")?;
     if consumed_at.is_some() {
-        return Err(ContactError::terminal(
-            409,
-            "verification challenge already used",
-        ));
+        return Err(Error::terminal(409, "verification challenge already used"));
     }
     let expires_at = challenge.col::<DateTime<Utc>>("expires_at")?;
     if expires_at < Utc::now() {
-        return Err(ContactError::terminal(
-            410,
-            "verification challenge expired",
-        ));
+        return Err(Error::terminal(410, "verification challenge expired"));
     }
     let attempts = challenge.col::<i32>("attempts")?;
     if attempts >= MAX_VERIFICATION_ATTEMPTS {
-        return Err(ContactError::terminal(
+        return Err(Error::terminal(
             429,
             "verification challenge attempts exceeded",
         ));
@@ -164,11 +156,12 @@ pub async fn complete_contact_verification(
         .bind(MAX_VERIFICATION_ATTEMPTS)
         .execute(&mut *transaction)
         .await
-        .map_err(|error| ContactError::database("increment verification attempts", error))?;
-        transaction.commit().await.map_err(|error| {
-            ContactError::database("commit invalid verification attempt", error)
-        })?;
-        return Err(ContactError::terminal(403, "invalid verification code"));
+        .map_err(|error| Error::database("increment verification attempts", error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| Error::database("commit invalid verification attempt", error))?;
+        return Err(Error::terminal(403, "invalid verification code"));
     }
 
     let point_id = ContactPointId(challenge.col::<Uuid>("contact_point_id")?);
@@ -198,7 +191,7 @@ pub async fn complete_contact_verification(
         .bind(tenant_id.0)
         .execute(&mut *transaction)
         .await
-        .map_err(|error| ContactError::database("merge contact", error))?;
+        .map_err(|error| Error::database("merge contact", error))?;
     } else {
         sqlx::query(
             r#"
@@ -210,7 +203,7 @@ pub async fn complete_contact_verification(
         .bind(point_id.0)
         .execute(&mut *transaction)
         .await
-        .map_err(|error| ContactError::database("mark contact point verified", error))?;
+        .map_err(|error| Error::database("mark contact point verified", error))?;
         sqlx::query(
             "UPDATE contacts SET state = 'verified', updated_at = NOW() WHERE id = $1 AND tenant_id = $2",
         )
@@ -218,7 +211,7 @@ pub async fn complete_contact_verification(
         .bind(tenant_id.0)
         .execute(&mut *transaction)
         .await
-        .map_err(|error| ContactError::database("mark contact verified", error))?;
+        .map_err(|error| Error::database("mark contact verified", error))?;
         upsert_verified_contact_point_channel_account(
             &mut transaction,
             tenant_id,
@@ -243,20 +236,18 @@ pub async fn complete_contact_verification(
     .bind(tenant_id.0)
     .execute(&mut *transaction)
     .await
-    .map_err(|error| {
-        ContactError::database("revoke pre-verification contact token grants", error)
-    })?;
+    .map_err(|error| Error::database("revoke pre-verification contact token grants", error))?;
 
     sqlx::query("UPDATE contact_verification_challenges SET consumed_at = NOW() WHERE id = $1")
         .bind(challenge_id.0)
         .execute(&mut *transaction)
         .await
-        .map_err(|error| ContactError::database("consume contact verification challenge", error))?;
+        .map_err(|error| Error::database("consume contact verification challenge", error))?;
 
     transaction
         .commit()
         .await
-        .map_err(|error| ContactError::database("commit contact verification completion", error))?;
+        .map_err(|error| Error::database("commit contact verification completion", error))?;
 
     load_contact_ref(pool, tenant_id, canonical_id.unwrap_or(contact_id)).await
 }
@@ -304,5 +295,5 @@ async fn existing_verified_contact(
     .fetch_optional(&mut **tx)
     .await
     .map(|value| value.map(ContactId))
-    .map_err(|error| ContactError::database("find existing verified contact", error))
+    .map_err(|error| Error::database("find existing verified contact", error))
 }

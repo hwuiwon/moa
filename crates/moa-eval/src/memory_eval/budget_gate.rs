@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 use serde_json::Value;
 
 use super::{
@@ -38,21 +38,21 @@ pub struct MinMetricFloor {
 }
 
 impl FromStr for MinMetricFloor {
-    type Err = EvalError;
+    type Err = Error;
 
     /// Parses a `name=value` floor as accepted by `--min-metric`.
     fn from_str(raw: &str) -> Result<Self> {
         let (name, value) = raw.split_once('=').ok_or_else(|| {
-            EvalError::InvalidConfig(format!("min-metric value `{raw}` must use name=value"))
+            Error::InvalidConfig(format!("min-metric value `{raw}` must use name=value"))
         })?;
         let name = name.trim();
         if name.is_empty() {
-            return Err(EvalError::InvalidConfig(format!(
+            return Err(Error::InvalidConfig(format!(
                 "min-metric value `{raw}` has an empty metric name"
             )));
         }
         let floor = value.trim().parse::<f64>().map_err(|error| {
-            EvalError::InvalidConfig(format!(
+            Error::InvalidConfig(format!(
                 "parse min-metric floor `{value}` for `{name}`: {error}"
             ))
         })?;
@@ -220,11 +220,11 @@ fn render_outcome(
 async fn load_json_value(path: &Path) -> Result<Value> {
     let raw = tokio::fs::read_to_string(path)
         .await
-        .map_err(|source| EvalError::Io {
+        .map_err(|source| Error::Io {
             path: path.to_path_buf(),
             source,
         })?;
-    serde_json::from_str(&raw).map_err(|source| EvalError::ParseJson {
+    serde_json::from_str(&raw).map_err(|source| Error::ParseJson {
         path: path.to_path_buf(),
         source,
     })
@@ -233,11 +233,11 @@ async fn load_json_value(path: &Path) -> Result<Value> {
 async fn load_memory_retrieval_report(path: &Path) -> Result<MemoryRetrievalEvalReport> {
     let raw = tokio::fs::read_to_string(path)
         .await
-        .map_err(|source| EvalError::Io {
+        .map_err(|source| Error::Io {
             path: path.to_path_buf(),
             source,
         })?;
-    serde_json::from_str(&raw).map_err(|source| EvalError::ParseJson {
+    serde_json::from_str(&raw).map_err(|source| Error::ParseJson {
         path: path.to_path_buf(),
         source,
     })
@@ -378,15 +378,15 @@ fn min_metric_violations(report: &Value, floors: &[MinMetricFloor]) -> Vec<Budge
 fn resolve_metric_number(report: &Value, name: &str) -> Result<f64> {
     let mut current = report
         .get("metrics")
-        .ok_or_else(|| EvalError::InvalidConfig("report is missing metrics object".to_string()))?;
+        .ok_or_else(|| Error::InvalidConfig("report is missing metrics object".to_string()))?;
     for part in name.split('.') {
         if part.is_empty() {
-            return Err(EvalError::InvalidConfig(format!(
+            return Err(Error::InvalidConfig(format!(
                 "metric path `{name}` contains an empty segment"
             )));
         }
         current = current.get(part).ok_or_else(|| {
-            EvalError::InvalidConfig(format!("metric `{name}` is missing path segment `{part}`"))
+            Error::InvalidConfig(format!("metric `{name}` is missing path segment `{part}`"))
         })?;
     }
     if let Some(value) = current.as_f64() {
@@ -395,7 +395,7 @@ fn resolve_metric_number(report: &Value, name: &str) -> Result<f64> {
     if let Some(value) = current.get("value").and_then(Value::as_f64) {
         return Ok(value);
     }
-    Err(EvalError::InvalidConfig(format!(
+    Err(Error::InvalidConfig(format!(
         "metric `{name}` did not resolve to a numeric value"
     )))
 }

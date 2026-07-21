@@ -22,7 +22,7 @@ use uuid::Uuid;
 use super::io::{read_jsonl, write_jsonl};
 use super::{LedgerFact, SyntheticSession, SyntheticTurn, validate_ledger, validate_sessions};
 use super::{stable_uuid_from_label, tenant_id_from_storage_partition_id};
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 
 const CHUNK_TARGET_TOKENS: usize = 700;
 const CHUNK_OVERLAP_TOKENS: usize = 100;
@@ -278,7 +278,7 @@ pub async fn resolve_gold_nodes(
         let report = ingest_turn_direct_with_ctx(turn_ctx, turn.clone())
             .await
             .map_err(|error| {
-                EvalError::InvalidConfig(format!(
+                Error::InvalidConfig(format!(
                     "gold ingestion failed for session {} turn {}: {error:?}",
                     turn.session_id, turn.turn_seq
                 ))
@@ -294,7 +294,7 @@ pub async fn resolve_gold_nodes(
     let mut records = Vec::with_capacity(ledger.len());
     for fact in sorted_facts(ledger) {
         let source = sources.get(&fact.fact_id).ok_or_else(|| {
-            EvalError::InvalidConfig(format!(
+            Error::InvalidConfig(format!(
                 "ledger fact {} has no matching synthetic source turn",
                 fact.fact_id
             ))
@@ -561,13 +561,13 @@ async fn expected_fact_hashes(
         barrier: None,
     };
     let chunks = chunk_turn(&turn, CHUNK_TARGET_TOKENS, CHUNK_OVERLAP_TOKENS).map_err(|error| {
-        EvalError::InvalidConfig(format!(
+        Error::InvalidConfig(format!(
             "failed to chunk source turn for fact {}: {error}",
             fact.fact_id
         ))
     })?;
     let extracted = extractor.extract(&chunks).await.map_err(|error| {
-        EvalError::InvalidConfig(format!(
+        Error::InvalidConfig(format!(
             "failed to extract expected source facts for {}: {error}",
             fact.fact_id
         ))
@@ -587,7 +587,7 @@ async fn expected_fact_hashes(
                 ));
         if candidate_matches {
             let hash = fact_hash(&candidate).map_err(|error| {
-                EvalError::InvalidConfig(format!(
+                Error::InvalidConfig(format!(
                     "failed to hash extracted source fact {}: {error}",
                     fact.fact_id
                 ))
@@ -824,7 +824,7 @@ fn sources_by_fact_id<'a>(
         for turn in &session.turns {
             for fact_id in &turn.fact_ids {
                 let Some(fact) = facts.get(fact_id.as_str()) else {
-                    return Err(EvalError::InvalidConfig(format!(
+                    return Err(Error::InvalidConfig(format!(
                         "synthetic session {} turn {} references missing fact_id {}",
                         session.session_id, turn.turn_seq, fact_id
                     )));
@@ -832,7 +832,7 @@ fn sources_by_fact_id<'a>(
                 if fact.source_session_id != session.session_id
                     || fact.source_turn_seq != turn.turn_seq
                 {
-                    return Err(EvalError::InvalidConfig(format!(
+                    return Err(Error::InvalidConfig(format!(
                         "ledger fact {} source {}:{} does not match synthetic turn {}:{}",
                         fact.fact_id,
                         fact.source_session_id,
@@ -845,7 +845,7 @@ fn sources_by_fact_id<'a>(
                     .insert(fact_id.clone(), FactSource { session, turn })
                     .is_some()
                 {
-                    return Err(EvalError::InvalidConfig(format!(
+                    return Err(Error::InvalidConfig(format!(
                         "ledger fact {fact_id} appears in multiple synthetic turns"
                     )));
                 }
@@ -855,7 +855,7 @@ fn sources_by_fact_id<'a>(
 
     for fact in facts.values() {
         if !sources.contains_key(&fact.fact_id) {
-            return Err(EvalError::InvalidConfig(format!(
+            return Err(Error::InvalidConfig(format!(
                 "ledger fact {} has no matching synthetic turn",
                 fact.fact_id
             )));
@@ -888,7 +888,7 @@ pub(crate) fn dominant_pii_class(
     let mut class = "none";
     for fact_id in &turn.fact_ids {
         let fact = facts.get(fact_id.as_str()).ok_or_else(|| {
-            EvalError::InvalidConfig(format!(
+            Error::InvalidConfig(format!(
                 "synthetic turn {} references missing fact_id {}",
                 turn.turn_seq, fact_id
             ))
@@ -909,7 +909,7 @@ pub(crate) fn turn_finalized_at(
     let mut timestamps = Vec::new();
     for fact_id in &turn.fact_ids {
         let fact = facts.get(fact_id.as_str()).ok_or_else(|| {
-            EvalError::InvalidConfig(format!(
+            Error::InvalidConfig(format!(
                 "synthetic turn {} references missing fact_id {}",
                 turn.turn_seq, fact_id
             ))
@@ -920,9 +920,7 @@ pub(crate) fn turn_finalized_at(
         return Ok(timestamp);
     }
     DateTime::<Utc>::from_timestamp(0, 0).ok_or_else(|| {
-        EvalError::InvalidConfig(
-            "failed to construct deterministic empty-turn timestamp".to_string(),
-        )
+        Error::InvalidConfig("failed to construct deterministic empty-turn timestamp".to_string())
     })
 }
 
@@ -930,7 +928,7 @@ pub(crate) fn facts_by_id(ledger: &[LedgerFact]) -> Result<HashMap<&str, &Ledger
     let mut facts = HashMap::new();
     for fact in ledger {
         if facts.insert(fact.fact_id.as_str(), fact).is_some() {
-            return Err(EvalError::InvalidConfig(format!(
+            return Err(Error::InvalidConfig(format!(
                 "duplicate ledger fact_id {}",
                 fact.fact_id
             )));

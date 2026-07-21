@@ -2,7 +2,7 @@
 
 use moa_authz::{enqueue, enqueue_raw};
 use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
-use moa_contacts::ContactError;
+use moa_contacts::Error;
 use moa_contacts::domain::{
     contact_id_from_claims, low_assurance_scopes, require_contact_agent_allowlist,
     require_contact_agent_permission, require_contact_scope, require_contact_session_permission,
@@ -13,7 +13,7 @@ use moa_contacts::repository::{
     issue_contact, load_contact_ref, promoted_from_contact, resolve_contact_session_channel,
 };
 use moa_contacts::verification_service::{
-    ContactVerificationService, ContactVerificationStartCommand, contact_delivery_error,
+    ContactVerificationStartCommand, ContactVerifier, contact_delivery_error,
 };
 use moa_core::traits::{Identity, IdentityType, SessionChannelBindingUpdate};
 use moa_core::wire::turn::{QueueMessageRequest, SessionProgress, SessionProgressRequest};
@@ -279,7 +279,7 @@ impl Contacts for ContactsImpl {
                 )
                 .await
                 .map_err(|error| contact_error_handler_error(contact_delivery_error(error)))?;
-                ContactVerificationService::new(pool, delivery)
+                ContactVerifier::new(pool, delivery)
                     .start_verification(ContactVerificationStartCommand {
                         tenant_id,
                         contact_id,
@@ -1116,12 +1116,10 @@ fn contact_identity(contact_id: ContactId, tenant_id: TenantId) -> Identity {
     }
 }
 
-fn contact_error_handler_error(error: ContactError) -> HandlerError {
+fn contact_error_handler_error(error: Error) -> HandlerError {
     match error {
-        ContactError::Terminal { code, message } => {
-            TerminalError::new_with_code(code, message).into()
-        }
-        ContactError::SessionStore(MoaError::SessionNotFound(_)) => {
+        Error::Terminal { code, message } => TerminalError::new_with_code(code, message).into(),
+        Error::SessionStore(MoaError::SessionNotFound(_)) => {
             TerminalError::new_with_code(404, "session not found").into()
         }
         error => TerminalError::new(error.to_string()).into(),

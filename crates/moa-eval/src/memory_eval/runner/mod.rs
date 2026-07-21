@@ -28,12 +28,15 @@ use moa_memory_graph::{GraphStore, NodeIndexRow, PostgresGraphStore};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, DeterministicEntityMergeVerifier,
     EXTRACTION_PROMPT_VERSION, EmbeddedFact, EntityMergeFixtureRecord, EntityMergeVerifier,
-    EntityResolver, ExtractedFact, ExtractionFixtureRecord, FactExtractor, HeuristicFactExtractor,
-    IngestCtx, IngestError, MERGE_PROMPT_VERSION, ModelEntityMergeVerifier, ModelFactExtractor,
-    RecordedEntityMergeVerifier, RecordedFactExtractor, SessionTurn, TurnChunk, chunk_turn,
+    EntityResolver, Error, ExtractedFact, ExtractionFixtureRecord, FactExtractor,
+    HeuristicFactExtractor, IngestCtx, MERGE_PROMPT_VERSION, ModelEntityMergeVerifier,
+    ModelFactExtractor, RecordedEntityMergeVerifier, RecordedFactExtractor, SessionTurn, TurnChunk,
+    chunk_turn,
 };
 use moa_memory_lifecycle::{ConsolidationOptions, ConsolidationOutcome, beta_smoothed_quality};
-use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, redact_text};
+use moa_memory_pii::{
+    Error as PiiError, PiiCategory, PiiClassifier, PiiResult, PiiSpan, redact_text,
+};
 use moa_memory_types::{MemoryScope, ScopeTier, normalize_entity_name};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorStore};
 use moa_providers::{
@@ -63,7 +66,7 @@ use crate::kernel::{
     CostLedger, CountingEmbedder, CountingExtractor, CountingMergeVerifier, CountingReranker,
     FixtureStore, ProviderProvenance, SharedCostLedger,
 };
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error as EvalError, Result};
 
 use super::io::io_error;
 

@@ -6,7 +6,7 @@ use moa_brain::planning::{PlanningCtx, QueryPlanner, Strategy};
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::security::SensitivityClass;
 use moa_memory_graph::{
-    EdgeLabel, EdgeWriteIntent, GraphError, GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent,
+    EdgeLabel, EdgeWriteIntent, Error, GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent,
 };
 use moa_memory_types::MemoryScope;
 use uuid::Uuid;
@@ -89,7 +89,7 @@ struct SeedGraph {
 
 #[async_trait]
 impl GraphStore for SeedGraph {
-    async fn create_node(&self, _intent: NodeWriteIntent) -> Result<Uuid, GraphError> {
+    async fn create_node(&self, _intent: NodeWriteIntent) -> Result<Uuid, Error> {
         unreachable!("query planner tests do not write graph nodes")
     }
 
@@ -97,23 +97,23 @@ impl GraphStore for SeedGraph {
         &self,
         _old_uid: Uuid,
         _intent: NodeWriteIntent,
-    ) -> Result<Uuid, GraphError> {
+    ) -> Result<Uuid, Error> {
         unreachable!("query planner tests do not supersede graph nodes")
     }
 
-    async fn invalidate_node(&self, _uid: Uuid, _reason: &str) -> Result<(), GraphError> {
+    async fn invalidate_node(&self, _uid: Uuid, _reason: &str) -> Result<(), Error> {
         unreachable!("query planner tests do not invalidate graph nodes")
     }
 
-    async fn hard_purge(&self, _uid: Uuid, _redaction_marker: &str) -> Result<(), GraphError> {
+    async fn hard_purge(&self, _uid: Uuid, _redaction_marker: &str) -> Result<(), Error> {
         unreachable!("query planner tests do not purge graph nodes")
     }
 
-    async fn create_edge(&self, _intent: EdgeWriteIntent) -> Result<Uuid, GraphError> {
+    async fn create_edge(&self, _intent: EdgeWriteIntent) -> Result<Uuid, Error> {
         unreachable!("query planner tests do not write graph edges")
     }
 
-    async fn get_node(&self, _uid: Uuid) -> Result<Option<NodeIndexRow>, GraphError> {
+    async fn get_node(&self, _uid: Uuid) -> Result<Option<NodeIndexRow>, Error> {
         Ok(None)
     }
 
@@ -123,7 +123,7 @@ impl GraphStore for SeedGraph {
         _hops: u8,
         _edge_filter: Option<&[EdgeLabel]>,
         _as_of: Option<DateTime<Utc>>,
-    ) -> Result<Vec<NodeIndexRow>, GraphError> {
+    ) -> Result<Vec<NodeIndexRow>, Error> {
         Ok(Vec::new())
     }
 
@@ -133,7 +133,7 @@ impl GraphStore for SeedGraph {
         _max_hops: u8,
         _as_of: Option<DateTime<Utc>>,
         _scoring: &moa_memory_graph::GraphWalkScoring,
-    ) -> Result<Vec<moa_memory_graph::GraphExpansionHit>, GraphError> {
+    ) -> Result<Vec<moa_memory_graph::GraphExpansionHit>, Error> {
         Ok(Vec::new())
     }
 
@@ -142,7 +142,7 @@ impl GraphStore for SeedGraph {
         name: &str,
         _limit: i64,
         _as_of: Option<DateTime<Utc>>,
-    ) -> Result<Vec<NodeIndexRow>, GraphError> {
+    ) -> Result<Vec<NodeIndexRow>, Error> {
         let lower = name.to_ascii_lowercase();
         if lower.contains("auth") {
             return Ok(vec![row(self.auth_uid, "auth service")]);
@@ -161,7 +161,7 @@ struct TemporalSeedGraph {
 
 #[async_trait]
 impl GraphStore for TemporalSeedGraph {
-    async fn create_node(&self, _intent: NodeWriteIntent) -> Result<Uuid, GraphError> {
+    async fn create_node(&self, _intent: NodeWriteIntent) -> Result<Uuid, Error> {
         unreachable!("query planner tests do not write graph nodes")
     }
 
@@ -169,23 +169,23 @@ impl GraphStore for TemporalSeedGraph {
         &self,
         _old_uid: Uuid,
         _intent: NodeWriteIntent,
-    ) -> Result<Uuid, GraphError> {
+    ) -> Result<Uuid, Error> {
         unreachable!("query planner tests do not supersede graph nodes")
     }
 
-    async fn invalidate_node(&self, _uid: Uuid, _reason: &str) -> Result<(), GraphError> {
+    async fn invalidate_node(&self, _uid: Uuid, _reason: &str) -> Result<(), Error> {
         unreachable!("query planner tests do not invalidate graph nodes")
     }
 
-    async fn hard_purge(&self, _uid: Uuid, _redaction_marker: &str) -> Result<(), GraphError> {
+    async fn hard_purge(&self, _uid: Uuid, _redaction_marker: &str) -> Result<(), Error> {
         unreachable!("query planner tests do not purge graph nodes")
     }
 
-    async fn create_edge(&self, _intent: EdgeWriteIntent) -> Result<Uuid, GraphError> {
+    async fn create_edge(&self, _intent: EdgeWriteIntent) -> Result<Uuid, Error> {
         unreachable!("query planner tests do not write graph edges")
     }
 
-    async fn get_node(&self, _uid: Uuid) -> Result<Option<NodeIndexRow>, GraphError> {
+    async fn get_node(&self, _uid: Uuid) -> Result<Option<NodeIndexRow>, Error> {
         Ok(None)
     }
 
@@ -195,7 +195,7 @@ impl GraphStore for TemporalSeedGraph {
         _hops: u8,
         _edge_filter: Option<&[EdgeLabel]>,
         _as_of: Option<DateTime<Utc>>,
-    ) -> Result<Vec<NodeIndexRow>, GraphError> {
+    ) -> Result<Vec<NodeIndexRow>, Error> {
         Ok(Vec::new())
     }
 
@@ -205,7 +205,7 @@ impl GraphStore for TemporalSeedGraph {
         _max_hops: u8,
         _as_of: Option<DateTime<Utc>>,
         _scoring: &moa_memory_graph::GraphWalkScoring,
-    ) -> Result<Vec<moa_memory_graph::GraphExpansionHit>, GraphError> {
+    ) -> Result<Vec<moa_memory_graph::GraphExpansionHit>, Error> {
         Ok(Vec::new())
     }
 
@@ -214,7 +214,7 @@ impl GraphStore for TemporalSeedGraph {
         name: &str,
         _limit: i64,
         as_of: Option<DateTime<Utc>>,
-    ) -> Result<Vec<NodeIndexRow>, GraphError> {
+    ) -> Result<Vec<NodeIndexRow>, Error> {
         assert_eq!(as_of, Some(utc("2026-03-01T00:00:00Z")));
         if name.to_ascii_lowercase().contains("auth") {
             return Ok(vec![row(

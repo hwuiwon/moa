@@ -1,11 +1,11 @@
 //! Error types for generic analytics catalog and query handling.
 
 /// Result alias for analytics operations.
-pub type Result<T> = std::result::Result<T, AnalyticsError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors returned by the analytics catalog, compiler, and executor.
 #[derive(Debug, thiserror::Error)]
-pub enum AnalyticsError {
+pub enum Error {
     /// A query referenced a dataset that is not in the catalog.
     #[error("unknown analytics dataset `{dataset}`")]
     UnknownDataset {

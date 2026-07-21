@@ -8,8 +8,8 @@ use uuid::Uuid;
 use moa_memory_types::{FactCategory, FactEdgeLabel};
 
 use crate::{
-    ExtractedFact, ExtractedFactScopeHint, FactExtractor, IngestError, Result, TurnChunk,
-    fact_hash, fact_uid_from_hash,
+    Error, ExtractedFact, ExtractedFactScopeHint, FactExtractor, Result, TurnChunk, fact_hash,
+    fact_uid_from_hash,
     model_fact_extractor::{
         COMPATIBLE_PROMPT_VERSIONS, normalize_extracted_fact, should_keep_extracted_fact,
     },
@@ -134,7 +134,7 @@ where
             // v3 only adds the optional `event_time` key on top of v2, so v2
             // fixtures stay valid: their facts simply carry no event time.
             if !COMPATIBLE_PROMPT_VERSIONS.contains(&record.prompt_version.as_str()) {
-                return Err(IngestError::Extraction(format!(
+                return Err(Error::Extraction(format!(
                     "recorded extraction fixture {} has prompt_version {}; expected one of {}",
                     record.chunk_hash,
                     record.prompt_version,
@@ -151,7 +151,7 @@ where
         if !missing.is_empty() {
             missing.sort();
             missing.dedup();
-            return Err(IngestError::Extraction(format!(
+            return Err(Error::Extraction(format!(
                 "recorded extraction fixtures are missing chunk hashes: {}. Regenerate with: {}",
                 missing.join(", "),
                 self.remediation_command

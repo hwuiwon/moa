@@ -5,4 +5,4 @@ pub mod error;
 pub mod repository;
 pub mod verification_service;
 
-pub use error::{ContactError, Result};
+pub use error::{Error, Result};

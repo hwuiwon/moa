@@ -12,7 +12,7 @@ use crate::catalog::analytics_catalog;
 use crate::clickhouse_exec::AnalyticsClickHouseClient;
 use crate::compiler::{AnalyticsBindValue, AnalyticsCompiler, CompiledAnalyticsQuery};
 use crate::dialect::AnalyticsBackend;
-use crate::error::{AnalyticsError, Result};
+use crate::error::{Error, Result};
 
 /// Generic analytics service facade.
 ///
@@ -89,7 +89,7 @@ impl AnalyticsService {
         let compiled = self.compile(request)?;
         let mut conn = ScopedConn::begin_tenant(pool, compiled.effective_tenant_id)
             .await
-            .map_err(|error| AnalyticsError::Execution(error.to_string()))?;
+            .map_err(|error| Error::Execution(error.to_string()))?;
         // Bound the database work: an unbounded ordered-percentile scan is
         // cancelled server-side rather than holding a connection open. `SET LOCAL`
         // scopes the timeout to this transaction only.
@@ -97,11 +97,11 @@ impl AnalyticsService {
             .bind(self.statement_timeout_ms.to_string())
             .execute(conn.as_mut())
             .await
-            .map_err(|error| AnalyticsError::Execution(error.to_string()))?;
+            .map_err(|error| Error::Execution(error.to_string()))?;
         let rows = execute_compiled(&compiled, conn.as_mut()).await?;
         conn.commit()
             .await
-            .map_err(|error| AnalyticsError::Execution(error.to_string()))?;
+            .map_err(|error| Error::Execution(error.to_string()))?;
         let row_count = rows.len() as u64;
         Ok(AnalyticsQueryResponse {
             columns: compiled.columns.clone(),
@@ -159,7 +159,7 @@ async fn execute_compiled(
     let rows = query
         .fetch_all(conn)
         .await
-        .map_err(|error| AnalyticsError::Execution(error.to_string()))?;
+        .map_err(|error| Error::Execution(error.to_string()))?;
     rows.iter()
         .map(|row| row_to_cells(row, compiled))
         .collect::<Result<Vec<_>>>()
@@ -211,5 +211,5 @@ fn optional_cell<T>(
 ) -> Result<AnalyticsCell> {
     result
         .map(|value| value.map(wrap).unwrap_or(AnalyticsCell::Null))
-        .map_err(|error| AnalyticsError::Execution(error.to_string()))
+        .map_err(|error| Error::Execution(error.to_string()))
 }

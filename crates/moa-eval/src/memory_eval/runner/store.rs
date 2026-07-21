@@ -187,7 +187,7 @@ impl ContradictionDetector for InsertOnlyContradictionDetector {
         _label: moa_memory_graph::NodeLabel,
         _pii_class: SensitivityClass,
         _ctx: &ContradictionContext,
-    ) -> std::result::Result<Conflict, IngestError> {
+    ) -> std::result::Result<Conflict, Error> {
         Ok(Conflict::Insert)
     }
 
@@ -195,7 +195,7 @@ impl ContradictionDetector for InsertOnlyContradictionDetector {
         &self,
         _fact: &EmbeddedFact,
         _ctx: &ContradictionContext,
-    ) -> std::result::Result<Conflict, IngestError> {
+    ) -> std::result::Result<Conflict, Error> {
         Ok(Conflict::Insert)
     }
 }

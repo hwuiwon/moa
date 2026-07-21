@@ -1178,7 +1178,7 @@ fn regression_summary_to_json(summary: &SkillRegressionSummary) -> Value {
     })
 }
 
-fn map_eval_error(error: moa_eval_core::EvalError) -> MoaError {
+fn map_eval_error(error: moa_eval_core::Error) -> MoaError {
     MoaError::StorageError(error.to_string())
 }
 

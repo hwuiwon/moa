@@ -17,7 +17,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::MoaMcpServer;
+use super::Server;
 use crate::routes::{AppState, authenticate_edge_request, require_direct_authz};
 
 /// Validated Host and Origin allowlists for the tenant-operations MCP endpoint.
@@ -98,7 +98,7 @@ pub(crate) fn router(
 ) -> Router {
     // Build the tool router and contracts once; stateless mode invokes this
     // factory for every JSON-RPC request.
-    let template = MoaMcpServer::new(state.clone());
+    let template = Server::new(state.clone());
     let service = StreamableHttpService::new(
         move || Ok(template.clone()),
         NeverSessionManager::default().into(),

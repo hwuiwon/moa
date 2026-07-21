@@ -52,8 +52,8 @@ use moa_eval::external_memory::report::{
 };
 use moa_memory_ingest::{
     DeterministicEntityMergeVerifier, EntityMergeFixtureRecord, EntityMergeVerifier,
-    EntityResolver, ExtractionFixtureRecord, HeuristicFactExtractor, IngestError,
-    ModelCallObserver, ModelEntityMergeVerifier, ModelFactExtractor, RecordedEntityMergeStore,
+    EntityResolver, Error, ExtractionFixtureRecord, HeuristicFactExtractor, ModelCallObserver,
+    ModelEntityMergeVerifier, ModelFactExtractor, RecordedEntityMergeStore,
     RecordedEntityMergeVerifier, RecordedExtractionStore, RecordedFactExtractor,
     RrfPlusJudgeDetector,
 };
@@ -204,10 +204,7 @@ impl AccountingModelObserver {
 
 #[async_trait]
 impl ModelCallObserver for AccountingModelObserver {
-    async fn before_call(
-        &self,
-        request: &CompletionRequest,
-    ) -> std::result::Result<(), IngestError> {
+    async fn before_call(&self, request: &CompletionRequest) -> std::result::Result<(), Error> {
         let accounting_id = self
             .budget
             .forecast(
@@ -217,7 +214,7 @@ impl ModelCallObserver for AccountingModelObserver {
                 estimated_completion_usage(request),
             )
             .await
-            .map_err(IngestError::ModelInference)?;
+            .map_err(Error::ModelInference)?;
         self.pending
             .lock()
             .await
@@ -228,9 +225,9 @@ impl ModelCallObserver for AccountingModelObserver {
     async fn after_response(
         &self,
         response: &CompletionResponse,
-    ) -> std::result::Result<(), IngestError> {
+    ) -> std::result::Result<(), Error> {
         let (accounting_id, started) = self.take_pending().await.ok_or_else(|| {
-            IngestError::ModelInference(
+            Error::ModelInference(
                 "memory benchmark observer received an unreserved response".to_string(),
             )
         })?;
@@ -241,7 +238,7 @@ impl ModelCallObserver for AccountingModelObserver {
                 elapsed_ms(started),
             )
             .await
-            .map_err(IngestError::ModelInference)
+            .map_err(Error::ModelInference)
     }
 
     async fn after_failure(&self) {

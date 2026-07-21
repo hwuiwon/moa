@@ -20,7 +20,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::command::ServicePath;
-use super::{AgentRevisionVariantInput, EmptyInput, MoaMcpServer, clamp_limit};
+use super::{AgentRevisionVariantInput, EmptyInput, Server, clamp_limit};
 
 const DEFINITIONS_LIST: ServicePath = ServicePath::new("/AgentDefinitions/list_definitions");
 const INSTALLATIONS_LIST: ServicePath = ServicePath::new("/AgentDefinitions/list_installations");
@@ -40,8 +40,8 @@ const PRINCIPAL_GRANT: ServicePath = ServicePath::new("/Agents/grant_can_act_as"
 const PRINCIPAL_REVOKE: ServicePath = ServicePath::new("/Agents/revoke_can_act_as");
 
 /// Build the configurable-agent and agent-principal tool router.
-pub(super) fn router() -> rmcp::handler::server::router::tool::ToolRouter<MoaMcpServer> {
-    MoaMcpServer::agents_router()
+pub(super) fn router() -> rmcp::handler::server::router::tool::ToolRouter<Server> {
+    Server::agents_router()
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -139,7 +139,7 @@ struct AgentPrincipalActAsInput {
 }
 
 #[tool_router(router = agents_router)]
-impl MoaMcpServer {
+impl Server {
     /// List visible published configurable-agent definitions.
     #[tool(annotations(
         read_only_hint = true,

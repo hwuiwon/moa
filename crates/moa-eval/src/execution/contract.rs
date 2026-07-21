@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moa_artifacts::execution_plan::{CompletionCheckKind, GeneratedExecutionCandidate};
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -689,6 +689,6 @@ fn usize_to_u64(value: usize, context: &str) -> Result<u64> {
     u64::try_from(value).map_err(|_| invalid_config(format!("{context} exceeds u64")))
 }
 
-fn invalid_config(message: String) -> EvalError {
-    EvalError::InvalidConfig(message)
+fn invalid_config(message: String) -> Error {
+    Error::InvalidConfig(message)
 }

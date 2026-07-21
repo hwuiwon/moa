@@ -17,7 +17,7 @@ use moa_memory_ingest::{
     ExtractedFact, ExtractedFactScopeHint, IngestCtx, RrfPlusJudgeDetector, ScriptedFactExtractor,
     SessionTurn, fact_hash, fact_uid_from_hash, ingest_turn_direct_with_ctx,
 };
-use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
+use moa_memory_pii::{Error, PiiClassifier, PiiResult, PiiSpan};
 use moa_memory_types::{FactCategory, FactEdgeLabel, MemoryScope};
 use moa_memory_vector::{PgvectorStore, TurbopufferStore, VECTOR_DIMENSION};
 use moa_session::testing;
@@ -145,7 +145,7 @@ struct FixedPiiClassifier;
 
 #[async_trait]
 impl PiiClassifier for FixedPiiClassifier {
-    async fn classify(&self, _text: &str) -> Result<PiiResult, PiiError> {
+    async fn classify(&self, _text: &str) -> Result<PiiResult, Error> {
         Ok(PiiResult {
             class: SensitivityClass::None,
             spans: Vec::<PiiSpan>::new(),

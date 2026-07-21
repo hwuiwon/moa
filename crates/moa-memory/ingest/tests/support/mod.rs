@@ -15,7 +15,7 @@ use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent, PostgresGraphStore};
 use moa_memory_ingest::{IngestCtx, RrfPlusJudgeDetector, SessionTurn};
-use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
+use moa_memory_pii::{Error, PiiClassifier, PiiResult, PiiSpan};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::{Value, json};
@@ -58,7 +58,7 @@ pub(crate) struct FixedPiiClassifier {
 
 #[async_trait]
 impl PiiClassifier for FixedPiiClassifier {
-    async fn classify(&self, _text: &str) -> Result<PiiResult, PiiError> {
+    async fn classify(&self, _text: &str) -> Result<PiiResult, Error> {
         Ok(PiiResult {
             class: self.class,
             spans: Vec::<PiiSpan>::new(),
@@ -83,7 +83,7 @@ impl FailClosedPiiClassifier {
 
 #[async_trait]
 impl PiiClassifier for FailClosedPiiClassifier {
-    async fn classify(&self, _text: &str) -> Result<PiiResult, PiiError> {
+    async fn classify(&self, _text: &str) -> Result<PiiResult, Error> {
         Ok(PiiResult::fail_closed(self.model_version.clone()))
     }
 }
@@ -105,10 +105,10 @@ impl FailOnNthPiiClassifier {
 
 #[async_trait]
 impl PiiClassifier for FailOnNthPiiClassifier {
-    async fn classify(&self, _text: &str) -> Result<PiiResult, PiiError> {
+    async fn classify(&self, _text: &str) -> Result<PiiResult, Error> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if call == self.nth {
-            return Err(PiiError::Inference(format!(
+            return Err(Error::Inference(format!(
                 "intentional pre-write failure at fact {call}"
             )));
         }

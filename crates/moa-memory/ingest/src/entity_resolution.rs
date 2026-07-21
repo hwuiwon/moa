@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{IngestError, Result};
+use crate::{Error, Result};
 
 const EMBEDDING_BLOCK_K: usize = 5;
 
@@ -441,12 +441,12 @@ impl EntityResolver {
             .embed(&[normalized_name.to_string()])
             .await
             .map_err(|error| {
-                IngestError::EntityResolution(format!(
+                Error::EntityResolution(format!(
                     "failed to embed entity name `{normalized_name}`: {error}"
                 ))
             })?;
         embeddings.into_iter().next().ok_or_else(|| {
-            IngestError::EntityResolution(format!(
+            Error::EntityResolution(format!(
                 "embedder returned no vector for entity name `{normalized_name}`"
             ))
         })

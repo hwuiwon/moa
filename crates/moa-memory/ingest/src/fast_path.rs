@@ -15,8 +15,10 @@ use moa_core::{
     types::session::SessionMeta, types::tools::ToolOutput,
 };
 use moa_db::ScopedConn;
-use moa_memory_graph::{GraphError, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore};
-use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, redact_text};
+use moa_memory_graph::{
+    Error as GraphError, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore,
+};
+use moa_memory_pii::{Error as PiiError, PiiClassifier, PiiResult, redact_text};
 use moa_memory_vector::VectorStoreFactory;
 use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorStore};
 use serde::{Deserialize, Serialize};
@@ -26,7 +28,7 @@ use tokio::{sync::OnceCell, time::timeout};
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::{Conflict, ContradictionContext, ContradictionDetector, IngestError, current_runtime};
+use crate::{Conflict, ContradictionContext, ContradictionDetector, Error, current_runtime};
 
 const JUDGE_TIMEOUT: Duration = Duration::from_millis(250);
 const SUPERSEDE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -237,7 +239,7 @@ pub enum FastError {
     Json(#[from] serde_json::Error),
     /// Slow/fast ingestion helper failed.
     #[error("ingest: {0}")]
-    Ingest(#[from] IngestError),
+    Ingest(#[from] Error),
 }
 
 /// Remembers one fact through the graph write protocol.

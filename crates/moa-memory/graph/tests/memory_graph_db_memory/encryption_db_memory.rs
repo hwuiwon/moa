@@ -267,10 +267,7 @@ async fn restricted_node_content_is_sealed_at_rest_and_decrypted_on_read_db_memo
         .create_node(rejected)
         .await
         .expect_err("sealed embedding must be rejected");
-    assert!(matches!(
-        error,
-        moa_memory_graph::GraphError::SealedEmbedding
-    ));
+    assert!(matches!(error, moa_memory_graph::Error::SealedEmbedding));
     let restricted = tenant_node_intent(
         tenant_id,
         NodeLabel::Fact,

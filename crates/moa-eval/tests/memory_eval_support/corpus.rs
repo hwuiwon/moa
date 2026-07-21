@@ -19,7 +19,7 @@ use moa_eval::memory_eval::{
     write_embeddings_jsonl, write_ledger_jsonl, write_manifest_json, write_memory_eval_corpus,
     write_probes_jsonl, write_sessions_jsonl,
 };
-use moa_eval_core::EvalError;
+use moa_eval_core::Error as EvalError;
 use moa_memory_types::ScopeTier;
 use moa_memory_vector::VECTOR_DIMENSION;
 

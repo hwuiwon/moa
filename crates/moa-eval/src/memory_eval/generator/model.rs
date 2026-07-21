@@ -1377,7 +1377,7 @@ fn next_turn_seq(turns: &mut BTreeMap<String, u64>, key: &str) -> Result<u64> {
     let current = turns.entry(key.to_string()).or_insert(0);
     let next = current
         .checked_add(1)
-        .ok_or_else(|| EvalError::InvalidConfig(format!("turn sequence overflow for {key}")))?;
+        .ok_or_else(|| Error::InvalidConfig(format!("turn sequence overflow for {key}")))?;
     *current = next;
     Ok(next)
 }
@@ -1416,7 +1416,7 @@ fn first_user_for_tenant(
     (0..users.len())
         .find(|candidate| tenant_index_for_user(*candidate, tenant_count) == tenant_index)
         .ok_or_else(|| {
-            EvalError::InvalidConfig(format!(
+            Error::InvalidConfig(format!(
                 "no generated user belongs to tenant index {tenant_index}"
             ))
         })
@@ -1612,30 +1612,29 @@ fn user_label(user_index: usize) -> String {
 fn fixed_time(day_offset: i64, hour: i64) -> Result<DateTime<Utc>> {
     let day_seconds = day_offset
         .checked_mul(SECONDS_PER_DAY)
-        .ok_or_else(|| EvalError::InvalidConfig("generated day offset overflowed".to_string()))?;
+        .ok_or_else(|| Error::InvalidConfig("generated day offset overflowed".to_string()))?;
     let hour_seconds = hour
         .checked_mul(SECONDS_PER_HOUR)
-        .ok_or_else(|| EvalError::InvalidConfig("generated hour offset overflowed".to_string()))?;
+        .ok_or_else(|| Error::InvalidConfig("generated hour offset overflowed".to_string()))?;
     let timestamp = BASE_UNIX_SECONDS
         .checked_add(day_seconds)
         .and_then(|value| value.checked_add(hour_seconds))
-        .ok_or_else(|| EvalError::InvalidConfig("generated timestamp overflowed".to_string()))?;
+        .ok_or_else(|| Error::InvalidConfig("generated timestamp overflowed".to_string()))?;
     Utc.timestamp_opt(timestamp, 0)
         .single()
-        .ok_or_else(|| EvalError::InvalidConfig(format!("invalid generated timestamp {timestamp}")))
+        .ok_or_else(|| Error::InvalidConfig(format!("invalid generated timestamp {timestamp}")))
 }
 
 fn first_day_after_months(month_offset: usize) -> Result<DateTime<Utc>> {
     let year = 2026
-        + i32::try_from(month_offset / 12).map_err(|_| {
-            EvalError::InvalidConfig("generated month offset overflowed".to_string())
-        })?;
+        + i32::try_from(month_offset / 12)
+            .map_err(|_| Error::InvalidConfig("generated month offset overflowed".to_string()))?;
     let month = u32::try_from((month_offset % 12) + 1)
-        .map_err(|_| EvalError::InvalidConfig("generated month offset overflowed".to_string()))?;
+        .map_err(|_| Error::InvalidConfig("generated month offset overflowed".to_string()))?;
     Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0)
         .single()
         .ok_or_else(|| {
-            EvalError::InvalidConfig(format!(
+            Error::InvalidConfig(format!(
                 "invalid generated month boundary {year:04}-{month:02}-01"
             ))
         })
@@ -1650,7 +1649,7 @@ fn first_day_of_next_month(value: DateTime<Utc>) -> Result<DateTime<Utc>> {
     Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0)
         .single()
         .ok_or_else(|| {
-            EvalError::InvalidConfig(format!(
+            Error::InvalidConfig(format!(
                 "invalid generated month boundary {year:04}-{month:02}-01"
             ))
         })
@@ -1735,8 +1734,8 @@ pub(super) fn sessions_per_user(sessions: &[SyntheticSession]) -> BTreeMap<Strin
     counts
 }
 
-fn missing_reference(kind: &str, seed_index: usize, index: usize) -> EvalError {
-    EvalError::InvalidConfig(format!(
+fn missing_reference(kind: &str, seed_index: usize, index: usize) -> Error {
+    Error::InvalidConfig(format!(
         "missing generated {kind} for seed index {seed_index}, record index {index}"
     ))
 }

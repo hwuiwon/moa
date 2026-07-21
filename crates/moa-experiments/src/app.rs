@@ -27,7 +27,7 @@ use moa_core::{
 };
 use moa_observability::{record_experiment_run, record_experiment_score_rows};
 use moa_scoring::{
-    ScoreCompareRef, ScoreCompareRow, ScoreRunRef, ScoreSummary, ScoreSummaryRow, ScoringError,
+    Error, ScoreCompareRef, ScoreCompareRow, ScoreRunRef, ScoreSummary, ScoreSummaryRow,
     compare_score_runs_for_tenant, score_summaries_for_tenant,
 };
 use serde::de::DeserializeOwned;
@@ -69,7 +69,7 @@ pub enum ExperimentAppError {
     Moa(#[from] MoaError),
     /// Scoring storage or comparison failed.
     #[error(transparent)]
-    Scoring(#[from] ScoringError),
+    Scoring(#[from] Error),
 }
 
 /// Convenience result type for behavior-lab application operations.

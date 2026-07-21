@@ -29,11 +29,11 @@ use moa_lineage_core::LineageEvent;
 use moa_lineage_core::{ScoreRecord, ScoreSource, ScoreTarget, ScoreValue};
 use moa_lineage_sink::{MpscSink, MpscSinkConfig};
 use moa_observability::restate_observability::annotate_restate_handler_span;
-use moa_scoring::{SCORE_RUN_SOURCE_EVAL_REPLAY, ensure_score_run_parent};
 use moa_scoring::{
-    ScoreCompare, ScoreCompareRef, ScoreRunRef, ScoreSummary, ScoringError,
+    Error as ScoringError, ScoreCompare, ScoreCompareRef, ScoreRunRef, ScoreSummary,
     compare_score_runs_for_tenant, score_summaries_for_tenant,
 };
+use moa_scoring::{SCORE_RUN_SOURCE_EVAL_REPLAY, ensure_score_run_parent};
 use repository::ScopedDatasetItem;
 use repository::load_dataset_items_for_tenant;
 use repository::{list_datasets_for_tenant, register_dataset_for_tenant};
@@ -485,7 +485,7 @@ pub enum EvalServiceError {
     Json(#[from] serde_json::Error),
     /// The eval engine failed.
     #[error(transparent)]
-    Eval(Box<moa_eval_core::EvalError>),
+    Eval(Box<moa_eval_core::Error>),
     /// Database access failed.
     #[error(transparent)]
     Sql(#[from] sqlx::Error),
@@ -534,8 +534,8 @@ pub enum EvalServiceError {
     },
 }
 
-impl From<moa_eval_core::EvalError> for EvalServiceError {
-    fn from(error: moa_eval_core::EvalError) -> Self {
+impl From<moa_eval_core::Error> for EvalServiceError {
+    fn from(error: moa_eval_core::Error) -> Self {
         Self::Eval(Box::new(error))
     }
 }
@@ -1075,7 +1075,7 @@ pub async fn hosted_eval_report_artifacts(
                 }
             }));
         } else {
-            return Err(moa_eval_core::EvalError::InvalidConfig(format!(
+            return Err(moa_eval_core::Error::InvalidConfig(format!(
                 "unknown report target '{spec}'"
             ))
             .into());

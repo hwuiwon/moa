@@ -73,14 +73,14 @@ impl TestCase {
     /// Returns long-conversation details for a long test case.
     pub fn long_case(&self) -> crate::Result<&LongTestCase> {
         if self.kind != TestCaseKind::Long {
-            return Err(crate::EvalError::InvalidConfig(format!(
+            return Err(crate::Error::InvalidConfig(format!(
                 "test case '{}' is not a long-conversation case",
                 self.name
             )));
         }
 
         let long = self.long.as_ref().ok_or_else(|| {
-            crate::EvalError::InvalidConfig(format!(
+            crate::Error::InvalidConfig(format!(
                 "long test case '{}' is missing transcript details",
                 self.name
             ))
@@ -88,7 +88,7 @@ impl TestCase {
         match long.mode {
             LongConversationMode::Recorded => {
                 if long.transcript.as_os_str().is_empty() {
-                    return Err(crate::EvalError::InvalidConfig(format!(
+                    return Err(crate::Error::InvalidConfig(format!(
                         "long test case '{}' must set transcript",
                         self.name
                     )));
@@ -100,7 +100,7 @@ impl TestCase {
                     .as_ref()
                     .is_none_or(|path| path.as_os_str().is_empty())
                 {
-                    return Err(crate::EvalError::InvalidConfig(format!(
+                    return Err(crate::Error::InvalidConfig(format!(
                         "long test case '{}' must set goal_card for scripted_user mode",
                         self.name
                     )));
@@ -110,7 +110,7 @@ impl TestCase {
                     .as_ref()
                     .is_none_or(|path| path.as_os_str().is_empty())
                 {
-                    return Err(crate::EvalError::InvalidConfig(format!(
+                    return Err(crate::Error::InvalidConfig(format!(
                         "long test case '{}' must set scripted_user for scripted_user mode",
                         self.name
                     )));
@@ -118,7 +118,7 @@ impl TestCase {
             }
         }
         if long.expectations.as_os_str().is_empty() {
-            return Err(crate::EvalError::InvalidConfig(format!(
+            return Err(crate::Error::InvalidConfig(format!(
                 "long test case '{}' must set expectations",
                 self.name
             )));
@@ -128,7 +128,7 @@ impl TestCase {
             .as_ref()
             .is_some_and(|secondary| secondary.transcript.as_os_str().is_empty())
         {
-            return Err(crate::EvalError::InvalidConfig(format!(
+            return Err(crate::Error::InvalidConfig(format!(
                 "long test case '{}' secondary_session must set transcript",
                 self.name
             )));

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 
 /// Record contract required by [`FixtureStore`].
 pub trait FixtureRecord {
@@ -50,14 +50,14 @@ where
                 continue;
             }
             let record: T = serde_json::from_str(line).map_err(|error| {
-                EvalError::InvalidConfig(format!(
+                Error::InvalidConfig(format!(
                     "failed to parse fixture {} line {}: {error}",
                     path.display(),
                     line_index + 1
                 ))
             })?;
             if !expected_versions.contains(&record.fixture_version()) {
-                return Err(EvalError::InvalidConfig(format!(
+                return Err(Error::InvalidConfig(format!(
                     "fixture {} key {} has version {}; expected one of {}",
                     path.display(),
                     record.fixture_key(),
@@ -67,7 +67,7 @@ where
             }
             let key = normalize_key(record.fixture_key());
             if records.insert(key.clone(), record).is_some() {
-                return Err(EvalError::InvalidConfig(format!(
+                return Err(Error::InvalidConfig(format!(
                     "fixture {} contains duplicate key {key}",
                     path.display()
                 )));
@@ -86,7 +86,7 @@ where
         for record in records {
             let key = normalize_key(record.fixture_key());
             if by_key.insert(key.clone(), record).is_some() {
-                return Err(EvalError::InvalidConfig(format!(
+                return Err(Error::InvalidConfig(format!(
                     "cannot write duplicate fixture key {key}"
                 )));
             }
@@ -127,7 +127,7 @@ where
                 message.push_str("; regenerate with: ");
                 message.push_str(command);
             }
-            EvalError::InvalidConfig(message)
+            Error::InvalidConfig(message)
         })
     }
 
@@ -147,8 +147,8 @@ fn normalize_key(key: &str) -> String {
     key.trim().to_ascii_lowercase()
 }
 
-fn io_error(path: &Path, source: std::io::Error) -> EvalError {
-    EvalError::Io {
+fn io_error(path: &Path, source: std::io::Error) -> Error {
+    Error::Io {
         path: PathBuf::from(path),
         source,
     }

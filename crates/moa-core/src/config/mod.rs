@@ -45,7 +45,7 @@ pub use context::{
     ResolutionWeights, SessionLimitsConfig, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
 };
 pub use database::{DatabaseConfig, DatabaseNeonConfig};
-pub use env_overlay::MoaEnvOverlay;
+pub use env_overlay::EnvOverlay;
 pub use execution::ExecutionConfig;
 pub use kms::{KmsConfig, KmsProviderKind};
 pub use knowledge::{

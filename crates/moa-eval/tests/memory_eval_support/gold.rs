@@ -22,9 +22,10 @@ use moa_eval::memory_eval::{
 };
 use moa_memory_graph::{NodeLabel, PostgresGraphStore};
 use moa_memory_ingest::{
-    Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, IngestCtx, IngestError,
+    Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, IngestCtx,
+    Error as IngestError,
 };
-use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
+use moa_memory_pii::{Error as PiiError, PiiClassifier, PiiResult, PiiSpan};
 use moa_memory_types::ScopeTier;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;

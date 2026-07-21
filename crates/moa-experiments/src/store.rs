@@ -1229,6 +1229,6 @@ fn map_sqlx_error(error: sqlx::Error) -> MoaError {
     MoaError::StorageError(error.to_string())
 }
 
-fn map_scoring_error(error: moa_scoring::ScoringError) -> MoaError {
+fn map_scoring_error(error: moa_scoring::Error) -> MoaError {
     MoaError::StorageError(error.to_string())
 }

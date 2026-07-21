@@ -26,7 +26,7 @@ pub use entity_resolution::{
     DeterministicEntityMergeVerifier, EntityMergeVerifier, EntityResolutionPlan,
     EntityResolutionRequest, EntityResolver, ResolvedEntity,
 };
-pub use error::{IngestError, Result};
+pub use error::{Error, Result};
 pub use extract::{
     ClassifiedFact, EmbeddedFact, ExtractedFact, ExtractedFactScopeHint, IngestApplyReport,
     IngestDecision, SessionTurn, TurnChunk, extract_facts, extraction_confidence_hint, fact_hash,

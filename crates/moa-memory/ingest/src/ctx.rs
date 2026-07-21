@@ -16,8 +16,8 @@ use sqlx::PgPool;
 
 use crate::model_client::resolved_extraction_config;
 use crate::{
-    ContradictionDetector, EntityMergeVerifier, EntityResolver, FactExtractor,
-    HeuristicFactExtractor, IngestError, ModelEntityMergeVerifier, ModelFactExtractor, Result,
+    ContradictionDetector, EntityMergeVerifier, EntityResolver, Error, FactExtractor,
+    HeuristicFactExtractor, ModelEntityMergeVerifier, ModelFactExtractor, Result,
     RrfPlusJudgeDetector,
 };
 
@@ -610,7 +610,7 @@ pub fn current_runtime() -> Result<IngestRuntime> {
     INGEST_RUNTIME
         .get()
         .cloned()
-        .ok_or(IngestError::RuntimeNotInstalled)
+        .ok_or(Error::RuntimeNotInstalled)
 }
 
 fn hash_debug(value: &impl std::fmt::Debug) -> u64 {

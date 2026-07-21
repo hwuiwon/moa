@@ -13,7 +13,7 @@ pub mod types;
 
 pub use conversation_cost::{ConversationCost, TurnCost};
 pub use engine::{EngineOptions, EvalRun, RunSummary};
-pub use error::{EvalError, Result};
+pub use error::{Error, Result};
 pub use evaluator::Evaluator;
 pub use evaluators::{
     EvaluatorOptions, OutputMatchEvaluator, ThresholdEvaluator, ToolSuccessEvaluator,

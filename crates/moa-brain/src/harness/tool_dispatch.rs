@@ -22,7 +22,7 @@ use super::context_build::append_event;
 
 pub(super) enum ToolCallOutcome {
     Executed,
-    Skipped(Option<DurableToolFailure>),
+    Skipped(Option<ToolFailure>),
     Cancelled,
 }
 
@@ -30,7 +30,7 @@ pub(super) enum ToolCallOutcome {
 ///
 /// `error_class` is a stable, low-cardinality label (never a raw error message),
 /// so incident titles assembled from it deduplicate across turns.
-pub(super) struct DurableToolFailure {
+pub(super) struct ToolFailure {
     pub(super) tool_name: String,
     pub(super) error_class: &'static str,
 }
@@ -105,7 +105,7 @@ pub(super) async fn handle_tool_call(
                 "Blocked because a protected canary token leaked into tool input".to_string(),
             ),
         }));
-        return Ok(ToolCallOutcome::Skipped(Some(DurableToolFailure {
+        return Ok(ToolCallOutcome::Skipped(Some(ToolFailure {
             tool_name: invocation.name.clone(),
             error_class: "canary_leak",
         })));
@@ -201,7 +201,7 @@ pub(super) async fn handle_tool_call(
                 summary,
                 detail: Some(message),
             }));
-            Ok(ToolCallOutcome::Skipped(Some(DurableToolFailure {
+            Ok(ToolCallOutcome::Skipped(Some(ToolFailure {
                 tool_name: invocation.name.clone(),
                 error_class: "action_policy_denied",
             })))
@@ -246,7 +246,7 @@ pub(super) async fn handle_tool_call(
                 summary: summary.clone(),
                 detail: Some(message),
             }));
-            Ok(ToolCallOutcome::Skipped(Some(DurableToolFailure {
+            Ok(ToolCallOutcome::Skipped(Some(ToolFailure {
                 tool_name: invocation.name.clone(),
                 error_class: "admin_review_required",
             })))
@@ -402,7 +402,7 @@ pub(super) async fn execute_tool(
                 summary: format!("{} failed", call.name),
                 detail: Some(error.to_string()),
             }));
-            Ok(ToolCallOutcome::Skipped(Some(DurableToolFailure {
+            Ok(ToolCallOutcome::Skipped(Some(ToolFailure {
                 tool_name: call.name.clone(),
                 error_class: tool_error_class(error),
             })))

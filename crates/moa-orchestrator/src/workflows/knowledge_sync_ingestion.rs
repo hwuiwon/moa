@@ -151,7 +151,7 @@ impl KnowledgeSyncIngestion for KnowledgeSyncIngestionImpl {
 
 /// Durable operations used by the knowledge sync ingestion workflow body.
 #[async_trait]
-pub trait KnowledgeSyncIngestionDurableSteps {
+pub trait KnowledgeSyncIngestionSteps {
     /// Loads and validates the sync run that owns this workflow instance.
     async fn prepare_ingestion_run(
         &mut self,
@@ -199,7 +199,7 @@ pub trait KnowledgeSyncIngestionDurableSteps {
 
 /// Runs the knowledge sync ingestion workflow body against durable steps.
 pub async fn run_knowledge_sync_ingestion_workflow(
-    steps: &mut impl KnowledgeSyncIngestionDurableSteps,
+    steps: &mut impl KnowledgeSyncIngestionSteps,
     request: KnowledgeSyncIngestionRequest,
 ) -> Result<KnowledgeSyncIngestionReport, HandlerError> {
     let prepared = steps.prepare_ingestion_run(&request).await?;
@@ -295,7 +295,7 @@ struct RestateKnowledgeSyncIngestionSteps<'ctx, 'workflow> {
 }
 
 #[async_trait]
-impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> {
+impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> {
     async fn prepare_ingestion_run(
         &mut self,
         request: &KnowledgeSyncIngestionRequest,
@@ -665,7 +665,7 @@ fn cap_provider_page(
 }
 
 async fn fail_prepared_run(
-    steps: &mut impl KnowledgeSyncIngestionDurableSteps,
+    steps: &mut impl KnowledgeSyncIngestionSteps,
     prepared: &KnowledgeSyncPreparedRun,
     stage: &'static str,
     error: &HandlerError,

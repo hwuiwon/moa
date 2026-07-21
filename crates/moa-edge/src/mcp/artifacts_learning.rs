@@ -18,7 +18,7 @@ use rmcp::{RoleServer, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::MoaMcpServer;
+use super::Server;
 use super::command::ServicePath;
 use super::{request_identity_and_headers, result};
 use crate::mcp::command::McpCommandClient;
@@ -33,8 +33,8 @@ const LEARNING_ACCEPT: ServicePath = ServicePath::new("/LearningReview/accept_sk
 const LEARNING_REJECT: ServicePath = ServicePath::new("/LearningReview/reject");
 
 /// Build the artifact and learning-review tool router.
-pub(super) fn router() -> rmcp::handler::server::router::tool::ToolRouter<MoaMcpServer> {
-    MoaMcpServer::artifacts_learning_router()
+pub(super) fn router() -> rmcp::handler::server::router::tool::ToolRouter<Server> {
+    Server::artifacts_learning_router()
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -155,7 +155,7 @@ struct LearningReviewInput {
 }
 
 #[tool_router(router = artifacts_learning_router)]
-impl MoaMcpServer {
+impl Server {
     /// List artifacts visible to the authenticated tenant.
     #[tool(annotations(
         read_only_hint = true,
@@ -347,7 +347,7 @@ impl MoaMcpServer {
     }
 }
 
-impl MoaMcpServer {
+impl Server {
     async fn review_candidate(
         &self,
         context: RequestContext<RoleServer>,

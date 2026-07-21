@@ -14,7 +14,7 @@ use moa_contacts::repository::{
     issue_contact, load_contact_ref, resolve_contact_session_channel, resolve_verified_contact_ids,
 };
 use moa_contacts::verification_service::{
-    ContactOtp, ContactOtpDelivery, ContactVerificationService, ContactVerificationStartCommand,
+    ContactOtp, ContactOtpDelivery, ContactVerificationStartCommand, ContactVerifier,
 };
 use moa_core::{
     error::MoaError, types::channel::Channel, types::channel::ChannelAccountId,
@@ -334,7 +334,7 @@ async fn contact_verification_service_consumes_failed_delivery_and_retries_with_
         pool.clone(),
         [DeliveryOutcome::Fail, DeliveryOutcome::Succeed],
     );
-    let service = ContactVerificationService::new(pool.clone(), delivery.clone());
+    let service = ContactVerifier::new(pool.clone(), delivery.clone());
 
     let first_error = service
         .start_verification(verification_command(tenant, contact.contact_id))

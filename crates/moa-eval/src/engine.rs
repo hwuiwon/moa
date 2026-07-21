@@ -14,7 +14,7 @@ use moa_core::{
 use moa_eval_core::engine::{EngineOptions, EvalRun, RunSummary};
 use moa_eval_core::plan::EvalPlan;
 use moa_eval_core::{
-    AgentConfig, EvalError, EvalMetrics, EvalResult, EvalStatus, Result, TestCase, TestCaseKind,
+    AgentConfig, Error, EvalMetrics, EvalResult, EvalStatus, Result, TestCase, TestCaseKind,
     TestSuite,
 };
 use opentelemetry::trace::TraceContextExt;
@@ -44,12 +44,12 @@ impl EvalEngine {
     /// Creates a new eval engine from a base MOA config and execution options.
     pub fn new(base_config: MoaConfig, options: EngineOptions) -> Result<Self> {
         if options.parallel == 0 {
-            return Err(EvalError::InvalidConfig(
+            return Err(Error::InvalidConfig(
                 "engine parallelism must be at least 1".to_string(),
             ));
         }
         if options.content_max_bytes == 0 {
-            return Err(EvalError::InvalidConfig(
+            return Err(Error::InvalidConfig(
                 "content_max_bytes must be at least 1".to_string(),
             ));
         }
@@ -397,14 +397,14 @@ async fn run_environment(
             StreamedTurnResult::Complete => break,
             StreamedTurnResult::Continue => {
                 if turn_index + 1 == MAX_AGENT_TURNS {
-                    return Err(EvalError::InvalidConfig(format!(
+                    return Err(Error::InvalidConfig(format!(
                         "agent exceeded the maximum of {MAX_AGENT_TURNS} turns"
                     )));
                 }
                 continue;
             }
             StreamedTurnResult::Cancelled => {
-                return Err(EvalError::Moa(moa_core::error::MoaError::Cancelled));
+                return Err(Error::Moa(moa_core::error::MoaError::Cancelled));
             }
         }
     }
@@ -455,7 +455,7 @@ async fn cleanup_workspace(path: &Path) -> Result<()> {
     if fs_try_exists(path).await? {
         tokio::fs::remove_dir_all(path)
             .await
-            .map_err(|source| EvalError::Io {
+            .map_err(|source| Error::Io {
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -466,7 +466,7 @@ async fn cleanup_workspace(path: &Path) -> Result<()> {
 async fn fs_try_exists(path: &Path) -> Result<bool> {
     tokio::fs::try_exists(path)
         .await
-        .map_err(|source| EvalError::Io {
+        .map_err(|source| Error::Io {
             path: path.to_path_buf(),
             source,
         })

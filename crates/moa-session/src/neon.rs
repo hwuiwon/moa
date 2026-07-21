@@ -5,8 +5,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use moa_core::{
     config::MoaConfig, error::MoaError, error::Result, traits::BranchManager,
-    types::identifiers::SessionId, types::session::CheckpointHandle,
-    types::session::CheckpointInfo,
+    types::identifiers::SessionId, types::session::Checkpoint, types::session::CheckpointHandle,
 };
 use reqwest::{Client, Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
@@ -108,7 +107,7 @@ impl NeonBranchManager {
     }
 
     /// Fetches one checkpoint by branch id, if it exists and belongs to MOA.
-    pub async fn get_checkpoint(&self, branch_id: &str) -> Result<Option<CheckpointInfo>> {
+    pub async fn get_checkpoint(&self, branch_id: &str) -> Result<Option<Checkpoint>> {
         let branch = self.fetch_branch(branch_id).await?;
         if !is_moa_checkpoint_branch(&branch.name) {
             return Ok(None);
@@ -379,7 +378,7 @@ impl BranchManager for NeonBranchManager {
     }
 
     /// Lists active MOA checkpoint branches.
-    async fn list_checkpoints(&self) -> Result<Vec<CheckpointInfo>> {
+    async fn list_checkpoints(&self) -> Result<Vec<Checkpoint>> {
         let mut checkpoints = Vec::new();
         for branch in self.list_checkpoint_branches().await? {
             let connection_url = self.fetch_connection_uri(&branch.id).await?;
@@ -477,7 +476,7 @@ fn checkpoint_info_from_branch(
     branch: NeonBranch,
     connection_url: String,
     session_id: Option<SessionId>,
-) -> CheckpointInfo {
+) -> Checkpoint {
     let handle = CheckpointHandle {
         id: branch.id.clone(),
         label: checkpoint_label_from_name(&branch.name),
@@ -485,7 +484,7 @@ fn checkpoint_info_from_branch(
         created_at: branch.created_at,
         session_id,
     };
-    CheckpointInfo {
+    Checkpoint {
         handle,
         size_bytes: branch.logical_size,
         parent_branch: branch.parent_id.unwrap_or_default(),

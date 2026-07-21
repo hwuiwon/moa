@@ -10,7 +10,7 @@ use sqlx::Row as _;
 use uuid::Uuid;
 
 use crate::domain::{contact_allows_channel_contact, parse_contact_point_kind};
-use crate::{ContactError, Result};
+use crate::{Error, Result};
 
 use super::row_mapping::RowExt as _;
 
@@ -38,10 +38,7 @@ pub async fn resolve_contact_session_channel(
             client_session_id,
         } => {
             if conversation_id.trim().is_empty() {
-                return Err(ContactError::terminal(
-                    400,
-                    "chat conversation_id is required",
-                ));
+                return Err(Error::terminal(400, "chat conversation_id is required"));
             }
             let display_name = Some(
                 user_id
@@ -73,9 +70,8 @@ pub async fn resolve_contact_session_channel(
             thread_ts,
             user_id,
         } => {
-            let user_id = user_id.ok_or_else(|| {
-                ContactError::terminal(400, "slack channel route requires user_id")
-            })?;
+            let user_id = user_id
+                .ok_or_else(|| Error::terminal(400, "slack channel route requires user_id"))?;
             let account = upsert_external_channel_account(
                 pool,
                 contact,
@@ -151,7 +147,7 @@ pub(super) async fn upsert_verified_contact_point_channel_account(
     .bind(channel.as_str())
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|error| ContactError::database("update verified channel account", error))?;
+    .map_err(|error| Error::database("update verified channel account", error))?;
 
     if let Some(row) = updated {
         return Ok(Some(ChannelAccountRef {
@@ -182,7 +178,7 @@ pub(super) async fn upsert_verified_contact_point_channel_account(
     .bind(serde_json::json!({ "source": "contact_verification" }))
     .execute(&mut **tx)
     .await
-    .map_err(|error| ContactError::database("insert verified channel account", error))?;
+    .map_err(|error| Error::database("insert verified channel account", error))?;
 
     Ok(Some(ChannelAccountRef {
         channel_account_id: account_id,
@@ -201,7 +197,7 @@ async fn upsert_external_channel_account(
     display_name: Option<String>,
 ) -> Result<ChannelAccountRef> {
     if external_user_key.trim().is_empty() {
-        return Err(ContactError::terminal(400, "channel user id is required"));
+        return Err(Error::terminal(400, "channel user id is required"));
     }
     let row = sqlx::query(
         r#"
@@ -220,7 +216,7 @@ async fn upsert_external_channel_account(
     .bind(external_user_key)
     .fetch_optional(pool)
     .await
-    .map_err(|error| ContactError::database("load channel account", error))?;
+    .map_err(|error| Error::database("load channel account", error))?;
 
     if let Some(row) = row {
         let account_contact_id = ContactId(row.col::<Uuid>("contact_id")?);
@@ -229,7 +225,7 @@ async fn upsert_external_channel_account(
             contact.canonical_contact_id,
             account_contact_id,
         ) {
-            return Err(ContactError::terminal(
+            return Err(Error::terminal(
                 403,
                 "channel account belongs to another contact",
             ));
@@ -246,7 +242,7 @@ async fn upsert_external_channel_account(
         .bind(account_id.0)
         .execute(pool)
         .await
-        .map_err(|error| ContactError::database("touch channel account", error))?;
+        .map_err(|error| Error::database("touch channel account", error))?;
         return Ok(ChannelAccountRef {
             channel_account_id: account_id,
             contact_point_id: None,
@@ -279,7 +275,7 @@ async fn upsert_external_channel_account(
     .bind(serde_json::json!({ "source": "session_channel" }))
     .execute(pool)
     .await
-    .map_err(|error| ContactError::database("insert channel account", error))?;
+    .map_err(|error| Error::database("insert channel account", error))?;
     Ok(ChannelAccountRef {
         channel_account_id: account_id,
         contact_point_id: None,
@@ -312,8 +308,8 @@ async fn resolve_contact_point_channel_account(
     .bind(channel.as_str())
     .fetch_optional(pool)
     .await
-    .map_err(|error| ContactError::database("load contact channel account", error))?
-    .ok_or_else(|| ContactError::terminal(404, "channel account not found"))?;
+    .map_err(|error| Error::database("load contact channel account", error))?
+    .ok_or_else(|| Error::terminal(404, "channel account not found"))?;
 
     let account_contact_id = ContactId(row.col::<Uuid>("contact_id")?);
     if !contact_allows_channel_contact(
@@ -321,7 +317,7 @@ async fn resolve_contact_point_channel_account(
         contact.canonical_contact_id,
         account_contact_id,
     ) {
-        return Err(ContactError::terminal(
+        return Err(Error::terminal(
             403,
             "channel account belongs to another contact",
         ));
@@ -329,14 +325,14 @@ async fn resolve_contact_point_channel_account(
     let point_id = ContactPointId(row.col::<Uuid>("contact_point_id")?);
     let kind = row.col::<String>("kind")?;
     if parse_contact_point_kind(&kind)? != expected_kind {
-        return Err(ContactError::terminal(
+        return Err(Error::terminal(
             400,
             "channel account contact point kind mismatch",
         ));
     }
     let verified = row.col::<bool>("verified")?;
     if !verified {
-        return Err(ContactError::terminal(
+        return Err(Error::terminal(
             403,
             "channel account contact point is not verified",
         ));
@@ -345,10 +341,7 @@ async fn resolve_contact_point_channel_account(
         Channel::Email => ChannelRef::Email { channel_account_id },
         Channel::Sms => ChannelRef::Sms { channel_account_id },
         Channel::Chat | Channel::Slack => {
-            return Err(ContactError::terminal(
-                400,
-                "unsupported contact point channel",
-            ));
+            return Err(Error::terminal(400, "unsupported contact point channel"));
         }
     };
     Ok(ResolvedSessionChannel {

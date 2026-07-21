@@ -1,6 +1,6 @@
 //! Typed failures for request-scoped DLP tokenization and restoration.
 
-use moa_memory_pii::PiiError;
+use moa_memory_pii::Error as PiiError;
 
 use crate::vault::{TokenDestination, TokenSourceRole};
 

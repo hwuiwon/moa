@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -348,6 +348,6 @@ fn outcome_name(outcome: &Value, index: usize) -> String {
     format!("mutant-{index}")
 }
 
-fn invalid_config(message: String) -> EvalError {
-    EvalError::InvalidConfig(message)
+fn invalid_config(message: String) -> Error {
+    Error::InvalidConfig(message)
 }

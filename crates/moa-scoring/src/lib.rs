@@ -49,7 +49,7 @@ ORDER BY name
 
 /// Error type for score storage and query helpers.
 #[derive(Debug, thiserror::Error)]
-pub enum ScoringError {
+pub enum Error {
     /// An integer value could not be represented on this platform.
     #[error("{field} is too large")]
     IntegerTooLarge {
@@ -147,7 +147,7 @@ pub struct ScoreCompare {
 pub async fn score_summaries_for_tenant(
     pool: &PgPool,
     request: ScoreRunRef,
-) -> Result<ScoreSummary, ScoringError> {
+) -> Result<ScoreSummary, Error> {
     let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
     let rows = sqlx::query(SCORES_BY_RUN_SQL)
         .bind(request.run_id)
@@ -171,7 +171,7 @@ pub async fn score_summaries_for_tenant(
 pub async fn compare_score_runs_for_tenant(
     pool: &PgPool,
     request: ScoreCompareRef,
-) -> Result<ScoreCompare, ScoringError> {
+) -> Result<ScoreCompare, Error> {
     let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
     let rows = sqlx::query(COMPARE_NUMERIC_RUNS_SQL)
         .bind(request.base_run)
@@ -204,7 +204,7 @@ pub async fn ensure_score_run_parent(
     scope: &ActionRuleScope,
     score_run_id: Uuid,
     source: &'static str,
-) -> Result<(), ScoringError> {
+) -> Result<(), Error> {
     let parts = ScopeParts::from_scope(scope);
     if let Some(row) = load_score_run_parent(conn, score_run_id).await? {
         return validate_score_run_parent(&row, &parts, score_run_id, source);
@@ -231,7 +231,7 @@ pub async fn ensure_score_run_parent(
     }
 
     let Some(row) = load_score_run_parent(conn, score_run_id).await? else {
-        return Err(ScoringError::ScoreRunMismatch {
+        return Err(Error::ScoreRunMismatch {
             score_run_id,
             expected_source: source,
         });
@@ -239,14 +239,14 @@ pub async fn ensure_score_run_parent(
     validate_score_run_parent(&row, &parts, score_run_id, source)
 }
 
-fn score_summary_row_from_row(row: &PgRow) -> Result<ScoreSummaryRow, ScoringError> {
+fn score_summary_row_from_row(row: &PgRow) -> Result<ScoreSummaryRow, Error> {
     let n: i64 = row.try_get("n")?;
     let numeric_mean: Option<f64> = row.try_get("numeric_mean")?;
     let boolean_rate: Option<f64> = row.try_get("boolean_rate")?;
     Ok(ScoreSummaryRow {
         name: row.try_get("name")?,
         value_type: row.try_get("value_type")?,
-        n: u64::try_from(n).map_err(|_| ScoringError::IntegerTooLarge { field: "n" })?,
+        n: u64::try_from(n).map_err(|_| Error::IntegerTooLarge { field: "n" })?,
         mean_or_rate: numeric_mean.or(boolean_rate),
     })
 }
@@ -254,7 +254,7 @@ fn score_summary_row_from_row(row: &PgRow) -> Result<ScoreSummaryRow, ScoringErr
 async fn load_score_run_parent(
     conn: &mut PgConnection,
     score_run_id: Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, ScoringError> {
+) -> Result<Option<sqlx::postgres::PgRow>, Error> {
     sqlx::query(
         r#"
         SELECT storage_partition_id, user_id, scope, source
@@ -266,7 +266,7 @@ async fn load_score_run_parent(
     .bind(score_run_id)
     .fetch_optional(conn)
     .await
-    .map_err(ScoringError::from)
+    .map_err(Error::from)
 }
 
 fn validate_score_run_parent(
@@ -274,7 +274,7 @@ fn validate_score_run_parent(
     parts: &ScopeParts,
     score_run_id: Uuid,
     source: &'static str,
-) -> Result<(), ScoringError> {
+) -> Result<(), Error> {
     let storage_partition_id: Option<String> = row.try_get("storage_partition_id")?;
     let user_id: Option<String> = row.try_get("user_id")?;
     let scope: String = row.try_get("scope")?;
@@ -288,7 +288,7 @@ fn validate_score_run_parent(
         return Ok(());
     }
 
-    Err(ScoringError::ScoreRunMismatch {
+    Err(Error::ScoreRunMismatch {
         score_run_id,
         expected_source: source,
     })

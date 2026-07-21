@@ -37,9 +37,8 @@ use crate::types::{
     learning::LearningEntry, model::Credential as StoredCredential, model::ModelCapabilities,
     segment_assessment::SegmentAssessment, segment_assessment::SegmentBaseline,
     segment_assessment::SkillResolutionRate, segments::SegmentCompletion, segments::TaskSegment,
-    session::CheckpointHandle, session::CheckpointInfo, session::SessionFilter,
-    session::SessionMeta, session::SessionStatus, session::SessionSummary,
-    snapshot::ContextSnapshot, tools::ToolOutput,
+    session::Checkpoint, session::CheckpointHandle, session::SessionFilter, session::SessionMeta,
+    session::SessionStatus, session::SessionSummary, snapshot::ContextSnapshot, tools::ToolOutput,
 };
 use crate::wire::analytics::LearningCandidateSummary;
 
@@ -577,7 +576,7 @@ pub trait BranchManager: Send + Sync {
     async fn discard_checkpoint(&self, handle: &CheckpointHandle) -> Result<()>;
 
     /// Lists active checkpoint branches managed by MOA.
-    async fn list_checkpoints(&self) -> Result<Vec<CheckpointInfo>>;
+    async fn list_checkpoints(&self) -> Result<Vec<Checkpoint>>;
 
     /// Deletes expired checkpoint branches and returns the number removed.
     async fn cleanup_expired(&self) -> Result<u32>;

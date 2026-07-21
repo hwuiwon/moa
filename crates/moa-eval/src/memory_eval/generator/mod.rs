@@ -18,7 +18,7 @@ use super::corpus::{
     SyntheticSession, SyntheticTurn, TranscriptStyle, validate_corpus, write_ledger_jsonl,
     write_manifest_json, write_probes_jsonl, write_sessions_jsonl,
 };
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 
 mod embeddings;
 mod model;

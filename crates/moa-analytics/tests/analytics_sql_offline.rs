@@ -294,10 +294,7 @@ fn clickhouse_backend_rejects_postgres_only_datasets_offline() {
                 .compile(request_for(dataset))
                 .expect_err("postgres-only dataset must not compile for clickhouse");
         assert!(
-            matches!(
-                error,
-                moa_analytics::AnalyticsError::BackendFieldUnavailable { .. }
-            ),
+            matches!(error, moa_analytics::Error::BackendFieldUnavailable { .. }),
             "expected BackendFieldUnavailable for {dataset}, got {error}"
         );
     }

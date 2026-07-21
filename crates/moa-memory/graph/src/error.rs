@@ -2,7 +2,7 @@
 
 /// Error returned by the graph-memory crate.
 #[derive(Debug, thiserror::Error)]
-pub enum GraphError {
+pub enum Error {
     /// A relational graph query failed or returned an unexpected shape.
     #[error("graph query: {0}")]
     GraphQuery(String),

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
@@ -62,7 +62,7 @@ pub struct ExecutionCorpus {
 pub async fn load_execution_corpus(manifest_path: &Path) -> Result<ExecutionCorpus> {
     let manifest_bytes = tokio::fs::read(manifest_path)
         .await
-        .map_err(|source| EvalError::Io {
+        .map_err(|source| Error::Io {
             path: manifest_path.to_path_buf(),
             source,
         })?;
@@ -73,7 +73,7 @@ pub async fn load_execution_corpus(manifest_path: &Path) -> Result<ExecutionCorp
         ))
     })?;
     let manifest = toml::from_str::<ExecutionCorpusManifest>(manifest_text).map_err(|source| {
-        EvalError::ParseToml {
+        Error::ParseToml {
             path: manifest_path.to_path_buf(),
             source,
         }
@@ -131,12 +131,10 @@ fn validate_manifest(manifest: &ExecutionCorpusManifest) -> Result<()> {
 }
 
 async fn read_verified(path: &Path, file: &ExecutionCorpusFile) -> Result<Vec<u8>> {
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|source| EvalError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let bytes = tokio::fs::read(path).await.map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
     let observed = format!("{:x}", Sha256::digest(&bytes));
     if observed != file.sha256 {
         return Err(invalid_config(format!(
@@ -164,7 +162,7 @@ fn parse_jsonl<T: DeserializeOwned>(path: &Path, bytes: &[u8]) -> Result<Vec<T>>
                 index + 1
             )));
         }
-        let record = serde_json::from_str::<T>(line).map_err(|source| EvalError::ParseJson {
+        let record = serde_json::from_str::<T>(line).map_err(|source| Error::ParseJson {
             path: path.to_path_buf(),
             source,
         })?;
@@ -319,6 +317,6 @@ fn validate_sha256(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn invalid_config(message: String) -> EvalError {
-    EvalError::InvalidConfig(message)
+fn invalid_config(message: String) -> Error {
+    Error::InvalidConfig(message)
 }

@@ -1,8 +1,8 @@
 //! Out-of-line tests for deterministic fact extraction.
 
 use moa_memory_ingest::{
-    FactExtractor, HeuristicFactExtractor, IngestError, ScriptedFactExtractor, TurnChunk,
-    extract_facts, extraction_confidence_hint,
+    Error, FactExtractor, HeuristicFactExtractor, ScriptedFactExtractor, TurnChunk, extract_facts,
+    extraction_confidence_hint,
 };
 use serde::Deserialize;
 
@@ -137,7 +137,7 @@ fn extract_returns_typed_error_for_chunks_exceeding_max_size() {
 
     assert!(matches!(
         error,
-        IngestError::ChunkTooLarge {
+        Error::ChunkTooLarge {
             index: 3,
             actual_chars: 50_000,
             ..

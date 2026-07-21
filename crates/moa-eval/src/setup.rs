@@ -19,8 +19,7 @@ use moa_core::{
 };
 use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_eval_core::{
-    ActionPolicyOverride, ActionPolicyRuleOverride, AgentConfig, EvalError, InstructionOverride,
-    Result,
+    ActionPolicyOverride, ActionPolicyRuleOverride, AgentConfig, Error, InstructionOverride, Result,
 };
 use moa_hands::ToolRouter;
 use moa_providers::ProviderRegistry;
@@ -81,7 +80,7 @@ impl AgentEnvironment {
         database_pool.close().await;
         cleanup_test_schema(&database_url, &schema_name)
             .await
-            .map_err(EvalError::from)
+            .map_err(Error::from)
     }
 }
 
@@ -140,7 +139,7 @@ pub(crate) async fn build_agent_environment_with_provider(
     let workspace_dir = run_root.join("workspace");
     fs::create_dir_all(&workspace_dir)
         .await
-        .map_err(|source| EvalError::Io {
+        .map_err(|source| Error::Io {
             path: workspace_dir.clone(),
             source,
         })?;
@@ -281,13 +280,13 @@ fn preprovisioned_eval_database(base_config: &MoaConfig) -> Option<(&str, &str)>
 
 async fn seed_memory(base_config: &MoaConfig, agent_config: &AgentConfig) -> Result<()> {
     if let Some(path) = &agent_config.memory.tenant_memory_path {
-        return Err(EvalError::InvalidConfig(format!(
+        return Err(Error::InvalidConfig(format!(
             "tenant memory fixture seeding is not implemented for {}",
             path.display()
         )));
     }
     if let Some(path) = &agent_config.memory.user_memory_path {
-        return Err(EvalError::InvalidConfig(format!(
+        return Err(Error::InvalidConfig(format!(
             "user memory fixture seeding is not implemented for {}",
             path.display()
         )));
@@ -439,7 +438,7 @@ async fn load_workspace_instructions(
         let resolved = resolve_path(path)?;
         let text = fs::read_to_string(&resolved)
             .await
-            .map_err(|source| EvalError::Io {
+            .map_err(|source| Error::Io {
                 path: resolved,
                 source,
             })?;
@@ -504,7 +503,7 @@ fn validate_named_tools(available_tools: &[String], requested_tools: &[String]) 
     let available = available_tools.iter().collect::<HashSet<_>>();
     for tool in requested_tools {
         if !available.contains(tool) {
-            return Err(EvalError::InvalidConfig(format!(
+            return Err(Error::InvalidConfig(format!(
                 "unknown tool override '{tool}'"
             )));
         }
@@ -562,7 +561,7 @@ fn resolve_path(path: &Path) -> Result<PathBuf> {
         return Ok(expanded);
     }
 
-    let current_dir = std::env::current_dir().map_err(|source| EvalError::Io {
+    let current_dir = std::env::current_dir().map_err(|source| Error::Io {
         path: PathBuf::from("."),
         source,
     })?;
@@ -574,7 +573,7 @@ fn expand_local_path(path: impl AsRef<Path>) -> Result<PathBuf> {
     let raw = path.to_string_lossy();
     if let Some(relative) = raw.strip_prefix("~/") {
         let home = std::env::var("HOME")
-            .map_err(|_| EvalError::Moa(moa_core::error::MoaError::HomeDirectoryNotFound))?;
+            .map_err(|_| Error::Moa(moa_core::error::MoaError::HomeDirectoryNotFound))?;
         return Ok(PathBuf::from(home).join(relative));
     }
 

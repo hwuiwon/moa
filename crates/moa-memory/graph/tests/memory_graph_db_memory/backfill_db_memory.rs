@@ -8,7 +8,7 @@ use moa_crypto::{
     Ciphertext, DataKeyDecryptRequest, EncryptionContext, Error as CryptoError, GeneratedDataKey,
     KeyHandle, KeyManagementProvider, LocalKmsProvider, PlaintextDek,
 };
-use moa_memory_graph::GraphError;
+use moa_memory_graph::Error;
 use moa_memory_graph::backfill::backfill_memory_sealed_content;
 use moa_session::testing;
 use serde_json::{Value, json};
@@ -302,7 +302,7 @@ async fn backfill_resumes_after_restart_and_enforces_sealed_state_db_memory() {
         .expect_err("second encryption batch should simulate a worker restart");
     assert!(matches!(
         interrupted,
-        GraphError::Crypto(CryptoError::Backend(message))
+        Error::Crypto(CryptoError::Backend(message))
             if message == "injected worker restart after first committed batch"
     ));
 

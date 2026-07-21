@@ -29,7 +29,7 @@ use moa_core::{
     types::session::SessionMeta,
 };
 use moa_eval_core::{
-    AgentConfig, ConversationCost, EngineOptions, EvalError, EvalResult, EvalScore, EvalScoreValue,
+    AgentConfig, ConversationCost, EngineOptions, Error, EvalResult, EvalScore, EvalScoreValue,
     EvalStatus, LongConversationMode, LongSessionInterleaving, LongTestCase, Result, TestCase,
 };
 use moa_lineage_core::LineageEvent;
@@ -166,7 +166,7 @@ async fn run_recorded_scenario(
 ) -> Result<LongRunReport> {
     let transcript_path = resolve_path(&long_case.transcript)?;
     let transcript = Transcript::read_jsonl(&transcript_path).map_err(|error| {
-        EvalError::InvalidConfig(format!(
+        Error::InvalidConfig(format!(
             "failed to read transcript {}: {error}",
             transcript_path.display()
         ))
@@ -176,7 +176,7 @@ async fn run_recorded_scenario(
         let secondary_transcript_path = resolve_path(&secondary_session.transcript)?;
         let secondary_transcript =
             Transcript::read_jsonl(&secondary_transcript_path).map_err(|error| {
-                EvalError::InvalidConfig(format!(
+                Error::InvalidConfig(format!(
                     "failed to read secondary transcript {}: {error}",
                     secondary_transcript_path.display()
                 ))
@@ -204,7 +204,7 @@ async fn run_scripted_user_scenario(
     environment: &crate::AgentEnvironment,
 ) -> Result<LongRunReport> {
     let Some(goal_card_path) = long_case.goal_card.as_deref() else {
-        return Err(EvalError::InvalidConfig(format!(
+        return Err(Error::InvalidConfig(format!(
             "long test case '{}' must set goal_card for scripted_user mode",
             case.name
         )));
@@ -212,19 +212,19 @@ async fn run_scripted_user_scenario(
     let goal_card_path = resolve_path(goal_card_path)?;
     let goal_card = tokio::fs::read_to_string(&goal_card_path)
         .await
-        .map_err(|source| EvalError::Io {
+        .map_err(|source| Error::Io {
             path: goal_card_path.clone(),
             source,
         })?;
     if goal_card.trim().is_empty() {
-        return Err(EvalError::InvalidConfig(format!(
+        return Err(Error::InvalidConfig(format!(
             "long test case '{}' goal_card must not be empty",
             case.name
         )));
     }
 
     let Some(script_path) = long_case.scripted_user.as_deref() else {
-        return Err(EvalError::InvalidConfig(format!(
+        return Err(Error::InvalidConfig(format!(
             "long test case '{}' must set scripted_user for scripted_user mode",
             case.name
         )));
@@ -233,7 +233,7 @@ async fn run_scripted_user_scenario(
     let script = ScriptedUserScript::read_jsonl(&script_path)
         .await
         .map_err(|error| {
-            EvalError::InvalidConfig(format!(
+            Error::InvalidConfig(format!(
                 "failed to read scripted-user script {}: {error}",
                 script_path.display()
             ))
@@ -427,7 +427,7 @@ fn validate_scripted_final_answer(
         return Ok(());
     }
 
-    Err(EvalError::InvalidConfig(format!(
+    Err(Error::InvalidConfig(format!(
         "scripted-user scenario '{}' final answer is missing expected fragment(s): {}",
         script.scenario,
         missing.join(", ")
@@ -575,13 +575,13 @@ async fn drive_one_turn(
             StreamedTurnResult::Complete => return Ok(()),
             StreamedTurnResult::Continue => {
                 if turn_index + 1 == MAX_LONG_CONVERSATION_AGENT_TURNS {
-                    return Err(EvalError::InvalidConfig(format!(
+                    return Err(Error::InvalidConfig(format!(
                         "agent exceeded the maximum of {MAX_LONG_CONVERSATION_AGENT_TURNS} turns"
                     )));
                 }
             }
             StreamedTurnResult::Cancelled => {
-                return Err(EvalError::Moa(moa_core::error::MoaError::Cancelled));
+                return Err(Error::Moa(moa_core::error::MoaError::Cancelled));
             }
         }
     }
@@ -725,7 +725,7 @@ async fn create_secondary_session(
     let session_meta = SessionMeta {
         tenant_id: moa_core::types::identifiers::TenantId::from(
             uuid::Uuid::parse_str(environment.storage_partition_id.as_str())
-                .map_err(|error| EvalError::InvalidConfig(error.to_string()))?,
+                .map_err(|error| Error::InvalidConfig(error.to_string()))?,
         ),
         created_by: Some(moa_core::types::contact::SessionActorRef::Identity {
             id: uuid::Uuid::now_v7(),
@@ -738,7 +738,7 @@ async fn create_secondary_session(
         .session_store
         .create_session(session_meta)
         .await
-        .map_err(EvalError::from)
+        .map_err(Error::from)
 }
 
 async fn collect_events_for_sessions(
@@ -768,7 +768,7 @@ async fn materialize_primary_learning_if_requested(
     };
     let events = collect_events_for_sessions(environment, &[primary.session_id]).await?;
     if events.is_empty() {
-        return Err(EvalError::InvalidConfig(format!(
+        return Err(Error::InvalidConfig(format!(
             "learning materialization for '{}' requires primary events",
             case.name
         )));
@@ -918,7 +918,7 @@ fn primary_learning_config(case: &TestCase) -> Result<Option<PrimaryLearningConf
         return Ok(None);
     };
     let Some(object) = value.as_object() else {
-        return Err(EvalError::InvalidConfig(format!(
+        return Err(Error::InvalidConfig(format!(
             "case '{}' metadata.learning_phase must be a table",
             case.name
         )));
@@ -936,7 +936,7 @@ fn primary_learning_config(case: &TestCase) -> Result<Option<PrimaryLearningConf
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
-            EvalError::InvalidConfig(format!(
+            Error::InvalidConfig(format!(
                 "case '{}' metadata.learning_phase.task_summary must be non-empty",
                 case.name
             ))
@@ -944,7 +944,7 @@ fn primary_learning_config(case: &TestCase) -> Result<Option<PrimaryLearningConf
         .to_string();
     let skills_activated = string_array_metadata(case, object, "skills_activated")?;
     if skills_activated.is_empty() {
-        return Err(EvalError::InvalidConfig(format!(
+        return Err(Error::InvalidConfig(format!(
             "case '{}' metadata.learning_phase.skills_activated must not be empty",
             case.name
         )));
@@ -967,7 +967,7 @@ fn string_array_metadata(
     key: &str,
 ) -> Result<Vec<String>> {
     let Some(values) = object.get(key).and_then(Value::as_array) else {
-        return Err(EvalError::InvalidConfig(format!(
+        return Err(Error::InvalidConfig(format!(
             "case '{}' metadata.learning_phase.{key} must be an array",
             case.name
         )));
@@ -979,7 +979,7 @@ fn string_array_metadata(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         else {
-            return Err(EvalError::InvalidConfig(format!(
+            return Err(Error::InvalidConfig(format!(
                 "case '{}' metadata.learning_phase.{key} must contain only non-empty strings",
                 case.name
             )));
@@ -1511,7 +1511,7 @@ fn resolve_path(path: &Path) -> Result<PathBuf> {
         return Ok(path.to_path_buf());
     }
 
-    let current_dir = std::env::current_dir().map_err(|source| EvalError::Io {
+    let current_dir = std::env::current_dir().map_err(|source| Error::Io {
         path: PathBuf::from("."),
         source,
     })?;
@@ -1526,14 +1526,14 @@ fn resolve_path(path: &Path) -> Result<PathBuf> {
 async fn cleanup_workspace(path: &Path) -> Result<()> {
     if tokio::fs::try_exists(path)
         .await
-        .map_err(|source| EvalError::Io {
+        .map_err(|source| Error::Io {
             path: path.to_path_buf(),
             source,
         })?
     {
         tokio::fs::remove_dir_all(path)
             .await
-            .map_err(|source| EvalError::Io {
+            .map_err(|source| Error::Io {
                 path: path.to_path_buf(),
                 source,
             })?;

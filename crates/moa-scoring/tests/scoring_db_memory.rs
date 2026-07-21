@@ -17,7 +17,7 @@ use moa_core::{
     types::action_policy::ActionRuleScope, types::contact::ContactId, types::identifiers::TenantId,
 };
 use moa_scoring::{
-    SCORE_RUN_SOURCE_EVAL_REPLAY, ScoreCompareRef, ScoreRunRef, ScoringError,
+    Error, SCORE_RUN_SOURCE_EVAL_REPLAY, ScoreCompareRef, ScoreRunRef,
     compare_score_runs_for_tenant, ensure_score_run_parent, score_summaries_for_tenant,
 };
 use sqlx::{PgPool, Row};
@@ -210,7 +210,7 @@ async fn ensure_score_run_parent_is_idempotent_and_rejects_source_mismatch_db_me
     assert!(
         matches!(
             error,
-            ScoringError::ScoreRunMismatch { score_run_id, expected_source }
+            Error::ScoreRunMismatch { score_run_id, expected_source }
                 if score_run_id == run_id && expected_source == SCORE_RUN_SOURCE_OTHER
         ),
         "expected ScoreRunMismatch, got {error:?}"
@@ -286,7 +286,7 @@ async fn ensure_score_run_parent_preserves_contact_scope_db_memory() {
     assert!(
         matches!(
             error,
-            ScoringError::ScoreRunMismatch {
+            Error::ScoreRunMismatch {
                 score_run_id,
                 expected_source
             } if score_run_id == run_id && expected_source == SCORE_RUN_SOURCE_EVAL_REPLAY

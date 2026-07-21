@@ -8,9 +8,9 @@ use std::{
 
 use crate::{
     ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
-    EntityResolutionPlan, EntityResolutionRequest, EntityResolver, ExtractedFact,
+    EntityResolutionPlan, EntityResolutionRequest, EntityResolver, Error, ExtractedFact,
     ExtractedFactScopeHint, FactExtractor, HeuristicFactExtractor, IngestApplyReport, IngestCtx,
-    IngestDecision, IngestError, RrfPlusJudgeDetector, SessionTurn, chunk_turn, current_runtime,
+    IngestDecision, RrfPlusJudgeDetector, SessionTurn, chunk_turn, current_runtime,
     extraction_confidence_hint, fact_hash, fact_uid_from_hash, scoped_fact_uid,
     should_ingest_degraded,
 };
@@ -427,7 +427,7 @@ async fn classify_facts_with(
         .map_err(HandlerError::from)?;
 
     if let Some(result) = results.iter().find(|result| result.abstained) {
-        return Err(IngestError::PiiClassificationUnavailable {
+        return Err(Error::PiiClassificationUnavailable {
             model_version: result.model_version.clone(),
         }
         .into());
@@ -552,12 +552,10 @@ async fn embed_batch_with(
     // the whole batch on a cardinality mismatch instead of zipping, which would
     // silently drop trailing facts (short response) or truncate vectors (long).
     if embeddings.len() != texts.len() {
-        return Err(HandlerError::from(
-            IngestError::EmbeddingCardinalityMismatch {
-                expected: texts.len(),
-                actual: embeddings.len(),
-            },
-        ));
+        return Err(HandlerError::from(Error::EmbeddingCardinalityMismatch {
+            expected: texts.len(),
+            actual: embeddings.len(),
+        }));
     }
     let mut embedded = facts
         .iter()
@@ -1571,8 +1569,8 @@ mod tests {
         turn_transcript,
     };
     use crate::{
-        ClassifiedFact, EmbeddedFact, ExtractedFact, ExtractedFactScopeHint, IngestDecision,
-        IngestError, fact_hash,
+        ClassifiedFact, EmbeddedFact, Error, ExtractedFact, ExtractedFactScopeHint, IngestDecision,
+        fact_hash,
     };
 
     /// PII classifier that counts calls and echoes input so ordering can be pinned.
@@ -2010,8 +2008,8 @@ mod tests {
             std::error::Error::source(error.as_ref() as &(dyn std::error::Error + 'static))
                 .expect("retryable handler error should preserve the ingestion error source");
         assert!(matches!(
-            source.downcast_ref::<IngestError>(),
-            Some(IngestError::PiiClassificationUnavailable { model_version })
+            source.downcast_ref::<Error>(),
+            Some(Error::PiiClassificationUnavailable { model_version })
                 if model_version == "privacy-filter:v9"
         ));
     }

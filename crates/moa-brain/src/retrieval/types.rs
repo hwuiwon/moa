@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use moa_core::types::security::SensitivityClass;
 use moa_core::types::{identifiers::SessionId, memory::InformationBarrierClearances};
 use moa_lineage_core::TurnId;
-use moa_memory_graph::{GraphError, NodeIndexRow, NodeLabel};
+use moa_memory_graph::{Error, NodeIndexRow, NodeLabel};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::Error as VectorError;
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ pub type Result<T> = std::result::Result<T, RetrievalError>;
 pub enum RetrievalError {
     /// Graph traversal failed.
     #[error("graph retrieval: {0}")]
-    Graph(#[from] GraphError),
+    Graph(#[from] Error),
     /// Vector KNN failed.
     #[error("vector retrieval: {0}")]
     Vector(#[from] VectorError),

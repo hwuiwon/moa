@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::model_client::{ModelCallObserver, ModelTextClient, resolved_extraction_config};
-use crate::{EntityMergeVerifier, IngestError, Result};
+use crate::{EntityMergeVerifier, Error, Result};
 
 /// Merge-verifier prompt version used for recorded fixtures.
 pub const MERGE_PROMPT_VERSION: &str = "v1";
@@ -37,7 +37,7 @@ impl ModelEntityMergeVerifier {
     /// Creates a merge verifier from runtime config.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
         let extraction = resolved_extraction_config(config).ok_or_else(|| {
-            IngestError::ModelInference("memory.extraction.enabled is false".to_string())
+            Error::ModelInference("memory.extraction.enabled is false".to_string())
         })?;
         Ok(Self::new(ModelTextClient::from_config(
             config,
@@ -51,7 +51,7 @@ impl ModelEntityMergeVerifier {
         observer: std::sync::Arc<dyn ModelCallObserver>,
     ) -> Result<Self> {
         let extraction = resolved_extraction_config(config).ok_or_else(|| {
-            IngestError::ModelInference("memory.extraction.enabled is false".to_string())
+            Error::ModelInference("memory.extraction.enabled is false".to_string())
         })?;
         Ok(Self::new(ModelTextClient::from_config_with_observer(
             config,
@@ -174,13 +174,13 @@ where
     async fn should_merge(&self, mention: &str, candidate: &NodeIndexRow) -> Result<bool> {
         let key = merge_fixture_key(mention, &candidate.name);
         let Some(record) = self.store.get_optional(&key) else {
-            return Err(IngestError::EntityResolution(format!(
+            return Err(Error::EntityResolution(format!(
                 "recorded merge fixture is missing key {key}. Regenerate with: {}",
                 self.remediation_command
             )));
         };
         if record.prompt_version != MERGE_PROMPT_VERSION {
-            return Err(IngestError::EntityResolution(format!(
+            return Err(Error::EntityResolution(format!(
                 "recorded merge fixture {} has prompt_version {}; expected {}",
                 record.key, record.prompt_version, MERGE_PROMPT_VERSION
             )));

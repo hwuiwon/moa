@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::model_client::{ModelCallObserver, ModelTextClient, resolved_extraction_config};
 use crate::{
-    ExtractedFact, ExtractedFactScopeHint, FactExtractor, IngestError, Result, TurnChunk,
-    fact_hash, fact_uid_from_hash,
+    Error, ExtractedFact, ExtractedFactScopeHint, FactExtractor, Result, TurnChunk, fact_hash,
+    fact_uid_from_hash,
 };
 
 /// Version for the LLM extraction prompt and recorded extraction fixtures.
@@ -78,7 +78,7 @@ impl ModelFactExtractor {
     /// Creates a model extractor from the runtime config.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
         let extraction = resolved_extraction_config(config).ok_or_else(|| {
-            IngestError::ModelInference("memory.extraction.enabled is false".to_string())
+            Error::ModelInference("memory.extraction.enabled is false".to_string())
         })?;
         let client = ModelTextClient::from_config(config, &extraction)?;
         Ok(Self::new(client, extraction.max_facts_per_chunk))
@@ -90,7 +90,7 @@ impl ModelFactExtractor {
         observer: std::sync::Arc<dyn ModelCallObserver>,
     ) -> Result<Self> {
         let extraction = resolved_extraction_config(config).ok_or_else(|| {
-            IngestError::ModelInference("memory.extraction.enabled is false".to_string())
+            Error::ModelInference("memory.extraction.enabled is false".to_string())
         })?;
         let client = ModelTextClient::from_config_with_observer(config, &extraction, observer)?;
         Ok(Self::new(client, extraction.max_facts_per_chunk))
@@ -184,7 +184,7 @@ impl ModelFactExtractionClient {
 fn parse_extraction_response(response: &str) -> Result<Vec<ParsedModelExtractedFact>> {
     let stripped = strip_json_code_fence(response);
     serde_json::from_str::<Vec<ParsedModelExtractedFact>>(stripped).map_err(|error| {
-        IngestError::Extraction(format!(
+        Error::Extraction(format!(
             "failed to parse model extraction JSON array: {error}"
         ))
     })
@@ -253,7 +253,7 @@ fn validate_chunks(chunks: &[TurnChunk]) -> Result<()> {
     for chunk in chunks {
         let actual_chars = chunk.text.chars().count();
         if actual_chars > crate::extract::MAX_EXTRACT_CHUNK_CHARS {
-            return Err(IngestError::ChunkTooLarge {
+            return Err(Error::ChunkTooLarge {
                 index: chunk.index,
                 actual_chars,
                 max_chars: crate::extract::MAX_EXTRACT_CHUNK_CHARS,

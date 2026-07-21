@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use super::command::McpCommandClient;
 use super::command::ServicePath;
-use super::{EmptyInput, MoaMcpServer, clamp_limit, request_identity_and_headers, result};
+use super::{EmptyInput, Server, clamp_limit, request_identity_and_headers, result};
 
 const CAPABILITIES_LIST: ServicePath = ServicePath::new("/Execution/list_capabilities");
 const EXECUTION_RUNS_LIST: ServicePath = ServicePath::new("/Execution/list_runs");
@@ -31,8 +31,8 @@ const EXECUTION_REVIEW: ServicePath = ServicePath::new("/Execution/decide_review
 const EXECUTION_SIGNAL: ServicePath = ServicePath::new("/Execution/deliver_signal");
 
 /// Build the execution lifecycle tool router.
-pub(super) fn router() -> rmcp::handler::server::router::tool::ToolRouter<MoaMcpServer> {
-    MoaMcpServer::execution_runs_router()
+pub(super) fn router() -> rmcp::handler::server::router::tool::ToolRouter<Server> {
+    Server::execution_runs_router()
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -159,7 +159,7 @@ struct ExecutionSignalInput {
 }
 
 #[tool_router(router = execution_runs_router)]
-impl MoaMcpServer {
+impl Server {
     /// List the authenticated tenant's compiler-ready execution capabilities.
     #[tool(annotations(
         read_only_hint = true,

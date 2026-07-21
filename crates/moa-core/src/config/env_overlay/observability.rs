@@ -61,7 +61,7 @@ fn parse_headers(value: &str) -> std::result::Result<HashMap<String, String>, St
     Ok(headers)
 }
 
-pub(super) fn validate_urls(overlay: &MoaEnvOverlay) -> Result<()> {
+pub(super) fn validate_urls(overlay: &EnvOverlay) -> Result<()> {
     validate_url(
         "MOA_OBSERVABILITY_OTLP_ENDPOINT",
         &overlay.observability_otlp_endpoint,
@@ -77,7 +77,7 @@ mod tests {
     fn clickhouse_env_creates_optional_section() {
         // Pins: flat Kubernetes env can enable the ClickHouse analytics store
         // without a TOML section; unset knobs keep their seeded defaults.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_CLICKHOUSE_URL", "http://clickhouse.example:8123"),
             ("MOA_CLICKHOUSE_PASSWORD", "redacted"),
@@ -104,7 +104,7 @@ mod tests {
     fn empty_clickhouse_env_values_mean_unset() {
         // Pins: compose files can pass `MOA_CLICKHOUSE_URL: ${MOA_CLICKHOUSE_URL:-}`;
         // empty values leave the section absent so Postgres stays the backend.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_CLICKHOUSE_URL", ""),
             ("MOA_CLICKHOUSE_USER", " "),
@@ -122,7 +122,7 @@ mod tests {
     fn clickhouse_env_without_url_is_rejected() {
         // Pins: a partially configured ClickHouse section fails startup instead
         // of silently falling back to Postgres while credentials are set.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_CLICKHOUSE_PASSWORD", "redacted"),
         ]))

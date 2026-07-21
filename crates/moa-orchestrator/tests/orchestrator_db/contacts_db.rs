@@ -1,7 +1,7 @@
 //! DB-harness coverage for contact token bounds and contact session authz tuples.
 
 use anyhow::{Result, anyhow};
-use moa_contacts::ContactError;
+use moa_contacts::Error;
 use moa_contacts::domain::{
     low_assurance_scopes, require_contact_agent_allowlist, require_contact_agent_permission,
 };
@@ -110,7 +110,7 @@ async fn contact_session_promotion_replaces_owner_and_contact_tuples_db() -> Res
     Ok(())
 }
 
-fn assert_terminal(error: &ContactError, code: u16, needle: &str) {
+fn assert_terminal(error: &Error, code: u16, needle: &str) {
     assert_eq!(
         error.terminal_code(),
         Some(code),

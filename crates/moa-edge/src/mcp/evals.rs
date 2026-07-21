@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::command::ServicePath;
-use super::{EmptyInput, MoaMcpServer};
+use super::{EmptyInput, Server};
 
 const EVAL_SUITES_LIST: ServicePath = ServicePath::new("/Eval/suites_list");
 const EVAL_PLAN: ServicePath = ServicePath::new("/Eval/plan");
@@ -27,8 +27,8 @@ const EVAL_SCORES: ServicePath = ServicePath::new("/Eval/scores");
 const EVAL_COMPARE: ServicePath = ServicePath::new("/Eval/compare");
 
 /// Build the internal eval tool router.
-pub(super) fn router() -> rmcp::handler::server::router::tool::ToolRouter<MoaMcpServer> {
-    MoaMcpServer::evals_router()
+pub(super) fn router() -> rmcp::handler::server::router::tool::ToolRouter<Server> {
+    Server::evals_router()
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -138,7 +138,7 @@ struct EvalCompareInput {
 }
 
 #[tool_router(router = evals_router)]
-impl MoaMcpServer {
+impl Server {
     /// Parse and summarize caller-supplied inline TOML eval suite documents.
     #[tool(annotations(
         read_only_hint = true,

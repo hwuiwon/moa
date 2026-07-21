@@ -44,7 +44,7 @@ pub(super) fn optional_section_seed(path: &[&str]) -> Option<Value> {
     }
 }
 
-pub(super) fn validate_urls(overlay: &MoaEnvOverlay) -> Result<()> {
+pub(super) fn validate_urls(overlay: &EnvOverlay) -> Result<()> {
     validate_url("MOA_AUTH_OIDC_ISSUER", &overlay.auth_oidc_issuer)?;
     validate_url("MOA_AUTH_OIDC_JWKS_URL", &overlay.auth_oidc_jwks_url)?;
     validate_url("MOA_AUTH_OAUTH_ISSUER", &overlay.auth_oauth_issuer)?;
@@ -53,7 +53,7 @@ pub(super) fn validate_urls(overlay: &MoaEnvOverlay) -> Result<()> {
     validate_url("MOA_PII_SERVICE_URL", &overlay.pii_service_url)
 }
 
-impl MoaEnvOverlay {
+impl EnvOverlay {
     pub(super) fn validate_required_sections(&self, config: &MoaConfig) -> Result<()> {
         self.validate_auth0(config)?;
         self.validate_oidc(config)?;
@@ -188,7 +188,7 @@ mod tests {
         // enums directly, so the message names the rejected variant rather than
         // the `MOA_` env var (see `restore_env_prefix`).
         assert_config_error_contains(
-            MoaEnvOverlay::from_iter(env_pairs([("MOA_AUTH_PROVIDER", "saml")])),
+            EnvOverlay::from_iter(env_pairs([("MOA_AUTH_PROVIDER", "saml")])),
             "saml",
         );
     }
@@ -197,7 +197,7 @@ mod tests {
     fn invalid_url_reports_env_name() {
         // Pins: URL-shaped parse failures name the canonical env var.
         assert_config_error_contains(
-            MoaEnvOverlay::from_iter(env_pairs([("MOA_AUTHZ_OPENFGA_URL", "openfga.internal")])),
+            EnvOverlay::from_iter(env_pairs([("MOA_AUTHZ_OPENFGA_URL", "openfga.internal")])),
             "MOA_AUTHZ_OPENFGA_URL",
         );
     }
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn partial_openfga_overlay_reports_missing_env_name() {
         // Pins: OpenFGA overlay cannot synthesize a partial nested config.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([(
+        let overlay = EnvOverlay::from_iter(env_pairs([(
             "MOA_AUTHZ_OPENFGA_URL",
             "http://openfga.example",
         )]))
@@ -222,7 +222,7 @@ mod tests {
     fn oauth_overlay_applies_resource_lifetimes_and_clients() {
         // Pins: every authorization-server value needed by independent edge
         // replicas can be declared through flat deployment environment values.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_AUTH_OAUTH_ISSUER", "https://auth.example"),
             ("MOA_AUTH_OAUTH_RESOURCE", "https://api.example/mcp"),
             (
@@ -265,7 +265,7 @@ mod tests {
     fn oauth_overlay_rejects_non_mcp_resource() {
         // Pins: deployment cannot accidentally grant OAuth authority over the
         // REST origin by configuring a broad or unrelated protected resource.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([(
+        let overlay = EnvOverlay::from_iter(env_pairs([(
             "MOA_AUTH_OAUTH_RESOURCE",
             "https://api.example/v1",
         )]))
@@ -279,7 +279,7 @@ mod tests {
     fn token_vault_refresh_overlay_applies_typed_secrets() {
         // Pins: replicas receive complete refresh credentials directly from one
         // typed JSON environment value without secondary environment lookups.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([(
+        let overlay = EnvOverlay::from_iter(env_pairs([(
             "MOA_TOKEN_VAULT_REFRESH_JSON",
             r#"{"github":{"token_endpoint":"https://github.com/login/oauth/access_token","client_id":"client-id","client_secret":"client-secret"}}"#,
         )]))
@@ -303,7 +303,7 @@ mod tests {
     fn token_vault_refresh_overlay_rejects_invalid_endpoint() {
         // Pins: invalid refresh endpoints fail startup validation instead of
         // surfacing only after a token expires.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([(
+        let overlay = EnvOverlay::from_iter(env_pairs([(
             "MOA_TOKEN_VAULT_REFRESH_JSON",
             r#"{"github":{"token_endpoint":"github.internal/token","client_id":"client-id"}}"#,
         )]))
@@ -320,7 +320,7 @@ mod tests {
     fn token_vault_refresh_overlay_rejects_malformed_json() {
         // Pins: malformed JSON names the deployment environment variable.
         assert_config_error_contains(
-            MoaEnvOverlay::from_iter(env_pairs([("MOA_TOKEN_VAULT_REFRESH_JSON", "{not-json}")])),
+            EnvOverlay::from_iter(env_pairs([("MOA_TOKEN_VAULT_REFRESH_JSON", "{not-json}")])),
             "MOA_TOKEN_VAULT_REFRESH_JSON",
         );
     }

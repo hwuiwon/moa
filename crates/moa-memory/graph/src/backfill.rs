@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::{
-    GraphError, Result,
+    Error, Result,
     write::{
         REDACTED_NAME_PLACEHOLDER, SEALED_CONTENT_VERSION, SealedNodeContent, is_sealed_class,
     },
@@ -59,7 +59,7 @@ pub async fn backfill_memory_sealed_content(
     batch_size: u32,
 ) -> Result<SealedContentBackfillReport> {
     if batch_size == 0 {
-        return Err(GraphError::Backfill(
+        return Err(Error::Backfill(
             "backfill batch size must be greater than zero".to_string(),
         ));
     }
@@ -92,7 +92,7 @@ pub async fn backfill_memory_sealed_content(
                 .data_subject_id
                 .is_some_and(|actual| actual != expected_subject)
             {
-                return Err(GraphError::DataSubjectMismatch {
+                return Err(Error::DataSubjectMismatch {
                     actual: candidate.data_subject_id.unwrap_or(expected_subject),
                     expected: expected_subject,
                 });
@@ -255,7 +255,7 @@ async fn prepare_candidates(
             continue;
         }
         if !candidate.properties.is_object() {
-            return Err(GraphError::Backfill(format!(
+            return Err(Error::Backfill(format!(
                 "node {} has non-object properties",
                 candidate.uid
             )));

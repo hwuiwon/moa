@@ -11,7 +11,7 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use moa_core::config::MoaConfig;
 use moa_db::ScopedConn;
-use moa_memory_graph::{GraphError, GraphStore, NodeIndexRow, NodeLabel};
+use moa_memory_graph::{Error, GraphStore, NodeIndexRow, NodeLabel};
 use moa_memory_vector::{Error as VectorError, PgvectorStore, TurbopufferStore};
 use moa_providers::{ConfiguredReranker, Reranker, build_reranker_from_config};
 use sqlx::PgPool;
@@ -991,31 +991,31 @@ fn is_fatal_retrieval_error(error: &RetrievalError) -> bool {
     }
 }
 
-fn is_fatal_graph_error(error: &GraphError) -> bool {
+fn is_fatal_graph_error(error: &Error) -> bool {
     match error {
         // RLS/privacy/scope invariants.
-        GraphError::RlsDenied | GraphError::MissingScope | GraphError::Scope(_) => true,
+        Error::RlsDenied | Error::MissingScope | Error::Scope(_) => true,
         // Invalid data/config invariants that will not self-heal.
-        GraphError::MissingEmbeddingMetadata
-        | GraphError::Conflict(_)
-        | GraphError::BiTemporal(_)
-        | GraphError::UnknownNodeLabel(_)
-        | GraphError::UnknownEdgeLabel(_)
-        | GraphError::SealedEmbedding
-        | GraphError::DataSubjectMismatch { .. }
-        | GraphError::Backfill(_)
-        | GraphError::ChangelogScopeMismatch { .. }
-        | GraphError::InvalidChangelogScope => true,
+        Error::MissingEmbeddingMetadata
+        | Error::Conflict(_)
+        | Error::BiTemporal(_)
+        | Error::UnknownNodeLabel(_)
+        | Error::UnknownEdgeLabel(_)
+        | Error::SealedEmbedding
+        | Error::DataSubjectMismatch { .. }
+        | Error::Backfill(_)
+        | Error::ChangelogScopeMismatch { .. }
+        | Error::InvalidChangelogScope => true,
         // Ordinary backend/query failures degrade this leg. A crypto failure
         // opening sealed content is treated the same: a transient KMS/backend
         // hiccup should degrade the leg rather than fatally abort retrieval.
-        GraphError::GraphQuery(_)
-        | GraphError::Sidecar(_)
-        | GraphError::NotFound(_)
-        | GraphError::Json(_)
-        | GraphError::Crypto(_) => false,
+        Error::GraphQuery(_)
+        | Error::Sidecar(_)
+        | Error::NotFound(_)
+        | Error::Json(_)
+        | Error::Crypto(_) => false,
         // Delegate to the vector classification.
-        GraphError::Vector(error) => is_fatal_vector_error(error),
+        Error::Vector(error) => is_fatal_vector_error(error),
     }
 }
 

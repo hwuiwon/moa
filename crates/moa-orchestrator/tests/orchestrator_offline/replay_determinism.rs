@@ -22,7 +22,7 @@ use moa_memory_lifecycle::{
     SweepStats,
 };
 use moa_orchestrator::workflows::consolidate::{
-    ConsolidateDurableSteps, ConsolidateReport, ConsolidateRequest, run_consolidate_workflow,
+    ConsolidateReport, ConsolidateRequest, ConsolidateSteps, run_consolidate_workflow,
 };
 use restate_sdk::prelude::HandlerError;
 use serde_json::json;
@@ -37,7 +37,7 @@ struct RecordedConsolidateSteps<'a> {
 }
 
 #[async_trait]
-impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
+impl ConsolidateSteps for RecordedConsolidateSteps<'_> {
     async fn mark_consolidation_started(
         &mut self,
         request: &ConsolidateRequest,

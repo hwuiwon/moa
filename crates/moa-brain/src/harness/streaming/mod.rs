@@ -28,7 +28,7 @@ use super::context_build::{
     complete_cache_report, last_user_message_text, record_turn_span_metrics,
     turn_number_for_events,
 };
-use super::tool_dispatch::{DurableToolFailure, ToolCallOutcome, handle_tool_call};
+use super::tool_dispatch::{ToolCallOutcome, ToolFailure, handle_tool_call};
 use super::{BrainTurnRequest, StreamedTurnRequest, StreamedTurnResult};
 
 const TURN_EVENT_TAIL_LIMIT: usize = 16;
@@ -88,7 +88,7 @@ pub(super) async fn run_streamed_turn(
         let mut total_output_tokens = 0usize;
         // First terminal tool failure seen this turn, if any. Capped at one so a
         // turn writes at most one incident when it completes.
-        let mut durable_failure: Option<DurableToolFailure> = None;
+        let mut durable_failure: Option<ToolFailure> = None;
 
         loop {
             let session = session_store.get_session(session_id).await?;
@@ -442,11 +442,7 @@ pub(super) async fn run_streamed_turn(
 /// write runs off the turn's critical path and its result is logged at debug, so
 /// a memory-storage hiccup never fails the turn. `record_incident` itself no-ops
 /// when memory learning is disabled or the failure was already recorded.
-fn spawn_incident_capture(
-    session: &SessionMeta,
-    turn_seq: i64,
-    failure: Option<DurableToolFailure>,
-) {
+fn spawn_incident_capture(session: &SessionMeta, turn_seq: i64, failure: Option<ToolFailure>) {
     let Some(failure) = failure else {
         return;
     };

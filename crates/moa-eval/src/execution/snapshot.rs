@@ -11,7 +11,7 @@ use moa_core::types::execution_planning::{
     ExecutionPlannerOutcome, ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload,
     ExecutionRouteKind, ExecutionRouteStage, ExecutionSourceProvenance, ExecutionStrategy,
 };
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 use moa_execution::{
     ExecutionEstimate,
     budget::BudgetLedger,
@@ -567,6 +567,6 @@ pub(crate) fn total_accounted_resources(
         .ok()
 }
 
-fn invalid_config(message: String) -> EvalError {
-    EvalError::InvalidConfig(message)
+fn invalid_config(message: String) -> Error {
+    Error::InvalidConfig(message)
 }

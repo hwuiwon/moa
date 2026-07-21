@@ -9,7 +9,7 @@ use moa_core::{
 use rand::Rng;
 use uuid::Uuid;
 
-use crate::{ContactError, Result};
+use crate::{Error, Result};
 
 const LOW_ASSURANCE_SCOPES: &[&str] = &[
     "agent:session:create",
@@ -47,7 +47,7 @@ pub struct ContactPointDelivery {
 /// Returns low-assurance scopes bounded by the contact service allowlist.
 pub fn low_assurance_scopes(requested_scopes: &[String]) -> Result<Vec<String>> {
     if requested_scopes.is_empty() {
-        return Err(ContactError::terminal(
+        return Err(Error::terminal(
             400,
             "contact token requested_scopes is required",
         ));
@@ -84,7 +84,7 @@ pub fn contact_point_delivery(
         ContactPointKind::Email => Channel::Email,
         ContactPointKind::Phone => Channel::Sms,
         ContactPointKind::ExternalId | ContactPointKind::AnonymousHandle => {
-            return Err(ContactError::terminal(
+            return Err(Error::terminal(
                 400,
                 "contact verification supports email and phone delivery only",
             ));
@@ -93,7 +93,7 @@ pub fn contact_point_delivery(
     if let Some(requested_channel) = requested_channel
         && requested_channel != channel
     {
-        return Err(ContactError::terminal(
+        return Err(Error::terminal(
             400,
             "delivery channel does not match contact point kind",
         ));
@@ -119,7 +119,7 @@ pub fn require_contact_scope(claims: &ContactTokenClaims, required_scope: &str) 
     if claims.scopes.iter().any(|scope| scope == required_scope) {
         Ok(())
     } else {
-        Err(ContactError::terminal(403, "contact token scope denied"))
+        Err(Error::terminal(403, "contact token scope denied"))
     }
 }
 
@@ -134,17 +134,14 @@ pub fn require_contact_session_permission(
     if claims.session_ids.is_empty() || claims.session_ids.contains(&session_id) {
         Ok(())
     } else {
-        Err(ContactError::terminal(403, "contact token session denied"))
+        Err(Error::terminal(403, "contact token session denied"))
     }
 }
 
 /// Requires token issuance to specify at least one allowed agent id.
 pub fn require_contact_agent_allowlist(agent_ids: &[String]) -> Result<()> {
     if agent_ids.is_empty() {
-        Err(ContactError::terminal(
-            400,
-            "contact token agent_ids is required",
-        ))
+        Err(Error::terminal(400, "contact token agent_ids is required"))
     } else {
         Ok(())
     }
@@ -156,7 +153,7 @@ pub fn require_contact_agent_permission(
     agent: &AgentSessionSelection,
 ) -> Result<()> {
     if claims.agent_ids.is_empty() {
-        return Err(ContactError::terminal(
+        return Err(Error::terminal(
             403,
             "contact token agent allowlist required",
         ));
@@ -169,7 +166,7 @@ pub fn require_contact_agent_permission(
     {
         Ok(())
     } else {
-        Err(ContactError::terminal(403, "contact token agent denied"))
+        Err(Error::terminal(403, "contact token agent denied"))
     }
 }
 
@@ -178,7 +175,7 @@ pub(crate) fn validate_contact_agent_selection(agent: &AgentSessionSelection) ->
     match (agent.installation_uid, agent.revision_uid) {
         (Some(installation_uid), None) => Ok(installation_uid.to_string()),
         (None, Some(revision_uid)) => Ok(revision_uid.to_string()),
-        _ => Err(ContactError::terminal(
+        _ => Err(Error::terminal(
             400,
             "contact session requires exactly one agent installation_uid or revision_uid",
         )),
@@ -189,23 +186,20 @@ pub(crate) fn validate_contact_agent_selection(agent: &AgentSessionSelection) ->
 pub fn contact_id_from_claims(claims: &ContactTokenClaims) -> Result<ContactId> {
     Uuid::parse_str(&claims.sub)
         .map(ContactId)
-        .map_err(|_| ContactError::terminal(400, "contact token subject is invalid"))
+        .map_err(|_| Error::terminal(400, "contact token subject is invalid"))
 }
 
 /// Normalizes one contact point for stable hashing and delivery.
 pub fn normalize_contact_point(kind: ContactPointKind, value: &str) -> Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err(ContactError::terminal(
-            400,
-            "contact point value is required",
-        ));
+        return Err(Error::terminal(400, "contact point value is required"));
     }
     match kind {
         ContactPointKind::Email => {
             let normalized = trimmed.to_ascii_lowercase();
             if !normalized.contains('@') {
-                return Err(ContactError::terminal(400, "invalid email contact point"));
+                return Err(Error::terminal(400, "invalid email contact point"));
             }
             Ok(normalized)
         }
@@ -218,7 +212,7 @@ pub fn normalize_contact_point(kind: ContactPointKind, value: &str) -> Result<St
 pub fn normalize_phone(value: &str) -> Result<String> {
     let digits: String = value.chars().filter(char::is_ascii_digit).collect();
     if !(8..=15).contains(&digits.len()) {
-        return Err(ContactError::terminal(400, "invalid phone contact point"));
+        return Err(Error::terminal(400, "invalid phone contact point"));
     }
     Ok(format!("+{digits}"))
 }
@@ -231,7 +225,7 @@ pub fn hash_contact_point_from_env(
     key_env: &str,
 ) -> Result<String> {
     let key_hex = std::env::var(key_env)
-        .map_err(|_| ContactError::terminal(503, "contact point hash key is not configured"))?;
+        .map_err(|_| Error::terminal(503, "contact point hash key is not configured"))?;
     hash_contact_point_with_key_hex(tenant_id, kind, normalized, key_hex.trim())
 }
 
@@ -243,13 +237,13 @@ pub fn hash_contact_point_with_key_hex(
     key_hex: &str,
 ) -> Result<String> {
     let key_bytes = hex::decode(key_hex).map_err(|error| {
-        ContactError::terminal(
+        Error::terminal(
             503,
             format!("contact point hash key must be hex-encoded: {error}"),
         )
     })?;
     let key: [u8; 32] = key_bytes.try_into().map_err(|bytes: Vec<u8>| {
-        ContactError::terminal(
+        Error::terminal(
             503,
             format!(
                 "contact point hash key must be 32 bytes, got {}",
@@ -286,7 +280,7 @@ where
 {
     value
         .parse::<T>()
-        .map_err(|_| ContactError::terminal(500, message))
+        .map_err(|_| Error::terminal(500, message))
 }
 
 /// Parses a persisted contact state.
@@ -312,9 +306,9 @@ mod tests {
         low_assurance_scopes, normalize_contact_point, normalize_phone,
         require_contact_agent_allowlist, require_contact_agent_permission,
     };
-    use crate::ContactError;
+    use crate::Error;
 
-    fn assert_terminal(error: &ContactError, code: u16, needle: &str) {
+    fn assert_terminal(error: &Error, code: u16, needle: &str) {
         assert_eq!(
             error.terminal_code(),
             Some(code),

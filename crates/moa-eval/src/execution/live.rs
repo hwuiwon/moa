@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use moa_core::types::execution_planning::{
     ExecutionRouteClassifierOutcome, ExecutionRouteKind, ExecutionRouteSource, ExecutionStrategy,
 };
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 use moa_execution::state::ExecutionRunStatus;
 use serde::{Deserialize, Serialize};
 
@@ -485,6 +485,6 @@ fn ratio(numerator: u64, denominator: u64) -> Option<f64> {
     (denominator != 0).then_some(numerator as f64 / denominator as f64)
 }
 
-fn invalid_config(message: String) -> EvalError {
-    EvalError::InvalidConfig(message)
+fn invalid_config(message: String) -> Error {
+    Error::InvalidConfig(message)
 }

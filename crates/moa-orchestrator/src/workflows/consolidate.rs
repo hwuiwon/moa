@@ -236,7 +236,7 @@ impl Consolidate for ConsolidateImpl {
 
 /// Durable operations used by the consolidation workflow body.
 #[async_trait]
-pub trait ConsolidateDurableSteps {
+pub trait ConsolidateSteps {
     /// Records that the owning tenant has started a consolidation run.
     async fn mark_consolidation_started(
         &mut self,
@@ -323,7 +323,7 @@ pub trait ConsolidateDurableSteps {
 
 /// Runs the consolidation workflow body against a durable-step implementation.
 pub async fn run_consolidate_workflow(
-    steps: &mut impl ConsolidateDurableSteps,
+    steps: &mut impl ConsolidateSteps,
     request: ConsolidateRequest,
 ) -> Result<ConsolidateReport, HandlerError> {
     let observed_changelog_version = match request.observed_changelog_version {
@@ -373,7 +373,7 @@ struct RestateConsolidateSteps<'ctx, 'workflow> {
 }
 
 #[async_trait]
-impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
+impl ConsolidateSteps for RestateConsolidateSteps<'_, '_> {
     async fn mark_consolidation_started(
         &mut self,
         request: &ConsolidateRequest,

@@ -26,11 +26,11 @@ use moa_db::ScopedConn;
 use moa_eval::golden::comparator::dump_traces;
 use moa_memory_graph::{GraphStore, NodeLabel, PostgresGraphStore};
 use moa_memory_ingest::{
-    Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, FastPathCtx,
-    FastRememberRequest, IngestCtx, IngestError, SessionTurn, fast_remember,
+    Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, Error as IngestError,
+    FastPathCtx, FastRememberRequest, IngestCtx, SessionTurn, fast_remember,
     ingest_turn_direct_with_ctx,
 };
-use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
+use moa_memory_pii::{Error as PiiError, PiiClassifier, PiiResult, PiiSpan};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;

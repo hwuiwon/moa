@@ -22,7 +22,7 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::model_client::{ModelTextClient, resolved_extraction_config};
-use crate::{EmbeddedFact, IngestError, Result};
+use crate::{EmbeddedFact, Error, Result};
 
 const VECTOR_K: usize = 10;
 const LEXICAL_K: i64 = 10;
@@ -294,7 +294,7 @@ impl RrfPlusJudgeDetector {
             .reranker
             .rerank(&self.rerank_model, fact_text, &documents, RERANK_TOP_N)
             .await
-            .map_err(|error| IngestError::Rerank(error.to_string()))?;
+            .map_err(|error| Error::Rerank(error.to_string()))?;
         let mut reranked = Vec::with_capacity(hits.len());
         for hit in hits {
             if let Some(candidate) = candidates.get(hit.index) {
@@ -484,7 +484,7 @@ async fn vector_candidate_uids(
         return Ok(Vec::new());
     }
     if embedding.len() != ctx.vector().dimension() || embedding.len() != VECTOR_DIMENSION {
-        return Err(IngestError::Vector(VectorError::DimensionMismatch {
+        return Err(Error::Vector(VectorError::DimensionMismatch {
             expected: VECTOR_DIMENSION,
             actual: embedding.len(),
         }));
@@ -561,7 +561,7 @@ async fn lexical_candidates_and_hydrate(
     let mut hydrated: HashMap<Uuid, NodeIndexRow> = HashMap::with_capacity(rows.len());
     for row in &rows {
         let lexical_ord: Option<i64> = row.try_get("lexical_ord")?;
-        let node = NodeIndexRow::from_row(row).map_err(IngestError::from)?;
+        let node = NodeIndexRow::from_row(row).map_err(Error::from)?;
         if let Some(ord) = lexical_ord {
             lexical_ranked.push((ord, node.uid));
         }
@@ -584,7 +584,7 @@ fn conflict_from_judge(response: JudgeResponse) -> Conflict {
 fn parse_judge_response(response: &str) -> Result<JudgeResponse> {
     let stripped = strip_json_code_fence(response);
     serde_json::from_str::<JudgeResponse>(stripped)
-        .map_err(|error| IngestError::Judge(format!("failed to parse judge JSON: {error}")))
+        .map_err(|error| Error::Judge(format!("failed to parse judge JSON: {error}")))
 }
 
 fn strip_json_code_fence(response: &str) -> &str {

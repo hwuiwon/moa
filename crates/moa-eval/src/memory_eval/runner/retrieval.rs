@@ -205,7 +205,7 @@ pub(super) fn probe_retrieval_request(
 pub(super) fn memory_retrieval_error(
     probe: &Probe,
     error: impl std::fmt::Display,
-) -> moa_eval_core::EvalError {
+) -> moa_eval_core::Error {
     EvalError::InvalidConfig(format!(
         "memory retrieval failed for probe {}: {error}",
         probe.probe_id

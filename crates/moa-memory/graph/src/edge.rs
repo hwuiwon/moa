@@ -5,7 +5,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{GraphError, Result};
+use crate::{Error, Result};
 
 /// Supported edge labels for graph memory.
 #[derive(
@@ -77,7 +77,7 @@ impl EdgeLabel {
 }
 
 impl FromStr for EdgeLabel {
-    type Err = GraphError;
+    type Err = Error;
 
     fn from_str(value: &str) -> Result<Self> {
         match value {
@@ -93,7 +93,7 @@ impl FromStr for EdgeLabel {
             "CAUSED" => Ok(Self::Caused),
             "LEARNED_FROM" => Ok(Self::LearnedFrom),
             "APPLIES_TO" => Ok(Self::AppliesTo),
-            other => Err(GraphError::UnknownEdgeLabel(other.to_string())),
+            other => Err(Error::UnknownEdgeLabel(other.to_string())),
         }
     }
 }

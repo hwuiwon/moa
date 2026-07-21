@@ -2,7 +2,7 @@
 
 This is the reference for MOA's runtime configuration through environment
 variables. The variable tables below are **generated from source** (the
-`MoaEnvOverlay` field set and `MoaConfig::default()`), so they stay accurate as
+`EnvOverlay` field set and `MoaConfig::default()`), so they stay accurate as
 config changes — see [Regenerating the tables](#regenerating-the-tables).
 
 ## How configuration works
@@ -660,7 +660,7 @@ env:
 
 The overlay tables are produced from source, not hand-maintained. The
 `#[ignore]` dev test `dump_env_var_reference` in
-`crates/moa-core/src/config/env_overlay.rs` walks `MoaEnvOverlay` and
+`crates/moa-core/src/config/env_overlay.rs` walks `EnvOverlay` and
 `MoaConfig::default()` and prints `env_var | config_path | default` for every
 variable:
 

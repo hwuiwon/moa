@@ -116,7 +116,7 @@ fn lesson_name(summary: &str) -> String {
     summary.chars().take(80).collect()
 }
 
-fn map_graph_error(error: moa_memory_graph::GraphError) -> MoaError {
+fn map_graph_error(error: moa_memory_graph::Error) -> MoaError {
     MoaError::StorageError(error.to_string())
 }
 

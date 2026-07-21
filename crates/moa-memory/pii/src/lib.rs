@@ -12,7 +12,7 @@ pub use mock::MockClassifier;
 pub use openai_filter::{OpenAiPrivacyFilterClassifier, PrivacyFilterThresholds};
 
 /// Result type returned by PII classifier implementations.
-pub type Result<T> = std::result::Result<T, PiiError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// PII categories emitted by `openai/privacy-filter` and normalized into MOA categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -385,7 +385,7 @@ impl PiiClassifier for HeuristicPiiClassifier {
 
 /// Errors returned by PII classification helpers.
 #[derive(Debug, thiserror::Error)]
-pub enum PiiError {
+pub enum Error {
     /// The inference service returned a non-network failure.
     #[error("inference: {0}")]
     Inference(String),

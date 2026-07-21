@@ -672,7 +672,7 @@ mod tests {
     use moa_core::types::completion::{StopReason, TokenUsage, ToolCallContent, ToolInvocation};
     use moa_core::types::identifiers::ModelId;
     use moa_core::types::security::SensitivityClass;
-    use moa_memory_pii::{PiiCategory, PiiError, PiiSpan};
+    use moa_memory_pii::{Error, PiiCategory, PiiSpan};
     use serde_json::json;
 
     use super::*;
@@ -1117,7 +1117,7 @@ mod tests {
         #[async_trait]
         impl PiiClassifier for Failing {
             async fn classify(&self, _text: &str) -> moa_memory_pii::Result<PiiResult> {
-                Err(PiiError::Inference("offline".to_string()))
+                Err(Error::Inference("offline".to_string()))
             }
         }
         let inner = EchoProvider::new(EchoMode::AllText);

@@ -9,7 +9,7 @@ use moa_core::wire::analytics::{
 };
 
 use crate::catalog::find_dataset;
-use crate::error::{AnalyticsError, Result};
+use crate::error::{Error, Result};
 
 /// Default number of rows returned when a query omits an explicit limit.
 pub(crate) const DEFAULT_QUERY_LIMIT: u32 = 100;
@@ -50,33 +50,30 @@ pub(crate) fn validate_query_at(
     request: AnalyticsQueryRequest,
     now: DateTime<Utc>,
 ) -> Result<ValidatedAnalyticsQuery> {
-    let dataset =
-        find_dataset(catalog, &request.dataset).ok_or_else(|| AnalyticsError::UnknownDataset {
-            dataset: request.dataset.clone(),
-        })?;
-    let tenant_id = request
-        .tenant_id
-        .ok_or(AnalyticsError::MissingTenantScope)?;
+    let dataset = find_dataset(catalog, &request.dataset).ok_or_else(|| Error::UnknownDataset {
+        dataset: request.dataset.clone(),
+    })?;
+    let tenant_id = request.tenant_id.ok_or(Error::MissingTenantScope)?;
 
     if request.dimensions.is_empty() && request.measures.is_empty() {
-        return Err(AnalyticsError::EmptySelection {
+        return Err(Error::EmptySelection {
             dataset: request.dataset.clone(),
         });
     }
     if request.dimensions.len() > MAX_DIMENSIONS {
-        return Err(AnalyticsError::TooManyDimensions {
+        return Err(Error::TooManyDimensions {
             count: request.dimensions.len(),
             max: MAX_DIMENSIONS,
         });
     }
     if request.measures.len() > MAX_MEASURES {
-        return Err(AnalyticsError::TooManyMeasures {
+        return Err(Error::TooManyMeasures {
             count: request.measures.len(),
             max: MAX_MEASURES,
         });
     }
     if request.filters.len() > MAX_FILTERS {
-        return Err(AnalyticsError::TooManyFilters {
+        return Err(Error::TooManyFilters {
             count: request.filters.len(),
             max: MAX_FILTERS,
         });
@@ -84,7 +81,7 @@ pub(crate) fn validate_query_at(
 
     let limit = request.limit.unwrap_or(DEFAULT_QUERY_LIMIT);
     if limit > MAX_QUERY_LIMIT {
-        return Err(AnalyticsError::LimitTooLarge {
+        return Err(Error::LimitTooLarge {
             limit,
             max: MAX_QUERY_LIMIT,
         });
@@ -104,7 +101,7 @@ pub(crate) fn validate_query_at(
             }
             None if measure.aggregation == AnalyticsAggregation::Count => {}
             None => {
-                return Err(AnalyticsError::MissingMeasureField {
+                return Err(Error::MissingMeasureField {
                     aggregation: aggregation_name(measure.aggregation),
                 });
             }
@@ -115,7 +112,7 @@ pub(crate) fn validate_query_at(
         let field = require_field(dataset.id.as_str(), &dataset.fields, &filter.field)?;
         require_filter_operator(field, filter.operator)?;
         if filter.value.is_none() && filter_requires_value(filter.operator) {
-            return Err(AnalyticsError::MissingFilterValue {
+            return Err(Error::MissingFilterValue {
                 field: filter.field.clone(),
                 operator: filter_operator_name(filter.operator),
             });
@@ -133,7 +130,7 @@ pub(crate) fn validate_query_at(
 
     for order in &request.order_by {
         if !selected_field_or_alias(&request, &order.field) {
-            return Err(AnalyticsError::UnknownOrderField {
+            return Err(Error::UnknownOrderField {
                 field: order.field.clone(),
             });
         }
@@ -154,7 +151,7 @@ fn require_field<'a>(
     fields
         .iter()
         .find(|field| field.id == field_id)
-        .ok_or_else(|| AnalyticsError::UnknownField {
+        .ok_or_else(|| Error::UnknownField {
             dataset: dataset_id.to_string(),
             field: field_id.to_string(),
         })
@@ -165,7 +162,7 @@ fn require_role(field: &AnalyticsField, role: AnalyticsFieldRole) -> Result<()> 
         return Ok(());
     }
 
-    Err(AnalyticsError::UnsupportedFieldRole {
+    Err(Error::UnsupportedFieldRole {
         field: field.id.clone(),
         role: role_name(role),
     })
@@ -176,7 +173,7 @@ fn require_aggregation(field: &AnalyticsField, aggregation: AnalyticsAggregation
         return Ok(());
     }
 
-    Err(AnalyticsError::UnsupportedAggregation {
+    Err(Error::UnsupportedAggregation {
         field: field.id.clone(),
         aggregation: aggregation_name(aggregation),
     })
@@ -190,7 +187,7 @@ fn require_filter_operator(
         return Ok(());
     }
 
-    Err(AnalyticsError::UnsupportedFilterOperator {
+    Err(Error::UnsupportedFilterOperator {
         field: field.id.clone(),
         operator: filter_operator_name(operator),
     })
@@ -235,15 +232,15 @@ fn validate_tenant_filter(
         return Ok(());
     }
     if operator != AnalyticsFilterOperator::Eq {
-        return Err(AnalyticsError::ConflictingTenantFilter);
+        return Err(Error::ConflictingTenantFilter);
     }
     let Some(value) = value.and_then(cell_as_string) else {
-        return Err(AnalyticsError::ConflictingTenantFilter);
+        return Err(Error::ConflictingTenantFilter);
     };
     if value == tenant_id.to_string() {
         Ok(())
     } else {
-        Err(AnalyticsError::ConflictingTenantFilter)
+        Err(Error::ConflictingTenantFilter)
     }
 }
 
@@ -255,12 +252,12 @@ fn validate_time_window(
     if field.kind != AnalyticsFieldKind::Timestamp || operator != AnalyticsFilterOperator::Between {
         return Ok(());
     }
-    let values = json_array(value).ok_or_else(|| AnalyticsError::InvalidFilterValue {
+    let values = json_array(value).ok_or_else(|| Error::InvalidFilterValue {
         field: field.id.clone(),
         reason: "between requires a two-element array".to_string(),
     })?;
     if values.len() != 2 {
-        return Err(AnalyticsError::InvalidFilterValue {
+        return Err(Error::InvalidFilterValue {
             field: field.id.clone(),
             reason: "between requires exactly two values".to_string(),
         });
@@ -269,7 +266,7 @@ fn validate_time_window(
     let end = parse_timestamp_json(&field.id, &values[1])?;
     let days = end.signed_duration_since(start).num_days().abs();
     if days > MAX_TIME_WINDOW_DAYS {
-        return Err(AnalyticsError::TimeWindowTooLarge {
+        return Err(Error::TimeWindowTooLarge {
             days,
             max_days: MAX_TIME_WINDOW_DAYS,
         });
@@ -308,7 +305,7 @@ fn enforce_required_time_window(
                 let start = lower_bound_timestamp(time_field, filter.value.as_ref())?;
                 let days = now.signed_duration_since(start).num_days();
                 if days > MAX_TIME_WINDOW_DAYS {
-                    return Err(AnalyticsError::TimeWindowTooLarge {
+                    return Err(Error::TimeWindowTooLarge {
                         days,
                         max_days: MAX_TIME_WINDOW_DAYS,
                     });
@@ -322,7 +319,7 @@ fn enforce_required_time_window(
     if bounded {
         Ok(())
     } else {
-        Err(AnalyticsError::MissingTimeWindow {
+        Err(Error::MissingTimeWindow {
             dataset: dataset.id.clone(),
             time_field: time_field.to_string(),
             max_days: MAX_TIME_WINDOW_DAYS,
@@ -333,13 +330,13 @@ fn enforce_required_time_window(
 fn lower_bound_timestamp(field: &str, value: Option<&AnalyticsCell>) -> Result<DateTime<Utc>> {
     let raw = value
         .and_then(cell_as_string)
-        .ok_or_else(|| AnalyticsError::InvalidFilterValue {
+        .ok_or_else(|| Error::InvalidFilterValue {
             field: field.to_string(),
             reason: "timestamp lower bound must be an RFC3339 string".to_string(),
         })?;
     DateTime::parse_from_rfc3339(raw)
         .map(|timestamp| timestamp.with_timezone(&Utc))
-        .map_err(|error| AnalyticsError::InvalidFilterValue {
+        .map_err(|error| Error::InvalidFilterValue {
             field: field.to_string(),
             reason: error.to_string(),
         })
@@ -347,14 +344,14 @@ fn lower_bound_timestamp(field: &str, value: Option<&AnalyticsCell>) -> Result<D
 
 fn parse_timestamp_json(field: &str, value: &serde_json::Value) -> Result<DateTime<Utc>> {
     let Some(value) = value.as_str() else {
-        return Err(AnalyticsError::InvalidFilterValue {
+        return Err(Error::InvalidFilterValue {
             field: field.to_string(),
             reason: "timestamp value must be an RFC3339 string".to_string(),
         });
     };
     DateTime::parse_from_rfc3339(value)
         .map(|timestamp| timestamp.with_timezone(&Utc))
-        .map_err(|error| AnalyticsError::InvalidFilterValue {
+        .map_err(|error| Error::InvalidFilterValue {
             field: field.to_string(),
             reason: error.to_string(),
         })
@@ -467,7 +464,7 @@ mod tests {
             fixed_now(),
         )
         .expect_err("unbounded query must be rejected");
-        assert!(matches!(error, AnalyticsError::MissingTimeWindow { .. }));
+        assert!(matches!(error, Error::MissingTimeWindow { .. }));
     }
 
     #[test]
@@ -479,7 +476,7 @@ mod tests {
         )];
         let error = validate_query_at(&analytics_catalog(), sessions_request(filters), fixed_now())
             .expect_err("upper-bound-only must be rejected");
-        assert!(matches!(error, AnalyticsError::MissingTimeWindow { .. }));
+        assert!(matches!(error, Error::MissingTimeWindow { .. }));
     }
 
     #[test]
@@ -491,7 +488,7 @@ mod tests {
         )];
         let error = validate_query_at(&analytics_catalog(), sessions_request(filters), fixed_now())
             .expect_err("too-wide lower bound must be rejected");
-        assert!(matches!(error, AnalyticsError::TimeWindowTooLarge { .. }));
+        assert!(matches!(error, Error::TimeWindowTooLarge { .. }));
     }
 
     #[test]

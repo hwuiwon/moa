@@ -8,7 +8,7 @@ use sqlx::{Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::{
-    GraphError, GraphExpansionHit, GraphStore, GraphTraversalDirection, GraphWalkScoring,
+    Error, GraphExpansionHit, GraphStore, GraphTraversalDirection, GraphWalkScoring,
     PostgresGraphStore,
     edge::{EdgeLabel, EdgeWriteIntent},
     node::{
@@ -31,7 +31,7 @@ impl PostgresGraphStore {
     async fn decrypt_sealed_rows(
         &self,
         sealed: Vec<SealedNodeRow>,
-    ) -> Result<Vec<NodeIndexRow>, GraphError> {
+    ) -> Result<Vec<NodeIndexRow>, Error> {
         let mut rows = sealed
             .into_iter()
             .map(Some)
@@ -40,13 +40,13 @@ impl PostgresGraphStore {
 
         for (index, sealed) in rows.iter().enumerate() {
             let Some(sealed) = sealed.as_ref() else {
-                return Err(GraphError::Backfill(
+                return Err(Error::Backfill(
                     "decryption row slot was unexpectedly empty".to_string(),
                 ));
             };
             if !is_sealed_class(sealed.row.pii_class) {
                 if sealed.content_sealed.is_some() {
-                    return Err(GraphError::Backfill(format!(
+                    return Err(Error::Backfill(format!(
                         "unsealed node {} unexpectedly carries sealed content",
                         sealed.row.uid
                     )));
@@ -54,19 +54,19 @@ impl PostgresGraphStore {
                 continue;
             }
             let tenant_id = sealed.tenant_id.ok_or_else(|| {
-                GraphError::Backfill(format!(
+                Error::Backfill(format!(
                     "sealed node {} is missing tenant_id",
                     sealed.row.uid
                 ))
             })?;
             let data_subject_id = sealed.data_subject_id.ok_or_else(|| {
-                GraphError::Backfill(format!(
+                Error::Backfill(format!(
                     "sealed node {} is missing data_subject_id",
                     sealed.row.uid
                 ))
             })?;
             let sealed_bytes = sealed.content_sealed.as_deref().ok_or_else(|| {
-                GraphError::Backfill(format!(
+                Error::Backfill(format!(
                     "restricted node {} has not been sealed",
                     sealed.row.uid
                 ))
@@ -96,12 +96,12 @@ impl PostgresGraphStore {
             for ((index, _), plaintext) in requests.into_iter().zip(plaintexts) {
                 let content: SealedNodeContent = serde_json::from_slice(&plaintext)?;
                 if content.version != SEALED_CONTENT_VERSION || !content.properties.is_object() {
-                    return Err(GraphError::Backfill(format!(
+                    return Err(Error::Backfill(format!(
                         "sealed node content at index {index} has an unsupported format"
                     )));
                 }
                 let Some(sealed) = rows[index].as_mut() else {
-                    return Err(GraphError::Backfill(format!(
+                    return Err(Error::Backfill(format!(
                         "decryption row slot {index} was unexpectedly empty"
                     )));
                 };
@@ -114,7 +114,7 @@ impl PostgresGraphStore {
         rows.into_iter()
             .map(|sealed| {
                 sealed.map(|sealed| sealed.row).ok_or_else(|| {
-                    GraphError::Backfill("decryption row slot was unexpectedly empty".to_string())
+                    Error::Backfill("decryption row slot was unexpectedly empty".to_string())
                 })
             })
             .collect()
@@ -124,17 +124,17 @@ impl PostgresGraphStore {
     ///
     /// This delegates to the same grouped boundary as multi-row reads, which
     /// validates sealed state and never accepts a plaintext restricted fallback.
-    async fn decrypt_sealed_row(&self, sealed: SealedNodeRow) -> Result<NodeIndexRow, GraphError> {
+    async fn decrypt_sealed_row(&self, sealed: SealedNodeRow) -> Result<NodeIndexRow, Error> {
         self.decrypt_sealed_rows(vec![sealed])
             .await?
             .pop()
-            .ok_or_else(|| GraphError::Backfill("single-row decrypt returned no row".to_string()))
+            .ok_or_else(|| Error::Backfill("single-row decrypt returned no row".to_string()))
     }
 }
 
 #[async_trait::async_trait]
 impl GraphStore for PostgresGraphStore {
-    async fn create_node(&self, intent: NodeWriteIntent) -> Result<Uuid, GraphError> {
+    async fn create_node(&self, intent: NodeWriteIntent) -> Result<Uuid, Error> {
         crate::write::create_node(self, intent).await
     }
 
@@ -142,35 +142,31 @@ impl GraphStore for PostgresGraphStore {
         &self,
         conn: &mut sqlx::PgConnection,
         intent: NodeWriteIntent,
-    ) -> Result<Uuid, GraphError> {
+    ) -> Result<Uuid, Error> {
         crate::write::create_node_in_conn(self, conn, intent).await
     }
 
-    async fn supersede_node(
-        &self,
-        old_uid: Uuid,
-        intent: NodeWriteIntent,
-    ) -> Result<Uuid, GraphError> {
+    async fn supersede_node(&self, old_uid: Uuid, intent: NodeWriteIntent) -> Result<Uuid, Error> {
         crate::write::supersede_node(self, old_uid, intent).await
     }
 
-    async fn reinforce_node(&self, intent: NodeReinforcementIntent) -> Result<bool, GraphError> {
+    async fn reinforce_node(&self, intent: NodeReinforcementIntent) -> Result<bool, Error> {
         crate::write::reinforce_node(self, intent).await
     }
 
-    async fn invalidate_node(&self, uid: Uuid, reason: &str) -> Result<(), GraphError> {
+    async fn invalidate_node(&self, uid: Uuid, reason: &str) -> Result<(), Error> {
         crate::write::invalidate_node(self, uid, reason).await
     }
 
-    async fn hard_purge(&self, uid: Uuid, redaction_marker: &str) -> Result<(), GraphError> {
+    async fn hard_purge(&self, uid: Uuid, redaction_marker: &str) -> Result<(), Error> {
         crate::write::hard_purge(self, uid, redaction_marker).await
     }
 
-    async fn create_edge(&self, intent: EdgeWriteIntent) -> Result<Uuid, GraphError> {
+    async fn create_edge(&self, intent: EdgeWriteIntent) -> Result<Uuid, Error> {
         crate::write::create_edge(self, intent).await
     }
 
-    async fn get_node(&self, uid: Uuid) -> Result<Option<NodeIndexRow>, GraphError> {
+    async fn get_node(&self, uid: Uuid) -> Result<Option<NodeIndexRow>, Error> {
         let sealed = if let Some(mut conn) = self.begin().await? {
             let row = fetch_node(conn.as_mut(), uid).await?;
             conn.commit().await?;
@@ -184,7 +180,7 @@ impl GraphStore for PostgresGraphStore {
         }
     }
 
-    async fn bulk_get_nodes(&self, uids: &[Uuid]) -> Result<Vec<NodeIndexRow>, GraphError> {
+    async fn bulk_get_nodes(&self, uids: &[Uuid]) -> Result<Vec<NodeIndexRow>, Error> {
         if uids.is_empty() {
             return Ok(Vec::new());
         }
@@ -198,10 +194,7 @@ impl GraphStore for PostgresGraphStore {
         self.decrypt_sealed_rows(sealed).await
     }
 
-    async fn bulk_create_nodes(
-        &self,
-        intents: Vec<NodeWriteIntent>,
-    ) -> Result<Vec<Uuid>, GraphError> {
+    async fn bulk_create_nodes(&self, intents: Vec<NodeWriteIntent>) -> Result<Vec<Uuid>, Error> {
         crate::write::bulk_create_nodes(self, intents).await
     }
 
@@ -211,7 +204,7 @@ impl GraphStore for PostgresGraphStore {
         hops: u8,
         edge_filter: Option<&[EdgeLabel]>,
         as_of: Option<DateTime<Utc>>,
-    ) -> Result<Vec<NodeIndexRow>, GraphError> {
+    ) -> Result<Vec<NodeIndexRow>, Error> {
         let max_hops = hops.clamp(1, 3);
         let limit = match max_hops {
             1 => 50_i64,
@@ -225,7 +218,7 @@ impl GraphStore for PostgresGraphStore {
                 .build_query_as::<SealedNodeRow>()
                 .fetch_all(conn.as_mut())
                 .await
-                .map_err(GraphError::from)?;
+                .map_err(Error::from)?;
             conn.commit().await?;
             rows
         } else {
@@ -233,7 +226,7 @@ impl GraphStore for PostgresGraphStore {
                 .build_query_as::<SealedNodeRow>()
                 .fetch_all(&self.pool)
                 .await
-                .map_err(GraphError::from)?
+                .map_err(Error::from)?
         };
         self.decrypt_sealed_rows(sealed).await
     }
@@ -244,7 +237,7 @@ impl GraphStore for PostgresGraphStore {
         max_hops: u8,
         as_of: Option<DateTime<Utc>>,
         scoring: &GraphWalkScoring,
-    ) -> Result<Vec<GraphExpansionHit>, GraphError> {
+    ) -> Result<Vec<GraphExpansionHit>, Error> {
         let seeds = unique_uids(seeds);
         if seeds.is_empty() || max_hops == 0 {
             return Ok(Vec::new());
@@ -257,7 +250,7 @@ impl GraphStore for PostgresGraphStore {
                 .build()
                 .fetch_all(conn.as_mut())
                 .await
-                .map_err(GraphError::from)?;
+                .map_err(Error::from)?;
             conn.commit().await?;
             expansion_hits_from_rows(rows)?
         } else {
@@ -265,7 +258,7 @@ impl GraphStore for PostgresGraphStore {
                 .build()
                 .fetch_all(&self.pool)
                 .await
-                .map_err(GraphError::from)?;
+                .map_err(Error::from)?;
             expansion_hits_from_rows(rows)?
         };
         if raw_hits.is_empty() {
@@ -305,7 +298,7 @@ impl GraphStore for PostgresGraphStore {
         name: &str,
         limit: i64,
         as_of: Option<DateTime<Utc>>,
-    ) -> Result<Vec<NodeIndexRow>, GraphError> {
+    ) -> Result<Vec<NodeIndexRow>, Error> {
         let sealed = if let Some(mut conn) = self.begin().await? {
             let rows =
                 crate::node::lookup_seed_candidates(conn.as_mut(), name, limit, as_of).await?;
@@ -322,7 +315,7 @@ impl GraphStore for PostgresGraphStore {
         names: &[&str],
         limit: i64,
         as_of: Option<DateTime<Utc>>,
-    ) -> Result<Vec<Vec<NodeIndexRow>>, GraphError> {
+    ) -> Result<Vec<Vec<NodeIndexRow>>, Error> {
         if names.is_empty() || limit <= 0 {
             return Ok(names.iter().map(|_| Vec::new()).collect());
         }
@@ -599,7 +592,7 @@ fn build_expansion_query<'a>(
 
 fn expansion_hits_from_rows(
     rows: Vec<sqlx::postgres::PgRow>,
-) -> Result<Vec<RawExpansionHit>, GraphError> {
+) -> Result<Vec<RawExpansionHit>, Error> {
     rows.into_iter()
         .map(|row| {
             let seed: Uuid = row.try_get("seed")?;
@@ -610,7 +603,7 @@ fn expansion_hits_from_rows(
             let valid_from: DateTime<Utc> = row.try_get("valid_from")?;
             let hop_i32: i32 = row.try_get("hop")?;
             let hop = u8::try_from(hop_i32).map_err(|error| {
-                GraphError::GraphQuery(format!(
+                Error::GraphQuery(format!(
                     "expansion returned invalid hop `{hop_i32}`: {error}"
                 ))
             })?;
@@ -640,7 +633,7 @@ fn expansion_hits_from_rows(
         .collect()
 }
 
-async fn fetch_node<'e, E>(executor: E, uid: Uuid) -> Result<Option<SealedNodeRow>, GraphError>
+async fn fetch_node<'e, E>(executor: E, uid: Uuid) -> Result<Option<SealedNodeRow>, Error>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
@@ -651,10 +644,10 @@ where
     .bind(uid)
     .fetch_optional(executor)
     .await
-    .map_err(GraphError::from)
+    .map_err(Error::from)
 }
 
-async fn fetch_nodes<'e, E>(executor: E, uids: &[Uuid]) -> Result<Vec<SealedNodeRow>, GraphError>
+async fn fetch_nodes<'e, E>(executor: E, uids: &[Uuid]) -> Result<Vec<SealedNodeRow>, Error>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
@@ -665,5 +658,5 @@ where
     .bind(uids)
     .fetch_all(executor)
     .await
-    .map_err(GraphError::from)
+    .map_err(Error::from)
 }

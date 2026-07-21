@@ -65,12 +65,12 @@ where
 
 /// Stateless MCP server backed by the edge's existing stores and orchestrator proxy.
 #[derive(Clone)]
-pub struct MoaMcpServer {
+pub struct Server {
     state: AppState,
     tool_router: ToolRouter<Self>,
 }
 
-impl MoaMcpServer {
+impl Server {
     fn new(state: AppState) -> Self {
         Self {
             state,
@@ -255,7 +255,7 @@ impl MoaMcpServer {
     }
 }
 
-fn all_tools() -> ToolRouter<MoaMcpServer> {
+fn all_tools() -> ToolRouter<Server> {
     let mut router = analytics_sessions::router()
         + artifacts_learning::router()
         + agents::router()
@@ -339,7 +339,7 @@ where
 }
 
 #[tool_handler(router = self.tool_router)]
-impl ServerHandler for MoaMcpServer {
+impl ServerHandler for Server {
     /// Dispatch one tool call, normalizing every errored result into the
     /// documented `{error}` structured envelope. The macro's generated
     /// dispatch is bypassed so rmcp-internal argument-deserialization

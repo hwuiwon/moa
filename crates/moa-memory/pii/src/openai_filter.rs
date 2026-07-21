@@ -6,7 +6,7 @@ use moa_core::types::security::SensitivityClass;
 use serde::Deserialize;
 use tracing::warn;
 
-use crate::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, Result};
+use crate::{Error, PiiCategory, PiiClassifier, PiiResult, PiiSpan, Result};
 
 const DEFAULT_MODEL_VERSION: &str = "openai/privacy-filter:v1.0";
 
@@ -216,7 +216,7 @@ impl ServiceSpan {
         let confidence = self
             .confidence
             .or(self.score)
-            .ok_or_else(|| PiiError::Parse("span missing confidence".to_string()))?;
+            .ok_or_else(|| Error::Parse("span missing confidence".to_string()))?;
         let category = self
             .category
             .as_deref()
@@ -228,7 +228,7 @@ impl ServiceSpan {
                     .and_then(PiiCategory::parse_label)
             })
             .or_else(|| self.entity.as_deref().and_then(PiiCategory::parse_label))
-            .ok_or_else(|| PiiError::Parse("span missing recognized category".to_string()))?;
+            .ok_or_else(|| Error::Parse("span missing recognized category".to_string()))?;
         Ok(PiiSpan::new(self.start, self.end, category, confidence))
     }
 }

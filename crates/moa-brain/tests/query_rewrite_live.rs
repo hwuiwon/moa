@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use moa_brain::pipeline::query_rewrite::QueryRewriter;
-use moa_core::config::MoaEnvOverlay;
+use moa_core::config::EnvOverlay;
 use moa_core::{
     config::MoaConfig, traits::ContextProcessor, traits::LLMProvider, types::channel::Channel,
     types::completion::CompletionRequest, types::completion::CompletionResponse,
@@ -94,7 +94,7 @@ async fn live_query_rewrite_gate_matrix() -> moa_core::error::Result<()> {
     }
 
     let mut config = MoaConfig::default();
-    MoaEnvOverlay::from_env()?.apply_to(&mut config)?;
+    EnvOverlay::from_env()?.apply_to(&mut config)?;
     config.models.auxiliary = Some("gpt-5.4-nano".to_string());
     config.query_rewrite.model = Some("gpt-5.4-nano".to_string());
     config.query_rewrite.timeout_ms = 5_000;

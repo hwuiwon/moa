@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgConnection, Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
 
-use crate::{GraphError, Result};
+use crate::{Error, Result};
 
 /// One projected row from `moa.node_index`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -150,7 +150,7 @@ impl NodeLabel {
 }
 
 impl FromStr for NodeLabel {
-    type Err = GraphError;
+    type Err = Error;
 
     fn from_str(value: &str) -> Result<Self> {
         match value {
@@ -164,7 +164,7 @@ impl FromStr for NodeLabel {
             "Document" => Ok(Self::Document),
             "Chunk" => Ok(Self::Chunk),
             "ContactGroup" => Ok(Self::ContactGroup),
-            other => Err(GraphError::UnknownNodeLabel(other.to_string())),
+            other => Err(Error::UnknownNodeLabel(other.to_string())),
         }
     }
 }
@@ -384,7 +384,7 @@ where
         .build_query_as::<SealedNodeRow>()
         .fetch_all(executor)
         .await
-        .map_err(GraphError::from)
+        .map_err(Error::from)
 }
 
 /// Looks up graph seed nodes for several names in one round trip.
@@ -481,23 +481,23 @@ where
         .build()
         .fetch_all(executor)
         .await
-        .map_err(GraphError::from)?;
+        .map_err(Error::from)?;
 
     let mut results: Vec<Vec<SealedNodeRow>> = names.iter().map(|_| Vec::new()).collect();
     for row in &rows {
         let ord: i64 = row.try_get("ord")?;
         let index = usize::try_from(ord - 1).map_err(|error| {
-            GraphError::GraphQuery(format!(
+            Error::GraphQuery(format!(
                 "seed lookup returned invalid ordinality `{ord}`: {error}"
             ))
         })?;
         let Some(bucket) = results.get_mut(index) else {
-            return Err(GraphError::GraphQuery(format!(
+            return Err(Error::GraphQuery(format!(
                 "seed lookup returned out-of-range ordinality `{ord}` for {} names",
                 names.len()
             )));
         };
-        bucket.push(SealedNodeRow::from_row(row).map_err(GraphError::from)?);
+        bucket.push(SealedNodeRow::from_row(row).map_err(Error::from)?);
     }
     Ok(results)
 }

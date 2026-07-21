@@ -9,7 +9,7 @@ use moa_core::wire::analytics::{
 
 use crate::catalog::{FieldSpec, analytics_catalog, find_dataset_spec, find_field_spec};
 use crate::dialect::{AnalyticsBackend, clickhouse_field_expr, clickhouse_from_sql};
-use crate::error::{AnalyticsError, Result};
+use crate::error::{Error, Result};
 use crate::query::{aggregation_name, validate_query};
 
 /// Catalog-backed analytics query compiler.
@@ -39,10 +39,9 @@ impl AnalyticsCompiler {
     pub fn compile(&self, request: AnalyticsQueryRequest) -> Result<CompiledAnalyticsQuery> {
         let validated = validate_query(&self.catalog, request)?;
         let dataset_id = validated.request.dataset.clone();
-        let dataset =
-            find_dataset_spec(&dataset_id).ok_or_else(|| AnalyticsError::UnknownDataset {
-                dataset: dataset_id.clone(),
-            })?;
+        let dataset = find_dataset_spec(&dataset_id).ok_or_else(|| Error::UnknownDataset {
+            dataset: dataset_id.clone(),
+        })?;
         let mut columns = Vec::with_capacity(
             validated.request.dimensions.len() + validated.request.measures.len(),
         );
@@ -130,7 +129,7 @@ impl AnalyticsCompiler {
             AnalyticsBackend::Postgres => (format!("{} AS d", dataset.relation_sql), false),
             AnalyticsBackend::ClickHouse => {
                 let raw = clickhouse_from_sql(&dataset_id).ok_or_else(|| {
-                    AnalyticsError::BackendFieldUnavailable {
+                    Error::BackendFieldUnavailable {
                         dataset: dataset_id.clone(),
                         field: "*".to_string(),
                         backend: backend.as_str(),
@@ -188,7 +187,7 @@ impl AnalyticsCompiler {
                         selected.response_id == order.field || selected.source_field == order.field
                     });
                     let Some(selected) = selected else {
-                        return Err(AnalyticsError::UnknownOrderField {
+                        return Err(Error::UnknownOrderField {
                             field: order.field.clone(),
                         });
                     };
@@ -268,7 +267,7 @@ fn required_spec<'a>(
     dataset: &'a crate::catalog::DatasetSpec,
     field_id: &str,
 ) -> Result<&'a FieldSpec> {
-    find_field_spec(dataset, field_id).ok_or_else(|| AnalyticsError::UnknownField {
+    find_field_spec(dataset, field_id).ok_or_else(|| Error::UnknownField {
         dataset: dataset.id.to_string(),
         field: field_id.to_string(),
     })
@@ -287,7 +286,7 @@ fn field_expression(
         AnalyticsBackend::Postgres => Ok(format!("d.{}", field.column)),
         AnalyticsBackend::ClickHouse => clickhouse_field_expr(dataset_id, field.id)
             .map(str::to_string)
-            .ok_or_else(|| AnalyticsError::BackendFieldUnavailable {
+            .ok_or_else(|| Error::BackendFieldUnavailable {
                 dataset: dataset_id.to_string(),
                 field: field.id.to_string(),
                 backend: backend.as_str(),
@@ -500,7 +499,7 @@ fn filter_predicate(
         AnalyticsFilterOperator::Between => {
             let placeholders = push_array_binds(backend, field, value, bind_values)?;
             if placeholders.len() != 2 {
-                return Err(AnalyticsError::InvalidFilterValue {
+                return Err(Error::InvalidFilterValue {
                     field: field.id.to_string(),
                     reason: "between requires exactly two values".to_string(),
                 });
@@ -519,7 +518,7 @@ fn push_cell_bind(
     value: Option<&AnalyticsCell>,
     bind_values: &mut Vec<AnalyticsBindValue>,
 ) -> Result<String> {
-    let value = value.ok_or_else(|| AnalyticsError::MissingFilterValue {
+    let value = value.ok_or_else(|| Error::MissingFilterValue {
         field: field.id.to_string(),
         operator: "filter",
     })?;
@@ -534,12 +533,12 @@ fn push_stringish_bind(
     value: Option<&AnalyticsCell>,
     bind_values: &mut Vec<AnalyticsBindValue>,
 ) -> Result<String> {
-    let value = value.ok_or_else(|| AnalyticsError::MissingFilterValue {
+    let value = value.ok_or_else(|| Error::MissingFilterValue {
         field: field.id.to_string(),
         operator: "filter",
     })?;
     let Some(value) = cell_string(value) else {
-        return Err(AnalyticsError::InvalidFilterValue {
+        return Err(Error::InvalidFilterValue {
             field: field.id.to_string(),
             reason: "text filter requires a string value".to_string(),
         });
@@ -555,13 +554,13 @@ fn push_array_binds(
     bind_values: &mut Vec<AnalyticsBindValue>,
 ) -> Result<Vec<String>> {
     let Some(AnalyticsCell::Json(serde_json::Value::Array(values))) = value else {
-        return Err(AnalyticsError::InvalidFilterValue {
+        return Err(Error::InvalidFilterValue {
             field: field.id.to_string(),
             reason: "operator requires an array value".to_string(),
         });
     };
     if values.is_empty() {
-        return Err(AnalyticsError::InvalidFilterValue {
+        return Err(Error::InvalidFilterValue {
             field: field.id.to_string(),
             reason: "array value must not be empty".to_string(),
         });
@@ -576,7 +575,7 @@ fn push_array_binds(
 
 fn bind_from_cell(field: &FieldSpec, value: &AnalyticsCell) -> Result<AnalyticsBindValue> {
     match (field.kind, value) {
-        (_, AnalyticsCell::Null) => Err(AnalyticsError::InvalidFilterValue {
+        (_, AnalyticsCell::Null) => Err(Error::InvalidFilterValue {
             field: field.id.to_string(),
             reason: "null requires is_null or is_not_null".to_string(),
         }),
@@ -585,7 +584,7 @@ fn bind_from_cell(field: &FieldSpec, value: &AnalyticsCell) -> Result<AnalyticsB
             _,
         ) => {
             let Some(value) = cell_string(value) else {
-                return Err(AnalyticsError::InvalidFilterValue {
+                return Err(Error::InvalidFilterValue {
                     field: field.id.to_string(),
                     reason: "value must be a string".to_string(),
                 });
@@ -595,14 +594,14 @@ fn bind_from_cell(field: &FieldSpec, value: &AnalyticsCell) -> Result<AnalyticsB
         (AnalyticsFieldKind::Integer, AnalyticsCell::Number(number)) => number
             .as_i64()
             .map(AnalyticsBindValue::Integer)
-            .ok_or_else(|| AnalyticsError::InvalidFilterValue {
+            .ok_or_else(|| Error::InvalidFilterValue {
                 field: field.id.to_string(),
                 reason: "value must be an integer".to_string(),
             }),
         (AnalyticsFieldKind::Float, AnalyticsCell::Number(number)) => number
             .as_f64()
             .map(AnalyticsBindValue::Float)
-            .ok_or_else(|| AnalyticsError::InvalidFilterValue {
+            .ok_or_else(|| Error::InvalidFilterValue {
                 field: field.id.to_string(),
                 reason: "value must be numeric".to_string(),
             }),
@@ -612,7 +611,7 @@ fn bind_from_cell(field: &FieldSpec, value: &AnalyticsCell) -> Result<AnalyticsB
         (AnalyticsFieldKind::Json, AnalyticsCell::Json(value)) => {
             Ok(AnalyticsBindValue::Json(value.clone()))
         }
-        _ => Err(AnalyticsError::InvalidFilterValue {
+        _ => Err(Error::InvalidFilterValue {
             field: field.id.to_string(),
             reason: "value kind does not match field kind".to_string(),
         }),
@@ -625,7 +624,7 @@ fn bind_from_json(field: &FieldSpec, value: &serde_json::Value) -> Result<Analyt
             value
                 .as_str()
                 .map(|value| AnalyticsBindValue::String(value.to_string()))
-                .ok_or_else(|| AnalyticsError::InvalidFilterValue {
+                .ok_or_else(|| Error::InvalidFilterValue {
                     field: field.id.to_string(),
                     reason: "array values must be strings".to_string(),
                 })
@@ -634,7 +633,7 @@ fn bind_from_json(field: &FieldSpec, value: &serde_json::Value) -> Result<Analyt
             value
                 .as_i64()
                 .map(AnalyticsBindValue::Integer)
-                .ok_or_else(|| AnalyticsError::InvalidFilterValue {
+                .ok_or_else(|| Error::InvalidFilterValue {
                     field: field.id.to_string(),
                     reason: "array values must be integers".to_string(),
                 })
@@ -643,7 +642,7 @@ fn bind_from_json(field: &FieldSpec, value: &serde_json::Value) -> Result<Analyt
             value
                 .as_f64()
                 .map(AnalyticsBindValue::Float)
-                .ok_or_else(|| AnalyticsError::InvalidFilterValue {
+                .ok_or_else(|| Error::InvalidFilterValue {
                     field: field.id.to_string(),
                     reason: "array values must be numeric".to_string(),
                 })
@@ -652,7 +651,7 @@ fn bind_from_json(field: &FieldSpec, value: &serde_json::Value) -> Result<Analyt
             value
                 .as_bool()
                 .map(AnalyticsBindValue::Bool)
-                .ok_or_else(|| AnalyticsError::InvalidFilterValue {
+                .ok_or_else(|| Error::InvalidFilterValue {
                     field: field.id.to_string(),
                     reason: "array values must be booleans".to_string(),
                 })
@@ -808,7 +807,7 @@ mod tests {
         let error = AnalyticsCompiler::default()
             .compile(request)
             .expect_err("unknown field should fail");
-        assert!(matches!(error, AnalyticsError::UnknownField { .. }));
+        assert!(matches!(error, Error::UnknownField { .. }));
     }
 
     #[test]
@@ -823,6 +822,6 @@ mod tests {
         let error = AnalyticsCompiler::default()
             .compile(request)
             .expect_err("tenant override should fail");
-        assert!(matches!(error, AnalyticsError::ConflictingTenantFilter));
+        assert!(matches!(error, Error::ConflictingTenantFilter));
     }
 }

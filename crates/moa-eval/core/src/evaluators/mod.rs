@@ -6,7 +6,7 @@ mod tool_success;
 mod trajectory_match;
 
 use crate::engine::{EvalRun, RunSummary};
-use crate::{EvalError, EvalScore, EvalStatus, Evaluator, Result, TestSuite};
+use crate::{Error, EvalScore, EvalStatus, Evaluator, Result, TestSuite};
 
 pub use output_match::OutputMatchEvaluator;
 pub use threshold::ThresholdEvaluator;
@@ -55,9 +55,7 @@ pub fn build_evaluators(
                 evaluators.push(Box::new(ToolSuccessEvaluator));
             }
             other => {
-                return Err(EvalError::InvalidConfig(format!(
-                    "unknown evaluator '{other}'"
-                )));
+                return Err(Error::InvalidConfig(format!("unknown evaluator '{other}'")));
             }
         }
     }
@@ -76,7 +74,7 @@ pub async fn evaluate_run(
             .iter()
             .find(|case| case.name == result.test_case)
         else {
-            return Err(EvalError::InvalidConfig(format!(
+            return Err(Error::InvalidConfig(format!(
                 "result references unknown test case '{}'",
                 result.test_case
             )));

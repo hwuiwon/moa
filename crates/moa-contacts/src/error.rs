@@ -3,11 +3,11 @@
 use thiserror::Error;
 
 /// Result alias for contact operations.
-pub type Result<T> = std::result::Result<T, ContactError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Contact-domain error with an optional HTTP-style terminal status.
 #[derive(Debug, Error)]
-pub enum ContactError {
+pub enum Error {
     /// Terminal caller-facing failure.
     #[error("{message}")]
     Terminal {
@@ -32,7 +32,7 @@ pub enum ContactError {
     SessionStore(#[from] moa_core::error::MoaError),
 }
 
-impl ContactError {
+impl Error {
     /// Builds a terminal caller-facing error.
     pub fn terminal(code: u16, message: impl Into<String>) -> Self {
         Self::Terminal {

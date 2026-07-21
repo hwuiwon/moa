@@ -12,7 +12,7 @@ use moa_core::{
 use moa_memory_types::ScopeTier;
 use serde::{Deserialize, Serialize};
 
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 
 use super::io::{
     ensure_non_empty, ensure_parent_dir, invalid_config, io_error, read_jsonl, write_jsonl,
@@ -424,7 +424,7 @@ pub fn validate_ledger(facts: &[LedgerFact]) -> Result<()> {
             ));
         }
         let canonical = facts_by_id.get(canonical_id).ok_or_else(|| {
-            EvalError::InvalidConfig(format!(
+            Error::InvalidConfig(format!(
                 "ledger fact {} restates missing canonical fact_id {}",
                 fact.fact_id, canonical_id
             ))

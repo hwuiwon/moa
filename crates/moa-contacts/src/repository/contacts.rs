@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::domain::{
     hash_contact_point_with_key_hex, normalize_contact_point, parse_contact_state,
 };
-use crate::{ContactError, Result};
+use crate::{Error, Result};
 
 use super::row_mapping::RowExt as _;
 
@@ -33,7 +33,7 @@ pub async fn issue_contact(
     let mut transaction = pool
         .begin()
         .await
-        .map_err(|error| ContactError::database("begin contact issuance", error))?;
+        .map_err(|error| Error::database("begin contact issuance", error))?;
     sqlx::query(
         r#"
         INSERT INTO contacts (
@@ -52,7 +52,7 @@ pub async fn issue_contact(
     .bind(&request.metadata)
     .execute(&mut *transaction)
     .await
-    .map_err(|error| ContactError::database("insert contact", error))?;
+    .map_err(|error| Error::database("insert contact", error))?;
 
     let mut contact_points = Vec::with_capacity(request.contact_points.len());
     for point in request.contact_points {
@@ -71,7 +71,7 @@ pub async fn issue_contact(
     transaction
         .commit()
         .await
-        .map_err(|error| ContactError::database("commit contact issuance", error))?;
+        .map_err(|error| Error::database("commit contact issuance", error))?;
 
     Ok((
         ContactRef {
@@ -107,8 +107,8 @@ pub async fn load_contact_ref(
     .bind(tenant_id.0)
     .fetch_optional(&pool)
     .await
-    .map_err(|error| ContactError::database("load contact", error))?
-    .ok_or_else(|| ContactError::terminal(404, "contact not found"))?;
+    .map_err(|error| Error::database("load contact", error))?
+    .ok_or_else(|| Error::terminal(404, "contact not found"))?;
     let state = row.col::<String>("state")?;
     Ok(ContactRef {
         contact_id,
@@ -163,7 +163,7 @@ pub async fn resolve_verified_contact_ids(
         .bind(&normalized_hash)
         .fetch_all(pool)
         .await
-        .map_err(|error| ContactError::database("resolve verified contact point", error))?;
+        .map_err(|error| Error::database("resolve verified contact point", error))?;
         for row in rows {
             let contact_id = ContactId(row);
             if !contact_ids.contains(&contact_id) {
@@ -182,16 +182,10 @@ pub async fn promoted_from_contact(
     tenant_id: TenantId,
 ) -> Result<Option<ContactId>> {
     let Some(current) = meta.contact.as_ref() else {
-        return Err(ContactError::terminal(
-            403,
-            "session has no contact binding",
-        ));
+        return Err(Error::terminal(403, "session has no contact binding"));
     };
     if current.tenant_id != contact.tenant_id || current.tenant_id != tenant_id {
-        return Err(ContactError::terminal(
-            403,
-            "session contact boundary mismatch",
-        ));
+        return Err(Error::terminal(403, "session contact boundary mismatch"));
     }
     if current.contact_id == contact.contact_id {
         return Ok(None);
@@ -199,7 +193,7 @@ pub async fn promoted_from_contact(
     if contact_is_merged_into(pool, tenant_id, current.contact_id, contact.contact_id).await? {
         return Ok(Some(current.contact_id));
     }
-    Err(ContactError::terminal(
+    Err(Error::terminal(
         403,
         "session contact is not linked to verified contact",
     ))
@@ -217,11 +211,11 @@ pub(super) async fn ensure_contact_in_tenant(
     .bind(tenant_id.0)
     .fetch_one(&mut **tx)
     .await
-    .map_err(|error| ContactError::database("check contact workspace", error))?;
+    .map_err(|error| Error::database("check contact workspace", error))?;
     if exists {
         Ok(())
     } else {
-        Err(ContactError::terminal(404, "contact not found"))
+        Err(Error::terminal(404, "contact not found"))
     }
 }
 
@@ -267,7 +261,7 @@ pub(super) async fn insert_contact_point(
     .bind(verified_at)
     .fetch_one(&mut **tx)
     .await
-    .map_err(|error| ContactError::database("upsert contact point", error))?;
+    .map_err(|error| Error::database("upsert contact point", error))?;
     Ok(ContactPointRef {
         id: ContactPointId(row.col::<Uuid>("id")?),
         kind: point.kind,
@@ -300,5 +294,5 @@ async fn contact_is_merged_into(
     .bind(canonical_contact_id.0)
     .fetch_one(pool)
     .await
-    .map_err(|error| ContactError::database("check promoted contact linkage", error))
+    .map_err(|error| Error::database("check promoted contact linkage", error))
 }

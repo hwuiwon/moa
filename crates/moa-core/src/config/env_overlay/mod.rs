@@ -31,7 +31,7 @@ use super::{
 /// server JSON array need bespoke handling.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
-pub struct MoaEnvOverlay {
+pub struct EnvOverlay {
     /// `MOA_GENERAL_DEFAULT_PROVIDER`.
     pub general_default_provider: Option<String>,
     /// `MOA_GENERAL_REASONING_EFFORT`.
@@ -682,7 +682,7 @@ pub struct MoaEnvOverlay {
     pub context_snapshot_max_size_bytes: Option<usize>,
 }
 
-impl MoaEnvOverlay {
+impl EnvOverlay {
     /// Loads a flat `MOA_` environment overlay from process environment variables.
     pub fn from_env() -> Result<Self> {
         let overlay: Self = envy::prefixed("MOA_").from_env().map_err(map_env_error)?;
@@ -1060,7 +1060,7 @@ const ALLOWLIST_EXACT: &[&str] = &[
 /// derived at runtime from the overlay struct itself (serde is the source of
 /// truth, so a renamed field updates this set automatically).
 fn known_overlay_env_keys() -> std::collections::BTreeSet<String> {
-    match serde_json::to_value(MoaEnvOverlay::default()) {
+    match serde_json::to_value(EnvOverlay::default()) {
         Ok(Value::Object(map)) => map
             .keys()
             .map(|field| format!("MOA_{}", field.to_uppercase()))
@@ -1128,7 +1128,7 @@ fn levenshtein(left: &str, right: &str) -> usize {
     previous[right.len()]
 }
 
-impl MoaEnvOverlay {
+impl EnvOverlay {
     /// Audits process `MOA_*` environment variables against the overlay registry.
     ///
     /// envy silently ignores unrecognized prefixed variables, so a typo like
@@ -1239,7 +1239,7 @@ mod tests {
     /// Regeneration tool for `docs/23-environment-variables.md`.
     ///
     /// Dumps every overlay variable with its config path and default, derived
-    /// from `MoaEnvOverlay` (serde field enumeration) and `MoaConfig::default()`,
+    /// from `EnvOverlay` (serde field enumeration) and `MoaConfig::default()`,
     /// so the reference doc is never hand-transcribed. Run with:
     /// `cargo test -p moa-core dump_env_var_reference -- --ignored --nocapture`.
     #[test]
@@ -1247,7 +1247,7 @@ mod tests {
     fn dump_env_var_reference() {
         let mut schema = serde_json::to_value(MoaConfig::default()).expect("serialize config");
         seed_optional_sections(&mut schema).expect("seed optional sections");
-        let overlay = serde_json::to_value(MoaEnvOverlay::default()).expect("serialize overlay");
+        let overlay = serde_json::to_value(EnvOverlay::default()).expect("serialize overlay");
         let Value::Object(fields) = overlay else {
             panic!("overlay must serialize to an object");
         };
@@ -1331,7 +1331,7 @@ mod tests {
     #[test]
     fn strict_mode_errors_and_lists_every_unknown() {
         // Pins: strict mode fails startup and names every offending variable.
-        let error = MoaEnvOverlay::audit_env_registry(
+        let error = EnvOverlay::audit_env_registry(
             names(&["MOA_MODELS_MIAN", "MOA_TOTALLY_MADE_UP", "MOA_MODELS_MAIN"]),
             true,
         )
@@ -1348,14 +1348,14 @@ mod tests {
     #[test]
     fn warn_mode_is_ok_for_unknown_vars() {
         // Pins: non-strict mode tolerates unknown vars (returns Ok, logs a warning).
-        MoaEnvOverlay::audit_env_registry(names(&["MOA_MODELS_MIAN"]), false)
+        EnvOverlay::audit_env_registry(names(&["MOA_MODELS_MIAN"]), false)
             .expect("warn mode returns ok");
     }
 
     #[test]
     fn strict_mode_suggests_the_nearest_known_key() {
         // Pins: a near-miss carries a "did you mean" suggestion for the real field.
-        let error = MoaEnvOverlay::audit_env_registry(names(&["MOA_MODELS_MIAN"]), true)
+        let error = EnvOverlay::audit_env_registry(names(&["MOA_MODELS_MIAN"]), true)
             .expect_err("near-miss should error in strict mode");
         assert!(
             error.to_string().contains("did you mean MOA_MODELS_MAIN"),
@@ -1370,8 +1370,8 @@ mod tests {
         let mut schema =
             serde_json::to_value(MoaConfig::default()).expect("default config should serialize");
         seed_optional_sections(&mut schema).expect("schema seeds should apply");
-        let Value::Object(fields) = serde_json::to_value(MoaEnvOverlay::default())
-            .expect("default overlay should serialize")
+        let Value::Object(fields) =
+            serde_json::to_value(EnvOverlay::default()).expect("default overlay should serialize")
         else {
             panic!("overlay should serialize as an object");
         };
@@ -1399,7 +1399,7 @@ mod tests {
         let export_key_hex = "02".repeat(32);
         let lineage_key_hex = "03".repeat(32);
         let pii_vault_secret_hex = "04".repeat(32);
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_DATABASE_MAX_CONNECTIONS", "42"),
             ("MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS", "3"),
@@ -1656,7 +1656,7 @@ mod tests {
     #[test]
     fn from_iter_applies_every_execution_resource_override() {
         // Pins: every execution default has exactly one flat MOA_EXECUTION_* override.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_EXECUTION_PLANNER_REPAIR_ATTEMPTS", "2"),
             ("MOA_EXECUTION_REPEATED_FAILURE_LIMIT", "4"),
             ("MOA_EXECUTION_MAX_TASKS", "20000"),
@@ -1721,7 +1721,7 @@ mod tests {
             "MOA_EXECUTION_VERIFIER_TURN_RETRIEVED_BYTES",
         ] {
             assert_config_error_contains(
-                MoaEnvOverlay::from_iter(env_pairs([(name, "not-an-integer")])),
+                EnvOverlay::from_iter(env_pairs([(name, "not-an-integer")])),
                 name,
             );
         }
@@ -1731,7 +1731,7 @@ mod tests {
     fn mcp_servers_json_replaces_configured_servers() {
         // Pins: the production env seam accepts the complete typed MCP server array and replaces,
         // rather than appends to, file-backed server configuration.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([(
+        let overlay = EnvOverlay::from_iter(env_pairs([(
             "MOA_MCP_SERVERS_JSON",
             r#"[{"name":"fixture","transport":"http","url":"http://127.0.0.1:4321","trust_tool_annotations":true}]"#,
         )]))
@@ -1760,7 +1760,7 @@ mod tests {
     fn mcp_servers_json_rejects_malformed_json_through_config_error() {
         // Pins: malformed production MCP JSON fails startup through the ordinary typed config path.
         assert_config_error_contains(
-            MoaEnvOverlay::from_iter(env_pairs([("MOA_MCP_SERVERS_JSON", "[{not-json]")])),
+            EnvOverlay::from_iter(env_pairs([("MOA_MCP_SERVERS_JSON", "[{not-json]")])),
             "MOA_MCP_SERVERS_JSON",
         );
     }

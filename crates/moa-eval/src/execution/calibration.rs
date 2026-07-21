@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 use super::report::ExecutionJudgeCalibrationStatus;
@@ -104,6 +104,6 @@ pub fn score_execution_calibration(
     })
 }
 
-fn invalid_config(message: String) -> EvalError {
-    EvalError::InvalidConfig(message)
+fn invalid_config(message: String) -> Error {
+    Error::InvalidConfig(message)
 }

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use moa_core::types::execution_planning::{
     ExecutionRouteKind, ExecutionRouteProvenance, ExecutionStrategy,
 };
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 use moa_execution::state::ExecutionRunStatus;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -647,6 +647,6 @@ fn usize_to_u64(value: usize, context: &str) -> Result<u64> {
         .map_err(|_| invalid_config(format!("{context} exceeds the report integer range")))
 }
 
-fn invalid_config(message: String) -> EvalError {
-    EvalError::InvalidConfig(message)
+fn invalid_config(message: String) -> Error {
+    Error::InvalidConfig(message)
 }

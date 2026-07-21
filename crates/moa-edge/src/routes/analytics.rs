@@ -6,7 +6,7 @@ use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use moa_analytics::{AnalyticsError, AnalyticsService};
+use moa_analytics::{AnalyticsService, Error};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::identifiers::TenantId;
@@ -103,7 +103,7 @@ pub(crate) fn catalog() -> AnalyticsCatalogResponse {
 pub(crate) async fn query(
     state: &AppState,
     request: AnalyticsQueryRequest,
-) -> Result<AnalyticsQueryResponse, AnalyticsError> {
+) -> Result<AnalyticsQueryResponse, Error> {
     // Materialized-view refresh is owned by the durable maintenance cron, not
     // triggered per request; reads serve current state and report freshness.
     if let Some(clickhouse) = state.clickhouse_analytics.as_deref() {
@@ -176,12 +176,12 @@ fn analytics_target_tenant(
     Ok(tenant_id.unwrap_or(identity.tenant_id))
 }
 
-fn analytics_error_response(error: AnalyticsError) -> Response {
+fn analytics_error_response(error: Error) -> Response {
     match error {
-        AnalyticsError::ConflictingTenantFilter => {
+        Error::ConflictingTenantFilter => {
             (StatusCode::FORBIDDEN, error.to_string()).into_response()
         }
-        AnalyticsError::Execution(_) => route_error(error),
+        Error::Execution(_) => route_error(error),
         other => (StatusCode::BAD_REQUEST, other.to_string()).into_response(),
     }
 }

@@ -17,6 +17,6 @@ pub use engine::EvalEngine;
 pub use plan::build_eval_plan;
 pub use setup::{AgentEnvironment, EvalLineageHandle, build_agent_environment};
 
-pub(crate) fn eval_sqlx_error(error: sqlx::Error) -> moa_eval_core::EvalError {
-    moa_eval_core::EvalError::Storage(error.to_string())
+pub(crate) fn eval_sqlx_error(error: sqlx::Error) -> moa_eval_core::Error {
+    moa_eval_core::Error::Storage(error.to_string())
 }

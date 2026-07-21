@@ -2,7 +2,7 @@
 
 use crate::{
     types::identifiers::{SessionId, TenantId},
-    types::session::{CheckpointHandle, CheckpointInfo},
+    types::session::{Checkpoint, CheckpointHandle},
 };
 use serde::{Deserialize, Serialize};
 
@@ -66,7 +66,7 @@ pub struct CheckpointCreateResponse {
 pub struct CheckpointListResponse {
     /// Active checkpoint branches ordered for API display.
     #[serde(default)]
-    pub checkpoints: Vec<CheckpointInfo>,
+    pub checkpoints: Vec<Checkpoint>,
 }
 
 /// Request payload for rolling back to a checkpoint branch.

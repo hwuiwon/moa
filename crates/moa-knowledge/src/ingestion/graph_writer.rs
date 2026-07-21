@@ -262,6 +262,6 @@ fn compact_properties(properties: Value) -> Value {
     }
 }
 
-fn map_graph_error(error: moa_memory_graph::GraphError) -> Error {
+fn map_graph_error(error: moa_memory_graph::Error) -> Error {
     Error::Repository(error.to_string())
 }

@@ -31,17 +31,17 @@ use crate::kernel::FixtureStore;
 use crate::kernel::cost::{
     GPT_5_4_MINI_INPUT_USD_PER_MILLION_TOKENS, GPT_5_4_MINI_OUTPUT_USD_PER_MILLION_TOKENS,
 };
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 
 const CHUNK_TARGET_TOKENS: usize = 700;
 const CHUNK_OVERLAP_TOKENS: usize = 100;
 
 fn load_api_key(api_key_env: &str) -> Result<String> {
     let api_key = env::var(api_key_env).map_err(|_| {
-        EvalError::InvalidConfig(format!("live recording requires {api_key_env} to be set"))
+        Error::InvalidConfig(format!("live recording requires {api_key_env} to be set"))
     })?;
     if api_key.trim().is_empty() {
-        return Err(EvalError::InvalidConfig(format!(
+        return Err(Error::InvalidConfig(format!(
             "live recording requires {api_key_env} to be non-empty"
         )));
     }
@@ -59,7 +59,7 @@ fn memory_recording_config(
     let (provider_id, _) =
         resolve_provider_selection(&config, Some(&config.memory.extraction.model)).map_err(
             |error| {
-                EvalError::InvalidConfig(format!(
+                Error::InvalidConfig(format!(
                     "memory extraction model '{}' could not resolve a provider: {error}",
                     config.memory.extraction.model
                 ))
@@ -250,7 +250,7 @@ pub async fn record_memory_extractions(
     let config = memory_recording_config(&options.extraction_config, &options.api_key_env)?;
     let extraction_config = config.memory.extraction.clone();
     let extractor = ModelFactExtractor::from_config(&config).map_err(|error| {
-        EvalError::InvalidConfig(format!(
+        Error::InvalidConfig(format!(
             "failed to initialize model fact extractor: {error}"
         ))
     })?;
@@ -265,7 +265,7 @@ pub async fn record_memory_extractions(
             let session_turn = super::gold::session_turn(&source, &facts)?;
             let chunks = chunk_turn(&session_turn, CHUNK_TARGET_TOKENS, CHUNK_OVERLAP_TOKENS)
                 .map_err(|error| {
-                    EvalError::InvalidConfig(format!(
+                    Error::InvalidConfig(format!(
                         "failed to chunk synthetic session {} turn {}: {error}",
                         session.session_id, turn.turn_seq
                     ))
@@ -280,7 +280,7 @@ pub async fn record_memory_extractions(
                     .extract(std::slice::from_ref(&chunk))
                     .await
                     .map_err(|error| {
-                        EvalError::InvalidConfig(format!(
+                        Error::InvalidConfig(format!(
                             "failed to record extraction for session {} turn {} chunk {}: {error}",
                             session.session_id, turn.turn_seq, chunk.index
                         ))
@@ -352,7 +352,7 @@ pub async fn record_memory_merges(
     ));
     let config = memory_recording_config(&options.extraction_config, &options.api_key_env)?;
     let live = ModelEntityMergeVerifier::from_config(&config).map_err(|error| {
-        EvalError::InvalidConfig(format!("failed to initialize live merge verifier: {error}"))
+        Error::InvalidConfig(format!("failed to initialize live merge verifier: {error}"))
     })?;
     let recorder = Arc::new(RecordingEntityMergeVerifier::new(
         live,
@@ -495,7 +495,7 @@ pub fn missing_extraction_chunk_hashes(
             let session_turn = super::gold::session_turn(&source, &facts)?;
             let chunks = chunk_turn(&session_turn, CHUNK_TARGET_TOKENS, CHUNK_OVERLAP_TOKENS)
                 .map_err(|error| {
-                    EvalError::InvalidConfig(format!(
+                    Error::InvalidConfig(format!(
                         "failed to chunk synthetic session {} turn {}: {error}",
                         session.session_id, turn.turn_seq
                     ))

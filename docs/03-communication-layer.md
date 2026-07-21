@@ -75,7 +75,7 @@ failures are observable. Promotion updates the session contact to the canonical
 verified contact. Contact memory remains contact-local: the promoted session
 does not inherit tenant memory or any other contact's memory by default.
 
-`ContactVerificationService` owns the persist/deliver/consume sequence. It
+`ContactVerifier` owns the persist/deliver/consume sequence. It
 depends on the narrow `ContactOtpDelivery` port for provider delivery, so
 contact persistence does not depend on a concrete messaging provider and an
 undelivered challenge triggers one observable compensating consume attempt.

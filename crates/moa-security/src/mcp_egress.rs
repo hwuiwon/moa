@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use moa_core::types::security::SensitivityClass;
-use moa_memory_pii::{PiiClassifier, PiiError};
+use moa_memory_pii::{Error, PiiClassifier};
 
 /// Errors returned by the MCP egress guard. Every variant blocks the outbound
 /// call: the payload is never sent.
@@ -46,7 +46,7 @@ pub enum McpEgressError {
         server: String,
         /// Underlying classifier error. Carries no payload content.
         #[source]
-        source: PiiError,
+        source: Error,
     },
     /// The classifier returned a result but *abstained* — genuine uncertainty
     /// about the payload's data class rather than a confident "no restricted
@@ -197,7 +197,7 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::types::security::SensitivityClass;
-    use moa_memory_pii::{PiiClassifier, PiiError, PiiResult};
+    use moa_memory_pii::{Error, PiiClassifier, PiiResult};
 
     use super::{McpEgressError, McpEgressGuard};
 
@@ -241,7 +241,7 @@ mod tests {
     impl PiiClassifier for FixedClassClassifier {
         async fn classify(&self, _text: &str) -> moa_memory_pii::Result<PiiResult> {
             if self.fail {
-                return Err(PiiError::Inference("classifier unavailable".to_string()));
+                return Err(Error::Inference("classifier unavailable".to_string()));
             }
             Ok(PiiResult {
                 class: self.class,

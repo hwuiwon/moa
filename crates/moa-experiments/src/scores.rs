@@ -1,7 +1,7 @@
 //! Experiment-owned score sources, trial joins, summaries, and comparisons.
 
 use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
-use moa_scoring::{ScoreSummaryRow, ScoringError};
+use moa_scoring::{Error, ScoreSummaryRow};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
@@ -211,7 +211,7 @@ pub struct ExperimentScoreBreakdownCompare {
 pub async fn experiment_score_breakdown_for_tenant(
     pool: &PgPool,
     request: ExperimentRunScoreRef,
-) -> Result<ExperimentScoreBreakdown, ScoringError> {
+) -> Result<ExperimentScoreBreakdown, Error> {
     let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
     let aggregate_rows = sqlx::query(TRIAL_ROLLUP_SCORES_BY_EXPERIMENT_RUN_SQL)
         .bind(request.run_uid)
@@ -245,7 +245,7 @@ pub async fn experiment_score_breakdown_for_tenant(
 pub async fn compare_experiment_score_breakdown_for_tenant(
     pool: &PgPool,
     request: ExperimentRunCompareRef,
-) -> Result<ExperimentScoreBreakdownCompare, ScoringError> {
+) -> Result<ExperimentScoreBreakdownCompare, Error> {
     let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
     let scenario_rows = sqlx::query(COMPARE_SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL)
         .bind(request.base_run_uid)
@@ -277,19 +277,19 @@ pub async fn compare_experiment_score_breakdown_for_tenant(
     })
 }
 
-fn score_summary_row_from_row(row: &PgRow) -> Result<ScoreSummaryRow, ScoringError> {
+fn score_summary_row_from_row(row: &PgRow) -> Result<ScoreSummaryRow, Error> {
     let n: i64 = row.try_get("n")?;
     let numeric_mean: Option<f64> = row.try_get("numeric_mean")?;
     let boolean_rate: Option<f64> = row.try_get("boolean_rate")?;
     Ok(ScoreSummaryRow {
         name: row.try_get("name")?,
         value_type: row.try_get("value_type")?,
-        n: u64::try_from(n).map_err(|_| ScoringError::IntegerTooLarge { field: "n" })?,
+        n: u64::try_from(n).map_err(|_| Error::IntegerTooLarge { field: "n" })?,
         mean_or_rate: numeric_mean.or(boolean_rate),
     })
 }
 
-fn trial_score_summaries_from_rows(rows: &[PgRow]) -> Result<Vec<TrialScoreSummary>, ScoringError> {
+fn trial_score_summaries_from_rows(rows: &[PgRow]) -> Result<Vec<TrialScoreSummary>, Error> {
     let mut summaries: Vec<TrialScoreSummary> = Vec::new();
     for row in rows {
         let trial_uid = row.try_get("trial_uid")?;
@@ -313,9 +313,7 @@ fn trial_score_summaries_from_rows(rows: &[PgRow]) -> Result<Vec<TrialScoreSumma
     Ok(summaries)
 }
 
-fn scenario_score_summaries_from_rows(
-    rows: &[PgRow],
-) -> Result<Vec<ScenarioScoreSummary>, ScoringError> {
+fn scenario_score_summaries_from_rows(rows: &[PgRow]) -> Result<Vec<ScenarioScoreSummary>, Error> {
     let mut summaries: Vec<ScenarioScoreSummary> = Vec::new();
     for row in rows {
         let scenario_id = row.try_get("scenario_id")?;
@@ -335,7 +333,7 @@ fn scenario_score_summaries_from_rows(
     Ok(summaries)
 }
 
-fn scenario_delta_from_row(row: &PgRow) -> Result<ScenarioScoreDeltaRow, ScoringError> {
+fn scenario_delta_from_row(row: &PgRow) -> Result<ScenarioScoreDeltaRow, Error> {
     Ok(ScenarioScoreDeltaRow {
         scenario_id: row.try_get("scenario_id")?,
         name: row.try_get("name")?,
@@ -345,7 +343,7 @@ fn scenario_delta_from_row(row: &PgRow) -> Result<ScenarioScoreDeltaRow, Scoring
     })
 }
 
-fn variant_delta_from_row(row: &PgRow) -> Result<VariantScoreDeltaRow, ScoringError> {
+fn variant_delta_from_row(row: &PgRow) -> Result<VariantScoreDeltaRow, Error> {
     Ok(VariantScoreDeltaRow {
         variant_key: row.try_get("variant_key")?,
         name: row.try_get("name")?,

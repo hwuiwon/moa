@@ -123,7 +123,7 @@ pub struct CheckpointHandle {
 
 /// Metadata about an active checkpoint branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointInfo {
+pub struct Checkpoint {
     /// Primary checkpoint handle.
     pub handle: CheckpointHandle,
     /// Approximate logical size of the branch in bytes, when available.

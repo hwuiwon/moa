@@ -17,7 +17,7 @@ pub type Result<T> = std::result::Result<T, ErasureError>;
 pub enum ErasureError {
     /// Graph-memory operation failed.
     #[error("graph erasure: {0}")]
-    Graph(#[from] moa_memory_graph::GraphError),
+    Graph(#[from] moa_memory_graph::Error),
     /// Scoped transaction setup failed.
     #[error("scoped erasure transaction: {0}")]
     Scope(#[from] moa_core::error::MoaError),

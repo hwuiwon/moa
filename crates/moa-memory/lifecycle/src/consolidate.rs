@@ -12,7 +12,7 @@ use moa_core::{
 };
 use moa_crypto::KeyManagementProvider;
 use moa_memory_graph::{
-    ExistingSupersessionIntent, GraphError, NodeContentUpdateIntent, NodeEmbeddingIntent,
+    Error as GraphError, ExistingSupersessionIntent, NodeContentUpdateIntent, NodeEmbeddingIntent,
     NodeExpiryIntent, NodeLabel, PostgresGraphStore,
 };
 use moa_memory_types::normalize_entity_name;

@@ -14,7 +14,7 @@ use moa_providers::build_provider_from_model;
 use serde_json::json;
 use tokio::time::timeout;
 
-use crate::{IngestError, Result};
+use crate::{Error, Result};
 
 /// Observer for one provider-backed memory-model call.
 ///
@@ -50,7 +50,7 @@ impl ModelTextClient {
         timeout_ms: u64,
     ) -> Result<Self> {
         if timeout_ms == 0 {
-            return Err(IngestError::ModelInference(
+            return Err(Error::ModelInference(
                 "memory.extraction.timeout_ms must be greater than zero".to_string(),
             ));
         }
@@ -81,12 +81,12 @@ impl ModelTextClient {
     ) -> Result<Self> {
         let model = extraction.model.trim();
         if model.is_empty() {
-            return Err(IngestError::ModelInference(
+            return Err(Error::ModelInference(
                 "memory.extraction.model is required".to_string(),
             ));
         }
         let (provider, model_id) = build_provider_from_model(config, Some(model))
-            .map_err(|error| IngestError::ModelInference(error.to_string()))?;
+            .map_err(|error| Error::ModelInference(error.to_string()))?;
         Self::new(provider, model_id, extraction.timeout_ms)
     }
 
@@ -98,12 +98,12 @@ impl ModelTextClient {
     ) -> Result<Self> {
         let model = extraction.model.trim();
         if model.is_empty() {
-            return Err(IngestError::ModelInference(
+            return Err(Error::ModelInference(
                 "memory.extraction.model is required".to_string(),
             ));
         }
         let (provider, model_id) = build_provider_from_model(config, Some(model))
-            .map_err(|error| IngestError::ModelInference(error.to_string()))?;
+            .map_err(|error| Error::ModelInference(error.to_string()))?;
         Self::new_with_observer(provider, model_id, extraction.timeout_ms, observer)
     }
 
@@ -145,11 +145,11 @@ impl ModelTextClient {
                 .provider
                 .complete(request)
                 .await
-                .map_err(|error| IngestError::ModelInference(error.to_string()))?;
+                .map_err(|error| Error::ModelInference(error.to_string()))?;
             stream
                 .collect()
                 .await
-                .map_err(|error| IngestError::ModelInference(error.to_string()))
+                .map_err(|error| Error::ModelInference(error.to_string()))
         })
         .await
         {
@@ -164,7 +164,7 @@ impl ModelTextClient {
                 if let Some(observer) = &self.observer {
                     observer.after_failure().await;
                 }
-                return Err(IngestError::ModelInference(format!(
+                return Err(Error::ModelInference(format!(
                     "memory model request timed out after {} ms",
                     self.timeout.as_millis()
                 )));
@@ -176,7 +176,7 @@ impl ModelTextClient {
         }
 
         if response.text.trim().is_empty() {
-            return Err(IngestError::ModelInference(
+            return Err(Error::ModelInference(
                 "memory model response did not contain assistant text".to_string(),
             ));
         }

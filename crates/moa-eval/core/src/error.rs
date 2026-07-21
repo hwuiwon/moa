@@ -3,11 +3,11 @@
 use std::path::PathBuf;
 
 /// Result alias used throughout `moa-eval-core`.
-pub type Result<T> = std::result::Result<T, EvalError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors returned by the `moa-eval-core` crate.
 #[derive(Debug, thiserror::Error)]
-pub enum EvalError {
+pub enum Error {
     /// Reading a file or directory failed.
     #[error("failed to read {path}: {source}")]
     Io {

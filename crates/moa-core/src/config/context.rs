@@ -352,7 +352,7 @@ impl Default for CompactionConfig {
 #[cfg(test)]
 mod tests {
     use super::SessionLimitsConfig;
-    use crate::config::{MoaConfig, MoaEnvOverlay};
+    use crate::config::{EnvOverlay, MoaConfig};
 
     #[test]
     fn progress_narration_defaults_are_on_with_cheapest_model() {
@@ -379,11 +379,11 @@ mod tests {
     #[test]
     fn worker_resume_budget_env_overlay_overrides_defaults() {
         // Pins: each MOA_SESSION_LIMITS_WORKER_RESUME_* flat env var maps to its field.
-        let overlay = MoaEnvOverlay {
+        let overlay = EnvOverlay {
             session_limits_worker_resume_max_per_window: Some(3),
             session_limits_worker_resume_window_ms: Some(120_000),
             session_limits_worker_input_timeout_ms: Some(90_000),
-            ..MoaEnvOverlay::default()
+            ..EnvOverlay::default()
         };
 
         let mut config = MoaConfig::default();
@@ -405,10 +405,10 @@ mod tests {
         assert_eq!(limits.worker_heartbeat_interval_ms, 15_000);
         assert_eq!(limits.worker_heartbeat_stale_ms, 60_000);
 
-        let overlay = MoaEnvOverlay {
+        let overlay = EnvOverlay {
             session_limits_worker_heartbeat_interval_ms: Some(5_000),
             session_limits_worker_heartbeat_stale_ms: Some(30_000),
-            ..MoaEnvOverlay::default()
+            ..EnvOverlay::default()
         };
         let mut config = MoaConfig::default();
         overlay
@@ -421,13 +421,13 @@ mod tests {
     #[test]
     fn progress_narration_env_overlay_overrides_defaults() {
         // Pins: each MOA_SESSION_LIMITS_PROGRESS_NARRATION_* flat env var maps to its field.
-        let overlay = MoaEnvOverlay {
+        let overlay = EnvOverlay {
             session_limits_progress_narration_enabled: Some(false),
             session_limits_progress_narration_model: Some("gpt-5-nano".to_string()),
             session_limits_progress_narration_interval_ms: Some(45_000),
             session_limits_progress_narration_max_per_window: Some(7),
             session_limits_progress_narration_max_tokens: Some(64),
-            ..MoaEnvOverlay::default()
+            ..EnvOverlay::default()
         };
 
         let mut config = MoaConfig::default();

@@ -17,12 +17,12 @@ use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{NodeLabel, PostgresGraphStore};
 use moa_memory_ingest::{
-    Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, FastError, FastPathCtx,
-    FastRememberRequest, ForgetPattern, IncidentRecord, IngestError, IngestRuntime,
+    Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, Error as IngestError,
+    FastError, FastPathCtx, FastRememberRequest, ForgetPattern, IncidentRecord, IngestRuntime,
     RrfPlusJudgeDetector, execute_memory_tool, fast_forget, fast_remember, install_runtime,
     record_incident, record_incident_with_ctx,
 };
-use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan};
+use moa_memory_pii::{Error as PiiError, PiiCategory, PiiClassifier, PiiResult, PiiSpan};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorStoreFactory};
 use moa_session::testing;
 use sqlx::PgPool;

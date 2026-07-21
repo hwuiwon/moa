@@ -131,7 +131,7 @@ where
         .map_err(serde::de::Error::custom)
 }
 
-pub(super) fn validate_urls(overlay: &MoaEnvOverlay) -> Result<()> {
+pub(super) fn validate_urls(overlay: &EnvOverlay) -> Result<()> {
     validate_url("MOA_TURBOPUFFER_BASE_URL", &overlay.turbopuffer_base_url)?;
     validate_url("MOA_NANGO_API_BASE_URL", &overlay.nango_api_base_url)?;
     validate_url("MOA_MERGE_API_BASE_URL", &overlay.merge_api_base_url)?;
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn knowledge_overlay_applies_flat_provider_and_parser_settings() {
         // Pins: tenant knowledge overlay updates non-secret runtime config without adding secret indirection knobs.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_KNOWLEDGE_PROVIDERS_ENABLED", "nango"),
             ("MOA_KNOWLEDGE_PARSERS_ENABLED", "native,llamaparse"),
             ("MOA_KNOWLEDGE_PARSER_DEFAULT", "native"),
@@ -263,7 +263,7 @@ mod tests {
         // Pins: an empty MOA_GENERAL_DEFAULT_PROVIDER must not silently clobber the
         // populated "openai" default (the known mock/empty gotcha); apply_to fails
         // closed naming the offending field rather than yielding an empty provider.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_GENERAL_DEFAULT_PROVIDER", ""),
         ]))
@@ -279,7 +279,7 @@ mod tests {
     fn empty_models_main_env_is_rejected_not_clobbered() {
         // Pins: an empty MOA_MODELS_MAIN must not clobber the populated main-model
         // default; validation fails closed naming models.main.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_MODELS_MAIN", ""),
         ]))
@@ -295,7 +295,7 @@ mod tests {
     fn fallback_models_env_overrides_model_failover_chain() {
         // Pins: flat Kubernetes env can configure the main-loop failover chain,
         // not just the primary and auxiliary models.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             (
                 "MOA_MODELS_FALLBACK_MODELS",
@@ -320,7 +320,7 @@ mod tests {
     fn stream_timeout_env_overrides_all_deadlines() {
         // Pins: Kubernetes can tune first-byte, idle, and total stream deadlines
         // without changing provider-specific credentials or adapter wiring.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_PROVIDERS_STREAM_TIMEOUTS_FIRST_BYTE_MS", "1000"),
             ("MOA_PROVIDERS_STREAM_TIMEOUTS_IDLE_MS", "2000"),
@@ -340,7 +340,7 @@ mod tests {
     fn deployment_policy_capabilities_and_llm_dlp_are_typed_overlays() {
         // Pins: env-only Kubernetes composition can enable LLM DLP and declare
         // both endpoint capabilities and the deployment-wide routing policy.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_LLM_DLP_TOKENIZE_ENABLED", "true"),
             ("MOA_ANTHROPIC_CAPABILITIES_ZERO_RETENTION", "true"),
             ("MOA_ANTHROPIC_CAPABILITIES_DATA_RESIDENCY", "eu"),
@@ -395,7 +395,7 @@ mod tests {
     fn deployment_policy_overlay_rejects_unknown_provider() {
         // Pins: a typo in a deployment provider allowlist fails startup rather
         // than being ignored or widening routing.
-        let error = MoaEnvOverlay::from_iter(env_pairs([(
+        let error = EnvOverlay::from_iter(env_pairs([(
             "MOA_PROVIDERS_ROUTING_POLICY_ALLOWED_PROVIDERS",
             "anthropicc",
         )]))
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn cloud_hands_fallback_providers_env_overrides_route_chain() {
         // Pins: cloud hand fallback can be configured from flat Kubernetes env.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_CLOUD_HANDS_DEFAULT_PROVIDER", "daytona"),
             ("MOA_CLOUD_HANDS_FALLBACK_PROVIDERS", "e2b"),

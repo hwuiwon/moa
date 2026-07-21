@@ -13,7 +13,7 @@ use moa_core::config::ClickHouseConfig;
 use moa_core::wire::analytics::{AnalyticsCell, AnalyticsColumn, AnalyticsFieldKind};
 
 use crate::compiler::{AnalyticsBindValue, CompiledAnalyticsQuery};
-use crate::error::{AnalyticsError, Result};
+use crate::error::{Error, Result};
 
 /// Output format requested from ClickHouse for dynamic result decoding.
 const RESULT_FORMAT: &str = "JSONEachRow";
@@ -125,7 +125,7 @@ impl AnalyticsClickHouseClient {
                 Err(error) if is_unknown_table(&error) => {
                     tracing::debug!(table, "analytics purge skipped missing table");
                 }
-                Err(error) => return Err(AnalyticsError::ClickHouse(error.to_string())),
+                Err(error) => return Err(Error::ClickHouse(error.to_string())),
             }
         }
         Ok(())
@@ -161,10 +161,10 @@ impl AnalyticsClickHouseClient {
 
         let bytes = query
             .fetch_bytes(RESULT_FORMAT)
-            .map_err(|error| AnalyticsError::ClickHouse(error.to_string()))?
+            .map_err(|error| Error::ClickHouse(error.to_string()))?
             .collect()
             .await
-            .map_err(|error| AnalyticsError::ClickHouse(error.to_string()))?;
+            .map_err(|error| Error::ClickHouse(error.to_string()))?;
 
         decode_json_each_row(&bytes, &compiled.columns)
     }
@@ -179,16 +179,14 @@ pub(crate) fn decode_json_each_row(
     columns: &[AnalyticsColumn],
 ) -> Result<Vec<Vec<AnalyticsCell>>> {
     let text = std::str::from_utf8(bytes)
-        .map_err(|error| AnalyticsError::ClickHouse(format!("response was not utf-8: {error}")))?;
+        .map_err(|error| Error::ClickHouse(format!("response was not utf-8: {error}")))?;
     let mut rows = Vec::new();
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
         }
         let object: serde_json::Map<String, serde_json::Value> = serde_json::from_str(line)
-            .map_err(|error| {
-                AnalyticsError::ClickHouse(format!("row is not a json object: {error}"))
-            })?;
+            .map_err(|error| Error::ClickHouse(format!("row is not a json object: {error}")))?;
         let mut cells = Vec::with_capacity(columns.len());
         for (index, column) in columns.iter().enumerate() {
             let alias = format!("c{index}");
@@ -225,7 +223,7 @@ fn decode_cell(value: &serde_json::Value, kind: AnalyticsFieldKind) -> Result<An
         AnalyticsFieldKind::Timestamp => {
             let micros = decode_i64(value).ok_or_else(|| type_error("timestamp micros", value))?;
             let timestamp = DateTime::from_timestamp_micros(micros).ok_or_else(|| {
-                AnalyticsError::ClickHouse(format!("timestamp micros {micros} out of range"))
+                Error::ClickHouse(format!("timestamp micros {micros} out of range"))
             })?;
             Ok(AnalyticsCell::String(timestamp.to_rfc3339()))
         }
@@ -270,8 +268,8 @@ fn decode_bool(value: &serde_json::Value) -> Option<bool> {
     }
 }
 
-fn type_error(expected: &str, value: &serde_json::Value) -> AnalyticsError {
-    AnalyticsError::ClickHouse(format!("expected {expected} cell, got {value}"))
+fn type_error(expected: &str, value: &serde_json::Value) -> Error {
+    Error::ClickHouse(format!("expected {expected} cell, got {value}"))
 }
 
 #[cfg(test)]

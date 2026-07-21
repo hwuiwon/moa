@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use moa_eval_core::{EvalError, Result};
+use moa_eval_core::{Error, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::fs::File;
@@ -82,13 +82,13 @@ pub(crate) fn invalid_config<T>(message: impl Into<String>) -> Result<T> {
 }
 
 /// Builds an invalid-config error for the provided message.
-pub(crate) fn invalid_config_error(message: impl Into<String>) -> EvalError {
-    EvalError::InvalidConfig(message.into())
+pub(crate) fn invalid_config_error(message: impl Into<String>) -> Error {
+    Error::InvalidConfig(message.into())
 }
 
 /// Wraps an I/O failure with the offending path.
-pub(crate) fn io_error(path: &Path, source: std::io::Error) -> EvalError {
-    EvalError::Io {
+pub(crate) fn io_error(path: &Path, source: std::io::Error) -> Error {
+    Error::Io {
         path: path.to_path_buf(),
         source,
     }

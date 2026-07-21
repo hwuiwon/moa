@@ -12,7 +12,7 @@ use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
 use crate::{
-    GraphError, PostgresGraphStore, Result,
+    Error, PostgresGraphStore, Result,
     changelog::{ChangelogRecord, write_and_bump},
     edge::{EdgeLabel, EdgeWriteIntent},
     node::{
@@ -96,7 +96,7 @@ async fn prepare_node_fields(
     prepare_node_fields_batch(store, std::slice::from_ref(intent), &[tenant_id])
         .await?
         .pop()
-        .ok_or_else(|| GraphError::Conflict("node preparation returned no fields".to_string()))
+        .ok_or_else(|| Error::Conflict("node preparation returned no fields".to_string()))
 }
 
 /// Prepares a node batch and performs one KMS call per `(tenant, subject)` group.
@@ -106,7 +106,7 @@ async fn prepare_node_fields_batch(
     tenant_ids: &[Uuid],
 ) -> Result<Vec<PreparedNodeFields>> {
     if intents.len() != tenant_ids.len() {
-        return Err(GraphError::Conflict(
+        return Err(Error::Conflict(
             "node preparation tenant cardinality mismatch".to_string(),
         ));
     }
@@ -132,7 +132,7 @@ async fn prepare_node_fields_batch(
             continue;
         }
         if intent.embedding.is_some() {
-            return Err(GraphError::SealedEmbedding);
+            return Err(Error::SealedEmbedding);
         }
         let payload = serde_json::to_vec(&SealedNodeContent {
             version: SEALED_CONTENT_VERSION,
@@ -171,7 +171,7 @@ async fn prepare_node_fields_batch(
         .into_iter()
         .map(|fields| {
             fields.ok_or_else(|| {
-                GraphError::Conflict("sealed node preparation returned no fields".to_string())
+                Error::Conflict("sealed node preparation returned no fields".to_string())
             })
         })
         .collect()
@@ -184,10 +184,10 @@ async fn prepare_node_fields_batch(
 /// on `moa.storage_partition_state` — can be chosen as the deadlock victim.
 /// Deterministic lock ordering removes the common cycle; this predicate lets the
 /// remaining, rare cases be retried instead of aborting the caller.
-fn is_deadlock(error: &GraphError) -> bool {
+fn is_deadlock(error: &Error) -> bool {
     matches!(
         error,
-        GraphError::Sidecar(sqlx_error)
+        Error::Sidecar(sqlx_error)
             if sqlx_error
                 .as_database_error()
                 .and_then(|db| db.code())
@@ -606,7 +606,7 @@ pub async fn supersede_node_in_conn(
                 .await?;
         }
     } else if vector_item.is_some() {
-        return Err(GraphError::Conflict(
+        return Err(Error::Conflict(
             "embedding provided but no vector store is configured".to_string(),
         ));
     }
@@ -649,11 +649,9 @@ pub async fn invalidate_node(store: &PostgresGraphStore, uid: Uuid, reason: &str
     let mut conn = store.begin_required().await?;
     let old = fetch_stored_node(conn.as_mut(), uid)
         .await?
-        .ok_or(GraphError::NotFound(uid))?;
+        .ok_or(Error::NotFound(uid))?;
     if old.valid_to.is_some() {
-        return Err(GraphError::BiTemporal(format!(
-            "{uid} is already invalidated"
-        )));
+        return Err(Error::BiTemporal(format!("{uid} is already invalidated")));
     }
 
     let now = Utc::now();
@@ -708,18 +706,18 @@ pub(crate) async fn close_existing_node_with_supersession(
     let mut conn = store.begin_required().await?;
     let old = fetch_stored_node(conn.as_mut(), intent.old_uid)
         .await?
-        .ok_or(GraphError::NotFound(intent.old_uid))?;
+        .ok_or(Error::NotFound(intent.old_uid))?;
     let replacement = fetch_stored_node(conn.as_mut(), intent.replacement_uid)
         .await?
-        .ok_or(GraphError::NotFound(intent.replacement_uid))?;
+        .ok_or(Error::NotFound(intent.replacement_uid))?;
     if old.valid_to.is_some() {
-        return Err(GraphError::BiTemporal(format!(
+        return Err(Error::BiTemporal(format!(
             "{} is already invalidated",
             intent.old_uid
         )));
     }
     if replacement.valid_to.is_some() {
-        return Err(GraphError::BiTemporal(format!(
+        return Err(Error::BiTemporal(format!(
             "{} is not an active replacement",
             intent.replacement_uid
         )));
@@ -799,7 +797,7 @@ pub(crate) async fn expire_node(
     let mut conn = store.begin_required().await?;
     let old = fetch_stored_node(conn.as_mut(), intent.uid)
         .await?
-        .ok_or(GraphError::NotFound(intent.uid))?;
+        .ok_or(Error::NotFound(intent.uid))?;
     if old.valid_to.is_some() {
         return Ok(false);
     }
@@ -852,7 +850,7 @@ pub(crate) async fn update_node_content(
     intent: NodeContentUpdateIntent,
 ) -> Result<()> {
     if !intent.properties.is_object() {
-        return Err(GraphError::Conflict(
+        return Err(Error::Conflict(
             "node properties must be a JSON object".to_string(),
         ));
     }
@@ -860,19 +858,16 @@ pub(crate) async fn update_node_content(
     let mut conn = store.begin_required().await?;
     let old = fetch_stored_node(conn.as_mut(), intent.uid)
         .await?
-        .ok_or(GraphError::NotFound(intent.uid))?;
+        .ok_or(Error::NotFound(intent.uid))?;
     if old.valid_to.is_some() {
-        return Err(GraphError::BiTemporal(format!(
-            "{} is not active",
-            intent.uid
-        )));
+        return Err(Error::BiTemporal(format!("{} is not active", intent.uid)));
     }
     let barrier = old
         .barrier
         .as_deref()
         .map(InformationBarrierId::parse)
         .transpose()
-        .map_err(|error| GraphError::Conflict(error.to_string()))?;
+        .map_err(|error| Error::Conflict(error.to_string()))?;
     let replacement = NodeWriteIntent {
         uid: intent.uid,
         label: old.label,
@@ -913,10 +908,7 @@ pub(crate) async fn update_node_content(
     .execute(conn.as_mut())
     .await?;
     if result.rows_affected() == 0 {
-        return Err(GraphError::BiTemporal(format!(
-            "{} is not active",
-            intent.uid
-        )));
+        return Err(Error::BiTemporal(format!("{} is not active", intent.uid)));
     }
     write_and_bump(
         conn.as_mut(),
@@ -1001,15 +993,12 @@ pub(crate) async fn upsert_node_embedding(
     let mut conn = store.begin_required().await?;
     let node = fetch_stored_node(conn.as_mut(), intent.uid)
         .await?
-        .ok_or(GraphError::NotFound(intent.uid))?;
+        .ok_or(Error::NotFound(intent.uid))?;
     if node.valid_to.is_some() {
-        return Err(GraphError::BiTemporal(format!(
-            "{} is not active",
-            intent.uid
-        )));
+        return Err(Error::BiTemporal(format!("{} is not active", intent.uid)));
     }
     if is_sealed_class(node.pii_class) {
-        return Err(GraphError::SealedEmbedding);
+        return Err(Error::SealedEmbedding);
     }
     let vector = require_vector_store(store)?;
     ensure_storage_partition_embedder_state(
@@ -1082,7 +1071,7 @@ pub async fn hard_purge_with_audit(
     let mut conn = store.begin_required().await?;
     let old = fetch_stored_node(conn.as_mut(), uid)
         .await?
-        .ok_or(GraphError::NotFound(uid))?;
+        .ok_or(Error::NotFound(uid))?;
     let (actor_id, actor_kind) = mutation_actor(store);
     let properties_hash = hash_properties(old.properties_summary.as_ref())?;
 
@@ -1204,7 +1193,7 @@ async fn edge_exists(conn: &mut PgConnection, uid: Uuid) -> Result<bool> {
         .bind(uid)
         .fetch_one(conn)
         .await
-        .map_err(GraphError::from)
+        .map_err(Error::from)
 }
 
 async fn insert_edge_index(
@@ -1311,18 +1300,18 @@ async fn insert_supersedes_edge_index(
 async fn validate_edge_endpoints(conn: &mut PgConnection, intent: &EdgeWriteIntent) -> Result<()> {
     let start = fetch_stored_node(conn, intent.start_uid)
         .await?
-        .ok_or(GraphError::NotFound(intent.start_uid))?;
+        .ok_or(Error::NotFound(intent.start_uid))?;
     let end = fetch_stored_node(conn, intent.end_uid)
         .await?
-        .ok_or(GraphError::NotFound(intent.end_uid))?;
+        .ok_or(Error::NotFound(intent.end_uid))?;
     if start.valid_to.is_some() {
-        return Err(GraphError::BiTemporal(format!(
+        return Err(Error::BiTemporal(format!(
             "{} is not active",
             intent.start_uid
         )));
     }
     if end.valid_to.is_some() {
-        return Err(GraphError::BiTemporal(format!(
+        return Err(Error::BiTemporal(format!(
             "{} is not active",
             intent.end_uid
         )));
@@ -1339,7 +1328,7 @@ fn validate_node_scope(intent: &NodeWriteIntent) -> Result<()> {
         &intent.scope,
     )?;
     if !intent.properties.is_object() {
-        return Err(GraphError::Conflict(
+        return Err(Error::Conflict(
             "node properties must be a JSON object".to_string(),
         ));
     }
@@ -1353,7 +1342,7 @@ fn validate_edge_scope(intent: &EdgeWriteIntent) -> Result<()> {
         &intent.scope,
     )?;
     if !intent.properties.is_object() {
-        return Err(GraphError::Conflict(
+        return Err(Error::Conflict(
             "edge properties must be a JSON object".to_string(),
         ));
     }
@@ -1381,13 +1370,12 @@ fn validate_scope_shape(
     contact_id: Option<&str>,
     scope: &str,
 ) -> Result<()> {
-    let expected = expected_scope_tier(storage_partition_id, contact_id).ok_or_else(|| {
-        GraphError::Conflict("contact scope requires storage partition".to_string())
-    })?;
+    let expected = expected_scope_tier(storage_partition_id, contact_id)
+        .ok_or_else(|| Error::Conflict("contact scope requires storage partition".to_string()))?;
     if scope == expected {
         Ok(())
     } else {
-        Err(GraphError::Conflict(format!(
+        Err(Error::Conflict(format!(
             "scope `{scope}` does not match computed scope `{expected}`"
         )))
     }
@@ -1429,12 +1417,12 @@ impl ScopeTriple for EdgeWriteIntent {
     }
 }
 
-/// Returns a [`GraphError::Conflict`] with `message` when the two scope triples differ.
+/// Returns a [`Error::Conflict`] with `message` when the two scope triples differ.
 fn ensure_same_scope(a: &impl ScopeTriple, b: &impl ScopeTriple, message: &str) -> Result<()> {
     if a.scope_triple() == b.scope_triple() {
         Ok(())
     } else {
-        Err(GraphError::Conflict(message.to_string()))
+        Err(Error::Conflict(message.to_string()))
     }
 }
 
@@ -1493,7 +1481,7 @@ fn runtime_ids_for_node(
     )?;
     let expected_subject_id = contact_id.unwrap_or(tenant_id);
     if intent.data_subject_id != expected_subject_id {
-        return Err(GraphError::DataSubjectMismatch {
+        return Err(Error::DataSubjectMismatch {
             actual: intent.data_subject_id,
             expected: expected_subject_id,
         });
@@ -1512,7 +1500,7 @@ fn runtime_ids_from_parts(
     }
 
     let Some(storage_partition_id) = storage_partition_id else {
-        return Err(GraphError::Conflict(format!(
+        return Err(Error::Conflict(format!(
             "tenant-owned graph {target} require tenant scope"
         )));
     };
@@ -1525,7 +1513,7 @@ fn runtime_ids_from_parts(
 
 fn parse_uuid(value: &str, value_kind: &str, column: &str) -> Result<Uuid> {
     Uuid::parse_str(value).map_err(|error| {
-        GraphError::Conflict(format!(
+        Error::Conflict(format!(
             "{value_kind} `{value}` cannot be used as {column}: {error}"
         ))
     })
@@ -1566,9 +1554,7 @@ async fn close_node_index(
     .execute(conn)
     .await?;
     if result.rows_affected() == 0 {
-        Err(GraphError::BiTemporal(format!(
-            "{uid} was already invalidated"
-        )))
+        Err(Error::BiTemporal(format!("{uid} was already invalidated")))
     } else {
         Ok(())
     }
@@ -1579,13 +1565,13 @@ fn vector_item_from_intent(intent: &NodeWriteIntent) -> Result<Option<VectorItem
         return Ok(None);
     };
     if is_sealed_class(intent.pii_class) {
-        return Err(GraphError::SealedEmbedding);
+        return Err(Error::SealedEmbedding);
     }
     let Some(embedding_model) = intent.embedding_model.clone() else {
-        return Err(GraphError::MissingEmbeddingMetadata);
+        return Err(Error::MissingEmbeddingMetadata);
     };
     let Some(embedding_model_version) = intent.embedding_model_version else {
-        return Err(GraphError::MissingEmbeddingMetadata);
+        return Err(Error::MissingEmbeddingMetadata);
     };
     Ok(Some(VectorItem {
         uid: intent.uid,
@@ -1607,7 +1593,7 @@ async fn ensure_storage_partition_embedder_state(
     embedding_model_version: i32,
 ) -> Result<()> {
     let storage_partition_id = storage_partition_id.ok_or_else(|| {
-        GraphError::Conflict("embedding writes require storage partition state".to_string())
+        Error::Conflict("embedding writes require storage partition state".to_string())
     })?;
     sqlx::query(
         r#"
@@ -1628,7 +1614,7 @@ async fn ensure_storage_partition_embedder_state(
 
 fn require_vector_store(store: &PostgresGraphStore) -> Result<&dyn VectorStore> {
     store.vector().ok_or_else(|| {
-        GraphError::Conflict("embedding provided but no vector store is configured".to_string())
+        Error::Conflict("embedding provided but no vector store is configured".to_string())
     })
 }
 
@@ -1703,14 +1689,14 @@ async fn fetch_current_supersession_target(
 
     loop {
         if !seen.insert(uid) {
-            return Err(GraphError::BiTemporal(format!(
+            return Err(Error::BiTemporal(format!(
                 "supersession cycle detected while resolving {initial_uid}"
             )));
         }
 
         let stored = fetch_stored_node(conn, uid)
             .await?
-            .ok_or(GraphError::NotFound(uid))?;
+            .ok_or(Error::NotFound(uid))?;
         if stored.valid_to.is_none() {
             return Ok((uid, stored));
         }
@@ -1732,7 +1718,7 @@ async fn fetch_current_supersession_target(
         match replacement_uid {
             Some(next_uid) => uid = next_uid,
             None => {
-                return Err(GraphError::BiTemporal(format!(
+                return Err(Error::BiTemporal(format!(
                     "{uid} is invalidated and has no supersession replacement"
                 )));
             }

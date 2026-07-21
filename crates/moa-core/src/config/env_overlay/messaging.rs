@@ -12,7 +12,7 @@ pub(super) fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
     Some(strings(path))
 }
 
-pub(super) fn validate_urls(overlay: &MoaEnvOverlay) -> Result<()> {
+pub(super) fn validate_urls(overlay: &EnvOverlay) -> Result<()> {
     validate_url("MOA_RESTATE_INGRESS_URL", &overlay.restate_ingress_url)?;
     validate_url("MOA_RESTATE_ADMIN_URL", &overlay.restate_admin_url)?;
     validate_url(
@@ -30,7 +30,7 @@ pub(super) fn validate_urls(overlay: &MoaEnvOverlay) -> Result<()> {
     )
 }
 
-impl MoaEnvOverlay {
+impl EnvOverlay {
     pub(super) fn finalize_intentional_fanout(&self, config: &mut MoaConfig) {
         if let Some(restate_ingress_url) = &self.restate_ingress_url {
             config.orchestrator.endpoint = Some(restate_ingress_url.clone());
@@ -49,7 +49,7 @@ mod tests {
     fn invalid_bool_reports_env_name() {
         // Pins: boolean parse failures name the canonical env var.
         assert_config_error_contains(
-            MoaEnvOverlay::from_iter(env_pairs([("MOA_LOCAL_DOCKER_ENABLED", "sometimes")])),
+            EnvOverlay::from_iter(env_pairs([("MOA_LOCAL_DOCKER_ENABLED", "sometimes")])),
             "MOA_LOCAL_DOCKER_ENABLED",
         );
     }
@@ -57,7 +57,7 @@ mod tests {
     #[test]
     fn runtime_cache_overlay_applies_backend_and_redis_url() {
         // Pins: runtime cache selection uses flat MOA env names through envy.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_RUNTIME_CACHE_BACKEND", "redis"),
             (
                 "MOA_RUNTIME_CACHE_REDIS_URL",
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn session_blob_overlay_applies_backend_and_local_path() {
         // Pins: claim-check blob storage is selected through explicit flat MOA env names.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_SESSION_BLOB_BACKEND", "local"),
             ("MOA_SESSION_BLOB_DIR", "/var/lib/moa/blobs"),
         ]))
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn session_attachment_overlay_applies_object_store_settings() {
         // Pins: session upload bytes use explicit object storage config rather than Postgres bytes.
-        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+        let overlay = EnvOverlay::from_iter(env_pairs([
             ("MOA_SESSION_ATTACHMENT_BACKEND", "gcs"),
             ("MOA_SESSION_ATTACHMENT_BUCKET", "moa-prod-attachments"),
             ("MOA_SESSION_ATTACHMENT_PREFIX", "prod/session-attachments"),
