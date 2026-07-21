@@ -6,23 +6,20 @@ manual, billed evidence lane. It does not replace the hermetic retrieval gate,
 and its outputs are informational until the authority checks below are
 completed in a separate reviewed change.
 
-## Protected workflow
+## Manual protected lane
 
-Run `.github/workflows/memory-benchmarks.yml` manually from `main`. The workflow
-has only a `workflow_dispatch` trigger and repository permission
-`contents: read`. Its benchmark job uses the protected `memory-benchmarks`
-environment. Repository administrators must configure that environment with:
+The dedicated GitHub workflow (`memory-benchmarks.yml`) has been removed; the
+lane now runs manually via the xtask commands below, from a `main` checkout.
+The controls that workflow enforced remain the contract for this lane — and
+for any reinstated CI workflow: `workflow_dispatch`-only from
+`refs/heads/main`, `contents: read`, a protected `memory-benchmarks`
+environment with deployment branches restricted to `main`, required reviewers,
+prevent-self-review, and only the minimum benchmark secrets described below.
 
-- deployment branches restricted to `main`;
-- required reviewers enabled;
-- prevent-self-review enabled; and
-- only the minimum benchmark secrets described below.
+The lane supports only `formation_mode=live`; recorded formation is a local
+workflow because there is no recorded-manifest artifact input here.
 
-The workflow rejects every non-`refs/heads/main` ref before entering the
-protected job. It supports only `formation_mode=live`; recorded formation is a
-local workflow because there is no recorded-manifest artifact input here.
-
-The protected job starts
+The lane runs against
 `ghcr.io/hwuiwon/moa-postgres:pg17-pgvector0.8.2-pgaudit` with database `moa`,
 password `ci`, and a `pg_isready` health check. It exports:
 
@@ -36,7 +33,7 @@ if migration fails.
 
 ### Inputs and secret boundary
 
-The workflow requires the dataset, live formation mode, extractor model, merge
+The lane requires the dataset, live formation mode, extractor model, merge
 verifier model, embedding selector, reader model, LongMemEval judge model,
 reader context window, reader output-token reserve, controls, evidence budget,
 and cumulative USD ceiling. Evidence budget is exactly `512`, `1024`, or
@@ -73,7 +70,7 @@ its LongMemEval variant has exact fields
 Both require schema version 1, the pinned package identity/counts, and
 `verified:true`; unknown fields or a summary/package mismatch fail closed.
 
-The workflow uploads package manifests, verified fetch summaries, and reports
+The lane produces package manifests, verified fetch summaries, and reports
 for review. It has no repository write permission and no baseline write,
 commit, or push step.
 
@@ -261,7 +258,7 @@ The report-level authority object separates retrieval from answer authority:
 }
 ```
 
-The workflow and runner cannot set either value to true or attach calibration
+The lane and runner cannot set either value to true or attach calibration
 links. Results cannot enable a projection, ranking change, or production
 default automatically.
 
@@ -530,7 +527,7 @@ cargo run -p xtask --features eval-tools -- calibrate-external-memory-judge scor
 
 ## Promotion checklist
 
-Retrieval and answer authority are separate reviewed decisions. The workflow
+Retrieval and answer authority are separate reviewed decisions. The lane
 never promotes either.
 
 Retrieval promotion requires:

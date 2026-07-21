@@ -73,15 +73,12 @@ marked PR profile, cached embeddings, heuristic extraction, deterministic
 merge verification, and noop reranking. It is a retrieval/privacy acceptance
 mechanism, not a reader or generated-answer quality measurement.
 
-The manual workflow is `.github/workflows/memory-eval-held-out.yml`. It accepts
-only `workflow_dispatch` from `refs/heads/main`, declares the
-`memory-eval-held-out` GitHub environment, compares against the dedicated
-held-out baseline with an explicit five-percent regression ceiling, and uploads
-the corpus, report, and paired comparison. Before enabling the workflow, a
-repository administrator must configure that environment with required
-reviewers, prevent self-review, and restrict deployment branches to `main`.
-Those controls live in GitHub repository settings and cannot be enforced by the
-checked-in workflow alone.
+The dedicated GitHub workflow for this lane has been removed; run the held-out
+lane manually with the `--held-out` xtask invocation described above, comparing
+against the dedicated held-out baseline with the explicit five-percent
+regression ceiling. If a CI workflow is reinstated, it must be
+`workflow_dispatch`-only from `refs/heads/main` behind a protected environment
+with required reviewers and prevent-self-review.
 
 ## Labeling Protocol
 

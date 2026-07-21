@@ -204,11 +204,10 @@ report does not generate answers or measure reader/answer quality. Review
 semantic provenance and metrics; wall-clock latency fields are not expected to
 be byte-identical across hosts.
 
-`.github/workflows/memory-eval-held-out.yml` is `workflow_dispatch`-only,
-rejects refs other than `refs/heads/main`, and declares the
-`memory-eval-held-out` environment. A repository administrator must configure
-that environment with required reviewers, prevent self-review, and restrict
-deployment branches to `main` before the workflow is considered protected.
+The dedicated held-out GitHub workflow has been removed; run the lane manually
+via the `--held-out` xtask invocation above. Any reinstated CI workflow must be
+`workflow_dispatch`-only from `refs/heads/main` behind a protected environment
+with required reviewers and prevent-self-review.
 
 ## Transcript styles
 
@@ -603,12 +602,12 @@ hermetic corpus above:
 
 - PR, held-out, and deterministic retrieval reports remain the shipping gate
   for local retrieval mechanics and privacy blockers.
-- `.github/workflows/memory-benchmarks.yml` is `workflow_dispatch`-only,
-  protected by the `memory-benchmarks` environment, and restricted to `main`.
+- The external benchmark lane runs manually (its dedicated GitHub workflow has
+  been removed); see `docs/eval/external-memory-benchmarks.md`.
 - Public download authorization and provider-spend authorization are separate.
 - External reports are informational until retrieval authority is reviewed and
   LongMemEval answer authority also passes the human calibration contract.
-- The workflow uploads evidence only. It never writes or commits a baseline and
+- The lane produces evidence only. It never writes or commits a baseline and
   cannot enable a projection or ranking change automatically.
 
 The external runner emits strict `ExternalMemoryReportV2` artifacts with one

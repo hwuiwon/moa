@@ -1,0 +1,128 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      # The repo's no-infra PR lane: no Postgres, Docker, Restate, OpenFGA,
+      # PII sidecar, or live/billed providers (see .config/nextest.toml).
+      - name: Run offline tests (fast-pr lane)
+        run: cargo nextest run --locked --profile fast-pr
+
+  db-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      MOA_DATABASE_URL: postgres://moa_owner:dev@localhost:10040/moa
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Start Postgres
+        run: docker compose up -d --build postgres
+
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 60); do
+            if docker compose exec -T postgres pg_isready -U moa_owner -d moa >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "timed out waiting for compose Postgres" >&2
+          docker compose logs postgres
+          exit 1
+
+      # Postgres-only lanes (see docs/20-testing.md): schema-isolated DB tests
+      # and template-cloned graph/vector state tests.
+      - name: Run DB session tests
+        run: cargo nextest run --locked --profile db-session
+
+      - name: Run DB memory tests
+        run: cargo nextest run --locked --profile db-memory
+
+      - name: Dump Postgres logs
+        if: failure()
+        run: docker compose logs postgres
+
+      - name: Stop compose stack
+        if: always()
+        run: docker compose down -v
