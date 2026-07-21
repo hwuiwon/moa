@@ -223,11 +223,17 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 
 | Crate | Role |
 |---|---|
-| [`moa-core`](crates/moa-core/) | Shared types, traits, config, events, telemetry, analytics DTOs |
+| [`moa-core`](crates/moa-core/) | Shared types, traits, events, and errors used across all crates |
+| [`moa-config`](crates/moa-config/) | Runtime configuration tree (`MoaConfig`) with flat env overlay |
+| [`moa-wire`](crates/moa-wire/) | Wire DTOs for edge and internal service boundaries |
 | [`moa-brain`](crates/moa-brain/) | Context pipeline, query rewriting, segment helpers, resolution scoring, streamed turns |
+| [`moa-retrieval`](crates/moa-retrieval/) | Graph-memory retrieval engine and query planning |
+| [`moa-execution`](crates/moa-execution/) | Pure compiler, interpreter, and persistence for durable execution runs |
 | [`moa-db`](crates/moa-db/) | Database helpers shared by MOA storage crates (pools, scoped connections, RLS) |
+| [`moa-crypto`](crates/moa-crypto/) | Envelope encryption, BYOK KMS seam, crypto-shred erasure |
 | [`moa-session`](crates/moa-session/) | Postgres session store, event log, task segments, learning log, analytics views |
 | [`moa-analytics`](crates/moa-analytics/) | Query catalog and read models for safe analytics API queries |
+| [`moa-analytics-export`](crates/moa-analytics-export/) | Background Postgres-to-ClickHouse analytics exporter with single-writer lease |
 | [`moa-runtime-store`](crates/moa-runtime-store/) | Runtime cache store implementations (in-memory and Redis/Valkey) |
 | [`moa-migrations`](crates/moa-migrations/) | Central Postgres migrations and schema runners |
 | [`moa-memory-graph`](crates/moa-memory/graph/) | Graph memory store, SQL sidecars, RLS, bitemporal state, and changelog |
@@ -259,6 +265,8 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-scoring`](crates/moa-scoring/) | Shared score-run storage and score summary queries |
 | [`moa-messaging`](crates/moa-messaging/) | Slack adapter, platform rendering, Postmark email connector, and Twilio SMS connector |
 | [`moa-security`](crates/moa-security/) | Credential vault, MCP proxy, policies, prompt-injection controls |
+| [`moa-kms`](crates/moa-kms/) | Postgres-backed KMS for envelope encryption and crypto-shred |
+| [`moa-dlp`](crates/moa-dlp/) | Request-scoped, provenance-aware PII tokenization for provider egress |
 | [`moa-skills`](crates/moa-skills/) | Agent Skills parsing, distillation, improvement, regression suites |
 | [`moa-eval-core`](crates/moa-eval/core/) | Shared evaluation engine types and scoring primitives |
 | [`moa-eval`](crates/moa-eval/) | Evaluation harness |
