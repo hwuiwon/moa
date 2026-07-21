@@ -1,7 +1,7 @@
 //! SQL compiler for validated analytics queries.
 
 use moa_core::types::identifiers::TenantId;
-use moa_core::wire::analytics::{
+use moa_wire::analytics::{
     AnalyticsAggregation, AnalyticsCatalogResponse, AnalyticsCell, AnalyticsColumn,
     AnalyticsFieldKind, AnalyticsFieldRole, AnalyticsFilterOperator, AnalyticsQueryRequest,
     AnalyticsSortDirection,
@@ -719,7 +719,7 @@ fn measure_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_core::wire::analytics::{
+    use moa_wire::analytics::{
         AnalyticsDimension, AnalyticsFilter, AnalyticsMeasure, AnalyticsOrderBy,
     };
 

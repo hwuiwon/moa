@@ -1,10 +1,10 @@
 //! Composite task-segment assessor.
 
 use chrono::{DateTime, Utc};
+use moa_config::ResolutionWeights;
 use moa_core::{
-    config::ResolutionWeights, types::segment_assessment::AssessmentPhase,
-    types::segment_assessment::SegmentAssessment, types::segment_assessment::SegmentEvidence,
-    types::segment_assessment::SegmentEvidenceKind,
+    types::segment_assessment::AssessmentPhase, types::segment_assessment::SegmentAssessment,
+    types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentEvidenceKind,
     types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
 };
 
@@ -305,9 +305,9 @@ fn polarity_for_strength(strength: f64) -> SegmentEvidencePolarity {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
+    use moa_config::ResolutionWeights;
     use moa_core::{
-        config::ResolutionWeights, types::segment_assessment::AssessmentPhase,
-        types::segment_assessment::SegmentEvidenceKind,
+        types::segment_assessment::AssessmentPhase, types::segment_assessment::SegmentEvidenceKind,
         types::segment_assessment::SegmentEvidencePolarity,
         types::segment_assessment::SegmentOutcome,
     };

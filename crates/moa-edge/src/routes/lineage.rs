@@ -9,11 +9,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::config::ComplianceConfig;
-use moa_core::wire::lineage::{
-    LineageExplainRequest, LineageExplainResponse, LineageQueryOrder, LineageQueryRequest,
-    LineageQueryResponse, LineageRecordView, LineageVerifyRequest, LineageVerifyResponse,
-};
+use moa_config::ComplianceConfig;
 use moa_core::{
     types::identifiers::SessionId, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId, types::identifiers::UserId, types::memory::RlsContext,
@@ -23,6 +19,10 @@ use moa_lineage_audit::{
     AuditRootSeed, AuditRootSigner, LocalAuditRootSigner, PerTenantAuditRootSigner, SigningKey,
 };
 use moa_lineage_sink::admin as lineage_sink_admin;
+use moa_wire::lineage::{
+    LineageExplainRequest, LineageExplainResponse, LineageQueryOrder, LineageQueryRequest,
+    LineageQueryResponse, LineageRecordView, LineageVerifyRequest, LineageVerifyResponse,
+};
 use sqlx::{Postgres, QueryBuilder, Row};
 
 use super::{
@@ -456,7 +456,7 @@ fn usize_to_u64(value: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::config::ComplianceConfig;
+    use moa_config::ComplianceConfig;
     use moa_lineage_audit::SigningKey;
 
     use super::{configured_audit_root_signer, normalized_query_limit};

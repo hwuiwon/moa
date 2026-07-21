@@ -7,7 +7,6 @@ use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
-use moa_core::wire::privacy::{ContactErasureScope, PrivacyEraseStatus};
 use moa_core::{types::contact::ContactId, types::identifiers::TenantId};
 use moa_crypto::{EncryptionContext, KeyManagementProvider, LocalKmsProvider};
 use moa_lineage_audit::PiiVault;
@@ -23,6 +22,7 @@ use moa_orchestrator::services::privacy::{
     write_export_readme, write_manifest,
 };
 use moa_session::testing;
+use moa_wire::privacy::{ContactErasureScope, PrivacyEraseStatus};
 use serde_json::json;
 use sqlx::PgPool;
 use tempfile::tempdir;

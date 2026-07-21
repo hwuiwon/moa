@@ -8,20 +8,20 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_brain::planning::{
+use moa_retrieval::planning::{
     PlannedQuery, PlanningCtx, QueryPlanner, parse_temporal,
     should_skip_graph_expansion_for_direct_lookup,
 };
-use moa_brain::retrieval::{
+use moa_retrieval::retrieval::{
     EvidenceWindowPolicy, GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy,
     HybridRetriever, RankingConfig, RetrievalHit, RetrievalOutput, RetrievalRequest,
 };
+use moa_config::MemoryDigestConfig;
+use moa_config::MemoryRankingConfig;
+use moa_config::MoaConfig;
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
-use moa_core::{
-    config::MemoryDigestConfig, config::MemoryRankingConfig, config::MoaConfig,
-    traits::EmbeddingProvider, types::contact::ContactId, types::identifiers::UserId,
-};
+use moa_core::{traits::EmbeddingProvider, types::contact::ContactId, types::identifiers::UserId};
 use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{GraphStore, NodeIndexRow, PostgresGraphStore};

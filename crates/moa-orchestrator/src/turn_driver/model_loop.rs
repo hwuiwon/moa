@@ -1,6 +1,6 @@
 //! Deterministic model-loop planning helpers for turn workflows.
 
-use moa_core::config::SessionLimitsConfig;
+use moa_config::SessionLimitsConfig;
 use moa_core::types::execution_planning::{ExecutionRouteDecision, ExecutionStrategy};
 
 use crate::workflows::turn_responsiveness::{
@@ -156,7 +156,7 @@ fn loop_plan(
 
 #[cfg(test)]
 mod tests {
-    use moa_core::config::SessionLimitsConfig;
+    use moa_config::SessionLimitsConfig;
     use moa_core::types::execution_planning::{ExecutionRouteDecision, ExecutionStrategy};
 
     use super::{

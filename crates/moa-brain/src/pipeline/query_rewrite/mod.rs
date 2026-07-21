@@ -13,12 +13,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use moa_config::QueryRewriteConfig;
 use moa_core::{
-    config::QueryRewriteConfig, error::Result, traits::ContextProcessor, traits::LLMProvider,
-    traits::SessionStore, types::context::ProcessorOutput, types::context::WorkingContext,
-    types::query_rewrite::QueryRewriteResult,
+    error::Result, traits::ContextProcessor, traits::LLMProvider, traits::SessionStore,
+    types::context::ProcessorOutput, types::context::WorkingContext,
 };
 use serde_json::json;
+
+use crate::query_rewrite::QueryRewriteResult;
 
 pub use self::circuit_breaker::CircuitBreaker;
 use self::gate::{RewriteDecision, RewriteGateInput};
@@ -257,21 +259,22 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
+    use moa_config::QueryRewriteConfig;
     use moa_core::{
-        config::QueryRewriteConfig, error::Result, events::Event, traits::ContextProcessor,
-        traits::LLMProvider, types::channel::Channel, types::completion::CompletionRequest,
+        error::Result, events::Event, traits::ContextProcessor, traits::LLMProvider,
+        types::channel::Channel, types::completion::CompletionRequest,
         types::completion::CompletionResponse, types::completion::CompletionStream,
         types::completion::StopReason, types::completion::TokenUsage,
         types::context::ContextMessage, types::context::ProcessorOutput,
         types::context::WorkingContext, types::events_stream::EventRecord,
         types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
-        types::provider::ModelTier, types::query_rewrite::QueryRewriteResult,
-        types::query_rewrite::RewriteReason, types::query_rewrite::RewriteSource,
-        types::session::SessionMeta,
+        types::provider::ModelTier, types::session::SessionMeta,
     };
     use serde_json::json;
     use uuid::Uuid;
+
+    use crate::query_rewrite::{QueryRewriteResult, RewriteReason, RewriteSource};
 
     use super::{CircuitBreaker, METADATA_KEY, QueryRewriter};
 

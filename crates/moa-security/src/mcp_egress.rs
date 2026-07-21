@@ -6,7 +6,7 @@
 //! the destination server is not allowlisted to receive.
 //!
 //! The policy is a per-server allowlist
-//! ([`moa_core::config::McpServerConfig::allowed_data_classes`]). It is
+//! ([`moa_config::McpServerConfig::allowed_data_classes`]). It is
 //! conservative: [`SensitivityClass::None`] content may always leave, but `pii`,
 //! `phi`, and `restricted` payloads are blocked unless the operator explicitly
 //! lists the class for that server. The guard fails closed — a classification

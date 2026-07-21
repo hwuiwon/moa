@@ -12,12 +12,10 @@ use moa_artifacts::execution_plan::{
     ExecutionUsage, MapTask, PlanAmendment, PlanAmendmentOperation, RetryPolicy,
 };
 use moa_artifacts::reference::ArtifactRef;
-use moa_core::{
-    config::ExecutionConfig,
-    types::{
-        action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
-        tools::IdempotencyClass,
-    },
+use moa_config::ExecutionConfig;
+use moa_core::types::{
+    action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
+    tools::IdempotencyClass,
 };
 use moa_execution::{
     capability::{

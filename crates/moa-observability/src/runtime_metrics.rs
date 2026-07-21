@@ -7,8 +7,8 @@ use std::time::Duration;
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 
+use moa_config::MetricsConfig;
 use moa_core::{
-    config::MetricsConfig,
     error::MoaError,
     error::Result,
     types::action_policy::ActionClass,

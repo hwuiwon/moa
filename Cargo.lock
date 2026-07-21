@@ -3419,14 +3419,34 @@ dependencies = [
  "chrono",
  "clickhouse",
  "insta",
+ "moa-config",
  "moa-core",
  "moa-db",
  "moa-lineage-core",
  "moa-test-support",
+ "moa-wire",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moa-analytics-export"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clickhouse",
+ "metrics",
+ "moa-config",
+ "serde",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
  "workspace-hack",
@@ -3470,6 +3490,7 @@ dependencies = [
  "moa-auth-providers-auth0",
  "moa-authz",
  "moa-authz-schema",
+ "moa-config",
  "moa-core",
  "moa-crypto",
  "moa-db",
@@ -3565,6 +3586,7 @@ dependencies = [
  "insta",
  "metrics",
  "moa-artifacts",
+ "moa-config",
  "moa-core",
  "moa-crypto",
  "moa-db",
@@ -3581,6 +3603,7 @@ dependencies = [
  "moa-observability",
  "moa-ocsf",
  "moa-providers",
+ "moa-retrieval",
  "moa-security",
  "moa-session",
  "moa-test-support",
@@ -3601,6 +3624,20 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wiremock",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moa-config"
+version = "0.1.0"
+dependencies = [
+ "envy",
+ "moa-core",
+ "serde",
+ "serde_json",
+ "strum",
+ "tracing",
+ "url",
  "workspace-hack",
 ]
 
@@ -3630,7 +3667,6 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
- "envy",
  "schemars 1.2.1",
  "secrecy",
  "serde",
@@ -3704,6 +3740,7 @@ dependencies = [
  "moa-auth-providers",
  "moa-authz",
  "moa-authz-schema",
+ "moa-config",
  "moa-core",
  "moa-db",
  "moa-execution",
@@ -3713,6 +3750,7 @@ dependencies = [
  "moa-observability",
  "moa-ocsf",
  "moa-session",
+ "moa-wire",
  "reqwest 0.13.4",
  "rmcp",
  "schemars 1.2.1",
@@ -3741,6 +3779,7 @@ dependencies = [
  "futures-util",
  "moa-artifacts",
  "moa-brain",
+ "moa-config",
  "moa-core",
  "moa-crypto",
  "moa-db",
@@ -3755,6 +3794,7 @@ dependencies = [
  "moa-memory-types",
  "moa-memory-vector",
  "moa-providers",
+ "moa-retrieval",
  "moa-security",
  "moa-session",
  "moa-skills",
@@ -3803,6 +3843,7 @@ dependencies = [
  "chrono",
  "jsonschema",
  "moa-artifacts",
+ "moa-config",
  "moa-core",
  "moa-db",
  "moa-test-support",
@@ -3829,6 +3870,7 @@ dependencies = [
  "moa-observability",
  "moa-scoring",
  "moa-test-support",
+ "moa-wire",
  "serde",
  "serde_json",
  "sqlx",
@@ -3868,6 +3910,7 @@ dependencies = [
  "globset",
  "ignore",
  "jsonschema",
+ "moa-config",
  "moa-core",
  "moa-memory-graph",
  "moa-memory-pii",
@@ -4010,24 +4053,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moa-lineage-otel"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "moa-core",
- "moa-lineage-core",
- "moa-memory-types",
- "opentelemetry",
- "opentelemetry_sdk",
- "serde_json",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "uuid",
- "workspace-hack",
-]
-
-[[package]]
 name = "moa-lineage-sink"
 version = "0.1.0"
 dependencies = [
@@ -4037,11 +4062,14 @@ dependencies = [
  "clickhouse",
  "fjall",
  "metrics",
+ "moa-config",
  "moa-core",
  "moa-lineage-core",
- "moa-lineage-otel",
  "moa-memory-types",
  "moa-migrations",
+ "moa-wire",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "serde",
  "serde_json",
  "sqlx",
@@ -4050,6 +4078,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
  "uuid",
  "workspace-hack",
 ]
@@ -4071,7 +4101,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "moa-auth-providers",
  "moa-authz",
- "moa-brain",
+ "moa-config",
  "moa-core",
  "moa-crypto",
  "moa-db",
@@ -4080,8 +4110,10 @@ dependencies = [
  "moa-memory-vector",
  "moa-observability",
  "moa-providers",
+ "moa-retrieval",
  "moa-session",
  "moa-test-support",
+ "moa-wire",
  "rand 0.8.5",
  "reqwest 0.13.4",
  "secrecy",
@@ -4131,6 +4163,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "metrics",
+ "moa-config",
  "moa-core",
  "moa-crypto",
  "moa-db",
@@ -4162,6 +4195,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "moa-brain",
+ "moa-config",
  "moa-core",
  "moa-crypto",
  "moa-memory-graph",
@@ -4190,6 +4224,7 @@ dependencies = [
  "moa-db",
  "moa-memory-graph",
  "moa-session",
+ "moa-wire",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -4220,6 +4255,7 @@ dependencies = [
  "async-trait",
  "backon",
  "chrono",
+ "moa-config",
  "moa-core",
  "moa-db",
  "moa-memory-pii",
@@ -4246,6 +4282,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "moa-config",
  "moa-core",
  "moa-observability",
  "moa-runtime-store",
@@ -4288,6 +4325,7 @@ version = "0.1.0"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
+ "moa-config",
  "moa-core",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -4348,11 +4386,13 @@ dependencies = [
  "metrics",
  "moa-agents",
  "moa-analytics",
+ "moa-analytics-export",
  "moa-artifacts",
  "moa-auth-providers",
  "moa-authz",
  "moa-authz-schema",
  "moa-brain",
+ "moa-config",
  "moa-contacts",
  "moa-core",
  "moa-crypto",
@@ -4380,12 +4420,14 @@ dependencies = [
  "moa-observability",
  "moa-ocsf",
  "moa-providers",
+ "moa-retrieval",
  "moa-runtime-store",
  "moa-scoring",
  "moa-security",
  "moa-session",
  "moa-skills",
  "moa-test-support",
+ "moa-wire",
  "reqwest 0.13.4",
  "restate-sdk",
  "secrecy",
@@ -4419,6 +4461,7 @@ dependencies = [
  "futures-util",
  "insta",
  "metrics",
+ "moa-config",
  "moa-core",
  "moa-dlp",
  "moa-memory-graph",
@@ -4442,10 +4485,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-retrieval"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "metrics",
+ "moa-config",
+ "moa-core",
+ "moa-db",
+ "moa-lineage-core",
+ "moa-memory-graph",
+ "moa-memory-types",
+ "moa-memory-vector",
+ "moa-providers",
+ "moka",
+ "rust-stemmers",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "strum",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moa-runtime-store"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "moa-config",
  "moa-core",
  "redis",
  "tokio",
@@ -4473,6 +4546,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "globset",
+ "moa-config",
  "moa-core",
  "moa-memory-graph",
  "moa-memory-pii",
@@ -4494,6 +4568,7 @@ dependencies = [
  "backon",
  "chrono",
  "hex",
+ "moa-config",
  "moa-core",
  "moa-db",
  "moa-execution",
@@ -4525,6 +4600,7 @@ dependencies = [
  "chrono",
  "hex",
  "moa-artifacts",
+ "moa-config",
  "moa-core",
  "moa-crypto",
  "moa-db",
@@ -4561,6 +4637,7 @@ dependencies = [
  "moa-execution",
  "moa-security",
  "moa-session",
+ "moa-wire",
  "nix 0.29.0",
  "opentelemetry-proto",
  "prost",
@@ -4575,6 +4652,20 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moa-wire"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "moa-core",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
  "uuid",
  "workspace-hack",
 ]
@@ -9052,7 +9143,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
- "moa-brain",
+ "moa-config",
  "moa-core",
  "moa-crypto",
  "moa-db",
@@ -9066,6 +9157,7 @@ dependencies = [
  "moa-memory-vector",
  "moa-migrations",
  "moa-providers",
+ "moa-retrieval",
  "pgvector",
  "reqwest 0.13.4",
  "serde",

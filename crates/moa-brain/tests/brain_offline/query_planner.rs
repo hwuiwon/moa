@@ -2,13 +2,13 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_brain::planning::{PlanningCtx, QueryPlanner, Strategy};
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::security::SensitivityClass;
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, Error, GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent,
 };
 use moa_memory_types::MemoryScope;
+use moa_retrieval::planning::{PlanningCtx, QueryPlanner, Strategy};
 use uuid::Uuid;
 
 #[tokio::test]

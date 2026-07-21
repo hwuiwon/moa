@@ -4,8 +4,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
-use moa_core::{config::SessionLimitsConfig, traits::ChannelAdapter};
+use moa_config::SessionLimitsConfig;
+use moa_core::traits::ChannelAdapter;
 use moa_core::{
     events::Event, types::action_policy::ActionPolicyEffect,
     types::action_policy::CapabilityProvenance, types::action_policy::ExecutionTaskOrigin,
@@ -18,6 +18,7 @@ use moa_core::{
 use moa_observability::restate_observability::{event_persist_span, tool_dispatch_span};
 use moa_observability::{record_turn_event_persist_duration, record_turn_tool_dispatch_duration};
 use moa_session::PostgresSessionStore;
+use moa_wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 

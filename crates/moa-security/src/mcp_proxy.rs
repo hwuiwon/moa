@@ -4,10 +4,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use moa_config::McpCredentialConfig;
+use moa_config::McpServerConfig;
 use moa_core::{
-    config::McpCredentialConfig, config::McpServerConfig, error::MoaError, error::Result,
-    traits::CredentialVault, traits::StoredCredentialMetadata, types::identifiers::SessionId,
-    types::model::Credential,
+    error::MoaError, error::Result, traits::CredentialVault, traits::StoredCredentialMetadata,
+    types::identifiers::SessionId, types::model::Credential,
 };
 use tokio::sync::RwLock;
 
@@ -191,9 +192,11 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use moa_config::McpCredentialConfig;
+    use moa_config::McpServerConfig;
     use moa_core::{
-        config::McpCredentialConfig, config::McpServerConfig, traits::CredentialVault,
-        traits::StoredCredentialMetadata, types::identifiers::SessionId, types::model::Credential,
+        traits::CredentialVault, traits::StoredCredentialMetadata, types::identifiers::SessionId,
+        types::model::Credential,
     };
     use uuid::Uuid;
 

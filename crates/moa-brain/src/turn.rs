@@ -6,9 +6,11 @@ use std::time::{Duration, Instant};
 use moa_core::{
     error::Result, traits::LLMProvider, types::completion::CompletionContent,
     types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::runtime_events::RuntimeEvent, types::session::SessionSignal,
+    types::session::SessionSignal,
 };
 use moa_observability::record_turn_llm_ttft;
+
+use crate::runtime_events::RuntimeEvent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 

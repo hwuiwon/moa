@@ -11,7 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
-use moa_brain::{
+use moa_retrieval::{
     planning::{NerExtractor, PlanningCtx, QueryPlanner, QueryRetrievalCtx, retrieve_for_query},
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalHit},
 };

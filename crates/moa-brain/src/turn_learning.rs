@@ -4,9 +4,11 @@ use chrono::{DateTime, Utc};
 use moa_core::{
     types::events_stream::EventRecord, types::experience::ExperienceAttribution,
     types::experience::ExperienceRecord, types::experience::LearningCandidate,
-    types::query_rewrite::QueryRewriteResult, types::segment_assessment::SegmentAssessment,
-    types::segments::TaskSegment, types::session::SessionMeta,
+    types::segment_assessment::SegmentAssessment, types::segments::TaskSegment,
+    types::session::SessionMeta,
 };
+
+use crate::query_rewrite::QueryRewriteResult;
 
 use crate::learning::{
     attribution::attributions_for_experience, candidates::propose_candidates_for_experience,

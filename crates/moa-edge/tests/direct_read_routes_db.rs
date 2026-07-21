@@ -8,13 +8,11 @@ use axum::extract::State;
 use axum::routing::post;
 use chrono::{Duration, Utc};
 use moa_authz::{FgaClient, FgaConfig};
-use moa_core::config::{OAuthClientConfig, OAuthClientType, OAuthServerConfig};
+use moa_config::MoaConfig;
+use moa_config::{OAuthClientConfig, OAuthClientType, OAuthServerConfig};
 use moa_core::traits::{AuthError, AuthProvider, Credential, Identity, IdentityType};
-use moa_core::wire::analytics::{AnalyticsCatalogResponse, AnalyticsCell, AnalyticsQueryResponse};
-use moa_core::wire::lineage::LineageQueryResponse;
-use moa_core::wire::tenants::{TenantPurgeStatus, TenantPurgeStatusResponse};
 use moa_core::{
-    config::MoaConfig, events::Event, traits::SessionStore, types::agent::AgentContext,
+    events::Event, traits::SessionStore, types::agent::AgentContext,
     types::contact::SessionActorRef, types::identifiers::ModelId, types::identifiers::SessionId,
     types::identifiers::TenantId, types::identifiers::ToolCallId, types::session::SessionMeta,
     types::tools::ToolOutput,
@@ -22,6 +20,9 @@ use moa_core::{
 use moa_edge::proxy::OrchestratorProxy;
 use moa_edge::routes::{self, AppState, KnowledgeWebhookEdgeConfig};
 use moa_session::{PostgresSessionStore, testing};
+use moa_wire::analytics::{AnalyticsCatalogResponse, AnalyticsCell, AnalyticsQueryResponse};
+use moa_wire::lineage::LineageQueryResponse;
+use moa_wire::tenants::{TenantPurgeStatus, TenantPurgeStatusResponse};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

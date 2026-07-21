@@ -242,19 +242,22 @@ pub(crate) fn final_brain_response(events: &[EventRecord]) -> Result<&str> {
 }
 
 fn journal_role(request: &CompletionRequest) -> JournalRequestRole {
-    if request
-        .response_format
-        .as_ref()
-        .is_some_and(|format| format.name == "generated_execution_candidate")
-    {
-        return JournalRequestRole::InitialPlanner;
-    }
     let message_text = request
         .messages
         .iter()
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>()
         .join("\n");
+    // The execution planner sends `response_format: None` and embeds the canonical candidate
+    // schema in-prompt as `<response_schema>…</response_schema>` (planner candidates carry
+    // free-form JSON that provider-native strict schemas cannot represent). Identify the
+    // initial-planner request by that marker. `planner_request` also builds restricted amendment
+    // requests, which add "Generate only a restricted plan amendment" and must stay `Normal`.
+    if message_text.contains("<response_schema>")
+        && !message_text.contains("Generate only a restricted plan amendment")
+    {
+        return JournalRequestRole::InitialPlanner;
+    }
     if message_text.contains(SYNTHESIS_INSTRUCTION) {
         JournalRequestRole::Synthesis
     } else if message_text.contains(AGENT_INSTRUCTION_SUFFIX)

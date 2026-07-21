@@ -20,7 +20,6 @@ use moa_artifacts::execution_plan::{
     CompletionCheckKind, ExecutionOperation, GeneratedExecutionCandidate,
 };
 use moa_core::traits::Identity;
-use moa_core::wire::turn::{StartTurnRequest, StartTurnResponse};
 use moa_core::{
     events::Event,
     types::contact::SessionActorRef,
@@ -49,6 +48,7 @@ use moa_execution::wire::{
     ExecutionPlanningContextRequest, ExecutionPlanningContextResponse, ExecutionRunRequest,
     ExecutionStatusResponse, ExecutionTaskListRequest, ExecutionTaskListResponse,
 };
+use moa_wire::turn::{StartTurnRequest, StartTurnResponse};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};

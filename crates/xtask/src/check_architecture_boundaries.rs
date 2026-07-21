@@ -1902,10 +1902,10 @@ mod tests {
                 {"name":"moa-core","id":"core","dependencies":[]},
                 {"name":"moa-brain","id":"brain","dependencies":[{"name":"moa-core","kind":null}]},
                 {"name":"moa-edge","id":"edge","dependencies":[{"name":"moa-core","kind":"build"}]},
-                {"name":"moa-lineage-otel","id":"otel","dependencies":[{"name":"moa-core","kind":"dev"}]}
+                {"name":"moa-devtool","id":"devtool","dependencies":[{"name":"moa-core","kind":"dev"}]}
             ],
-            "workspace_members":["core","brain","edge","otel"],
-            "workspace_default_members":["core","brain","edge","otel"]
+            "workspace_members":["core","brain","edge","devtool"],
+            "workspace_default_members":["core","brain","edge","devtool"]
         }"#;
 
         let graph = parse_package_graph(metadata).expect("fixture metadata should parse");
@@ -1916,12 +1916,12 @@ mod tests {
         );
         assert_eq!(
             graph.dev_only_edges(),
-            vec![("moa-lineage-otel".to_string(), "moa-core".to_string())]
+            vec![("moa-devtool".to_string(), "moa-core".to_string())]
         );
         assert!(
             graph
                 .dependencies(DependencyKind::Dev)
-                .get("moa-lineage-otel")
+                .get("moa-devtool")
                 .is_some_and(|dependencies| dependencies.contains("moa-core"))
         );
     }

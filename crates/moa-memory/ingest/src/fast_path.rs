@@ -1223,8 +1223,8 @@ fn parse_node_label(value: Option<&str>) -> Result<NodeLabel, FastError> {
 
 #[cfg(test)]
 mod tests {
+    use moa_config::MoaConfig;
     use moa_core::{
-        config::MoaConfig,
         types::agent::{AgentContext, AgentKnowledgePolicy, AgentPolicySnapshot},
         types::contact::ContactId,
         types::contact::ContactRef,

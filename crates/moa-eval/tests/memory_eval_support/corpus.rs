@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error;
 
 use chrono::{DateTime, Utc};
-use moa_brain::planning::parse_temporal;
+use moa_retrieval::planning::parse_temporal;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
     error::MoaError, traits::EmbeddingProvider, types::identifiers::StoragePartitionId,

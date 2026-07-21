@@ -5,15 +5,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
-use moa_core::config::SessionLimitsConfig;
+use moa_config::SessionLimitsConfig;
 use moa_core::traits::SessionRepository;
-use moa_core::wire::session_store::{AppendEventRequest, GetEventsRequest, UpdateStatusRequest};
-use moa_core::wire::turn::{
-    CancelResponse, PendingMessage, QueueMessageRequest, QueueMessageResponse, RunTurnRequest,
-    SessionProgress, SessionProgressRequest, SessionSnapshot, StartTurnRequest, StartTurnResponse,
-    TurnOutcome as ExecutionTurnOutcome, TurnOutcomeKind as ExecutionTurnOutcomeKind, TurnProgress,
-    TurnTrigger,
-};
 use moa_core::{
     error::MoaError, error::Result as MoaResult, events::Event, events::ExecutionInputRequired,
     events::ExecutionProgress, events::ExecutionRunEvidenceRef,
@@ -34,6 +27,13 @@ use moa_core::{
 };
 use moa_observability::record_turn_event_persist_duration;
 use moa_session::PostgresSessionStore;
+use moa_wire::session_store::{AppendEventRequest, GetEventsRequest, UpdateStatusRequest};
+use moa_wire::turn::{
+    CancelResponse, PendingMessage, QueueMessageRequest, QueueMessageResponse, RunTurnRequest,
+    SessionProgress, SessionProgressRequest, SessionSnapshot, StartTurnRequest, StartTurnResponse,
+    TurnOutcome as ExecutionTurnOutcome, TurnOutcomeKind as ExecutionTurnOutcomeKind, TurnProgress,
+    TurnTrigger,
+};
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 

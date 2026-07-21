@@ -2,6 +2,7 @@
 
 use moa_authz::{enqueue, enqueue_raw};
 use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
+use moa_config::MoaConfig;
 use moa_contacts::Error;
 use moa_contacts::domain::{
     contact_id_from_claims, low_assurance_scopes, require_contact_agent_allowlist,
@@ -16,8 +17,7 @@ use moa_contacts::verification_service::{
     ContactVerificationStartCommand, ContactVerifier, contact_delivery_error,
 };
 use moa_core::traits::{Identity, IdentityType, SessionChannelBindingUpdate};
-use moa_core::wire::turn::{QueueMessageRequest, SessionProgress, SessionProgressRequest};
-use moa_core::{config::MoaConfig, error::MoaError, traits::SessionStore};
+use moa_core::{error::MoaError, traits::SessionStore};
 use moa_core::{
     events::Event, types::channel::ChannelAccountRef, types::channel::ChannelRef,
     types::channel::SessionChannelBindingId, types::contact::ContactId,
@@ -41,6 +41,7 @@ use moa_core::{
 };
 use moa_messaging::ProviderDeliverySink;
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_wire::turn::{QueueMessageRequest, SessionProgress, SessionProgressRequest};
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

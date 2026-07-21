@@ -27,8 +27,8 @@ use moa_artifacts::execution_plan::{
     CompletionCheck, CompletionCheckKind, ExecutionBudgetLimit, ExecutionGoalContract,
     ExecutionNode, ExecutionOperation, ExecutionPlanDefinition, ExecutionRequirement, RetryPolicy,
 };
+use moa_config::ExecutionConfig;
 use moa_core::{
-    config::ExecutionConfig,
     events::Event,
     types::execution_planning::{
         ExecutionAdmissionEstimate, ExecutionConfirmationEvidence, ExecutionEstimateMethodology,

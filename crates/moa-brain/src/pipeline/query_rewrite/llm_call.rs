@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use moa_core::{
     error::Result, types::completion::CompletionRequest, types::completion::JsonResponseFormat,
     types::context::ContextMessage, types::context::WorkingContext, types::identifiers::ModelId,
-    types::query_rewrite::QueryRewriteResult, types::query_rewrite::RewriteReason,
 };
 use serde_json::json;
+
+use crate::query_rewrite::{QueryRewriteResult, RewriteReason};
 
 use super::QueryRewriter;
 use super::input::RewriteInput;

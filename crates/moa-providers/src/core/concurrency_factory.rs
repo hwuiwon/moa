@@ -5,7 +5,7 @@
 //! credential serves (e.g. Cohere embed + rerank on one key) draws from. The
 //! effective limit is the provider's own `max_concurrent_requests`, else the
 //! workspace-wide
-//! [`default_max_in_flight`](moa_core::config::ProviderConcurrencyConfig).
+//! [`default_max_in_flight`](moa_config::ProviderConcurrencyConfig).
 //!
 //! Local scope shares one process-local semaphore per budget key (so the two
 //! Cohere clients above contend for one budget); global scope shares one lease
@@ -19,8 +19,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use moa_core::config::MoaConfig;
-use moa_core::config::{ConcurrencyScope, ProviderConcurrencyConfig};
+use moa_config::MoaConfig;
+use moa_config::{ConcurrencyScope, ProviderConcurrencyConfig};
 use moa_core::traits::RuntimeCacheStore;
 use tokio::sync::Semaphore;
 

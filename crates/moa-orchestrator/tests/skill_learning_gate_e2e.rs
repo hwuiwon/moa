@@ -20,11 +20,9 @@ use chrono::Utc;
 use moa_artifacts::document::ArtifactStatus;
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
 use moa_artifacts::validation::validate_for_status;
-use moa_core::wire::session_store::{
-    LearningCandidateReviewAction, LearningCandidateReviewRequest,
-};
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, types::action_policy::ActionRuleScope, types::experience::LearningCandidate,
+    types::action_policy::ActionRuleScope, types::experience::LearningCandidate,
     types::experience::LearningCandidateStatus, types::experience::LearningCandidateType,
     types::experience::LearningRiskClass, types::identifiers::StoragePartitionId,
 };
@@ -34,6 +32,7 @@ use moa_skills::artifact::skill_artifact_document_from_package;
 use moa_skills::package::{SkillPackage, SkillPackageFile, ValidatedSkillPackage};
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::bootstrap_test_db;
+use moa_wire::session_store::{LearningCandidateReviewAction, LearningCandidateReviewRequest};
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -253,7 +252,7 @@ mod skill_learning_gate {
             &self,
             candidate_id: Uuid,
         ) -> Result<
-            moa_core::wire::session_store::LearningCandidateReviewResponse,
+            moa_wire::session_store::LearningCandidateReviewResponse,
             Box<dyn std::error::Error>,
         > {
             let store = Arc::new(self.test_db.store().clone());

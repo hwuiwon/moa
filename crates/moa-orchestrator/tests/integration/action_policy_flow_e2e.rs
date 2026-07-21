@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use moa_core::{
     events::Event,
     types::action_policy::ActionReviewDecision,
@@ -30,6 +29,7 @@ use moa_orchestrator::services::action_reviews::{
 };
 use moa_orchestrator::services::tool_executor::ExecutionTaskToolCallRequest;
 use moa_test_support::{IsolatedTest, OrchestratorTestFixture, TestApiClient};
+use moa_wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;

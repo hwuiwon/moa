@@ -15,7 +15,7 @@
 
 use super::*;
 use moa_core::types::worker::state::{WorkerProgressSummary, WorkerState};
-use moa_core::wire::turn::{
+use moa_wire::turn::{
     QueueMessageRequest, QueueMessageResponse, SessionProgress, SessionProgressRequest,
 };
 
@@ -262,7 +262,7 @@ mod tests {
     //! Unit coverage for conversation settling projections.
 
     use super::*;
-    use moa_core::wire::turn::SessionSnapshot;
+    use moa_wire::turn::SessionSnapshot;
 
     fn progress() -> SessionProgress {
         SessionProgress {

@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use moa_core::{config::MoaConfig, error::MoaError, error::Result};
+use moa_config::MoaConfig;
+use moa_core::{error::MoaError, error::Result};
 
 use super::cohere::COHERE_DEFAULT_RERANK_MODEL;
 #[cfg(test)]
@@ -121,7 +122,7 @@ fn build_provider(provider: RerankerProviderKind, config: &MoaConfig) -> Result<
     match provider {
         RerankerProviderKind::Cohere => {
             ensure_no_zeroentropy_latency(config, provider)?;
-            let api_key = moa_core::config::required_config_secret(
+            let api_key = moa_config::required_config_secret(
                 "MOA_COHERE_API_KEY",
                 &config.providers.cohere.api_key,
             )?;
@@ -139,7 +140,7 @@ fn build_provider(provider: RerankerProviderKind, config: &MoaConfig) -> Result<
             Ok(Arc::new(reranker))
         }
         RerankerProviderKind::ZeroEntropy => {
-            let api_key = moa_core::config::required_config_secret(
+            let api_key = moa_config::required_config_secret(
                 "MOA_ZEROENTROPY_API_KEY",
                 &config.providers.zeroentropy.api_key,
             )?;
@@ -194,7 +195,7 @@ fn ensure_no_zeroentropy_latency(config: &MoaConfig, provider: RerankerProviderK
 
 #[cfg(test)]
 mod tests {
-    use moa_core::config::MoaConfig;
+    use moa_config::MoaConfig;
 
     use super::{
         COHERE_DEFAULT_RERANK_MODEL, RerankerProviderKind, ZEROENTROPY_DEFAULT_RERANK_MODEL,

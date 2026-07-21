@@ -3,9 +3,10 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, error::MoaError, error::Result, traits::BranchManager,
-    types::identifiers::SessionId, types::session::Checkpoint, types::session::CheckpointHandle,
+    error::MoaError, error::Result, traits::BranchManager, types::identifiers::SessionId,
+    types::session::Checkpoint, types::session::CheckpointHandle,
 };
 use reqwest::{Client, Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
@@ -67,7 +68,7 @@ impl NeonBranchManager {
                     .to_string(),
             ));
         }
-        let api_key = moa_core::config::required_config_secret(
+        let api_key = moa_config::required_config_secret(
             "MOA_DATABASE_NEON_API_KEY",
             &config.database.neon.api_key,
         )?;

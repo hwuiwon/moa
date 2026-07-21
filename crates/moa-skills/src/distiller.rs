@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use moa_artifacts::registry::ArtifactRegistry;
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, error::Result, events::Event, traits::EmbeddingProvider,
-    types::completion::CompletionRequest, types::events_stream::EventRecord,
-    types::experience::AttributionEffect, types::experience::AttributionSubjectType,
-    types::experience::ExperienceAttribution, types::experience::ExperienceRecord,
-    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
-    types::memory::SkillMetadata, types::provider::ModelTask,
+    error::Result, events::Event, traits::EmbeddingProvider, types::completion::CompletionRequest,
+    types::events_stream::EventRecord, types::experience::AttributionEffect,
+    types::experience::AttributionSubjectType, types::experience::ExperienceAttribution,
+    types::experience::ExperienceRecord, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::memory::SkillMetadata, types::provider::ModelTask,
     types::segment_assessment::SegmentEvidenceKind,
     types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
     types::session::SessionMeta,

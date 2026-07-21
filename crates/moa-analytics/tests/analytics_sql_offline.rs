@@ -7,7 +7,7 @@
 
 use moa_analytics::{AnalyticsBackend, AnalyticsCompiler, analytics_catalog};
 use moa_core::types::identifiers::TenantId;
-use moa_core::wire::analytics::{
+use moa_wire::analytics::{
     AnalyticsAggregation, AnalyticsCell, AnalyticsDimension, AnalyticsFilter,
     AnalyticsFilterOperator, AnalyticsMeasure, AnalyticsOrderBy, AnalyticsQueryRequest,
     AnalyticsSortDirection,

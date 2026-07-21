@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use moa_config::MoaConfig;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
-    config::MoaConfig,
     traits::{Identity, IdentityType, MemoryRetrievalExecutor},
     types::agent::{AgentContext, AgentKnowledgePolicy, AgentPolicySnapshot},
     types::contact::SessionActorRef,

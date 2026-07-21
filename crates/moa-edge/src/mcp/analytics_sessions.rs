@@ -2,9 +2,9 @@
 
 use moa_core::types::contact::ContactId;
 use moa_core::types::identifiers::SessionId;
-use moa_core::wire::analytics::AnalyticsQueryRequest;
-use moa_core::wire::lineage::LineageExplainRequest;
 use moa_session::store::{DashboardEventPageRequest, DashboardSessionListRequest};
+use moa_wire::analytics::AnalyticsQueryRequest;
+use moa_wire::lineage::LineageExplainRequest;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::service::RequestContext;

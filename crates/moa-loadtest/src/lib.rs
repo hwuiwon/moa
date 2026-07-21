@@ -24,8 +24,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use clap::ValueEnum;
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, error::MoaError, error::Result, events::Event, types::channel::Channel,
+    error::MoaError, error::Result, events::Event, types::channel::Channel,
     types::contact::SessionActorRef, types::events_stream::EventRecord,
     types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
     types::provider::ModelTask, types::session::SessionMeta, types::session::SessionStatus,

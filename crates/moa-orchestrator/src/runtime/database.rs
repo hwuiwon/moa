@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use anyhow::{Context as AnyhowContext, Result};
-use moa_core::config::MoaConfig;
+use moa_config::MoaConfig;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
 /// Builds the Postgres search path used by runtime and migration pools.

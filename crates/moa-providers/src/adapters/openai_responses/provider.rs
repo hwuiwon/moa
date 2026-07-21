@@ -3,16 +3,11 @@
 use std::env;
 use std::time::{Duration, Instant};
 
+use moa_config::{MoaConfig, ProviderStreamTimeoutConfig};
 use moa_core::{
-    config::{MoaConfig, ProviderStreamTimeoutConfig},
-    error::MoaError,
-    error::Result,
-    traits::LLMProvider,
-    types::completion::CompletionRequest,
-    types::completion::CompletionStream,
-    types::identifiers::ModelId,
-    types::model::ModelCapabilities,
-    types::model::ProviderNativeTool,
+    error::MoaError, error::Result, traits::LLMProvider, types::completion::CompletionRequest,
+    types::completion::CompletionStream, types::identifiers::ModelId,
+    types::model::ModelCapabilities, types::model::ProviderNativeTool,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -116,7 +111,7 @@ impl OpenAIProvider {
         config: &MoaConfig,
         default_model: impl Into<String>,
     ) -> Result<Self> {
-        let api_key = moa_core::config::required_config_secret(
+        let api_key = moa_config::required_config_secret(
             "MOA_OPENAI_API_KEY",
             &config.providers.openai.api_key,
         )?;

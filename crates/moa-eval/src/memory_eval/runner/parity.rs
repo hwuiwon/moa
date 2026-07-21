@@ -13,7 +13,7 @@ use moa_brain::pipeline::MemoryEvidenceRequest;
 use moa_brain::pipeline::memory::{
     GraphMemoryRetriever, ScopedRetrievalRuntime, ScopedRetrievalRuntimeFactory,
 };
-use moa_brain::retrieval::CachedHybridRetriever;
+use moa_retrieval::retrieval::CachedHybridRetriever;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::channel::Channel;
 use moa_core::types::contact::{ContactRef, ContactVerificationState};

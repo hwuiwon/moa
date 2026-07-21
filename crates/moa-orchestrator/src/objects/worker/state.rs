@@ -167,7 +167,7 @@ pub struct WorkerVoState {
     /// Active workflow-backed worker turn id, when one is running.
     pub active_turn_id: Option<String>,
     /// Last workflow terminal outcome recorded for this child.
-    pub last_outcome: Option<moa_core::wire::turn::TurnOutcome>,
+    pub last_outcome: Option<moa_wire::turn::TurnOutcome>,
     /// Whether the terminal parent-session notification has been appended.
     pub notification_delivered: bool,
     /// Awakeable ids waiting for this worker's terminal result.

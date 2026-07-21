@@ -1,6 +1,6 @@
 //! Deterministic turn cap and recent-target policy around model-assisted routing.
 
-use moa_core::config::SessionLimitsConfig;
+use moa_config::SessionLimitsConfig;
 use moa_core::{
     events::Event, types::completion::ToolInvocation, types::events_stream::EventRecord,
 };
@@ -464,7 +464,7 @@ fn truncate_field(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::config::SessionLimitsConfig;
+    use moa_config::SessionLimitsConfig;
     use moa_core::{
         events::Event, types::channel::Attachment, types::completion::ToolInvocation,
         types::events_stream::EventRecord, types::identifiers::SessionId,

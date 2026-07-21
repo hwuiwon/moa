@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_core::config::MemoryExtractionConfig;
-use moa_core::config::MoaConfig;
+use moa_config::MemoryExtractionConfig;
+use moa_config::MoaConfig;
 use moa_core::types::provider::ProviderId;
 use moa_memory_graph::NodeIndexRow;
 use moa_memory_ingest::{

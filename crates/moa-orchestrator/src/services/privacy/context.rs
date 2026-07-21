@@ -1,13 +1,13 @@
 //! Privacy operation context and subject-scope helpers.
 
-use moa_core::config::ComplianceConfig;
-use moa_core::wire::privacy::{
-    ContactErasureScope, ParsedPrivacySubjectId, PrivacyEraseRequest,
-    contact_privacy_subject_string,
-};
+use moa_config::ComplianceConfig;
 use moa_core::{
     types::contact::ContactId, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId, types::identifiers::UserId,
+};
+use moa_wire::privacy::{
+    ContactErasureScope, ParsedPrivacySubjectId, PrivacyEraseRequest,
+    contact_privacy_subject_string,
 };
 use restate_sdk::prelude::*;
 use sqlx::PgPool;

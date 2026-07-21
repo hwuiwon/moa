@@ -10,10 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use moa_core::wire::turn::{
-    RunWorkerTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
-};
-use moa_core::{config::SessionLimitsConfig, traits::ChannelAdapter};
+use moa_config::SessionLimitsConfig;
+use moa_core::traits::ChannelAdapter;
 use moa_core::{
     coordination_counters::CoordinationCounters,
     coordination_counters::scope_coordination_counters, events::Event, types::channel::Channel,
@@ -41,6 +39,7 @@ use moa_observability::{
     record_session_error, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
     record_turn_workflow_outcome,
 };
+use moa_wire::turn::{RunWorkerTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress};
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
@@ -1281,13 +1280,13 @@ fn workflow_outcome_from_core(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::wire::turn::{TurnOutcome, TurnOutcomeKind};
     use moa_core::{
         types::identifiers::AgentSignalId, types::identifiers::SessionId,
         types::worker::commands::ChildReportKind, types::worker::commands::ReportToParentInput,
         types::worker::state::ChildSignalKind, types::worker::state::InputAudience,
         types::worker::state::ParentResumePolicy, types::worker::state::SignalSeverity,
     };
+    use moa_wire::turn::{TurnOutcome, TurnOutcomeKind};
 
     use super::{
         build_child_report_signal, build_failed_child_signal, build_needs_input_signal,

@@ -1,8 +1,9 @@
 //! Stage 2: injects configured workspace and user instructions.
 
 use async_trait::async_trait;
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, error::Result, traits::ContextProcessor, types::context::ProcessorOutput,
+    error::Result, traits::ContextProcessor, types::context::ProcessorOutput,
     types::context::WorkingContext, types::context::estimate_text_tokens,
 };
 
@@ -77,11 +78,11 @@ impl ContextProcessor for InstructionProcessor {
 
 #[cfg(test)]
 mod tests {
+    use moa_config::GeneralConfig;
     use moa_core::{
-        config::GeneralConfig, types::channel::Channel, types::identifiers::ModelId,
-        types::identifiers::SessionId, types::identifiers::TenantId,
-        types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
-        types::session::SessionMeta,
+        types::channel::Channel, types::identifiers::ModelId, types::identifiers::SessionId,
+        types::identifiers::TenantId, types::model::ModelCapabilities, types::model::TokenPricing,
+        types::model::ToolCallFormat, types::session::SessionMeta,
     };
 
     use super::*;

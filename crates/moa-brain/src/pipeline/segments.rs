@@ -3,13 +3,15 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
+use moa_config::SegmentBoundaryConfig;
 use moa_core::{
-    config::SegmentBoundaryConfig, events::Event, types::identifiers::SegmentId,
-    types::identifiers::SessionId, types::query_rewrite::QueryRewriteResult,
+    events::Event, types::identifiers::SegmentId, types::identifiers::SessionId,
     types::segments::ActiveSegment, types::segments::SegmentCompletion,
     types::segments::TaskSegment, types::segments::deterministic_segment_id,
 };
 use serde_json::Value;
+
+use crate::query_rewrite::QueryRewriteResult;
 
 const QUERY_REWRITE_METADATA_KEY: &str = "query_rewrite";
 
@@ -288,13 +290,14 @@ fn completed_from_active(segment: &ActiveSegment, now: DateTime<Utc>) -> Segment
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone};
+    use moa_config::SegmentBoundaryConfig;
     use moa_core::{
-        config::SegmentBoundaryConfig, types::identifiers::SessionId,
-        types::query_rewrite::QueryRewriteResult, types::query_rewrite::RewriteReason,
-        types::query_rewrite::RewriteSource, types::segments::ActiveSegment,
+        types::identifiers::SessionId, types::segments::ActiveSegment,
         types::segments::deterministic_segment_id,
     };
     use serde_json::json;
+
+    use crate::query_rewrite::{QueryRewriteResult, RewriteReason, RewriteSource};
 
     use super::{BoundaryFallbackInput, SegmentTracker};
 

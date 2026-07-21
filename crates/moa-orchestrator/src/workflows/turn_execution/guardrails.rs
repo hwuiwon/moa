@@ -1,11 +1,11 @@
 //! Input and output guardrail evaluation for root turns.
 
-use moa_core::wire::turn::{TurnOutcomeKind, TurnPhase};
 use moa_core::{
     events::Event, types::agent::AgentContext, types::completion::CompletionResponse,
     types::guardrails::GuardrailDecision, types::guardrails::GuardrailDirection,
     types::identifiers::SessionId, types::provider::ModelTier, types::session::SessionMeta,
 };
+use moa_wire::turn::{TurnOutcomeKind, TurnPhase};
 use restate_sdk::prelude::*;
 
 use crate::services::llm_gateway::LLMGatewayClient;

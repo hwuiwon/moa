@@ -3,8 +3,8 @@
 use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::agents::{AgentActAsRequest, AgentSummary, RegisterAgentRequest};
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_wire::agents::{AgentActAsRequest, AgentSummary, RegisterAgentRequest};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 

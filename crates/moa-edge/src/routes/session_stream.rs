@@ -5,7 +5,6 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use futures_util::stream;
-use moa_core::wire::turn::{SessionProgress, TurnPhase, TurnProgress};
 use moa_core::{
     events::Event, types::contact::ContactSessionMessageRequest,
     types::contact::ContactSessionMessageResponse, types::contact::ContactSessionProgressRequest,
@@ -14,6 +13,7 @@ use moa_core::{
     types::worker::state::WorkerId, types::worker::state::WorkerProgressSummary,
     types::worker::state::WorkerState,
 };
+use moa_wire::turn::{SessionProgress, TurnPhase, TurnProgress};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -384,10 +384,10 @@ fn done_status(progress: &SessionProgress) -> &'static str {
         return "idle";
     };
     match outcome.kind {
-        moa_core::wire::turn::TurnOutcomeKind::Completed => "completed",
-        moa_core::wire::turn::TurnOutcomeKind::Accepted { .. } => "accepted",
-        moa_core::wire::turn::TurnOutcomeKind::Cancelled => "cancelled",
-        moa_core::wire::turn::TurnOutcomeKind::Failed => "failed",
+        moa_wire::turn::TurnOutcomeKind::Completed => "completed",
+        moa_wire::turn::TurnOutcomeKind::Accepted { .. } => "accepted",
+        moa_wire::turn::TurnOutcomeKind::Cancelled => "cancelled",
+        moa_wire::turn::TurnOutcomeKind::Failed => "failed",
     }
 }
 
@@ -518,8 +518,8 @@ fn error_sse_event(message: String) -> SseEvent {
 mod tests {
     use chrono::Utc;
     use moa_core::types::execution_planning::{ExecutionRunAdmissionStatus, ExecutionRunStarted};
-    use moa_core::wire::turn::{SessionSnapshot, TurnOutcome, TurnOutcomeKind};
     use moa_core::{events::EventType, types::events_stream::EventRecord};
+    use moa_wire::turn::{SessionSnapshot, TurnOutcome, TurnOutcomeKind};
     use uuid::Uuid;
 
     use super::*;

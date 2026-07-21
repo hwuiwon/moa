@@ -2,10 +2,8 @@
 
 use std::sync::Arc;
 
-use moa_core::{
-    config::MoaConfig, error::MoaError, error::Result, traits::LLMProvider,
-    types::identifiers::ModelId,
-};
+use moa_config::MoaConfig;
+use moa_core::{error::MoaError, error::Result, traits::LLMProvider, types::identifiers::ModelId};
 
 use crate::ProviderRegistry;
 use moa_core::types::provider::ProviderId;
@@ -73,7 +71,7 @@ pub fn resolve_rewriter_provider(config: &MoaConfig) -> Result<Arc<dyn LLMProvid
 
 #[cfg(test)]
 mod tests {
-    use moa_core::config::MoaConfig;
+    use moa_config::MoaConfig;
 
     use crate::core::models::{PROVIDER_ANTHROPIC, PROVIDER_GOOGLE, PROVIDER_OPENAI};
 

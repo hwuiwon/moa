@@ -20,13 +20,6 @@ use moa_core::{
         execution_planning::{ExecutionRunStarted, PinnedExecutionTemplateRef},
         identifiers::{ModelId, SessionId, TenantId},
     },
-    wire::{
-        artifacts::{
-            ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest,
-            ArtifactPublishResponse,
-        },
-        experiments::{ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusResponse},
-    },
 };
 use moa_experiments::{
     model::{ExperimentScorecard, ExperimentTarget, ExperimentVariant, NewExperimentRun},
@@ -34,6 +27,13 @@ use moa_experiments::{
 };
 use moa_orchestrator::workflows::experiment_run::ExperimentRunWorkflowRequest;
 use moa_test_support::postgres::test_database_url;
+use moa_wire::{
+    artifacts::{
+        ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest,
+        ArtifactPublishResponse,
+    },
+    experiments::{ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusResponse},
+};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tempfile::TempDir;

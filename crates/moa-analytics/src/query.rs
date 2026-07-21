@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::types::identifiers::TenantId;
-use moa_core::wire::analytics::{
+use moa_wire::analytics::{
     AnalyticsAggregation, AnalyticsCatalogResponse, AnalyticsCell, AnalyticsDataset,
     AnalyticsField, AnalyticsFieldKind, AnalyticsFieldRole, AnalyticsFilter,
     AnalyticsFilterOperator, AnalyticsQueryRequest,
@@ -419,7 +419,7 @@ mod tests {
     use super::*;
     use crate::catalog::analytics_catalog;
     use chrono::TimeZone;
-    use moa_core::wire::analytics::{AnalyticsDimension, AnalyticsMeasure};
+    use moa_wire::analytics::{AnalyticsDimension, AnalyticsMeasure};
 
     fn fixed_now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0)

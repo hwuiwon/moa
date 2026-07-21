@@ -9,9 +9,8 @@ use moa_core::{
 };
 
 /// Cycle-safe core pending target instantiated with the artifact-owned execution budget.
-pub type PendingUserReplyTarget = moa_core::wire::turn::PendingUserReplyTarget<
-    moa_artifacts::execution_plan::ExecutionBudgetLimit,
->;
+pub type PendingUserReplyTarget =
+    moa_wire::turn::PendingUserReplyTarget<moa_artifacts::execution_plan::ExecutionBudgetLimit>;
 
 pub(super) const K_META: &str = "meta";
 pub(super) const K_STATUS: &str = "status";

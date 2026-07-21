@@ -5,8 +5,8 @@ use std::sync::Arc;
 #[cfg(feature = "auth0")]
 use async_trait::async_trait;
 use moa_authz::AwakeableResolver;
-use moa_core::config::MoaConfig;
-use moa_core::config::{AsyncAuthzKind, AuthProviderKind, TokenVaultKind};
+use moa_config::MoaConfig;
+use moa_config::{AsyncAuthzKind, AuthProviderKind, TokenVaultKind};
 use moa_core::traits::{AsyncAuthzProvider, AuthProvider, TokenVaultProvider};
 #[cfg(feature = "auth0")]
 use moa_core::traits::{AuthError, Credential, Identity};
@@ -200,10 +200,8 @@ pub fn build_async_authz_provider(
 pub fn build_contact_token_issuer(
     cfg: &MoaConfig,
 ) -> Result<Option<Arc<crate::ContactTokenIssuer>>, BuildError> {
-    let private_key =
-        moa_core::config::optional_config_secret(&cfg.auth.contact_tokens.private_key_pem);
-    let public_key =
-        moa_core::config::optional_config_secret(&cfg.auth.contact_tokens.public_key_pem);
+    let private_key = moa_config::optional_config_secret(&cfg.auth.contact_tokens.private_key_pem);
+    let public_key = moa_config::optional_config_secret(&cfg.auth.contact_tokens.public_key_pem);
     match (private_key, public_key) {
         (None, None) => Ok(None),
         (Some(private_key), Some(public_key)) => crate::ContactTokenIssuer::from_key_pems(
@@ -225,7 +223,7 @@ pub fn build_contact_token_issuer(
 
 #[cfg(feature = "auth0")]
 fn required_config_secret(env_name: &'static str, value: &str) -> Result<String, BuildError> {
-    moa_core::config::required_config_secret(env_name, value)
+    moa_config::required_config_secret(env_name, value)
         .map_err(|_| BuildError::MissingEnv(env_name.to_string()))
 }
 
@@ -235,7 +233,7 @@ fn required_config_secret(env_name: &'static str, value: &str) -> Result<String,
 /// expired-token-fails-closed behavior. Otherwise resolves each connection's
 /// client secret directly from typed config and constructs the refresher.
 fn build_token_refresher(
-    cfg: &moa_core::config::TokenVaultConfig,
+    cfg: &moa_config::TokenVaultConfig,
 ) -> Result<Option<Arc<crate::TokenRefresher>>, BuildError> {
     if cfg.refresh.is_empty() {
         return Ok(None);
@@ -293,7 +291,7 @@ impl AuthProvider for HybridAuthProvider {
 #[cfg(all(test, not(feature = "auth0")))]
 mod tests {
     use super::*;
-    use moa_core::config::AuthProviderKind;
+    use moa_config::AuthProviderKind;
     use moa_core::traits::{Credential, IdentityType};
 
     #[tokio::test]
@@ -344,10 +342,10 @@ mod tests {
     fn token_refresher_accepts_direct_client_secret() {
         // Pins: refresh credentials are consumed directly from typed config;
         // construction does not depend on a second environment-variable name.
-        let mut config = moa_core::config::TokenVaultConfig::default();
+        let mut config = moa_config::TokenVaultConfig::default();
         config.refresh.insert(
             "github".to_string(),
-            moa_core::config::OAuthRefreshConfig {
+            moa_config::OAuthRefreshConfig {
                 token_endpoint: "https://github.com/login/oauth/access_token".to_string(),
                 client_id: "client-id".to_string(),
                 client_secret: Some("client-secret".to_string()),

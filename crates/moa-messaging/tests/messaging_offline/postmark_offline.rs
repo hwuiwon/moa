@@ -5,9 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moa_core::{
-    config::MessagingConfig, error::MoaError, traits::CredentialVault, types::model::Credential,
-};
+use moa_config::MessagingConfig;
+use moa_core::{error::MoaError, traits::CredentialVault, types::model::Credential};
 use moa_messaging::{
     POSTMARK_SERVER_TOKEN_SERVICE, PostmarkEmailClient, PostmarkEmailFailureClass,
     PostmarkEmailMessage, PostmarkEmailSendResult,

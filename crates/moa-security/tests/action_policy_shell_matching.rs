@@ -6,8 +6,9 @@
 //! isolation, which the inline `policies.rs` unit tests already cover.
 
 use chrono::Utc;
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, types::action_policy::ActionClass, types::action_policy::ActionPolicyEffect,
+    types::action_policy::ActionClass, types::action_policy::ActionPolicyEffect,
     types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
     types::action_policy::RiskLevel, types::identifiers::ModelId, types::identifiers::TenantId,
     types::identifiers::UserId, types::session::SessionMeta, types::tools::ToolPolicyInput,

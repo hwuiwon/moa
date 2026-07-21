@@ -1,9 +1,10 @@
 #![recursion_limit = "256"]
 use std::sync::Arc;
 
+use moa_config::MoaConfig;
 use moa_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_core::{
-    config::MoaConfig, types::completion::CompletionRequest, types::completion::StopReason,
+    types::completion::CompletionRequest, types::completion::StopReason,
     types::completion::TokenUsage, types::identifiers::SessionId,
     types::identifiers::StoragePartitionId, types::identifiers::UserId,
 };

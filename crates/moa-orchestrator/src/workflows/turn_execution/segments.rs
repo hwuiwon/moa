@@ -1,20 +1,21 @@
 //! Segment lifecycle transitions and deterministic outcome assessment.
 
 use moa_brain::pipeline::segments::{BoundaryFallbackInput, SegmentCompleted, SegmentTracker};
+use moa_brain::query_rewrite::QueryRewriteResult;
 use moa_brain::segment_assessment::AssessmentOverride;
 use moa_brain::turn_segments::{
     assess_segment_events, latest_user_message, segment_boundary_sequences,
     segment_events_for_assessment, task_segment_from_active, task_segment_from_completed,
 };
-use moa_core::wire::session_store::{
-    AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest,
-    UpdateSegmentAssessmentRequest,
-};
 use moa_core::{
     events::Event, types::completion::CompletionRequest, types::events_stream::EventRecord,
     types::identifiers::SegmentId, types::identifiers::SessionId,
-    types::query_rewrite::QueryRewriteResult, types::segment_assessment::AssessmentPhase,
-    types::segments::ActiveSegment, types::segments::TaskSegment, types::session::SessionMeta,
+    types::segment_assessment::AssessmentPhase, types::segments::ActiveSegment,
+    types::segments::TaskSegment, types::session::SessionMeta,
+};
+use moa_wire::session_store::{
+    AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest,
+    UpdateSegmentAssessmentRequest,
 };
 use restate_sdk::prelude::*;
 
@@ -40,7 +41,7 @@ pub(super) struct PostOutcomeAssessment {
     cutoff_before_seq: Option<u64>,
     duration_ms: u64,
     assessed_at: chrono::DateTime<chrono::Utc>,
-    resolution_config: moa_core::config::ResolutionConfig,
+    resolution_config: moa_config::ResolutionConfig,
 }
 
 enum SegmentAssessmentTarget<'a> {
@@ -57,7 +58,7 @@ struct SegmentAssessmentInput<'a> {
     overrides: &'a [AssessmentOverride],
     duration_ms: u64,
     assessed_at: chrono::DateTime<chrono::Utc>,
-    resolution_config: &'a moa_core::config::ResolutionConfig,
+    resolution_config: &'a moa_config::ResolutionConfig,
 }
 
 impl SegmentAssessmentTarget<'_> {
@@ -205,7 +206,7 @@ struct OwnedBoundaryFallback {
 impl OwnedBoundaryFallback {
     fn as_input<'a>(
         &'a self,
-        config: &'a moa_core::config::SegmentBoundaryConfig,
+        config: &'a moa_config::SegmentBoundaryConfig,
     ) -> BoundaryFallbackInput<'a> {
         BoundaryFallbackInput {
             user_message: &self.user_message,

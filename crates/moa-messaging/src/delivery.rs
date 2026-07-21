@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_config::MessagingConfig;
 use moa_core::{
-    config::MessagingConfig, error::MoaError, error::Result, traits::CredentialVault,
-    traits::StoredCredentialMetadata, types::channel::Channel, types::contact::ContactId,
-    types::model::Credential,
+    error::MoaError, error::Result, traits::CredentialVault, traits::StoredCredentialMetadata,
+    types::channel::Channel, types::contact::ContactId, types::model::Credential,
 };
 use moa_observability::current_turn_root_span;
 use tracing::Instrument;

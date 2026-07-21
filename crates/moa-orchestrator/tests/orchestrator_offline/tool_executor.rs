@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::wire::tools::ToolDescriptor;
 use moa_core::{
     events::Event, events::EventType, traits::BuiltInTool, traits::Identity, traits::IdentityType,
     traits::ToolContext, types::action_policy::ActionClass, types::action_policy::RiskLevel,
@@ -22,6 +21,7 @@ use moa_orchestrator::services::tool_executor::{
     ToolExecutorImpl, build_tool_run_plan, has_prior_non_idempotent_result, tool_run_name,
     trusted_sandbox_files_from_manifest_payload,
 };
+use moa_wire::tools::ToolDescriptor;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;

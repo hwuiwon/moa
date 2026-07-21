@@ -357,9 +357,9 @@ async fn lineage_writer_clickhouse_backend_splits_rows_from_scores_db() -> TestR
     let create_table = mock.add(clickhouse::test::handlers::record_ddl());
     let insert = mock.add(clickhouse::test::handlers::record::<RecordedClickHouseRow>());
 
-    let clickhouse_config = moa_core::config::ClickHouseConfig {
+    let clickhouse_config = moa_config::ClickHouseConfig {
         url: mock.url().to_string(),
-        ..moa_core::config::ClickHouseConfig::default()
+        ..moa_config::ClickHouseConfig::default()
     };
     let store = LineageStore::from_config(Some(&clickhouse_config), pool.clone());
 

@@ -1,9 +1,9 @@
 //! Wire response builders for memory retrieval and ingestion results.
 
-use moa_brain::retrieval::RetrievalHit;
-use moa_core::wire::memory::{MemoryHit, MemoryIngestResult};
 use moa_memory_graph::NodeIndexRow;
 use moa_memory_ingest::IngestApplyReport;
+use moa_retrieval::retrieval::RetrievalHit;
+use moa_wire::memory::{MemoryHit, MemoryIngestResult};
 use serde_json::Value;
 
 /// Converts one retrieval hit into the public memory-hit DTO.
@@ -26,7 +26,7 @@ pub(super) fn memory_hit_from_retrieval(hit: RetrievalHit) -> MemoryHit {
     }
 }
 
-fn leg_trace(legs: moa_brain::retrieval::LegSources) -> Vec<String> {
+fn leg_trace(legs: moa_retrieval::retrieval::LegSources) -> Vec<String> {
     let mut out = Vec::new();
     if legs.graph {
         out.push("graph".to_string());

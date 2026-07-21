@@ -4,11 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
+use moa_config::MemoryDigestConfig;
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
-    config::MemoryDigestConfig, traits::EmbeddingProvider, types::contact::ContactId,
-    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    traits::EmbeddingProvider, types::contact::ContactId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
 };
 use moa_crypto::KeyManagementProvider;
 use moa_memory_graph::{

@@ -10,9 +10,9 @@ include!("brain_turn_support/pipeline.rs");
 use std::sync::Arc;
 
 use moa_brain::{BrainTurnRequest, TurnResult, run_brain_turn};
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, events::Event, traits::LLMProvider, traits::SessionStore,
-    types::events_stream::EventRange,
+    events::Event, traits::LLMProvider, traits::SessionStore, types::events_stream::EventRange,
 };
 use moa_providers::OpenAIProvider;
 use wiremock::MockServer;

@@ -5,17 +5,17 @@ use std::time::Duration;
 
 use moa_analytics::AnalyticsClickHouseClient;
 use moa_authz::FgaClient;
-use moa_core::wire::tenants::{
-    TenantPurgeRequest, TenantPurgeStatus, TenantPurgeStatusRequest, TenantPurgeStatusResponse,
-    tenant_purge_operation_id,
-};
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, types::identifiers::StoragePartitionId, types::identifiers::TenantId,
-    types::memory::RlsContext,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId, types::memory::RlsContext,
 };
 use moa_lineage_sink::ClickHouseStore;
 use moa_memory_vector::{VectorStore, VectorStoreFactory};
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_wire::tenants::{
+    TenantPurgeRequest, TenantPurgeStatus, TenantPurgeStatusRequest, TenantPurgeStatusResponse,
+    tenant_purge_operation_id,
+};
 use restate_sdk::prelude::*;
 
 pub mod repository;

@@ -9,10 +9,11 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
     pipeline::identity::DEFAULT_IDENTITY_PROMPT,
 };
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, traits::ExperienceStore, traits::Identity, traits::IdentityType,
-    traits::LLMProvider, traits::LearningCandidateStore, traits::LineageHandle,
-    traits::SegmentStore, traits::SessionStore, types::action_policy::ActionPolicyEffect,
+    traits::ExperienceStore, traits::Identity, traits::IdentityType, traits::LLMProvider,
+    traits::LearningCandidateStore, traits::LineageHandle, traits::SegmentStore,
+    traits::SessionStore, types::action_policy::ActionPolicyEffect,
     types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
     types::contact::SessionActorRef, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId, types::identifiers::UserId, types::session::SessionMeta,
@@ -585,8 +586,9 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use moa_config::MoaConfig;
     use moa_core::{
-        config::MoaConfig, traits::LLMProvider, types::completion::CompletionRequest,
+        traits::LLMProvider, types::completion::CompletionRequest,
         types::completion::CompletionResponse, types::completion::CompletionStream,
         types::completion::StopReason, types::completion::TokenUsage,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,

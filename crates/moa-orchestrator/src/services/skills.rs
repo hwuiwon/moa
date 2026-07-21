@@ -3,15 +3,15 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_authz_schema::Relation;
-use moa_core::wire::skills::{
-    SkillExportRequest, SkillExportResponse, SkillImportRequest, SkillImportResponse,
-    SkillListRequest, SkillListResponse, SkillPackageDocument, SkillPackageDocumentFile,
-    SkillSummary,
-};
 use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::TenantId};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_skills::registry::{NewSkill, Skill, SkillRegistry, StoredSkillPackage};
+use moa_wire::skills::{
+    SkillExportRequest, SkillExportResponse, SkillImportRequest, SkillImportResponse,
+    SkillListRequest, SkillListResponse, SkillPackageDocument, SkillPackageDocumentFile,
+    SkillSummary,
+};
 use restate_sdk::prelude::*;
 
 use crate::ctx::RequestHeaders;

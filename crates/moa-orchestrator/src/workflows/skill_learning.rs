@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use moa_core::wire::session_store::AppendEventRequest;
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, error::MoaError, error::Result as MoaResult, events::Event,
-    events::EventType, traits::EmbeddingProvider, traits::SessionStore as _,
-    types::events_stream::EventRange, types::events_stream::EventRecord,
-    types::identifiers::SegmentId, types::identifiers::SessionId,
+    error::MoaError, error::Result as MoaResult, events::Event, events::EventType,
+    traits::EmbeddingProvider, traits::SessionStore as _, types::events_stream::EventRange,
+    types::events_stream::EventRecord, types::identifiers::SegmentId,
+    types::identifiers::SessionId,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_providers::{ModelRouter, ProviderRegistry};
@@ -20,6 +20,7 @@ use moa_skills::distiller::{
 use moa_skills::proposals::{
     RecurrenceSiblingSuite, SiblingResynthesis, SkillDraftProposal, accumulate_recurrence_siblings,
 };
+use moa_wire::session_store::AppendEventRequest;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

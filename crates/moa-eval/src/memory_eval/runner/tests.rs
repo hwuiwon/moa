@@ -4,7 +4,7 @@ use super::*;
 use crate::memory_eval::{
     CorpusProfile, TranscriptStyle, generate_memory_eval_corpus, write_memory_eval_corpus,
 };
-use moa_brain::planning::Strategy;
+use moa_retrieval::planning::Strategy;
 use moa_core::{
     types::identifiers::SessionId, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId,
@@ -95,7 +95,7 @@ fn graph_expansion_policy_does_not_treat_contractions_as_exact_anchors() {
 fn probe_graph_comparison_classifies_hurt_and_keeps_path_identity() {
     // Pins: memory eval graph A/B diagnostics keep the seed and path behind hurt probes.
     use crate::memory_eval::CandidateLegs;
-    use moa_brain::retrieval::{
+    use moa_retrieval::retrieval::{
         GraphCandidateCounts, GraphPathTrace, GraphSeedDiagnostics, GraphSeedSource,
     };
 
@@ -169,7 +169,7 @@ fn probe_graph_comparison_classifies_hurt_and_keeps_path_identity() {
             graph_only: 1,
             ..GraphCandidateCounts::default()
         },
-        source_object_ranking: moa_brain::retrieval::SourceObjectRankingDiagnostics::default(),
+        source_object_ranking: moa_retrieval::retrieval::SourceObjectRankingDiagnostics::default(),
         graph_latency_ms: 9,
         raw_path_count: 1,
     };
@@ -230,7 +230,7 @@ fn request_for_policy(query_text: &str) -> RetrievalRequest {
         lineage: None,
         disable_leg_timeouts: true,
         disable_graph_expansion: false,
-        window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+        window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
     }
 }
 

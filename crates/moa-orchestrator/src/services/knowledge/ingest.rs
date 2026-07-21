@@ -3,8 +3,9 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
+use moa_config::MoaConfig;
 use moa_core::types::memory::{InformationBarrierId, RlsContext};
-use moa_core::{config::MoaConfig, traits::EmbeddingProvider, types::identifiers::TenantId};
+use moa_core::{traits::EmbeddingProvider, types::identifiers::TenantId};
 use moa_crypto::KeyManagementProvider;
 use moa_knowledge::{
     chunking::ChunkingConfig,
@@ -349,7 +350,7 @@ fn selected_parser_label(config: &MoaConfig, run: &KnowledgeSyncRun) -> String {
         .unwrap_or(config.knowledge.parser.external_default.clone())
 }
 
-fn chunking_config(config: moa_core::config::KnowledgeChunkingConfig) -> ChunkingConfig {
+fn chunking_config(config: moa_config::KnowledgeChunkingConfig) -> ChunkingConfig {
     ChunkingConfig {
         target_tokens: config.target_tokens,
         max_tokens: config.max_tokens,

@@ -17,19 +17,9 @@ use hmac::{Hmac, Mac};
 use moa_core::types::memory::{InformationBarrierId, RlsContext};
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
-    traits::EmbeddingProvider,
-    types::contact::ContactId,
-    types::identifiers::SessionId,
-    types::identifiers::StoragePartitionId,
-    types::identifiers::TenantId,
+    traits::EmbeddingProvider, types::contact::ContactId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
     types::identifiers::UserId,
-    wire::knowledge::{
-        KnowledgeConnectionListRequest, KnowledgeDisconnectConnectionRequest,
-        KnowledgeExchangeTokenRequest, KnowledgeIntegrationListRequest,
-        KnowledgeObjectInspectRequest, KnowledgeObjectListRequest, KnowledgeProviderWebhookRequest,
-        KnowledgeQueryTraceRequest, KnowledgeSyncEventsRequest, KnowledgeSyncRequest,
-        KnowledgeSyncStatusRequest, KnowledgeUpdateConnectionSourceSelectionRequest,
-    },
 };
 use moa_db::ScopedConn;
 use moa_knowledge::{
@@ -72,6 +62,13 @@ use moa_orchestrator::services::knowledge::{
 use moa_orchestrator::workflows::knowledge_sync_ingestion::{
     KnowledgeSyncIngestionRequest, KnowledgeSyncIngestionSteps, KnowledgeSyncPageApplication,
     KnowledgeSyncPreparedRun, KnowledgeSyncProviderPage, run_knowledge_sync_ingestion_workflow,
+};
+use moa_wire::knowledge::{
+    KnowledgeConnectionListRequest, KnowledgeDisconnectConnectionRequest,
+    KnowledgeExchangeTokenRequest, KnowledgeIntegrationListRequest, KnowledgeObjectInspectRequest,
+    KnowledgeObjectListRequest, KnowledgeProviderWebhookRequest, KnowledgeQueryTraceRequest,
+    KnowledgeSyncEventsRequest, KnowledgeSyncRequest, KnowledgeSyncStatusRequest,
+    KnowledgeUpdateConnectionSourceSelectionRequest,
 };
 use reqwest::header::HeaderMap;
 use restate_sdk::prelude::{HandlerError, TerminalError};
@@ -1000,7 +997,7 @@ async fn insert_retrieval_lineage_row(
 }
 
 fn assert_sync_status_counters(
-    status: &moa_core::wire::knowledge::KnowledgeSyncStatusResponse,
+    status: &moa_wire::knowledge::KnowledgeSyncStatusResponse,
     expected_records: u64,
     expected_graph_nodes: u64,
     expected_graph_edges: u64,

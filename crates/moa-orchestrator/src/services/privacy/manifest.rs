@@ -7,7 +7,7 @@ use chrono::Utc;
 use ed25519_dalek::{Signer as DalekSigner, SigningKey};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use moa_core::config::ComplianceConfig;
+use moa_config::ComplianceConfig;
 use restate_sdk::prelude::*;
 use serde::Serialize;
 use serde_json::Value;

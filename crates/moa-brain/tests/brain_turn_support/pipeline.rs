@@ -2,14 +2,14 @@
 
 #[allow(dead_code)]
 fn build_no_memory_test_pipeline(
-    config: &moa_core::config::MoaConfig,
+    config: &moa_config::MoaConfig,
     session_store: std::sync::Arc<dyn moa_core::traits::SessionStore>,
 ) -> moa_brain::pipeline::ContextPipeline {
     build_no_memory_test_pipeline_with_tools(config, session_store, Vec::new())
 }
 
 fn build_no_memory_test_pipeline_with_tools(
-    config: &moa_core::config::MoaConfig,
+    config: &moa_config::MoaConfig,
     session_store: std::sync::Arc<dyn moa_core::traits::SessionStore>,
     tool_schemas: Vec<serde_json::Value>,
 ) -> moa_brain::pipeline::ContextPipeline {

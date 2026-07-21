@@ -13,7 +13,7 @@ use crate::core::rate_guard::RateGuard;
 use crate::core::schema::normalize_openai_strict_output;
 use crate::core::streaming::StreamDeadline;
 use eventsource_stream::Eventsource;
-use moa_core::config::ProviderStreamTimeoutConfig;
+use moa_config::ProviderStreamTimeoutConfig;
 use opentelemetry::KeyValue;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 

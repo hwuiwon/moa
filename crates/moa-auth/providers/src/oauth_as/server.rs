@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
-use moa_core::config::OAuthServerConfig;
+use moa_config::OAuthServerConfig;
 use moa_core::types::identifiers::TenantId;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;

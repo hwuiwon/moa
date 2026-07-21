@@ -19,7 +19,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use futures_util::future::try_join_all;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
-use moa_brain::{
+use moa_retrieval::{
     planning::{PlannedQuery, Strategy},
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest},
 };

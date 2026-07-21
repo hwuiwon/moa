@@ -6,6 +6,7 @@ use moa_brain::{
     GraphMemoryPipelineOptions,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
     lineage::emit_context_lineage, pipeline::history::HISTORY_SNAPSHOT_METADATA_KEY,
+    query_rewrite::QueryRewriteResult,
 };
 use moa_core::{
     error::MoaError,
@@ -22,7 +23,6 @@ use moa_core::{
     types::events_stream::EventRecord,
     types::hands::SandboxFile,
     types::identifiers::SessionId,
-    types::query_rewrite::QueryRewriteResult,
     types::snapshot::ContextSnapshot,
 };
 use moa_lineage_citation::ChunkRef;
@@ -34,7 +34,7 @@ use moa_security::inject_canary;
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
-use crate::OrchestratorCtx;
+use crate::ctx::OrchestratorCtx;
 use crate::services::llm_gateway::USER_TURN_METADATA_KEY;
 
 const TURN_EVENT_TAIL_LIMIT: usize = 32;

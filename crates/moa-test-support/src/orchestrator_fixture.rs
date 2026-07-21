@@ -18,8 +18,6 @@ use chrono::Utc;
 use moa_authz::{FgaClient, FgaConfig};
 use moa_authz_schema::{SCHEMA_V1_JSON, TupleOp};
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::session_store::{AppendEventRequest, GetEventsRequest, InitSessionVoRequest};
-use moa_core::wire::turn::{SessionSnapshot, StartTurnRequest, StartTurnResponse, TurnOutcome};
 use moa_core::{
     events::Event, types::agent::AgentContext, types::agent::AgentKnowledgePolicy,
     types::agent::AgentKnowledgeScopeMode, types::agent::AgentPolicySnapshot,
@@ -28,6 +26,8 @@ use moa_core::{
     types::identifiers::StoragePartitionId, types::identifiers::TenantId,
     types::identifiers::UserId, types::session::SessionMeta, types::session::SessionStatus,
 };
+use moa_wire::session_store::{AppendEventRequest, GetEventsRequest, InitSessionVoRequest};
+use moa_wire::turn::{SessionSnapshot, StartTurnRequest, StartTurnResponse, TurnOutcome};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::json;

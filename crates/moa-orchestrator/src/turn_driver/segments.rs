@@ -2,10 +2,8 @@
 
 use std::collections::HashMap;
 
-use moa_core::{
-    types::completion::CompletionRequest, types::query_rewrite::QueryRewriteResult,
-    types::segments::ActiveSegment,
-};
+use moa_brain::query_rewrite::QueryRewriteResult;
+use moa_core::{types::completion::CompletionRequest, types::segments::ActiveSegment};
 
 /// Completion metadata key for the active segment identifier.
 pub(crate) const ACTIVE_SEGMENT_ID_METADATA_KEY: &str = "_moa.segment_id";
@@ -41,9 +39,10 @@ pub(crate) fn query_rewrite_from_metadata(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use moa_brain::query_rewrite::QueryRewriteResult;
     use moa_core::{
         types::completion::CompletionRequest, types::identifiers::ModelId,
-        types::identifiers::SegmentId, types::query_rewrite::QueryRewriteResult,
+        types::identifiers::SegmentId,
     };
 
     use super::{

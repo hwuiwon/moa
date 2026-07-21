@@ -7,10 +7,6 @@
 
 use std::time::Instant;
 
-use moa_core::wire::session_store::{
-    AppendEventRequest, RecordSegmentSkillUseRequest, RecordSegmentToolUseRequest,
-};
-use moa_core::wire::turn::TurnOutcomeKind;
 use moa_core::{
     events::Event, types::completion::ToolCallContent, types::completion::ToolInvocation,
     types::events_stream::EventRecord, types::identifiers::SessionId,
@@ -19,6 +15,10 @@ use moa_core::{
 };
 use moa_observability::restate_observability::event_persist_span;
 use moa_observability::{record_session_error, record_turn_event_persist_duration};
+use moa_wire::session_store::{
+    AppendEventRequest, RecordSegmentSkillUseRequest, RecordSegmentToolUseRequest,
+};
+use moa_wire::turn::TurnOutcomeKind;
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 

@@ -10,7 +10,7 @@ pub use memory::MemoryRuntimeCacheStore;
 #[cfg(feature = "redis")]
 pub use redis::RedisRuntimeCacheStore;
 
-use moa_core::config::{RuntimeCacheBackend, RuntimeCacheConfig};
+use moa_config::{RuntimeCacheBackend, RuntimeCacheConfig};
 use moa_core::error::{MoaError, Result};
 
 /// Environment flag that explicitly allows the process-local memory backend for `auto`.
@@ -79,7 +79,7 @@ fn has_redis_url(config: &RuntimeCacheConfig) -> bool {
 mod tests {
     use std::time::Duration;
 
-    use moa_core::config::{RuntimeCacheBackend, RuntimeCacheConfig};
+    use moa_config::{RuntimeCacheBackend, RuntimeCacheConfig};
     use moa_core::error::Result;
     use moa_core::traits::RuntimeCacheStore;
     use tokio::time::advance;

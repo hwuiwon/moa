@@ -21,10 +21,6 @@ use moa_core::types::execution_planning::{
 };
 use moa_core::types::identifiers::ModelId;
 use moa_core::types::session::SessionStatus;
-use moa_core::wire::experiments::{
-    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
-    ExperimentRunStatusResponse, ExperimentTrialsRequest, ExperimentTrialsResponse,
-};
 use moa_execution::state::{ExecutionTaskId, ExecutionTaskStatus};
 use moa_execution::wire::{
     ExecutionPlanningContextSnapshot, ExecutionRunRequest, planning_context_hash,
@@ -34,6 +30,10 @@ use moa_experiments::model::{
     ExperimentVariant,
 };
 use moa_test_support::{FixtureCapabilityOptions, OrchestratorTestFixture, TestApiClient};
+use moa_wire::experiments::{
+    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
+    ExperimentRunStatusResponse, ExperimentTrialsRequest, ExperimentTrialsResponse,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::PgPool;

@@ -6,11 +6,11 @@ mod openai_wiremock;
 use std::sync::Arc;
 
 use moa_brain::pipeline::query_rewrite::QueryRewriter;
+use moa_brain::query_rewrite::{QueryRewriteResult, RewriteSource};
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, traits::ContextProcessor, traits::LLMProvider, types::channel::Channel,
-    types::context::ContextMessage, types::identifiers::TenantId,
-    types::query_rewrite::QueryRewriteResult, types::query_rewrite::RewriteSource,
-    types::session::SessionMeta,
+    traits::ContextProcessor, traits::LLMProvider, types::channel::Channel,
+    types::context::ContextMessage, types::identifiers::TenantId, types::session::SessionMeta,
 };
 use moa_providers::OpenAIProvider;
 use serde_json::json;

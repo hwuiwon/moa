@@ -43,8 +43,8 @@ impl Default for MpscSinkConfig {
     }
 }
 
-impl From<&moa_core::config::LineageConfig> for MpscSinkConfig {
-    fn from(config: &moa_core::config::LineageConfig) -> Self {
+impl From<&moa_config::LineageConfig> for MpscSinkConfig {
+    fn from(config: &moa_config::LineageConfig) -> Self {
         Self {
             channel_capacity: config.channel_capacity,
             batch_size: config.batch_size,
@@ -398,13 +398,13 @@ impl LineageHandle for NullSink {
 fn emit_lineage_span_attributes(span: &tracing::Span, evt_json: &serde_json::Value) {
     match serde_json::from_value::<LineageEvent>(evt_json.clone()) {
         Ok(LineageEvent::Retrieval(record)) => {
-            moa_lineage_otel::emit_retrieval_attrs(span, &record);
+            crate::otel::emit_retrieval_attrs(span, &record);
         }
         Ok(LineageEvent::Context(record)) => {
-            moa_lineage_otel::emit_context_attrs(span, &record);
+            crate::otel::emit_context_attrs(span, &record);
         }
         Ok(LineageEvent::Generation(record)) => {
-            moa_lineage_otel::emit_generation_attrs(span, &record);
+            crate::otel::emit_generation_attrs(span, &record);
         }
         Ok(_) => {}
         Err(error) => {

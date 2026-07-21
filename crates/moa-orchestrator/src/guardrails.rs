@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, events::Event, types::completion::CompletionRequest,
-    types::completion::CompletionResponse, types::completion::JsonResponseFormat,
-    types::context::ContextMessage, types::guardrails::AgentGuardrailStagePolicy,
-    types::guardrails::GuardrailDecision, types::guardrails::GuardrailDirection,
-    types::guardrails::GuardrailJudgeOutcome, types::guardrails::GuardrailMode,
-    types::identifiers::ModelId, types::provider::ModelTask,
+    events::Event, types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::JsonResponseFormat, types::context::ContextMessage,
+    types::guardrails::AgentGuardrailStagePolicy, types::guardrails::GuardrailDecision,
+    types::guardrails::GuardrailDirection, types::guardrails::GuardrailJudgeOutcome,
+    types::guardrails::GuardrailMode, types::identifiers::ModelId, types::provider::ModelTask,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -235,8 +235,9 @@ fn parse_judge_output(text: &str) -> (GuardrailJudgeOutcome, Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    use moa_config::MoaConfig;
     use moa_core::{
-        config::MoaConfig, types::completion::CompletionContent, types::completion::StopReason,
+        types::completion::CompletionContent, types::completion::StopReason,
         types::completion::TokenUsage, types::guardrails::AgentGuardrailStagePolicy,
         types::guardrails::GuardrailDecision, types::guardrails::GuardrailDirection,
         types::guardrails::GuardrailJudgeOutcome, types::guardrails::GuardrailMode,

@@ -203,8 +203,8 @@ impl OAuthStore {
         let mut conn = self.control_plane_conn().await?;
         for client in registry.clients() {
             let client_type = match client.client_type {
-                moa_core::config::OAuthClientType::Public => "public",
-                moa_core::config::OAuthClientType::Confidential => "confidential",
+                moa_config::OAuthClientType::Public => "public",
+                moa_config::OAuthClientType::Confidential => "confidential",
             };
             sqlx::query(
                 r#"

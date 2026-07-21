@@ -9,6 +9,7 @@ async-trait.workspace = true
 chrono.workspace = true
 globset.workspace = true
 moa-core = { workspace = true }
+moa-config = { workspace = true }
 moa-memory-pii = { workspace = true }
 serde_json.workspace = true
 shell-words.workspace = true

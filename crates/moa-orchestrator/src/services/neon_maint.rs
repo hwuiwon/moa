@@ -3,7 +3,8 @@
 //! If `MOA_NEON_API_KEY` is unset, the service is a no-op so local development
 //! and self-hosted deployments do not require Neon.
 
-use moa_core::{config::MoaConfig, traits::BranchManager};
+use moa_config::MoaConfig;
+use moa_core::traits::BranchManager;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};

@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use eventsource_stream::Eventsource;
 use futures_util::stream;
-use moa_core::config::ProviderStreamTimeoutConfig;
+use moa_config::ProviderStreamTimeoutConfig;
 use moa_core::{
     traits::LLMProvider, types::completion::CompletionContent,
     types::completion::CompletionRequest, types::completion::JsonResponseFormat,

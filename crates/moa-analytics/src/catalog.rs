@@ -1,6 +1,6 @@
 //! Static catalog for the generic analytics query surface.
 
-use moa_core::wire::analytics::{
+use moa_wire::analytics::{
     AnalyticsAggregation, AnalyticsCatalogResponse, AnalyticsDataset, AnalyticsField,
     AnalyticsFieldKind, AnalyticsFieldRole, AnalyticsFilterOperator,
 };

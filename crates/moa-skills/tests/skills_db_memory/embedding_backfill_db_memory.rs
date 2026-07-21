@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
 use moa_artifacts::validation::validate_for_status;
-use moa_core::config::EmbeddingBackfillConfig;
+use moa_config::EmbeddingBackfillConfig;
 use moa_core::error::Result;
 use moa_core::traits::EmbeddingProvider;
 use moa_core::types::action_policy::ActionRuleScope;

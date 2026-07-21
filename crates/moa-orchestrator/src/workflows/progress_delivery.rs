@@ -1,12 +1,12 @@
 //! Live channel delivery for transient turn progress updates.
 
-use moa_core::wire::turn::TurnPhase;
 use moa_core::{
     traits::ChannelAdapter, types::channel::Channel, types::channel::MessageContent,
     types::channel::MessageId, types::channel::OutboundMessage,
     types::channel::SessionChannelBinding, types::channel::SessionChannelBindingId,
     types::identifiers::SessionId, types::session::SessionStatus,
 };
+use moa_wire::turn::TurnPhase;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};

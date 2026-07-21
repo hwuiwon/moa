@@ -2,8 +2,9 @@
 
 use std::collections::HashSet;
 
+use moa_config::ToolOutputConfig;
 use moa_core::{
-    config::ToolOutputConfig, error::Result, events::Event, truncation::truncate_head_tail,
+    error::Result, events::Event, truncation::truncate_head_tail,
     types::channel::render_user_message_with_attachments, types::context::ContextMessage,
     types::context::ContextSourceRef, types::context::estimate_text_tokens,
     types::events_stream::EventRecord, types::identifiers::ToolCallId, types::tools::ToolContent,
@@ -913,7 +914,7 @@ mod tests {
         // sits in `recent`. The suppression set is computed over the full visible window, so the
         // recent-slice result still renders as system evidence — not a dangling provider
         // `tool_result` with no matching `tool_use` (which the provider rejects with a 400).
-        use moa_core::config::ToolOutputConfig;
+        use moa_config::ToolOutputConfig;
 
         use super::{answered_worker_inputs, child_report_tool_ids, compile_records};
 

@@ -6,8 +6,8 @@ use crate::handlers::authz_shim::{authorize_session_participant, require_identit
 use crate::objects::session::SessionClient;
 use crate::services::tool_executor::{ReleaseWorkerHandsRequest, ToolExecutorClient};
 use crate::workflows::worker_turn_execution::WorkerTurnExecutionClient;
-use moa_core::wire::turn::{RunWorkerTurnRequest, TurnOutcomeKind};
 use moa_security::{canary_system_message, new_canary_token};
+use moa_wire::turn::{RunWorkerTurnRequest, TurnOutcomeKind};
 
 impl Worker for WorkerImpl {
     #[tracing::instrument(skip(self, ctx, msg))]
@@ -438,7 +438,7 @@ impl Worker for WorkerImpl {
     async fn record_turn_outcome(
         &self,
         mut ctx: ObjectContext<'_>,
-        outcome: Json<moa_core::wire::turn::TurnOutcome>,
+        outcome: Json<moa_wire::turn::TurnOutcome>,
     ) -> Result<(), HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "record_turn_outcome");

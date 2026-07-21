@@ -1,6 +1,5 @@
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::types::memory::RlsContext;
-use moa_core::wire::experiments::ExperimentCancelRequest;
 use moa_core::{
     error::Result, types::action_policy::ActionRuleScope, types::contact::ContactId,
     types::identifiers::ModelId, types::identifiers::SessionId,
@@ -22,6 +21,7 @@ use moa_experiments::{
     store::ExperimentStore,
 };
 use moa_scoring::ScoreSummaryRow;
+use moa_wire::experiments::ExperimentCancelRequest;
 use serde_json::json;
 use tokio::sync::Mutex;
 use uuid::Uuid;

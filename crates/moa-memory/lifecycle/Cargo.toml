@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 chrono.workspace = true
 moa-core = { workspace = true }
+moa-config = { workspace = true }
 moa-crypto = { workspace = true }
 moa-memory-graph = { workspace = true }
 moa-memory-pii = { workspace = true }

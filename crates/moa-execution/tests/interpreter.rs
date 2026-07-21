@@ -7,12 +7,10 @@ use moa_artifacts::execution_plan::{
     ExecutionPlanDefinition, ExecutionReference, ExecutionRequirement, ExecutionTaskOutcome,
     ExecutionTaskResult, ExecutionUsage, MapTask, RetryPolicy,
 };
-use moa_core::{
-    config::ExecutionConfig,
-    types::{
-        action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
-        tools::IdempotencyClass,
-    },
+use moa_config::ExecutionConfig;
+use moa_core::types::{
+    action_policy::{ActionClass, ActionPolicyEffect, RiskLevel},
+    tools::IdempotencyClass,
 };
 use moa_execution::{
     budget::BudgetLedger,

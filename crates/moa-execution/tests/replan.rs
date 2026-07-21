@@ -5,7 +5,7 @@ use moa_artifacts::execution_plan::{
     CapabilityReference, ExecutionBudgetLimit, ExecutionFailureClass, ExecutionNode,
     ExecutionOperation, PlanAmendment, PlanAmendmentOperation, RetryPolicy,
 };
-use moa_core::config::ExecutionConfig;
+use moa_config::ExecutionConfig;
 use moa_execution::{
     capability::{
         ExecutionEstimate, ExecutionHash, amendment_hash, amendment_operations_fingerprint,

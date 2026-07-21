@@ -9,12 +9,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::Utc;
+use moa_config::MoaConfig;
 use moa_core::traits::{EmbeddingProvider, LLMProvider};
 use moa_core::types::provider::ProviderId;
 use moa_core::{
-    config::MoaConfig, error::MoaError, types::completion::CompletionRequest,
-    types::completion::CompletionResponse, types::context::ContextMessage,
-    types::context::estimate_text_tokens, types::identifiers::ModelId,
+    error::MoaError, types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::context::ContextMessage, types::context::estimate_text_tokens,
+    types::identifiers::ModelId,
 };
 use moa_crypto::LocalKmsProvider;
 use moa_eval::external_memory::answer::{

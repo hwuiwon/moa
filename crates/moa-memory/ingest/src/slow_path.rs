@@ -15,8 +15,9 @@ use crate::{
     should_ingest_degraded,
 };
 use futures_util::{StreamExt, TryStreamExt, stream};
+use moa_config::MoaConfig;
+use moa_core::traits::EmbeddingProvider;
 use moa_core::types::{memory::RlsContext, security::SensitivityClass};
-use moa_core::{config::MoaConfig, traits::EmbeddingProvider};
 use moa_crypto::KeyManagementProvider;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
@@ -1550,11 +1551,11 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use chrono::Utc;
+    use moa_config::MoaConfig;
     use moa_core::traits::EmbeddingProvider;
     use moa_core::types::security::SensitivityClass;
     use moa_core::{
-        config::MoaConfig, types::contact::ContactId, types::identifiers::SessionId,
-        types::identifiers::TenantId,
+        types::contact::ContactId, types::identifiers::SessionId, types::identifiers::TenantId,
     };
     use moa_crypto::LocalKmsProvider;
     use moa_memory_graph::EdgeLabel;

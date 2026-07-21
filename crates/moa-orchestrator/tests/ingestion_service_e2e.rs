@@ -4,8 +4,8 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig,
     types::contact::ContactId,
     types::identifiers::SessionId,
     types::identifiers::TenantId,

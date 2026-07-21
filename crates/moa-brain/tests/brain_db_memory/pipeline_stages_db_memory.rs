@@ -15,24 +15,25 @@ use moa_brain::pipeline::memory::GraphMemoryRetriever;
 use moa_brain::pipeline::query_rewrite::QueryRewriter;
 use moa_brain::pipeline::runtime_context::{Clock, RuntimeContextProcessor};
 use moa_brain::pipeline::tools::ToolDefinitionProcessor;
+use moa_brain::query_rewrite::{QueryRewriteResult, RewriteReason, RewriteSource};
 use moa_brain::{
     GraphMemoryPipelineOptions,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
 };
+use moa_config::MoaConfig;
+use moa_config::QueryRewriteConfig;
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
-    config::MoaConfig, config::QueryRewriteConfig, error::Result, traits::ContextProcessor,
-    traits::Identity, traits::IdentityType, traits::LLMProvider, traits::NullLineageHandle,
-    types::completion::CompletionContent, types::completion::CompletionRequest,
-    types::completion::CompletionResponse, types::completion::CompletionStream,
-    types::completion::StopReason, types::completion::TokenUsage, types::contact::ContactId,
-    types::context::ContextMessage, types::context::MessageRole,
-    types::context::TURN_ID_METADATA_KEY, types::context::WorkingContext,
-    types::identifiers::ModelId, types::identifiers::StoragePartitionId,
-    types::identifiers::TenantId, types::model::ModelCapabilities,
-    types::observability::stable_prefix_fingerprint, types::query_rewrite::QueryRewriteResult,
-    types::query_rewrite::RewriteReason, types::query_rewrite::RewriteSource,
+    error::Result, traits::ContextProcessor, traits::Identity, traits::IdentityType,
+    traits::LLMProvider, traits::NullLineageHandle, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::CompletionStream, types::completion::StopReason,
+    types::completion::TokenUsage, types::contact::ContactId, types::context::ContextMessage,
+    types::context::MessageRole, types::context::TURN_ID_METADATA_KEY,
+    types::context::WorkingContext, types::identifiers::ModelId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::model::ModelCapabilities, types::observability::stable_prefix_fingerprint,
 };
 use moa_crypto::LocalKmsProvider;
 use moa_db::ScopedConn;
@@ -780,7 +781,7 @@ fn invalidated_uids_in_content(content: &str, hits: &[MemoryHit]) -> Vec<String>
 /// a mock or absent embedder, where per-hit evidence is lexical-only and cannot
 /// reach a cosine-scaled threshold, so leaving abstention on would clear every
 /// hit regardless of admission. Abstention is pinned directly in the
-/// `moa_brain::retrieval::hybrid` unit tests; disabling it here keeps these
+/// `moa_retrieval::retrieval::hybrid` unit tests; disabling it here keeps these
 /// tests focused on admission, scope boundaries, and lineage.
 fn abstention_disabled_config() -> MoaConfig {
     let mut config = MoaConfig::default();

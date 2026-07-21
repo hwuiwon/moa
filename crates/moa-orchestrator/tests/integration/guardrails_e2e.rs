@@ -5,7 +5,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use moa_core::{
     events::Event, types::agent::AgentContext, types::agent::AgentKnowledgePolicy,
     types::agent::AgentKnowledgeScopeMode, types::agent::AgentPolicySnapshot,
@@ -17,6 +16,7 @@ use moa_core::{
     types::session::SessionStatus,
 };
 use moa_test_support::{OrchestratorTestFixture, TestApiClient};
+use moa_wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use serde_json::json;
 use uuid::Uuid;
 

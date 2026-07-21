@@ -4,7 +4,7 @@ use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, Uri};
 use base64::{Engine as _, engine::general_purpose};
 use moa_core::types::identifiers::TenantId;
-use moa_core::wire::knowledge::{
+use moa_wire::knowledge::{
     KnowledgeConnectionListRequest, KnowledgeCreateLinkTokenRequest,
     KnowledgeDisconnectConnectionRequest, KnowledgeExchangeTokenRequest,
     KnowledgeIntegrationListRequest, KnowledgeObjectInspectRequest, KnowledgeObjectListRequest,
@@ -147,7 +147,7 @@ mod tests {
     use axum::body::Bytes;
     use axum::http::{HeaderMap, Method, Uri, header};
     use base64::{Engine as _, engine::general_purpose};
-    use moa_core::wire::knowledge::KnowledgeProviderWebhookRequest;
+    use moa_wire::knowledge::KnowledgeProviderWebhookRequest;
 
     use crate::routes::test_support::{TEST_TENANT_ID, test_tenant_json, translate};
     use crate::routes::{KNOWLEDGE_WEBHOOK_BODY_LIMIT_BYTES, RouteTranslation};

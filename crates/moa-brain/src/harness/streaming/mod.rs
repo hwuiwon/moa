@@ -9,7 +9,7 @@ use moa_core::{
     types::completion::StopReason, types::context::WorkingContext,
     types::events_stream::EventRange, types::observability::TraceContext,
     types::observability::genai_operation_name, types::observability::genai_provider_name,
-    types::provider::ModelTask, types::runtime_events::RuntimeEvent, types::session::SessionMeta,
+    types::provider::ModelTask, types::session::SessionMeta,
 };
 use moa_hands::ToolRouter;
 use moa_lineage_core::TurnId;
@@ -20,6 +20,7 @@ use tracing::Instrument;
 
 use self::signals::{drain_signal_queue, handle_stream_signal};
 use crate::lineage::{emit_context_lineage, emit_generation_lineage};
+use crate::runtime_events::RuntimeEvent;
 use crate::turn::{StreamSignalDisposition, stream_completion_response};
 
 use super::budget::enforce_tenant_budget;
@@ -438,7 +439,7 @@ pub(super) async fn run_streamed_turn(
 /// Fire-and-forgets a negative-results incident write when a turn concludes on a
 /// terminal tool failure.
 ///
-/// Mirrors [`crate::retrieval::bump_last_accessed`]'s background pattern: the
+/// Mirrors [`moa_retrieval::retrieval::bump_last_accessed`]'s background pattern: the
 /// write runs off the turn's critical path and its result is logged at debug, so
 /// a memory-storage hiccup never fails the turn. `record_incident` itself no-ops
 /// when memory learning is disabled or the failure was already recorded.

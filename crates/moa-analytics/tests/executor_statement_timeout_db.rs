@@ -3,14 +3,14 @@
 
 use moa_analytics::AnalyticsService;
 use moa_core::types::identifiers::{SessionId, StoragePartitionId, TenantId, UserId};
-use moa_core::wire::analytics::{
-    AnalyticsAggregation, AnalyticsCell, AnalyticsDimension, AnalyticsFilter,
-    AnalyticsFilterOperator, AnalyticsMeasure, AnalyticsQueryRequest,
-};
 use moa_lineage_core::{
     Citation, CitationLineage, LineageEvent, RecordKind, TurnId, VerifierResult,
 };
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
+use moa_wire::analytics::{
+    AnalyticsAggregation, AnalyticsCell, AnalyticsDimension, AnalyticsFilter,
+    AnalyticsFilterOperator, AnalyticsMeasure, AnalyticsQueryRequest,
+};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -42,7 +42,7 @@ async fn analytics_query_applies_statement_timeout_and_runs_db() {
         }],
         measures: vec![AnalyticsMeasure {
             field: None,
-            aggregation: moa_core::wire::analytics::AnalyticsAggregation::Count,
+            aggregation: moa_wire::analytics::AnalyticsAggregation::Count,
             alias: None,
         }],
         filters: vec![AnalyticsFilter {

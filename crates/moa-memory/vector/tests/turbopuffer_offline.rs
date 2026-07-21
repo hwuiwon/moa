@@ -1,6 +1,7 @@
 //! Wiremock offline counterpart for Turbopuffer vector-store live coverage.
 
-use moa_core::{config::TurbopufferVectorType, types::security::SensitivityClass};
+use moa_config::TurbopufferVectorType;
+use moa_core::types::security::SensitivityClass;
 use moa_memory_vector::{
     Error, TurbopufferStore, TurbopufferTextQuery, VECTOR_DIMENSION, VectorItem, VectorQuery,
     VectorStore,

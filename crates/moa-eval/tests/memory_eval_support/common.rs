@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
-use moa_brain::retrieval::{LegSources, RetrievalHit, SourceTier};
+use moa_retrieval::retrieval::{LegSources, RetrievalHit, SourceTier};
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
     types::identifiers::SessionId, types::identifiers::StoragePartitionId,

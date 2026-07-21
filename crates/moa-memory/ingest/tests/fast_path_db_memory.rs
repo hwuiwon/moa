@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::config::MoaConfig;
+use moa_config::MoaConfig;
 use moa_core::types::agent::{AgentContext, AgentKnowledgePolicy, AgentPolicySnapshot};
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;

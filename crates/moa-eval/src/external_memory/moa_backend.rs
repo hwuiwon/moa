@@ -112,7 +112,7 @@ impl MoaMemoryBackend {
             )));
         }
         let retriever = GraphMemoryRetriever::new_with_config(
-            moa_core::config::MoaConfig::default(),
+            moa_config::MoaConfig::default(),
             pool.clone(),
             kms.clone(),
             Some(embedder.clone()),

@@ -3,11 +3,11 @@
 use std::collections::HashSet;
 
 use moa_core::{
-    error::MoaError, error::Result, types::context::WorkingContext,
-    types::experience::TaskFacetSet, types::query_rewrite::QueryRewriteResult,
-    types::query_rewrite::RewriteReason, types::query_rewrite::RewriteSource,
+    error::MoaError, error::Result, types::context::WorkingContext, types::experience::TaskFacetSet,
 };
 use serde::Deserialize;
+
+use crate::query_rewrite::{QueryRewriteResult, RewriteReason, RewriteSource};
 
 use super::METADATA_KEY;
 use super::input::RewriteInput;

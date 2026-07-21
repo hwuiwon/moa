@@ -1,9 +1,10 @@
 //! Tool output budgeting, truncation, and claim-check artifactization.
 
+use moa_config::ToolBudgetConfig;
+use moa_config::ToolOutputConfig;
 use moa_core::{
-    config::ToolBudgetConfig, config::ToolOutputConfig, truncation::truncate_head_tail,
-    types::session::SessionMeta, types::tools::ToolContent, types::tools::ToolDefinition,
-    types::tools::ToolOutput, types::tools::ToolOutputArtifact,
+    truncation::truncate_head_tail, types::session::SessionMeta, types::tools::ToolContent,
+    types::tools::ToolDefinition, types::tools::ToolOutput, types::tools::ToolOutputArtifact,
 };
 use moa_observability::record_tool_output_truncated_metric;
 use serde_json::json;

@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moa_core::config::MemoryExtractionConfig;
+use moa_config::MemoryExtractionConfig;
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, traits::LLMProvider, types::completion::CompletionRequest,
+    traits::LLMProvider, types::completion::CompletionRequest,
     types::completion::CompletionResponse, types::context::ContextMessage,
     types::identifiers::ModelId,
 };

@@ -1,6 +1,6 @@
 //! Backend selection for durable lineage rows.
 
-use moa_core::config::ClickHouseConfig;
+use moa_config::ClickHouseConfig;
 
 use crate::clickhouse::ClickHouseStore;
 use crate::{Result, ensure_schema};

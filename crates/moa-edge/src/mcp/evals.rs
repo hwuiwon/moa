@@ -1,6 +1,6 @@
 //! Internal tenant-operator eval MCP tools.
 
-use moa_core::wire::eval::{
+use moa_wire::eval::{
     EvalCompareRequest, EvalCompareResponse, EvalDatasetListRequest, EvalDatasetListResponse,
     EvalDatasetRegisterRequest, EvalDatasetRegisterResponse, EvalPlanRequest, EvalPlanResponse,
     EvalRunRequest, EvalRunResponse, EvalRunStatusRequest, EvalRunStatusResponse,

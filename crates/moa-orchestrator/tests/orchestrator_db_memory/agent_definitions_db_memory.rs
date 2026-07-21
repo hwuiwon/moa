@@ -5,14 +5,14 @@ use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifactRevision};
 use moa_artifacts::validation::validate_for_status;
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::agents::{
-    AgentDefinitionListRequest, AgentDeployRequest, AgentDeploymentListRequest,
-    AgentInstallRequest, AgentInstallationListRequest,
-};
 use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::TenantId};
 use moa_orchestrator::services::agent_definitions::{
     deploy_inner, install_inner, list_definitions_inner, list_deployments_inner,
     list_installations_inner,
+};
+use moa_wire::agents::{
+    AgentDefinitionListRequest, AgentDeployRequest, AgentDeploymentListRequest,
+    AgentInstallRequest, AgentInstallationListRequest,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;

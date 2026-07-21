@@ -7,10 +7,11 @@ use moa_brain::{
     BrainTurnRequest, GraphMemoryPipelineOptions,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, error::Result, events::Event, traits::Identity, traits::IdentityType,
-    traits::LLMProvider, traits::SessionStore, types::events_stream::EventRange,
-    types::identifiers::TenantId, types::session::SessionMeta,
+    error::Result, events::Event, traits::Identity, traits::IdentityType, traits::LLMProvider,
+    traits::SessionStore, types::events_stream::EventRange, types::identifiers::TenantId,
+    types::session::SessionMeta,
 };
 use moa_crypto::LocalKmsProvider;
 use moa_hands::ToolRouter;

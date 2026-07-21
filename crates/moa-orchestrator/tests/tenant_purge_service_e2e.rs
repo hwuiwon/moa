@@ -4,10 +4,10 @@ use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use moa_core::types::identifiers::TenantId;
-use moa_core::wire::tenants::{
+use moa_test_support::postgres::test_database_url;
+use moa_wire::tenants::{
     TenantPurgeRequest, TenantPurgeStatus, TenantPurgeStatusRequest, TenantPurgeStatusResponse,
 };
-use moa_test_support::postgres::test_database_url;
 use tempfile::TempDir;
 use uuid::Uuid;
 

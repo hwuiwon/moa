@@ -5,10 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use moa_core::{
-    config::MessagingConfig, error::MoaError, error::Result, traits::CredentialVault,
-    types::model::Credential,
-};
+use moa_config::MessagingConfig;
+use moa_core::{error::MoaError, error::Result, traits::CredentialVault, types::model::Credential};
 use reqwest::{StatusCode, header::HeaderMap};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};

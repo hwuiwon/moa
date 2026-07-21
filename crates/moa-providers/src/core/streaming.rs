@@ -4,10 +4,8 @@ use std::{pin::Pin, time::Duration};
 
 use eventsource_stream::Event as SseEvent;
 use futures_util::{Stream, StreamExt};
-use moa_core::{
-    config::ProviderStreamTimeoutConfig, error::MoaError, error::Result,
-    types::completion::CompletionResponse,
-};
+use moa_config::ProviderStreamTimeoutConfig;
+use moa_core::{error::MoaError, error::Result, types::completion::CompletionResponse};
 use reqwest::{RequestBuilder, Response};
 use serde::de::DeserializeOwned;
 

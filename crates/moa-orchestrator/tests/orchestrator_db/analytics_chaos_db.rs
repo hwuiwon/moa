@@ -13,7 +13,7 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use clickhouse::Client;
 use clickhouse::test::{Mock, handlers, status};
-use moa_orchestrator::analytics_export::{AnalyticsExporter, EventRawRow};
+use moa_analytics_export::{AnalyticsExporter, EventRawRow};
 use serde_json::json;
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;

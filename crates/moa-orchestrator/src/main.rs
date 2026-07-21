@@ -13,6 +13,7 @@ use axum::routing::get;
 use axum::{Router, serve};
 use clap::{Parser, Subcommand};
 use moa_observability::{TelemetryConfig, init_observability, metrics_endpoint_url};
+use moa_orchestrator::services::scim::{self, ScimState};
 use moa_orchestrator::{
     config::{
         ProvidersOverride, load_moa_config_from_env, restate_admin_url, restate_ingress_url,
@@ -31,7 +32,6 @@ use moa_orchestrator::{
         },
         kms::KmsRuntime,
     },
-    services::scim::{self, ScimState},
 };
 use reqwest::Client;
 use restate_sdk::prelude::*;
@@ -258,7 +258,7 @@ async fn async_main() -> anyhow::Result<()> {
         restate_ingress_url.clone(),
         shutdown.clone(),
     );
-    let mut analytics_export = moa_orchestrator::analytics_export::spawn_analytics_export(
+    let mut analytics_export = moa_analytics_export::spawn_analytics_export(
         runtime_deps.background_pool.clone(),
         moa_config.clickhouse.as_ref(),
         shutdown.clone(),

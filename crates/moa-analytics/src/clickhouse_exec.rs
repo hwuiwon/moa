@@ -9,8 +9,8 @@
 
 use chrono::DateTime;
 use clickhouse::Client;
-use moa_core::config::ClickHouseConfig;
-use moa_core::wire::analytics::{AnalyticsCell, AnalyticsColumn, AnalyticsFieldKind};
+use moa_config::ClickHouseConfig;
+use moa_wire::analytics::{AnalyticsCell, AnalyticsColumn, AnalyticsFieldKind};
 
 use crate::compiler::{AnalyticsBindValue, CompiledAnalyticsQuery};
 use crate::error::{Error, Result};
@@ -40,7 +40,7 @@ pub struct AnalyticsClickHouseClient {
 }
 
 /// Default ClickHouse per-query budgets applied when the caller does not
-/// override them from config. Mirror [`moa_core::config::AnalyticsConfig`].
+/// override them from config. Mirror [`moa_config::AnalyticsConfig`].
 const DEFAULT_MAX_EXECUTION_TIME_SECS: u64 = 10;
 const DEFAULT_MAX_ROWS_TO_READ: u64 = 1_000_000_000;
 const DEFAULT_MAX_BYTES_TO_READ: u64 = 10_000_000_000;
@@ -275,7 +275,7 @@ fn type_error(expected: &str, value: &serde_json::Value) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_core::wire::analytics::AnalyticsFieldRole;
+    use moa_wire::analytics::AnalyticsFieldRole;
 
     fn column(kind: AnalyticsFieldKind) -> AnalyticsColumn {
         AnalyticsColumn {

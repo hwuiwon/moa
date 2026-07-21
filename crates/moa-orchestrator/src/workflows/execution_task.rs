@@ -6,8 +6,8 @@ use moa_artifacts::execution_plan::{
     CapabilityReference, ExecutionFailureClass, ExecutionNode, ExecutionOperation,
     ExecutionTaskOutcome, ExecutionTaskResult, ExecutionUsage,
 };
+use moa_config::SessionLimitsConfig;
 use moa_core::{
-    config::SessionLimitsConfig,
     traits::{ChannelAdapter, SessionStore as _},
     types::{
         action_policy::{ActionRuleScope, CapabilityProvenance},
@@ -46,8 +46,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use crate::ctx::RequestHeaders;
+
 use crate::{
-    ctx::RequestHeaders,
     services::{
         llm_gateway::LLMGatewayClient,
         tool_executor::{ReleaseExecutionTaskHandsRequest, ToolExecutorClient},

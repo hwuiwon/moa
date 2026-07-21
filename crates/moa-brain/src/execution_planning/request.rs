@@ -4,14 +4,12 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use moa_artifacts::execution_plan::{GeneratedAmendmentCandidate, GeneratedExecutionCandidate};
-use moa_core::{
-    config::ExecutionConfig,
-    types::{
-        completion::{CompletionRequest, NativeWebSearchPolicy},
-        context::ContextMessage,
-        execution_planning::{DurableUpgradeSignal, ExecutionTemplateInvocation},
-        identifiers::ModelId,
-    },
+use moa_config::ExecutionConfig;
+use moa_core::types::{
+    completion::{CompletionRequest, NativeWebSearchPolicy},
+    context::ContextMessage,
+    execution_planning::{DurableUpgradeSignal, ExecutionTemplateInvocation},
+    identifiers::ModelId,
 };
 use moa_execution::{
     compiler::CanonicalExecutionPlan,

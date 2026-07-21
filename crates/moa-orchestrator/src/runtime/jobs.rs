@@ -4,15 +4,17 @@ use std::{future::Future, sync::Arc, time::Duration};
 
 use anyhow::{Context as AnyhowContext, Result, bail};
 use moa_authz::{AwakeableResolver, FgaClient};
-use moa_core::{config::AsyncAuthzKind, config::MoaConfig};
+use moa_config::AsyncAuthzKind;
+use moa_config::MoaConfig;
 use reqwest::Client;
 use sqlx::PgPool;
 use tokio::task::JoinHandle;
 
+use crate::services::authz_challenges_reaper::{AuthzChallengeReaper, AuthzChallengeReaperHandle};
+
 use crate::{
     runtime::endpoint::{RegisteredDeployment, services_registered},
     services::action_reviews_reaper::{ActionReviewReaper, ActionReviewReaperHandle},
-    services::authz_challenges_reaper::{AuthzChallengeReaper, AuthzChallengeReaperHandle},
 };
 
 const DEFAULT_RESTATE_INGRESS_PORT: u16 = 8080;

@@ -19,9 +19,9 @@
 //! defaults to "no guarantees", because a public cloud endpoint does not
 //! guarantee zero retention or private residency unless the deployment operator
 //! asserts it through provider credential config
-//! ([`ProviderCredentialConfig`](moa_core::config::ProviderCredentialConfig)).
+//! ([`ProviderCredentialConfig`](moa_config::ProviderCredentialConfig)).
 
-use moa_core::config::{DeploymentProviderPolicyConfig, MoaConfig, ProviderCredentialConfig};
+use moa_config::{DeploymentProviderPolicyConfig, MoaConfig, ProviderCredentialConfig};
 use moa_core::error::MoaError;
 use moa_core::types::provider::ProviderId;
 
@@ -264,12 +264,12 @@ mod tests {
         // Pins: the shared provider id is used directly by deployment policy and
         // every provider descriptor, with no second string vocabulary to drift.
         for descriptor in crate::routing::PROVIDER_DESCRIPTORS {
-            let providers = moa_core::config::ProvidersConfig {
+            let providers = moa_config::ProvidersConfig {
                 routing_policy: DeploymentProviderPolicyConfig {
                     allowed_providers: vec![descriptor.id],
                     ..DeploymentProviderPolicyConfig::default()
                 },
-                ..moa_core::config::ProvidersConfig::default()
+                ..moa_config::ProvidersConfig::default()
             };
             providers.validate().unwrap_or_else(|error| {
                 panic!(

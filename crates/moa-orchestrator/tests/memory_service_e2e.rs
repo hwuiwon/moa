@@ -13,17 +13,17 @@ use moa_core::{
     types::identifiers::{SessionId, TenantId},
     types::memory::{InformationBarrierClearances, InformationBarrierId, RlsContext},
     types::session::SessionMeta,
-    wire::memory::{
-        MemoryIngestDocument, MemoryIngestRequest, MemoryIngestResponse,
-        MemoryRetrieveDebugRequest, MemoryRetrieveDebugResponse, MemorySearchRequest,
-        MemorySearchResponse, MemoryShowRequest, MemoryShowResponse,
-    },
 };
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore,
 };
 use moa_session::testing;
 use moa_test_support::OrchestratorTestFixture;
+use moa_wire::memory::{
+    MemoryIngestDocument, MemoryIngestRequest, MemoryIngestResponse, MemoryRetrieveDebugRequest,
+    MemoryRetrieveDebugResponse, MemorySearchRequest, MemorySearchResponse, MemoryShowRequest,
+    MemoryShowResponse,
+};
 use reqwest::RequestBuilder;
 use serde_json::{Value, json};
 use uuid::Uuid;

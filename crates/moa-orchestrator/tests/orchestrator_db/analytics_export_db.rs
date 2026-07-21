@@ -14,7 +14,7 @@
 use chrono::{DateTime, Duration, Utc};
 use clickhouse::Client;
 use clickhouse::test::{Mock, handlers};
-use moa_orchestrator::analytics_export::{
+use moa_analytics_export::{
     AnalyticsExporter, DimExecutionRunRow, DimExecutionTaskRow, DimSessionRow, EventRawRow,
     ToolCallFactRow, TurnFactRow,
 };

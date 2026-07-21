@@ -7,14 +7,14 @@ use moa_core::{
     events::Event, types::context::WorkingContext, types::events_stream::EventRecord,
     types::experience::ExperienceRecord, types::experience::ExperienceResource,
     types::experience::TaskFacetSet, types::experience::TaskFingerprint,
-    types::identifiers::UserId, types::query_rewrite::QueryRewriteResult,
-    types::segment_assessment::SegmentAssessment, types::segments::TaskSegment,
-    types::session::SessionMeta,
+    types::identifiers::UserId, types::segment_assessment::SegmentAssessment,
+    types::segments::TaskSegment, types::session::SessionMeta,
 };
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::pipeline::memory::extract_search_keywords;
+use crate::query_rewrite::QueryRewriteResult;
 
 /// Current deterministic experience extraction policy.
 pub const EXPERIENCE_EXTRACTION_POLICY_VERSION: &str = "experience_v1";

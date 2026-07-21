@@ -5,21 +5,22 @@ use std::{path::Path, sync::Arc};
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
 use chrono::{DateTime, Utc};
+use moa_config::MoaConfig;
+use moa_config::SessionAttachmentStorageConfig;
 use moa_core::traits::{
     SessionAnalyticsStore, SessionChannelBindingUpdate, SessionChannelStore,
     SessionEventLookupStore, SessionLearningLogStore,
 };
-use moa_core::wire::analytics::LearningCandidateSummary;
+use moa_core::types::experience::LearningCandidateSummary;
 use moa_core::{
     analytics::CacheDailyMetric, analytics::SessionAnalyticsSummary, analytics::SessionTurnMetric,
-    analytics::TenantAnalyticsSummary, analytics::ToolCallSummary, config::MoaConfig,
-    config::SessionAttachmentStorageConfig, error::MoaError, error::Result, events::Event,
-    events::EventType, session_replay::record_session_event_replay, traits::BlobStore,
-    traits::ExperienceStore, traits::LearningCandidateStore, traits::SegmentStore,
-    traits::SessionStore, types::action_policy::ActionPolicyRule, types::channel::ChannelAccountId,
-    types::channel::ChannelRef, types::channel::SessionChannelBinding,
-    types::channel::SessionChannelBindingId, types::contact::ContactId,
-    types::contact::ContactPointId, types::events_stream::ClaimCheck,
+    analytics::TenantAnalyticsSummary, analytics::ToolCallSummary, error::MoaError, error::Result,
+    events::Event, events::EventType, session_replay::record_session_event_replay,
+    traits::BlobStore, traits::ExperienceStore, traits::LearningCandidateStore,
+    traits::SegmentStore, traits::SessionStore, types::action_policy::ActionPolicyRule,
+    types::channel::ChannelAccountId, types::channel::ChannelRef,
+    types::channel::SessionChannelBinding, types::channel::SessionChannelBindingId,
+    types::contact::ContactId, types::contact::ContactPointId, types::events_stream::ClaimCheck,
     types::events_stream::EventFilter, types::events_stream::EventRange,
     types::events_stream::EventRecord, types::experience::ExperienceAttribution,
     types::experience::ExperienceRecord, types::experience::LearningCandidate,

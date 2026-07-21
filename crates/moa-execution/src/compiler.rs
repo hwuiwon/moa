@@ -12,7 +12,7 @@ use moa_artifacts::{
     reference::ArtifactRef,
     validation::{validate_execution_goal_contract, validate_execution_plan_definition},
 };
-use moa_core::config::ExecutionConfig;
+use moa_config::ExecutionConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -1857,7 +1857,7 @@ mod tests {
         ExecutionNode, ExecutionOperation, ExecutionPlanDefinition, ExecutionRequirement,
         PlanAmendment, PlanAmendmentOperation, RetryPolicy,
     };
-    use moa_core::config::ExecutionConfig;
+    use moa_config::ExecutionConfig;
     use serde_json::json;
 
     use super::*;

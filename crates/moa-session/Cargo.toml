@@ -13,6 +13,7 @@ async-trait.workspace = true
 backon.workspace = true
 chrono.workspace = true
 moa-core = { workspace = true }
+moa-config = { workspace = true }
 moa-db = { workspace = true }
 moa-migrations = { workspace = true }
 moa-observability = { workspace = true }

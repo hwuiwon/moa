@@ -15,16 +15,16 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use moa_core::config::SessionLimitsConfig;
+use moa_config::SessionLimitsConfig;
 use moa_core::traits::Identity;
-use moa_core::wire::session_store::AppendEventRequest;
-use moa_core::wire::turn::{SessionProgress, SessionProgressRequest, TurnPhase, TurnProgress};
 use moa_core::{
     events::Event, types::completion::CompletionRequest, types::context::ContextMessage,
     types::identifiers::ModelId, types::identifiers::SessionId,
     types::worker::state::NarrationSegment, types::worker::state::NarrationSource,
     types::worker::state::WorkerProgressSummary, types::worker::state::WorkerState,
 };
+use moa_wire::session_store::AppendEventRequest;
+use moa_wire::turn::{SessionProgress, SessionProgressRequest, TurnPhase, TurnProgress};
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -482,7 +482,7 @@ fn escape_xml(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::wire::turn::SessionSnapshot;
+    use moa_wire::turn::SessionSnapshot;
 
     use super::*;
 

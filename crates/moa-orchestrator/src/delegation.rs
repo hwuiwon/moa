@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::{
     events::Event, types::contact::SessionActorRef, types::identifiers::SessionId,
     types::identifiers::UserId, types::session::SessionMeta, types::tools::ToolOutput,
@@ -21,6 +20,7 @@ use moa_core::{
     types::worker::state::WorkerState, types::worker::state::WorkerTerminalResult,
     types::worker::tool_schema::DelegationTool,
 };
+use moa_wire::session_store::AppendEventRequest;
 use restate_sdk::prelude::*;
 use serde::Serialize;
 use tracing::Instrument;

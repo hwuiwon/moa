@@ -4,15 +4,11 @@ use std::sync::Arc;
 
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
+use moa_config::MoaConfig;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::memory::RlsContext;
-use moa_core::wire::admin::{
-    CheckpointCleanupResponse, CheckpointCreateRequest, CheckpointCreateResponse,
-    CheckpointListResponse, CheckpointRollbackRequest, CheckpointRollbackResponse,
-    VectorPromoteRequest, VectorPromotionResponse, VectorPromotionUpdateRequest,
-};
 use moa_core::{
-    WORKSPACE_ID, config::MoaConfig, traits::BranchManager, types::identifiers::StoragePartitionId,
+    WORKSPACE_ID, traits::BranchManager, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId,
 };
 use moa_memory_vector::{
@@ -20,6 +16,11 @@ use moa_memory_vector::{
     VectorStoreFactory, finalize_promotion, rollback_promotion,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_wire::admin::{
+    CheckpointCleanupResponse, CheckpointCreateRequest, CheckpointCreateResponse,
+    CheckpointListResponse, CheckpointRollbackRequest, CheckpointRollbackResponse,
+    VectorPromoteRequest, VectorPromotionResponse, VectorPromotionUpdateRequest,
+};
 use restate_sdk::prelude::*;
 
 use crate::ctx::RequestHeaders;

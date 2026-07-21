@@ -6,19 +6,10 @@ use std::sync::Arc;
 use std::{future::Future, pin::Pin, result::Result as StdResult};
 
 use chrono::Utc;
+use moa_config::MoaConfig;
 use moa_core::types::action_policy::ActionRuleScope;
 use moa_core::types::memory::RlsContext;
-use moa_core::wire::eval::{
-    EvalCompareRequest, EvalCompareResponse, EvalCompareRow, EvalDatasetListRequest,
-    EvalDatasetListResponse, EvalDatasetRegisterRequest, EvalDatasetRegisterResponse,
-    EvalPlanRequest, EvalPlanResponse, EvalReplayRequest, EvalReplayResponse, EvalRunRequest,
-    EvalRunResponse, EvalRunStatus, EvalRunStatusRequest, EvalRunStatusResponse,
-    EvalScoreSummaryRow, EvalScoresRequest, EvalScoresResponse, EvalSuiteListRequest,
-    EvalSuiteListResponse, EvalSuiteSummary,
-};
-use moa_core::{
-    config::MoaConfig, types::identifiers::StoragePartitionId, types::identifiers::TenantId,
-};
+use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
 use moa_db::ScopedConn;
 use moa_eval::{EvalEngine, build_eval_plan};
 use moa_eval_core::{AgentConfig, EvalRun as CoreEvalRun, TestSuite};
@@ -34,6 +25,14 @@ use moa_scoring::{
     compare_score_runs_for_tenant, score_summaries_for_tenant,
 };
 use moa_scoring::{SCORE_RUN_SOURCE_EVAL_REPLAY, ensure_score_run_parent};
+use moa_wire::eval::{
+    EvalCompareRequest, EvalCompareResponse, EvalCompareRow, EvalDatasetListRequest,
+    EvalDatasetListResponse, EvalDatasetRegisterRequest, EvalDatasetRegisterResponse,
+    EvalPlanRequest, EvalPlanResponse, EvalReplayRequest, EvalReplayResponse, EvalRunRequest,
+    EvalRunResponse, EvalRunStatus, EvalRunStatusRequest, EvalRunStatusResponse,
+    EvalScoreSummaryRow, EvalScoresRequest, EvalScoresResponse, EvalSuiteListRequest,
+    EvalSuiteListResponse, EvalSuiteSummary,
+};
 use repository::ScopedDatasetItem;
 use repository::load_dataset_items_for_tenant;
 use repository::{list_datasets_for_tenant, register_dataset_for_tenant};
@@ -963,7 +962,7 @@ fn plan_eval_suite(
 
 /// Builds eval suite summaries from API-supplied suite documents.
 pub fn suite_summaries_from_documents(
-    documents: Vec<moa_core::wire::eval::EvalSuiteListDocument>,
+    documents: Vec<moa_wire::eval::EvalSuiteListDocument>,
 ) -> Result<Vec<EvalSuiteSummary>, EvalServiceError> {
     documents
         .into_iter()

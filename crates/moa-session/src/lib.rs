@@ -15,7 +15,8 @@ pub mod testing;
 
 use std::sync::Arc;
 
-use moa_core::{config::MoaConfig, error::Result};
+use moa_config::MoaConfig;
+use moa_core::error::Result;
 
 pub use blob::FileBlobStore;
 pub use neon::NeonBranchManager;

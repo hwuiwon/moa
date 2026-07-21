@@ -4,12 +4,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
-use moa_core::{
-    config::{MoaConfig, TurbopufferVectorType},
-    types::{
-        identifiers::{StoragePartitionId, TenantId},
-        security::SensitivityClass,
-    },
+use moa_config::{MoaConfig, TurbopufferVectorType};
+use moa_core::types::{
+    identifiers::{StoragePartitionId, TenantId},
+    security::SensitivityClass,
 };
 use reqwest::{Client, Method};
 use secrecy::{ExposeSecret, SecretString};

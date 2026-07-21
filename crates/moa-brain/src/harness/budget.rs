@@ -6,11 +6,11 @@ use chrono::{Duration, Utc};
 use moa_core::{
     error::MoaError, error::Result, events::Event, traits::SessionStore,
     types::events_stream::EventRecord, types::identifiers::SessionId, types::identifiers::TenantId,
-    types::runtime_events::RuntimeEvent,
 };
 use tokio::sync::broadcast;
 
 use super::context_build::append_event;
+use crate::runtime_events::RuntimeEvent;
 
 pub(super) async fn enforce_tenant_budget(
     session_store: &Arc<dyn SessionStore>,

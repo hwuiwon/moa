@@ -3,8 +3,8 @@
 use crate::*;
 use moa_authz::{FgaClient, FgaConfig};
 use moa_core::traits::Identity;
-use moa_core::wire::session_store::{AppendEventRequest, GetEventsRequest, InitSessionVoRequest};
-use moa_core::wire::turn::{SessionSnapshot, StartTurnRequest, TurnOutcome};
+use moa_wire::session_store::{AppendEventRequest, GetEventsRequest, InitSessionVoRequest};
+use moa_wire::turn::{SessionSnapshot, StartTurnRequest, TurnOutcome};
 use serde::Serialize;
 
 const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -208,27 +208,25 @@ fn classify_turn_outcome(
     outcome: TurnOutcome,
 ) -> std::result::Result<TurnObservation, TurnFailure> {
     match outcome.kind {
-        moa_core::wire::turn::TurnOutcomeKind::Completed => Ok(TurnObservation {
+        moa_wire::turn::TurnOutcomeKind::Completed => Ok(TurnObservation {
             kind: TurnObservationKind::CompletedAnswer,
             ttft: None,
             edge_observation_wait: None,
             auto_denied_approvals: 0,
         }),
-        moa_core::wire::turn::TurnOutcomeKind::Accepted { execution_run_uid } => {
-            Ok(TurnObservation {
-                kind: TurnObservationKind::ExecutionAdmission {
-                    run_uid: execution_run_uid,
-                },
-                ttft: None,
-                edge_observation_wait: None,
-                auto_denied_approvals: 0,
-            })
-        }
-        moa_core::wire::turn::TurnOutcomeKind::Cancelled => Err(TurnFailure {
+        moa_wire::turn::TurnOutcomeKind::Accepted { execution_run_uid } => Ok(TurnObservation {
+            kind: TurnObservationKind::ExecutionAdmission {
+                run_uid: execution_run_uid,
+            },
+            ttft: None,
+            edge_observation_wait: None,
+            auto_denied_approvals: 0,
+        }),
+        moa_wire::turn::TurnOutcomeKind::Cancelled => Err(TurnFailure {
             kind: TurnFailureKind::Cancelled,
             message: outcome.message,
         }),
-        moa_core::wire::turn::TurnOutcomeKind::Failed => Err(TurnFailure {
+        moa_wire::turn::TurnOutcomeKind::Failed => Err(TurnFailure {
             kind: TurnFailureKind::Failed,
             message: outcome.message,
         }),
@@ -504,7 +502,7 @@ impl RemoteSessionHandle<'_> {
         &self,
         request: StartTurnRequest,
         idempotency_key: Option<&str>,
-    ) -> std::result::Result<moa_core::wire::turn::StartTurnResponse, RemoteHttpError> {
+    ) -> std::result::Result<moa_wire::turn::StartTurnResponse, RemoteHttpError> {
         self.client
             .post_call_with_idempotency(
                 &format!("/Session/{}/start_turn", self.session_id),
@@ -592,7 +590,7 @@ pub(crate) fn live_fga_client() -> Result<FgaClient> {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::wire::turn::TurnOutcomeKind;
+    use moa_wire::turn::TurnOutcomeKind;
 
     use super::*;
 

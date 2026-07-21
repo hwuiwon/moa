@@ -6,7 +6,8 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use moa_core::{config::MoaConfig, error::MoaError, traits::EmbeddingProvider};
+use moa_config::MoaConfig;
+use moa_core::{error::MoaError, traits::EmbeddingProvider};
 use moa_crypto::KeyManagementProvider;
 use moa_memory_graph::GraphStore;
 use moa_memory_pii::{HeuristicPiiClassifier, OpenAiPrivacyFilterClassifier, PiiClassifier};
@@ -625,7 +626,8 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::{Arc, OnceLock};
 
-    use moa_core::{config::MoaConfig, error::MoaError};
+    use moa_config::MoaConfig;
+    use moa_core::error::MoaError;
     use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
     use sqlx::postgres::PgPoolOptions;
     use tracing::field::{Field, Visit};

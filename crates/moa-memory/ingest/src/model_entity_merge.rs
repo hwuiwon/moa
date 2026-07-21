@@ -1,7 +1,7 @@
 //! Model-backed entity merge verification and recorded replay support.
 
 use async_trait::async_trait;
-use moa_core::config::MoaConfig;
+use moa_config::MoaConfig;
 use moa_memory_graph::NodeIndexRow;
 use moa_memory_types::normalize_entity_name;
 use serde::{Deserialize, Serialize};

@@ -15,8 +15,9 @@
 
 use std::sync::Arc;
 
+use moa_config::MoaConfig;
 use moa_core::traits::EmbeddingProvider;
-use moa_core::{config::MoaConfig, error::MoaError, error::Result};
+use moa_core::{error::MoaError, error::Result};
 
 use super::cache::CachedEmbeddingProvider;
 use super::cohere::{COHERE_DEFAULT_MODEL, cohere_input_type_for_role};
@@ -278,7 +279,7 @@ fn build_gemini_embedder(
 }
 
 fn read_api_key(env_name: &'static str, value: &str) -> Result<String> {
-    moa_core::config::required_config_secret(env_name, value)
+    moa_config::required_config_secret(env_name, value)
 }
 
 /// Builds the configured embedding provider for semantic memory search.
@@ -340,7 +341,7 @@ fn resolve_embedding_model(
 
 #[cfg(test)]
 mod tests {
-    use moa_core::config::MoaConfig;
+    use moa_config::MoaConfig;
 
     use super::{
         COHERE_DEFAULT_MODEL, EmbeddingProviderKind, GEMINI_V2_MODEL, ZEROENTROPY_DEFAULT_MODEL,

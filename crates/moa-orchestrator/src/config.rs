@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context as AnyhowContext, Result, bail};
-use moa_core::config::MoaConfig;
+use moa_config::MoaConfig;
 
 /// Loads the orchestrator's shared MOA runtime configuration from environment variables.
 pub fn load_moa_config_from_env() -> Result<MoaConfig> {
@@ -132,7 +132,7 @@ fn is_prod_value(value: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::config::MoaConfig;
+    use moa_config::MoaConfig;
 
     use super::{
         ProvidersOverride, apply_orchestrator_defaults, env_flag_from_reader, restate_admin_url,

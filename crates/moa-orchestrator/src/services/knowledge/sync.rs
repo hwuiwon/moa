@@ -1,13 +1,6 @@
 //! Sync-run command and status logic for the Knowledge service.
 
 use chrono::Utc;
-use moa_core::wire::knowledge::{
-    KnowledgeConnectionListRequest, KnowledgeConnectionListResponse, KnowledgeConnectionSummary,
-    KnowledgeIntegrationListRequest, KnowledgeIntegrationListResponse, KnowledgeIntegrationSummary,
-    KnowledgeSyncEventsRequest, KnowledgeSyncEventsResponse, KnowledgeSyncRequest,
-    KnowledgeSyncResponse, KnowledgeSyncStatusRequest, KnowledgeSyncStatusResponse,
-    KnowledgeSyncStepView, KnowledgeUnavailableProvider,
-};
 use moa_knowledge::domain::{
     IngestionStepStatus, KnowledgeIngestionStep, KnowledgeSyncRun, SyncRunStatus,
     TriggerSyncRequest,
@@ -16,6 +9,13 @@ use moa_knowledge::observability::{build_step_row, classify_failure, failed_outc
 use moa_knowledge::providers::LinkedIntegrationProvider;
 use moa_knowledge::repository::SyncRunClaim;
 use moa_observability::record_knowledge_sync_run;
+use moa_wire::knowledge::{
+    KnowledgeConnectionListRequest, KnowledgeConnectionListResponse, KnowledgeConnectionSummary,
+    KnowledgeIntegrationListRequest, KnowledgeIntegrationListResponse, KnowledgeIntegrationSummary,
+    KnowledgeSyncEventsRequest, KnowledgeSyncEventsResponse, KnowledgeSyncRequest,
+    KnowledgeSyncResponse, KnowledgeSyncStatusRequest, KnowledgeSyncStatusResponse,
+    KnowledgeSyncStepView, KnowledgeUnavailableProvider,
+};
 use serde_json::json;
 use tracing::Instrument;
 use uuid::Uuid;

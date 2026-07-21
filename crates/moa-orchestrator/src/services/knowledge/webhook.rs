@@ -2,10 +2,7 @@
 
 use base64::{Engine as _, engine::general_purpose};
 use chrono::Utc;
-use moa_core::{
-    types::identifiers::TenantId,
-    wire::knowledge::{KnowledgeProviderWebhookRequest, KnowledgeProviderWebhookResponse},
-};
+use moa_core::types::identifiers::TenantId;
 use moa_knowledge::domain::{
     IngestionStepStatus, KnowledgeConnection, KnowledgeIngestionStep, KnowledgeObject,
     KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus,
@@ -13,6 +10,7 @@ use moa_knowledge::domain::{
 };
 use moa_knowledge::repository::{ProviderAccountConnectionLookup, SyncRunClaim};
 use moa_observability::record_knowledge_sync_run;
+use moa_wire::knowledge::{KnowledgeProviderWebhookRequest, KnowledgeProviderWebhookResponse};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 use tracing::Instrument;

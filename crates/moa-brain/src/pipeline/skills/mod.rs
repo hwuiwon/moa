@@ -10,9 +10,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use moa_config::SkillBudgetConfig;
 use moa_core::{
-    config::SkillBudgetConfig, error::Result, traits::ContextProcessor, traits::EmbeddingProvider,
-    traits::SegmentStore, traits::SessionStore, traits::StageApply, types::agent::AgentSkillPolicy,
+    error::Result, traits::ContextProcessor, traits::EmbeddingProvider, traits::SegmentStore,
+    traits::SessionStore, traits::StageApply, types::agent::AgentSkillPolicy,
     types::agent::AgentSkillPolicyMode, types::context::ContextMessage,
     types::context::ExcludedItem, types::context::ProcessorOutput, types::context::WorkingContext,
     types::memory::SkillMetadata,
@@ -420,12 +421,12 @@ fn pinned_skill_names(policy: &AgentSkillPolicy) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use moa_config::SkillBudgetConfig;
     use moa_core::{
-        config::SkillBudgetConfig, traits::ContextProcessor, types::agent::AgentContext,
-        types::agent::AgentPolicySnapshot, types::agent::AgentSkillPolicy,
-        types::agent::AgentSkillPolicyMode, types::agent::SYSTEM_DEFAULT_AGENT_POLICY_HASH,
-        types::agent::SYSTEM_DEFAULT_AGENT_REF, types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID,
-        types::context::ContextMessage,
+        traits::ContextProcessor, types::agent::AgentContext, types::agent::AgentPolicySnapshot,
+        types::agent::AgentSkillPolicy, types::agent::AgentSkillPolicyMode,
+        types::agent::SYSTEM_DEFAULT_AGENT_POLICY_HASH, types::agent::SYSTEM_DEFAULT_AGENT_REF,
+        types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID, types::context::ContextMessage,
     };
     use serde_json::json;
 

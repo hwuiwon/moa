@@ -13,7 +13,6 @@ use moa_core::{
     types::context::ContextMessage, types::context::ContextSourceRef, types::context::ExcludedItem,
     types::context::ProcessorOutput, types::context::TURN_ID_METADATA_KEY,
     types::context::WorkingContext, types::identifiers::SessionId,
-    types::query_rewrite::QueryRewriteResult,
 };
 use moa_crypto::KeyManagementProvider;
 use moa_memory_graph::{GraphStore, PostgresGraphStore};
@@ -21,8 +20,9 @@ use moa_memory_types::MemoryScope;
 use moa_memory_vector::VectorStoreFactory;
 use sqlx::PgPool;
 
-use crate::planning::{PlannedQuery, Strategy};
-use crate::retrieval::{
+use crate::query_rewrite::QueryRewriteResult;
+use moa_retrieval::planning::{PlannedQuery, Strategy};
+use moa_retrieval::retrieval::{
     MemoryAdmissionPolicy, PlannedRetriever, RetrievalHit, RetrievalOutput, RetrievalProvenance,
     RetrievalRequest, RetrievalScopePlan, RetrievalStrategy, decompose_query, dedupe_and_rank_hits,
     route_query,
@@ -191,11 +191,11 @@ impl MemoryAccessAuditor for DurableMemoryAccessAuditor {
 pub struct GraphMemoryRetriever {
     pool: PgPool,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
-    config: moa_core::config::MoaConfig,
+    config: moa_config::MoaConfig,
     assume_app_role: bool,
     lineage: Arc<dyn LineageHandle>,
     result_limit: usize,
-    planner: crate::planning::QueryPlanner,
+    planner: moa_retrieval::planning::QueryPlanner,
     scoped_runtimes: moka::future::Cache<MemoryScope, Arc<ScopedRetrievalRuntime>>,
     runtime_factory: Arc<dyn ScopedRetrievalRuntimeFactory>,
     access_auditor: Arc<dyn MemoryAccessAuditor>,
@@ -259,7 +259,7 @@ pub trait ScopedRetrievalRuntimeFactory: Send + Sync {
     async fn build_runtime(
         &self,
         scope: &MemoryScope,
-        config: &moa_core::config::MoaConfig,
+        config: &moa_config::MoaConfig,
         pool: &PgPool,
         assume_app_role: bool,
     ) -> Result<ScopedRetrievalRuntime>;
@@ -269,7 +269,7 @@ struct PostgresScopedRetrievalRuntimeFactory {
     kms: Arc<dyn KeyManagementProvider>,
     /// Shared bounded enrichment worker handle, cloned into each scoped
     /// [`HybridRetriever`]. `None` when constructed outside a Tokio runtime.
-    enrichment: Option<crate::retrieval::enrichment::EnrichmentHandle>,
+    enrichment: Option<moa_retrieval::retrieval::enrichment::EnrichmentHandle>,
 }
 
 #[async_trait]
@@ -277,7 +277,7 @@ impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
     async fn build_runtime(
         &self,
         scope: &MemoryScope,
-        config: &moa_core::config::MoaConfig,
+        config: &moa_config::MoaConfig,
         pool: &PgPool,
         assume_app_role: bool,
     ) -> Result<ScopedRetrievalRuntime> {
@@ -295,7 +295,7 @@ impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
         };
         let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
         let hybrid = Arc::new(
-            crate::retrieval::HybridRetriever::from_config(
+            moa_retrieval::retrieval::HybridRetriever::from_config(
                 config,
                 pool.clone(),
                 graph.clone(),
@@ -305,12 +305,14 @@ impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
             .with_enrichment(self.enrichment.clone()),
         );
         let cached: Arc<dyn PlannedRetriever> = if assume_app_role {
-            Arc::new(crate::retrieval::CachedHybridRetriever::new_for_app_role(
-                hybrid,
-                pool.clone(),
-            ))
+            Arc::new(
+                moa_retrieval::retrieval::CachedHybridRetriever::new_for_app_role(
+                    hybrid,
+                    pool.clone(),
+                ),
+            )
         } else {
-            Arc::new(crate::retrieval::CachedHybridRetriever::new(
+            Arc::new(moa_retrieval::retrieval::CachedHybridRetriever::new(
                 hybrid,
                 pool.clone(),
             ))
@@ -327,13 +329,13 @@ impl GraphMemoryRetriever {
         kms: Arc<dyn KeyManagementProvider>,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
     ) -> Self {
-        Self::new_with_config(moa_core::config::MoaConfig::default(), pool, kms, embedder)
+        Self::new_with_config(moa_config::MoaConfig::default(), pool, kms, embedder)
     }
 
     /// Creates a graph-memory retriever backed by the shared Postgres pool and runtime config.
     #[must_use]
     pub fn new_with_config(
-        config: moa_core::config::MoaConfig,
+        config: moa_config::MoaConfig,
         pool: PgPool,
         kms: Arc<dyn KeyManagementProvider>,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
@@ -343,7 +345,7 @@ impl GraphMemoryRetriever {
         // (eval/unit setup) get no worker and skip best-effort enrichment.
         let enrichment = tokio::runtime::Handle::try_current()
             .ok()
-            .map(|_| crate::retrieval::enrichment::spawn_enrichment_worker(pool.clone()));
+            .map(|_| moa_retrieval::retrieval::enrichment::spawn_enrichment_worker(pool.clone()));
         Self {
             pool,
             embedder,
@@ -351,7 +353,7 @@ impl GraphMemoryRetriever {
             assume_app_role: false,
             lineage: Arc::new(NullLineageHandle),
             result_limit: GRAPH_MEMORY_RESULTS,
-            planner: crate::planning::QueryPlanner::new(),
+            planner: moa_retrieval::planning::QueryPlanner::new(),
             scoped_runtimes: build_scoped_runtime_cache(),
             runtime_factory: Arc::new(PostgresScopedRetrievalRuntimeFactory { kms, enrichment }),
             access_auditor: Arc::new(DurableMemoryAccessAuditor),
@@ -645,8 +647,10 @@ impl GraphMemoryRetriever {
         result_limit: usize,
     ) -> Result<ScopeProbe<'a>> {
         let runtime = self.runtime_for_scope(scope_plan.scope()).await?;
-        let planning =
-            crate::planning::PlanningCtx::new(scope_plan.scope().clone(), runtime.graph.clone());
+        let planning = moa_retrieval::planning::PlanningCtx::new(
+            scope_plan.scope().clone(),
+            runtime.graph.clone(),
+        );
         let planned = self.planner.plan(query, &planning).await.map_err(|error| {
             MoaError::StorageError(format!("graph memory planning failed: {error}"))
         })?;
@@ -732,7 +736,7 @@ impl GraphMemoryRetriever {
         // configured memory ranking knobs. Knowledge-lane retrievals keep the
         // default (off) policy and size their own top-k window.
         let ranking = &self.config.memory.retrieval.ranking;
-        request.window_policy = crate::retrieval::EvidenceWindowPolicy {
+        request.window_policy = moa_retrieval::retrieval::EvidenceWindowPolicy {
             rerank_window: ranking.rerank_window,
             abstain_below_window_evidence: ranking.abstain_below_window_evidence,
         };
@@ -763,7 +767,7 @@ impl GraphMemoryRetriever {
         request.disable_graph_expansion = should_disable_graph_expansion(scope_plan);
         if matches!(
             scope_plan.source_tier(),
-            crate::retrieval::SourceTier::TenantKnowledge
+            moa_retrieval::retrieval::SourceTier::TenantKnowledge
         ) {
             request.strategy = Some(Strategy::VectorFirst);
         }
@@ -1153,7 +1157,7 @@ fn extract_search_query(ctx: &WorkingContext) -> Option<String> {
 fn should_disable_graph_expansion(scope_plan: &RetrievalScopePlan) -> bool {
     matches!(
         scope_plan.source_tier(),
-        crate::retrieval::SourceTier::TenantKnowledge
+        moa_retrieval::retrieval::SourceTier::TenantKnowledge
     )
 }
 
@@ -1235,7 +1239,6 @@ mod tests {
         types::model::ModelCapabilities,
         types::model::TokenPricing,
         types::model::ToolCallFormat,
-        types::query_rewrite::QueryRewriteResult,
         types::session::SessionMeta,
     };
     use moa_crypto::LocalKmsProvider;
@@ -1249,8 +1252,9 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
 
-    use crate::planning::Strategy;
-    use crate::retrieval::{MemoryAdmissionPolicy, RetrievalScopePlan};
+    use crate::query_rewrite::QueryRewriteResult;
+    use moa_retrieval::planning::Strategy;
+    use moa_retrieval::retrieval::{MemoryAdmissionPolicy, RetrievalScopePlan};
 
     use super::{
         GraphMemoryRetriever, MemoryAccessAuditor, MemoryEvidenceRequest, ScopedRetrievalRuntime,
@@ -1260,8 +1264,10 @@ mod tests {
     };
 
     /// Wraps scripted hits in a retrieval output with empty diagnostics/provenance.
-    fn test_output(hits: Vec<crate::retrieval::RetrievalHit>) -> crate::retrieval::RetrievalOutput {
-        crate::retrieval::RetrievalOutput {
+    fn test_output(
+        hits: Vec<moa_retrieval::retrieval::RetrievalHit>,
+    ) -> moa_retrieval::retrieval::RetrievalOutput {
+        moa_retrieval::retrieval::RetrievalOutput {
             hits,
             diagnostics: Default::default(),
             provenance: Default::default(),
@@ -1298,7 +1304,7 @@ mod tests {
             _pool: &sqlx::PgPool,
             _ctx: &WorkingContext,
             _policy: &MemoryAdmissionPolicy,
-            _hits: &[crate::retrieval::RetrievalHit],
+            _hits: &[moa_retrieval::retrieval::RetrievalHit],
         ) -> moa_core::error::Result<()> {
             Ok(())
         }
@@ -1372,12 +1378,12 @@ mod tests {
     struct NoopPlannedRetriever;
 
     #[async_trait]
-    impl crate::retrieval::PlannedRetriever for NoopPlannedRetriever {
+    impl moa_retrieval::retrieval::PlannedRetriever for NoopPlannedRetriever {
         async fn retrieve(
             &self,
-            _planned: &crate::planning::PlannedQuery,
-            _req: crate::retrieval::RetrievalRequest,
-        ) -> crate::retrieval::Result<crate::retrieval::RetrievalOutput> {
+            _planned: &moa_retrieval::planning::PlannedQuery,
+            _req: moa_retrieval::retrieval::RetrievalRequest,
+        ) -> moa_retrieval::retrieval::Result<moa_retrieval::retrieval::RetrievalOutput> {
             Ok(test_output(Vec::new()))
         }
     }
@@ -1392,7 +1398,7 @@ mod tests {
         async fn build_runtime(
             &self,
             _scope: &MemoryScope,
-            _config: &moa_core::config::MoaConfig,
+            _config: &moa_config::MoaConfig,
             _pool: &sqlx::PgPool,
             _assume_app_role: bool,
         ) -> moa_core::error::Result<ScopedRetrievalRuntime> {
@@ -1416,16 +1422,16 @@ mod tests {
     #[derive(Debug)]
     struct ScriptedPlannedRetriever {
         calls: Arc<Mutex<Vec<RecordedRetrievalRequest>>>,
-        hits_by_scope: HashMap<MemoryScope, Vec<crate::retrieval::RetrievalHit>>,
+        hits_by_scope: HashMap<MemoryScope, Vec<moa_retrieval::retrieval::RetrievalHit>>,
     }
 
     #[async_trait]
-    impl crate::retrieval::PlannedRetriever for ScriptedPlannedRetriever {
+    impl moa_retrieval::retrieval::PlannedRetriever for ScriptedPlannedRetriever {
         async fn retrieve(
             &self,
-            _planned: &crate::planning::PlannedQuery,
-            req: crate::retrieval::RetrievalRequest,
-        ) -> crate::retrieval::Result<crate::retrieval::RetrievalOutput> {
+            _planned: &moa_retrieval::planning::PlannedQuery,
+            req: moa_retrieval::retrieval::RetrievalRequest,
+        ) -> moa_retrieval::retrieval::Result<moa_retrieval::retrieval::RetrievalOutput> {
             self.calls
                 .lock()
                 .expect("scripted retriever calls lock")
@@ -1455,11 +1461,12 @@ mod tests {
         async fn build_runtime(
             &self,
             _scope: &MemoryScope,
-            _config: &moa_core::config::MoaConfig,
+            _config: &moa_config::MoaConfig,
             _pool: &sqlx::PgPool,
             _assume_app_role: bool,
         ) -> moa_core::error::Result<ScopedRetrievalRuntime> {
-            let retriever: Arc<dyn crate::retrieval::PlannedRetriever> = self.retriever.clone();
+            let retriever: Arc<dyn moa_retrieval::retrieval::PlannedRetriever> =
+                self.retriever.clone();
             Ok(ScopedRetrievalRuntime::new(
                 Arc::new(NoopGraphStore),
                 retriever,
@@ -1473,16 +1480,16 @@ mod tests {
     #[derive(Debug)]
     struct QueryScriptedPlannedRetriever {
         queries: Arc<Mutex<Vec<String>>>,
-        hits_by_marker: Vec<(String, Vec<crate::retrieval::RetrievalHit>)>,
+        hits_by_marker: Vec<(String, Vec<moa_retrieval::retrieval::RetrievalHit>)>,
     }
 
     #[async_trait]
-    impl crate::retrieval::PlannedRetriever for QueryScriptedPlannedRetriever {
+    impl moa_retrieval::retrieval::PlannedRetriever for QueryScriptedPlannedRetriever {
         async fn retrieve(
             &self,
-            _planned: &crate::planning::PlannedQuery,
-            req: crate::retrieval::RetrievalRequest,
-        ) -> crate::retrieval::Result<crate::retrieval::RetrievalOutput> {
+            _planned: &moa_retrieval::planning::PlannedQuery,
+            req: moa_retrieval::retrieval::RetrievalRequest,
+        ) -> moa_retrieval::retrieval::Result<moa_retrieval::retrieval::RetrievalOutput> {
             let query = req.query_text.to_ascii_lowercase();
             self.queries
                 .lock()
@@ -1508,11 +1515,12 @@ mod tests {
         async fn build_runtime(
             &self,
             _scope: &MemoryScope,
-            _config: &moa_core::config::MoaConfig,
+            _config: &moa_config::MoaConfig,
             _pool: &sqlx::PgPool,
             _assume_app_role: bool,
         ) -> moa_core::error::Result<ScopedRetrievalRuntime> {
-            let retriever: Arc<dyn crate::retrieval::PlannedRetriever> = self.retriever.clone();
+            let retriever: Arc<dyn moa_retrieval::retrieval::PlannedRetriever> =
+                self.retriever.clone();
             Ok(ScopedRetrievalRuntime::new(
                 Arc::new(NoopGraphStore),
                 retriever,
@@ -1527,21 +1535,22 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::retrieval::PlannedRetriever for CacheHitRetriever {
+    impl moa_retrieval::retrieval::PlannedRetriever for CacheHitRetriever {
         async fn retrieve(
             &self,
-            _planned: &crate::planning::PlannedQuery,
-            _req: crate::retrieval::RetrievalRequest,
-        ) -> crate::retrieval::Result<crate::retrieval::RetrievalOutput> {
+            _planned: &moa_retrieval::planning::PlannedQuery,
+            _req: moa_retrieval::retrieval::RetrievalRequest,
+        ) -> moa_retrieval::retrieval::Result<moa_retrieval::retrieval::RetrievalOutput> {
             self.retrieve_calls.fetch_add(1, Ordering::SeqCst);
             Ok(test_output(Vec::new()))
         }
 
         async fn retrieve_cached(
             &self,
-            _planned: &crate::planning::PlannedQuery,
-            _req: &crate::retrieval::RetrievalRequest,
-        ) -> crate::retrieval::Result<Option<Vec<crate::retrieval::RetrievalHit>>> {
+            _planned: &moa_retrieval::planning::PlannedQuery,
+            _req: &moa_retrieval::retrieval::RetrievalRequest,
+        ) -> moa_retrieval::retrieval::Result<Option<Vec<moa_retrieval::retrieval::RetrievalHit>>>
+        {
             Ok(Some(Vec::new()))
         }
     }
@@ -1556,11 +1565,12 @@ mod tests {
         async fn build_runtime(
             &self,
             _scope: &MemoryScope,
-            _config: &moa_core::config::MoaConfig,
+            _config: &moa_config::MoaConfig,
             _pool: &sqlx::PgPool,
             _assume_app_role: bool,
         ) -> moa_core::error::Result<ScopedRetrievalRuntime> {
-            let retriever: Arc<dyn crate::retrieval::PlannedRetriever> = self.retriever.clone();
+            let retriever: Arc<dyn moa_retrieval::retrieval::PlannedRetriever> =
+                self.retriever.clone();
             Ok(ScopedRetrievalRuntime::new(
                 Arc::new(NoopGraphStore),
                 retriever,
@@ -1911,7 +1921,7 @@ mod tests {
         );
         assert_eq!(
             plan[0].source_tier(),
-            crate::retrieval::SourceTier::TenantKnowledge
+            moa_retrieval::retrieval::SourceTier::TenantKnowledge
         );
         assert_eq!(
             plan[0].label_filter(),
@@ -1933,7 +1943,7 @@ mod tests {
         );
         assert_eq!(
             plan[1].source_tier(),
-            crate::retrieval::SourceTier::UserMemory
+            moa_retrieval::retrieval::SourceTier::UserMemory
         );
         assert_eq!(plan[1].label_filter(), None);
     }
@@ -1951,12 +1961,14 @@ mod tests {
         let tenant_plan = plan
             .iter()
             .find(|scope_plan| {
-                scope_plan.source_tier() == crate::retrieval::SourceTier::TenantKnowledge
+                scope_plan.source_tier() == moa_retrieval::retrieval::SourceTier::TenantKnowledge
             })
             .expect("tenant knowledge plan should exist");
         let contact_plan = plan
             .iter()
-            .find(|scope_plan| scope_plan.source_tier() == crate::retrieval::SourceTier::UserMemory)
+            .find(|scope_plan| {
+                scope_plan.source_tier() == moa_retrieval::retrieval::SourceTier::UserMemory
+            })
             .expect("contact memory plan should exist");
 
         assert!(should_disable_graph_expansion(tenant_plan));
@@ -1986,7 +1998,7 @@ mod tests {
         );
         assert_eq!(
             plan[0].source_tier(),
-            crate::retrieval::SourceTier::TenantKnowledge
+            moa_retrieval::retrieval::SourceTier::TenantKnowledge
         );
     }
 
@@ -2047,7 +2059,7 @@ mod tests {
                     None,
                     NodeLabel::Fact,
                     "tenant",
-                    crate::retrieval::SourceTier::TenantKnowledge,
+                    moa_retrieval::retrieval::SourceTier::TenantKnowledge,
                     "tenant operational fact",
                     "tenant fact should not be tenant knowledge",
                     0.99,
@@ -2058,7 +2070,7 @@ mod tests {
                     None,
                     NodeLabel::Chunk,
                     "tenant",
-                    crate::retrieval::SourceTier::TenantKnowledge,
+                    moa_retrieval::retrieval::SourceTier::TenantKnowledge,
                     "tenant runbook chunk",
                     "tenant knowledge answer",
                     0.90,
@@ -2074,7 +2086,7 @@ mod tests {
                     Some(contact_id),
                     NodeLabel::Fact,
                     "contact",
-                    crate::retrieval::SourceTier::UserMemory,
+                    moa_retrieval::retrieval::SourceTier::UserMemory,
                     "current contact preference",
                     "current user memory answer",
                     0.80,
@@ -2085,7 +2097,7 @@ mod tests {
                     Some(linked_contact_id),
                     NodeLabel::Fact,
                     "contact",
-                    crate::retrieval::SourceTier::UserMemory,
+                    moa_retrieval::retrieval::SourceTier::UserMemory,
                     "other contact preference",
                     "cross contact memory should not leak",
                     0.95,
@@ -2310,7 +2322,7 @@ mod tests {
                 None,
                 NodeLabel::Chunk,
                 "tenant",
-                crate::retrieval::SourceTier::TenantKnowledge,
+                moa_retrieval::retrieval::SourceTier::TenantKnowledge,
                 "rotation policy",
                 "API keys rotate every 90 days",
                 0.90,
@@ -2386,7 +2398,7 @@ mod tests {
                 None,
                 NodeLabel::Chunk,
                 "tenant",
-                crate::retrieval::SourceTier::TenantKnowledge,
+                moa_retrieval::retrieval::SourceTier::TenantKnowledge,
                 "prior incident",
                 "the auth outage was caused by a rotated key",
                 0.90,
@@ -2436,7 +2448,7 @@ mod tests {
             None,
             NodeLabel::Chunk,
             "tenant",
-            crate::retrieval::SourceTier::TenantKnowledge,
+            moa_retrieval::retrieval::SourceTier::TenantKnowledge,
             "dependency chunk",
             "svc depends on the shared crypto library",
             0.90,
@@ -2447,7 +2459,7 @@ mod tests {
             None,
             NodeLabel::Chunk,
             "tenant",
-            crate::retrieval::SourceTier::TenantKnowledge,
+            moa_retrieval::retrieval::SourceTier::TenantKnowledge,
             "ownership chunk",
             "the platform team owns the shared crypto library",
             0.80,
@@ -2579,7 +2591,7 @@ mod tests {
                 None,
                 NodeLabel::Fact,
                 "tenant",
-                crate::retrieval::SourceTier::TenantKnowledge,
+                moa_retrieval::retrieval::SourceTier::TenantKnowledge,
                 "tenant fact",
                 "tenant fact must not cross the knowledge label admission boundary",
                 0.99,
@@ -2590,7 +2602,7 @@ mod tests {
                 None,
                 NodeLabel::Chunk,
                 "tenant",
-                crate::retrieval::SourceTier::TenantKnowledge,
+                moa_retrieval::retrieval::SourceTier::TenantKnowledge,
                 "runbook",
                 "Tenant runbook evidence.",
                 0.90,
@@ -2602,7 +2614,7 @@ mod tests {
             Some(contact_id),
             NodeLabel::Fact,
             "contact",
-            crate::retrieval::SourceTier::UserMemory,
+            moa_retrieval::retrieval::SourceTier::UserMemory,
             "preference",
             "Current contact prefers concise summaries.",
             0.80,
@@ -2618,7 +2630,7 @@ mod tests {
             Some(other_contact_id),
             NodeLabel::Fact,
             "contact",
-            crate::retrieval::SourceTier::UserMemory,
+            moa_retrieval::retrieval::SourceTier::UserMemory,
             "other preference",
             "Other contact memory must not leak.",
             0.98,
@@ -2748,7 +2760,7 @@ mod tests {
                 None,
                 NodeLabel::Chunk,
                 "tenant",
-                crate::retrieval::SourceTier::TenantKnowledge,
+                moa_retrieval::retrieval::SourceTier::TenantKnowledge,
                 "rotation",
                 &long_summary,
                 0.90,
@@ -2813,7 +2825,7 @@ mod tests {
                     None,
                     NodeLabel::Chunk,
                     "tenant",
-                    crate::retrieval::SourceTier::TenantKnowledge,
+                    moa_retrieval::retrieval::SourceTier::TenantKnowledge,
                     &format!("ranked-{index}"),
                     &format!("{} {index}", "ranked evidence".repeat(120)),
                     1.0 - (index as f64 * 0.01),
@@ -3009,7 +3021,7 @@ mod tests {
 
     fn scripted_graph_memory_retriever(
         calls: Arc<Mutex<Vec<RecordedRetrievalRequest>>>,
-        hits_by_scope: HashMap<MemoryScope, Vec<crate::retrieval::RetrievalHit>>,
+        hits_by_scope: HashMap<MemoryScope, Vec<moa_retrieval::retrieval::RetrievalHit>>,
     ) -> GraphMemoryRetriever {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://localhost/moa_test")
@@ -3041,21 +3053,21 @@ mod tests {
         contact_id: Option<ContactId>,
         label: NodeLabel,
         scope: &str,
-        source_tier: crate::retrieval::SourceTier,
+        source_tier: moa_retrieval::retrieval::SourceTier,
         name: &str,
         summary: &str,
         score: f64,
-    ) -> crate::retrieval::RetrievalHit {
-        crate::retrieval::RetrievalHit {
+    ) -> moa_retrieval::retrieval::RetrievalHit {
+        moa_retrieval::retrieval::RetrievalHit {
             uid,
             score,
-            legs: crate::retrieval::LegSources {
+            legs: moa_retrieval::retrieval::LegSources {
                 graph: false,
                 vector: false,
                 lexical: true,
             },
             similarity: None,
-            lexical_backend: Some(crate::retrieval::LexicalBackend::PostgresTsvector),
+            lexical_backend: Some(moa_retrieval::retrieval::LexicalBackend::PostgresTsvector),
             source_tier,
             knowledge_chunk: None,
             node: NodeIndexRow {
@@ -3097,7 +3109,7 @@ mod tests {
             None,
             NodeLabel::Fact,
             "tenant",
-            crate::retrieval::SourceTier::TenantKnowledge,
+            moa_retrieval::retrieval::SourceTier::TenantKnowledge,
             "audit failure",
             "must not be consumed",
             1.0,

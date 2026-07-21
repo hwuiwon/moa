@@ -9,9 +9,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::{
-    config::MessagingConfig, error::MoaError, traits::CredentialVault, types::model::Credential,
-};
+use moa_config::MessagingConfig;
+use moa_core::{error::MoaError, traits::CredentialVault, types::model::Credential};
 use moa_messaging::{
     POSTMARK_SERVER_API_TOKEN_ENV, POSTMARK_SERVER_TOKEN_SERVICE, POSTMARK_TEST_TOKEN,
     PostmarkEmailClient, PostmarkEmailMessage,

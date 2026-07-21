@@ -29,8 +29,8 @@ use uuid::Uuid;
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use moa_brain::planning::{PlanningCtx, QueryPlanner, QueryRetrievalCtx};
-use moa_brain::retrieval::{
+use moa_retrieval::planning::{PlanningCtx, QueryPlanner, QueryRetrievalCtx};
+use moa_retrieval::retrieval::{
     CachedHybridRetriever, HybridRetriever, RetrievalRequest,
     legs::{lexical_leg, vector_leg},
 };
@@ -208,7 +208,7 @@ fn scripted_user_fact(summary: &str) -> ExtractedFact {
     fact
 }
 
-fn hit_summary(hit: &moa_brain::retrieval::RetrievalHit) -> Option<&str> {
+fn hit_summary(hit: &moa_retrieval::retrieval::RetrievalHit) -> Option<&str> {
     hit.node
         .properties_summary
         .as_ref()
@@ -577,7 +577,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
         lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
-        window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+        window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
     };
     let lexical_hits = lexical_leg(session_store.pool(), &request, true)
         .await
@@ -627,7 +627,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .expect("retrieve graph-only entity seed hits");
@@ -657,7 +657,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: true,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .expect("retrieve with graph expansion disabled");
@@ -754,7 +754,7 @@ async fn barrier_cleared_agent_retrieves_node_uncleared_fails_closed_db_memory()
         lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
-        window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+        window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
     };
 
     let cleared_hits = retriever
@@ -890,7 +890,7 @@ async fn duplicate_crowding_keeps_distinct_supporting_knowledge_chunk() {
             lineage: None,
             disable_leg_timeouts: true,
             disable_graph_expansion: true,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .expect("retrieve duplicate-heavy knowledge chunks");
@@ -1003,7 +1003,7 @@ async fn parent_document_retrieval_hydrates_ordinal_adjacent_neighbors() {
             lineage: None,
             disable_leg_timeouts: true,
             disable_graph_expansion: true,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .expect("retrieve parent-document chunks");
@@ -1195,7 +1195,7 @@ async fn reinforced_fact_survives_consolidation_while_idle_one_off_expires_from_
         lineage: None,
         disable_leg_timeouts: true,
         disable_graph_expansion: false,
-        window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+        window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
     };
     let retained_hits = retriever
         .retrieve(request(&retained.summary))
@@ -1331,7 +1331,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
                 lineage: None,
                 disable_leg_timeouts: true,
                 disable_graph_expansion: false,
-                window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+                window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
             })
             .await
             .expect("owner retrieval succeeds");
@@ -1365,7 +1365,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
                 lineage: None,
                 disable_leg_timeouts: true,
                 disable_graph_expansion: false,
-                window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+                window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
             })
             .await
             .expect("other-user retrieval succeeds");
@@ -1437,7 +1437,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
         lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
-        window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+        window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
     };
 
     let lexical_hits = lexical_leg(session_store.pool(), &historical, true)
@@ -1469,7 +1469,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
         lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
-        window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+        window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
     };
     let current_hits = retriever
         .retrieve(current)
@@ -1557,7 +1557,7 @@ async fn temporal_turbopuffer_as_of_uses_pgvector_without_calling_turbopuffer() 
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .expect("retrieve through pgvector fallback");
@@ -1650,7 +1650,7 @@ async fn temporal_dual_read_as_of_uses_pgvector_without_calling_turbopuffer() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .expect("retrieve through pgvector source");
@@ -1750,7 +1750,7 @@ async fn turbopuffer_backend_uses_bm25_for_lexical_candidates_db_memory() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: true,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .expect("retrieve through Turbopuffer BM25");
@@ -1842,7 +1842,7 @@ async fn turbopuffer_backend_keeps_postgres_lexical_for_fact_candidates_db_memor
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: true,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .expect("retrieve fact through Postgres lexical");
@@ -1939,7 +1939,7 @@ async fn turbopuffer_bm25_error_falls_back_to_postgres_lexical_db_memory() {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: true,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .expect("retrieve through Postgres lexical fallback");
@@ -2015,7 +2015,7 @@ async fn lexical_prefix_fallback_matches_word_prefix_when_primary_misses_db_memo
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: true,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .expect("retrieve through sargable prefix fallback");
@@ -2112,7 +2112,7 @@ async fn lexical_fallback_matches_structured_predicate_in_properties_db_memory()
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: true,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .expect("retrieve through properties_tsv fallback");

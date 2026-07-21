@@ -9,6 +9,7 @@ async-trait.workspace = true
 backon.workspace = true
 chrono.workspace = true
 moa-core = { workspace = true }
+moa-config = { workspace = true }
 moa-db = { workspace = true }
 pgvector = { version = "0.4.1", features = ["sqlx", "halfvec"] }
 reqwest = { workspace = true, features = ["gzip"] }

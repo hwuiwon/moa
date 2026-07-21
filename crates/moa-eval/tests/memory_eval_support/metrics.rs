@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::path::Path;
 
-use moa_brain::retrieval::LexicalBackend;
+use moa_retrieval::retrieval::LexicalBackend;
 use moa_eval::kernel::{CostLedger, ProviderProvenance};
 use moa_eval::memory_eval::{
     BinaryProbeOutcome, BootstrapConfig, CandidateLegs, EntityFragmentationCounts,

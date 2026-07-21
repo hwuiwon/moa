@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use std::{panic::AssertUnwindSafe, panic::resume_unwind};
 
 use futures_util::FutureExt;
+use moa_config::CloudHandsConfig;
+use moa_config::MoaConfig;
 use moa_core::{
-    config::CloudHandsConfig,
-    config::MoaConfig,
     error::MoaError,
     error::Result,
     traits::{HandProvider, Identity, IdentityType},

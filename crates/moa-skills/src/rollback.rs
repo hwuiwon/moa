@@ -13,7 +13,7 @@
 //! operation; nothing here changes what is served.
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::config::RegressionMonitorConfig;
+use moa_config::RegressionMonitorConfig;
 use moa_core::types::experience::{
     LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
     LearningCandidateType, LearningRiskClass,

@@ -239,8 +239,7 @@ crates and `crates/moa-memory/README.md` for crate-level details.
 | [`moa-knowledge`](crates/moa-knowledge/) | Tenant knowledge-base domain, providers, parsers, and ingestion seams |
 | [`moa-lineage-core`](crates/moa-lineage/core/) | Lineage records and score record types |
 | [`moa-lineage-citation`](crates/moa-lineage/citation/) | Provider citation normalization and BM25/NLI verification helpers |
-| [`moa-lineage-sink`](crates/moa-lineage/sink/) | Async lineage sink writers |
-| [`moa-lineage-otel`](crates/moa-lineage/otel/) | OTel/OpenInference bridge |
+| [`moa-lineage-sink`](crates/moa-lineage/sink/) | Async lineage sink writers plus the OTel/OpenInference span bridge |
 | [`moa-lineage-audit`](crates/moa-lineage/audit/) | Compliance audit hashes, Merkle roots, signing, DSAR support |
 | [`moa-observability`](crates/moa-observability/) | Runtime metrics, tracing bootstrap, and Restate observability helpers |
 | [`moa-authz-schema`](crates/moa-auth/authz-schema/) | Typed OpenFGA object, relation, and tuple-key constants |

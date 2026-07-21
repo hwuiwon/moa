@@ -5,10 +5,11 @@ use super::status::{
 };
 use super::trial_simulator::{SimulatorContext, simulator_done, simulator_next_user_message};
 use super::*;
+use crate::ctx::OrchestratorCtx;
 use crate::objects::session::{AttachSessionTurnWaiterInput, RemoveSessionTurnWaiterInput};
 use crate::services::execution::ExecutionClient;
 use crate::services::session_store::RestateSessionStoreClient;
-use crate::{ctx::OrchestratorCtx, workflows::durable_utc_now};
+use crate::workflows::durable_utc_now;
 use moa_artifacts::{
     canonical::canonical_json_bytes as artifact_canonical_json_bytes,
     execution_plan::{ExecutionGoalContract, GeneratedExecutionCandidate},
@@ -24,7 +25,6 @@ use moa_core::types::{
         execution_planning_hash,
     },
 };
-use moa_core::wire::session_store::AppendEventRequest;
 use moa_execution::{
     CompileExecutionOutcome, CompileExecutionRequest, ExecutionValidationReport,
     ExecutionValidationSeverity, compile,
@@ -36,6 +36,7 @@ use moa_execution::{
         ExecutionStartRequest, ExecutionStatusResponse,
     },
 };
+use moa_wire::session_store::AppendEventRequest;
 use std::{str::FromStr, time::Instant};
 
 const EXECUTION_TARGET_WAIT_TIMEOUT: Duration = Duration::from_secs(90);

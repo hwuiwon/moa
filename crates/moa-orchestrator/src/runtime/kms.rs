@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
-use moa_core::config::{KmsProviderKind, MoaConfig};
+use moa_config::{KmsProviderKind, MoaConfig};
 use moa_crypto::KeyManagementProvider;
 use moa_kms::{PostgresKmsProvider, RootKeyRing};
 use sqlx::PgPool;

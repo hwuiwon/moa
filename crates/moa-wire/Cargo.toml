@@ -1,0 +1,15 @@
+[package]
+name = "moa-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+moa-core = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["chrono", "uuid"] }
+thiserror.workspace = true
+uuid.workspace = true
+workspace-hack = { workspace = true }

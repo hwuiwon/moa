@@ -5,9 +5,8 @@ use moa_artifacts::execution_plan::{
     CompletionCheck, CompletionCheckKind, ExecutionGoalContract, ExecutionNode, ExecutionOperation,
     ExecutionPlanDefinition, ExecutionRequirement, RetryPolicy,
 };
-use moa_core::{
-    config::ExecutionConfig, events::Event, types::execution_planning::ExecutionSourceProvenance,
-};
+use moa_config::ExecutionConfig;
+use moa_core::{events::Event, types::execution_planning::ExecutionSourceProvenance};
 use moa_execution::{
     compiler::{CompileExecutionRequest, compile},
     repository::{ExecutionRepository, ExecutionScope},

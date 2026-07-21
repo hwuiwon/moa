@@ -1,12 +1,12 @@
 //! Configurable-agent and agent-principal MCP tools.
 
-use moa_core::wire::agents::{
+use moa_wire::agents::{
     AgentActAsRequest, AgentDefinitionListRequest, AgentDefinitionListResponse, AgentDeployRequest,
     AgentDeployResponse, AgentDeploymentListRequest, AgentDeploymentListResponse,
     AgentInstallRequest, AgentInstallResponse, AgentInstallationListRequest,
     AgentInstallationListResponse, AgentSummary, RegisterAgentRequest,
 };
-use moa_core::wire::experiments::{
+use moa_wire::experiments::{
     AgentRevisionCompareRequest, AgentRevisionCompareResponse,
     AgentRevisionSimulationCompareRequest, AgentRevisionSimulationCompareResponse,
     AgentRevisionSimulationRunRequest, AgentRevisionSimulationRunResponse,

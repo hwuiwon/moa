@@ -2,10 +2,11 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_config::MemoryDigestConfig;
 use moa_core::types::memory::RlsContext;
 use moa_core::{
-    config::MemoryDigestConfig, error::MoaError, error::Result, traits::ContextProcessor,
-    traits::StageApply, types::context::ContextMessage, types::context::ProcessorOutput,
+    error::MoaError, error::Result, traits::ContextProcessor, traits::StageApply,
+    types::context::ContextMessage, types::context::ProcessorOutput,
     types::context::WorkingContext,
 };
 use moa_db::ScopedConn;
@@ -176,9 +177,10 @@ struct DigestRow {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
+    use moa_config::MemoryDigestConfig;
     use moa_core::{
-        config::MemoryDigestConfig, traits::ContextProcessor, types::channel::Channel,
-        types::context::WorkingContext, types::identifiers::ModelId, types::identifiers::SessionId,
+        traits::ContextProcessor, types::channel::Channel, types::context::WorkingContext,
+        types::identifiers::ModelId, types::identifiers::SessionId,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
         types::session::SessionMeta,
     };

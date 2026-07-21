@@ -9,6 +9,7 @@ chrono.workspace = true
 hex.workspace = true
 moa-artifacts.workspace = true
 moa-core = { workspace = true }
+moa-config = { workspace = true }
 moa-db = { workspace = true }
 moa-eval-core = { workspace = true }
 moa-memory-graph = { workspace = true }

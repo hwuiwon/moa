@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use moa_core::config::{OAuthClientConfig, OAuthClientType};
+use moa_config::{OAuthClientConfig, OAuthClientType};
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;

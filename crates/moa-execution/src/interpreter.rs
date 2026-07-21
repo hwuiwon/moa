@@ -7,7 +7,7 @@ use moa_artifacts::execution_plan::{
     CapabilityReference, CompletionCheckKind, ExecutionFailureClass, ExecutionGoalContract,
     ExecutionNode, ExecutionOperation, ExecutionReducer, ExecutionTaskResult, MapTask, RetryPolicy,
 };
-use moa_core::config::ExecutionConfig;
+use moa_config::ExecutionConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;

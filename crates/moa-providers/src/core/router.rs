@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use moa_core::{config::MoaConfig, error::Result, traits::LLMProvider, types::provider::ModelTask};
+use moa_config::MoaConfig;
+use moa_core::{error::Result, traits::LLMProvider, types::provider::ModelTask};
 
 use crate::ProviderRegistry;
 

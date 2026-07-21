@@ -431,14 +431,15 @@ mod egress_dispatch_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use moa_config::McpServerConfig;
+    use moa_config::McpTransportConfig;
     use moa_core::types::security::SensitivityClass;
     use moa_core::{
-        config::McpServerConfig, config::McpTransportConfig, types::action_policy::ActionClass,
-        types::action_policy::ActionPolicyEffect, types::action_policy::RiskLevel,
-        types::completion::ToolInvocation, types::identifiers::SessionId,
-        types::identifiers::TenantId, types::session::SessionMeta, types::tools::IdempotencyClass,
-        types::tools::ToolDefinition, types::tools::ToolDiffStrategy, types::tools::ToolInputShape,
-        types::tools::ToolPolicySpec,
+        types::action_policy::ActionClass, types::action_policy::ActionPolicyEffect,
+        types::action_policy::RiskLevel, types::completion::ToolInvocation,
+        types::identifiers::SessionId, types::identifiers::TenantId, types::session::SessionMeta,
+        types::tools::IdempotencyClass, types::tools::ToolDefinition,
+        types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolPolicySpec,
     };
     use moa_memory_pii::{MockClassifier, PiiResult};
     use moa_security::McpEgressGuard;

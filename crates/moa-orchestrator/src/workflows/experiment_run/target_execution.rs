@@ -22,7 +22,6 @@ use moa_core::{
             canonical_json_bytes, execution_planning_hash,
         },
     },
-    wire::session_store::AppendEventRequest,
 };
 use moa_execution::{
     CompileExecutionOutcome, CompileExecutionRequest, ExecutionValidationReport,
@@ -35,11 +34,11 @@ use moa_execution::{
         ExecutionStartRequest, ExecutionStatusResponse,
     },
 };
+use moa_wire::session_store::AppendEventRequest;
 
-use crate::{
-    ctx::OrchestratorCtx,
-    services::{execution::ExecutionClient, session_store::RestateSessionStoreClient},
-};
+use crate::ctx::OrchestratorCtx;
+
+use crate::services::{execution::ExecutionClient, session_store::RestateSessionStoreClient};
 
 const EXECUTION_TARGET_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 const EXECUTION_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(1);

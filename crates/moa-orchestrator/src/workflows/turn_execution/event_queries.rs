@@ -3,13 +3,13 @@
 use moa_brain::turn_segments::{
     SegmentBoundarySequences, latest_user_message, segment_assessment_to_seq,
 };
-use moa_core::wire::session_store::GetSegmentBaselineRequest;
 use moa_core::{
     events::EventType, traits::SessionStore as _, types::events_stream::EventRange,
     types::events_stream::EventRecord, types::identifiers::SegmentId,
     types::identifiers::SessionId, types::session::SessionMeta,
 };
 use moa_session::PostgresSessionStore;
+use moa_wire::session_store::GetSegmentBaselineRequest;
 use restate_sdk::prelude::*;
 
 use crate::services::session_store::RestateSessionStoreClient;

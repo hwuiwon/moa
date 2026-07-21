@@ -9,16 +9,17 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_brain::planning::Strategy;
-use moa_brain::retrieval::{
+use moa_retrieval::planning::Strategy;
+use moa_retrieval::retrieval::{
     GraphCandidateCounts, GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy,
     GraphSeedDiagnostics, GraphSeedSource, HybridRetriever, LexicalBackend, RetrievalHit,
     RetrievalOutput, RetrievalRequest, SourceObjectFeatureContribution,
     SourceObjectFeatureContributions,
 };
+use moa_config::MoaConfig;
 use moa_core::traits::EmbeddingProvider;
 use moa_core::types::security::SensitivityClass;
-use moa_core::{config::MoaConfig, types::identifiers::TenantId, types::memory::RlsContext};
+use moa_core::{types::identifiers::TenantId, types::memory::RlsContext};
 use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_db::ScopedConn;
 use moa_eval::kernel::cost::{
@@ -894,7 +895,7 @@ async fn retrieve_wixqa_output(
             disable_graph_expansion,
             // Article-level retrieval sizes its own window via --top-k; the
             // memory-lane window knobs must not clamp it.
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .with_context(|| format!("retrieve WixQA query `{}`", question.question))
@@ -2179,7 +2180,7 @@ struct SourceObjectRankingReport {
 }
 
 impl SourceObjectRankingReport {
-    fn record(&mut self, diagnostics: &moa_brain::retrieval::SourceObjectRankingDiagnostics) {
+    fn record(&mut self, diagnostics: &moa_retrieval::retrieval::SourceObjectRankingDiagnostics) {
         if !diagnostics.enabled {
             return;
         }
@@ -2439,7 +2440,7 @@ fn elapsed_ms(started: Instant) -> u128 {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_brain::retrieval::{KnowledgeChunkHydration, LegSources, SourceTier};
+    use moa_retrieval::retrieval::{KnowledgeChunkHydration, LegSources, SourceTier};
     use moa_memory_graph::NodeIndexRow;
     use serde_json::Value;
 
@@ -2581,7 +2582,7 @@ mod tests {
         // movements instead of burying them in per-query retrieval diagnostics.
         let object_uid = Uuid::from_u128(42);
         let mut diagnostics = GraphRetrievalDiagnostics::new(GraphRetrievalPolicy::SourceGraph);
-        diagnostics.source_object_ranking = moa_brain::retrieval::SourceObjectRankingDiagnostics {
+        diagnostics.source_object_ranking = moa_retrieval::retrieval::SourceObjectRankingDiagnostics {
             enabled: true,
             ranked_source_object_count: 2,
             feature_totals: SourceObjectFeatureContributions {

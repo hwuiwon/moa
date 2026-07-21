@@ -4,9 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use moa_core::config::SessionLimitsConfig;
+use moa_config::SessionLimitsConfig;
 use moa_core::traits::SessionRepository;
-use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentTurnUsageRequest};
 use moa_core::{
     error::MoaError, events::Event, types::completion::CompletionRequest,
     types::context::ContextMessage, types::context::MessageRole, types::events_stream::ClaimCheck,
@@ -31,6 +30,7 @@ use moa_core::{
     types::worker::tool_schema::child_report_tool_schemas,
 };
 use moa_providers::ProviderRegistry;
+use moa_wire::session_store::{AppendEventRequest, RecordSegmentTurnUsageRequest};
 use restate_sdk::prelude::*;
 use serde_json::json;
 
@@ -126,7 +126,7 @@ pub trait Worker {
 
     /// Records the terminal outcome delivered by a worker turn workflow.
     async fn record_turn_outcome(
-        outcome: Json<moa_core::wire::turn::TurnOutcome>,
+        outcome: Json<moa_wire::turn::TurnOutcome>,
     ) -> Result<(), HandlerError>;
 
     /// Clears all persisted state for this child key.

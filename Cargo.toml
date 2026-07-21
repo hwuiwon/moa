@@ -2,7 +2,10 @@
 resolver = "2"
 members = [
     "crates/moa-analytics",
+    "crates/moa-analytics-export",
     "crates/moa-core",
+    "crates/moa-config",
+    "crates/moa-wire",
     "crates/moa-crypto",
     "crates/moa-dlp",
     "crates/moa-kms",
@@ -12,6 +15,7 @@ members = [
     "crates/moa-agents",
     "crates/moa-artifacts",
     "crates/moa-brain",
+    "crates/moa-retrieval",
     "crates/moa-contacts",
     "crates/moa-observability",
     "crates/moa-session",
@@ -25,7 +29,6 @@ members = [
     "crates/moa-lineage/core",
     "crates/moa-lineage/citation",
     "crates/moa-lineage/sink",
-    "crates/moa-lineage/otel",
     "crates/moa-lineage/audit",
     "crates/moa-auth/authz-schema",
     "crates/moa-auth/authz",
@@ -52,7 +55,10 @@ members = [
 ]
 default-members = [
     "crates/moa-analytics",
+    "crates/moa-analytics-export",
     "crates/moa-core",
+    "crates/moa-config",
+    "crates/moa-wire",
     "crates/moa-crypto",
     "crates/moa-dlp",
     "crates/moa-kms",
@@ -62,6 +68,7 @@ default-members = [
     "crates/moa-agents",
     "crates/moa-artifacts",
     "crates/moa-brain",
+    "crates/moa-retrieval",
     "crates/moa-contacts",
     "crates/moa-observability",
     "crates/moa-session",
@@ -75,7 +82,6 @@ default-members = [
     "crates/moa-lineage/core",
     "crates/moa-lineage/citation",
     "crates/moa-lineage/sink",
-    "crates/moa-lineage/otel",
     "crates/moa-lineage/audit",
     "crates/moa-auth/authz-schema",
     "crates/moa-auth/authz",
@@ -105,6 +111,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 moa-analytics = { path = "crates/moa-analytics" }
+moa-analytics-export = { path = "crates/moa-analytics-export" }
 moa-auth-providers = { path = "crates/moa-auth/providers" }
 moa-auth-providers-auth0 = { path = "crates/moa-auth/auth0" }
 moa-authz = { path = "crates/moa-auth/authz" }
@@ -112,8 +119,11 @@ moa-authz-schema = { path = "crates/moa-auth/authz-schema" }
 moa-artifacts = { path = "crates/moa-artifacts" }
 moa-agents = { path = "crates/moa-agents" }
 moa-brain = { path = "crates/moa-brain" }
+moa-retrieval = { path = "crates/moa-retrieval" }
 moa-contacts = { path = "crates/moa-contacts" }
 moa-core = { path = "crates/moa-core" }
+moa-config = { path = "crates/moa-config" }
+moa-wire = { path = "crates/moa-wire" }
 moa-crypto = { path = "crates/moa-crypto" }
 moa-dlp = { path = "crates/moa-dlp" }
 moa-kms = { path = "crates/moa-kms" }
@@ -131,7 +141,6 @@ moa-knowledge = { path = "crates/moa-knowledge" }
 moa-lineage-audit = { path = "crates/moa-lineage/audit" }
 moa-lineage-citation = { path = "crates/moa-lineage/citation" }
 moa-lineage-core = { path = "crates/moa-lineage/core" }
-moa-lineage-otel = { path = "crates/moa-lineage/otel" }
 moa-lineage-sink = { path = "crates/moa-lineage/sink" }
 moa-loadtest = { path = "crates/moa-loadtest" }
 moa-memory-graph = { path = "crates/moa-memory/graph" }

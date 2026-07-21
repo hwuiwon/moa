@@ -2,8 +2,9 @@
 
 use anyhow::Result;
 use chrono::Utc;
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId, types::identifiers::UserId,
 };
 use moa_lineage_core::{

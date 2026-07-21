@@ -16,10 +16,10 @@ use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::registry::{ArtifactRegistry, StoredArtifactRevision};
 use moa_artifacts::skill::{SkillActionDefinition, SkillActionKind};
 use moa_authz_schema::Relation;
+use moa_config::ExecutionConfig;
 use moa_core::types::memory::RlsContext;
 use moa_core::types::tools::{ToolDefinition, ToolPolicySpec};
 use moa_core::{
-    config::ExecutionConfig,
     error::{MoaError, Result as MoaResult},
     events::Event,
     traits::SessionStore as _,
@@ -4205,7 +4205,7 @@ mod tests {
             current_failure: None,
             unresolved_requirement_ids: BTreeSet::from(["req_report".to_string()]),
             amendment: proposed,
-            config: moa_core::config::ExecutionConfig::default(),
+            config: moa_config::ExecutionConfig::default(),
         });
         assert_eq!(
             decision,
@@ -4237,7 +4237,7 @@ mod tests {
                 current_failure: None,
                 unresolved_requirement_ids: BTreeSet::from(["req_report".to_string()]),
                 amendment,
-                config: moa_core::config::ExecutionConfig::default(),
+                config: moa_config::ExecutionConfig::default(),
             }),
             ReplanDecision::Stop {
                 reason: ReplanStopReason::NoProgress

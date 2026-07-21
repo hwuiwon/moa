@@ -20,6 +20,7 @@ use crate::analytics::{
 };
 use crate::error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 use crate::events::{Event, EventType};
+use crate::types::experience::LearningCandidateSummary;
 use crate::types::{
     channel::Attachment, channel::Channel, channel::ChannelAccountId, channel::ChannelCapabilities,
     channel::ChannelEvent, channel::ChannelRef, channel::MessageId, channel::OutboundMessage,
@@ -40,7 +41,6 @@ use crate::types::{
     session::Checkpoint, session::CheckpointHandle, session::SessionFilter, session::SessionMeta,
     session::SessionStatus, session::SessionSummary, snapshot::ContextSnapshot, tools::ToolOutput,
 };
-use crate::wire::analytics::LearningCandidateSummary;
 
 pub use auth::*;
 pub use embedding::EmbeddingProvider;

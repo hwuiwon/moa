@@ -3,11 +3,12 @@
 use std::{sync::Arc, time::Duration, time::Instant};
 
 use async_trait::async_trait;
+use moa_config::MoaConfig;
 use moa_core::traits::{ChannelAdapter, RuntimeCacheStore};
 use moa_core::{
-    config::MoaConfig, error::MoaError, error::Result, types::channel::Channel,
-    types::channel::ChannelCapabilities, types::channel::ChannelEvent, types::channel::ChannelRef,
-    types::channel::MessageId, types::channel::OutboundMessage,
+    error::MoaError, error::Result, types::channel::Channel, types::channel::ChannelCapabilities,
+    types::channel::ChannelEvent, types::channel::ChannelRef, types::channel::MessageId,
+    types::channel::OutboundMessage,
 };
 use moka::future::Cache;
 use slack_morphism::errors::SlackClientError;
@@ -100,11 +101,11 @@ impl SlackAdapter {
 
     /// Creates a Slack adapter using the configured token environment variables.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
-        let bot_token = moa_core::config::required_config_secret(
+        let bot_token = moa_config::required_config_secret(
             "MOA_MESSAGING_SLACK_TOKEN",
             &config.messaging.slack_token,
         )?;
-        let app_token = moa_core::config::required_config_secret(
+        let app_token = moa_config::required_config_secret(
             "MOA_MESSAGING_SLACK_APP_TOKEN",
             &config.messaging.slack_app_token,
         )?;

@@ -7,9 +7,9 @@ use std::time::Duration;
 use chrono::NaiveDate;
 use eventsource_stream::Eventsource;
 use futures_util::{StreamExt, pin_mut};
+use moa_config::McpServerConfig;
 use moa_core::{
-    config::McpServerConfig, error::MoaError, error::Result, types::tools::ToolContent,
-    types::tools::ToolOutput,
+    error::MoaError, error::Result, types::tools::ToolContent, types::tools::ToolOutput,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;

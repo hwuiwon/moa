@@ -4,9 +4,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::Utc;
+use moa_config::MoaConfig;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
-    config::MoaConfig, traits::Identity, traits::IdentityType, traits::MemoryRetrievalExecutor,
+    traits::Identity, traits::IdentityType, traits::MemoryRetrievalExecutor,
     types::channel::Channel, types::contact::ContactId, types::contact::ContactRef,
     types::contact::ContactVerificationState, types::contact::SessionActorRef,
     types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,

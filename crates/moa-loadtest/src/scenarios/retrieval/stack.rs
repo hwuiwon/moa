@@ -190,7 +190,7 @@ impl TenantRetriever {
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         };
         let output = self
             .cache

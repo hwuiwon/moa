@@ -4,7 +4,7 @@ use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header,
 };
-use moa_core::config::ContactTokenConfig;
+use moa_config::ContactTokenConfig;
 use moa_core::{
     error::MoaError, types::contact::ContactRef, types::contact::ContactTokenClaims,
     types::contact::ContactVerificationState,
@@ -209,6 +209,6 @@ fn token_ttl(config: &ContactTokenConfig, state: ContactVerificationState) -> i6
 }
 
 fn config_secret(env_name: &'static str, value: &str) -> Result<String, ContactTokenError> {
-    moa_core::config::required_config_secret(env_name, value)
+    moa_config::required_config_secret(env_name, value)
         .map_err(|_| ContactTokenError::MissingEnv(env_name.to_string()))
 }

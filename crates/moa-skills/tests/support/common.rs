@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig,
     error::MoaError,
     error::Result as MoaResult,
     events::Event,

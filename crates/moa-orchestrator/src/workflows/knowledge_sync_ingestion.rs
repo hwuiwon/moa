@@ -3,8 +3,9 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
+use moa_config::MoaConfig;
 use moa_core::types::memory::RlsContext;
-use moa_core::{config::MoaConfig, traits::CredentialVault, types::identifiers::TenantId};
+use moa_core::{traits::CredentialVault, types::identifiers::TenantId};
 use moa_crypto::KeyManagementProvider;
 use moa_knowledge::{
     domain::{
@@ -616,7 +617,7 @@ impl From<PageIngestionReport> for KnowledgeSyncPageApplication {
 /// proxy content path only needs the connection's provider account and
 /// connector, so no vault credential resolution is required.
 fn build_record_content_fetcher(
-    config: &std::sync::Arc<moa_core::config::MoaConfig>,
+    config: &std::sync::Arc<moa_config::MoaConfig>,
     provider_label: &str,
     connection: KnowledgeConnection,
 ) -> Option<Arc<dyn RecordContentFetcher>> {

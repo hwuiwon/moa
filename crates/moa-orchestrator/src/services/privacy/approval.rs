@@ -4,7 +4,7 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD};
 use chrono::Utc;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use moa_core::config::ComplianceConfig;
+use moa_config::ComplianceConfig;
 use moa_core::types::identifiers::TenantId;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};

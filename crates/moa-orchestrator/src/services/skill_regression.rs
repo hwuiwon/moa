@@ -11,8 +11,9 @@ use moa_artifacts::{
     },
     registry::{ArtifactFile, StoredArtifactRevision},
 };
+use moa_config::MoaConfig;
+use moa_core::{error::MoaError, traits::LLMProvider, types::provider::ModelTask};
 use moa_core::{
-    config::MoaConfig,
     error::Result,
     types::{
         action_policy::ActionRuleScope,
@@ -25,7 +26,6 @@ use moa_core::{
         identifiers::TenantId,
     },
 };
-use moa_core::{error::MoaError, traits::LLMProvider, types::provider::ModelTask};
 use moa_eval::EvalEngine;
 use moa_eval_core::engine::EvalRun;
 use moa_eval_core::{
@@ -1185,15 +1185,13 @@ fn map_eval_error(error: moa_eval_core::Error) -> MoaError {
 #[cfg(test)]
 mod tests {
     use moa_artifacts::execution_plan::ExecutionPlanTemplate;
-    use moa_core::{
-        config::MoaConfig,
-        types::{
-            execution_planning::{
-                ExecutionAuditReport, ExecutionCompileOutcome, ExecutionCompileSource,
-                ExecutionPlanningAuditPayload,
-            },
-            identifiers::TenantId,
+    use moa_config::MoaConfig;
+    use moa_core::types::{
+        execution_planning::{
+            ExecutionAuditReport, ExecutionCompileOutcome, ExecutionCompileSource,
+            ExecutionPlanningAuditPayload,
         },
+        identifiers::TenantId,
     };
     use moa_execution::{ExecutionAuthorizationEnvelope, ExecutionCapabilityCatalog};
     use moa_hands::ToolRegistry;

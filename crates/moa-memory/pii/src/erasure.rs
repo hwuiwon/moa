@@ -240,8 +240,8 @@ fn contact_scope_from_subject(tenant_id: TenantId, subject_user_id: &str) -> Res
 }
 
 fn contact_id_from_subject(subject_user_id: &str) -> Result<ContactId> {
-    moa_core::wire::privacy::ParsedPrivacySubjectId::parse_str(subject_user_id)
-        .map(moa_core::wire::privacy::ParsedPrivacySubjectId::contact_id)
+    moa_wire::privacy::ParsedPrivacySubjectId::parse_str(subject_user_id)
+        .map(moa_wire::privacy::ParsedPrivacySubjectId::contact_id)
         .map_err(|error| {
             ErasureError::Scope(moa_core::error::MoaError::ValidationError(format!(
                 "privacy erasure subject_user_id must be a contact UUID or contact:<UUID> for contact-scoped memory: {error}"

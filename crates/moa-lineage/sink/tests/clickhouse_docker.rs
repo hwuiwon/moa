@@ -11,10 +11,10 @@
 use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
+use moa_config::ClickHouseConfig;
 use moa_core::{
-    config::ClickHouseConfig, types::identifiers::SessionId,
-    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
-    types::identifiers::UserId,
+    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::UserId,
 };
 use moa_lineage_core::{
     BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, StageTimings,

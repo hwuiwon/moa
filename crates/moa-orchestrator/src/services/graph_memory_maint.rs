@@ -1,7 +1,8 @@
 //! Periodic graph-memory maintenance triggered by the CronJob virtual object.
 
 use chrono::{NaiveDate, Utc};
-use moa_core::{config::MoaConfig, types::identifiers::TenantId};
+use moa_config::MoaConfig;
+use moa_core::types::identifiers::TenantId;
 use moa_memory_lifecycle::TenantConsolidationCursor;
 use moa_memory_vector::{VectorStoreFactory, VectorSyncReport};
 use moa_observability::restate_observability::annotate_restate_handler_span;

@@ -23,7 +23,7 @@ pub(super) struct BudgetedRenderedMemoryContext {
 /// budget too small for even one minimally rendered hit returns empty evidence
 /// instead of emitting an over-budget or structurally truncated section.
 pub(super) fn render_memory_context_with_budget(
-    hits: &[crate::retrieval::RetrievalHit],
+    hits: &[moa_retrieval::retrieval::RetrievalHit],
     token_budget: usize,
 ) -> BudgetedRenderedMemoryContext {
     if hits.is_empty() || token_budget == 0 {
@@ -84,7 +84,7 @@ fn empty_budgeted_context() -> BudgetedRenderedMemoryContext {
 /// and the evidence refs, so citation verification checks the exact text the
 /// model saw for each hit.
 pub(super) fn render_memory_context(
-    hits: &[crate::retrieval::RetrievalHit],
+    hits: &[moa_retrieval::retrieval::RetrievalHit],
     per_hit_budget: usize,
 ) -> RenderedMemoryContext {
     let excerpts = hits
@@ -123,7 +123,7 @@ pub(super) fn render_memory_context(
 }
 
 fn render_knowledge_context(
-    hits: &[crate::retrieval::RetrievalHit],
+    hits: &[moa_retrieval::retrieval::RetrievalHit],
     excerpts: &[String],
 ) -> String {
     let mut section = String::from(
@@ -136,14 +136,14 @@ verify drift-prone facts before relying on them.\n\
         &mut section,
         hits,
         excerpts,
-        crate::retrieval::SourceTier::TenantKnowledge,
+        moa_retrieval::retrieval::SourceTier::TenantKnowledge,
     );
     section.push_str("</tenant_knowledge>\n<user_memory>\n");
     push_tier_context(
         &mut section,
         hits,
         excerpts,
-        crate::retrieval::SourceTier::UserMemory,
+        moa_retrieval::retrieval::SourceTier::UserMemory,
     );
     section.push_str("</user_memory>\n</knowledge_context>");
     section
@@ -151,9 +151,9 @@ verify drift-prone facts before relying on them.\n\
 
 fn push_tier_context(
     section: &mut String,
-    hits: &[crate::retrieval::RetrievalHit],
+    hits: &[moa_retrieval::retrieval::RetrievalHit],
     excerpts: &[String],
-    source_tier: crate::retrieval::SourceTier,
+    source_tier: moa_retrieval::retrieval::SourceTier,
 ) {
     for (hit, excerpt) in hits
         .iter()
@@ -164,7 +164,11 @@ fn push_tier_context(
     }
 }
 
-fn push_hit_context(section: &mut String, hit: &crate::retrieval::RetrievalHit, excerpt: &str) {
+fn push_hit_context(
+    section: &mut String,
+    hit: &moa_retrieval::retrieval::RetrievalHit,
+    excerpt: &str,
+) {
     section.push_str(&format!(
         "## {} [tier={} label={} graph_uid={} scope={} score={:.3} valid_from={} legs={}",
         hit_title(hit),
@@ -203,7 +207,7 @@ fn push_hit_context(section: &mut String, hit: &crate::retrieval::RetrievalHit, 
 }
 
 /// Returns the prompt and lineage title for a retrieved hit.
-pub(super) fn hit_title(hit: &crate::retrieval::RetrievalHit) -> String {
+pub(super) fn hit_title(hit: &moa_retrieval::retrieval::RetrievalHit) -> String {
     hit.knowledge_chunk
         .as_ref()
         .and_then(|chunk| chunk.source_title.as_deref())
@@ -214,7 +218,7 @@ pub(super) fn hit_title(hit: &crate::retrieval::RetrievalHit) -> String {
 }
 
 /// Returns the prompt and lineage excerpt for a retrieved hit.
-pub(super) fn hit_excerpt(hit: &crate::retrieval::RetrievalHit) -> String {
+pub(super) fn hit_excerpt(hit: &moa_retrieval::retrieval::RetrievalHit) -> String {
     hit.knowledge_chunk
         .as_ref()
         .map(|chunk| chunk.text.trim())
@@ -239,7 +243,7 @@ const MATCHED_CLOSE: &str = "[/matched chunk]";
 /// expansion never exceeds it. Hits without a context window fall back to the
 /// plain [`hit_excerpt`].
 pub(super) fn hit_prompt_excerpt(
-    hit: &crate::retrieval::RetrievalHit,
+    hit: &moa_retrieval::retrieval::RetrievalHit,
     per_hit_budget: usize,
 ) -> String {
     let matched = hit_excerpt(hit);
@@ -253,7 +257,7 @@ pub(super) fn hit_prompt_excerpt(
 }
 
 fn stitch_context_window(
-    chunk: &crate::retrieval::KnowledgeChunkHydration,
+    chunk: &moa_retrieval::retrieval::KnowledgeChunkHydration,
     matched: &str,
     per_hit_budget: usize,
 ) -> String {
@@ -301,7 +305,7 @@ fn graph_hit_excerpt(row: &moa_memory_graph::NodeIndexRow) -> String {
     row.name.clone()
 }
 
-fn retrieval_legs(legs: crate::retrieval::LegSources) -> String {
+fn retrieval_legs(legs: moa_retrieval::retrieval::LegSources) -> String {
     let parts = retrieval_leg_values(legs);
     if parts.is_empty() {
         return "unknown".to_string();
@@ -310,7 +314,7 @@ fn retrieval_legs(legs: crate::retrieval::LegSources) -> String {
 }
 
 /// Converts retrieval leg flags into stable lineage values.
-pub(super) fn retrieval_leg_values(legs: crate::retrieval::LegSources) -> Vec<String> {
+pub(super) fn retrieval_leg_values(legs: moa_retrieval::retrieval::LegSources) -> Vec<String> {
     let mut parts = Vec::new();
     if legs.graph {
         parts.push("graph".to_string());
@@ -344,7 +348,7 @@ mod tests {
     use serde_json::Value;
     use uuid::Uuid;
 
-    use crate::retrieval::{
+    use moa_retrieval::retrieval::{
         KnowledgeChunkHydration, KnowledgeChunkWindowPart, LegSources, RetrievalHit, SourceTier,
     };
 

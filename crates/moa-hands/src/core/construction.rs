@@ -4,11 +4,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use moa_config::CloudHandsConfig;
+use moa_config::MoaConfig;
+use moa_config::ToolBudgetConfig;
+use moa_config::ToolOutputConfig;
 use moa_core::{
-    config::CloudHandsConfig, config::MoaConfig, config::ToolBudgetConfig,
-    config::ToolOutputConfig, error::MoaError, error::Result, traits::HandProvider,
-    traits::LineageHandle, traits::NullLineageHandle, traits::SessionStore,
-    types::hands::SandboxTier,
+    error::MoaError, error::Result, traits::HandProvider, traits::LineageHandle,
+    traits::NullLineageHandle, traits::SessionStore, types::hands::SandboxTier,
 };
 use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, EnvironmentCredentialVault, MCPCredentialProxy,
@@ -444,7 +446,9 @@ fn cloud_provider_requested(hands: &CloudHandsConfig, provider: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{config::CloudHandsConfig, config::MoaConfig, types::hands::SandboxTier};
+    use moa_config::CloudHandsConfig;
+    use moa_config::MoaConfig;
+    use moa_core::types::hands::SandboxTier;
 
     use super::{DEFAULT_PROVIDER_NAME, configured_hand_routes};
 

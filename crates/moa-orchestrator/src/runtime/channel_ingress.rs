@@ -15,8 +15,8 @@ use moa_core::{
     types::channel::OutboundMessage,
     types::channel::SessionChannelBindingResolution,
     types::identifiers::SessionId,
-    wire::turn::{CancelResponse, SessionProgress, SessionProgressRequest},
 };
+use moa_wire::turn::{CancelResponse, SessionProgress, SessionProgressRequest};
 use reqwest::Client;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -347,16 +347,12 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        types::channel::ChannelActor,
-        types::channel::ChannelCapabilities,
-        types::channel::ChannelRef,
-        types::channel::MessageId,
-        types::channel::SessionChannelBinding,
-        types::channel::SessionChannelBindingId,
-        types::contact::ContactId,
-        types::identifiers::TenantId,
-        wire::turn::{SessionSnapshot, TurnPhase, TurnProgress},
+        types::channel::ChannelActor, types::channel::ChannelCapabilities,
+        types::channel::ChannelRef, types::channel::MessageId,
+        types::channel::SessionChannelBinding, types::channel::SessionChannelBindingId,
+        types::contact::ContactId, types::identifiers::TenantId,
     };
+    use moa_wire::turn::{SessionSnapshot, TurnPhase, TurnProgress};
     use uuid::Uuid;
 
     use super::*;

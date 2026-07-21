@@ -1,9 +1,7 @@
 //! Progress and cancellation state helpers shared by turn workflows.
 
-use moa_core::{
-    types::execution_planning::{ExecutionRouteDecision, ExecutionRouteSummary},
-    wire::turn::{TurnPhase, TurnProgress},
-};
+use moa_core::types::execution_planning::{ExecutionRouteDecision, ExecutionRouteSummary};
+use moa_wire::turn::{TurnPhase, TurnProgress};
 use restate_sdk::prelude::*;
 
 use crate::turn::util::meaningful_cancel_reason;
@@ -202,7 +200,7 @@ pub(crate) async fn snapshot(
 
 #[cfg(test)]
 mod tests {
-    use moa_core::wire::turn::TurnPhase;
+    use moa_wire::turn::TurnPhase;
 
     use super::is_terminal_phase;
 

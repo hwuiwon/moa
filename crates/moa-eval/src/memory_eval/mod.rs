@@ -56,7 +56,7 @@ pub use metrics::{
     aggregate_retrieval_eval_from_diagnostic_counts, aggregate_retrieval_eval_with_diagnostics,
     aggregate_retrieval_eval_with_extraction_precision, candidates_from_retrieval_hits,
 };
-pub use moa_brain::retrieval::RankingConfig;
+pub use moa_retrieval::retrieval::RankingConfig;
 pub use moa_test_support::fixtures::{
     stable_uuid_from_label, tenant_id_from_label, tenant_id_from_storage_partition,
     tenant_id_from_storage_partition_id,

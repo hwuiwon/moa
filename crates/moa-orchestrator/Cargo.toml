@@ -52,7 +52,6 @@ blake3.workspace = true
 chrono.workspace = true
 chrono-tz = "0.10"
 clap.workspace = true
-clickhouse.workspace = true
 croner = "2.2"
 ed25519-dalek.workspace = true
 flate2 = "1"
@@ -63,10 +62,14 @@ moa-authz-schema.workspace = true
 moa-auth-providers.workspace = true
 moa-agents.workspace = true
 moa-analytics.workspace = true
+moa-analytics-export = { workspace = true }
 moa-artifacts.workspace = true
 moa-brain = { workspace = true, features = ["eval-harness"] }
+moa-retrieval = { workspace = true }
 moa-contacts = { workspace = true }
 moa-core = { workspace = true }
+moa-wire = { workspace = true }
+moa-config = { workspace = true }
 moa-crypto = { workspace = true }
 moa-dlp = { workspace = true }
 moa-kms = { workspace = true }
@@ -118,6 +121,7 @@ workspace-hack = { workspace = true }
 
 [dev-dependencies]
 clickhouse = { workspace = true, features = ["test-util"] }
+moa-analytics-export = { workspace = true }
 moa-eval-core.workspace = true
 moa-test-support = { workspace = true, features = ["orchestrator-fixture"] }
 serde_canonical_json.workspace = true

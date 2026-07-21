@@ -27,6 +27,7 @@ chrono.workspace = true
 moa-authz = { workspace = true, optional = true }
 moa-authz-schema = { workspace = true, optional = true }
 moa-core = { workspace = true }
+moa-wire = { workspace = true }
 moa-execution = { workspace = true, optional = true }
 moa-security = { workspace = true }
 moa-session = { workspace = true }

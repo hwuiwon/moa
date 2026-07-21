@@ -82,7 +82,7 @@ pub trait ExecutionRun {
 #[derive(Clone)]
 pub struct ExecutionRunImpl {
     repository: ExecutionRepository,
-    config: moa_core::config::ExecutionConfig,
+    config: moa_config::ExecutionConfig,
     planner_model: ModelId,
     router: Arc<ToolRouter>,
 }
@@ -92,7 +92,7 @@ impl ExecutionRunImpl {
     #[must_use]
     pub fn new(
         pool: sqlx::PgPool,
-        config: moa_core::config::ExecutionConfig,
+        config: moa_config::ExecutionConfig,
         planner_model: ModelId,
         router: Arc<ToolRouter>,
     ) -> Self {
@@ -516,7 +516,7 @@ struct PreparedAmendmentPlanning {
 
 struct AmendmentOperationContext {
     repository: ExecutionRepository,
-    config: moa_core::config::ExecutionConfig,
+    config: moa_config::ExecutionConfig,
     planner_model: ModelId,
     scope: ExecutionScope,
     request: ExecutionRunWorkflowRequest,
@@ -868,7 +868,7 @@ async fn drive_once(
     repository: ExecutionRepository,
     scope: ExecutionScope,
     request: ExecutionRunWorkflowRequest,
-    config: moa_core::config::ExecutionConfig,
+    config: moa_config::ExecutionConfig,
 ) -> Result<RunDriveStep, HandlerError> {
     let Some(snapshot) = repository
         .load_scheduling_snapshot(scope, request.run_uid)
@@ -1809,7 +1809,7 @@ mod tests {
             catalog: catalog.clone(),
             authorization: authorization.clone(),
             approved_budget: planning_budget.clone(),
-            config: moa_core::config::ExecutionConfig::default(),
+            config: moa_config::ExecutionConfig::default(),
             now: Utc::now(),
         });
         let compiled = compile_outcome.compiled.unwrap_or_else(|| {
@@ -1988,7 +1988,7 @@ mod tests {
                 evidence: prepared.evidence,
                 remaining_budget: prepared.remaining_budget,
                 planner_model: ModelId::new("scripted-confirmed-replan"),
-                config: moa_core::config::ExecutionConfig::default(),
+                config: moa_config::ExecutionConfig::default(),
                 now: prepared.now,
             },
         )
@@ -2020,7 +2020,7 @@ mod tests {
         };
         let applied = crate::services::execution::apply_amendment_for_test(
             pool.clone(),
-            moa_core::config::ExecutionConfig::default(),
+            moa_config::ExecutionConfig::default(),
             amendment_request.clone(),
         )
         .await
@@ -2034,7 +2034,7 @@ mod tests {
         );
         let replayed = crate::services::execution::apply_amendment_for_test(
             pool,
-            moa_core::config::ExecutionConfig::default(),
+            moa_config::ExecutionConfig::default(),
             amendment_request.clone(),
         )
         .await
@@ -2141,10 +2141,13 @@ mod tests {
             deliverables: Vec::new(),
             coverage: Vec::new(),
             constraints: Vec::new(),
+            // Both requirements are covered by the terminal output check so the
+            // linkage survives amendments that rename the prepare/output nodes
+            // (a node-referencing check would dangle after ReplacePendingNode).
             completion_checks: vec![CompletionCheck {
                 id: "check_output".to_string(),
                 description: "validate the repaired output".to_string(),
-                requirement_ids: vec!["req_report".to_string()],
+                requirement_ids: vec!["req_inputs".to_string(), "req_report".to_string()],
                 constraint_ids: Vec::new(),
                 kind: CompletionCheckKind::OutputSchema,
             }],
@@ -2405,7 +2408,7 @@ mod tests {
             catalog: persisted_source.catalog.clone(),
             authorization: persisted_source.authorization.clone(),
             approved_budget: persisted_source.budget.clone(),
-            config: moa_core::config::ExecutionConfig::default(),
+            config: moa_config::ExecutionConfig::default(),
             now: Utc::now(),
         });
         let compiled = compile_outcome.compiled.unwrap_or_else(|| {
@@ -2452,7 +2455,7 @@ mod tests {
             catalog: narrowed.catalog,
             authorization: narrowed.authorization,
             remaining_budget: replan_budget(1_000_000, 10),
-            config: moa_core::config::ExecutionConfig::default(),
+            config: moa_config::ExecutionConfig::default(),
             now: Utc::now(),
         };
         let mut unavailable_validation = validation.clone();

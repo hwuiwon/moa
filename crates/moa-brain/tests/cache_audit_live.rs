@@ -13,8 +13,9 @@ use moa_brain::{
     BrainTurnRequest, GraphMemoryPipelineOptions,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, error::Result, events::Event, traits::LLMProvider, traits::SessionStore,
+    error::Result, events::Event, traits::LLMProvider, traits::SessionStore,
     types::completion::CompletionRequest, types::completion::CompletionResponse,
     types::completion::CompletionStream, types::contact::ContactId, types::contact::ContactRef,
     types::contact::ContactVerificationState, types::contact::SessionActorRef,

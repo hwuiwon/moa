@@ -8,10 +8,9 @@ mod support;
 use std::sync::atomic::Ordering;
 
 use chrono::{Duration, Utc};
-use moa_core::{
-    config::MoaConfig, config::RecurrenceConfig, types::identifiers::TenantId,
-    types::segment_assessment::SegmentOutcome,
-};
+use moa_config::MoaConfig;
+use moa_config::RecurrenceConfig;
+use moa_core::{types::identifiers::TenantId, types::segment_assessment::SegmentOutcome};
 use moa_skills::distiller::{
     DispatchEvidence, DistillationOutcome, DistillationSkipReason,
     distill_skill_from_experience_with_learning,

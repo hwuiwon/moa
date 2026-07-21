@@ -10,13 +10,13 @@ use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::ArtifactRegistry;
 use moa_brain::learning::attribution::attributions_for_experience;
 use moa_brain::learning::experience::experience_from_assessment;
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, error::MoaError, events::Event, traits::LLMProvider,
-    traits::SessionStore as _, types::action_policy::ActionRuleScope, types::channel::Attachment,
-    types::channel::Channel, types::completion::CompletionContent,
-    types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::CompletionStream, types::completion::StopReason,
-    types::completion::TokenUsage, types::contact::SessionActorRef,
+    error::MoaError, events::Event, traits::LLMProvider, traits::SessionStore as _,
+    types::action_policy::ActionRuleScope, types::channel::Attachment, types::channel::Channel,
+    types::completion::CompletionContent, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::StopReason, types::completion::TokenUsage, types::contact::SessionActorRef,
     types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
     types::experience::LearningCandidateType, types::experience::LearningRiskClass,
     types::experience::TaskFingerprint, types::identifiers::ModelId, types::identifiers::SegmentId,

@@ -1,11 +1,9 @@
 //! Live session-signal handling for streamed turns.
 
-use moa_core::{
-    error::MoaError, error::Result, types::runtime_events::RuntimeEvent,
-    types::session::SessionSignal,
-};
+use moa_core::{error::MoaError, error::Result, types::session::SessionSignal};
 use tokio::sync::{broadcast, mpsc};
 
+use crate::runtime_events::RuntimeEvent;
 use crate::turn::StreamSignalDisposition;
 
 pub(super) fn handle_stream_signal(

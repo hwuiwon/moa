@@ -8,8 +8,10 @@ use moa_session::testing;
 use sqlx::Row;
 use uuid::Uuid;
 
-use moa_brain::retrieval::{LineageContext, RetrievalLineageHit, legs::write_retrieval_lineage};
 use moa_lineage_core::TurnId;
+use moa_retrieval::retrieval::{
+    LineageContext, RetrievalLineageHit, legs::write_retrieval_lineage,
+};
 
 #[tokio::test]
 async fn retrieval_lineage_rows_record_chunk_and_document_provenance_db_memory() {

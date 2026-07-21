@@ -1811,7 +1811,7 @@ async fn postgres_session_ids_are_native_uuid_and_concurrent_emits_are_serialize
 #[tokio::test]
 #[ignore]
 async fn postgres_connection_retry_surfaces_final_failure() {
-    let mut config = moa_core::config::MoaConfig::default();
+    let mut config = moa_config::MoaConfig::default();
     config.database.url = "postgres://127.0.0.1:1/moa_test".to_string();
     config.database.connect_timeout_seconds = 1;
     let error = match PostgresSessionStore::from_config(&config).await {

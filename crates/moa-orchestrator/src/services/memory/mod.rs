@@ -11,17 +11,17 @@ pub use scope::{UserScopeError, checked_ingest_contact_id, effective_user_id};
 pub use tools::OrchestratorMemoryRetrievalExecutor;
 
 use moa_authz_schema::Relation;
-use moa_core::config::MoaConfig;
+use moa_config::MoaConfig;
 use moa_core::traits::{Identity, SessionStore};
 use moa_core::types::identifiers::SessionId;
 use moa_core::types::session::SessionMeta;
-use moa_core::wire::memory::{
+use moa_crypto::KeyManagementProvider;
+use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_wire::memory::{
     MemoryIngestRequest, MemoryIngestResponse, MemoryRetrieveDebugRequest,
     MemoryRetrieveDebugResponse, MemorySearchRequest, MemorySearchResponse, MemoryShowRequest,
     MemoryShowResponse,
 };
-use moa_crypto::KeyManagementProvider;
-use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use std::sync::Arc;
 

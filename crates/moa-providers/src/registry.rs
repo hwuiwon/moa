@@ -3,10 +3,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
+use moa_config::MoaConfig;
+use moa_config::QueryRewriteConfig;
 use moa_core::types::provider::ProviderId;
 use moa_core::{
-    config::MoaConfig, config::QueryRewriteConfig, error::MoaError, traits::LLMProvider,
-    types::identifiers::ModelId, types::model::ModelCapabilities, types::provider::ModelTask,
+    error::MoaError, traits::LLMProvider, types::identifiers::ModelId,
+    types::model::ModelCapabilities, types::provider::ModelTask,
 };
 #[cfg(feature = "scripted-provider")]
 use moa_core::{
@@ -930,14 +932,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
+    use moa_config::QueryRewriteConfig;
     use moa_core::{
-        config::QueryRewriteConfig, traits::LLMProvider, types::completion::CompletionRequest,
+        traits::LLMProvider, types::completion::CompletionRequest,
         types::completion::CompletionResponse, types::completion::CompletionStream,
         types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
 
-    use moa_core::config::DeploymentProviderPolicyConfig;
+    use moa_config::DeploymentProviderPolicyConfig;
 
     use super::{ProviderFactory, ProviderId, ProviderRegistry, provider_descriptor};
     use crate::provider_policy::{DeploymentProviderPolicy, ProviderCapabilities};
@@ -1007,7 +1010,7 @@ mod tests {
     #[test]
     fn from_config_uses_configured_api_key() {
         // Pins: provider registry availability follows direct MoaConfig provider API keys.
-        let mut config = moa_core::config::MoaConfig::default();
+        let mut config = moa_config::MoaConfig::default();
         config.providers.openai.api_key = "test-key".to_string();
 
         let registry = ProviderRegistry::from_config(&config);
@@ -1151,7 +1154,7 @@ mod tests {
     fn failover_accepts_adjacent_tier_fallback() {
         // Pins: a within-one-tier fallback (fable-5 Frontier → opus-4-8 Flagship)
         // is accepted and wraps the primary provider.
-        let mut config = moa_core::config::MoaConfig::default();
+        let mut config = moa_config::MoaConfig::default();
         config.models.main = "claude-fable-5".to_string();
         config.models.fallback_models = vec!["claude-opus-4-8".to_string()];
         let registry = ProviderRegistry::with_static_providers(
@@ -1175,7 +1178,7 @@ mod tests {
     fn failover_rejects_two_tier_gap_naming_both_tiers() {
         // Pins: a fallback more than one tier from the primary (gpt-5.4 Flagship →
         // claude-haiku-4-5 Fast) is a hard config error at build time.
-        let mut config = moa_core::config::MoaConfig::default();
+        let mut config = moa_config::MoaConfig::default();
         config.models.main = "gpt-5.4".to_string();
         config.models.fallback_models = vec!["claude-haiku-4-5".to_string()];
         let registry = ProviderRegistry::with_static_providers(
@@ -1207,7 +1210,7 @@ mod tests {
     #[test]
     fn failover_rejects_fallback_absent_from_catalog() {
         // Pins: a fallback model that is not catalogued is a hard config error.
-        let mut config = moa_core::config::MoaConfig::default();
+        let mut config = moa_config::MoaConfig::default();
         config.models.main = "gpt-5.4".to_string();
         config.models.fallback_models = vec!["claude-imaginary-9".to_string()];
         let registry =
@@ -1362,7 +1365,7 @@ mod tests {
         // Pins: an operator's zero-retention assertion on a credential plus an
         // active policy in config produce a governed registry whose single gate
         // fails closed for the non-compliant provider but admits the compliant one.
-        let mut config = moa_core::config::MoaConfig::default();
+        let mut config = moa_config::MoaConfig::default();
         config.providers.openai.api_key = "openai-key".to_string();
         config.providers.anthropic.api_key = "anthropic-key".to_string();
         config.providers.anthropic.capabilities.zero_retention = true;

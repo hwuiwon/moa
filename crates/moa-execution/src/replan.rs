@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use moa_artifacts::execution_plan::{ExecutionBudgetLimit, PlanAmendment, PlanAmendmentOperation};
-use moa_core::config::ExecutionConfig;
+use moa_config::ExecutionConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::{

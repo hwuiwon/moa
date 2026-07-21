@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, traits::ContextProcessor, traits::EmbeddingProvider, traits::LLMProvider,
+    traits::ContextProcessor, traits::EmbeddingProvider, traits::LLMProvider,
     traits::LineageHandle, traits::SegmentStore, traits::SessionStore,
 };
 use moa_crypto::KeyManagementProvider;

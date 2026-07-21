@@ -3,14 +3,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::ctx::{
+    AuthDeps, LineageDeps, MemoryDeps, OrchestratorCtx, OrchestratorDeps, PersistenceDeps,
+    ProviderDeps, ToolDeps,
+};
 use anyhow::{Context as AnyhowContext, Result, bail};
 use moa_authz::{AwakeableResolver, FgaClient};
 use moa_brain::{
     build_graph_memory_retriever,
     pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector},
 };
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig,
     traits::{ChannelAdapter, EmbeddingProvider, RuntimeCacheStore},
     types::channel::Channel,
 };
@@ -25,18 +29,15 @@ use moa_session::PostgresSessionStore;
 use serde_json::Value;
 use sqlx::PgPool;
 
+use crate::services::{authz_challenges_reaper::HttpAwakeableResolver, scim::ScimState};
+
 use crate::{
     config::ProvidersOverride,
-    ctx::{
-        AuthDeps, LineageDeps, MemoryDeps, OrchestratorCtx, OrchestratorDeps, PersistenceDeps,
-        ProviderDeps, ToolDeps,
-    },
     lineage::{LineageSinkRuntime, build_lineage_sink},
     runtime::{
         jobs::{restate_ingress_base_url, start_authz_outbox_poller},
         kms::KmsRuntime,
     },
-    services::{authz_challenges_reaper::HttpAwakeableResolver, scim::ScimState},
 };
 
 /// Constructed dependencies shared by Restate handlers and process services.
@@ -462,11 +463,9 @@ fn build_fga_client(config: &MoaConfig) -> Result<FgaClient> {
 mod tests {
     use std::time::Duration;
 
-    use moa_core::{
-        config::MoaConfig,
-        config::{McpServerConfig, RuntimeCacheBackend, RuntimeCacheConfig},
-        traits::RuntimeCacheStore,
-    };
+    use moa_config::MoaConfig;
+    use moa_config::{McpServerConfig, RuntimeCacheBackend, RuntimeCacheConfig};
+    use moa_core::traits::RuntimeCacheStore;
 
     use super::{build_egress_pii_classifier, build_mcp_egress_guard, build_runtime_cache_store};
 

@@ -25,14 +25,14 @@ use chrono::{DateTime, Duration, Utc};
 use clickhouse::sql::Identifier;
 use clickhouse::{Client, Row};
 use moa_analytics::{AnalyticsClickHouseClient, AnalyticsService};
-use moa_core::config::ClickHouseConfig;
+use moa_analytics_export::AnalyticsExporter;
+use moa_config::ClickHouseConfig;
 use moa_core::types::identifiers::TenantId;
-use moa_core::wire::analytics::{
+use moa_wire::analytics::{
     AnalyticsAggregation, AnalyticsCell, AnalyticsDataset, AnalyticsDimension, AnalyticsFieldKind,
     AnalyticsFieldRole, AnalyticsFilter, AnalyticsFilterOperator, AnalyticsMeasure,
     AnalyticsOrderBy, AnalyticsQueryRequest, AnalyticsQueryResponse, AnalyticsSortDirection,
 };
-use moa_orchestrator::analytics_export::AnalyticsExporter;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
@@ -874,7 +874,7 @@ async fn execution_incremental_high_water_recovery_docker() -> TestResult<()> {
 fn role_fields(
     dataset: &AnalyticsDataset,
     role: AnalyticsFieldRole,
-) -> Vec<&moa_core::wire::analytics::AnalyticsField> {
+) -> Vec<&moa_wire::analytics::AnalyticsField> {
     dataset
         .fields
         .iter()

@@ -544,7 +544,7 @@ fn execution_planning_request(
         execution_template: None,
         durable_upgrade: None,
         planner_model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
-        config: moa_core::config::ExecutionConfig::default(),
+        config: moa_config::ExecutionConfig::default(),
         now: Utc::now(),
     }
 }
@@ -631,7 +631,7 @@ fn execution_amendment_planning_request()
             catalog: context.catalog.clone(),
             authorization: context.authorization.clone(),
             approved_budget: context.budget.clone(),
-            config: moa_core::config::ExecutionConfig::default(),
+            config: moa_config::ExecutionConfig::default(),
             now: Utc::now(),
         });
     let compiled = compile_outcome.compiled.unwrap_or_else(|| {
@@ -714,7 +714,7 @@ fn execution_amendment_planning_request()
         },
         remaining_budget: context.budget,
         planner_model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
-        config: moa_core::config::ExecutionConfig::default(),
+        config: moa_config::ExecutionConfig::default(),
         now: Utc::now(),
     }
 }

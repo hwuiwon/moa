@@ -7,17 +7,6 @@
 use std::sync::Arc;
 
 use moa_core::traits::EmbeddingProvider;
-use moa_core::wire::session_store::{
-    AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest,
-    AppendLearningCandidateRequest, CompleteSegmentRequest, CreateAgentSessionRequest,
-    CreateAgentSessionResponse, CreateSegmentRequest, GetEventsRequest,
-    GetLearningCandidateRequest, GetSegmentBaselineRequest, InitSessionVoRequest,
-    ListExperienceAttributionsRequest, ListExperienceRecordsRequest, ListLearningCandidatesRequest,
-    ListSessionsRequest, ListSkillResolutionRatesRequest, ListTaskStrategySuccessRatesRequest,
-    RecordSegmentSkillActivationRequest, RecordSegmentSkillUseRequest, RecordSegmentToolUseRequest,
-    RecordSegmentTurnUsageRequest, SearchEventsRequest, TenantCostSinceRequest,
-    UpdateLearningCandidateStatusRequest, UpdateSegmentAssessmentRequest, UpdateStatusRequest,
-};
 use moa_core::{
     events::Event, traits::SessionStore as CoreSessionStore, types::events_stream::EventRecord,
     types::experience::ExperienceAttribution, types::experience::ExperienceRecord,
@@ -28,6 +17,17 @@ use moa_core::{
 };
 use moa_observability::record_session_error;
 use moa_session::PostgresSessionStore;
+use moa_wire::session_store::{
+    AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest,
+    AppendLearningCandidateRequest, CompleteSegmentRequest, CreateAgentSessionRequest,
+    CreateAgentSessionResponse, CreateSegmentRequest, GetEventsRequest,
+    GetLearningCandidateRequest, GetSegmentBaselineRequest, InitSessionVoRequest,
+    ListExperienceAttributionsRequest, ListExperienceRecordsRequest, ListLearningCandidatesRequest,
+    ListSessionsRequest, ListSkillResolutionRatesRequest, ListTaskStrategySuccessRatesRequest,
+    RecordSegmentSkillActivationRequest, RecordSegmentSkillUseRequest, RecordSegmentToolUseRequest,
+    RecordSegmentTurnUsageRequest, SearchEventsRequest, TenantCostSinceRequest,
+    UpdateLearningCandidateStatusRequest, UpdateSegmentAssessmentRequest, UpdateStatusRequest,
+};
 use restate_sdk::prelude::*;
 use sqlx::PgPool;
 
@@ -208,7 +208,7 @@ pub trait RestateSessionStore {
 pub struct SessionStoreImpl {
     store: Arc<PostgresSessionStore>,
     pool: PgPool,
-    config: Arc<moa_core::config::MoaConfig>,
+    config: Arc<moa_config::MoaConfig>,
     /// Tenant embedder reused for the learning-embeddings backfill cron. `None`
     /// when the configured vector embedder is disabled or its credential is
     /// missing; the backfill handler then no-ops so a deployment without
@@ -222,7 +222,7 @@ impl SessionStoreImpl {
     pub fn new(
         store: Arc<PostgresSessionStore>,
         pool: PgPool,
-        config: Arc<moa_core::config::MoaConfig>,
+        config: Arc<moa_config::MoaConfig>,
     ) -> Self {
         let embedder = build_learning_embedder(&config);
         Self {
@@ -241,9 +241,7 @@ impl SessionStoreImpl {
 /// space with memory. A disabled selector or a missing credential is not a
 /// startup error here: it disables the backfill and logs a warning, matching how
 /// semantic memory search degrades when the embedder is unavailable.
-fn build_learning_embedder(
-    config: &moa_core::config::MoaConfig,
-) -> Option<Arc<dyn EmbeddingProvider>> {
+fn build_learning_embedder(config: &moa_config::MoaConfig) -> Option<Arc<dyn EmbeddingProvider>> {
     match moa_providers::embedding::build_embedder_from_config(
         config,
         moa_providers::EmbedderConstructionRole::Ingestion,

@@ -6,8 +6,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_brain::pipeline::memory::GraphMemoryRetriever;
-use moa_brain::planning::{PlannedQuery, Strategy};
-use moa_brain::retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest};
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
@@ -37,6 +35,8 @@ use moa_memory_vector::{
     PgvectorStore, PromotionOptions, TurbopufferStore, VECTOR_DIMENSION, VectorPartitionPromotion,
     VectorStore,
 };
+use moa_retrieval::planning::{PlannedQuery, Strategy};
+use moa_retrieval::retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest};
 use moa_session::testing;
 use secrecy::SecretString;
 use serde_json::{Value, json};
@@ -892,11 +892,11 @@ async fn await_data_access_event(pool: &PgPool, tenant_id: TenantId) -> DataAcce
 /// deterministic mock embedder whose cosine scores are not on that scale, so the
 /// tenant-knowledge chunk (vector-only, not graph-admitted) would abstain out of
 /// the window even though it matches. Abstention is pinned directly in the
-/// `moa_brain::retrieval::hybrid` unit tests; disabling it here keeps this test
+/// `moa_retrieval::retrieval::hybrid` unit tests; disabling it here keeps this test
 /// focused on its actual invariant — the tenant-knowledge/current-contact
 /// admission and cross-contact/operator-memory privacy boundaries.
-fn abstention_disabled_config() -> moa_core::config::MoaConfig {
-    let mut config = moa_core::config::MoaConfig::default();
+fn abstention_disabled_config() -> moa_config::MoaConfig {
+    let mut config = moa_config::MoaConfig::default();
     config
         .memory
         .retrieval
@@ -1188,7 +1188,7 @@ fn tenant_chunk_request(tenant_id: TenantId, query: &str) -> RetrievalRequest {
         lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
-        window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+        window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
     }
 }
 
@@ -1197,7 +1197,7 @@ fn tenant_memory_scope(tenant_id: TenantId) -> MemoryScope {
 }
 
 fn knowledge_text(
-    hits: &[moa_brain::retrieval::RetrievalHit],
+    hits: &[moa_retrieval::retrieval::RetrievalHit],
     graph_node_uid: Uuid,
 ) -> Option<&str> {
     hits.iter()

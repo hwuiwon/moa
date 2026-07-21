@@ -9,10 +9,6 @@ use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, StoredArtifactRevision};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::experiments::{
-    AgentRevisionSimulationVariant, ExperimentRunStatusRequest, ExperimentRunStatusResponse,
-};
-use moa_core::wire::turn::QueueMessageRequest;
 use moa_core::{
     traits::SessionStore, types::action_policy::ActionRuleScope,
     types::agent::AgentSessionSelection, types::channel::Channel, types::contact::SessionActorRef,
@@ -28,6 +24,10 @@ use moa_experiments::store::ExperimentStore;
 use moa_observability::record_experiment_run;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_session::PostgresSessionStore;
+use moa_wire::experiments::{
+    AgentRevisionSimulationVariant, ExperimentRunStatusRequest, ExperimentRunStatusResponse,
+};
+use moa_wire::turn::QueueMessageRequest;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

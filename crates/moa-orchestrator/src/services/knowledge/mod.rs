@@ -17,27 +17,11 @@ use std::{
 
 use async_trait::async_trait;
 use moa_authz_schema::Relation;
+use moa_config::MoaConfig;
 use moa_core::types::memory::RlsContext;
 use moa_core::{
-    config::MoaConfig,
-    error::MoaError,
-    traits::CredentialVault,
-    types::identifiers::TenantId,
+    error::MoaError, traits::CredentialVault, types::identifiers::TenantId,
     types::model::Credential,
-    wire::knowledge::{
-        KnowledgeConnectionListRequest, KnowledgeConnectionListResponse,
-        KnowledgeCreateLinkTokenRequest, KnowledgeCreateLinkTokenResponse,
-        KnowledgeDisconnectConnectionRequest, KnowledgeDisconnectConnectionResponse,
-        KnowledgeExchangeTokenRequest, KnowledgeExchangeTokenResponse,
-        KnowledgeIntegrationListRequest, KnowledgeIntegrationListResponse,
-        KnowledgeObjectInspectRequest, KnowledgeObjectInspectResponse, KnowledgeObjectListRequest,
-        KnowledgeObjectListResponse, KnowledgeProviderWebhookRequest,
-        KnowledgeProviderWebhookResponse, KnowledgeQueryTraceRequest, KnowledgeQueryTraceResponse,
-        KnowledgeSyncEventsRequest, KnowledgeSyncEventsResponse, KnowledgeSyncRequest,
-        KnowledgeSyncResponse, KnowledgeSyncStatusRequest, KnowledgeSyncStatusResponse,
-        KnowledgeUpdateConnectionSourceSelectionRequest,
-        KnowledgeUpdateConnectionSourceSelectionResponse,
-    },
 };
 use moa_knowledge::{
     domain::{KnowledgeConnection, LinkedAccount},
@@ -48,14 +32,25 @@ use moa_knowledge::{
     },
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_wire::knowledge::{
+    KnowledgeConnectionListRequest, KnowledgeConnectionListResponse,
+    KnowledgeCreateLinkTokenRequest, KnowledgeCreateLinkTokenResponse,
+    KnowledgeDisconnectConnectionRequest, KnowledgeDisconnectConnectionResponse,
+    KnowledgeExchangeTokenRequest, KnowledgeExchangeTokenResponse, KnowledgeIntegrationListRequest,
+    KnowledgeIntegrationListResponse, KnowledgeObjectInspectRequest,
+    KnowledgeObjectInspectResponse, KnowledgeObjectListRequest, KnowledgeObjectListResponse,
+    KnowledgeProviderWebhookRequest, KnowledgeProviderWebhookResponse, KnowledgeQueryTraceRequest,
+    KnowledgeQueryTraceResponse, KnowledgeSyncEventsRequest, KnowledgeSyncEventsResponse,
+    KnowledgeSyncRequest, KnowledgeSyncResponse, KnowledgeSyncStatusRequest,
+    KnowledgeSyncStatusResponse, KnowledgeUpdateConnectionSourceSelectionRequest,
+    KnowledgeUpdateConnectionSourceSelectionResponse,
+};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
-use crate::{
-    ctx::RequestHeaders,
-    workflows::knowledge_sync_ingestion::{
-        KnowledgeSyncIngestionClient, KnowledgeSyncIngestionRequest,
-    },
+use crate::ctx::RequestHeaders;
+use crate::workflows::knowledge_sync_ingestion::{
+    KnowledgeSyncIngestionClient, KnowledgeSyncIngestionRequest,
 };
 
 use self::webhook_verifier::LinkedProviderWebhookVerifier;
@@ -874,12 +869,12 @@ fn parse_credential_ref(value: &str) -> Option<(String, String)> {
 /// Config-backed production provider resolver used by services and internal workflows.
 #[derive(Clone)]
 pub(crate) struct ConfigKnowledgeProviders {
-    config: moa_core::config::KnowledgeConfig,
+    config: moa_config::KnowledgeConfig,
 }
 
 impl ConfigKnowledgeProviders {
     /// Builds a provider resolver from tenant knowledge configuration.
-    pub(crate) fn new(config: moa_core::config::KnowledgeConfig) -> Self {
+    pub(crate) fn new(config: moa_config::KnowledgeConfig) -> Self {
         Self { config }
     }
 }
@@ -895,7 +890,7 @@ impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
                 let mut implementation =
                     NangoProvider::new(self.config.nango.api_base_url.clone(), api_key)?;
                 if let Some(signing_key) =
-                    moa_core::config::optional_config_secret(&self.config.nango.webhook_signing_key)
+                    moa_config::optional_config_secret(&self.config.nango.webhook_signing_key)
                 {
                     implementation = implementation.with_webhook_signing_key(signing_key);
                 }
@@ -905,9 +900,9 @@ impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
                 let api_key = self.config.selected_provider_api_key(provider)?;
                 let mut implementation =
                     MergeProvider::new(self.config.merge.api_base_url.clone(), api_key)?;
-                if let Some(signature_key) = moa_core::config::optional_config_secret(
-                    &self.config.merge.webhook_signature_key,
-                ) {
+                if let Some(signature_key) =
+                    moa_config::optional_config_secret(&self.config.merge.webhook_signature_key)
+                {
                     implementation = implementation.with_webhook_signature_key(signature_key);
                 }
                 Ok(Arc::new(implementation))
@@ -953,14 +948,12 @@ impl ConfigKnowledgeProviders {
         }
         let (signing_key, header_name, header_value) = match provider {
             "llamaparse" => (
-                moa_core::config::optional_config_secret(
-                    &self.config.llamaparse.webhook_signing_key,
-                ),
+                moa_config::optional_config_secret(&self.config.llamaparse.webhook_signing_key),
                 self.config.llamaparse.webhook_header_name.clone(),
                 self.config.llamaparse.webhook_header_value.clone(),
             ),
             "reducto" => (
-                moa_core::config::optional_config_secret(&self.config.reducto.webhook_signing_key),
+                moa_config::optional_config_secret(&self.config.reducto.webhook_signing_key),
                 self.config.reducto.webhook_header_name.clone(),
                 self.config.reducto.webhook_header_value.clone(),
             ),

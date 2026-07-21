@@ -965,7 +965,7 @@ impl RestateSessionStore for SessionStoreImpl {
 /// stays in `moa-skills`; only the reads happen here.
 async fn discover_recurrence_dispatches(
     store: &moa_session::PostgresSessionStore,
-    config: &moa_core::config::RecurrenceConfig,
+    config: &moa_config::RecurrenceConfig,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<crate::workflows::skill_learning::RunSkillLearningRequest>, moa_core::error::MoaError>
 {

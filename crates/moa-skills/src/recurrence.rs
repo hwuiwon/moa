@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::config::RecurrenceConfig;
+use moa_config::RecurrenceConfig;
 use moa_core::types::experience::LearningCandidateStatus;
 use moa_core::types::segment_assessment::SegmentOutcome;
 use moa_session::{

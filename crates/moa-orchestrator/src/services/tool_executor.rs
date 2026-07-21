@@ -5,8 +5,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::traits::SessionRepository;
-use moa_core::wire::session_store::AppendEventRequest;
-use moa_core::wire::tools::{ToolDescriptor, tool_descriptor};
 use moa_core::{
     error::MoaError, error::ToolFailureClass, events::Event, events::EventType,
     types::action_policy::ExecutionTaskOrigin, types::completion::ToolInvocation,
@@ -19,6 +17,8 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use moa_observability::record_tool_idempotency_scan;
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
+use moa_wire::session_store::AppendEventRequest;
+use moa_wire::tools::{ToolDescriptor, tool_descriptor};
 use restate_sdk::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -961,35 +961,19 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
+    use moa_config::{McpServerConfig, McpTransportConfig, MoaConfig};
     use moa_core::{
-        config::{McpServerConfig, McpTransportConfig, MoaConfig},
-        events::Event,
-        events::EventType,
-        traits::HandProvider,
-        types::action_policy::ExecutionTaskOrigin,
-        types::action_policy::RiskLevel,
-        types::agent::AgentContext,
-        types::agent::AgentPolicySnapshot,
-        types::agent::AgentToolPolicy,
-        types::agent::AgentToolPolicyMode,
-        types::events_stream::EventRecord,
-        types::hands::HandHandle,
-        types::hands::HandSpec,
-        types::hands::HandStatus,
-        types::hands::SandboxFile,
-        types::hands::SandboxTier,
-        types::identifiers::SessionId,
-        types::identifiers::TenantId,
-        types::identifiers::ToolCallId,
-        types::security::SensitivityClass,
-        types::session::SessionMeta,
-        types::tools::IdempotencyClass,
-        types::tools::ToolCallRequest,
-        types::tools::ToolDiffStrategy,
-        types::tools::ToolInputShape,
-        types::tools::ToolOutput,
-        types::tools::ToolPolicySpec,
-        types::tools::TrustedSandboxFileEntry,
+        events::Event, events::EventType, traits::HandProvider,
+        types::action_policy::ExecutionTaskOrigin, types::action_policy::RiskLevel,
+        types::agent::AgentContext, types::agent::AgentPolicySnapshot,
+        types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode,
+        types::events_stream::EventRecord, types::hands::HandHandle, types::hands::HandSpec,
+        types::hands::HandStatus, types::hands::SandboxFile, types::hands::SandboxTier,
+        types::identifiers::SessionId, types::identifiers::TenantId,
+        types::identifiers::ToolCallId, types::security::SensitivityClass,
+        types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::ToolCallRequest,
+        types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolOutput,
+        types::tools::ToolPolicySpec, types::tools::TrustedSandboxFileEntry,
         types::tools::TrustedSandboxFileManifestRef,
     };
     use moa_hands::{HandRoute, ToolRegistry, ToolRouter};

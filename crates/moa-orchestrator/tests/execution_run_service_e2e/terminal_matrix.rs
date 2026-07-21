@@ -16,8 +16,8 @@ use moa_artifacts::execution_plan::{
     GeneratedAmendmentCandidate, GeneratedExecutionCandidate, PlanAmendment,
     PlanAmendmentOperation, RetryPolicy,
 };
+use moa_config::ExecutionConfig;
 use moa_core::{
-    config::ExecutionConfig,
     events::Event,
     types::{
         contact::SessionActorRef,
@@ -29,7 +29,6 @@ use moa_core::{
         identifiers::{SessionId, TenantId, UserId},
         session::SessionStatus,
     },
-    wire::turn::{TurnOutcomeKind, TurnPhase, TurnProgress},
 };
 use moa_execution::{
     capability::{
@@ -61,6 +60,7 @@ use moa_test_support::{
     FixtureCapabilityOptions, FixtureCapabilityOutcome, FixtureCapabilityTool,
     OrchestratorTestFixture, TestApiClient,
 };
+use moa_wire::turn::{TurnOutcomeKind, TurnPhase, TurnProgress};
 use serde_json::{Value, json};
 
 use crate::execution_execution_support::assertions::{
@@ -1694,7 +1694,13 @@ fn terminal_blueprint() -> Result<RunBlueprint> {
             deliverables: Vec::new(),
             coverage: Vec::new(),
             constraints: Vec::new(),
-            completion_checks: Vec::new(),
+            completion_checks: vec![CompletionCheck {
+                id: "terminal_output_schema".to_string(),
+                description: "terminal output satisfies its declared schema".to_string(),
+                requirement_ids: vec![REQ_USEFUL.to_string(), REQ_REMAINING.to_string()],
+                constraint_ids: Vec::new(),
+                kind: CompletionCheckKind::OutputSchema,
+            }],
         },
         plan: ExecutionPlanDefinition {
             schema_version: 1,
@@ -2063,6 +2069,15 @@ fn replan_goal(objective: &str) -> ExecutionGoalContract {
             description: "establish one completed dependency before replanning".to_string(),
         },
     );
+    goal.completion_checks.push(CompletionCheck {
+        id: "setup_seed".to_string(),
+        description: "the seed dependency completed before replanning".to_string(),
+        requirement_ids: vec!["setup".to_string()],
+        constraint_ids: Vec::new(),
+        kind: CompletionCheckKind::RequiredNodes {
+            node_ids: vec!["seed".to_string()],
+        },
+    });
     goal
 }
 

@@ -6,6 +6,7 @@ mod clickhouse;
 mod error;
 mod fjall_journal;
 mod mpsc_sink;
+pub mod otel;
 mod schema;
 mod store;
 mod writer;

@@ -10,14 +10,14 @@ use std::sync::Arc;
 use moa_core::{
     error::MoaError, error::Result, traits::Identity, traits::LLMProvider, traits::LineageHandle,
     traits::NullLineageHandle, traits::SessionStore, types::events_stream::EventRecord,
-    types::identifiers::SessionId, types::runtime_events::RuntimeEvent,
-    types::session::SessionSignal,
+    types::identifiers::SessionId, types::session::SessionSignal,
 };
 use moa_hands::ToolRouter;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::pipeline::ContextPipeline;
+use crate::runtime_events::RuntimeEvent;
 
 /// Outcome of a single buffered brain turn.
 #[derive(Debug, Clone, PartialEq, Eq)]

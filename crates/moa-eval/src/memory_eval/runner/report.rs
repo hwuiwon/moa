@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use moa_brain::retrieval::{GraphCandidateCounts, GraphRetrievalPolicy};
+use moa_retrieval::retrieval::{GraphCandidateCounts, GraphRetrievalPolicy};
 use moa_memory_lifecycle::ConsolidationOutcome;
 use serde::{Deserialize, Serialize};
 

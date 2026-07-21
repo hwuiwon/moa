@@ -6,7 +6,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::wire::tenants::{
+use moa_wire::tenants::{
     TenantPurgeRequest, TenantPurgeStatus, TenantPurgeStatusRequest, TenantPurgeStatusResponse,
     tenant_id_from_purge_operation_id, tenant_purge_operation_id,
 };

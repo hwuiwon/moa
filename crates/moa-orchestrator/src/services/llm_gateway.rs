@@ -4,8 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use moa_core::config::SessionLimitsConfig;
-use moa_core::wire::session_store::AppendEventRequest;
+use moa_config::SessionLimitsConfig;
 use moa_core::{
     events::Event, types::completion::CompletionRequest, types::completion::CompletionResponse,
     types::completion::DEFER_BRAIN_RESPONSE_METADATA_KEY, types::completion::TokenUsage,
@@ -17,6 +16,7 @@ use moa_core::{
 use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_observability::record_llm_cost_cents;
 use moa_providers::ProviderRegistry;
+use moa_wire::session_store::AppendEventRequest;
 use restate_sdk::prelude::*;
 use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt;

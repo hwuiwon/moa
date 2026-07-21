@@ -5,13 +5,12 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
+use moa_config::MoaConfig;
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
-    config::MoaConfig, traits::EmbeddingProvider, types::contact::ContactId,
-    types::identifiers::SessionId, types::identifiers::StoragePartitionId,
-    types::identifiers::TenantId,
+    traits::EmbeddingProvider, types::contact::ContactId, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
 };
 use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_db::ScopedConn;
@@ -22,6 +21,7 @@ use moa_memory_vector::{
     PgvectorStore, PromotionOptions, TurbopufferStore, VectorPartitionPromotion, finalize_promotion,
 };
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
+use moa_retrieval::retrieval::{HybridRetriever, RetrievalRequest};
 use moa_session::testing;
 use uuid::Uuid;
 
@@ -204,7 +204,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
-        window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+        window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
     };
 
     let dual_read_hits = retriever.retrieve(req.clone()).await?;
@@ -261,7 +261,10 @@ async fn seed_workspace_embedder_state(
     Ok(())
 }
 
-fn assert_contains_artemis_core_stage(hits: &[moa_brain::retrieval::RetrievalHit], phase: &str) {
+fn assert_contains_artemis_core_stage(
+    hits: &[moa_retrieval::retrieval::RetrievalHit],
+    phase: &str,
+) {
     let rendered = hits
         .iter()
         .map(|hit| {

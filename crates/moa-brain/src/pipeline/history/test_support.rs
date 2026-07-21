@@ -5,8 +5,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_config::CompactionConfig;
+use moa_config::ContextSnapshotConfig;
+use moa_config::ToolOutputConfig;
 use moa_core::{
-    config::CompactionConfig, config::ContextSnapshotConfig, config::ToolOutputConfig,
     error::Result, events::Event, traits::LLMProvider, traits::SessionStore,
     types::channel::Channel, types::completion::CompletionContent,
     types::completion::CompletionRequest, types::completion::CompletionResponse,
@@ -29,12 +31,13 @@ pub(crate) mod prelude {
     pub(crate) use std::time::Duration;
 
     pub(crate) use chrono::Utc;
+    pub(crate) use moa_config::CompactionConfig;
+    pub(crate) use moa_config::ToolOutputConfig;
     pub(crate) use moa_core::{
-        config::CompactionConfig, config::ToolOutputConfig, events::Event,
-        traits::ContextProcessor, traits::SessionStore, types::context::ContextMessage,
-        types::context::WorkingContext, types::events_stream::EventRange,
-        types::events_stream::EventRecord, types::identifiers::ModelId,
-        types::identifiers::ToolCallId, types::session::SessionMeta,
+        events::Event, traits::ContextProcessor, traits::SessionStore,
+        types::context::ContextMessage, types::context::WorkingContext,
+        types::events_stream::EventRange, types::events_stream::EventRecord,
+        types::identifiers::ModelId, types::identifiers::ToolCallId, types::session::SessionMeta,
         types::snapshot::CONTEXT_SNAPSHOT_FORMAT_VERSION, types::snapshot::ContextSnapshot,
         types::snapshot::FileReadDedupState, types::tools::ToolContent, types::tools::ToolOutput,
     };

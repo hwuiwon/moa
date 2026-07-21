@@ -5,7 +5,7 @@ use moa_auth_providers::oauth_as::{
     AuthorizationDecision, AuthorizationRequest, AuthorizationSubject, CodeExchangeRequest,
     OAuthServer,
 };
-use moa_core::config::{OAuthClientConfig, OAuthClientType, OAuthServerConfig};
+use moa_config::{OAuthClientConfig, OAuthClientType, OAuthServerConfig};
 use moa_core::traits::{AuthError, IdentityType};
 use moa_core::types::identifiers::TenantId;
 use secrecy::{ExposeSecret, SecretString};

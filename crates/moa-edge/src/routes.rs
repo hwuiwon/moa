@@ -14,9 +14,10 @@ use chrono::{DateTime, Utc};
 use moa_auth_providers::oauth_access_token::AuthenticatedPrincipal;
 use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
+use moa_config::MoaConfig;
 use moa_core::traits::{AuthProvider, Credential, Identity};
 use moa_core::{
-    config::MoaConfig, error::MoaError, traits::SessionAttachmentStore,
+    error::MoaError, traits::SessionAttachmentStore,
     types::contact::ContactSessionAuthorizationRequest,
     types::contact::ContactSessionAuthorizationResponse,
     types::contact::ContactSessionMessageResponse, types::identifiers::SessionAttachmentId,

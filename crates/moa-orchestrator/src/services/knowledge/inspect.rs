@@ -3,15 +3,15 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use moa_core::wire::knowledge::{
-    KnowledgeObjectChunkInspectView, KnowledgeObjectInspectRequest, KnowledgeObjectInspectResponse,
-    KnowledgeObjectListRequest, KnowledgeObjectListResponse, KnowledgeQueryTraceHit,
-    KnowledgeQueryTraceRequest, KnowledgeQueryTraceResponse, KnowledgeQueryTraceStage,
-};
 use moa_core::{error::MoaError, types::identifiers::StoragePartitionId};
 use moa_knowledge::normalize::redact_provider_metadata;
 use moa_lineage_core::{LineageEvent, RecordKind, RetrievalLineage};
 use moa_observability::{record_knowledge_retrieval_duration, record_knowledge_retrieval_hits};
+use moa_wire::knowledge::{
+    KnowledgeObjectChunkInspectView, KnowledgeObjectInspectRequest, KnowledgeObjectInspectResponse,
+    KnowledgeObjectListRequest, KnowledgeObjectListResponse, KnowledgeQueryTraceHit,
+    KnowledgeQueryTraceRequest, KnowledgeQueryTraceResponse, KnowledgeQueryTraceStage,
+};
 use serde_json::{Value, json};
 use sqlx::Row;
 

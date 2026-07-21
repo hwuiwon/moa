@@ -8,7 +8,6 @@ use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::ArtifactRegistry;
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::turn::{QueueMessageRequest, TurnOutcome, TurnOutcomeKind};
 use moa_core::{
     events::Event, events::EventType, traits::SessionStore, types::action_policy::ActionRuleScope,
     types::agent::AgentSessionSelection, types::channel::Channel,
@@ -30,6 +29,7 @@ use moa_observability::{
 };
 use moa_providers::ProviderRegistry;
 use moa_session::PostgresSessionStore;
+use moa_wire::turn::{QueueMessageRequest, TurnOutcome, TurnOutcomeKind};
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

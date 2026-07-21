@@ -6,9 +6,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
-use moa_core::{
-    config::MessagingConfig, error::MoaError, traits::CredentialVault, types::model::Credential,
-};
+use moa_config::MessagingConfig;
+use moa_core::{error::MoaError, traits::CredentialVault, types::model::Credential};
 use moa_messaging::{
     TWILIO_ACCOUNT_SID_SERVICE, TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SID_SERVICE,
     TWILIO_MESSAGING_SERVICE_SID_SERVICE, TwilioSmsClient, TwilioSmsFailureClass, TwilioSmsMessage,

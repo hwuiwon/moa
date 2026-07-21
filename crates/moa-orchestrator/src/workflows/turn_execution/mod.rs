@@ -30,12 +30,6 @@ use moa_brain::execution_planning::{
 use moa_brain::lineage::emit_generation_lineage;
 use moa_brain::pipeline::skills::SELECTED_SKILL_NAMES_METADATA_KEY;
 use moa_brain::segment_assessment::AssessmentOverride;
-use moa_core::wire::session_store::{
-    AppendEventRequest, RecordSegmentSkillActivationRequest, RecordSegmentTurnUsageRequest,
-};
-use moa_core::wire::turn::{
-    RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress, TurnTrigger,
-};
 use moa_core::{
     coordination_counters::CoordinationCounters,
     coordination_counters::scope_coordination_counters,
@@ -73,6 +67,12 @@ use moa_observability::restate_observability::{
 use moa_observability::{
     TurnLatencyCounters, record_session_error, record_turn_latency, record_turn_llm_call_duration,
     scope_turn_latency_counters,
+};
+use moa_wire::session_store::{
+    AppendEventRequest, RecordSegmentSkillActivationRequest, RecordSegmentTurnUsageRequest,
+};
+use moa_wire::turn::{
+    RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress, TurnTrigger,
 };
 use restate_sdk::prelude::*;
 use tracing::Instrument;

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::{Deref, DerefMut};
 
-use moa_brain::retrieval::{
+use moa_retrieval::retrieval::{
     GraphPathTrace, GraphRetrievalDiagnostics, GraphSeedSource, LegSources, LexicalBackend,
     RetrievalHit,
 };
@@ -719,7 +719,7 @@ pub fn candidates_from_retrieval_hits(
     equivalent_fact_ids_by_uid: &HashMap<Uuid, Vec<String>>,
     query_text: &str,
 ) -> Vec<RetrievedCandidate> {
-    let query_tokens = moa_brain::retrieval::ranking::normalize_tokens(query_text);
+    let query_tokens = moa_retrieval::retrieval::ranking::normalize_tokens(query_text);
     hits.iter()
         .enumerate()
         .map(|(index, hit)| {
@@ -727,9 +727,9 @@ pub fn candidates_from_retrieval_hits(
             let lexical_evidence = if let Some(chunk) = &hit.knowledge_chunk {
                 let mut node = hit.node.clone();
                 node.name.clone_from(&chunk.text);
-                moa_brain::retrieval::ranking::FeatureRanker::evidence(&query_tokens, &node)
+                moa_retrieval::retrieval::ranking::FeatureRanker::evidence(&query_tokens, &node)
             } else {
-                moa_brain::retrieval::ranking::FeatureRanker::evidence(&query_tokens, &hit.node)
+                moa_retrieval::retrieval::ranking::FeatureRanker::evidence(&query_tokens, &hit.node)
             };
             RetrievedCandidate {
                 uid: hit.uid,

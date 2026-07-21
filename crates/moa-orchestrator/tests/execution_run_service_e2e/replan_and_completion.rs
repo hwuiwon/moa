@@ -7,7 +7,7 @@ use moa_artifacts::execution_plan::{
     ExecutionPlanDefinition, ExecutionReference, ExecutionRequirement, ExecutionTaskResult,
     GeneratedAmendmentCandidate, MapTask, PlanAmendment, PlanAmendmentOperation, RetryPolicy,
 };
-use moa_core::config::ExecutionConfig;
+use moa_config::ExecutionConfig;
 use moa_core::events::Event;
 use moa_eval::execution::ExecutionInvariantSpec;
 use moa_execution::capability::{
@@ -1585,7 +1585,7 @@ async fn assert_valid_amendment(
         catalog: snapshot.catalog,
         authorization: snapshot.authorization,
         remaining_budget,
-        config: moa_core::config::ExecutionConfig::default(),
+        config: moa_config::ExecutionConfig::default(),
         now: chrono::Utc::now(),
     });
     if validated.plan.is_none() {
@@ -1744,13 +1744,16 @@ fn useful_replan_contract(
             deliverables: Vec::new(),
             coverage: Vec::new(),
             constraints: Vec::new(),
-            completion_checks: vec![CompletionCheck {
-                id: "useful_output_schema".to_string(),
-                description: "the useful output retains its exact schema".to_string(),
-                requirement_ids: vec![USEFUL_OUTPUT_REQUIREMENT.to_string()],
-                constraint_ids: Vec::new(),
-                kind: CompletionCheckKind::OutputSchema,
-            }],
+            completion_checks: vec![
+                CompletionCheck {
+                    id: "useful_output_schema".to_string(),
+                    description: "the useful output retains its exact schema".to_string(),
+                    requirement_ids: vec![USEFUL_OUTPUT_REQUIREMENT.to_string()],
+                    constraint_ids: Vec::new(),
+                    kind: CompletionCheckKind::OutputSchema,
+                },
+                output_schema_check("repair_output_schema", REPAIR_REQUIREMENT),
+            ],
         },
         ExecutionPlanDefinition {
             schema_version: 1,
@@ -2139,6 +2142,24 @@ fn declared_contradiction_contract() -> (ExecutionGoalContract, ExecutionPlanDef
             coverage: Vec::new(),
             constraints: Vec::new(),
             completion_checks: vec![
+                CompletionCheck {
+                    id: "source_a_check".to_string(),
+                    description: "the first source position was collected".to_string(),
+                    requirement_ids: vec!["source_a".to_string()],
+                    constraint_ids: Vec::new(),
+                    kind: CompletionCheckKind::RequiredNodes {
+                        node_ids: vec!["source_a".to_string()],
+                    },
+                },
+                CompletionCheck {
+                    id: "source_b_check".to_string(),
+                    description: "the second source position was collected".to_string(),
+                    requirement_ids: vec!["source_b".to_string()],
+                    constraint_ids: Vec::new(),
+                    kind: CompletionCheckKind::RequiredNodes {
+                        node_ids: vec!["source_b".to_string()],
+                    },
+                },
                 CompletionCheck {
                     id: "declared_conflict_check".to_string(),
                     description: "the declared conflict verifier completed".to_string(),

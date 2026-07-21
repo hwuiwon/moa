@@ -3,11 +3,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use chrono::{DateTime, Utc};
-use moa_core::wire::turn::TurnPhase;
-use moa_core::{
-    config::SessionLimitsConfig, traits::ChannelAdapter, types::channel::Channel,
-    types::identifiers::SessionId,
-};
+use moa_config::SessionLimitsConfig;
+use moa_core::{traits::ChannelAdapter, types::channel::Channel, types::identifiers::SessionId};
+use moa_wire::turn::TurnPhase;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 

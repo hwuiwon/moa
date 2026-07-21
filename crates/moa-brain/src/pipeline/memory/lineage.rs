@@ -4,8 +4,9 @@ use chrono::Utc;
 use moa_core::{
     traits::LineageHandle, types::context::TURN_ID_METADATA_KEY,
     types::identifiers::StoragePartitionId, types::identifiers::UserId,
-    types::query_rewrite::QueryRewriteResult, types::query_rewrite::RewriteSource,
 };
+
+use crate::query_rewrite::{QueryRewriteResult, RewriteSource};
 use moa_lineage_core::{
     BackendIntrospection, DecisionKind, DecisionRecord, FusedHit, GraphPath, LineageEvent,
     RerankHit, RetrievalLineage, RetrievalStage, ScopeEnforcementDecision, ScoreRecord,
@@ -20,7 +21,7 @@ use uuid::Uuid;
 use crate::lineage::{
     pii_redaction_decision_event, push_event, record_durable_batch, redact_lineage_text,
 };
-use crate::retrieval::{
+use moa_retrieval::retrieval::{
     GraphPathTrace, MemoryAdmissionPolicy, RetrievalProvenance, RetrievalScopePlan,
 };
 
@@ -50,7 +51,7 @@ pub(super) async fn emit_retrieval_lineage(
     lineage: &dyn LineageHandle,
     ctx: &moa_core::types::context::WorkingContext,
     query: &str,
-    hits: &[crate::retrieval::RetrievalHit],
+    hits: &[moa_retrieval::retrieval::RetrievalHit],
     elapsed: std::time::Duration,
     embedder: &EmbedderProvenance,
     provenance: &RetrievalProvenance,
@@ -288,8 +289,8 @@ const FUSION_METHOD: &str = "rrf";
 /// Builds the retrieval-lineage context passed into storage-backed retrieval.
 pub(super) fn lineage_context_from_context(
     ctx: &moa_core::types::context::WorkingContext,
-) -> crate::retrieval::LineageContext {
-    crate::retrieval::LineageContext {
+) -> moa_retrieval::retrieval::LineageContext {
+    moa_retrieval::retrieval::LineageContext {
         session_id: ctx.session_id,
         turn_id: turn_id_from_context(ctx),
         turn_seq: turn_seq_from_context(ctx).unwrap_or(0),
@@ -297,7 +298,7 @@ pub(super) fn lineage_context_from_context(
 }
 
 fn retrieval_selected_hit(
-    hit: &crate::retrieval::RetrievalHit,
+    hit: &moa_retrieval::retrieval::RetrievalHit,
     prompt_included: bool,
 ) -> (RetrievalSelectedHit, Vec<String>) {
     let chunk = hit.knowledge_chunk.as_ref();
@@ -310,7 +311,7 @@ fn retrieval_selected_hit(
     let selected = RetrievalSelectedHit {
         graph_node_uid: hit.uid,
         chunk_uid: chunk.map(|chunk| chunk.chunk_uid),
-        fact_uid: (hit.source_tier == crate::retrieval::SourceTier::UserMemory
+        fact_uid: (hit.source_tier == moa_retrieval::retrieval::SourceTier::UserMemory
             && hit.node.label == NodeLabel::Fact)
             .then_some(hit.uid),
         source_tier: hit.source_tier.as_str().to_string(),
@@ -584,7 +585,7 @@ mod tests {
         // scores with the resolved model, real graph paths, non-zero per-stage
         // timings for exercised stages — and a rejected candidate produces exactly
         // one ScopeEnforcement decision carrying only the count.
-        use crate::retrieval::{GraphPathTrace, RerankScore, RetrievalStageTimings};
+        use moa_retrieval::retrieval::{GraphPathTrace, RerankScore, RetrievalStageTimings};
 
         let handle = CapturingLineage::default();
         let ctx = ctx_with_turn(Some(TurnId::new_v7()));

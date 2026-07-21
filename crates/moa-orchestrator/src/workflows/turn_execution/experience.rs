@@ -1,11 +1,11 @@
 //! Best-effort experience persistence, weakness mining, and skill-learning dispatch.
 
 use chrono::Utc;
+use moa_brain::query_rewrite::QueryRewriteResult;
 use moa_brain::turn_learning::build_segment_learning_bundle;
 use moa_core::{
     error::MoaError, events::Event, types::events_stream::EventRecord,
-    types::identifiers::SegmentId, types::identifiers::SessionId,
-    types::query_rewrite::QueryRewriteResult, types::segments::TaskSegment,
+    types::identifiers::SegmentId, types::identifiers::SessionId, types::segments::TaskSegment,
     types::session::SessionMeta,
 };
 use restate_sdk::prelude::*;

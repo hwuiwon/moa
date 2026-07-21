@@ -36,7 +36,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
     let workspace = root.path().join("workspace");
     tokio::fs::create_dir_all(&workspace).await?;
 
-    let mut config = moa_core::config::MoaConfig::default();
+    let mut config = moa_config::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
     // The manifest budget must clear the fixed preamble/footer (~550 chars, now that
     // each entry carries the exact [activate: <path>] activation guidance) plus one
@@ -188,7 +188,7 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
     let workspace = root.path().join("workspace");
     tokio::fs::create_dir_all(&workspace).await?;
 
-    let mut config = moa_core::config::MoaConfig::default();
+    let mut config = moa_config::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
     // The manifest budget must clear the fixed preamble/footer (~550 chars, now that
     // each entry carries the exact [activate: <path>] activation guidance) plus one

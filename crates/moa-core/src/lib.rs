@@ -1,11 +1,10 @@
-//! Shared MOA types, traits, configuration, and error definitions.
+//! Shared MOA types, traits, and error definitions.
 //!
 //! The crate root deliberately exports only the universal [`MoaError`],
 //! [`Result`], and [`WORKSPACE_ID`] items. All other APIs are addressed through
 //! their owning modules.
 
 pub mod analytics;
-pub mod config;
 pub mod coordination_counters;
 pub mod diff;
 pub mod error;
@@ -17,7 +16,6 @@ pub mod traits;
 pub mod transcript;
 pub mod truncation;
 pub mod types;
-pub mod wire;
 pub mod workspace;
 
 pub use error::{MoaError, Result};

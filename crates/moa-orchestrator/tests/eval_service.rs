@@ -1,9 +1,6 @@
 //! Eval service helper coverage.
 
 use moa_core::types::identifiers::TenantId;
-use moa_core::wire::eval::{
-    EvalRunResponse, EvalRunStatus, EvalRunStatusResponse, EvalSuiteListDocument,
-};
 use moa_eval_core::{
     AgentConfig, EvalResult, EvalRun, EvalStatus, RunSummary, TestCase, TestSuite,
 };
@@ -11,6 +8,9 @@ use moa_orchestrator::services::eval::repository::parse_dataset_items_for_tenant
 use moa_orchestrator::services::eval::{
     EvalServiceError, accepted_eval_run_response, hosted_eval_report_artifacts,
     status_response_from_run_response, suite_summaries_from_documents, verify_run_status_tenant,
+};
+use moa_wire::eval::{
+    EvalRunResponse, EvalRunStatus, EvalRunStatusResponse, EvalSuiteListDocument,
 };
 use serde_json::json;
 use uuid::Uuid;

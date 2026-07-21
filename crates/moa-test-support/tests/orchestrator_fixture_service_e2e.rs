@@ -7,8 +7,8 @@ use std::time::Duration;
 use moa_core::events::Event;
 use moa_core::types::events_stream::EventRange;
 use moa_core::types::session::SessionStatus;
-use moa_core::wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use moa_test_support::OrchestratorTestFixture;
+use moa_wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use serde_json::json;
 
 #[tokio::test]

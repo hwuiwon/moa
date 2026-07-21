@@ -18,13 +18,15 @@ metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 moa-auth-providers = { workspace = true }
 moa-authz = { workspace = true }
-moa-brain = { workspace = true }
 moa-core = { workspace = true }
+moa-wire = { workspace = true }
+moa-config = { workspace = true }
 moa-crypto = { workspace = true }
 moa-db = { workspace = true }
 moa-memory-graph = { workspace = true }
 moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
+moa-retrieval = { workspace = true }
 moa-observability = { workspace = true }
 moa-providers = { workspace = true }
 moa-session = { workspace = true }

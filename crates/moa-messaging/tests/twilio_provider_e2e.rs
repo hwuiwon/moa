@@ -10,9 +10,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::{
-    config::MessagingConfig, error::MoaError, traits::CredentialVault, types::model::Credential,
-};
+use moa_config::MessagingConfig;
+use moa_core::{error::MoaError, traits::CredentialVault, types::model::Credential};
 use moa_messaging::{
     TWILIO_ACCOUNT_SID_ENV, TWILIO_ACCOUNT_SID_SERVICE, TWILIO_API_KEY_SECRET_ENV,
     TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SID_ENV, TWILIO_API_KEY_SID_SERVICE,

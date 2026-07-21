@@ -14,19 +14,17 @@ use moa_core::types::execution_planning::{ExecutionRouteKind, ExecutionStrategy}
 use moa_core::types::execution_planning::{ExecutionRunStarted, ExecutionTemplateInvocation};
 use moa_core::types::identifiers::{SessionId, TenantId};
 use moa_core::types::session::SessionStatus;
-use moa_core::wire::artifacts::{
-    ArtifactFileDocument, ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest,
-    ArtifactPublishResponse,
-};
-use moa_core::wire::turn::{
-    SessionProgress, SessionProgressRequest, StartTurnRequest, TurnOutcome,
-};
 use moa_execution::wire::{
     ExecutionRunRequest, ExecutionStatusResponse, ExecutionTaskListRequest,
     ExecutionTaskListResponse,
 };
 use moa_orchestrator::services::action_policy::UpsertActionPolicyRuleRequest;
 use moa_test_support::{IsolatedTest, OrchestratorTestFixture, TestApiClient};
+use moa_wire::artifacts::{
+    ArtifactFileDocument, ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest,
+    ArtifactPublishResponse,
+};
+use moa_wire::turn::{SessionProgress, SessionProgressRequest, StartTurnRequest, TurnOutcome};
 use serde_json::{Value, json};
 use tokio::time::Instant;
 

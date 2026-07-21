@@ -3,7 +3,6 @@
 use chrono::{DateTime, Utc};
 use moa_artifacts::execution_plan::ExecutionFailureClass;
 use moa_authz_schema::Relation;
-use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::{
     events::Event, events::EventType, types::action_policy::ActionClass,
     types::action_policy::ActionEnvelope, types::action_policy::ActionReviewPreview,
@@ -15,6 +14,7 @@ use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_observability::{
     record_action_review_decision, record_action_review_requested, record_approval_wait,
 };
+use moa_wire::session_store::AppendEventRequest;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

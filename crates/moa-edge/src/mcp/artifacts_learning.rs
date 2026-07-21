@@ -2,12 +2,12 @@
 
 use moa_core::types::action_policy::ActionRuleScope;
 use moa_core::types::experience::LearningCandidate;
-use moa_core::wire::artifacts::{
+use moa_wire::artifacts::{
     ArtifactExportRequest, ArtifactExportResponse, ArtifactFileDocument, ArtifactImportRequest,
     ArtifactImportResponse, ArtifactListRequest, ArtifactListResponse, ArtifactPublishRequest,
     ArtifactPublishResponse, ArtifactValidateRequest, ArtifactValidateResponse,
 };
-use moa_core::wire::session_store::{
+use moa_wire::session_store::{
     GetLearningCandidateRequest, LearningCandidateReviewAction, LearningCandidateReviewRequest,
     LearningCandidateReviewResponse,
 };

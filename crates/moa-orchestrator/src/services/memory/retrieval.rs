@@ -3,25 +3,25 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use moa_brain::retrieval::{
-    HybridRetriever, MemoryAdmissionPolicy, RetrievalHit, RetrievalRequest, SourceTier,
-    dedupe_and_rank_hits,
-};
-use moa_core::config::MoaConfig;
+use moa_config::MoaConfig;
 use moa_core::traits::{EmbeddingProvider, Identity};
 use moa_core::types::memory::InformationBarrierClearances;
 use moa_core::types::security::SensitivityClass;
 use moa_core::types::session::SessionMeta;
-use moa_core::wire::memory::{
-    MemoryRetrieveDebugRequest, MemoryRetrieveDebugResponse, MemorySearchRequest,
-    MemorySearchResponse, MemoryShowRequest, MemoryShowResponse,
-};
 use moa_crypto::KeyManagementProvider;
 use moa_memory_graph::{EdgeLabel, GraphStore, NodeIndexRow, NodeLabel, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::VectorStoreFactory;
 use moa_observability::record_memory_operation;
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
+use moa_retrieval::retrieval::{
+    HybridRetriever, MemoryAdmissionPolicy, RetrievalHit, RetrievalRequest, SourceTier,
+    dedupe_and_rank_hits,
+};
+use moa_wire::memory::{
+    MemoryRetrieveDebugRequest, MemoryRetrieveDebugResponse, MemorySearchRequest,
+    MemorySearchResponse, MemoryShowRequest, MemoryShowResponse,
+};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
@@ -140,7 +140,7 @@ pub(super) async fn show_inner(
             .unwrap_or_else(|| serde_json::json!({})),
         neighbors: neighbors
             .into_iter()
-            .map(|neighbor| moa_core::wire::memory::MemoryNeighbor {
+            .map(|neighbor| moa_wire::memory::MemoryNeighbor {
                 uid: neighbor.uid,
                 label: neighbor.label.as_str().to_string(),
                 name: neighbor.name,
@@ -330,7 +330,7 @@ async fn retrieve_hits_with_embedding(
             lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: inputs.disable_graph_expansion,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
         })
         .await
         .map_err(memory_handler_error)

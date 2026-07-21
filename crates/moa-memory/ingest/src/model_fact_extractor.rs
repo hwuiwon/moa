@@ -1,7 +1,7 @@
 //! Model-backed fact extraction through the existing ingestion extractor seam.
 
 use async_trait::async_trait;
-use moa_core::config::MoaConfig;
+use moa_config::MoaConfig;
 use moa_memory_types::{FactCategory, FactEdgeLabel};
 use serde::Deserialize;
 use uuid::Uuid;

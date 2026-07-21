@@ -2,9 +2,10 @@
 
 use std::time::Instant;
 
+use moa_config::ContextSnapshotConfig;
 use moa_core::{
-    config::ContextSnapshotConfig, error::Result, traits::ContextProcessor,
-    types::context::MessageRole, types::context::ProcessorOutput, types::context::WorkingContext,
+    error::Result, traits::ContextProcessor, types::context::MessageRole,
+    types::context::ProcessorOutput, types::context::WorkingContext,
 };
 use moa_observability::record_query_rewrite_decision;
 use tracing::Instrument;

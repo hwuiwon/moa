@@ -8,6 +8,7 @@ license.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 moa-core = { workspace = true }
+moa-wire = { workspace = true }
 moa-crypto = { workspace = true }
 moa-db = { workspace = true }
 moa-memory-graph = { workspace = true }

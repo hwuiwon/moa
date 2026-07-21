@@ -6,11 +6,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
+use moa_brain::runtime_events::RuntimeEvent;
 use moa_brain::{BrainTurnRequest, StreamedTurnRequest, StreamedTurnResult, run_streamed_turn};
-use moa_core::{
-    config::MoaConfig, events::Event, traits::LLMProvider, types::events_stream::EventRange,
-    types::runtime_events::RuntimeEvent,
-};
+use moa_config::MoaConfig;
+use moa_core::{events::Event, traits::LLMProvider, types::events_stream::EventRange};
 use moa_eval_core::engine::{EngineOptions, EvalRun, RunSummary};
 use moa_eval_core::plan::EvalPlan;
 use moa_eval_core::{
@@ -509,8 +508,9 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use moa_config::MoaConfig;
     use moa_core::{
-        config::MoaConfig, traits::LLMProvider, types::completion::CompletionRequest,
+        traits::LLMProvider, types::completion::CompletionRequest,
         types::completion::CompletionResponse, types::completion::CompletionStream,
         types::completion::StopReason, types::completion::TokenUsage,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,

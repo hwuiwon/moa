@@ -1,13 +1,13 @@
 //! Memory service authorization-scope helper coverage.
 
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::memory::MemoryIngestDocument;
 use moa_core::{
     types::contact::ContactId, types::identifiers::TenantId, types::identifiers::UserId,
 };
 use moa_orchestrator::services::memory::{
     UserScopeError, checked_ingest_contact_id, document_ingest_session_id, effective_user_id,
 };
+use moa_wire::memory::MemoryIngestDocument;
 use serde_json::json;
 use uuid::Uuid;
 use uuid::Variant;

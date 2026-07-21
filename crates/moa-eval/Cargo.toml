@@ -13,8 +13,10 @@ chrono.workspace = true
 csv.workspace = true
 futures-util.workspace = true
 moa-brain = { workspace = true, features = ["eval-harness"] }
+moa-retrieval = { workspace = true }
 moa-artifacts = { workspace = true }
 moa-core = { workspace = true }
+moa-config = { workspace = true }
 moa-crypto = { workspace = true }
 moa-db = { workspace = true }
 moa-eval-core = { workspace = true }

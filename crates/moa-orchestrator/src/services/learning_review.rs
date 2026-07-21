@@ -6,16 +6,12 @@ use chrono::Utc;
 use moa_artifacts::registry::ArtifactRegistry;
 use moa_authz::fga_subject;
 use moa_authz_schema::Relation;
+use moa_config::MoaConfig;
 use moa_core::types::memory::RlsContext;
-use moa_core::wire::session_store::{
-    GetLearningCandidateRequest, LearningCandidateReviewAction, LearningCandidateReviewRequest,
-    LearningCandidateReviewResponse,
-};
 use moa_core::{
-    config::MoaConfig, types::experience::LearningCandidate,
-    types::experience::LearningCandidateStatus, types::experience::LearningCandidateStatusUpdate,
-    types::experience::LearningCandidateType, types::identifiers::TenantId,
-    types::learning::LearningEntry,
+    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
+    types::experience::LearningCandidateStatusUpdate, types::experience::LearningCandidateType,
+    types::identifiers::TenantId, types::learning::LearningEntry,
 };
 use moa_db::ScopedConn;
 use moa_hands::ToolRouter;
@@ -28,6 +24,10 @@ use moa_skills::review::{
     SkillReviewRequest, get_learning_candidate_for_review, prepare_skill_acceptance,
     promote_claimed_skill_candidate, reject_claimed_skill_candidate, reject_learning_candidate,
     release_claimed_skill_candidate,
+};
+use moa_wire::session_store::{
+    GetLearningCandidateRequest, LearningCandidateReviewAction, LearningCandidateReviewRequest,
+    LearningCandidateReviewResponse,
 };
 use restate_sdk::prelude::*;
 use serde_json::{Value, json};
@@ -302,7 +302,7 @@ pub async fn get_learning_candidate_after_authz(
 pub async fn accept_skill_candidate_after_authz(
     store: Arc<PostgresSessionStore>,
     pool: sqlx::PgPool,
-    config: Arc<moa_core::config::MoaConfig>,
+    config: Arc<moa_config::MoaConfig>,
     providers: Arc<moa_providers::ProviderRegistry>,
     router: Arc<ToolRouter>,
     request: LearningCandidateReviewRequest,

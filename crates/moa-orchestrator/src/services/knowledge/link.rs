@@ -1,18 +1,18 @@
 //! Link-token and public-token exchange logic for the Knowledge service.
 
 use chrono::Utc;
-use moa_core::wire::knowledge::{
+use moa_knowledge::domain::{
+    ApplySourceSelectionRequest, ConnectionStatus, CreateLinkTokenRequest,
+    ExchangePublicTokenRequest, KnowledgeConnection,
+};
+use moa_knowledge::normalize::normalize_source_selection;
+use moa_wire::knowledge::{
     KnowledgeCreateLinkTokenRequest, KnowledgeCreateLinkTokenResponse,
     KnowledgeDisconnectConnectionRequest, KnowledgeDisconnectConnectionResponse,
     KnowledgeExchangeTokenRequest, KnowledgeExchangeTokenResponse, KnowledgeSyncRequest,
     KnowledgeUpdateConnectionSourceSelectionRequest,
     KnowledgeUpdateConnectionSourceSelectionResponse,
 };
-use moa_knowledge::domain::{
-    ApplySourceSelectionRequest, ConnectionStatus, CreateLinkTokenRequest,
-    ExchangePublicTokenRequest, KnowledgeConnection,
-};
-use moa_knowledge::normalize::normalize_source_selection;
 use uuid::Uuid;
 
 use super::{KnowledgeService, KnowledgeServiceError};

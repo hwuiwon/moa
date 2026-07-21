@@ -52,7 +52,7 @@ async fn test_service() -> Result<(SessionStoreImpl, String, String)> {
         SessionStoreImpl::new(
             Arc::new(store),
             pool,
-            Arc::new(moa_core::config::MoaConfig::default()),
+            Arc::new(moa_config::MoaConfig::default()),
         ),
         database_url,
         schema_name,

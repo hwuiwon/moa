@@ -1,10 +1,10 @@
 //! SQL repository helpers for hosted eval datasets.
 
-use moa_core::wire::eval::{
+use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
+use moa_wire::eval::{
     EvalDatasetListRequest, EvalDatasetListResponse, EvalDatasetRegisterRequest,
     EvalDatasetRegisterResponse, EvalDatasetSummary,
 };
-use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};

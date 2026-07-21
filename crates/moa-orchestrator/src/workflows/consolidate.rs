@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, traits::EmbeddingProvider, types::identifiers::TenantId,
-    types::learning::LearningEntry,
+    traits::EmbeddingProvider, types::identifiers::TenantId, types::learning::LearningEntry,
 };
 use moa_crypto::KeyManagementProvider;
 use moa_memory_lifecycle::{

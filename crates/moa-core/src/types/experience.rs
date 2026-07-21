@@ -6,8 +6,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
-    identifiers::SegmentId, identifiers::SessionId, identifiers::TenantId, identifiers::UserId,
-    segment_assessment::SegmentEvidence, segment_assessment::SegmentOutcome,
+    contact::ContactId, identifiers::SegmentId, identifiers::SessionId, identifiers::TenantId,
+    identifiers::UserId, segment_assessment::SegmentEvidence, segment_assessment::SegmentOutcome,
 };
 
 /// Stable task grouping key used for task-conditioned learning.
@@ -451,4 +451,35 @@ pub struct TaskStrategySuccessRate {
     /// fingerprint: skills injected into the manifest but never engaged. High
     /// values relative to [`Self::uses`] are weak negative-relevance evidence.
     pub unused_injections: u64,
+}
+
+/// Redacted read-model projection of one learning candidate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LearningCandidateSummary {
+    /// Stable candidate identifier.
+    pub id: Uuid,
+    /// Tenant scope for the candidate.
+    pub tenant_id: TenantId,
+    /// Optional contact scope for contact-local candidates.
+    pub contact_id: Option<ContactId>,
+    /// Candidate target type.
+    pub candidate_type: LearningCandidateType,
+    /// Current promotion status.
+    pub status: LearningCandidateStatus,
+    /// Optional target identifier when mutating existing learned state.
+    pub target_id: Option<String>,
+    /// Optional human-readable target label.
+    pub target_label: Option<String>,
+    /// Task fingerprint hash the candidate is expected to help.
+    pub task_fingerprint: Option<String>,
+    /// Confidence in the candidate proposal.
+    pub confidence: Option<f64>,
+    /// Promotion risk class.
+    pub risk_class: LearningRiskClass,
+    /// Short, redacted preview of the candidate payload.
+    pub payload_preview: String,
+    /// Candidate creation time.
+    pub created_at: DateTime<Utc>,
+    /// Last candidate update time.
+    pub updated_at: DateTime<Utc>,
 }

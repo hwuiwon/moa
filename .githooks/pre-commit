@@ -49,7 +49,6 @@ WORKSPACE_MEMBERS=(
   crates/moa-memory/vector
   crates/moa-lineage/core
   crates/moa-lineage/sink
-  crates/moa-lineage/otel
   crates/moa-lineage/citation
   crates/moa-lineage/cold
   crates/moa-lineage/audit

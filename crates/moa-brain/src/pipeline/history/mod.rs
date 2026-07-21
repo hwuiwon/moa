@@ -4,8 +4,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use moa_config::CompactionConfig;
+use moa_config::ContextSnapshotConfig;
+use moa_config::ToolOutputConfig;
 use moa_core::{
-    config::CompactionConfig, config::ContextSnapshotConfig, config::ToolOutputConfig,
     error::Result, events::Event, traits::ContextProcessor, traits::LLMProvider,
     traits::SessionStore, types::context::ContextMessage, types::context::ProcessorOutput,
     types::context::WorkingContext, types::events_stream::EventRange,

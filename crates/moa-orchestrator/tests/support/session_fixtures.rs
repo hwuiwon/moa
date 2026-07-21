@@ -1,6 +1,5 @@
 //! SessionStore request and metadata fixtures for Restate service tests.
 
-use moa_core::wire::session_store::{AppendEventRequest, GetEventsRequest, InitSessionVoRequest};
 use moa_core::{
     events::Event, types::agent::AgentContext, types::agent::AgentKnowledgePolicy,
     types::agent::AgentKnowledgeScopeMode, types::agent::AgentPolicySnapshot,
@@ -11,6 +10,7 @@ use moa_core::{
     types::session::SessionMeta, types::session::UserMessage,
 };
 use moa_test_support::fixtures::contact_ref_fixture;
+use moa_wire::session_store::{AppendEventRequest, GetEventsRequest, InitSessionVoRequest};
 
 /// Returns a request payload for `append_event`.
 pub fn append_event_request(session_id: SessionId, event: Event) -> AppendEventRequest {

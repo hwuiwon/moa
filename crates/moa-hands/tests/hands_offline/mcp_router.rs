@@ -1,6 +1,9 @@
+use moa_config::McpCredentialConfig;
+use moa_config::McpServerConfig;
+use moa_config::McpTransportConfig;
+use moa_config::MoaConfig;
 use moa_core::{
-    config::McpCredentialConfig, config::McpServerConfig, config::McpTransportConfig,
-    config::MoaConfig, traits::Identity, traits::IdentityType, types::completion::ToolInvocation,
+    traits::Identity, traits::IdentityType, types::completion::ToolInvocation,
     types::identifiers::ModelId, types::identifiers::TenantId, types::security::SensitivityClass,
     types::session::SessionMeta, types::tools::IdempotencyClass,
 };

@@ -321,7 +321,7 @@ fn memory_eval_report_serializes_probe_graph_harm_path() -> TestResult {
     // Pins: memory eval reports explain graph harm per probe with seed and path identity.
     use std::collections::BTreeMap;
 
-    use moa_brain::retrieval::{
+    use moa_retrieval::retrieval::{
         GraphCandidateCounts, GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy,
         GraphSeedDiagnostics, GraphSeedSource,
     };
@@ -371,7 +371,7 @@ fn memory_eval_report_serializes_probe_graph_harm_path() -> TestResult {
             graph_only: 1,
             ..GraphCandidateCounts::default()
         },
-        source_object_ranking: moa_brain::retrieval::SourceObjectRankingDiagnostics::default(),
+        source_object_ranking: moa_retrieval::retrieval::SourceObjectRankingDiagnostics::default(),
         graph_latency_ms: 7,
         raw_path_count: 1,
     };

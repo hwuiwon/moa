@@ -28,7 +28,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
     let workspace = root.path().join("workspace");
     tokio::fs::create_dir_all(&workspace).await?;
 
-    let mut config = moa_core::config::MoaConfig::default();
+    let mut config = moa_config::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
 
     let (session_store, _database_url, _schema_name) =

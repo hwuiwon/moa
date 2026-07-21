@@ -2,9 +2,10 @@
 
 use async_trait::async_trait;
 use globset::{Glob, GlobMatcher};
+use moa_config::MoaConfig;
 use moa_core::shell::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 use moa_core::{
-    config::MoaConfig, error::MoaError, error::Result, types::action_policy::ActionPolicyEffect,
+    error::MoaError, error::Result, types::action_policy::ActionPolicyEffect,
     types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
     types::contact::ContactId, types::identifiers::TenantId, types::identifiers::UserId,
     types::session::SessionMeta, types::tools::ToolPolicyInput,
@@ -298,9 +299,10 @@ fn rule_matches(rule: &ActionPolicyRule, tool: &str, normalized_input: &str) -> 
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use moa_config::MoaConfig;
     use moa_core::shell::split_shell_chain;
     use moa_core::{
-        config::MoaConfig, error::MoaError, types::action_policy::ActionPolicyEffect,
+        error::MoaError, types::action_policy::ActionPolicyEffect,
         types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
         types::action_policy::RiskLevel, types::contact::ContactId, types::contact::ContactRef,
         types::contact::ContactVerificationState, types::identifiers::ModelId,

@@ -8,14 +8,14 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use moa_brain::pipeline::query_rewrite::QueryRewriter;
-use moa_core::config::EnvOverlay;
+use moa_brain::query_rewrite::{QueryRewriteResult, RewriteReason, RewriteSource};
+use moa_config::EnvOverlay;
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, traits::ContextProcessor, traits::LLMProvider, types::channel::Channel,
+    traits::ContextProcessor, traits::LLMProvider, types::channel::Channel,
     types::completion::CompletionRequest, types::completion::CompletionResponse,
     types::completion::CompletionStream, types::context::ContextMessage,
-    types::identifiers::TenantId, types::model::ModelCapabilities,
-    types::query_rewrite::QueryRewriteResult, types::query_rewrite::RewriteReason,
-    types::query_rewrite::RewriteSource, types::session::SessionMeta,
+    types::identifiers::TenantId, types::model::ModelCapabilities, types::session::SessionMeta,
 };
 use moa_providers::resolve_rewriter_provider;
 use tokio::sync::Mutex;

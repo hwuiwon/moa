@@ -12,10 +12,12 @@ clickhouse.workspace = true
 fjall = "3"
 metrics.workspace = true
 moa-core = { workspace = true }
+moa-wire = { workspace = true }
+moa-config = { workspace = true }
 moa-lineage-core = { workspace = true }
-moa-lineage-otel = { workspace = true }
 moa-memory-types = { workspace = true }
 moa-migrations = { workspace = true }
+opentelemetry.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "chrono", "json", "uuid"] }
@@ -23,9 +25,12 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
 tokio-util.workspace = true
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
 uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
 clickhouse = { workspace = true, features = ["test-util"] }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+tracing-subscriber = { workspace = true }

@@ -3,10 +3,12 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use moa_config::MoaConfig;
+use moa_config::SessionAttachmentStorageConfig;
 use moa_core::{
-    config::MoaConfig, config::SessionAttachmentStorageConfig, traits::BranchManager,
-    traits::SessionStore, types::contact::SessionActorRef, types::identifiers::ModelId,
-    types::identifiers::TenantId, types::session::SessionFilter, types::session::SessionMeta,
+    traits::BranchManager, traits::SessionStore, types::contact::SessionActorRef,
+    types::identifiers::ModelId, types::identifiers::TenantId, types::session::SessionFilter,
+    types::session::SessionMeta,
 };
 use moa_session::{NeonBranchManager, PostgresSessionStore};
 use reqwest::Client;

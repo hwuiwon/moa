@@ -207,8 +207,7 @@ services and virtual objects in `moa-orchestrator` (see sections 5–6 and
 | `moa-knowledge` | Tenant knowledge-base domain, providers, parsers, and ingestion seams |
 | `moa-lineage-core` | Lineage record types and score records |
 | `moa-lineage-citation` | Provider citation normalization and answer-source verification |
-| `moa-lineage-sink` | Async lineage sink writers |
-| `moa-lineage-otel` | OTel/OpenInference bridge |
+| `moa-lineage-sink` | Async lineage sink writers plus the OTel/OpenInference span bridge |
 | `moa-lineage-audit` | Compliance audit hashes, roots, signing, and DSAR support |
 | `moa-observability` | Runtime metrics, tracing bootstrap, and Restate observability helpers |
 | `moa-auth/authz-schema` (`moa-authz-schema`) | Typed OpenFGA tuple keys and model constants |

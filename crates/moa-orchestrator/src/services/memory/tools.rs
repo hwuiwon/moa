@@ -12,9 +12,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use moa_brain::retrieval::{MemoryAdmissionPolicy, RetrievalHit};
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig,
     error::MoaError,
     error::Result,
     traits::{Identity, MemoryRetrievalExecutor},
@@ -24,6 +23,7 @@ use moa_core::{
 };
 use moa_crypto::KeyManagementProvider;
 use moa_memory_graph::EdgeLabel;
+use moa_retrieval::retrieval::{MemoryAdmissionPolicy, RetrievalHit};
 use restate_sdk::prelude::HandlerError;
 use serde::Deserialize;
 use serde_json::{Value, json};

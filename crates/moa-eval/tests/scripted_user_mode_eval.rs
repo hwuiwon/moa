@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig, events::Event, traits::LLMProvider, types::completion::CompletionContent,
+    events::Event, traits::LLMProvider, types::completion::CompletionContent,
     types::completion::CompletionRequest, types::completion::CompletionResponse,
     types::completion::CompletionStream, types::completion::StopReason,
     types::completion::TokenUsage, types::completion::ToolCallContent,

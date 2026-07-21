@@ -8,6 +8,7 @@ license.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 moa-core = { workspace = true }
+moa-config = { workspace = true }
 opentelemetry.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true

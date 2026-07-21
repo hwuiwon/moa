@@ -10,12 +10,12 @@ use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::validate_for_status;
 use moa_authz_schema::Relation;
 use moa_core::types::action_policy::ActionRuleScope;
-use moa_core::wire::artifacts::{
+use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_wire::artifacts::{
     ArtifactExportRequest, ArtifactExportResponse, ArtifactFileDocument, ArtifactImportRequest,
     ArtifactImportResponse, ArtifactListRequest, ArtifactListResponse, ArtifactPublishRequest,
     ArtifactPublishResponse, ArtifactSummary, ArtifactValidateRequest, ArtifactValidateResponse,
 };
-use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 
 use crate::ctx::RequestHeaders;

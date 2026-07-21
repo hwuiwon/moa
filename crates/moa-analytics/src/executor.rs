@@ -1,11 +1,11 @@
 //! Analytics service entrypoint used by edge route integration.
 
 use chrono::{DateTime, Utc};
-use moa_core::wire::analytics::{
+use moa_db::ScopedConn;
+use moa_wire::analytics::{
     AnalyticsCatalogResponse, AnalyticsCell, AnalyticsFieldKind, AnalyticsQueryMetadata,
     AnalyticsQueryRequest, AnalyticsQueryResponse,
 };
-use moa_db::ScopedConn;
 use sqlx::{PgPool, Row, postgres::PgRow};
 
 use crate::catalog::analytics_catalog;

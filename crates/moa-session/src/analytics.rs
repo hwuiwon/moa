@@ -5,7 +5,7 @@ use serde_json::Value;
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
 
-use moa_core::wire::analytics::LearningCandidateSummary;
+use moa_core::types::experience::LearningCandidateSummary;
 use moa_core::{
     analytics::CacheDailyMetric, analytics::SessionAnalyticsSummary, analytics::SessionTurnMetric,
     analytics::TenantAnalyticsSummary, analytics::ToolCallSummary, error::MoaError, error::Result,

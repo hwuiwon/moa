@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use moa_core::{config::MoaConfig, traits::LLMProvider, types::provider::ProviderId};
+use moa_config::MoaConfig;
+use moa_core::{traits::LLMProvider, types::provider::ProviderId};
 
 use crate::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 

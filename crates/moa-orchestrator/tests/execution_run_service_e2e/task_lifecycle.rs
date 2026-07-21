@@ -1176,7 +1176,7 @@ async fn prepare_capability_run(
         catalog: planning.snapshot.catalog.clone(),
         authorization: planning.snapshot.authorization.clone(),
         approved_budget: planning.snapshot.budget.clone(),
-        config: moa_core::config::ExecutionConfig::default(),
+        config: moa_config::ExecutionConfig::default(),
         now: chrono::Utc::now(),
     })
     .compiled
@@ -1215,7 +1215,7 @@ fn recompile_with_node_output_schema(
         catalog: prepared.planning.snapshot.catalog.clone(),
         authorization: prepared.planning.snapshot.authorization.clone(),
         approved_budget: prepared.planning.snapshot.budget.clone(),
-        config: moa_core::config::ExecutionConfig::default(),
+        config: moa_config::ExecutionConfig::default(),
         now: chrono::Utc::now(),
     });
     prepared.compiled = outcome.compiled.with_context(|| {

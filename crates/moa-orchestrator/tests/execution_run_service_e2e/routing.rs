@@ -21,7 +21,6 @@ use moa_core::types::execution_planning::{
     ExecutionTemplateInvocation, PinnedExecutionTemplateRef,
 };
 use moa_core::types::session::SessionStatus;
-use moa_core::wire::turn::{RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnTrigger};
 use moa_eval::execution::ExecutionInvariantSpec;
 use moa_execution::{
     repository::{ExecutionRepository, ExecutionScope},
@@ -31,6 +30,7 @@ use moa_test_support::{
     FixtureCapabilityOptions, FixtureCapabilityOutcome, FixtureCapabilityTool,
     OrchestratorTestFixture,
 };
+use moa_wire::turn::{RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnTrigger};
 use serde_json::{Value, json};
 
 use crate::evaluation::{assert_execution_eval_case, assert_non_durable_eval};

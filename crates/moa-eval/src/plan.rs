@@ -1,6 +1,6 @@
 //! Provider-aware dry-run planning for eval suite execution.
 
-use moa_core::config::MoaConfig;
+use moa_config::MoaConfig;
 use moa_eval_core::{
     AgentConfig, EvalPlan, TestCase, TestSuite, build_eval_plan_with_estimator,
     estimate_run_cost_range,

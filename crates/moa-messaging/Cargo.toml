@@ -12,6 +12,7 @@ twilio = ["dep:reqwest"]
 
 [dependencies]
 moa-core = { workspace = true }
+moa-config = { workspace = true }
 moa-observability = { workspace = true }
 async-trait.workspace = true
 chrono.workspace = true

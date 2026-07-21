@@ -7,9 +7,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use moa_core::config::SessionBlobBackend;
+use moa_config::MoaConfig;
+use moa_config::SessionBlobBackend;
 use moa_core::{
-    config::MoaConfig, error::MoaError, error::Result, events::Event, traits::BlobStore,
+    error::MoaError, error::Result, events::Event, traits::BlobStore,
     types::events_stream::ClaimCheck, types::identifiers::SessionId,
 };
 use serde_json::{Value, json};

@@ -9,12 +9,11 @@ use moa_artifacts::execution_plan::{
     ExecutionReducer, ExecutionRequirement, ExecutionTaskResult, GeneratedExecutionCandidate,
     MapTask, RetryPolicy,
 };
-use moa_core::config::ToolBudgetConfig;
+use moa_config::ToolBudgetConfig;
 use moa_core::events::{Event, ExecutionTaskResultsRef};
 use moa_core::types::action_policy::{ActionClass, ActionPolicyEffect, RiskLevel};
 use moa_core::types::session::SessionStatus;
 use moa_core::types::tools::{IdempotencyClass, ToolDiffStrategy, ToolInputShape, ToolPolicySpec};
-use moa_core::wire::turn::TurnOutcomeKind;
 use moa_eval::execution::ExecutionInvariantSpec;
 use moa_execution::bindings::extract_map_key;
 use moa_execution::capability::{ExecutionEstimate, capability_version};
@@ -27,6 +26,7 @@ use moa_test_support::{
     FixtureCapabilityAttempt, FixtureCapabilityCall, FixtureCapabilityOptions,
     FixtureCapabilityOutcome, FixtureCapabilityTool, OrchestratorTestFixture,
 };
+use moa_wire::turn::TurnOutcomeKind;
 use serde_json::{Value, json};
 use sqlx::postgres::PgListener;
 use sqlx::{Connection, PgConnection, PgPool};

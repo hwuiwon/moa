@@ -87,7 +87,7 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     .await?;
     tokio::fs::write(workspace.join(".gitignore"), "ignored_dir/\n").await?;
 
-    let mut config = moa_core::config::MoaConfig::default();
+    let mut config = moa_config::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
     config.general.workspace_instructions = Some("Cache integration guidance.\n".repeat(200));
     config.compaction.recent_turns_verbatim = 2;

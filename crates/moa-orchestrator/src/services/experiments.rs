@@ -4,22 +4,6 @@ use moa_agents::{AgentResolver, AgentRuntimePolicy};
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::ArtifactRegistry;
 use moa_core::traits::{Identity, LearningCandidateStore};
-use moa_core::wire::artifacts::ArtifactSummary as WireArtifactSummary;
-use moa_core::wire::experiments::{
-    AgentArtifactDependencyDelta, AgentDependencyChange, AgentRevisionCompareRequest,
-    AgentRevisionCompareResponse, AgentRevisionSimulationCompareRequest,
-    AgentRevisionSimulationCompareResponse, AgentRevisionSimulationRunRequest,
-    AgentRevisionSimulationRunResponse, AgentRevisionSimulationVariant,
-    AgentRevisionSimulationVariantResult, AgentToolDependencyDelta, ExperimentCancelRequest,
-    ExperimentCancelResponse, ExperimentCompareRequest, ExperimentCompareResponse,
-    ExperimentGeneratePlanRequest, ExperimentGeneratePlanResponse, ExperimentListRequest,
-    ExperimentListResponse, ExperimentPlanListRequest, ExperimentPlanListResponse,
-    ExperimentProposeImprovementsRequest, ExperimentProposeImprovementsResponse,
-    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
-    ExperimentRunStatusResponse, ExperimentScoresRequest, ExperimentScoresResponse,
-    ExperimentTrialStatusRequest, ExperimentTrialStatusResponse, ExperimentTrialsRequest,
-    ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
-};
 use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::TenantId};
 use moa_experiments::app::{
     ExperimentAppError, admit_run, cancel_run, compare_runs, list_runs, list_trials,
@@ -35,6 +19,22 @@ use moa_observability::record_experiment_learning_candidates;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_providers::ProviderRegistry;
 use moa_scoring::Error;
+use moa_wire::artifacts::ArtifactSummary as WireArtifactSummary;
+use moa_wire::experiments::{
+    AgentArtifactDependencyDelta, AgentDependencyChange, AgentRevisionCompareRequest,
+    AgentRevisionCompareResponse, AgentRevisionSimulationCompareRequest,
+    AgentRevisionSimulationCompareResponse, AgentRevisionSimulationRunRequest,
+    AgentRevisionSimulationRunResponse, AgentRevisionSimulationVariant,
+    AgentRevisionSimulationVariantResult, AgentToolDependencyDelta, ExperimentCancelRequest,
+    ExperimentCancelResponse, ExperimentCompareRequest, ExperimentCompareResponse,
+    ExperimentGeneratePlanRequest, ExperimentGeneratePlanResponse, ExperimentListRequest,
+    ExperimentListResponse, ExperimentPlanListRequest, ExperimentPlanListResponse,
+    ExperimentProposeImprovementsRequest, ExperimentProposeImprovementsResponse,
+    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
+    ExperimentRunStatusResponse, ExperimentScoresRequest, ExperimentScoresResponse,
+    ExperimentTrialStatusRequest, ExperimentTrialStatusResponse, ExperimentTrialsRequest,
+    ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
+};
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1132,11 +1132,11 @@ fn score_error_to_handler_error(error: Error) -> HandlerError {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::wire::experiments::AgentDependencyChange;
     use moa_core::{
         types::agent::AgentRevisionLock, types::agent::LockedToolRef,
         types::agent::ResolvedArtifactRevisionRef,
     };
+    use moa_wire::experiments::AgentDependencyChange;
     use uuid::Uuid;
 
     use super::{compare_artifact_dependencies, compare_tool_dependencies};

@@ -18,14 +18,14 @@ pub use export::write_export_readme;
 pub use manifest::{Ed25519ManifestSigner, finalize_archive_to_bytes, write_manifest};
 
 use moa_authz_schema::Relation;
-use moa_core::config::ComplianceConfig;
-use moa_core::wire::privacy::{
+use moa_config::ComplianceConfig;
+use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_wire::privacy::{
     ApproveDualControlRequest, ApproveDualControlResponse, PlaceLegalHoldRequest,
     PlaceLegalHoldResponse, PrivacyEraseRequest, PrivacyEraseResponse, PrivacyExportRequest,
     PrivacyExportResponse, ReleaseLegalHoldRequest, ReleaseLegalHoldResponse,
     RequestErasureApprovalRequest, RequestErasureApprovalResponse,
 };
-use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use std::sync::Arc;
 

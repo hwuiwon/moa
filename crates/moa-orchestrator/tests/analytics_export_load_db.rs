@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use clickhouse::Client;
 use clickhouse::test::{Mock, handlers};
-use moa_orchestrator::analytics_export::AnalyticsExporter;
+use moa_analytics_export::AnalyticsExporter;
 use sqlx::PgPool;
 use uuid::Uuid;
 

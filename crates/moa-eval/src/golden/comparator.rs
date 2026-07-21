@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use moa_brain::retrieval::RetrievalHit;
+use moa_retrieval::retrieval::RetrievalHit;
 
 /// Formats a retrieval trace with uid, score, contributing legs, and node name.
 #[must_use]

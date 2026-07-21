@@ -1,6 +1,6 @@
 //! Behavior Lab experiment MCP tools.
 
-use moa_core::wire::experiments::{
+use moa_wire::experiments::{
     ExperimentCancelRequest, ExperimentCancelResponse, ExperimentCompareRequest,
     ExperimentCompareResponse, ExperimentGeneratePlanRequest, ExperimentGeneratePlanResponse,
     ExperimentListRequest, ExperimentListResponse, ExperimentProposeImprovementsRequest,

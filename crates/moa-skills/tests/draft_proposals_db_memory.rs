@@ -493,7 +493,7 @@ async fn concurrent_skill_proposal_attempts_share_one_draft_artifact_db() {
 /// candidate id and whether the generalization pass rewrote the open draft. Each sibling gets a
 /// fresh session under the origin tenant so the fingerprint dedupe lands on the open candidate.
 async fn distill_sibling(
-    config: &moa_core::config::MoaConfig,
+    config: &moa_config::MoaConfig,
     store: &std::sync::Arc<moa_session::PostgresSessionStore>,
     origin: &support::LoadedSession,
     task_summary: &str,

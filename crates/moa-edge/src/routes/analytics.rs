@@ -10,7 +10,7 @@ use moa_analytics::{AnalyticsService, Error};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::identifiers::TenantId;
-use moa_core::wire::analytics::{
+use moa_wire::analytics::{
     AnalyticsCatalogResponse, AnalyticsQueryRequest, AnalyticsQueryResponse,
 };
 use serde::Deserialize;

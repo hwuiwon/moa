@@ -1,10 +1,28 @@
 //! Restate endpoint binding and registration-readiness helpers.
 
+use crate::services::knowledge::{Knowledge, KnowledgeImpl, KnowledgeService};
+use crate::services::privacy::{Privacy, PrivacyImpl};
+use crate::services::{
+    admin_maintenance::{AdminMaintenance, AdminMaintenanceImpl},
+    agent_definitions::{AgentDefinitions, AgentDefinitionsImpl},
+    agents::{Agents, AgentsImpl},
+    api_keys::{ApiKeys, ApiKeysImpl},
+    authz_admin::{Authz, AuthzImpl},
+    authz_challenges::{AuthzChallenges, AuthzChallengesImpl},
+    neon_maint::{NeonMaint, NeonMaintImpl},
+    tenants::{Tenants, TenantsImpl},
+};
+use crate::workflows::knowledge_sync_ingestion::{
+    KnowledgeSyncIngestion, KnowledgeSyncIngestionImpl,
+};
+use crate::workflows::tenant_purge::{TenantPurge, TenantPurgeImpl};
 use moa_artifacts::registry::ArtifactRegistry;
 use moa_authz::FgaClient;
+use moa_config::MoaConfig;
+use moa_config::SessionLimitsConfig;
 use moa_core::{
-    config::MoaConfig, config::SessionLimitsConfig, traits::ChannelAdapter,
-    traits::EmbeddingProvider, traits::LineageHandle, types::channel::Channel,
+    traits::ChannelAdapter, traits::EmbeddingProvider, traits::LineageHandle,
+    types::channel::Channel,
 };
 use moa_hands::ToolRouter;
 use moa_memory_ingest::{IngestionVO, IngestionVOImpl};
@@ -18,7 +36,6 @@ use crate::services::experiments::{Experiments, ExperimentsImpl};
 use crate::workflows::experiment_run::{ExperimentRun, ExperimentRunImpl};
 use crate::workflows::experiment_trial_run::{ExperimentTrialRun, ExperimentTrialRunImpl};
 use crate::workflows::skill_learning::{SkillLearning, SkillLearningImpl};
-use crate::workflows::tenant_purge::{TenantPurge, TenantPurgeImpl};
 use crate::{
     objects::{
         cron_job::{CronJob, CronJobImpl},
@@ -29,32 +46,21 @@ use crate::{
     services::{
         action_policy::{ActionPolicy, ActionPolicyImpl},
         action_reviews::{ActionReviews, ActionReviewsImpl},
-        admin_maintenance::{AdminMaintenance, AdminMaintenanceImpl},
-        agent_definitions::{AgentDefinitions, AgentDefinitionsImpl},
-        agents::{Agents, AgentsImpl},
-        api_keys::{ApiKeys, ApiKeysImpl},
         artifacts::{Artifacts, ArtifactsImpl},
-        authz_admin::{Authz, AuthzImpl},
-        authz_challenges::{AuthzChallenges, AuthzChallengesImpl},
         contacts::{Contacts, ContactsImpl},
         execution::{Execution, ExecutionImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
-        knowledge::{Knowledge, KnowledgeImpl, KnowledgeService},
         learning_review::{LearningReview, LearningReviewImpl},
         llm_gateway::{LLMGateway, LLMGatewayImpl},
         memory::{Memory, MemoryImpl},
-        neon_maint::{NeonMaint, NeonMaintImpl},
-        privacy::{Privacy, PrivacyImpl},
         session_store::{RestateSessionStore, SessionStoreImpl},
         skills::{Skills, SkillsImpl},
-        tenants::{Tenants, TenantsImpl},
         tool_executor::{ToolExecutor, ToolExecutorImpl},
     },
     workflows::{
         consolidate::{Consolidate, ConsolidateImpl},
         execution_run::{ExecutionRun, ExecutionRunImpl},
         execution_task::{ExecutionTask, ExecutionTaskImpl},
-        knowledge_sync_ingestion::{KnowledgeSyncIngestion, KnowledgeSyncIngestionImpl},
         turn_execution::{TurnExecution, implementation::TurnExecutionImpl},
         worker_turn_execution::{WorkerTurnExecution, WorkerTurnExecutionImpl},
     },

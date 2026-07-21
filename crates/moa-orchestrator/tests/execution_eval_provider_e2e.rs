@@ -14,7 +14,6 @@ use moa_core::types::execution_planning::{
     ExecutionRouteProvenance, ExecutionRouteStage, ExecutionStrategy,
 };
 use moa_core::types::identifiers::ModelId;
-use moa_core::wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use moa_eval::execution::{
     EXECUTION_LIVE_REPETITIONS, ExecutionCalibrationArtifact, ExecutionEvalCaseResult,
     ExecutionEvalProvider, ExecutionInvariantSpec, ExecutionJudgeCalibrationStatus,
@@ -25,6 +24,7 @@ use moa_eval::execution::{
 use moa_execution::repository::{ExecutionRepository, ExecutionScope};
 use moa_execution::wire::{ExecutionRunRequest, ExecutionStatusResponse};
 use moa_test_support::OrchestratorTestFixture;
+use moa_wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use sha2::{Digest, Sha256};
 
 use execution_evaluation::collect_execution_eval_snapshot;

@@ -1,0 +1,30 @@
+[package]
+name = "moa-retrieval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+metrics.workspace = true
+moa-core = { workspace = true }
+moa-config = { workspace = true }
+moa-db = { workspace = true }
+moa-lineage-core = { workspace = true }
+moa-memory-graph = { workspace = true }
+moa-memory-types = { workspace = true }
+moa-memory-vector = { workspace = true }
+moa-providers = { workspace = true }
+moka.workspace = true
+rust-stemmers.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid", "json"] }
+strum.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+workspace-hack = { workspace = true }

@@ -13,16 +13,6 @@ use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_core::traits::Identity;
-use moa_core::wire::artifacts::{
-    ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
-};
-use moa_core::wire::experiments::{
-    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
-    ExperimentRunStatusResponse,
-};
-use moa_core::wire::skills::{
-    SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
-};
 use moa_core::{
     events::Event, types::action_policy::ActionRuleScope, types::events_stream::EventRange,
     types::events_stream::EventRecord, types::identifiers::StoragePartitionId,
@@ -30,6 +20,16 @@ use moa_core::{
 };
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::test_database_url;
+use moa_wire::artifacts::{
+    ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
+};
+use moa_wire::experiments::{
+    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
+    ExperimentRunStatusResponse,
+};
+use moa_wire::skills::{
+    SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
+};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::time::sleep;

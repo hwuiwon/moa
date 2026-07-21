@@ -13,7 +13,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use moa_artifacts::registry::{ArtifactRegistry, NewSkillEmbedding};
-use moa_core::config::EmbeddingBackfillConfig;
+use moa_config::EmbeddingBackfillConfig;
 use moa_core::error::{MoaError, Result};
 use moa_core::traits::EmbeddingProvider;
 use moa_session::PostgresSessionStore;

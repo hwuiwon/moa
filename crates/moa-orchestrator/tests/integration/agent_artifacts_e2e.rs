@@ -14,9 +14,6 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::skill::SkillActionKind;
 use moa_core::traits::Identity;
-use moa_core::wire::skills::{
-    SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
-};
 use moa_core::{
     events::Event, types::action_policy::ActionRuleScope, types::events_stream::EventRange,
     types::events_stream::EventRecord, types::identifiers::ModelId, types::identifiers::SessionId,
@@ -26,6 +23,9 @@ use moa_skills::artifact::skill_definition_from_package;
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_test_support::fixtures::tenant_id_from_storage_partition_id;
 use moa_test_support::postgres::test_database_url;
+use moa_wire::skills::{
+    SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
+};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::time::sleep;

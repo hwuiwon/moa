@@ -4,8 +4,8 @@ use std::sync::{Arc, OnceLock};
 
 use moa_authz::FgaClient;
 use moa_brain::pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector};
+use moa_config::MoaConfig;
 use moa_core::{
-    config::MoaConfig,
     traits::LineageHandle,
     traits::{EmbeddingProvider, Identity, RuntimeCacheStore, SessionRepository},
 };

@@ -142,7 +142,7 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
         };
     let temp_dir = tempdir()?;
 
-    let mut base_config = moa_core::config::MoaConfig::default();
+    let mut base_config = moa_config::MoaConfig::default();
     base_config.database.url = moa_test_support::postgres::test_database_url();
     base_config.query_rewrite.enabled = false;
     let mut agent_config = agent_config_for(scenario_name);
@@ -486,7 +486,7 @@ async fn run_learning_matrix_case(
         primary_transcript,
     ));
 
-    let mut base_config = moa_core::config::MoaConfig::default();
+    let mut base_config = moa_config::MoaConfig::default();
     base_config.database.url = moa_test_support::postgres::test_database_url();
     base_config.query_rewrite.enabled = false;
     base_config.skill_budget.max_manifest_chars = Some(EXPERIENCE_LEARNING_MAX_MANIFEST_CHARS);
@@ -878,7 +878,7 @@ async fn seed_learning_matrix_skills(
 }
 
 async fn configure_experience_learning_database(
-    base_config: &mut moa_core::config::MoaConfig,
+    base_config: &mut moa_config::MoaConfig,
     storage_partition_id: &str,
 ) -> TestResult {
     let maintenance_url = base_config.database.url.clone();
@@ -901,7 +901,7 @@ async fn configure_experience_learning_database(
 }
 
 async fn configure_learning_matrix_database(
-    base_config: &mut moa_core::config::MoaConfig,
+    base_config: &mut moa_config::MoaConfig,
     storage_partition_id: &str,
     matrix_case: &LearningMatrixCase,
 ) -> TestResult {

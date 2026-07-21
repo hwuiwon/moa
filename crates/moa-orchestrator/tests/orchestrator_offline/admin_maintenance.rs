@@ -2,7 +2,6 @@
 
 use chrono::Utc;
 use moa_core::traits::IdentityType;
-use moa_core::wire::admin::CheckpointRollbackResponse;
 use moa_core::{types::identifiers::TenantId, types::session::CheckpointHandle};
 use moa_memory_vector::PromotionReport;
 use moa_orchestrator::ctx::RequestHeaders;
@@ -10,6 +9,7 @@ use moa_orchestrator::services::admin_maintenance::{
     authorize_platform_maintenance, platform_maintenance_identity, promotion_response_from_report,
     promotion_update_response,
 };
+use moa_wire::admin::CheckpointRollbackResponse;
 use restate_sdk::prelude::{HandlerError, HeaderMap};
 use uuid::Uuid;
 

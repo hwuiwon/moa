@@ -2,10 +2,8 @@
 
 use std::{sync::Arc, time::Duration};
 
-use moa_core::{
-    config::MoaConfig,
-    types::{identifiers::TenantId, memory::RlsContext, security::SensitivityClass},
-};
+use moa_config::MoaConfig;
+use moa_core::types::{identifiers::TenantId, memory::RlsContext, security::SensitivityClass};
 use moa_db::ScopedConn;
 use moa_memory_pii::legal_hold::start_destruction;
 use moa_memory_vector::{

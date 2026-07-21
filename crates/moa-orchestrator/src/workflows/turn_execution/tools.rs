@@ -2,7 +2,6 @@
 
 use std::{collections::HashMap, time::Instant};
 
-use moa_core::wire::turn::TurnPhase;
 use moa_core::{
     types::completion::ToolInvocation,
     types::completion::{CompletionRequest, ToolCallContent},
@@ -12,6 +11,7 @@ use moa_core::{
     types::tools::ToolOutput,
     types::tools::TrustedSandboxFileManifestRef,
 };
+use moa_wire::turn::TurnPhase;
 use restate_sdk::prelude::*;
 use serde::Deserialize;
 use tracing::Instrument;

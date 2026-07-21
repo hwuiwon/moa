@@ -1,11 +1,12 @@
 //! Pure helpers for assessing task segments during turn execution.
 
 use chrono::{DateTime, Utc};
+use moa_config::ResolutionConfig;
 use moa_core::{
-    config::ResolutionConfig, events::Event, types::events_stream::EventRecord,
-    types::identifiers::SegmentId, types::segment_assessment::AssessmentPhase,
-    types::segment_assessment::SegmentAssessment, types::segment_assessment::SegmentBaseline,
-    types::segments::ActiveSegment, types::segments::TaskSegment, types::session::SessionMeta,
+    events::Event, types::events_stream::EventRecord, types::identifiers::SegmentId,
+    types::segment_assessment::AssessmentPhase, types::segment_assessment::SegmentAssessment,
+    types::segment_assessment::SegmentBaseline, types::segments::ActiveSegment,
+    types::segments::TaskSegment, types::session::SessionMeta,
 };
 
 use crate::pipeline::segments::SegmentCompleted;
@@ -254,10 +255,10 @@ fn last_brain_response(events: &[EventRecord]) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
+    use moa_config::ResolutionConfig;
     use moa_core::{
-        config::ResolutionConfig, events::Event, types::events_stream::EventRecord,
-        types::identifiers::SegmentId, types::identifiers::SessionId,
-        types::segment_assessment::AssessmentPhase,
+        events::Event, types::events_stream::EventRecord, types::identifiers::SegmentId,
+        types::identifiers::SessionId, types::segment_assessment::AssessmentPhase,
     };
     use uuid::Uuid;
 

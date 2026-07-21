@@ -15,7 +15,7 @@ The root workspace package inventory comes from `cargo metadata --no-deps`:
   `moa-auth-providers`, `moa-auth-providers-auth0`, `moa-fga-bootstrap`,
   `moa-ocsf`, `moa-security`.
 - Lineage/observability/analytics: `moa-lineage-core`,
-  `moa-lineage-citation`, `moa-lineage-sink`, `moa-lineage-otel`,
+  `moa-lineage-citation`, `moa-lineage-sink`,
   `moa-lineage-audit`, `moa-observability`, `moa-analytics`.
 - Product domains: `moa-agents`, `moa-contacts`, `moa-artifacts`,
   `moa-experiments`, `moa-scoring`, `moa-messaging`, `moa-skills`.
