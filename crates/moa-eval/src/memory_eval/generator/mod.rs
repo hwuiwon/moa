@@ -4,11 +4,11 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, Duration, TimeZone, Utc};
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     types::identifiers::SessionId, types::identifiers::StoragePartitionId,
     types::identifiers::UserId,
 };
-use moa_memory_graph::PiiClass;
 use moa_memory_types::ScopeTier;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

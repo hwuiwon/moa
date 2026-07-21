@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{types::identifiers::TenantId, types::memory::RlsContext};
-use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
+use moa_crypto::LocalKmsProvider;
+use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore};
 use moa_memory_ingest::{ContradictionContext, RrfPlusJudgeDetector};
 use moa_memory_vector::{VECTOR_DIMENSION, VectorItem, VectorMatch, VectorQuery, VectorStore};
 use moa_session::testing;
@@ -68,14 +70,17 @@ impl VectorStore for StubVectorStore {
 
 fn fact_intent(storage_partition_id: &str, uid: Uuid, name: &str) -> NodeWriteIntent {
     NodeWriteIntent {
+        barrier: None,
         uid,
+        data_subject_id: Uuid::parse_str(storage_partition_id)
+            .expect("storage partition fixture should be a tenant UUID"),
         label: NodeLabel::Fact,
         storage_partition_id: Some(storage_partition_id.to_string()),
         contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "summary": name, "source": "contradiction_candidates" }),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         confidence: Some(0.9),
         valid_from: Utc::now(),
         embedding: None,
@@ -100,7 +105,11 @@ async fn candidates_merge_hydrates_lexical_and_vector_hits_excluding_inactive_db
     let tenant_id = TenantId::from(Uuid::now_v7());
     let storage_partition_id = tenant_id.0.to_string();
     let scope = RlsContext::tenant(tenant_id);
-    let graph = PostgresGraphStore::scoped_for_app_role(store.pool().clone(), scope.clone());
+    let graph = PostgresGraphStore::scoped_for_app_role(
+        store.pool().clone(),
+        scope.clone(),
+        Arc::new(LocalKmsProvider::new()),
+    );
 
     let lexical_uid = Uuid::now_v7();
     let vector_uid = Uuid::now_v7();
@@ -144,7 +153,7 @@ async fn candidates_merge_hydrates_lexical_and_vector_hits_excluding_inactive_db
             "checkout deploys railway",
             &embedding,
             NodeLabel::Fact,
-            PiiClass::None,
+            SensitivityClass::None,
             &ctx,
         )
         .await

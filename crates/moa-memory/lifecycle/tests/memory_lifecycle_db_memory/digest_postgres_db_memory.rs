@@ -267,16 +267,19 @@ async fn seed_fact(
     object: &str,
 ) {
     let uid = Uuid::now_v7();
+    let data_subject_id = Uuid::parse_str(storage_partition_id)
+        .expect("digest storage partition fixture should be a tenant UUID");
     let name = format!("{subject} {predicate} {object}");
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, storage_partition_id, user_id, name, pii_class, confidence, valid_from, properties_summary)
-        VALUES ($1, 'Fact', $2, $3, $4, 'none', 0.9, $5, $6)
+            (uid, label, storage_partition_id, data_subject_id, user_id, name, pii_class, confidence, valid_from, properties_summary)
+        VALUES ($1, 'Fact', $2, $3, $4, $5, 'none', 0.9, $6, $7)
         "#,
     )
     .bind(uid)
     .bind(storage_partition_id)
+    .bind(data_subject_id)
     .bind(user_id)
     .bind(&name)
     .bind(

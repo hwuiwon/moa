@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use moa_core::{
-    error::MoaError, traits::SessionStore as _, types::completion::CompletionRequest,
-    types::hands::SandboxFile, types::identifiers::SessionId,
+    error::MoaError, traits::Identity, traits::SessionStore as _,
+    types::completion::CompletionRequest, types::hands::SandboxFile, types::identifiers::SessionId,
     types::tools::TrustedSandboxFileEntry, types::tools::TrustedSandboxFileManifestPayload,
     types::tools::TrustedSandboxFileManifestRef,
 };
@@ -32,6 +32,7 @@ pub(super) async fn build_request_inside_workflow(
     session_store: Arc<PostgresSessionStore>,
     session_id: SessionId,
     turn_id: TurnId,
+    identity: Identity,
 ) -> Result<Option<BuiltTurnRequest>, HandlerError> {
     let active_user_sequence_num = ctx
         .get::<Json<u64>>(driver_progress::RootTurnStateKey::USER_MESSAGE_SEQUENCE)
@@ -46,6 +47,7 @@ pub(super) async fn build_request_inside_workflow(
             prepare_turn_request(
                 session_id,
                 turn_id,
+                identity,
                 active_user_sequence_num,
                 cached_query_rewrite,
             )

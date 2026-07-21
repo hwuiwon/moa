@@ -645,6 +645,11 @@ async fn input_resume_preserves_attempt_and_history_service_e2e() -> Result<()> 
         tenant_id: run.tenant_id,
         contact_id: None,
         session_id: run.session_id,
+        identity: fixture
+            .client
+            .identity()
+            .context("fixture client identity")?
+            .clone(),
     };
     let driver = tokio::spawn(async move { client.post_void(&task_path, &task_request).await });
     let calls = controller.wait_for_calls(1, SERVICE_TIMEOUT).await?;
@@ -1480,6 +1485,11 @@ async fn drive_task_workflow(
                 tenant_id: run.tenant_id,
                 contact_id: None,
                 session_id: run.session_id,
+                identity: fixture
+                    .client
+                    .identity()
+                    .context("fixture client identity")?
+                    .clone(),
             },
         ),
     )
@@ -1503,6 +1513,11 @@ async fn drive_run_workflow(
                 tenant_id: run.tenant_id,
                 contact_id: None,
                 session_id: run.session_id,
+                identity: fixture
+                    .client
+                    .identity()
+                    .context("fixture client identity")?
+                    .clone(),
             },
         )
         .await
@@ -1526,6 +1541,11 @@ async fn drive_run_workflow(
                 tenant_id: run.tenant_id,
                 contact_id: None,
                 session_id: run.session_id,
+                identity: fixture
+                    .client
+                    .identity()
+                    .context("fixture client identity")?
+                    .clone(),
             },
         )
         .await

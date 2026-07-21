@@ -147,15 +147,18 @@ async fn audit_writes_log_line() -> Result<(), Box<dyn Error>> {
     let pool = PgPool::connect(&test_database_url()).await?;
     moa_migrations::run(&test_database_url()).await?;
     let uid = Uuid::now_v7();
-    let phi_like_placeholder = "audit smoke placeholder 123-45-6789";
+    let tenant_id = Uuid::now_v7();
+    let audit_placeholder = "audit smoke placeholder 123-45-6789";
     sqlx::query(
         "INSERT INTO moa.node_index \
-         (uid, label, storage_partition_id, user_id, name, pii_class, properties_summary) \
-         VALUES ($1, 'Fact', 'audit-smoke', NULL, $2, 'phi', $3)",
+         (uid, label, storage_partition_id, tenant_id, data_subject_id, user_id, name, pii_class, properties_summary) \
+         VALUES ($1, 'Fact', $2, $3, $3, NULL, $4, 'none', $5)",
     )
     .bind(uid)
-    .bind(phi_like_placeholder)
-    .bind(serde_json::json!({ "source": phi_like_placeholder }))
+    .bind(tenant_id.to_string())
+    .bind(tenant_id)
+    .bind(audit_placeholder)
+    .bind(serde_json::json!({ "source": audit_placeholder }))
     .execute(&pool)
     .await?;
 
@@ -188,7 +191,7 @@ async fn audit_writes_log_line() -> Result<(), Box<dyn Error>> {
     assert!(stdout.contains("INSERT"), "{stdout}");
     assert!(stdout.contains("moa.node_index"), "{stdout}");
     assert!(
-        !stdout.contains(phi_like_placeholder),
+        !stdout.contains(audit_placeholder),
         "pgaudit output unexpectedly contained PHI-like plaintext: {stdout}"
     );
 

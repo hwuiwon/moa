@@ -1,6 +1,6 @@
 //! Helpers for propagating trusted MOA identity headers across Restate calls.
 
-use moa_core::traits::{Identity, IdentityType};
+use moa_core::traits::Identity;
 use reqwest::RequestBuilder;
 use restate_sdk::prelude::Request;
 
@@ -29,7 +29,7 @@ pub(crate) fn with_identity_headers<'a, Req, Res>(
     let request = request
         .header(
             "x-moa-identity-type".to_string(),
-            identity_type_header(identity.identity_type).to_string(),
+            identity.identity_type.as_str().to_string(),
         )
         .header("x-moa-identity-id".to_string(), identity.id.to_string())
         .header(
@@ -58,10 +58,7 @@ pub(crate) fn with_reqwest_identity_headers(
     identity: &Identity,
 ) -> RequestBuilder {
     let request = request
-        .header(
-            "x-moa-identity-type",
-            identity_type_header(identity.identity_type),
-        )
+        .header("x-moa-identity-type", identity.identity_type.as_str())
         .header("x-moa-identity-id", identity.id.to_string())
         .header("x-moa-tenant-id", identity.tenant_id.to_string());
     let request = if let Some(api_key_id) = identity.api_key_id {
@@ -75,13 +72,4 @@ pub(crate) fn with_reqwest_identity_headers(
         request
     };
     with_reqwest_trace_headers(request)
-}
-
-fn identity_type_header(identity_type: IdentityType) -> &'static str {
-    match identity_type {
-        IdentityType::Operator => "operator",
-        IdentityType::Contact => "contact",
-        IdentityType::Agent => "agent",
-        IdentityType::Service => "service",
-    }
 }

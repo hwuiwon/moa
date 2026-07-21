@@ -303,6 +303,12 @@ fn dimension_select_expression(
     let expression = field_expression(backend, dataset_id, field)?;
     Ok(match (backend, field.kind) {
         (AnalyticsBackend::Postgres, AnalyticsFieldKind::Uuid) => format!("{expression}::TEXT"),
+        // Normalize narrow Postgres integer columns to the wire decoder's i64
+        // representation. Catalog integer dimensions can originate from INT2,
+        // INT4, or INT8 read-model columns.
+        (AnalyticsBackend::Postgres, AnalyticsFieldKind::Integer) => {
+            format!("{expression}::BIGINT")
+        }
         (AnalyticsBackend::ClickHouse, AnalyticsFieldKind::Uuid) => {
             format!("toString({expression})")
         }
@@ -362,10 +368,12 @@ fn postgres_measure_expression(
         AnalyticsAggregation::Avg => format!("AVG({expression})::DOUBLE PRECISION"),
         AnalyticsAggregation::Min => match field.kind {
             AnalyticsFieldKind::Uuid => format!("MIN({expression}::TEXT)"),
+            AnalyticsFieldKind::Integer => format!("MIN({expression})::BIGINT"),
             _ => format!("MIN({expression})"),
         },
         AnalyticsAggregation::Max => match field.kind {
             AnalyticsFieldKind::Uuid => format!("MAX({expression}::TEXT)"),
+            AnalyticsFieldKind::Integer => format!("MAX({expression})::BIGINT"),
             _ => format!("MAX({expression})"),
         },
         AnalyticsAggregation::P50 => {
@@ -759,6 +767,37 @@ mod tests {
         // Tenant scope bind plus the required time-window lower bound.
         assert_eq!(compiled.bind_values.len(), 2);
         assert_eq!(compiled.limit, 25);
+    }
+
+    #[test]
+    fn postgres_integer_dimensions_are_normalized_to_bigint_offline() {
+        // Pins: INT4-backed catalog dimensions use the same i64 wire shape as
+        // COUNT and SUM measures instead of failing SQLx decoding at runtime.
+        let mut request = request();
+        request.dataset = "execution_tasks".to_string();
+        request.dimensions = vec![AnalyticsDimension {
+            field: "attempt".to_string(),
+            alias: None,
+        }];
+        request.measures = vec![AnalyticsMeasure {
+            field: None,
+            aggregation: AnalyticsAggregation::Count,
+            alias: None,
+        }];
+        request.filters = vec![AnalyticsFilter {
+            field: "started_at".to_string(),
+            operator: AnalyticsFilterOperator::Gte,
+            value: Some(AnalyticsCell::String(
+                (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(),
+            )),
+        }];
+        request.order_by.clear();
+
+        let compiled = AnalyticsCompiler::default()
+            .compile(request)
+            .expect("compile integer dimension query");
+
+        assert!(compiled.sql.contains("d.attempt::BIGINT AS c0"));
     }
 
     #[test]

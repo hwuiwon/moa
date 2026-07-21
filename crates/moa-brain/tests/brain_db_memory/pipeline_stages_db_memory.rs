@@ -20,20 +20,23 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
 };
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     config::MoaConfig, config::QueryRewriteConfig, error::Result, traits::ContextProcessor,
-    traits::LLMProvider, traits::NullLineageHandle, types::completion::CompletionContent,
-    types::completion::CompletionRequest, types::completion::CompletionResponse,
-    types::completion::CompletionStream, types::completion::StopReason,
-    types::completion::TokenUsage, types::contact::ContactId, types::context::ContextMessage,
-    types::context::MessageRole, types::context::WorkingContext, types::identifiers::ModelId,
-    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
-    types::model::ModelCapabilities, types::observability::stable_prefix_fingerprint,
-    types::query_rewrite::QueryRewriteResult, types::query_rewrite::RewriteReason,
-    types::query_rewrite::RewriteSource,
+    traits::Identity, traits::IdentityType, traits::LLMProvider, traits::NullLineageHandle,
+    types::completion::CompletionContent, types::completion::CompletionRequest,
+    types::completion::CompletionResponse, types::completion::CompletionStream,
+    types::completion::StopReason, types::completion::TokenUsage, types::contact::ContactId,
+    types::context::ContextMessage, types::context::MessageRole,
+    types::context::TURN_ID_METADATA_KEY, types::context::WorkingContext,
+    types::identifiers::ModelId, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::model::ModelCapabilities,
+    types::observability::stable_prefix_fingerprint, types::query_rewrite::QueryRewriteResult,
+    types::query_rewrite::RewriteReason, types::query_rewrite::RewriteSource,
 };
+use moa_crypto::LocalKmsProvider;
 use moa_db::ScopedConn;
-use moa_memory_graph::{NodeLabel, PiiClass};
+use moa_memory_graph::NodeLabel;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorItem, VectorStore};
 use moa_session::testing;
 use serde_json::json;
@@ -65,6 +68,7 @@ async fn digest_processor_registers_at_documented_position() {
         session_store,
         GraphMemoryPipelineOptions {
             graph_pool: pool,
+            kms: Arc::new(LocalKmsProvider::new()),
             shared_graph_memory_retriever: None,
             retrieval_embedder: None,
             shared_skill_injector: None,
@@ -375,6 +379,14 @@ async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalid
         .as_ref()
         .expect("memory-stage fixture should have a contact")
         .contact_id;
+    ctx.set_caller_identity(Identity {
+        identity_type: IdentityType::Contact,
+        id: runtime_contact_id.0,
+        tenant_id: runtime_tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    });
+    ctx.insert_metadata(TURN_ID_METADATA_KEY, json!(Uuid::now_v7().to_string()));
     let runtime_storage_partition_id = StoragePartitionId::for_tenant(runtime_tenant_id);
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     delete_memory_rows(store.pool(), &runtime_storage_partition_id).await?;
@@ -401,6 +413,7 @@ async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalid
     let output = GraphMemoryRetriever::new_with_config(
         abstention_disabled_config(),
         store.pool().clone(),
+        Arc::new(LocalKmsProvider::new()),
         None,
     )
     .with_assume_app_role(true)
@@ -589,17 +602,18 @@ async fn seed_memory_rows(
         sqlx::query(
             r#"
             INSERT INTO moa.node_index
-                (uid, label, storage_partition_id, user_id, name, pii_class, confidence,
-                 valid_to, properties_summary, last_accessed_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                (uid, label, storage_partition_id, user_id, data_subject_id, name, pii_class,
+                 confidence, valid_to, properties_summary, last_accessed_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(hit.uid)
         .bind(NodeLabel::Fact.as_str())
         .bind(storage_partition_id.as_str())
         .bind(contact_id.to_string())
+        .bind(contact_id.0)
         .bind(&hit.name)
-        .bind(PiiClass::None.as_str())
+        .bind(SensitivityClass::None.as_str())
         .bind(0.99_f64)
         .bind(valid_to)
         .bind(json!({ "summary": hit.summary }))
@@ -636,16 +650,17 @@ async fn seed_other_tenant_vector_noise(
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, storage_partition_id, user_id, name, pii_class, confidence,
-             properties_summary, last_accessed_at)
-        VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8)
+            (uid, label, storage_partition_id, user_id, data_subject_id, name, pii_class,
+             confidence, properties_summary, last_accessed_at)
+        VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(uid)
     .bind(NodeLabel::Fact.as_str())
     .bind(&other_storage_partition_id)
+    .bind(other_tenant_id.0)
     .bind("unrelated cross-tenant vector noise")
-    .bind(PiiClass::None.as_str())
+    .bind(SensitivityClass::None.as_str())
     .bind(0.99_f64)
     .bind(json!({ "summary": "unrelated cross-tenant vector noise" }))
     .bind(clock_at + Duration::seconds(10_000))
@@ -659,7 +674,7 @@ async fn seed_other_tenant_vector_noise(
             uid,
             user_id: None,
             label: NodeLabel::Fact.as_str().to_string(),
-            pii_class: PiiClass::None.as_str().to_string(),
+            pii_class: SensitivityClass::None,
             embedding: vec![0.0; VECTOR_DIMENSION],
             embedding_model: "pipeline-stage-test".to_string(),
             embedding_model_version: 1,

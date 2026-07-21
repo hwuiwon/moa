@@ -5,10 +5,10 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
-    PostgresGraphStore,
+    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore,
 };
 use moa_memory_vector::{PgvectorStore, VectorItem, VectorQuery, VectorStore};
 use moa_session::testing;
@@ -93,7 +93,8 @@ fn basis_vector(index: usize) -> Vec<f32> {
 fn graph_store(pool: &PgPool, storage_partition_id: &str) -> PostgresGraphStore {
     let scope = tenant_scope(storage_partition_id);
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
-    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
+    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope, super::test_kms())
+        .with_vector_store(Arc::new(vector))
 }
 
 fn node_intent(
@@ -104,14 +105,16 @@ fn node_intent(
     embedding: Option<Vec<f32>>,
 ) -> NodeWriteIntent {
     NodeWriteIntent {
+        barrier: None,
         uid: Uuid::now_v7(),
+        data_subject_id: tenant_scope(storage_partition_id).tenant_id().0,
         label,
         storage_partition_id: Some(storage_partition_id.to_string()),
         contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "source": "write_protocol" }),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         confidence: Some(0.9),
         valid_from,
         embedding,
@@ -258,7 +261,7 @@ async fn in_conn_write_primitives_compose_in_one_transaction_db_memory() {
     let pool = session_store.pool();
     let storage_partition_id = Uuid::now_v7().to_string();
     let scope = tenant_scope(&storage_partition_id);
-    let store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope);
+    let store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope, super::test_kms());
 
     let t0 = Utc::now() - Duration::minutes(5);
     let fact = node_intent(
@@ -452,14 +455,16 @@ fn shared_entity_intent(
     now: chrono::DateTime<Utc>,
 ) -> NodeWriteIntent {
     NodeWriteIntent {
+        barrier: None,
         uid,
+        data_subject_id: tenant_scope(partition).tenant_id().0,
         label: NodeLabel::Entity,
         storage_partition_id: Some(partition.to_string()),
         contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "source": "deadlock_probe" }),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         confidence: Some(0.9),
         valid_from: now,
         embedding: None,
@@ -700,6 +705,7 @@ async fn graph_write_with_vector_store_commits_node_state_db_memory() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         session_store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
+        super::test_kms(),
     )
     .with_vector_store(Arc::new(RecordingVectorStore {}));
 
@@ -770,7 +776,7 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
             embedding: basis_vector(0),
             k: 1,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: None,
         })
@@ -810,7 +816,7 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
             embedding: basis_vector(0),
             k: 5,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: Some(t0 + Duration::seconds(30)),
         })

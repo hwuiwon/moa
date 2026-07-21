@@ -7,12 +7,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_brain::{
-    StreamedTurnResult,
+    BrainTurnRequest, StreamedTurnRequest, StreamedTurnResult,
     learning::{
         attribution::attributions_for_experience, candidates::propose_candidates_for_experience,
         experience::experience_from_assessment,
     },
-    run_streamed_turn_with_lineage,
+    run_streamed_turn,
 };
 use moa_core::transcript::Transcript;
 use moa_core::{
@@ -553,18 +553,22 @@ async fn drive_one_turn(
     hard_cancel_token: &CancellationToken,
 ) -> Result<()> {
     for turn_index in 0..MAX_LONG_CONVERSATION_AGENT_TURNS {
-        let outcome = run_streamed_turn_with_lineage(
-            session_id,
-            environment.session_store.clone(),
-            llm_provider.clone(),
-            &environment.pipeline,
-            Some(environment.tool_router.clone()),
+        let outcome = run_streamed_turn(StreamedTurnRequest {
+            turn: BrainTurnRequest {
+                identity: environment.identity.clone(),
+                session_id,
+                session_store: environment.session_store.clone(),
+                llm_provider: llm_provider.clone(),
+                pipeline: &environment.pipeline,
+                tool_router: Some(environment.tool_router.clone()),
+            },
             runtime_tx,
-            None,
-            Some(cancel_token.clone()),
-            Some(hard_cancel_token.clone()),
-            environment.lineage.clone(),
-        )
+            event_tx: None,
+            cancel_token: Some(cancel_token.clone()),
+            hard_cancel_token: Some(hard_cancel_token.clone()),
+            signal_state: None,
+            lineage: environment.lineage.clone(),
+        })
         .await?;
 
         match outcome {

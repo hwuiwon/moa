@@ -467,6 +467,7 @@ async fn run_worker_iteration(
             turn_id: &input.request.turn_id,
             worker_id: &input.request.worker_id,
             meta: &input.meta,
+            identity: &input.request.identity,
             session_id: input.parent_session,
             active_canary: input.active_canary.as_deref(),
             trusted_sandbox_manifest: input.request.trusted_sandbox_manifest.as_ref(),
@@ -549,6 +550,7 @@ struct WorkerToolContext<'a> {
     turn_id: &'a str,
     worker_id: &'a str,
     meta: &'a SessionMeta,
+    identity: &'a moa_core::traits::Identity,
     session_id: SessionId,
     active_canary: Option<&'a str>,
     trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
@@ -600,6 +602,7 @@ async fn handle_tool_call(
         ctx,
         GovernedInvocationRequest {
             session: meta,
+            identity: tool_context.identity,
             session_id,
             tool_id,
             tool_call,

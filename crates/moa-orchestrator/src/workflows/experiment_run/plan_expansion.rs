@@ -15,13 +15,14 @@ struct ActivePlanTrialWait<F> {
 pub(super) async fn run_experiment_plan(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
+    scope: ActionRuleScope,
     plan_revision_uid: Uuid,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     persist_run_status(
         ctx,
-        request.tenant_id,
+        scope,
         request.run_uid,
         ExperimentRunStatus::Running,
         None,
@@ -31,17 +32,18 @@ pub(super) async fn run_experiment_plan(
     .await?;
     let expansion = load_plan_expansion(
         ctx,
-        request.tenant_id,
+        scope,
         request.run_uid,
         plan_revision_uid,
         request.agent_revision_variants.clone(),
         pool,
     )
     .await?;
-    let trials = create_plan_trial_rows(ctx, request.tenant_id, expansion.trials, pool).await?;
+    let trials = create_plan_trial_rows(ctx, scope, expansion.trials, pool).await?;
     dispatch_plan_trials(
         ctx,
         request,
+        scope,
         expansion.parallelism,
         trials,
         pool,
@@ -53,6 +55,7 @@ pub(super) async fn run_experiment_plan(
 async fn dispatch_plan_trials(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
+    scope: ActionRuleScope,
     parallelism: usize,
     trials: Vec<PlanTrialDispatch>,
     pool: &sqlx::PgPool,
@@ -66,8 +69,7 @@ async fn dispatch_plan_trials(
     let mut last_progress = None;
 
     loop {
-        let aggregate =
-            aggregate_plan_status(ctx, request.tenant_id, request.run_uid, pool).await?;
+        let aggregate = aggregate_plan_status(ctx, scope, request.run_uid, pool).await?;
         retain_active_plan_waits(&mut active_waits, &aggregate.trials);
         let progress = plan_progress_fingerprint(&aggregate);
         let state_changed = last_progress
@@ -78,7 +80,7 @@ async fn dispatch_plan_trials(
         if aggregate.run.status == ExperimentRunStatus::Cancelled {
             cancel_active_plan_trials(
                 ctx,
-                request.tenant_id,
+                scope,
                 request.run_uid,
                 aggregate
                     .run
@@ -103,7 +105,7 @@ async fn dispatch_plan_trials(
         if run_status_is_terminal(aggregate.status) {
             persist_run_status(
                 ctx,
-                request.tenant_id,
+                scope,
                 request.run_uid,
                 aggregate.status,
                 aggregate.error.clone(),
@@ -126,7 +128,7 @@ async fn dispatch_plan_trials(
         if aggregate.status != aggregate.run.status {
             persist_run_status(
                 ctx,
-                request.tenant_id,
+                scope,
                 request.run_uid,
                 aggregate.status,
                 aggregate.error.clone(),
@@ -150,7 +152,7 @@ async fn dispatch_plan_trials(
             .collect::<Vec<_>>();
         let claimed_trials = claim_plan_trial_dispatches(
             ctx,
-            request.tenant_id,
+            scope,
             request.run_uid,
             ready_trial_keys,
             available_slots,
@@ -185,17 +187,10 @@ async fn dispatch_plan_trials(
         if !state_changed && !claimed_any_trials && active_waits.is_empty() {
             let reason =
                 "experiment plan made no progress and has no active trial waiters".to_string();
-            cancel_active_plan_trials(
-                ctx,
-                request.tenant_id,
-                request.run_uid,
-                reason.clone(),
-                pool,
-            )
-            .await?;
+            cancel_active_plan_trials(ctx, scope, request.run_uid, reason.clone(), pool).await?;
             persist_run_status(
                 ctx,
-                request.tenant_id,
+                scope,
                 request.run_uid,
                 ExperimentRunStatus::Failed,
                 Some(reason),
@@ -244,14 +239,13 @@ pub(super) struct PlanStatusAggregate {
 
 async fn load_plan_expansion(
     ctx: &WorkflowContext<'_>,
-    tenant_id: TenantId,
+    scope: ActionRuleScope,
     run_uid: Uuid,
     plan_revision_uid: Uuid,
     agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
     pool: &sqlx::PgPool,
 ) -> Result<PlanExpansion, HandlerError> {
     let pool = pool.clone();
-    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
             expand_plan(
@@ -372,12 +366,11 @@ async fn load_required_published_revision(
 
 async fn create_plan_trial_rows(
     ctx: &WorkflowContext<'_>,
-    tenant_id: TenantId,
+    scope: ActionRuleScope,
     trials: Vec<ExpandedPlanTrial>,
     pool: &sqlx::PgPool,
 ) -> Result<Vec<PlanTrialDispatch>, HandlerError> {
     let pool = pool.clone();
-    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
             let store = ExperimentStore::new(pool);
@@ -403,12 +396,11 @@ async fn create_plan_trial_rows(
 
 async fn aggregate_plan_status(
     ctx: &WorkflowContext<'_>,
-    tenant_id: TenantId,
+    scope: ActionRuleScope,
     run_uid: Uuid,
     pool: &sqlx::PgPool,
 ) -> Result<PlanStatusAggregate, HandlerError> {
     let pool = pool.clone();
-    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
             aggregate_plan_status_from_store(pool, scope, run_uid)
@@ -513,13 +505,12 @@ pub(super) fn aggregate_error_for_trials(trials: &[ExperimentTrialRecord]) -> Op
 
 async fn cancel_active_plan_trials(
     ctx: &WorkflowContext<'_>,
-    tenant_id: TenantId,
+    scope: ActionRuleScope,
     run_uid: Uuid,
     reason: String,
     pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
     let pool = pool.clone();
-    let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         ExperimentStore::new(pool)
             .cancel_active_trials(&scope, run_uid, reason)
@@ -534,7 +525,7 @@ async fn cancel_active_plan_trials(
 
 async fn claim_plan_trial_dispatches(
     ctx: &WorkflowContext<'_>,
-    tenant_id: TenantId,
+    scope: ActionRuleScope,
     run_uid: Uuid,
     trial_keys: Vec<String>,
     available_slots: usize,
@@ -547,7 +538,6 @@ async fn claim_plan_trial_dispatches(
     let limit = i64::try_from(available_slots)
         .map_err(|_| TerminalError::new("experiment dispatch parallelism is too large"))?;
     let pool = pool.clone();
-    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
             let mut trials = ExperimentStore::new(pool)

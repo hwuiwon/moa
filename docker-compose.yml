@@ -248,6 +248,11 @@ services:
       # Development-only: the local hand provider is fail-closed by default
       # and must be opted into explicitly outside production.
       MOA_CLOUD_HANDS_ALLOW_LOCAL: "true"
+      # Match multi-replica deployments: Postgres owns shared KMS state and a
+      # fixed development-only key file survives container restarts.
+      MOA_KMS_PROVIDER: postgres
+      MOA_KMS_ROOT_KEY_DIR: /var/run/secrets/moa-kms/root-keys
+      MOA_KMS_REQUIRED_GENERATION: primary
       MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
       MOA_DEREGISTER_ON_SHUTDOWN: "false"
       MOA_METRICS_ENABLED: ${MOA_METRICS_ENABLED:-true}
@@ -271,6 +276,7 @@ services:
       - "10023:9090"
     volumes:
       - ./crates/moa-loadtest/scripts:/loadtest-scripts:ro
+      - ./k8s/overlays/local/kms-root-keys:/var/run/secrets/moa-kms/root-keys:ro
 
   moa-edge:
     build:

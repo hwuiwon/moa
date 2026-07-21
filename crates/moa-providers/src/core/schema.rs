@@ -2,6 +2,18 @@
 
 use serde_json::{Map, Value, json};
 
+/// Compiles a canonical response schema for Anthropic structured output.
+///
+/// Anthropic rejects `oneOf` and numeric validation constraints in the schema
+/// sent through `output_config.format`, so the provider receives a structural
+/// clone with `anyOf` alternatives and without those constraints. The canonical
+/// schema remains available to validate the parsed response downstream.
+pub fn compile_for_anthropic_output(schema: &Value) -> Value {
+    let mut compiled = schema.clone();
+    make_anthropic_output_compatible(&mut compiled);
+    compiled
+}
+
 /// Compiles a canonical tool schema into a Gemini-compatible function schema.
 pub fn compile_for_gemini(schema: &Value) -> Value {
     let mut compiled = schema.clone();
@@ -114,6 +126,56 @@ fn make_gemini_compatible(schema: &mut Value) {
     }
 }
 
+fn make_anthropic_output_compatible(schema: &mut Value) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+
+    for keyword in [
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+    ] {
+        object.remove(keyword);
+    }
+
+    for key in ["properties", "$defs", "definitions"] {
+        if let Some(children) = object.get_mut(key).and_then(Value::as_object_mut) {
+            for child in children.values_mut() {
+                make_anthropic_output_compatible(child);
+            }
+        }
+    }
+    if let Some(items) = object.get_mut("items") {
+        make_anthropic_output_compatible(items);
+    }
+    for key in ["anyOf", "allOf", "oneOf"] {
+        if let Some(variants) = object.get_mut(key).and_then(Value::as_array_mut) {
+            for variant in variants {
+                make_anthropic_output_compatible(variant);
+            }
+        }
+    }
+    rewrite_one_of_as_any_of(object);
+}
+
+fn rewrite_one_of_as_any_of(object: &mut Map<String, Value>) {
+    if let Some(one_of) = object.remove("oneOf") {
+        match object.get_mut("anyOf").and_then(Value::as_array_mut) {
+            Some(existing) => {
+                if let Value::Array(variants) = one_of {
+                    existing.extend(variants);
+                }
+            }
+            None => {
+                object.insert("anyOf".to_string(), one_of);
+            }
+        }
+    }
+}
+
 /// Reports every OpenAI strict-mode violation in a compiled schema.
 ///
 /// Walks the schema and returns one `path: problem` line per violation of the
@@ -204,18 +266,7 @@ fn make_strict_compatible(schema: &mut Value) {
         object.retain(|key, _| matches!(key.as_str(), "$ref" | "$defs" | "definitions"));
     }
     // OpenAI strict mode rejects `oneOf`; the equivalent `anyOf` is permitted.
-    if let Some(one_of) = object.remove("oneOf") {
-        match object.get_mut("anyOf").and_then(Value::as_array_mut) {
-            Some(existing) => {
-                if let Value::Array(variants) = one_of {
-                    existing.extend(variants);
-                }
-            }
-            None => {
-                object.insert("anyOf".to_string(), one_of);
-            }
-        }
-    }
+    rewrite_one_of_as_any_of(object);
 
     let property_names = object
         .get("properties")
@@ -349,7 +400,68 @@ fn strip_validation_keywords(object: &mut Map<String, Value>) {
 mod tests {
     use serde_json::json;
 
-    use super::{compile_for_gemini, compile_for_openai_strict, normalize_openai_strict_output};
+    use super::{
+        compile_for_anthropic_output, compile_for_gemini, compile_for_openai_strict,
+        normalize_openai_strict_output,
+    };
+
+    #[test]
+    fn compile_for_anthropic_output_removes_unsupported_nested_schema_features() {
+        // Pins: Anthropic rejects `oneOf` and numeric validation constraints in
+        // structured output schemas, but accepts their `anyOf` equivalent and
+        // the surrounding JSON Schema shape.
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "scores": {
+                    "type": "array",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 10,
+                                "multipleOf": 1
+                            },
+                            {
+                                "type": "number",
+                                "exclusiveMinimum": 0,
+                                "exclusiveMaximum": 100
+                            }
+                        ]
+                    }
+                }
+            },
+            "required": ["scores"]
+        });
+
+        let compiled = compile_for_anthropic_output(&schema);
+
+        assert_eq!(
+            compiled,
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "scores": {
+                        "type": "array",
+                        "items": {
+                            "anyOf": [
+                                { "type": "integer" },
+                                { "type": "number" }
+                            ]
+                        }
+                    }
+                },
+                "required": ["scores"]
+            })
+        );
+        assert_eq!(
+            schema["properties"]["scores"]["items"]["oneOf"][0]["minimum"],
+            1
+        );
+    }
 
     #[test]
     fn compile_for_gemini_removes_additional_properties_recursively() {

@@ -1,5 +1,6 @@
 //! Wiremock offline counterpart for Turbopuffer news retrieval live coverage.
 
+use moa_core::types::security::SensitivityClass;
 use moa_memory_vector::{
     TurbopufferStore, TurbopufferTextQuery, VECTOR_DIMENSION, VectorItem, VectorQuery, VectorStore,
 };
@@ -44,7 +45,7 @@ async fn turbopuffer_news_offline_upsert_and_query_returns_promoted_news_fact() 
             uid,
             user_id: None,
             label: "Fact".to_string(),
-            pii_class: "none".to_string(),
+            pii_class: SensitivityClass::None,
             embedding: basis_vector(7),
             embedding_model: "offline-news-embed".to_string(),
             embedding_model_version: 1,
@@ -58,7 +59,7 @@ async fn turbopuffer_news_offline_upsert_and_query_returns_promoted_news_fact() 
             embedding: basis_vector(7),
             k: 5,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: None,
         })
@@ -96,7 +97,7 @@ async fn turbopuffer_news_offline_bm25_returns_exact_news_identifier() {
             query_text: "abc-123".to_string(),
             k: 5,
             label_filter: Some(vec!["Chunk".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
         })
         .await

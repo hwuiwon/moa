@@ -14,7 +14,8 @@ pub(super) async fn create_sync_run(
             sync_run_uid, tenant_id, storage_partition_id, connection_id, status,
             parser_provider, max_records, records_seen, records_changed, records_deleted,
             records_ingested, records_failed, objects_parsed, chunks_embedded,
-            graph_nodes_upserted, graph_edges_upserted, error, started_at, finished_at
+            graph_nodes_upserted, graph_edges_upserted, error, started_at, finished_at,
+            information_barrier
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
@@ -23,7 +24,7 @@ pub(super) async fn create_sync_run(
                 WHEN $17::TEXT IS NULL THEN NULL
                 ELSE jsonb_build_object('code', $17::TEXT)
             END,
-            $18, $19
+            $18, $19, $20
         )
         "#,
     )
@@ -46,6 +47,11 @@ pub(super) async fn create_sync_run(
     .bind(run.error_code)
     .bind(run.started_at)
     .bind(run.finished_at)
+    .bind(
+        run.information_barrier
+            .as_ref()
+            .map(InformationBarrierId::as_str),
+    )
     .execute(conn.as_mut())
     .await
     .map_err(map_sqlx_error)?;
@@ -67,7 +73,8 @@ pub(super) async fn claim_sync_run(
             sync_run_uid, tenant_id, storage_partition_id, connection_id, status,
             parser_provider, max_records, records_seen, records_changed, records_deleted,
             records_ingested, records_failed, objects_parsed, chunks_embedded,
-            graph_nodes_upserted, graph_edges_upserted, error, started_at, finished_at
+            graph_nodes_upserted, graph_edges_upserted, error, started_at, finished_at,
+            information_barrier
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
@@ -76,7 +83,7 @@ pub(super) async fn claim_sync_run(
                 WHEN $17::TEXT IS NULL THEN NULL
                 ELSE jsonb_build_object('code', $17::TEXT)
             END,
-            $18, $19
+            $18, $19, $20
         )
         ON CONFLICT (tenant_id, connection_id)
         WHERE status IN (
@@ -91,7 +98,8 @@ pub(super) async fn claim_sync_run(
                   max_records, records_seen, records_changed, records_deleted,
                   records_ingested, records_failed, objects_parsed, chunks_embedded,
                   graph_nodes_upserted, graph_edges_upserted,
-                  error->>'code' AS error_code, started_at, finished_at
+                  error->>'code' AS error_code, started_at, finished_at,
+                  information_barrier
         "#,
     )
     .bind(run.sync_run_uid)
@@ -113,6 +121,11 @@ pub(super) async fn claim_sync_run(
     .bind(run.error_code)
     .bind(run.started_at)
     .bind(run.finished_at)
+    .bind(
+        run.information_barrier
+            .as_ref()
+            .map(InformationBarrierId::as_str),
+    )
     .fetch_optional(conn.as_mut())
     .await
     .map_err(map_sqlx_error)?;
@@ -129,7 +142,8 @@ pub(super) async fn claim_sync_run(
                max_records, records_seen, records_changed, records_deleted,
                records_ingested, records_failed, objects_parsed, chunks_embedded,
                graph_nodes_upserted, graph_edges_upserted,
-               error->>'code' AS error_code, started_at, finished_at
+               error->>'code' AS error_code, started_at, finished_at,
+               information_barrier
         FROM moa.knowledge_sync_runs
         WHERE tenant_id = $1
           AND connection_id = $2
@@ -164,7 +178,7 @@ pub(super) async fn get_sync_run(
                records_seen, records_changed, records_deleted, records_ingested,
                records_failed, objects_parsed, chunks_embedded, graph_nodes_upserted,
                graph_edges_upserted, error->>'code' AS error_code,
-               started_at, finished_at
+               started_at, finished_at, information_barrier
         FROM moa.knowledge_sync_runs
         WHERE sync_run_uid = $1
         "#,
@@ -193,7 +207,8 @@ pub(super) async fn latest_sync_run_for_connection(
                records_seen, records_changed, records_deleted, records_ingested,
                records_failed, objects_parsed, chunks_embedded,
                graph_nodes_upserted, graph_edges_upserted,
-               error->>'code' AS error_code, started_at, finished_at
+               error->>'code' AS error_code, started_at, finished_at,
+               information_barrier
         FROM moa.knowledge_sync_runs
         WHERE connection_id = $1
           AND (cardinality($2::TEXT[]) = 0 OR status = ANY($2::TEXT[]))

@@ -3,8 +3,9 @@
 use chrono::{DateTime, Duration, Utc};
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_memory_graph::{
-    EdgeLabel, EdgeWriteIntent, GraphStore, GraphWalkScoring, NodeLabel, NodeWriteIntent, PiiClass,
+    EdgeLabel, EdgeWriteIntent, GraphStore, GraphWalkScoring, NodeLabel, NodeWriteIntent,
     PostgresGraphStore,
 };
 use moa_session::testing;
@@ -33,14 +34,16 @@ fn node_intent(
     valid_from: DateTime<Utc>,
 ) -> NodeWriteIntent {
     NodeWriteIntent {
+        barrier: None,
         uid: Uuid::now_v7(),
+        data_subject_id: tenant_scope(storage_partition_id).tenant_id().0,
         label,
         storage_partition_id: Some(storage_partition_id.to_string()),
         contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "source": "edge_validity" }),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         confidence: Some(0.99),
         valid_from,
         embedding: None,
@@ -84,6 +87,7 @@ async fn future_edge_is_invisible_to_as_of_walks_in_the_past() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(&storage_partition_id),
+        super::test_kms(),
     );
     let node_valid_from = utc("2026-01-01T00:00:00Z");
     let edge_valid_from = utc("2026-06-01T00:00:00Z");
@@ -161,6 +165,7 @@ async fn node_supersession_closes_incident_edges_at_the_supersession_instant() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(&storage_partition_id),
+        super::test_kms(),
     );
     let old_valid_from = utc("2026-02-01T00:00:00Z");
     let new_valid_from = utc("2026-04-01T00:00:00Z");

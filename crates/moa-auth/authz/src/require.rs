@@ -304,12 +304,7 @@ pub fn fga_subject(identity: &Identity) -> String {
         return format!("api_key:{api_key_id}");
     }
 
-    match identity.identity_type {
-        IdentityType::Operator => format!("operator:{}", identity.id),
-        IdentityType::Contact => format!("contact:{}", identity.id),
-        IdentityType::Agent => format!("agent:{}", identity.id),
-        IdentityType::Service => format!("service:{}", identity.id),
-    }
+    format!("{}:{}", identity.identity_type.as_str(), identity.id)
 }
 
 #[cfg(test)]

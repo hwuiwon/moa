@@ -11,9 +11,11 @@ mod context;
 mod database;
 mod env_overlay;
 mod execution;
+mod kms;
 mod knowledge;
 mod learning;
 mod lineage;
+mod llm_dlp;
 mod loader;
 mod memory;
 mod messaging;
@@ -31,7 +33,7 @@ pub use async_authz::{AsyncAuthzConfig, AsyncAuthzKind};
 pub use audit_security::AuditSecurityConfig;
 pub use auth::{
     Auth0AuthConfig, AuthConfig, AuthProviderKind, ContactTokenConfig, LocalAuthConfig,
-    OidcAuthConfig,
+    OAuthClientConfig, OAuthClientType, OAuthServerConfig, OidcAuthConfig,
 };
 pub use authz::{AuthzConfig, AuthzEngine, OpenFgaConfig};
 pub use clickhouse::ClickHouseConfig;
@@ -45,6 +47,7 @@ pub use context::{
 pub use database::{DatabaseConfig, DatabaseNeonConfig};
 pub use env_overlay::MoaEnvOverlay;
 pub use execution::ExecutionConfig;
+pub use kms::{KmsConfig, KmsProviderKind};
 pub use knowledge::{
     KnowledgeChunkingConfig, KnowledgeConfig, KnowledgeObservabilityConfig,
     KnowledgeParserDefaultsConfig, KnowledgeParsersConfig, KnowledgeProvidersConfig,
@@ -57,6 +60,7 @@ pub use learning::{
     SegmentBoundaryConfig, SkillLearningConfig,
 };
 pub use lineage::LineageConfig;
+pub use llm_dlp::LlmDlpConfig;
 pub use memory::{
     MemoryConfig, MemoryDigestConfig, MemoryExtractionConfig, MemoryRankingConfig,
     MemoryRankingWeights, MemoryRetrievalConfig, MemoryVectorConfig, TurbopufferVectorConfig,
@@ -65,8 +69,9 @@ pub use memory::{
 pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;
 pub use providers::{
-    ConcurrencyScope, GeneralConfig, ModelsConfig, ProviderConcurrencyConfig,
-    ProviderCredentialConfig, ProviderStreamTimeoutConfig, ProvidersConfig,
+    ConcurrencyScope, DeploymentProviderPolicyConfig, GeneralConfig, ModelsConfig,
+    ProviderCapabilitiesConfig, ProviderConcurrencyConfig, ProviderCredentialConfig,
+    ProviderStreamTimeoutConfig, ProvidersConfig,
 };
 pub use runtime_cache::{RuntimeCacheBackend, RuntimeCacheConfig};
 pub use sandbox::{
@@ -78,7 +83,7 @@ pub use session::{
     SessionAttachmentBackend, SessionAttachmentStorageConfig, SessionBlobBackend, SessionConfig,
 };
 pub use telemetry::{MetricsConfig, ObservabilityConfig, OtlpProtocol};
-pub use token_vault::{TokenVaultConfig, TokenVaultKind};
+pub use token_vault::{OAuthRefreshConfig, TokenVaultConfig, TokenVaultKind};
 
 use serde::{Deserialize, Serialize};
 
@@ -102,12 +107,16 @@ pub struct MoaConfig {
     pub auth: AuthConfig,
     /// Token vault provider settings.
     pub token_vault: TokenVaultConfig,
+    /// Envelope-encryption key-management settings.
+    pub kms: KmsConfig,
     /// Async authorization provider settings.
     pub async_authz: AsyncAuthzConfig,
     /// OCSF security-event audit settings.
     pub audit_security: AuditSecurityConfig,
     /// Compliance, privacy, and DSAR signing settings.
     pub compliance: ComplianceConfig,
+    /// DLP governance applied on the outbound LLM egress boundary.
+    pub llm_dlp: LlmDlpConfig,
     /// Local runtime settings.
     pub local: LocalConfig,
     /// Memory bootstrap and maintenance settings.
@@ -231,6 +240,21 @@ impl MoaConfig {
 
         self.session.validate()?;
         self.providers.validate()?;
+        self.token_vault.validate()?;
+
+        if self.kms.provider == KmsProviderKind::Postgres {
+            if self.kms.root_key_dir.as_os_str().is_empty() {
+                return Err(MoaError::ConfigError(
+                    "kms.root_key_dir must be set for the postgres provider".to_string(),
+                ));
+            }
+            if self.kms.required_generation.trim().is_empty() {
+                return Err(MoaError::ConfigError(
+                    "kms.required_generation must be non-empty for the postgres provider"
+                        .to_string(),
+                ));
+            }
+        }
 
         if let Some(clickhouse) = &self.clickhouse {
             clickhouse.validate()?;
@@ -280,6 +304,7 @@ mod tests {
         "MOA_PRIVACY_EXPORT_SIGNING_KEY_ID",
         "MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX",
         "MOA_LINEAGE_AUDIT_SIGNING_KEY_ID",
+        "MOA_LINEAGE_AUDIT_ROOT_SEED_HEX",
         "MOA_PII_VAULT_SECRET_HEX",
         "MOA_ANTHROPIC_API_KEY",
         "MOA_OPENAI_API_KEY",

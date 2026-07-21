@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use moa_brain::{
-    GraphMemoryPipelineOptions, TurnResult,
+    BrainTurnRequest, GraphMemoryPipelineOptions, TurnResult,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
@@ -49,6 +49,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
         session_store.clone(),
         GraphMemoryPipelineOptions {
             graph_pool,
+            kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
             shared_graph_memory_retriever: None,
             retrieval_embedder: None,
             shared_skill_injector: None,
@@ -78,13 +79,14 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        run_brain_turn(
-            first_session_id,
-            session_store.clone(),
-            provider.clone(),
-            &pipeline,
-            Some(router.clone()),
-        )
+        run_brain_turn(BrainTurnRequest {
+            identity: test_identity(tenant_id),
+            session_id: first_session_id,
+            session_store: session_store.clone(),
+            llm_provider: provider.clone(),
+            pipeline: &pipeline,
+            tool_router: Some(router.clone()),
+        })
         .await?,
         TurnResult::Complete
     );
@@ -106,13 +108,14 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        run_brain_turn(
-            second_session_id,
+        run_brain_turn(BrainTurnRequest {
+            identity: test_identity(tenant_id),
+            session_id: second_session_id,
             session_store,
-            provider.clone(),
-            &pipeline,
-            Some(router),
-        )
+            llm_provider: provider.clone(),
+            pipeline: &pipeline,
+            tool_router: Some(router),
+        })
         .await?,
         TurnResult::Complete
     );
@@ -136,6 +139,16 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
     )));
 
     Ok(())
+}
+
+fn test_identity(tenant_id: TenantId) -> moa_core::traits::Identity {
+    moa_core::traits::Identity {
+        identity_type: moa_core::traits::IdentityType::Operator,
+        id: uuid::Uuid::from_u128(0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c413),
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    }
 }
 
 fn scripted_provider() -> ScriptedProvider {

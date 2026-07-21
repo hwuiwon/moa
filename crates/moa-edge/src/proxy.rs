@@ -2,7 +2,7 @@
 
 use crate::headers;
 use anyhow::{Context, bail};
-use moa_core::traits::{Identity, IdentityType};
+use moa_core::traits::Identity;
 use reqwest::Client;
 use std::time::Duration;
 
@@ -48,10 +48,7 @@ impl OrchestratorProxy {
         }
 
         request = request
-            .header(
-                headers::H_IDENTITY_TYPE,
-                identity_type_str(identity.identity_type),
-            )
+            .header(headers::H_IDENTITY_TYPE, identity.identity_type.as_str())
             .header(headers::H_IDENTITY_ID, identity.id.to_string())
             .header(headers::H_TENANT_ID, identity.tenant_id.to_string());
         if let Some(api_key_id) = identity.api_key_id {
@@ -185,15 +182,6 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn identity_type_str(identity_type: IdentityType) -> &'static str {
-    match identity_type {
-        IdentityType::Operator => "operator",
-        IdentityType::Contact => "contact",
-        IdentityType::Agent => "agent",
-        IdentityType::Service => "service",
-    }
-}
-
 fn is_hop_by_hop_header(name: &str) -> bool {
     const HOP_BY_HOP: [&str; 9] = [
         "host",
@@ -215,6 +203,7 @@ fn is_hop_by_hop_header(name: &str) -> bool {
 mod tests {
     use super::*;
     use axum::http::HeaderMap;
+    use moa_core::traits::IdentityType;
     use moa_core::types::identifiers::TenantId;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;

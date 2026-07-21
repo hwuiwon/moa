@@ -11,6 +11,7 @@ use moa_core::{
 };
 use restate_sdk::prelude::*;
 use sqlx::PgPool;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use super::approval::ApprovalClaims;
@@ -36,10 +37,11 @@ pub struct PrivacyExportContext {
 }
 
 /// Context for one server-side privacy erase.
-#[derive(Debug)]
 pub struct PrivacyEraseContext {
     /// Postgres pool used for graph and PII-vault erasure.
     pub pool: PgPool,
+    /// Required key-management provider used for fail-closed crypto-shred.
+    pub kms: Arc<dyn moa_crypto::KeyManagementProvider>,
     /// Tenant that authorized the privacy operation.
     pub tenant_id: TenantId,
     /// Storage partition derived from the tenant id.
@@ -58,6 +60,10 @@ pub struct PrivacyEraseContext {
     pub claims: ApprovalClaims,
     /// Optional PII vault secret used to compute subject pseudonyms.
     pub pii_vault_secret: Option<Vec<u8>>,
+    /// When true, a distinct second-admin dual-control approval must be consumed
+    /// before this erasure may execute (four-eyes / segregation of duties). Off by
+    /// default, preserving single-admin erasure.
+    pub require_dual_control: bool,
 }
 
 impl PrivacyEraseContext {
@@ -67,11 +73,13 @@ impl PrivacyEraseContext {
         request: PrivacyEraseRequest,
         claims: ApprovalClaims,
         config: &ComplianceConfig,
+        kms: Arc<dyn moa_crypto::KeyManagementProvider>,
     ) -> Result<Self, HandlerError> {
         let subject_user = parse_subject_uuid(&request.subject_user_id)?;
         let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
         Ok(Self {
             pool,
+            kms,
             tenant_id: request.tenant_id,
             storage_partition_id: storage_partition_id.to_string(),
             subject_user,
@@ -81,6 +89,7 @@ impl PrivacyEraseContext {
             contact_erasure_scope: request.contact_erasure_scope,
             claims,
             pii_vault_secret: pii_vault_secret_from_config(config)?,
+            require_dual_control: config.require_dual_control_for_erasure,
         })
     }
 }

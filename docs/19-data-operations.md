@@ -435,7 +435,7 @@ Configuration:
 
 Rust callers use `moa_memory_pii::OpenAiPrivacyFilterClassifier`. The client
 fails closed by default: network, HTTP, or parse failures return
-`PiiClass::Pii` with `abstained = true`. Callers that need hard errors can
+`SensitivityClass::Pii` with `abstained = true`. Callers that need hard errors can
 disable fail-closed behavior explicitly.
 
 Operational notes:

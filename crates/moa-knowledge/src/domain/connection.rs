@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::types::identifiers::TenantId;
+use moa_core::types::memory::InformationBarrierId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -31,6 +32,9 @@ pub struct KnowledgeConnection {
     /// Provider-native selected source state. Empty means provider default/all.
     #[serde(default)]
     pub source_selection: Value,
+    /// Source-owned information barrier applied to every record from this connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub information_barrier: Option<InformationBarrierId>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.

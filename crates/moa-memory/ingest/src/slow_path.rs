@@ -15,8 +15,9 @@ use crate::{
     should_ingest_degraded,
 };
 use futures_util::{StreamExt, TryStreamExt, stream};
-use moa_core::types::memory::RlsContext;
+use moa_core::types::{memory::RlsContext, security::SensitivityClass};
 use moa_core::{config::MoaConfig, traits::EmbeddingProvider};
+use moa_crypto::KeyManagementProvider;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, NodeLabel, NodeWriteIntent, PostgresGraphStore,
@@ -74,6 +75,7 @@ impl IngestionVO for IngestionVOImpl {
         let embedder = runtime.embedder();
         let contradiction_detector = runtime.contradiction_detector();
         let vector_factory = runtime.vector_store_factory();
+        let kms = runtime.kms();
         let degraded = storage_partition_degraded(&pool, &turn).await?;
         if degraded && !should_ingest_degraded(&turn) {
             ctx.set(&done_key, Json::from(true));
@@ -167,10 +169,12 @@ impl IngestionVO for IngestionVOImpl {
         let upsert_entity_resolver = runtime.entity_resolver();
         let upsert_entity_blocking_embedder = runtime.entity_blocking_embedder();
         let upsert_vector_factory = vector_factory.clone();
+        let upsert_kms = kms.clone();
         let report = ctx
             .run(|| async move {
                 apply_decisions(
                     &upsert_pool,
+                    &upsert_kms,
                     &upsert_vector_factory,
                     upsert_entity_resolver.as_ref(),
                     upsert_entity_blocking_embedder,
@@ -202,6 +206,7 @@ pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, 
     ingest_turn_direct_with_pool_and_pii(
         DirectIngestDeps {
             pool: runtime.pool().clone(),
+            kms: runtime.kms(),
             pii_classifier: runtime.pii_classifier(),
             embedder: runtime.embedder(),
             extractor: runtime.extractor(),
@@ -224,15 +229,17 @@ pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, 
 /// so duplicate direct callers for the same turn serialize across pods.
 pub async fn ingest_turn_direct_with_pool(
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     turn: SessionTurn,
 ) -> Result<IngestApplyReport, HandlerError> {
     let config = MoaConfig::load_from_env().map_err(HandlerError::from)?;
-    let deps = direct_ingest_deps_from_config(pool, &config)?;
+    let deps = direct_ingest_deps_from_config(pool, kms, &config)?;
     ingest_turn_direct_with_pool_and_pii(deps, turn).await
 }
 
 struct DirectIngestDeps {
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     pii_classifier: Arc<dyn PiiClassifier>,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
     extractor: Arc<dyn FactExtractor>,
@@ -244,12 +251,14 @@ struct DirectIngestDeps {
 
 fn direct_ingest_deps_from_config(
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     config: &MoaConfig,
 ) -> Result<DirectIngestDeps, HandlerError> {
     let embedder =
         crate::ctx::build_configured_ingestion_embedder(config).map_err(HandlerError::from)?;
     Ok(DirectIngestDeps {
         pool,
+        kms,
         pii_classifier: crate::ctx::build_shared_pii_classifier(
             config.memory.pii_service_url.as_deref(),
         ),
@@ -268,6 +277,7 @@ async fn ingest_turn_direct_with_pool_and_pii(
 ) -> Result<IngestApplyReport, HandlerError> {
     let DirectIngestDeps {
         pool,
+        kms,
         pii_classifier,
         embedder,
         extractor,
@@ -305,6 +315,7 @@ async fn ingest_turn_direct_with_pool_and_pii(
     .await?;
     let report = apply_decisions(
         &pool,
+        &kms,
         &vector_factory,
         entity_resolver.as_ref(),
         entity_blocking_embedder,
@@ -358,6 +369,7 @@ pub async fn ingest_turn_direct_with_ctx(
     let entity_blocking_embedder = ctx.entity_blocking_enabled.then(|| ctx.embedder.clone());
     let report = apply_decisions(
         &ctx.pool,
+        &ctx.kms,
         &vector_factory,
         ctx.entity_resolver.as_ref(),
         entity_blocking_embedder,
@@ -522,11 +534,20 @@ async fn embed_batch_with(
     embedder: &dyn EmbeddingProvider,
     facts: &[ClassifiedFact],
 ) -> Result<Vec<EmbeddedFact>, HandlerError> {
-    let texts = facts
+    let embeddable = facts
         .iter()
-        .map(|fact| fact.fact.summary.clone())
+        .enumerate()
+        .filter(|(_, fact)| !is_sealed_class(fact.pii_class))
         .collect::<Vec<_>>();
-    let embeddings = embedder.embed(&texts).await.map_err(HandlerError::from)?;
+    let texts = embeddable
+        .iter()
+        .map(|(_, fact)| fact.fact.summary.clone())
+        .collect::<Vec<_>>();
+    let embeddings = if texts.is_empty() {
+        Vec::new()
+    } else {
+        embedder.embed(&texts).await.map_err(HandlerError::from)?
+    };
     // F08: the embedding provider must return exactly one vector per input. Reject
     // the whole batch on a cardinality mismatch instead of zipping, which would
     // silently drop trailing facts (short response) or truncate vectors (long).
@@ -538,17 +559,27 @@ async fn embed_batch_with(
             },
         ));
     }
-    Ok(facts
+    let mut embedded = facts
         .iter()
         .cloned()
-        .zip(embeddings)
-        .map(|(classified, embedding)| EmbeddedFact {
+        .map(|classified| EmbeddedFact {
             classified,
-            embedding: Some(embedding),
-            embedding_model: Some(embedder.model_id().to_string()),
-            embedding_model_version: Some(embedder.model_version()),
+            embedding: None,
+            embedding_model: None,
+            embedding_model_version: None,
         })
-        .collect())
+        .collect::<Vec<_>>();
+    for ((index, _), embedding) in embeddable.into_iter().zip(embeddings) {
+        let fact = &mut embedded[index];
+        fact.embedding = Some(embedding);
+        fact.embedding_model = Some(embedder.model_id().to_string());
+        fact.embedding_model_version = Some(embedder.model_version());
+    }
+    Ok(embedded)
+}
+
+fn is_sealed_class(class: SensitivityClass) -> bool {
+    matches!(class, SensitivityClass::Phi | SensitivityClass::Restricted)
 }
 
 async fn detect_contradictions_with(
@@ -647,10 +678,14 @@ fn decision_from_conflict(conflict: Conflict, fact: EmbeddedFact) -> IngestDecis
 }
 
 fn decision_scope(turn: &SessionTurn, decision: &IngestDecision) -> RlsContext {
-    match decision {
+    let scope = match decision {
         IngestDecision::Insert { fact }
         | IngestDecision::Supersede { fact, .. }
         | IngestDecision::SkipDuplicate { fact, .. } => fact_scope(turn, fact),
+    };
+    match turn.barrier.clone() {
+        Some(barrier) => scope.with_cleared_barriers([barrier].into_iter().collect()),
+        None => scope,
     }
 }
 
@@ -674,6 +709,7 @@ fn turn_default_scope(turn: &SessionTurn) -> RlsContext {
 
 async fn apply_decisions(
     pool: &PgPool,
+    kms: &Arc<dyn KeyManagementProvider>,
     vector_factory: &VectorStoreFactory,
     entity_resolver: &EntityResolver,
     entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
@@ -688,6 +724,7 @@ async fn apply_decisions(
         precompute_entity_embeddings(entity_blocking_embedder.as_deref(), decisions).await?;
     let mut deps = ApplyDecisionDeps {
         pool,
+        kms,
         vector_factory,
         vector_cache: ConfiguredVectorStoreCache::default(),
         entity_resolver,
@@ -775,6 +812,7 @@ async fn drain_external_vector_sync(
 
 struct ApplyDecisionDeps<'a> {
     pool: &'a PgPool,
+    kms: &'a Arc<dyn KeyManagementProvider>,
     vector_factory: &'a VectorStoreFactory,
     vector_cache: ConfiguredVectorStoreCache,
     entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
@@ -797,7 +835,9 @@ async fn apply_one_decision(
     let Some(fact) = decision_fact(decision) else {
         return Ok(ApplyOutcome::Skipped);
     };
-    let entity_vector = if deps.entity_blocking_embedder.is_some() {
+    let use_entity_embeddings =
+        deps.entity_blocking_embedder.is_some() && !is_sealed_class(fact.classified.pii_class);
+    let entity_vector = if use_entity_embeddings {
         Some(
             deps.vector_cache
                 .configured_for_scope(deps.pool, deps.vector_factory, scope.clone(), true)
@@ -820,6 +860,7 @@ async fn apply_one_decision(
     let graph = graph_store(
         deps.pool.clone(),
         scope.clone(),
+        deps.kms.clone(),
         fact,
         deps.vector_factory,
         scoped_resolver.is_some(),
@@ -927,6 +968,7 @@ impl ConfiguredVectorStoreCache {
 fn graph_store(
     pool: PgPool,
     scope: RlsContext,
+    kms: Arc<dyn KeyManagementProvider>,
     fact: &EmbeddedFact,
     vector_factory: &VectorStoreFactory,
     needs_entity_vector_writes: bool,
@@ -937,7 +979,7 @@ fn graph_store(
     // for pgvector-only partitions the outbox is always empty). The outbox is
     // drained once per storage partition after the whole batch commits — see
     // `apply_decisions` and `drain_external_vector_sync`.
-    let store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone());
+    let store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone(), kms);
     if fact.embedding.is_some() || needs_entity_vector_writes {
         let vector_backend = vector_factory.transactional_graph_backend(pool, scope, true);
         store.with_vector_store(vector_backend.vector_store())
@@ -958,7 +1000,11 @@ fn node_intent(
     let contact_id = scope_user_id(scope);
     let scope_tier = scope.tier_str();
     NodeWriteIntent {
+        barrier: turn.barrier.clone(),
         uid: fact_uid,
+        data_subject_id: scope
+            .contact_id()
+            .map_or(scope.tenant_id().0, |contact_id| contact_id.0),
         label: NodeLabel::Fact,
         storage_partition_id: storage_partition_id.clone(),
         contact_id: contact_id.clone(),
@@ -1057,6 +1103,7 @@ async fn resolve_fact_entities(
                 valid_from: turn.finalized_at,
                 actor_id: &actor_id,
                 actor_kind,
+                barrier: turn.barrier.as_ref(),
                 precomputed_embedding: entity_embedding_for(entity_embeddings, &extracted.subject),
             },
         )
@@ -1073,6 +1120,7 @@ async fn resolve_fact_entities(
                 valid_from: turn.finalized_at,
                 actor_id: &actor_id,
                 actor_kind,
+                barrier: turn.barrier.as_ref(),
                 precomputed_embedding: entity_embedding_for(entity_embeddings, &extracted.object),
             },
         )
@@ -1136,6 +1184,9 @@ async fn precompute_entity_embeddings(
         let Some(fact) = decision_fact(decision) else {
             continue;
         };
+        if is_sealed_class(fact.classified.pii_class) {
+            continue;
+        }
         let extracted = &fact.classified.fact;
         for raw in [extracted.subject.as_str(), extracted.object.as_str()] {
             let normalized = normalize_entity_name(raw);
@@ -1502,11 +1553,13 @@ mod tests {
 
     use chrono::Utc;
     use moa_core::traits::EmbeddingProvider;
+    use moa_core::types::security::SensitivityClass;
     use moa_core::{
         config::MoaConfig, types::contact::ContactId, types::identifiers::SessionId,
         types::identifiers::TenantId,
     };
-    use moa_memory_graph::{EdgeLabel, PiiClass};
+    use moa_crypto::LocalKmsProvider;
+    use moa_memory_graph::EdgeLabel;
     use moa_memory_pii::{PiiCategory, PiiClassifier, PiiResult, PiiSpan, classify_heuristic};
     use moa_memory_types::{FactCategory, FactEdgeLabel};
     use sqlx::postgres::PgPoolOptions;
@@ -1532,7 +1585,7 @@ mod tests {
         async fn classify(&self, text: &str) -> moa_memory_pii::Result<PiiResult> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(PiiResult {
-                class: PiiClass::None,
+                class: SensitivityClass::None,
                 spans: Vec::new(),
                 model_version: text.to_string(),
                 abstained: false,
@@ -1612,12 +1665,12 @@ mod tests {
         let facts = vec![
             ClassifiedFact {
                 fact: plain_fact("first fact"),
-                pii_class: PiiClass::None,
+                pii_class: SensitivityClass::None,
                 pii_spans: Vec::new(),
             },
             ClassifiedFact {
                 fact: plain_fact("second fact"),
-                pii_class: PiiClass::None,
+                pii_class: SensitivityClass::None,
                 pii_spans: Vec::new(),
             },
         ];
@@ -1637,11 +1690,100 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn embed_batch_omits_sealed_classes_before_provider_offline() {
+        // Pins: PHI and restricted facts never enter the embedding-provider
+        // batch and retain no vector identity, while ordinary and PII facts in
+        // the same batch remain semantically indexable.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let batch_len = Arc::new(AtomicUsize::new(0));
+        let embedder = CountingEmbedder {
+            calls: calls.clone(),
+            last_batch_len: batch_len.clone(),
+            dim: 8,
+        };
+        let facts = [
+            ("ordinary fact", SensitivityClass::None),
+            ("contact fact", SensitivityClass::Pii),
+            ("health fact", SensitivityClass::Phi),
+            ("credential fact", SensitivityClass::Restricted),
+        ]
+        .into_iter()
+        .map(|(summary, pii_class)| ClassifiedFact {
+            fact: plain_fact(summary),
+            pii_class,
+            pii_spans: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+
+        let embedded = super::embed_batch_with(&embedder, &facts)
+            .await
+            .expect("mixed-sensitivity embedding batch should succeed");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(batch_len.load(Ordering::SeqCst), 2);
+        for index in [0, 1] {
+            assert!(embedded[index].embedding.is_some());
+            assert_eq!(embedded[index].embedding_model.as_deref(), Some("counting"));
+            assert_eq!(embedded[index].embedding_model_version, Some(1));
+        }
+        for index in [2, 3] {
+            assert_eq!(embedded[index].embedding, None);
+            assert_eq!(embedded[index].embedding_model, None);
+            assert_eq!(embedded[index].embedding_model_version, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn embed_batch_with_only_sealed_classes_skips_provider_offline() {
+        // Pins: an all-sealed turn performs no empty or content-bearing provider
+        // request and returns facts with no semantic-index identity.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let batch_len = Arc::new(AtomicUsize::new(0));
+        let embedder = CountingEmbedder {
+            calls: calls.clone(),
+            last_batch_len: batch_len.clone(),
+            dim: 8,
+        };
+        let facts = [SensitivityClass::Phi, SensitivityClass::Restricted]
+            .into_iter()
+            .map(|pii_class| ClassifiedFact {
+                fact: plain_fact("sealed fact"),
+                pii_class,
+                pii_spans: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        let embedded = super::embed_batch_with(&embedder, &facts)
+            .await
+            .expect("all-sealed batch should stay in no-vector mode");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(batch_len.load(Ordering::SeqCst), 0);
+        assert_eq!(embedded.len(), 2);
+        assert!(embedded.iter().all(|fact| fact.embedding.is_none()));
+        assert!(
+            embedded.iter().all(
+                |fact| fact.embedding_model.is_none() && fact.embedding_model_version.is_none()
+            )
+        );
+    }
+
     fn embedded_decision(
         subject: &str,
         object: &str,
         summary: &str,
         embedding: Option<Vec<f32>>,
+    ) -> IngestDecision {
+        embedded_decision_with_class(subject, object, summary, embedding, SensitivityClass::None)
+    }
+
+    fn embedded_decision_with_class(
+        subject: &str,
+        object: &str,
+        summary: &str,
+        embedding: Option<Vec<f32>>,
+        pii_class: SensitivityClass,
     ) -> IngestDecision {
         let mut fact = ExtractedFact {
             uid: uuid::Uuid::nil(),
@@ -1664,7 +1806,7 @@ mod tests {
             fact: EmbeddedFact {
                 classified: ClassifiedFact {
                     fact,
-                    pii_class: PiiClass::None,
+                    pii_class,
                     pii_spans: Vec::new(),
                 },
                 embedding,
@@ -1728,12 +1870,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn precompute_entity_embeddings_omits_sealed_fact_names_offline() {
+        // Pins: entity blocking cannot make a second provider call for names
+        // inherited from a sealed fact after fact embedding has been withheld.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let batch_len = Arc::new(AtomicUsize::new(0));
+        let embedder = CountingEmbedder {
+            calls: calls.clone(),
+            last_batch_len: batch_len.clone(),
+            dim: 8,
+        };
+        let decisions = vec![
+            embedded_decision("api", "db", "api uses db", None),
+            embedded_decision_with_class(
+                "patient",
+                "123-45-6789",
+                "patient SSN is 123-45-6789",
+                None,
+                SensitivityClass::Phi,
+            ),
+        ];
+
+        let map = precompute_entity_embeddings(Some(&embedder), &decisions)
+            .await
+            .expect("precompute should ignore sealed entity names");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(batch_len.load(Ordering::SeqCst), 2);
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("api"));
+        assert!(map.contains_key("db"));
+        assert!(!map.contains_key("patient"));
+        assert!(!map.contains_key("123 45 6789"));
+    }
+
+    #[tokio::test]
     async fn slow_path_without_configured_embedder_preserves_no_vector_facts() {
         // Pins: disabled or uncredentialed runtime construction leaves the slow
         // path writable while omitting vector bytes and their model identity.
         let facts = vec![ClassifiedFact {
             fact: plain_fact("the api uses postgres"),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             pii_spans: Vec::new(),
         }];
 
@@ -1759,7 +1936,7 @@ mod tests {
         config.memory.vector.embedder.name = "gemini:gemini-embedding-2".to_string();
         config.providers.google.api_key = "test-google-key".to_string();
 
-        let deps = direct_ingest_deps_from_config(pool, &config)
+        let deps = direct_ingest_deps_from_config(pool, Arc::new(LocalKmsProvider::new()), &config)
             .expect("direct helper dependencies should build without provider calls");
         let fact_embedder = deps
             .embedder
@@ -1814,7 +1991,7 @@ mod tests {
         assert_eq!(classified.len(), facts.len());
         for (index, entry) in classified.iter().enumerate() {
             assert_eq!(entry.fact.summary, format!("fact number {index}"));
-            assert_eq!(entry.pii_class, PiiClass::None);
+            assert_eq!(entry.pii_class, SensitivityClass::None);
         }
     }
 
@@ -1854,7 +2031,7 @@ mod tests {
         .expect("non-abstaining PII classification should proceed");
 
         assert_eq!(classified.len(), 1);
-        assert_eq!(classified[0].pii_class, PiiClass::Pii);
+        assert_eq!(classified[0].pii_class, SensitivityClass::Pii);
         assert_eq!(classified[0].pii_spans, result.spans);
         assert_eq!(
             classified[0].fact.summary,
@@ -1888,7 +2065,7 @@ mod tests {
         // Pins: ingest fallback PII classification uses the shared heuristic classifier.
         let result = classify_heuristic("The API secret is sk-test-123.");
 
-        assert_eq!(result.class, PiiClass::Restricted);
+        assert_eq!(result.class, SensitivityClass::Restricted);
         assert!(
             result
                 .spans
@@ -2056,7 +2233,7 @@ mod tests {
     fn pii_result(summary: &str, needle: &str, category: PiiCategory) -> PiiResult {
         let start = summary.find(needle).expect("needle present");
         PiiResult {
-            class: PiiClass::Pii,
+            class: SensitivityClass::Pii,
             spans: vec![PiiSpan::new(start, start + needle.len(), category, 0.99)],
             model_version: "test".to_string(),
             abstained: false,
@@ -2074,6 +2251,7 @@ mod tests {
             transcript: "user: checkout-service depends on libfoo".to_string(),
             dominant_pii_class: "none".to_string(),
             finalized_at: Utc::now(),
+            barrier: None,
         }
     }
 }

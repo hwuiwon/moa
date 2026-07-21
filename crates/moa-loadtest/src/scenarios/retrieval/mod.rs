@@ -24,11 +24,13 @@ use moa_brain::{
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest},
 };
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     traits::EmbeddingProvider, types::identifiers::StoragePartitionId, types::identifiers::TenantId,
 };
+use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_db::ScopedConn;
-use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
+use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_providers::CohereV4Embedder;

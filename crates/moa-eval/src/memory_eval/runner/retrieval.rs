@@ -4,6 +4,7 @@ use super::*;
 
 pub(super) async fn retrieve_probe(
     pool: &PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     planner: &QueryPlanner,
     embedder: &dyn EmbeddingProvider,
     reranker: Arc<dyn Reranker>,
@@ -30,7 +31,7 @@ pub(super) async fn retrieve_probe(
     }
     let vector = Arc::new(vector_store);
     let graph_vector: Arc<dyn VectorStore> = vector.clone();
-    let graph_store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context)
+    let graph_store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context, kms)
         .with_vector_store(graph_vector);
     let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
     let hybrid = HybridRetriever::new(pool.clone(), graph.clone(), vector)
@@ -187,7 +188,7 @@ pub(super) fn probe_retrieval_request(
     let mut request = planned.clone().into_retrieval_request(
         &probe.query,
         query_embedding,
-        PiiClass::Restricted,
+        SensitivityClass::Restricted,
         options.k_final,
         options.use_reranker,
     );

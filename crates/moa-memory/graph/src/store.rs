@@ -3,22 +3,30 @@
 use std::sync::Arc;
 
 use moa_core::types::memory::RlsContext;
+use moa_crypto::KeyManagementProvider;
 use moa_db::ScopedConn;
 use moa_memory_vector::VectorStore;
 use sqlx::{PgConnection, PgPool};
 
 use crate::{
-    ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodeExpiryIntent,
-    NodePropertyUpdateIntent, NodeWriteIntent,
+    ExistingSupersessionIntent, GraphError, NodeContentUpdateIntent, NodeEmbeddingIntent,
+    NodeExpiryIntent, NodeWriteIntent,
 };
 
 /// Graph store backed by relational node, edge, changelog, and vector tables.
+///
+/// The key-management provider seals restricted/PHI `name` and
+/// `properties_summary` on the write path and opens them on the read path (see
+/// [`crate::write`] and [`crate::read`]). Every constructor requires the shared
+/// provider explicitly so sealed content is readable across store instances and
+/// process restarts.
 #[derive(Clone)]
 pub struct PostgresGraphStore {
     pub(crate) pool: PgPool,
     pub(crate) scope: Option<RlsContext>,
     pub(crate) assume_app_role: bool,
     pub(crate) vector: Option<Arc<dyn VectorStore>>,
+    pub(crate) kms: Arc<dyn KeyManagementProvider>,
 }
 
 impl PostgresGraphStore {
@@ -26,22 +34,24 @@ impl PostgresGraphStore {
     ///
     /// This constructor does not install request-scope GUCs. Use `scoped` for tenant-context
     /// application paths.
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: PgPool, kms: Arc<dyn KeyManagementProvider>) -> Self {
         Self {
             pool,
             scope: None,
             assume_app_role: false,
             vector: None,
+            kms,
         }
     }
 
     /// Creates a graph store that installs scope GUCs for each operation.
-    pub fn scoped(pool: PgPool, scope: RlsContext) -> Self {
+    pub fn scoped(pool: PgPool, scope: RlsContext, kms: Arc<dyn KeyManagementProvider>) -> Self {
         Self {
             pool,
             scope: Some(scope),
             assume_app_role: false,
             vector: None,
+            kms,
         }
     }
 
@@ -49,12 +59,17 @@ impl PostgresGraphStore {
     ///
     /// This is intended for integration tests that connect as `moa_owner` while still exercising
     /// application RLS policies.
-    pub fn scoped_for_app_role(pool: PgPool, scope: RlsContext) -> Self {
+    pub fn scoped_for_app_role(
+        pool: PgPool,
+        scope: RlsContext,
+        kms: Arc<dyn KeyManagementProvider>,
+    ) -> Self {
         Self {
             pool,
             scope: Some(scope),
             assume_app_role: true,
             vector: None,
+            kms,
         }
     }
 
@@ -62,6 +77,11 @@ impl PostgresGraphStore {
     pub fn with_vector_store(mut self, vector: Arc<dyn VectorStore>) -> Self {
         self.vector = Some(vector);
         self
+    }
+
+    /// Returns the key-management provider used for restricted node content.
+    pub fn kms(&self) -> &Arc<dyn KeyManagementProvider> {
+        &self.kms
     }
 
     /// Returns the underlying Postgres pool.
@@ -104,12 +124,12 @@ impl PostgresGraphStore {
         crate::write::expire_node(self, intent).await
     }
 
-    /// Updates a node's mutable properties in place.
-    pub async fn update_node_properties(
+    /// Replaces a node's complete mutable content in place.
+    pub async fn update_node_content(
         &self,
-        intent: NodePropertyUpdateIntent,
+        intent: NodeContentUpdateIntent,
     ) -> Result<(), GraphError> {
-        crate::write::update_node_properties(self, intent).await
+        crate::write::update_node_content(self, intent).await
     }
 
     /// Attaches a vector embedding to an existing node.

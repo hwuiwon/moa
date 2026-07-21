@@ -18,12 +18,13 @@ pub mod signing;
 
 pub use audit_sink::init_background_audit;
 pub use emit::{
-    ActorInput, EmitError, emit_agent_deactivated_tx, emit_agent_registered_tx,
-    emit_api_key_created_tx, emit_api_key_revoked_tx, emit_approval_decided_tx, emit_authn_failure,
-    emit_authn_success, emit_authz_decision, emit_delegation_granted_tx,
-    emit_delegation_revoked_tx, emit_group_membership_added_tx, emit_group_membership_removed_tx,
-    emit_scim_group_created_tx, emit_scim_group_deleted_tx, emit_scim_group_updated_tx,
-    emit_scim_user_created_tx, emit_scim_user_deleted_tx, emit_scim_user_updated_tx,
-    emit_user_deactivated_tx, spawn_authn_failure, spawn_authn_success, spawn_authz_decision,
+    ActorInput, EmitError, MemoryDataAccess, MemoryDataAccessDetails, emit_agent_deactivated_tx,
+    emit_agent_registered_tx, emit_api_key_created_tx, emit_api_key_revoked_tx,
+    emit_approval_decided_tx, emit_authn_failure, emit_authn_success, emit_authz_decision,
+    emit_data_access, emit_delegation_granted_tx, emit_delegation_revoked_tx,
+    emit_group_membership_added_tx, emit_group_membership_removed_tx, emit_scim_group_created_tx,
+    emit_scim_group_deleted_tx, emit_scim_group_updated_tx, emit_scim_user_created_tx,
+    emit_scim_user_deleted_tx, emit_scim_user_updated_tx, emit_user_deactivated_tx,
+    spawn_authn_failure, spawn_authn_success, spawn_authz_decision,
 };
 pub use signing::{SigningError, ensure_key, rotate_key, verify};

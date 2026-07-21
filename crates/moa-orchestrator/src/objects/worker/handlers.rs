@@ -82,11 +82,21 @@ impl Worker for WorkerImpl {
             None
         };
         let max_turns = state.max_turns;
+        let identity = state
+            .identity
+            .clone()
+            .ok_or_else(|| TerminalError::new("worker is missing its admitted caller identity"))?;
         let trusted_sandbox_manifest = state.trusted_sandbox_manifest.clone();
         state.persist(&ctx);
 
         if let Some(turn_id) = turn_id {
-            start_worker_turn_execution(&ctx, turn_id, max_turns, trusted_sandbox_manifest);
+            start_worker_turn_execution(
+                &ctx,
+                turn_id,
+                identity,
+                max_turns,
+                trusted_sandbox_manifest,
+            );
         }
         Ok(())
     }
@@ -457,11 +467,21 @@ impl Worker for WorkerImpl {
             None
         };
         let max_turns = state.max_turns;
+        let identity = state
+            .identity
+            .clone()
+            .ok_or_else(|| TerminalError::new("worker is missing its admitted caller identity"))?;
         let trusted_sandbox_manifest = state.trusted_sandbox_manifest.clone();
         state.persist(&ctx);
 
         if let Some(turn_id) = next_turn_id {
-            start_worker_turn_execution(&ctx, turn_id, max_turns, trusted_sandbox_manifest);
+            start_worker_turn_execution(
+                &ctx,
+                turn_id,
+                identity,
+                max_turns,
+                trusted_sandbox_manifest,
+            );
             return Ok(());
         }
         maybe_resolve_parent_awakeable(&ctx, &self.session_limits).await
@@ -962,6 +982,7 @@ async fn hydrate_claimed_history_entry(
 fn start_worker_turn_execution(
     ctx: &ObjectContext<'_>,
     turn_id: String,
+    identity: moa_core::traits::Identity,
     max_turns: Option<u32>,
     trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
 ) {
@@ -970,6 +991,7 @@ fn start_worker_turn_execution(
             .run(Json::from(RunWorkerTurnRequest {
                 worker_id: ctx.key().to_string(),
                 turn_id,
+                identity,
                 max_turns,
                 trusted_sandbox_manifest,
             })),

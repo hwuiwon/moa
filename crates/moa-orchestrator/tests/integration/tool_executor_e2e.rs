@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use moa_core::{
-    events::Event, types::events_stream::EventRange, types::identifiers::ToolCallId,
-    types::tools::ToolCallRequest, types::tools::ToolOutput,
+    events::Event, traits::Identity, types::events_stream::EventRange,
+    types::identifiers::ToolCallId, types::tools::ToolCallRequest, types::tools::ToolOutput,
 };
 use moa_test_support::postgres::test_database_url;
 use serde_json::json;
@@ -52,17 +52,16 @@ fn tool_request(
     tool_name: &str,
     input: serde_json::Value,
     session_id: moa_core::types::identifiers::SessionId,
-    meta: &moa_core::types::session::SessionMeta,
+    identity: &Identity,
 ) -> ToolCallRequest {
     ToolCallRequest {
         tool_call_id,
+        caller_identity: identity.clone(),
         provider_tool_use_id: None,
         tool_name: tool_name.to_string(),
         input,
         active_canary: None,
-        session_id: Some(session_id),
-        tenant_id: meta.tenant_id,
-        user_id: fallback_tool_user_id(meta),
+        session_id,
         trusted_sandbox_manifest: None,
         worker_id: None,
     }
@@ -74,35 +73,18 @@ fn tool_request_with_provider_id(
     tool_name: &str,
     input: serde_json::Value,
     session_id: moa_core::types::identifiers::SessionId,
-    meta: &moa_core::types::session::SessionMeta,
+    identity: &Identity,
 ) -> ToolCallRequest {
     ToolCallRequest {
         tool_call_id,
+        caller_identity: identity.clone(),
         provider_tool_use_id: provider_tool_use_id.map(ToOwned::to_owned),
         tool_name: tool_name.to_string(),
         input,
         active_canary: None,
-        session_id: Some(session_id),
-        tenant_id: meta.tenant_id,
-        user_id: fallback_tool_user_id(meta),
+        session_id,
         trusted_sandbox_manifest: None,
         worker_id: None,
-    }
-}
-
-fn fallback_tool_user_id(
-    meta: &moa_core::types::session::SessionMeta,
-) -> moa_core::types::identifiers::UserId {
-    match &meta.created_by {
-        Some(moa_core::types::contact::SessionActorRef::Identity { id }) => {
-            moa_core::types::identifiers::UserId::new(id.to_string())
-        }
-        Some(moa_core::types::contact::SessionActorRef::Contact { id }) => {
-            moa_core::types::identifiers::UserId::new(format!("contact:{id}"))
-        }
-        Some(moa_core::types::contact::SessionActorRef::Anonymous) | None => {
-            moa_core::types::identifiers::UserId::new(format!("tenant:{}", meta.tenant_id))
-        }
     }
 }
 
@@ -155,7 +137,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
                 "content": "hello from tool executor"
             }),
             session_id,
-            &meta,
+            &identity,
         );
         write_request.worker_id = Some(worker_id.clone());
         let write_output = client
@@ -179,7 +161,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             "file_read",
             json!({ "path": "note.txt" }),
             session_id,
-            &meta,
+            &identity,
         );
         read_request.worker_id = Some(worker_id.clone());
         let read_output = client
@@ -209,7 +191,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             "file_read",
             json!({ "path": "note.txt" }),
             session_id,
-            &meta,
+            &identity,
         );
         let root_read_output = client
             .post(format!(
@@ -237,7 +219,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             "bash",
             json!({ "cmd": "printf hello-from-bash" }),
             session_id,
-            &meta,
+            &identity,
         );
         let bash_output = client
             .post(format!(
@@ -364,7 +346,7 @@ async fn tool_executor_blocks_canary_input_before_backend_execution() -> Result<
                 "content": canary.clone(),
             }),
             session_id,
-            &meta,
+            &identity,
         );
         write_request.active_canary = Some(canary);
 
@@ -504,7 +486,7 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
             "bash",
             input.clone(),
             session_id,
-            &meta,
+            &identity,
         );
 
         client

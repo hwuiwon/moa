@@ -22,6 +22,52 @@ pub(super) fn optional_section_seed(path: &[&str]) -> Option<Value> {
 
 pub(super) fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
     let path = match field {
+        "llm_dlp_tokenize_enabled" => &["llm_dlp", "tokenize_enabled"][..],
+        "anthropic_capabilities_zero_retention" => {
+            &["providers", "anthropic", "capabilities", "zero_retention"]
+        }
+        "anthropic_capabilities_private_deployment" => &[
+            "providers",
+            "anthropic",
+            "capabilities",
+            "private_deployment",
+        ],
+        "anthropic_capabilities_data_residency" => {
+            &["providers", "anthropic", "capabilities", "data_residency"]
+        }
+        "openai_capabilities_zero_retention" => {
+            &["providers", "openai", "capabilities", "zero_retention"]
+        }
+        "openai_capabilities_private_deployment" => {
+            &["providers", "openai", "capabilities", "private_deployment"]
+        }
+        "openai_capabilities_data_residency" => {
+            &["providers", "openai", "capabilities", "data_residency"]
+        }
+        "google_capabilities_zero_retention" => {
+            &["providers", "google", "capabilities", "zero_retention"]
+        }
+        "google_capabilities_private_deployment" => {
+            &["providers", "google", "capabilities", "private_deployment"]
+        }
+        "google_capabilities_data_residency" => {
+            &["providers", "google", "capabilities", "data_residency"]
+        }
+        "providers_routing_policy_require_zero_retention" => {
+            &["providers", "routing_policy", "require_zero_retention"]
+        }
+        "providers_routing_policy_require_private_deployment" => {
+            &["providers", "routing_policy", "require_private_deployment"]
+        }
+        "providers_routing_policy_allowed_providers" => {
+            &["providers", "routing_policy", "allowed_providers"]
+        }
+        "providers_routing_policy_denied_providers" => {
+            &["providers", "routing_policy", "denied_providers"]
+        }
+        "providers_routing_policy_required_residency" => {
+            &["providers", "routing_policy", "required_residency"]
+        }
         "models_fallback_models" => &["models", "fallback_models"][..],
         "knowledge_external_parser_default" => &["knowledge", "parser", "external_default"],
         "llamaparse_api_url" => &["knowledge", "llamaparse", "api_base_url"],
@@ -65,6 +111,24 @@ fn split_list(value: String) -> Vec<String> {
             (!item.is_empty()).then(|| item.to_string())
         })
         .collect()
+}
+
+pub(super) fn deserialize_optional_provider_ids<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<ProviderId>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    raw.split(',')
+        .filter_map(|item| {
+            let item = item.trim();
+            (!item.is_empty()).then_some(item)
+        })
+        .map(str::parse)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 pub(super) fn validate_urls(overlay: &MoaEnvOverlay) -> Result<()> {
@@ -270,6 +334,74 @@ mod tests {
         assert_eq!(config.providers.stream_timeouts.first_byte_ms, 1000);
         assert_eq!(config.providers.stream_timeouts.idle_ms, 2000);
         assert_eq!(config.providers.stream_timeouts.total_ms, 3000);
+    }
+
+    #[test]
+    fn deployment_policy_capabilities_and_llm_dlp_are_typed_overlays() {
+        // Pins: env-only Kubernetes composition can enable LLM DLP and declare
+        // both endpoint capabilities and the deployment-wide routing policy.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_LLM_DLP_TOKENIZE_ENABLED", "true"),
+            ("MOA_ANTHROPIC_CAPABILITIES_ZERO_RETENTION", "true"),
+            ("MOA_ANTHROPIC_CAPABILITIES_DATA_RESIDENCY", "eu"),
+            (
+                "MOA_PROVIDERS_ROUTING_POLICY_REQUIRE_ZERO_RETENTION",
+                "true",
+            ),
+            (
+                "MOA_PROVIDERS_ROUTING_POLICY_ALLOWED_PROVIDERS",
+                "anthropic,google",
+            ),
+            ("MOA_PROVIDERS_ROUTING_POLICY_DENIED_PROVIDERS", "openai"),
+            ("MOA_PROVIDERS_ROUTING_POLICY_REQUIRED_RESIDENCY", "eu"),
+        ]))
+        .expect("typed provider overlay should parse");
+        let mut config = MoaConfig::default();
+
+        overlay
+            .apply_to(&mut config)
+            .expect("typed provider overlay should apply");
+
+        assert!(config.llm_dlp.tokenize_enabled);
+        assert!(config.providers.anthropic.capabilities.zero_retention);
+        assert_eq!(
+            config
+                .providers
+                .anthropic
+                .capabilities
+                .data_residency
+                .as_deref(),
+            Some("eu")
+        );
+        assert_eq!(
+            config.providers.routing_policy.allowed_providers,
+            vec![ProviderId::Anthropic, ProviderId::Google]
+        );
+        assert_eq!(
+            config.providers.routing_policy.denied_providers,
+            vec![ProviderId::OpenAI]
+        );
+        assert_eq!(
+            config
+                .providers
+                .routing_policy
+                .required_residency
+                .as_deref(),
+            Some("eu")
+        );
+    }
+
+    #[test]
+    fn deployment_policy_overlay_rejects_unknown_provider() {
+        // Pins: a typo in a deployment provider allowlist fails startup rather
+        // than being ignored or widening routing.
+        let error = MoaEnvOverlay::from_iter(env_pairs([(
+            "MOA_PROVIDERS_ROUTING_POLICY_ALLOWED_PROVIDERS",
+            "anthropicc",
+        )]))
+        .expect_err("unknown provider id must fail overlay parsing");
+
+        assert!(error.to_string().contains("anthropicc"), "{error}");
     }
 
     #[test]

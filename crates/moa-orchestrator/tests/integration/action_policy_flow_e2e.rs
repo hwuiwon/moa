@@ -18,7 +18,6 @@ use moa_core::{
     types::identifiers::SessionId,
     types::identifiers::TenantId,
     types::identifiers::ToolCallId,
-    types::identifiers::UserId,
     types::session::SessionStatus,
     types::tools::ToolCallRequest,
     types::tools::ToolOutput,
@@ -93,13 +92,16 @@ async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
     let tool_call_id = ToolCallId::new();
     let tool_request = ToolCallRequest {
         tool_call_id,
+        caller_identity: test
+            .client()
+            .identity()
+            .context("fixture client identity")?
+            .clone(),
         provider_tool_use_id: None,
         tool_name: "bash".to_string(),
         input: json!({"cmd": command.clone()}),
         active_canary: None,
-        session_id: Some(session_id),
-        tenant_id: session.tenant_id,
-        user_id: UserId::new(deciding_user.clone()),
+        session_id,
         trusted_sandbox_manifest: None,
         worker_id: None,
     };
@@ -293,7 +295,6 @@ async fn execution_task_tool_executor_emits_zero_root_tool_events(
     // Pins: dynamic task execution uses the owning session context without replaying or appending root tool events.
     let test = fixture.isolated().await;
     let session_id = test.create_session("execution-task-no-root-events").await?;
-    let session = test.client().get_session(session_id).await?;
     let tool_call_id = ToolCallId::new();
     let output: ToolOutput = test
         .client()
@@ -302,13 +303,16 @@ async fn execution_task_tool_executor_emits_zero_root_tool_events(
             &ExecutionTaskToolCallRequest {
                 call: ToolCallRequest {
                     tool_call_id,
+                    caller_identity: test
+                        .client()
+                        .identity()
+                        .context("fixture client identity")?
+                        .clone(),
                     provider_tool_use_id: None,
                     tool_name: "bash".to_string(),
                     input: json!({"cmd": "printf execution-task-ok"}),
                     active_canary: None,
-                    session_id: Some(session_id),
-                    tenant_id: session.tenant_id,
-                    user_id: UserId::new("execution-task-owner"),
+                    session_id,
                     trusted_sandbox_manifest: None,
                     worker_id: None,
                 },
@@ -747,21 +751,6 @@ async fn run_scripted_turn(
         .await
 }
 
-/// Mirrors the orchestrator's fallback tool `user_id` derivation for a session.
-fn fallback_tool_user_id(meta: &moa_core::types::session::SessionMeta) -> UserId {
-    match &meta.created_by {
-        Some(moa_core::types::contact::SessionActorRef::Identity { id }) => {
-            UserId::new(id.to_string())
-        }
-        Some(moa_core::types::contact::SessionActorRef::Contact { id }) => {
-            UserId::new(format!("contact:{id}"))
-        }
-        Some(moa_core::types::contact::SessionActorRef::Anonymous) | None => {
-            UserId::new(format!("tenant:{}", meta.tenant_id))
-        }
-    }
-}
-
 /// Creates a pending admin review for a worker-scoped bash invocation by
 /// driving the same `ActionPolicy/prepare_action_review` and
 /// `ActionReviews/request` calls the turn workflows make, returning the review
@@ -803,13 +792,16 @@ async fn create_pending_bash_review(
 
     let tool_request = ToolCallRequest {
         tool_call_id,
+        caller_identity: test
+            .client()
+            .identity()
+            .context("fixture client identity")?
+            .clone(),
         provider_tool_use_id: None,
         tool_name: "bash".to_string(),
         input: json!({ "cmd": cmd }),
         active_canary: None,
-        session_id: Some(session_id),
-        tenant_id: meta.tenant_id,
-        user_id: fallback_tool_user_id(&meta),
+        session_id,
         trusted_sandbox_manifest: None,
         worker_id: Some("worker-action-policy-e2e".to_string()),
     };

@@ -2,11 +2,10 @@
 
 use chrono::Utc;
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{types::contact::ContactId, types::identifiers::TenantId};
 use moa_db::ScopedConn;
-use moa_memory_graph::{
-    EdgeLabel, GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore,
-};
+use moa_memory_graph::{EdgeLabel, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore};
 use moa_session::testing;
 use serde_json::json;
 use sqlx::Row;
@@ -24,18 +23,20 @@ struct EdgeIndexRow {
     properties: serde_json::Value,
 }
 
-fn node_intent(tenant_id: TenantId, name: &str) -> NodeWriteIntent {
+fn node_intent(tenant_id: TenantId, contact_id: ContactId, name: &str) -> NodeWriteIntent {
     NodeWriteIntent {
+        barrier: None,
         uid: Uuid::now_v7(),
+        data_subject_id: contact_id.0,
         label: NodeLabel::Fact,
         storage_partition_id: Some(
             moa_core::types::identifiers::StoragePartitionId::for_tenant(tenant_id).to_string(),
         ),
-        contact_id: None,
-        scope: "tenant".to_string(),
+        contact_id: Some(contact_id.to_string()),
+        scope: "contact".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "source": "contact_write_db_memory" }),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         confidence: Some(0.9),
         valid_from: Utc::now(),
         embedding: None,
@@ -86,14 +87,15 @@ async fn insert_contact_edge_fixture(
             r#"
             INSERT INTO moa.node_index
                 (uid, label, storage_partition_id, user_id, tenant_id, contact_id,
-                 name, pii_class, confidence, properties_summary)
-            VALUES ($1, 'Fact', $2, $3, $4, $5, $6, 'none', 0.9, $7)
+                 data_subject_id, name, pii_class, confidence, properties_summary)
+            VALUES ($1, 'Fact', $2, $3, $4, $5, $6, $7, 'none', 0.9, $8)
             "#,
         )
         .bind(uid)
         .bind(&storage_partition_id)
         .bind(contact_id.to_string())
         .bind(tenant_id.0)
+        .bind(contact_id.0)
         .bind(contact_id.0)
         .bind(name)
         .bind(json!({ "name": name, "source": "contact_edge_rls" }))
@@ -176,10 +178,15 @@ async fn contact_scoped_graph_write_sets_contact_and_blocks_other_contact_db_mem
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         RlsContext::contact(tenant_id, contact_a),
+        super::test_kms(),
     );
 
     let uid = graph
-        .create_node(node_intent(tenant_id, "contact A private graph fact"))
+        .create_node(node_intent(
+            tenant_id,
+            contact_a,
+            "contact A private graph fact",
+        ))
         .await
         .expect("contact-scoped graph write should succeed");
 
@@ -205,13 +212,15 @@ async fn contact_scoped_graph_write_sets_contact_and_blocks_other_contact_db_mem
     let forged = sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, storage_partition_id, tenant_id, contact_id, name, pii_class, confidence, properties_summary)
-        VALUES ($1, 'Fact', $2, $3, $4, 'forged contact B fact', 'none', 0.9, $5)
+            (uid, label, storage_partition_id, tenant_id, contact_id, data_subject_id,
+             name, pii_class, confidence, properties_summary)
+        VALUES ($1, 'Fact', $2, $3, $4, $5, 'forged contact B fact', 'none', 0.9, $6)
         "#,
     )
     .bind(Uuid::now_v7())
     .bind(tenant_id.to_string())
     .bind(tenant_id.0)
+    .bind(contact_b.0)
     .bind(contact_b.0)
     .bind(json!({ "name": "forged contact B fact" }))
     .execute(write_conn.as_mut())

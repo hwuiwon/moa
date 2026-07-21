@@ -1,6 +1,6 @@
 //! Contract tests for the shared deterministic PII heuristic.
 
-use moa_memory_graph::PiiClass;
+use moa_core::types::security::SensitivityClass;
 use moa_memory_pii::{PiiCategory, classify_heuristic, redact_text, redaction_replacement};
 
 #[test]
@@ -82,12 +82,13 @@ fn heuristic_classifier_aggregates_detected_spans_into_privacy_class() {
     // the span offsets. Secret -> Restricted, SSN -> Phi, every other detected
     // category -> Pii; this is the privacy class downstream storage trusts.
     let cases = [
-        ("Email alice@example.com now", PiiClass::Pii),
-        ("Call 555-123-4567 today", PiiClass::Pii),
-        ("SSN 123-45-6789 confirmed", PiiClass::Phi),
-        ("Card 4242-4242-4242-4242 expires", PiiClass::Pii),
-        ("Patient MRN: A12345 checked", PiiClass::Pii),
-        ("Key sk-test-123 is active", PiiClass::Restricted),
+        ("Email alice@example.com now", SensitivityClass::Pii),
+        ("Call 555-123-4567 today", SensitivityClass::Pii),
+        ("SSN 123-45-6789 confirmed", SensitivityClass::Phi),
+        ("Card 4242-4242-4242-4242 expires", SensitivityClass::Pii),
+        ("Patient MRN: A12345 checked", SensitivityClass::Pii),
+        ("Key sk-test-123 is active", SensitivityClass::Restricted),
+        (r#"{"key":"sk-test-123"}"#, SensitivityClass::Restricted),
     ];
 
     for (text, expected_class) in cases {
@@ -101,13 +102,15 @@ fn heuristic_classifier_aggregates_detected_spans_into_privacy_class() {
 #[test]
 fn heuristic_classifier_leaves_non_pii_text_unclassified() {
     // Pins the privacy NEGATIVE space: clean text must produce zero spans and a
-    // `PiiClass::None` so unredacted, fully-readable memory is not silently
+    // `SensitivityClass::None` so unredacted, fully-readable memory is not silently
     // restricted/encrypted. Each case targets a specific historical over-match:
     //   - "secretary" embeds "secret" but is not a credential.
+    //   - "task-lifecycle" contains the byte sequence `sk-` inside an ordinary word.
     //   - a bare 10-digit order/tracking number is not a phone number.
     //   - a UUID and a git SHA are opaque identifiers, not PII.
     let clean_cases = [
         "Ask the secretary to confirm the meeting",
+        r#"{"case":"task-lifecycle"}"#,
         "Order 1234567890 shipped to the warehouse",
         "Tracking number 9400110200830000000000",
         "Run id 550e8400-e29b-41d4-a716-446655440000 completed",
@@ -124,8 +127,8 @@ fn heuristic_classifier_leaves_non_pii_text_unclassified() {
         );
         assert_eq!(
             result.class,
-            PiiClass::None,
-            "expected PiiClass::None for clean text {text:?}",
+            SensitivityClass::None,
+            "expected SensitivityClass::None for clean text {text:?}",
         );
         assert!(!result.abstained, "{text}");
     }
@@ -135,9 +138,9 @@ fn heuristic_classifier_leaves_non_pii_text_unclassified() {
 fn heuristic_classifier_still_detects_secret_keyword_as_standalone_word() {
     // Pins: the word-boundary fix that suppresses "secretary" must not regress
     // the real positive — a standalone "secret" credential keyword still maps to
-    // PiiClass::Restricted.
+    // SensitivityClass::Restricted.
     let result = classify_heuristic("The deploy secret rotated overnight");
-    assert_eq!(result.class, PiiClass::Restricted, "{result:?}");
+    assert_eq!(result.class, SensitivityClass::Restricted, "{result:?}");
     assert!(
         result
             .spans

@@ -2,7 +2,8 @@
 
 use chrono::Utc;
 use moa_core::{
-    traits::LineageHandle, types::identifiers::StoragePartitionId, types::identifiers::UserId,
+    traits::LineageHandle, types::context::TURN_ID_METADATA_KEY,
+    types::identifiers::StoragePartitionId, types::identifiers::UserId,
     types::query_rewrite::QueryRewriteResult, types::query_rewrite::RewriteSource,
 };
 use moa_lineage_core::{
@@ -420,7 +421,7 @@ fn lineage_user_id_from_context(ctx: &moa_core::types::context::WorkingContext) 
 }
 
 fn turn_id_from_context(ctx: &moa_core::types::context::WorkingContext) -> Option<TurnId> {
-    let value = ctx.metadata().get("_moa.turn_id")?.as_str()?;
+    let value = ctx.metadata().get(TURN_ID_METADATA_KEY)?.as_str()?;
     Uuid::parse_str(value).ok().map(TurnId)
 }
 
@@ -488,7 +489,7 @@ mod tests {
         let session = SessionMeta::default();
         let mut ctx = WorkingContext::new(&session, ModelCapabilities::default());
         if let Some(turn) = turn {
-            ctx.insert_metadata("_moa.turn_id", serde_json::json!(turn.0.to_string()));
+            ctx.insert_metadata(TURN_ID_METADATA_KEY, serde_json::json!(turn.0.to_string()));
         }
         ctx
     }

@@ -451,6 +451,7 @@ fn live_connection(connector: &str, connection_id: &str, model: &str) -> Knowled
         status: ConnectionStatus::Active,
         metadata: json!({}),
         source_selection: json!({ "model": model }),
+        information_barrier: None,
         created_at: now,
         updated_at: now,
         last_synced_at: None,

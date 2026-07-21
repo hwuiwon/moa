@@ -16,6 +16,7 @@ mod http;
 mod result;
 
 use axum::http::HeaderMap;
+use axum::http::Method;
 use moa_core::traits::Identity;
 use moa_core::types::identifiers::TenantId;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -265,6 +266,47 @@ fn all_tools() -> ToolRouter<MoaMcpServer> {
     router
 }
 
+const MCP_READ_SCOPE: &str = "mcp:read";
+const MCP_WRITE_SCOPE: &str = "mcp:write";
+
+/// Derive the exact OAuth scope for one MCP HTTP message.
+pub(crate) fn required_oauth_scope(method: &Method, body: &[u8]) -> Result<&'static str, ()> {
+    if *method != Method::POST {
+        return Ok(MCP_READ_SCOPE);
+    }
+    let value: Value = serde_json::from_slice(body).map_err(|_| ())?;
+    match value.get("method").and_then(Value::as_str) {
+        Some("tools/call") => {
+            let name = value
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .ok_or(())?;
+            let router = all_tools();
+            let tool = router.map.get(name).ok_or(())?;
+            let annotations = tool.attr.annotations.as_ref().ok_or(())?;
+            if annotations.read_only_hint.is_none()
+                || annotations.destructive_hint.is_none()
+                || annotations.idempotent_hint.is_none()
+                || annotations.open_world_hint.is_none()
+                || (annotations.read_only_hint == Some(true)
+                    && annotations.destructive_hint == Some(true))
+            {
+                return Err(());
+            }
+            Ok(if annotations.read_only_hint == Some(true) {
+                MCP_READ_SCOPE
+            } else {
+                MCP_WRITE_SCOPE
+            })
+        }
+        Some("initialize")
+        | Some("ping")
+        | Some("tools/list")
+        | Some("notifications/initialized") => Ok(MCP_READ_SCOPE),
+        _ => Err(()),
+    }
+}
+
 fn request_identity_and_headers(
     context: &RequestContext<RoleServer>,
 ) -> Result<(Identity, HeaderMap), CallToolResult> {
@@ -330,6 +372,7 @@ mod tests {
     use serde_json::Value;
 
     use super::all_tools;
+    use super::required_oauth_scope;
 
     fn collect_undocumented_properties(value: &Value, path: &str, failures: &mut Vec<String>) {
         match value {
@@ -449,6 +492,29 @@ mod tests {
         );
         assert!(!actual.contains("execute_run"));
         assert!(!actual.contains("replay"));
+    }
+
+    #[test]
+    fn oauth_scope_derives_from_complete_tool_annotations_offline() {
+        // Pins: read/write OAuth authority follows the advertised tool contract.
+        let read = serde_json::to_vec(&serde_json::json!({
+            "method": "tools/call",
+            "params": { "name": "sessions_list" }
+        }))
+        .expect("serialize read call");
+        let write = serde_json::to_vec(&serde_json::json!({
+            "method": "tools/call",
+            "params": { "name": "artifact_publish" }
+        }))
+        .expect("serialize write call");
+        assert_eq!(
+            required_oauth_scope(&axum::http::Method::POST, &read),
+            Ok("mcp:read")
+        );
+        assert_eq!(
+            required_oauth_scope(&axum::http::Method::POST, &write),
+            Ok("mcp:write")
+        );
     }
 
     #[test]

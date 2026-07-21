@@ -23,6 +23,7 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+moa-memory-pii = { workspace = true }
 moa-test-support.workspace = true
 moa-session = { workspace = true }
 wiremock.workspace = true

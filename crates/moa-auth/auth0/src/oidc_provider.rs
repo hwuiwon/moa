@@ -60,7 +60,9 @@ impl AuthProvider for OidcAuthProvider {
     async fn authenticate(&self, credential: &Credential) -> Result<Identity, AuthError> {
         let token = match credential {
             Credential::BearerJwt(token) => token,
-            Credential::ApiKey(_) | Credential::UserSessionToken(_) => {
+            Credential::ApiKey(_)
+            | Credential::UserSessionToken(_)
+            | Credential::OAuthAccessToken(_) => {
                 return Err(AuthError::NotConfigured);
             }
         };

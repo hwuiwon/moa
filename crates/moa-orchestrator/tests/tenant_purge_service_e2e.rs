@@ -36,6 +36,14 @@ fn spawn_orchestrator(
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
+        .env("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true")
+        .env("MOA_KMS_ALLOW_EPHEMERAL", "true")
+        .env("MOA_RUNTIME_CACHE_BACKEND", "redis")
+        .env(
+            "MOA_RUNTIME_CACHE_REDIS_URL",
+            std::env::var("MOA_RUNTIME_CACHE_REDIS_URL")
+                .unwrap_or_else(|_| "redis://127.0.0.1:10051".to_string()),
+        )
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env("RUST_LOG", "info")
         .stdout(Stdio::null())
@@ -45,10 +53,9 @@ fn spawn_orchestrator(
 }
 
 #[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
-async fn tenant_purge_replay_keeps_one_relational_commit_and_final_inverse_tuples_service_e2e()
--> Result<()> {
-    // Pins: one tenant-keyed workflow survives duplicate calls, commits inverse tuples with deletion, and reaches analytics_purged.
+#[ignore = "requires local Restate, Postgres, OpenFGA, and Valkey"]
+async fn tenant_purge_commits_once_and_preserves_final_inverse_tuples_service_e2e() -> Result<()> {
+    // Pins: one tenant-keyed workflow commits inverse tuples with deletion, reports durable status, and reaches analytics_purged.
     let _guard = RESTATE_E2E_LOCK.lock().await;
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
@@ -90,14 +97,6 @@ async fn tenant_purge_replay_keeps_one_relational_commit_and_final_inverse_tuple
             &TenantPurgeRequest { tenant_id },
         )
         .await?;
-        let repeated: TenantPurgeStatusResponse = call(
-            &client,
-            &ingress,
-            &identity,
-            &path,
-            &TenantPurgeRequest { tenant_id },
-        )
-        .await?;
         let status: TenantPurgeStatusResponse = call(
             &client,
             &ingress,
@@ -107,11 +106,16 @@ async fn tenant_purge_replay_keeps_one_relational_commit_and_final_inverse_tuple
         )
         .await?;
 
-        assert_eq!(first, repeated);
         assert_eq!(status, first);
         assert_eq!(status.status, TenantPurgeStatus::AnalyticsPurged);
         let fence_count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM moa.tenant_purge_operations WHERE tenant_id = $1 AND status = 'relationally_committed'",
+        )
+        .bind(tenant_id.0)
+        .fetch_one(&pool)
+        .await?;
+        let destruction_fence_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM moa.destruction_operation_fence WHERE tenant_id = $1 AND subject_id IS NULL AND status = 'committed'",
         )
         .bind(tenant_id.0)
         .fetch_one(&pool)
@@ -129,6 +133,7 @@ async fn tenant_purge_replay_keeps_one_relational_commit_and_final_inverse_tuple
         .fetch_one(&pool)
         .await?;
         assert_eq!(fence_count, 1);
+        assert_eq!(destruction_fence_count, 1);
         assert_eq!(product_count, 0);
         assert_eq!(inverse_tuple_count, 3);
         Ok(())

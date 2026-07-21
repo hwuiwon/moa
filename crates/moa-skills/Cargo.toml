@@ -29,6 +29,7 @@ workspace-hack = { workspace = true }
 
 [dev-dependencies]
 async-trait.workspace = true
+moa-crypto.workspace = true
 moa-eval-core.workspace = true
 moa-providers.workspace = true
 moa-session.workspace = true

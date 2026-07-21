@@ -132,6 +132,7 @@ struct RunOnceContext<'a> {
     objective: &'a str,
     durable_upgrade_allowed: bool,
     execution_synthesis_instruction: Option<&'a str>,
+    identity: &'a moa_core::traits::Identity,
 }
 
 struct RestateExecutionModelProvider<'a> {
@@ -180,13 +181,9 @@ struct DurableUpgradeGuard {
 }
 
 impl DurableUpgradeGuard {
-    fn new(
-        request: &RunTurnRequest,
-        originating_user_sequence_num: u64,
-        initial_route: &ExecutionRouteDecision,
-    ) -> Self {
+    fn new(request: &RunTurnRequest, initial_route: &ExecutionRouteDecision) -> Self {
         Self {
-            has_root_user_origin: has_user_message_origin(request, originating_user_sequence_num),
+            has_root_user_origin: has_user_message_origin(request),
             initial_route: initial_route.clone(),
             consumed: false,
         }
@@ -355,8 +352,7 @@ async fn execute_turn_inside_workflow(
             ..
         }
     );
-    if !has_user_message_origin(request, user_sequence_num)
-        && (request.execution_template.is_some() || durable_route)
+    if !has_user_message_origin(request) && (request.execution_template.is_some() || durable_route)
     {
         return Err(TerminalError::new_with_code(
             409,
@@ -433,7 +429,7 @@ async fn execute_turn_inside_workflow(
         loop_plan.max_turns,
         loop_plan.max_tool_calls,
     );
-    let mut durable_upgrade_guard = DurableUpgradeGuard::new(request, user_sequence_num, &route);
+    let mut durable_upgrade_guard = DurableUpgradeGuard::new(request, &route);
 
     let mut last_summary = None;
     let mut turn_evidence = TurnEvidence::default();
@@ -488,6 +484,7 @@ async fn execute_turn_inside_workflow(
                                 durable_upgrade_allowed: durable_upgrade_guard.allows_tool_signal(),
                                 execution_synthesis_instruction: execution_synthesis_turn
                                     .then_some(request.user_message.as_str()),
+                                identity: &request.identity,
                             },
                             &mut last_summary,
                             &mut turn_evidence,
@@ -889,7 +886,7 @@ async fn execute_durable_admission(
     originating_user_sequence_num: u64,
     durable_upgrade: Option<DurableUpgradeSignal>,
 ) -> Result<BodyOutcome, HandlerError> {
-    if !has_user_message_origin(request, originating_user_sequence_num) {
+    if !has_user_message_origin(request) {
         return Err(TerminalError::new_with_code(
             409,
             "durable_execution_requires_user_message_origin",
@@ -1008,8 +1005,8 @@ async fn execute_durable_admission(
     })
 }
 
-fn has_user_message_origin(request: &RunTurnRequest, originating_user_sequence_num: u64) -> bool {
-    request.trigger == TurnTrigger::UserMessage && originating_user_sequence_num > 0
+fn has_user_message_origin(request: &RunTurnRequest) -> bool {
+    request.trigger == TurnTrigger::UserMessage
 }
 
 fn is_execution_synthesis_turn(request: &RunTurnRequest) -> bool {
@@ -1132,9 +1129,14 @@ async fn run_once_inside_workflow(
         workflow.channel_adapters.as_ref(),
     )
     .await?;
-    let Some(built_request) =
-        build_request_inside_workflow(ctx, workflow.session_store.clone(), session_id, turn_id)
-            .await?
+    let Some(built_request) = build_request_inside_workflow(
+        ctx,
+        workflow.session_store.clone(),
+        session_id,
+        turn_id,
+        turn_context.identity.clone(),
+    )
+    .await?
     else {
         return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Idle));
     };
@@ -1257,6 +1259,7 @@ async fn run_once_inside_workflow(
         ctx,
         RootToolContext {
             meta: &meta,
+            identity: turn_context.identity,
             session_id,
             active_canary: active_canary.as_deref(),
             trusted_sandbox_manifest: trusted_sandbox_manifest.as_ref(),
@@ -1490,6 +1493,48 @@ mod tests {
 
     use super::*;
 
+    fn run_turn_request(trigger: TurnTrigger) -> RunTurnRequest {
+        RunTurnRequest {
+            session_id: "session-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            identity: moa_core::traits::Identity {
+                identity_type: moa_core::traits::IdentityType::Service,
+                id: uuid::Uuid::from_u128(1),
+                tenant_id: moa_core::types::identifiers::TenantId::from(uuid::Uuid::from_u128(2)),
+                api_key_id: None,
+                acting_on_behalf_of: None,
+            },
+            contact: None,
+            user_message: "Inspect every account".to_string(),
+            attachments: Vec::new(),
+            model: None,
+            max_turns: None,
+            trigger,
+            child_signal_id: None,
+            execution_template: None,
+        }
+    }
+
+    #[test]
+    fn user_message_origin_is_trigger_based_for_zero_based_events() {
+        // Pins: event sequence zero is a valid first user message; system
+        // continuations remain distinguishable by their explicit trigger.
+        let mut request = run_turn_request(TurnTrigger::UserMessage);
+        assert!(has_user_message_origin(&request));
+
+        for trigger in [
+            TurnTrigger::ChildSignal,
+            TurnTrigger::WorkerResults,
+            TurnTrigger::ExecutionSynthesis,
+        ] {
+            request.trigger = trigger;
+            assert!(
+                !has_user_message_origin(&request),
+                "system continuation must not gain user-message origin: {trigger:?}"
+            );
+        }
+    }
+
     #[test]
     fn turn_cap_reached_message_states_the_effective_cap() {
         // Pins: the cap-stop message reports the cap actually in force, so an escalated
@@ -1514,25 +1559,7 @@ mod tests {
     fn durable_upgrade_guard_is_root_inline_byte_exact_and_single_use() {
         // Pins: only an initial root Execute/Inline turn can consume one bounded Durable
         // upgrade for its byte-identical persisted objective; a second transition is rejected.
-        let mut request = RunTurnRequest {
-            session_id: "session-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            identity: moa_core::traits::Identity {
-                identity_type: moa_core::traits::IdentityType::Service,
-                id: uuid::Uuid::new_v4(),
-                tenant_id: moa_core::types::identifiers::TenantId::new(),
-                api_key_id: None,
-                acting_on_behalf_of: None,
-            },
-            contact: None,
-            user_message: "Inspect every account".to_string(),
-            attachments: Vec::new(),
-            model: None,
-            max_turns: None,
-            trigger: TurnTrigger::UserMessage,
-            child_signal_id: None,
-            execution_template: None,
-        };
+        let mut request = run_turn_request(TurnTrigger::UserMessage);
         let inline_route = ExecutionRouteDecision::Execute {
             strategy: ExecutionStrategy::Inline,
             rationale: "The inspection can begin in a bounded interactive loop.".to_string(),
@@ -1548,7 +1575,7 @@ mod tests {
                 },
             ],
         };
-        let mut guard = DurableUpgradeGuard::new(&request, 1, &inline_route);
+        let mut guard = DurableUpgradeGuard::new(&request, &inline_route);
         assert!(guard.allows_tool_signal());
         assert_eq!(
             guard
@@ -1567,7 +1594,7 @@ mod tests {
             Err(DurableUpgradeTransitionError::AlreadyConsumed)
         );
 
-        let mut changed_objective_guard = DurableUpgradeGuard::new(&request, 1, &inline_route);
+        let mut changed_objective_guard = DurableUpgradeGuard::new(&request, &inline_route);
         let mut changed = signal.clone();
         changed.objective.push(' ');
         assert_eq!(
@@ -1582,7 +1609,7 @@ mod tests {
         ] {
             request.trigger = trigger;
             assert!(
-                !DurableUpgradeGuard::new(&request, 1, &inline_route).allows_tool_signal(),
+                !DurableUpgradeGuard::new(&request, &inline_route).allows_tool_signal(),
                 "system trigger must not gain Durable-upgrade authority: {trigger:?}"
             );
         }
@@ -1593,7 +1620,7 @@ mod tests {
             rationale: "The account workflow must run durably.".to_string(),
         };
         assert!(
-            !DurableUpgradeGuard::new(&request, 1, &durable_route).allows_tool_signal(),
+            !DurableUpgradeGuard::new(&request, &durable_route).allows_tool_signal(),
             "an initially Durable route cannot transition back through Inline"
         );
     }

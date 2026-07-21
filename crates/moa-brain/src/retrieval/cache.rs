@@ -403,6 +403,15 @@ fn canonicalize(
     });
     out.push_str("|pii=");
     out.push_str(req.max_pii_class.as_str());
+    out.push_str("|authorization_policy_revision=");
+    out.push_str(&blake3::hash(req.cleared_barriers.policy_revision().as_bytes()).to_hex());
+    out.push_str("|cleared_barriers=");
+    for barrier in &req.cleared_barriers {
+        out.push_str(&barrier.as_str().len().to_string());
+        out.push(':');
+        out.push_str(barrier.as_str());
+        out.push(',');
+    }
     out.push_str("|k=");
     out.push_str(&req.k_final.to_string());
     out.push_str("|rerank=");
@@ -441,8 +450,12 @@ mod tests {
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use chrono::Utc;
-    use moa_core::{types::contact::ContactId, types::identifiers::TenantId};
-    use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
+    use moa_core::types::security::SensitivityClass;
+    use moa_core::{
+        types::contact::ContactId, types::identifiers::TenantId,
+        types::memory::InformationBarrierId,
+    };
+    use moa_memory_graph::{NodeIndexRow, NodeLabel};
     use moa_memory_types::MemoryScope;
     use uuid::Uuid;
 
@@ -477,6 +490,50 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(backend.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_isolated_by_clearances_and_policy_revision() {
+        // Pins: a cleared principal warming the shared tenant cache cannot
+        // produce a hit for an uncleared principal, and a policy revision change
+        // invalidates reuse even when the clearance set is unchanged.
+        let backend = Arc::new(CountingBackend::new());
+        let version = Arc::new(MockVersionReader::new(7));
+        let cache = CachedHybridRetriever::with_parts(
+            backend.clone(),
+            version,
+            CachedHybridRetrieverConfig::default(),
+        );
+        let planned = planned_query(tenant_scope(), "restricted deal");
+        let mut cleared = request(&planned, "restricted deal");
+        cleared.cleared_barriers =
+            [InformationBarrierId::parse("deal-alpha").expect("valid barrier")]
+                .into_iter()
+                .collect();
+        cleared.cleared_barriers = cleared.cleared_barriers.with_policy_revision("policy-v1");
+        let mut uncleared = request(&planned, "restricted deal");
+        uncleared.cleared_barriers = uncleared.cleared_barriers.with_policy_revision("policy-v1");
+        let mut revised = cleared.clone();
+        revised.cleared_barriers = revised.cleared_barriers.with_policy_revision("policy-v2");
+
+        let cleared_output = cache
+            .retrieve(&planned, cleared)
+            .await
+            .expect("cleared retrieval");
+        let uncleared_output = cache
+            .retrieve(&planned, uncleared)
+            .await
+            .expect("uncleared retrieval");
+        cache
+            .retrieve(&planned, revised)
+            .await
+            .expect("revised policy retrieval");
+
+        assert_ne!(
+            cleared_output.hits[0].uid, uncleared_output.hits[0].uid,
+            "uncleared request must not receive the cleared cache entry"
+        );
+        assert_eq!(backend.calls(), 3);
     }
 
     #[tokio::test]
@@ -761,7 +818,7 @@ mod tests {
                         contact_id: None,
                         scope: "tenant".to_string(),
                         name: format!("hit {call}"),
-                        pii_class: PiiClass::None,
+                        pii_class: SensitivityClass::None,
                         valid_to: None,
                         valid_from: Utc::now(),
                         properties_summary: None,
@@ -833,6 +890,7 @@ mod tests {
 
     fn request(planned: &PlannedQuery, query: &str) -> RetrievalRequest {
         RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: planned.seeds.clone(),
             query_text: query.to_string(),
             query_embedding: vec![0.0; 1024],
@@ -841,7 +899,7 @@ mod tests {
             // boost, and only a scope plan would set the hard `label_filter`.
             label_filter: None,
             label_boost: planned.label_hint.clone(),
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 5,
             use_reranker: false,
             strategy: Some(planned.strategy),

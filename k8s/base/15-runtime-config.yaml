@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: moa-runtime-config
+  namespace: moa-system
+data:
+  # Every KMS-capable replica shares Postgres state and the same immutable
+  # generation-named keyring. Root-key material remains in a Secret volume.
+  MOA_KMS_PROVIDER: postgres
+  MOA_KMS_ROOT_KEY_DIR: /var/run/secrets/moa-kms/root-keys
+  MOA_KMS_REQUIRED_GENERATION: primary

@@ -173,7 +173,7 @@ context.
 
 Tenant knowledge is tenant-public by design. Every synced document is visible to
 every contact of the owning tenant. Knowledge nodes are written tenant-scoped
-with `PiiClass::None`, and retrieval admission adds a fixed
+with `SensitivityClass::None`, and retrieval admission adds a fixed
 `SourceTier::TenantKnowledge` leg to every session whose agent knowledge policy is
 enabled. The only admission controls today are that pinned agent knowledge policy
 — which can disable knowledge retrieval entirely, cap the retrieval budget, and

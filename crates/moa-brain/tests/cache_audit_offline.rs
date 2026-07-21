@@ -9,7 +9,7 @@ include!("brain_turn_support/pipeline.rs");
 
 use std::sync::Arc;
 
-use moa_brain::{TurnResult, run_brain_turn};
+use moa_brain::{BrainTurnRequest, TurnResult, run_brain_turn};
 use moa_core::{
     config::MoaConfig, events::Event, traits::LLMProvider, traits::SessionStore,
     types::events_stream::EventRange,
@@ -38,6 +38,7 @@ async fn cache_audit_offline_tracks_stable_prefix_reuse_and_cached_usage()
             .with_api_base(format!("{}/v1", server.uri()))?,
     );
     let session = session_meta("offline-cache-audit", "gpt-5.4");
+    let identity = test_identity(session.tenant_id);
     let session_id = session.id;
     let store = Arc::new(MockSessionStore::new(session, Vec::new()));
     let pipeline = build_no_memory_test_pipeline(&config, store.clone());
@@ -56,7 +57,15 @@ async fn cache_audit_offline_tracks_stable_prefix_reuse_and_cached_usage()
             )
             .await?;
         assert_eq!(
-            run_brain_turn(session_id, store.clone(), provider.clone(), &pipeline, None).await?,
+            run_brain_turn(BrainTurnRequest {
+                identity: identity.clone(),
+                session_id,
+                session_store: store.clone(),
+                llm_provider: provider.clone(),
+                pipeline: &pipeline,
+                tool_router: None,
+            })
+            .await?,
             TurnResult::Complete
         );
     }
@@ -80,4 +89,14 @@ async fn cache_audit_offline_tracks_stable_prefix_reuse_and_cached_usage()
     assert_eq!(brain_responses, 2);
 
     Ok(())
+}
+
+fn test_identity(tenant_id: moa_core::types::identifiers::TenantId) -> moa_core::traits::Identity {
+    moa_core::traits::Identity {
+        identity_type: moa_core::traits::IdentityType::Operator,
+        id: uuid::Uuid::from_u128(0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c412),
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    }
 }

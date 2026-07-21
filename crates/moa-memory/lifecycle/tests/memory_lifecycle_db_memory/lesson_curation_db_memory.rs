@@ -61,9 +61,15 @@ async fn duplicate_lessons_merge_into_oldest_canonical_db_memory() {
     )
     .await;
 
-    let stats = curate_skill_lessons(pool, tenant_id, now, &LessonCurationOptions::default())
-        .await
-        .expect("curate skill lessons");
+    let stats = curate_skill_lessons(
+        pool,
+        super::test_kms(),
+        tenant_id,
+        now,
+        &LessonCurationOptions::default(),
+    )
+    .await
+    .expect("curate skill lessons");
 
     assert_eq!(stats.merged, 2, "both duplicates superseded into canonical");
     assert_eq!(stats.retired, 0, "fresh lessons are not retired");
@@ -112,9 +118,15 @@ async fn stale_unrenewed_lesson_retires_db_memory() {
     )
     .await;
 
-    let stats = curate_skill_lessons(pool, tenant_id, now, &LessonCurationOptions::default())
-        .await
-        .expect("curate skill lessons");
+    let stats = curate_skill_lessons(
+        pool,
+        super::test_kms(),
+        tenant_id,
+        now,
+        &LessonCurationOptions::default(),
+    )
+    .await
+    .expect("curate skill lessons");
 
     assert_eq!(stats.merged, 0, "distinct summaries do not merge");
     assert_eq!(stats.retired, 1, "only the stale lesson retires");
@@ -144,9 +156,15 @@ async fn fresh_unique_lesson_untouched_db_memory() {
     )
     .await;
 
-    let stats = curate_skill_lessons(pool, tenant_id, now, &LessonCurationOptions::default())
-        .await
-        .expect("curate skill lessons");
+    let stats = curate_skill_lessons(
+        pool,
+        super::test_kms(),
+        tenant_id,
+        now,
+        &LessonCurationOptions::default(),
+    )
+    .await
+    .expect("curate skill lessons");
 
     assert_eq!(stats, Default::default(), "no work on a lone fresh lesson");
     assert_active(pool, lesson, true).await;
@@ -184,9 +202,15 @@ async fn old_canonical_renewed_by_fresh_duplicate_survives_retirement_db_memory(
     )
     .await;
 
-    let stats = curate_skill_lessons(pool, tenant_id, now, &LessonCurationOptions::default())
-        .await
-        .expect("curate skill lessons");
+    let stats = curate_skill_lessons(
+        pool,
+        super::test_kms(),
+        tenant_id,
+        now,
+        &LessonCurationOptions::default(),
+    )
+    .await
+    .expect("curate skill lessons");
 
     assert_eq!(stats.merged, 1, "the fresh restatement merges in");
     assert_eq!(stats.retired, 0, "the renewed canonical is not retired");
@@ -218,9 +242,9 @@ async fn seed_lesson(
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, storage_partition_id, tenant_id, user_id, contact_id, name,
+            (uid, label, storage_partition_id, tenant_id, data_subject_id, user_id, contact_id, name,
              pii_class, confidence, valid_from, last_accessed_at, properties_summary)
-        VALUES ($1, 'Lesson', $2, $3, NULL, NULL, $4, 'none', 1.0, $5, $5, $6::jsonb)
+        VALUES ($1, 'Lesson', $2, $3, $3, NULL, NULL, $4, 'none', 1.0, $5, $5, $6::jsonb)
         "#,
     )
     .bind(uid)

@@ -2,8 +2,10 @@
 
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_eval_consolidation(
     pool: &PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     ledger: &[LedgerFact],
     gold_resolution: &GoldResolutionReport,
     fact_ids_by_uid: &HashMap<Uuid, String>,
@@ -17,6 +19,7 @@ pub(super) async fn run_eval_consolidation(
         let tenant_id = tenant_id_from_storage_partition(storage_partition_id);
         let workspace_outcome = moa_memory_lifecycle::consolidate_tenant(
             pool,
+            kms.clone(),
             tenant_id,
             ConsolidationOptions {
                 digest: digest_config.clone(),
@@ -41,6 +44,7 @@ pub(super) async fn run_eval_consolidation(
         let tenant_id = tenant_id_from_storage_partition(storage_partition_id);
         let second_outcome = moa_memory_lifecycle::consolidate_tenant(
             pool,
+            kms.clone(),
             tenant_id,
             ConsolidationOptions {
                 digest: digest_config.clone(),

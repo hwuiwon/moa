@@ -22,7 +22,7 @@ use moa_core::{
     traits::SessionStore, types::hands::HandHandle, types::hands::SandboxFile,
     types::identifiers::TenantId,
 };
-use moa_security::{ActionPolicies, ActionPolicyRuleStore, MCPCredentialProxy};
+use moa_security::{ActionPolicies, ActionPolicyRuleStore, MCPCredentialProxy, McpEgressGuard};
 use tokio::sync::RwLock;
 
 use crate::adapters::local::LocalHandProvider;
@@ -43,6 +43,16 @@ pub struct ToolRouter {
     mcp_clients: RwLock<HashMap<String, Arc<MCPClient>>>,
     mcp_servers: HashMap<String, McpServerConfig>,
     mcp_proxy: Option<Arc<MCPCredentialProxy>>,
+    /// Optional data-class egress guard for outbound MCP tool calls. When
+    /// present, each call's serialized arguments are classified against the
+    /// destination server's `allowed_data_classes` allowlist and blocked (fail
+    /// closed) before dispatch when the payload carries a class the server is not
+    /// permitted to receive. Absence is valid only when no MCP servers are
+    /// configured: configured construction rejects it, and manually assembled
+    /// routers fail closed at dispatch. The guard is held here rather than on
+    /// [`MCPCredentialProxy`] so it governs every external MCP server, including
+    /// credential-less ones for which no proxy is built.
+    mcp_egress_guard: Option<Arc<McpEgressGuard>>,
     active_hands: RwLock<HashMap<String, HandHandle>>,
     preferred_hand_routes: RwLock<HashMap<String, String>>,
     hand_leases: Option<Arc<dyn HandLeaseStore>>,

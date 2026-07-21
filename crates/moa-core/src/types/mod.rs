@@ -22,6 +22,7 @@ pub mod observability;
 pub mod provider;
 pub mod query_rewrite;
 pub mod runtime_events;
+pub mod security;
 pub mod segment_assessment;
 pub mod segments;
 pub mod session;

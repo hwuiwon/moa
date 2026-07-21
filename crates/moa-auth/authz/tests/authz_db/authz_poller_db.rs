@@ -155,6 +155,113 @@ async fn poller_drains_pending_row_to_succeeded_db() {
     assert_eq!(last_error, None, "a succeeded row has no retry diagnostics");
 }
 
+#[tokio::test]
+async fn targeted_flush_takes_over_live_replica_lease_db() {
+    // Pins: a session-creation visibility barrier can deliver its exact object
+    // even when another Kubernetes replica already holds a non-expired poller
+    // lease; correctness cannot wait for that pod's polling interval.
+    let pool = test_pool().await;
+    let server = MockServer::start();
+    let write = server.mock(|when, then| {
+        when.method(POST).path("/stores/store/write");
+        then.status(200).json_body(json!({}));
+    });
+    let row_id = Uuid::new_v4();
+    let object = format!("session:{}", Uuid::new_v4());
+    insert_outbox_row_for_object(
+        &pool,
+        row_id,
+        "in_flight",
+        Some(Uuid::new_v4()),
+        "NOW() + INTERVAL '5 minutes'",
+        &object,
+    )
+    .await;
+    let poller = poller_with_url(pool.clone(), 1, server.base_url());
+
+    let delivered = poller
+        .flush_object(&object)
+        .await
+        .expect("targeted flush should complete");
+
+    assert_eq!(delivered, 1, "the exact session tuple should be delivered");
+    write.assert_hits(1);
+    let (status, lease_token): (String, Option<Uuid>) =
+        sqlx::query_as("SELECT status, lease_token FROM authz_outbox WHERE id = $1")
+            .bind(row_id)
+            .fetch_one(&pool)
+            .await
+            .expect("flushed row should remain readable");
+    assert_eq!(status, "succeeded");
+    assert_eq!(
+        lease_token, None,
+        "the visibility barrier releases its lease"
+    );
+}
+
+#[tokio::test]
+async fn targeted_flush_accepts_same_generation_success_without_reapplying_db() {
+    // Pins: a replay observes its exact completed receipt and does not issue a
+    // duplicate network write merely because the session workflow was retried.
+    let pool = test_pool().await;
+    let server = MockServer::start();
+    let write = server.mock(|when, then| {
+        when.method(POST).path("/stores/store/write");
+        then.status(200).json_body(json!({}));
+    });
+    let row_id = Uuid::new_v4();
+    let object = format!("session:{}", Uuid::new_v4());
+    insert_outbox_row_for_object(&pool, row_id, "succeeded", None, "NULL", &object).await;
+    let poller = poller_with_url(pool.clone(), 1, server.base_url());
+
+    let satisfied = poller
+        .flush_object(&object)
+        .await
+        .expect("completed receipt should satisfy the barrier");
+
+    assert_eq!(satisfied, 1);
+    write.assert_hits(0);
+    let status: String = sqlx::query_scalar("SELECT status FROM authz_outbox WHERE id = $1")
+        .bind(row_id)
+        .fetch_one(&pool)
+        .await
+        .expect("completed receipt should remain readable");
+    assert_eq!(status, "succeeded");
+}
+
+#[tokio::test]
+async fn targeted_flush_never_revives_dead_letter_receipt_db() {
+    // Pins: explicit synchronous delivery does not erase an exhausted tuple's
+    // diagnostics or silently turn a dead letter back into live work.
+    let pool = test_pool().await;
+    let server = MockServer::start();
+    let write = server.mock(|when, then| {
+        when.method(POST).path("/stores/store/write");
+        then.status(200).json_body(json!({}));
+    });
+    let row_id = Uuid::new_v4();
+    let object = format!("session:{}", Uuid::new_v4());
+    insert_outbox_row_for_object(&pool, row_id, "dead_letter", None, "NULL", &object).await;
+    let poller = poller_with_url(pool.clone(), 1, server.base_url());
+
+    let error = poller
+        .flush_object(&object)
+        .await
+        .expect_err("dead-lettered receipt must fail closed");
+
+    assert!(
+        error.to_string().contains("dead-lettered"),
+        "error should name the exhausted receipt: {error}"
+    );
+    write.assert_hits(0);
+    let status: String = sqlx::query_scalar("SELECT status FROM authz_outbox WHERE id = $1")
+        .bind(row_id)
+        .fetch_one(&pool)
+        .await
+        .expect("dead-lettered receipt should remain readable");
+    assert_eq!(status, "dead_letter");
+}
+
 async fn test_pool() -> PgPool {
     let database_url = std::env::var("MOA_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://moa_owner:dev@localhost:10040/moa".to_string());
@@ -217,6 +324,25 @@ async fn insert_outbox_row(
     lease_token: Option<Uuid>,
     lease_expires_at_sql: &str,
 ) {
+    insert_outbox_row_for_object(
+        pool,
+        row_id,
+        status,
+        lease_token,
+        lease_expires_at_sql,
+        &format!("tenant:{}", Uuid::new_v4()),
+    )
+    .await;
+}
+
+async fn insert_outbox_row_for_object(
+    pool: &PgPool,
+    row_id: Uuid,
+    status: &str,
+    lease_token: Option<Uuid>,
+    lease_expires_at_sql: &str,
+    object: &str,
+) {
     let sql = format!(
         r#"
         INSERT INTO authz_outbox
@@ -230,7 +356,7 @@ async fn insert_outbox_row(
     sqlx::query(&sql)
         .bind(row_id)
         .bind(format!("operator:{}", Uuid::new_v4()))
-        .bind(format!("tenant:{}", Uuid::new_v4()))
+        .bind(object)
         .bind(status)
         .bind(lease_token)
         .execute(pool)

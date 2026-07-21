@@ -7,8 +7,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moa_core::config::MoaConfig;
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_db::ScopedConn;
-use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
+use moa_memory_graph::{NodeIndexRow, NodeLabel};
 use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorQuery, VectorStore};
 #[cfg(test)]
 use moa_providers::COHERE_DEFAULT_RERANK_MODEL;
@@ -102,7 +103,7 @@ pub trait ContradictionDetector: Send + Sync {
         fact_text: &str,
         embedding: &[f32],
         label: NodeLabel,
-        pii_class: PiiClass,
+        pii_class: SensitivityClass,
         ctx: &ContradictionContext,
     ) -> Result<Conflict>;
 
@@ -256,7 +257,7 @@ impl RrfPlusJudgeDetector {
         fact_text: &str,
         embedding: &[f32],
         label: NodeLabel,
-        pii_class: PiiClass,
+        pii_class: SensitivityClass,
         ctx: &ContradictionContext,
     ) -> Result<Vec<NodeIndexRow>> {
         let vector_hits =
@@ -342,7 +343,7 @@ impl RrfPlusJudgeDetector {
         fact_text: &str,
         embedding: &[f32],
         label: NodeLabel,
-        pii_class: PiiClass,
+        pii_class: SensitivityClass,
         ctx: &ContradictionContext,
     ) -> Result<Conflict> {
         let candidates = self
@@ -397,7 +398,7 @@ impl ContradictionDetector for RrfPlusJudgeDetector {
         fact_text: &str,
         embedding: &[f32],
         label: NodeLabel,
-        pii_class: PiiClass,
+        pii_class: SensitivityClass,
         ctx: &ContradictionContext,
     ) -> Result<Conflict> {
         match timeout(
@@ -475,7 +476,7 @@ async fn vector_candidate_uids(
     fact_text: &str,
     embedding: &[f32],
     label: NodeLabel,
-    pii_class: PiiClass,
+    pii_class: SensitivityClass,
     ctx: &ContradictionContext,
 ) -> Result<Vec<Uuid>> {
     let _ = fact_text;
@@ -495,16 +496,12 @@ async fn vector_candidate_uids(
             embedding: embedding.to_vec(),
             k: VECTOR_K,
             label_filter: Some(vec![label.as_str().to_string()]),
-            max_pii_class: contradiction_candidate_max_pii_class(pii_class).to_string(),
+            max_pii_class: pii_class,
             include_global: true,
             as_of: None,
         })
         .await?;
     Ok(hits.into_iter().map(|hit| hit.uid).collect())
-}
-
-fn contradiction_candidate_max_pii_class(pii_class: PiiClass) -> &'static str {
-    pii_class.as_str()
 }
 
 /// Retrieves lexical candidates and hydrates them together with the vector
@@ -791,13 +788,13 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
+    use moa_core::types::security::SensitivityClass;
     use moa_core::{
         traits::LLMProvider, types::completion::CompletionRequest,
         types::completion::CompletionResponse, types::completion::CompletionStream,
         types::completion::StopReason, types::completion::TokenUsage, types::identifiers::ModelId,
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
-    use moa_memory_graph::PiiClass;
     use moa_providers::NoopReranker;
     use tokio::time::sleep;
 
@@ -900,21 +897,6 @@ mod tests {
             .expect("judge empty candidates");
 
         assert_eq!(conflict, Conflict::Insert);
-    }
-
-    #[test]
-    fn contradiction_candidate_query_uses_fact_pii_class() {
-        // Pins: contradiction candidate retrieval does not widen beyond the fact's own PII class.
-        assert_eq!(
-            contradiction_candidate_max_pii_class(PiiClass::None),
-            "none"
-        );
-        assert_eq!(contradiction_candidate_max_pii_class(PiiClass::Pii), "pii");
-        assert_eq!(contradiction_candidate_max_pii_class(PiiClass::Phi), "phi");
-        assert_eq!(
-            contradiction_candidate_max_pii_class(PiiClass::Restricted),
-            "restricted"
-        );
     }
 
     #[tokio::test]
@@ -1052,7 +1034,7 @@ mod tests {
             contact_id: None,
             scope: "tenant".to_string(),
             name: name.to_string(),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             valid_to: None,
             valid_from: Utc::now(),
             properties_summary,

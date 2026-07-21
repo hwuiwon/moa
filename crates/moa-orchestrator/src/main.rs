@@ -29,6 +29,7 @@ use moa_orchestrator::{
             restate_ingress_base_url, spawn_default_cron_bootstrap, start_action_review_reaper,
             start_authz_challenge_reaper_if_configured,
         },
+        kms::KmsRuntime,
     },
     services::scim::{self, ScimState},
 };
@@ -62,10 +63,25 @@ struct Args {
     scim_port: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum Command {
     /// Apply database migrations and exit.
     Migrate,
+    /// Seal historical restricted/PHI graph-memory content and validate invariants.
+    BackfillMemorySealedContent {
+        /// Maximum rows claimed and committed per worker transaction.
+        #[arg(long, default_value_t = 100)]
+        batch_size: u32,
+    },
+    /// Activate the required root-key generation and rewrap live KEKs in batches.
+    KmsRewrap {
+        /// Maximum KEKs claimed and committed per transaction.
+        #[arg(long, default_value_t = 100)]
+        batch_size: u32,
+        /// Explicit old generation to retire only after every rewrap batch drains.
+        #[arg(long)]
+        retire_generation: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -88,6 +104,65 @@ async fn async_main() -> anyhow::Result<()> {
     let _telemetry =
         init_observability(moa_config.as_ref(), &TelemetryConfig { json_stdout: true })?;
     let database_search_path = database_search_path(moa_config.as_ref());
+    match args.command.as_ref() {
+        Some(Command::BackfillMemorySealedContent { batch_size }) => {
+            let pool = build_database_pool(
+                moa_config.database.admin_url(),
+                &database_search_path,
+                moa_config.database.max_connections.clamp(1, 5),
+                Duration::from_secs(moa_config.database.connect_timeout_seconds),
+            )
+            .await
+            .context("connect sealed-memory backfill database pool")?;
+            let kms = KmsRuntime::build_serving(moa_config.as_ref(), pool.clone())
+                .await
+                .context("build sealed-memory backfill KMS provider")?;
+            let report = moa_memory_graph::backfill::backfill_memory_sealed_content(
+                &pool,
+                kms.provider().as_ref(),
+                *batch_size,
+            )
+            .await
+            .context("backfill sealed graph-memory content")?;
+            tracing::info!(
+                rows_claimed = report.rows_claimed,
+                rows_sealed = report.rows_sealed,
+                subjects_set = report.subjects_set,
+                embeddings_deleted = report.embeddings_deleted,
+                batches_committed = report.batches_committed,
+                "sealed graph-memory backfill complete"
+            );
+            return Ok(());
+        }
+        Some(Command::KmsRewrap {
+            batch_size,
+            retire_generation,
+        }) => {
+            let pool = build_database_pool(
+                moa_config.database.admin_url(),
+                &database_search_path,
+                moa_config.database.max_connections.clamp(1, 5),
+                Duration::from_secs(moa_config.database.connect_timeout_seconds),
+            )
+            .await
+            .context("connect KMS rewrap database pool")?;
+            let kms = KmsRuntime::build_maintenance(moa_config.as_ref(), pool)
+                .await
+                .context("build KMS maintenance provider")?;
+            let report = kms
+                .rewrap_to_required(*batch_size, retire_generation.as_deref())
+                .await?;
+            tracing::info!(
+                active_generation = %report.active_generation,
+                rewrapped = report.rewrapped,
+                batches = report.batches,
+                retired_generation = ?report.retired_generation,
+                "KMS rewrap complete"
+            );
+            return Ok(());
+        }
+        Some(Command::Migrate) | None => {}
+    }
     let migration_pool = build_database_pool(
         moa_config.database.admin_url(),
         &database_search_path,
@@ -98,7 +173,7 @@ async fn async_main() -> anyhow::Result<()> {
     .context("connect migration database pool")?;
     apply_database_migrations(moa_config.as_ref(), &migration_pool).await?;
     drop(migration_pool);
-    if args.command == Some(Command::Migrate) {
+    if matches!(args.command, Some(Command::Migrate)) {
         return Ok(());
     }
 
@@ -141,20 +216,26 @@ async fn async_main() -> anyhow::Result<()> {
     let endpoint = build_endpoint(
         runtime_deps.session_store.clone(),
         runtime_deps.pool.clone(),
+        runtime_deps.kms.provider(),
         runtime_deps.fga_client.clone(),
         runtime_deps.providers.clone(),
         runtime_deps.tool_router.clone(),
         runtime_deps.tool_schemas.clone(),
         moa_config.session_limits.clone(),
         moa_config.clone(),
-        runtime_deps.auth_providers.contact_tokens.clone(),
+        runtime_deps.contact_token_issuer.clone(),
         runtime_deps.lineage.handle.clone(),
         runtime_deps.embedding_provider.clone(),
         Arc::new(runtime_deps.channel_adapters.clone()),
     );
 
     let readiness = Arc::new(AtomicBool::new(false));
-    let probe_state = ProbeState::new(readiness.clone(), pool.clone(), restate_admin_url)?;
+    let probe_state = ProbeState::new(
+        readiness.clone(),
+        pool.clone(),
+        runtime_deps.kms.clone(),
+        restate_admin_url,
+    )?;
     let shutdown = CancellationToken::new();
     let authz_challenge_reaper_handle = start_authz_challenge_reaper_if_configured(
         &runtime_deps.background_pool,
@@ -307,6 +388,7 @@ async fn async_main() -> anyhow::Result<()> {
 struct ProbeState {
     readiness: Arc<AtomicBool>,
     pool: sqlx::PgPool,
+    kms: KmsRuntime,
     admin_base_url: String,
     client: Client,
     require_registration: bool,
@@ -317,6 +399,7 @@ impl ProbeState {
     fn new(
         readiness: Arc<AtomicBool>,
         pool: sqlx::PgPool,
+        kms: KmsRuntime,
         admin_base_url: String,
     ) -> anyhow::Result<Self> {
         let client = Client::builder()
@@ -327,6 +410,7 @@ impl ProbeState {
         Ok(Self {
             readiness,
             pool,
+            kms,
             admin_base_url: admin_base_url.trim_end_matches('/').to_string(),
             client,
             require_registration: env_flag("MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS", false),
@@ -351,6 +435,8 @@ impl ProbeState {
             .fetch_one(&self.pool)
             .await
             .context("Postgres readiness check failed")?;
+
+        self.kms.check_readiness().await?;
 
         let deployments = self.fetch_deployments().await?;
         if self.require_registration && !services_registered(&deployments) {

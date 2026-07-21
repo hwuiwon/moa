@@ -43,6 +43,7 @@ use super::TurnExecutionImpl;
 
 struct DelegationToolRequest<'a> {
     meta: &'a SessionMeta,
+    identity: &'a moa_core::traits::Identity,
     session_id: SessionId,
     tool_id: ToolCallId,
     tool_call: &'a ToolCallContent,
@@ -59,6 +60,7 @@ async fn handle_delegation_tool(
 ) -> Result<bool, HandlerError> {
     let DelegationToolRequest {
         meta,
+        identity,
         session_id,
         tool_id,
         tool_call,
@@ -92,7 +94,11 @@ async fn handle_delegation_tool(
     let dispatch_started = Instant::now();
     let output = crate::delegation::execute_delegation_tool(
         ctx,
-        crate::delegation::DelegationParent::RootSession { session_id, meta },
+        crate::delegation::DelegationParent::RootSession {
+            session_id,
+            meta,
+            identity,
+        },
         tool,
         trusted_sandbox_manifest,
     )
@@ -356,6 +362,7 @@ fn annotate_cached_file_read(path: &str, serves: usize) -> ToolOutput {
 
 pub(super) struct RootToolContext<'a> {
     pub(super) meta: &'a SessionMeta,
+    pub(super) identity: &'a moa_core::traits::Identity,
     pub(super) session_id: SessionId,
     pub(super) active_canary: Option<&'a str>,
     pub(super) trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
@@ -481,6 +488,7 @@ async fn handle_tool_call(
     {
         let request = GovernedInvocationRequest {
             session: meta,
+            identity: tool_context.identity,
             session_id,
             tool_id,
             tool_call,
@@ -502,6 +510,7 @@ async fn handle_tool_call(
         ctx,
         GovernedInvocationRequest {
             session: meta,
+            identity: tool_context.identity,
             session_id,
             tool_id,
             tool_call,
@@ -541,6 +550,7 @@ async fn handle_tool_call(
                 ctx,
                 DelegationToolRequest {
                     meta,
+                    identity: tool_context.identity,
                     session_id,
                     tool_id,
                     tool_call,

@@ -5,8 +5,9 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Duration, Utc};
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_db::ScopedConn;
-use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
+use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore};
 use moa_test_support::fixtures::stable_uuid_from_label;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use proptest::strategy::{Strategy, ValueTree};
@@ -49,6 +50,7 @@ fn graph_store(test_db: &TestDb, storage_partition_id: &str) -> PostgresGraphSto
     PostgresGraphStore::scoped_for_app_role(
         test_db.store().pool().clone(),
         scope(storage_partition_id),
+        super::test_kms(),
     )
 }
 
@@ -60,14 +62,16 @@ fn node_intent(
     value: impl Into<String>,
 ) -> NodeWriteIntent {
     NodeWriteIntent {
+        barrier: None,
         uid,
+        data_subject_id: scope(storage_partition_id).tenant_id().0,
         label: NodeLabel::Fact,
         storage_partition_id: Some(storage_partition_id.to_string()),
         contact_id: None,
         scope: "tenant".to_string(),
         name: name.into(),
         properties: json!({ "value": value.into() }),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         confidence: Some(0.9),
         valid_from,
         embedding: None,

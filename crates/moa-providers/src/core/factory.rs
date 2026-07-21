@@ -8,7 +8,7 @@ use moa_core::{
 };
 
 use crate::ProviderRegistry;
-use crate::routing::ProviderId;
+use moa_core::types::provider::ProviderId;
 
 /// Resolves the effective provider and model from config plus an optional user override.
 pub fn resolve_provider_selection(

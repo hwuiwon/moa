@@ -304,6 +304,16 @@ async fn execute_memory_retrieval_tool(
         )
     })?;
     executor
-        .execute_retrieval_tool(ctx.session, tool_name, input)
+        .execute_retrieval_tool(
+            ctx.session,
+            ctx.caller_identity,
+            ctx.tool_call_id.ok_or_else(|| {
+                moa_core::error::MoaError::ValidationError(
+                    "memory retrieval requires a replay-stable tool-call id".to_string(),
+                )
+            })?,
+            tool_name,
+            input,
+        )
         .await
 }

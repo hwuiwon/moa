@@ -1,6 +1,10 @@
 //! Graph-memory service wire DTOs.
 
-use crate::{types::contact::ContactId, types::identifiers::TenantId};
+use crate::{
+    types::contact::ContactId,
+    types::identifiers::{SessionId, TenantId},
+    types::memory::InformationBarrierId,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,23 +12,14 @@ use uuid::Uuid;
 
 /// Request payload for graph-memory search.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemorySearchRequest {
-    /// Tenant whose memory should be searched.
-    pub tenant_id: TenantId,
-    /// Optional contact scope for contact-local memory reads.
-    pub contact_id: Option<ContactId>,
+    /// Persisted session whose pinned scope and agent policy authorize retrieval.
+    pub session_id: SessionId,
     /// Search query text.
     pub query: String,
     /// Maximum number of hits to return.
     pub limit: u32,
-    /// Optional graph labels to include.
-    #[serde(default)]
-    pub label_filter: Vec<String>,
-    /// Optional maximum PII class accepted by the caller.
-    pub max_pii_class: Option<String>,
-    /// Whether the retrieval service should apply reranking.
-    #[serde(default)]
-    pub use_reranker: bool,
 }
 
 /// Response payload containing graph-memory search hits.
@@ -72,9 +67,10 @@ pub struct MemoryHit {
 
 /// Request payload for showing one graph-memory node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemoryShowRequest {
-    /// Tenant used to authorize and scope the node lookup.
-    pub tenant_id: TenantId,
+    /// Persisted session whose pinned scope and agent policy authorize retrieval.
+    pub session_id: SessionId,
     /// Stable graph node UID.
     pub uid: Uuid,
     /// Neighbor traversal depth requested by the caller.
@@ -138,6 +134,8 @@ pub struct MemoryIngestRequest {
     pub tenant_id: TenantId,
     /// Contact owner for contact memory; absent means tenant-owned ingestion.
     pub contact_id: Option<ContactId>,
+    /// Operator-authorized information barrier assigned to every document in the request.
+    pub information_barrier: Option<InformationBarrierId>,
     /// Documents to ingest.
     #[serde(default)]
     pub documents: Vec<MemoryIngestDocument>,
@@ -179,11 +177,10 @@ pub struct MemoryIngestResult {
 
 /// Request payload for detailed memory retrieval debugging.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemoryRetrieveDebugRequest {
-    /// Tenant whose memory should be searched.
-    pub tenant_id: TenantId,
-    /// Optional contact scope for contact-local memory reads.
-    pub contact_id: Option<ContactId>,
+    /// Persisted session whose pinned scope and agent policy authorize retrieval.
+    pub session_id: SessionId,
     /// Search query text.
     pub query: String,
     /// Maximum number of hits to return.
@@ -213,4 +210,33 @@ pub struct MemoryRetrieveDebugResponse {
     /// Additional backend-specific retrieval diagnostics.
     #[serde(default)]
     pub diagnostics: Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retrieval_requests_reject_legacy_self_asserted_authorization_fields() {
+        // Pins: public callers can identify only a persisted session; tenant,
+        // scope, clearance policy, and audit operation identity are server-owned.
+        let error = serde_json::from_value::<MemorySearchRequest>(serde_json::json!({
+            "session_id": Uuid::now_v7(),
+            "query": "restricted deal status",
+            "limit": 5,
+            "tenant_id": Uuid::now_v7(),
+            "contact_id": Uuid::now_v7(),
+            "retrieval_operation_id": Uuid::now_v7(),
+            "information_barrier_policy": {
+                "revision": "forged",
+                "clearances": ["deal-alpha"]
+            }
+        }))
+        .expect_err("legacy caller-owned authorization fields must be rejected");
+
+        assert!(
+            error.to_string().contains("unknown field"),
+            "strict wire decoding should reject self-asserted policy: {error}"
+        );
+    }
 }

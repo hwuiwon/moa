@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use moa_core::types::memory::RlsContext;
-use moa_core::{types::contact::ContactId, types::identifiers::TenantId};
+use moa_core::{
+    types::contact::ContactId, types::identifiers::TenantId, types::security::SensitivityClass,
+};
 use moa_db::ScopedConn;
 use moa_memory_vector::{
     PROMOTION_OVERLAP_THRESHOLD, PgvectorStore, VectorItem, VectorMatch, VectorPartitionPromotion,
@@ -87,7 +89,7 @@ fn vector_item(
         uid,
         user_id: None,
         label: label.to_string(),
-        pii_class: "none".to_string(),
+        pii_class: SensitivityClass::None,
         embedding,
         embedding_model: "test-model".to_string(),
         embedding_model_version: 1,
@@ -105,6 +107,7 @@ async fn set_app_role(conn: &mut sqlx::PgConnection) {
 
 async fn insert_node_index_rows(pool: &PgPool, storage_partition_id: &str, items: &[VectorItem]) {
     let ctx = tenant_scope(storage_partition_id);
+    let data_subject_id = ctx.tenant_id().0;
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin node_index seed transaction");
@@ -112,14 +115,15 @@ async fn insert_node_index_rows(pool: &PgPool, storage_partition_id: &str, items
 
     for item in items {
         sqlx::query(
-            "INSERT INTO moa.node_index (uid, label, storage_partition_id, name, pii_class) \
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO moa.node_index (uid, label, storage_partition_id, data_subject_id, name, pii_class) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(item.uid)
         .bind(&item.label)
         .bind(storage_partition_id)
+        .bind(data_subject_id)
         .bind(format!("vector seed {}", item.uid))
-        .bind(&item.pii_class)
+        .bind(item.pii_class.as_str())
         .execute(conn.as_mut())
         .await
         .expect("insert node_index seed row");
@@ -146,15 +150,17 @@ async fn insert_contact_node_index_rows(
 
     for item in items {
         sqlx::query(
-            "INSERT INTO moa.node_index (uid, label, storage_partition_id, user_id, name, pii_class) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO moa.node_index (uid, label, storage_partition_id, data_subject_id, user_id, contact_id, name, pii_class) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(item.uid)
         .bind(&item.label)
         .bind(storage_partition_id)
+        .bind(contact_id.0)
         .bind(item.user_id.as_deref())
+        .bind(contact_id.0)
         .bind(format!("contact vector seed {}", item.uid))
-        .bind(&item.pii_class)
+        .bind(item.pii_class.as_str())
         .execute(conn.as_mut())
         .await
         .expect("insert contact node_index seed row");
@@ -202,6 +208,7 @@ async fn insert_node_index_row_with_validity(
     valid_to: Option<DateTime<Utc>>,
 ) {
     let ctx = tenant_scope(storage_partition_id);
+    let data_subject_id = ctx.tenant_id().0;
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin historical node_index seed transaction");
@@ -209,14 +216,15 @@ async fn insert_node_index_row_with_validity(
 
     sqlx::query(
         "INSERT INTO moa.node_index \
-            (uid, label, storage_partition_id, name, pii_class, valid_from, valid_to) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            (uid, label, storage_partition_id, data_subject_id, name, pii_class, valid_from, valid_to) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(item.uid)
     .bind(&item.label)
     .bind(storage_partition_id)
+    .bind(data_subject_id)
     .bind(format!("historical vector seed {}", item.uid))
-    .bind(&item.pii_class)
+    .bind(item.pii_class.as_str())
     .bind(valid_from)
     .bind(valid_to)
     .execute(conn.as_mut())
@@ -268,7 +276,7 @@ async fn pgvector_round_trip_returns_identical_seed_first() {
             embedding: seed.embedding.clone(),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: None,
         })
@@ -305,7 +313,7 @@ async fn knn_on_unprovisioned_partition_returns_no_hits_instead_of_erroring() {
             embedding: basis_vector(0),
             k: 10,
             label_filter: None,
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: None,
         })
@@ -424,7 +432,7 @@ async fn cross_tenant_knn_cannot_see_other_workspace_vectors() {
             embedding: item_a.embedding.clone(),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: None,
         })
@@ -477,7 +485,7 @@ async fn control_plane_knn_can_validate_contact_workspace_vectors() {
         embedding: item.embedding.clone(),
         k: 10,
         label_filter: Some(vec!["Fact".to_string()]),
-        max_pii_class: "restricted".to_string(),
+        max_pii_class: SensitivityClass::Restricted,
         include_global: false,
         as_of: None,
     };
@@ -576,7 +584,7 @@ async fn pgvector_as_of_filters_by_node_index_validity_window() {
             embedding: old.embedding.clone(),
             k: 5,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: Some(utc("2026-03-01T00:00:00Z")),
         })
@@ -597,19 +605,18 @@ async fn pgvector_as_of_filters_by_node_index_validity_window() {
 }
 
 #[tokio::test]
-async fn pgvector_knn_excludes_vectors_above_max_pii_class_ceiling() {
+async fn pgvector_knn_excludes_pii_vectors_under_none_ceiling() {
     // Pins the privacy ceiling at pgvector_store.rs:169-179: a query with a lower
-    // `max_pii_class` must exclude higher-PII embeddings even when they are the
-    // nearest neighbors. The three rows share one embedding so neighbor distance
-    // is identical and only the pii_class rank gate decides membership. Without
-    // the CASE/<= filter, a "phi"-ceiling query would leak the "restricted" row.
+    // `max_pii_class` must exclude PII embeddings even when they are the nearest
+    // neighbors. Restricted and PHI nodes cannot have embeddings, so this test
+    // exercises the complete none/PII range that vector storage accepts.
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
     let storage_partition_id = Uuid::now_v7().to_string();
 
     let none_item = VectorItem {
-        pii_class: "none".to_string(),
+        pii_class: SensitivityClass::None,
         ..vector_item(
             Uuid::now_v7(),
             &storage_partition_id,
@@ -617,8 +624,8 @@ async fn pgvector_knn_excludes_vectors_above_max_pii_class_ceiling() {
             basis_vector(0),
         )
     };
-    let phi_item = VectorItem {
-        pii_class: "phi".to_string(),
+    let pii_item = VectorItem {
+        pii_class: SensitivityClass::Pii,
         ..vector_item(
             Uuid::now_v7(),
             &storage_partition_id,
@@ -626,16 +633,7 @@ async fn pgvector_knn_excludes_vectors_above_max_pii_class_ceiling() {
             basis_vector(0),
         )
     };
-    let restricted_item = VectorItem {
-        pii_class: "restricted".to_string(),
-        ..vector_item(
-            Uuid::now_v7(),
-            &storage_partition_id,
-            "Fact",
-            basis_vector(0),
-        )
-    };
-    let items = vec![none_item.clone(), phi_item.clone(), restricted_item.clone()];
+    let items = vec![none_item.clone(), pii_item.clone()];
     let uids: Vec<_> = items.iter().map(|item| item.uid).collect();
 
     insert_node_index_rows(session_store.pool(), &storage_partition_id, &items).await;
@@ -650,37 +648,33 @@ async fn pgvector_knn_excludes_vectors_above_max_pii_class_ceiling() {
         .await
         .expect("upsert mixed-pii vectors");
 
-    let query_at = |ceiling: &str| VectorQuery {
+    let query_at = |ceiling| VectorQuery {
         embedding: basis_vector(0),
         k: 10,
         label_filter: Some(vec!["Fact".to_string()]),
-        max_pii_class: ceiling.to_string(),
+        max_pii_class: ceiling,
         include_global: false,
         as_of: None,
     };
 
-    let phi_ceiling: HashSet<Uuid> = store
-        .knn(&query_at("phi"))
+    let pii_ceiling: HashSet<Uuid> = store
+        .knn(&query_at(SensitivityClass::Pii))
         .await
-        .expect("phi-ceiling query")
+        .expect("pii-ceiling query")
         .into_iter()
         .map(|row| row.uid)
         .collect();
     assert!(
-        phi_ceiling.contains(&none_item.uid),
-        "none-class vector must pass a phi ceiling: {phi_ceiling:?}"
+        pii_ceiling.contains(&none_item.uid),
+        "none-class vector must pass a PII ceiling: {pii_ceiling:?}"
     );
     assert!(
-        phi_ceiling.contains(&phi_item.uid),
-        "phi-class vector must pass a phi ceiling: {phi_ceiling:?}"
-    );
-    assert!(
-        !phi_ceiling.contains(&restricted_item.uid),
-        "restricted-class vector must be excluded under a phi ceiling: {phi_ceiling:?}"
+        pii_ceiling.contains(&pii_item.uid),
+        "PII vector must pass a PII ceiling: {pii_ceiling:?}"
     );
 
     let none_ceiling: HashSet<Uuid> = store
-        .knn(&query_at("none"))
+        .knn(&query_at(SensitivityClass::None))
         .await
         .expect("none-ceiling query")
         .into_iter()
@@ -817,7 +811,7 @@ async fn pgvector_knn_returns_topk_in_strict_distance_order_db_memory() {
             embedding: probe.clone(),
             k: 5,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: None,
         })
@@ -843,7 +837,7 @@ async fn pgvector_knn_returns_topk_in_strict_distance_order_db_memory() {
             embedding: probe,
             k: 3,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: None,
         })
@@ -907,7 +901,7 @@ async fn pgvector_knn_excludes_soft_deleted_embedding_even_when_nearest_db_memor
             embedding: mixed_vector(1.0, 0.0),
             k: 5,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: None,
         })
@@ -993,7 +987,7 @@ async fn pgvector_knn_hnsw_tuning_does_not_leak_past_transaction_db_memory() {
             embedding: mixed_vector(1.0, 0.0),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: None,
         })
@@ -1066,7 +1060,7 @@ fn topk_query(k: usize) -> VectorQuery {
         embedding: mixed_vector(10.0, 0.0),
         k,
         label_filter: Some(vec!["Fact".to_string()]),
-        max_pii_class: "restricted".to_string(),
+        max_pii_class: SensitivityClass::Restricted,
         include_global: false,
         as_of: None,
     }

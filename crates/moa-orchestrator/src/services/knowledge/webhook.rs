@@ -122,12 +122,18 @@ impl KnowledgeService {
                 verify_span.record("sync_run_id", tracing::field::display(run.sync_run_uid));
                 sync_run_uid = Some(run.sync_run_uid);
             } else {
+                let information_barrier = repository
+                    .get_connection(connection_uid)
+                    .await?
+                    .ok_or(KnowledgeServiceError::NotFound("knowledge connection"))?
+                    .information_barrier;
                 let run = KnowledgeSyncRun {
                     sync_run_uid: Uuid::now_v7(),
                     tenant_id: binding.tenant_id,
                     connection_uid,
                     parser: None,
                     max_records: None,
+                    information_barrier,
                     status: SyncRunStatus::ProviderSynced,
                     records_seen: 0,
                     records_changed: 0,

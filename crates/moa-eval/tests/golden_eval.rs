@@ -16,13 +16,15 @@ use moa_brain::{
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalHit},
 };
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     traits::EmbeddingProvider, types::contact::ContactId, types::identifiers::SessionId,
     types::identifiers::TenantId,
 };
+use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_db::ScopedConn;
 use moa_eval::golden::comparator::dump_traces;
-use moa_memory_graph::{GraphStore, NodeLabel, PiiClass, PostgresGraphStore};
+use moa_memory_graph::{GraphStore, NodeLabel, PostgresGraphStore};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, FastPathCtx,
     FastRememberRequest, IngestCtx, IngestError, SessionTurn, fast_remember,
@@ -105,7 +107,7 @@ struct NoPiiClassifier;
 impl PiiClassifier for NoPiiClassifier {
     async fn classify(&self, _text: &str) -> Result<PiiResult, PiiError> {
         Ok(PiiResult {
-            class: PiiClass::None,
+            class: SensitivityClass::None,
             spans: Vec::<PiiSpan>::new(),
             model_version: "golden-no-pii".to_string(),
             abstained: false,
@@ -123,7 +125,7 @@ impl ContradictionDetector for InsertOnlyDetector {
         _fact_text: &str,
         _embedding: &[f32],
         _label: NodeLabel,
-        _pii_class: PiiClass,
+        _pii_class: SensitivityClass,
         _ctx: &ContradictionContext,
     ) -> Result<Conflict, IngestError> {
         Ok(Conflict::Insert)
@@ -140,6 +142,7 @@ impl ContradictionDetector for InsertOnlyDetector {
 
 struct GoldenStack {
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     database_url: String,
     schema_name: String,
     tenant_uuid: Uuid,
@@ -163,15 +166,17 @@ impl GoldenStack {
         let user_uuid = Uuid::now_v7();
         let tenant_id = TenantId::from(tenant_uuid);
         let scope = RlsContext::tenant(tenant_id);
+        let kms: Arc<dyn KeyManagementProvider> = Arc::new(LocalKmsProvider::new());
         let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
         let graph = Arc::new(
-            PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
+            PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone(), kms.clone())
                 .with_vector_store(vector.clone()),
         );
         seed_tenant_embedder_state(&pool, &scope, tenant_uuid).await?;
 
         Ok(Self {
             pool,
+            kms,
             database_url,
             schema_name,
             tenant_uuid,
@@ -189,6 +194,7 @@ impl GoldenStack {
     fn ingest_ctx(&self) -> IngestCtx {
         IngestCtx::new(
             self.pool.clone(),
+            self.kms.clone(),
             self.graph.clone(),
             self.vector.clone(),
             self.embedder.clone(),
@@ -318,6 +324,7 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
                 supersedes_specific: Some(old_uid),
                 actor_id: stack.user_uuid,
                 actor_kind: "user".to_string(),
+                barrier: None,
             },
             &fast_ctx,
         )
@@ -422,8 +429,12 @@ impl RetrievalHarness {
             scope_ctx.clone(),
         ));
         let graph = Arc::new(
-            PostgresGraphStore::scoped_for_app_role(stack.pool.clone(), scope_ctx)
-                .with_vector_store(vector.clone()),
+            PostgresGraphStore::scoped_for_app_role(
+                stack.pool.clone(),
+                scope_ctx,
+                stack.kms.clone(),
+            )
+            .with_vector_store(vector.clone()),
         );
         let hybrid = HybridRetriever::new(stack.pool.clone(), graph.clone(), vector)
             .with_assume_app_role(true);
@@ -445,7 +456,7 @@ impl RetrievalHarness {
             &self.planning,
             self.embedder.as_ref(),
             &self.hybrid,
-            PiiClass::Restricted,
+            SensitivityClass::Restricted,
         )
         .with_k_final(5)
         .with_reranker(false)
@@ -470,7 +481,7 @@ impl RetrievalHarness {
         let request = planned.clone().into_retrieval_request(
             query,
             Vec::new(),
-            PiiClass::Restricted,
+            SensitivityClass::Restricted,
             5,
             false,
         );
@@ -525,6 +536,7 @@ fn session_turn(stack: &GoldenStack, fixture: &GoldenFixture, turn_seq: u64) -> 
         transcript: format!("Fact: tenant shared {}", fixture.summary),
         dominant_pii_class: "none".to_string(),
         finalized_at: fixture.valid_from,
+        barrier: None,
     }
 }
 

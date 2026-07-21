@@ -3,6 +3,7 @@ kind: Kustomization
 resources:
   - 00-namespace.yaml
   - 10-restate-cluster.yaml
+  - 15-runtime-config.yaml
   - 20-orchestrator-deployment.yaml
   - 25-orchestrator-service.yaml
   - 26-orchestrator-network-policy.yaml

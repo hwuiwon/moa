@@ -3,10 +3,11 @@
 use serde::{Deserialize, Serialize};
 
 pub mod erasure;
+pub mod legal_hold;
 pub mod mock;
 pub mod openai_filter;
 
-use moa_memory_graph::PiiClass;
+use moa_core::types::security::SensitivityClass;
 pub use mock::MockClassifier;
 pub use openai_filter::{OpenAiPrivacyFilterClassifier, PrivacyFilterThresholds};
 
@@ -118,7 +119,7 @@ impl PiiSpan {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PiiResult {
     /// Aggregated privacy class derived from detected spans.
-    pub class: PiiClass,
+    pub class: SensitivityClass,
     /// Detected spans, preserving offsets and model categories for later encryption/redaction.
     pub spans: Vec<PiiSpan>,
     /// Model and serving version that produced this result.
@@ -131,7 +132,7 @@ impl PiiResult {
     /// Builds the fail-closed result used when inference is unavailable.
     pub fn fail_closed(model_version: impl Into<String>) -> Self {
         Self {
-            class: PiiClass::Pii,
+            class: SensitivityClass::Pii,
             spans: Vec::new(),
             model_version: model_version.into(),
             abstained: true,
@@ -207,7 +208,7 @@ pub fn classify_heuristic(text: &str) -> PiiResult {
     for (index, token) in tokens.iter().enumerate() {
         if token.text.contains('@') {
             push_heuristic_span(token, PiiCategory::Email, 0.80, &mut spans);
-        } else if token.text.contains("sk-") || contains_secret_keyword(token.text) {
+        } else if contains_secret_key_prefix(token.text) || contains_secret_keyword(token.text) {
             push_heuristic_span(token, PiiCategory::Secret, 0.80, &mut spans);
         } else if looks_like_ssn(token.text) {
             push_heuristic_span(token, PiiCategory::Ssn, 0.90, &mut spans);
@@ -226,16 +227,16 @@ pub fn classify_heuristic(text: &str) -> PiiResult {
         .iter()
         .any(|span| matches!(span.category, PiiCategory::Secret))
     {
-        PiiClass::Restricted
+        SensitivityClass::Restricted
     } else if spans
         .iter()
         .any(|span| matches!(span.category, PiiCategory::Ssn))
     {
-        PiiClass::Phi
+        SensitivityClass::Phi
     } else if spans.is_empty() {
-        PiiClass::None
+        SensitivityClass::None
     } else {
-        PiiClass::Pii
+        SensitivityClass::Pii
     };
 
     PiiResult {
@@ -341,6 +342,26 @@ fn contains_secret_keyword(token: &str) -> bool {
         let preceded_by_letter = start > 0 && bytes[start - 1].is_ascii_alphabetic();
         let followed_by_letter = bytes.get(end).is_some_and(u8::is_ascii_alphabetic);
         if !preceded_by_letter && !followed_by_letter {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+/// Reports whether `token` contains an `sk-` credential prefix at a token boundary.
+///
+/// Serialized JSON often has no whitespace around values, so punctuation is a
+/// valid boundary. An alphanumeric predecessor is not: without this check,
+/// ordinary values such as `task-lifecycle` are misclassified as credentials.
+fn contains_secret_key_prefix(token: &str) -> bool {
+    const PREFIX: &str = "sk-";
+    let bytes = token.as_bytes();
+    let mut from = 0;
+    while let Some(offset) = token[from..].find(PREFIX) {
+        let start = from + offset;
+        let preceded_by_alphanumeric = start > 0 && bytes[start - 1].is_ascii_alphanumeric();
+        if !preceded_by_alphanumeric {
             return true;
         }
         from = start + 1;

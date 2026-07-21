@@ -53,19 +53,21 @@ pub(super) struct ResolvedPrivacySubjects {
 /// ledger insert.
 pub(super) async fn consume_approval_jti(
     pool: &PgPool,
+    tenant_id: Uuid,
     claims: &ApprovalClaims,
 ) -> Result<(), HandlerError> {
     let expires_at = jti_expires_at(claims)?;
     let inserted = sqlx::query_scalar::<_, String>(
         r#"
         INSERT INTO moa.audit_jti_used
-            (jti, op, subject_user_id, approver_id, approval_claims, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
+            (jti, tenant_id, op, subject_user_id, approver_id, approval_claims, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (jti) DO NOTHING
         RETURNING jti
         "#,
     )
     .bind(&claims.jti)
+    .bind(tenant_id)
     .bind(&claims.op)
     .bind(&claims.subject_user_id)
     .bind(&claims.sub)
@@ -214,12 +216,13 @@ pub(super) async fn claim_erasure_job(
     sqlx::query(
         r#"
         INSERT INTO moa.audit_jti_used
-            (jti, op, subject_user_id, approver_id, approval_claims, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
+            (jti, tenant_id, op, subject_user_id, approver_id, approval_claims, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (jti) DO NOTHING
         "#,
     )
     .bind(&claims.jti)
+    .bind(tenant_id)
     .bind(&claims.op)
     .bind(&claims.subject_user_id)
     .bind(&claims.sub)

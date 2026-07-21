@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::types::memory::RlsContext;
+use moa_core::types::memory::{InformationBarrierId, RlsContext};
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     error::MoaError, traits::EmbeddingProvider, traits::MemoryToolExecutor,
     types::contact::ContactId, types::contact::SessionActorRef,
@@ -14,12 +15,8 @@ use moa_core::{
     types::session::SessionMeta, types::tools::ToolOutput,
 };
 use moa_db::ScopedConn;
-use moa_memory_graph::{
-    GraphError, GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore,
-};
-use moa_memory_pii::{
-    OpenAiPrivacyFilterClassifier, PiiClassifier, PiiError, PiiResult, redact_text,
-};
+use moa_memory_graph::{GraphError, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore};
+use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, redact_text};
 use moa_memory_vector::VectorStoreFactory;
 use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorStore};
 use serde::{Deserialize, Serialize};
@@ -49,6 +46,10 @@ pub struct FastRememberRequest {
     pub label: NodeLabel,
     /// Explicit supersession target, bypassing contradiction detection.
     pub supersedes_specific: Option<Uuid>,
+    /// Information-barrier the write is running under, inherited from the calling
+    /// session. `Some(tag)` restricts the node to callers cleared for the barrier;
+    /// `None` (the common case) leaves it unrestricted.
+    pub barrier: Option<InformationBarrierId>,
     /// Principal that triggered the write.
     pub actor_id: Uuid,
     /// Principal kind written to the changelog.
@@ -295,6 +296,10 @@ pub struct IncidentRecord {
     pub attempted: String,
     /// Why it failed (a stable error class, not a raw message).
     pub failure: String,
+    /// Information-barrier the failing session is running under, inherited so the
+    /// incident node is need-to-know restricted like the rest of the session's
+    /// memory. `None` leaves it unrestricted.
+    pub barrier: Option<InformationBarrierId>,
     /// Principal recorded in the changelog for the write.
     pub actor_id: Uuid,
     /// Principal kind recorded in the changelog for the write.
@@ -318,6 +323,7 @@ pub async fn record_incident(
     if !runtime.fact_extraction_enabled() {
         return Ok(None);
     }
+    let barrier = pinned_write_barrier(session)?;
     let tenant_id = tenant_uuid(session);
     let contact_id = session.contact.as_ref().map(|contact| contact.contact_id.0);
     let (scope_ctx, scope) = match contact_id {
@@ -327,6 +333,7 @@ pub async fn record_incident(
         ),
         None => (RlsContext::tenant(TenantId::from(tenant_id)), "tenant"),
     };
+    let scope_ctx = with_write_barrier_clearance(scope_ctx, barrier.as_ref());
     let ctx = runtime_fast_ctx(scope_ctx).await?;
     record_incident_with_ctx(
         IncidentRecord {
@@ -337,6 +344,7 @@ pub async fn record_incident(
             turn_seq,
             attempted: attempted.to_string(),
             failure: failure.to_string(),
+            barrier,
             actor_id: actor_id_from_session(session),
             actor_kind: "system".to_string(),
         },
@@ -387,7 +395,9 @@ pub async fn record_incident_with_ctx(
     }
 
     let intent = NodeWriteIntent {
+        barrier: req.barrier.clone(),
         uid: Uuid::now_v7(),
+        data_subject_id: req.contact_id.unwrap_or(req.tenant_id),
         label: NodeLabel::Incident,
         storage_partition_id: Some(
             StoragePartitionId::for_tenant(TenantId::from(req.tenant_id)).to_string(),
@@ -438,7 +448,7 @@ fn validate_incident_request(req: &IncidentRecord) -> Result<(), FastError> {
 async fn classify_and_redact(
     text: &str,
     ctx: &FastPathCtx,
-) -> Result<Option<(String, PiiClass)>, FastError> {
+) -> Result<Option<(String, SensitivityClass)>, FastError> {
     let pii = match ctx.pii.classify(text).await {
         Ok(result) => result,
         Err(error) => {
@@ -475,21 +485,8 @@ async fn incident_already_recorded(
     Ok(exists)
 }
 
-fn more_restrictive(a: PiiClass, b: PiiClass) -> PiiClass {
-    if incident_pii_rank(a) >= incident_pii_rank(b) {
-        a
-    } else {
-        b
-    }
-}
-
-fn incident_pii_rank(class: PiiClass) -> u8 {
-    match class {
-        PiiClass::None => 0,
-        PiiClass::Pii => 1,
-        PiiClass::Phi => 2,
-        PiiClass::Restricted => 3,
-    }
+fn more_restrictive(a: SensitivityClass, b: SensitivityClass) -> SensitivityClass {
+    if a.rank() >= b.rank() { a } else { b }
 }
 
 /// Executes a memory tool request using the installed orchestrator runtime.
@@ -667,14 +664,16 @@ fn safe_fast_path_text(text: &str, pii: &PiiResult) -> Result<String, FastError>
 fn build_intent(
     req: &FastRememberRequest,
     embedding: &[f32],
-    pii_class: PiiClass,
+    pii_class: SensitivityClass,
     confidence: f64,
     embedding_model: &str,
     embedding_model_version: i32,
     redacted_text: &str,
 ) -> NodeWriteIntent {
     NodeWriteIntent {
+        barrier: req.barrier.clone(),
         uid: Uuid::now_v7(),
+        data_subject_id: req.contact_id.unwrap_or(req.tenant_id),
         label: req.label,
         storage_partition_id: Some(
             StoragePartitionId::for_tenant(TenantId::from(req.tenant_id)).to_string(),
@@ -832,6 +831,7 @@ async fn execute_remember_tool(
 ) -> Result<ToolOutput, FastError> {
     let batch: RememberBatchInput = serde_json::from_value(input.clone())?;
     validate_remember_batch_len(batch.items.len())?;
+    let barrier = pinned_write_barrier(session)?;
 
     // One runtime context per requested scope is reused across items so a large
     // batch does not rebuild the graph/vector/PII stack per fact. Item failures
@@ -840,7 +840,7 @@ async fn execute_remember_tool(
         std::collections::HashMap::new();
     let mut outcomes = Vec::with_capacity(batch.items.len());
     for item in &batch.items {
-        outcomes.push(remember_one_item(session, item, &mut scope_ctxs).await);
+        outcomes.push(remember_one_item(session, item, barrier.as_ref(), &mut scope_ctxs).await);
     }
     Ok(batch_remember_output(&outcomes, started))
 }
@@ -864,6 +864,7 @@ fn validate_remember_batch_len(len: usize) -> Result<(), FastError> {
 async fn remember_one_item(
     session: &SessionMeta,
     item: &RememberItemInput,
+    barrier: Option<&InformationBarrierId>,
     scope_ctxs: &mut std::collections::HashMap<String, (FastPathCtx, Uuid, Option<Uuid>)>,
 ) -> RememberOutcome {
     let label = match parse_node_label(item.label.as_deref()) {
@@ -874,10 +875,11 @@ async fn remember_one_item(
         return RememberOutcome::Rejected(CONTACT_SCOPE_WITHOUT_CONTACT_REASON.to_string());
     }
     let scope = requested_write_scope(item.scope.as_deref());
-    let (ctx, tenant_id, contact_id) = match scoped_ctx_for(session, &scope, scope_ctxs).await {
-        Ok(triple) => triple,
-        Err(error) => return RememberOutcome::Rejected(remember_item_reason(&error)),
-    };
+    let (ctx, tenant_id, contact_id) =
+        match scoped_ctx_for(session, &scope, barrier, scope_ctxs).await {
+            Ok(triple) => triple,
+            Err(error) => return RememberOutcome::Rejected(remember_item_reason(&error)),
+        };
     let actor_id = actor_id_from_session(session);
     match fast_remember(
         FastRememberRequest {
@@ -887,6 +889,7 @@ async fn remember_one_item(
             text: item.text.clone(),
             label,
             supersedes_specific: item.supersedes_specific,
+            barrier: barrier.cloned(),
             actor_id,
             actor_kind: "user".to_string(),
         },
@@ -903,12 +906,13 @@ async fn remember_one_item(
 async fn scoped_ctx_for(
     session: &SessionMeta,
     scope: &str,
+    barrier: Option<&InformationBarrierId>,
     scope_ctxs: &mut std::collections::HashMap<String, (FastPathCtx, Uuid, Option<Uuid>)>,
 ) -> Result<(FastPathCtx, Uuid, Option<Uuid>), FastError> {
     if let Some(existing) = scope_ctxs.get(scope) {
         return Ok(existing.clone());
     }
-    let built = runtime_ctx_for_scope(session, scope).await?;
+    let built = runtime_ctx_for_scope(session, scope, barrier).await?;
     scope_ctxs.insert(scope.to_string(), built.clone());
     Ok(built)
 }
@@ -993,17 +997,18 @@ async fn execute_forget_tool(
     started: Instant,
 ) -> Result<ToolOutput, FastError> {
     let params: ForgetToolInput = serde_json::from_value(input.clone())?;
+    let barrier = pinned_write_barrier(session)?;
     let count = match (params.uid, params.name, params.soft_all_contact_id) {
         (Some(uid), None, None) => {
-            let ctx = runtime_ctx_for_visible_session_scope(session).await?;
+            let ctx = runtime_ctx_for_visible_session_scope(session, barrier.as_ref()).await?;
             fast_forget(ForgetPattern::Uid(uid), &ctx).await?
         }
         (None, Some(name), None) => {
-            let ctx = runtime_ctx_for_visible_session_scope(session).await?;
+            let ctx = runtime_ctx_for_visible_session_scope(session, barrier.as_ref()).await?;
             fast_forget(ForgetPattern::NameMatch(name), &ctx).await?
         }
         (None, None, Some(contact_id)) => {
-            let ctx = runtime_ctx_for_contact(session, contact_id).await?;
+            let ctx = runtime_ctx_for_contact(session, contact_id, barrier.as_ref()).await?;
             fast_forget(ForgetPattern::SoftAll(contact_id), &ctx).await?
         }
         _ => {
@@ -1043,6 +1048,7 @@ async fn execute_supersede_tool(
 async fn runtime_ctx_for_scope(
     session: &SessionMeta,
     scope: &str,
+    barrier: Option<&InformationBarrierId>,
 ) -> Result<(FastPathCtx, Uuid, Option<Uuid>), FastError> {
     let tenant_id = tenant_uuid(session);
     let contact_id = match scope {
@@ -1058,6 +1064,7 @@ async fn runtime_ctx_for_scope(
         Some(contact_id) => RlsContext::contact(TenantId::from(tenant_id), ContactId(contact_id)),
         None => RlsContext::tenant(TenantId::from(tenant_id)),
     };
+    let scope_ctx = with_write_barrier_clearance(scope_ctx, barrier);
     Ok((runtime_fast_ctx(scope_ctx).await?, tenant_id, contact_id))
 }
 
@@ -1104,25 +1111,47 @@ fn memory_tool_failure_output(tool_name: &str, error: &FastError, started: Insta
 async fn runtime_ctx_for_contact(
     session: &SessionMeta,
     contact_id: Uuid,
+    barrier: Option<&InformationBarrierId>,
 ) -> Result<FastPathCtx, FastError> {
     let tenant_id = tenant_uuid(session);
     let scope_ctx = RlsContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
+    let scope_ctx = with_write_barrier_clearance(scope_ctx, barrier);
     runtime_fast_ctx(scope_ctx).await
 }
 
 async fn runtime_ctx_for_visible_session_scope(
     session: &SessionMeta,
+    barrier: Option<&InformationBarrierId>,
 ) -> Result<FastPathCtx, FastError> {
     if let Some(contact) = &session.contact {
-        runtime_ctx_for_contact(session, contact.contact_id.0).await
+        runtime_ctx_for_contact(session, contact.contact_id.0, barrier).await
     } else {
-        let (ctx, _, _) = runtime_ctx_for_scope(session, "tenant").await?;
+        let (ctx, _, _) = runtime_ctx_for_scope(session, "tenant", barrier).await?;
         Ok(ctx)
     }
 }
 
 fn tenant_uuid(session: &SessionMeta) -> Uuid {
     session.tenant_id.0
+}
+
+fn pinned_write_barrier(session: &SessionMeta) -> Result<Option<InformationBarrierId>, FastError> {
+    let Some(agent_context) = session.agent_context.as_ref() else {
+        return Ok(None);
+    };
+    let policy = agent_context.parsed_policy_snapshot()?.knowledge_policy;
+    policy.validate()?;
+    Ok(policy.write_barrier)
+}
+
+fn with_write_barrier_clearance(
+    scope: RlsContext,
+    barrier: Option<&InformationBarrierId>,
+) -> RlsContext {
+    match barrier {
+        Some(barrier) => scope.with_cleared_barriers([barrier.clone()].into_iter().collect()),
+        None => scope,
+    }
 }
 
 fn session_contact_uuid(session: &SessionMeta) -> Result<Uuid, FastError> {
@@ -1157,14 +1186,11 @@ async fn runtime_fast_ctx_from_runtime(
     let graph_vector =
         vector_factory.transactional_graph_backend(pool.clone(), scope.clone(), false);
     let graph = Arc::new(
-        PostgresGraphStore::scoped(pool.clone(), scope.clone())
+        PostgresGraphStore::scoped(pool.clone(), scope.clone(), runtime.kms())
             .with_vector_store(graph_vector.vector_store()),
     );
     let embedder = runtime.embedder();
-    let pii: Arc<dyn PiiClassifier> = match runtime.pii_service_url() {
-        Some(url) => Arc::new(OpenAiPrivacyFilterClassifier::new(url)?),
-        None => Arc::new(FailClosedClassifier),
-    };
+    let pii = runtime.pii_classifier();
     let contradict = runtime.contradiction_detector();
 
     Ok(FastPathCtx::new_with_optional_embedder(
@@ -1193,23 +1219,19 @@ fn parse_node_label(value: Option<&str>) -> Result<NodeLabel, FastError> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct FailClosedClassifier;
-
-#[async_trait]
-impl PiiClassifier for FailClosedClassifier {
-    async fn classify(&self, _text: &str) -> Result<PiiResult, PiiError> {
-        Ok(PiiResult::fail_closed("fast-path-no-pii-service"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        config::MoaConfig, types::contact::ContactId, types::contact::ContactRef,
-        types::contact::ContactVerificationState, types::identifiers::TenantId,
-        types::session::SessionMeta, types::tools::ToolContent,
+        config::MoaConfig,
+        types::agent::{AgentContext, AgentKnowledgePolicy, AgentPolicySnapshot},
+        types::contact::ContactId,
+        types::contact::ContactRef,
+        types::contact::ContactVerificationState,
+        types::identifiers::TenantId,
+        types::session::SessionMeta,
+        types::tools::ToolContent,
     };
+    use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
     use serde_json::json;
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -1222,6 +1244,62 @@ mod tests {
             .expect("lazy test pool should not connect")
     }
 
+    fn test_kms() -> Arc<dyn KeyManagementProvider> {
+        static KMS: std::sync::OnceLock<Arc<dyn KeyManagementProvider>> =
+            std::sync::OnceLock::new();
+        KMS.get_or_init(|| Arc::new(LocalKmsProvider::new()))
+            .clone()
+    }
+
+    fn session_with_knowledge_policy(policy: AgentKnowledgePolicy) -> SessionMeta {
+        let mut agent_context = AgentContext::system_default();
+        agent_context.policy_snapshot = json!(AgentPolicySnapshot {
+            knowledge_policy: policy,
+            ..AgentPolicySnapshot::default()
+        });
+        SessionMeta {
+            agent_context: Some(agent_context),
+            ..SessionMeta::default()
+        }
+    }
+
+    #[test]
+    fn pinned_write_barrier_comes_from_validated_session_policy() {
+        // Pins: session-facing remember, supersede, and incident paths share the
+        // typed barrier copied onto the pinned agent policy; sessions without a
+        // pinned agent remain unbarriered.
+        let barrier = InformationBarrierId::parse("deal-alpha").expect("valid barrier");
+        let session = session_with_knowledge_policy(AgentKnowledgePolicy {
+            cleared_barriers: [barrier.clone()].into_iter().collect(),
+            write_barrier: Some(barrier.clone()),
+            ..AgentKnowledgePolicy::default()
+        });
+
+        assert_eq!(
+            pinned_write_barrier(&session).expect("valid policy"),
+            Some(barrier)
+        );
+        assert_eq!(
+            pinned_write_barrier(&SessionMeta::default()).expect("unpinned session"),
+            None
+        );
+    }
+
+    #[test]
+    fn pinned_write_barrier_rejects_policy_without_matching_clearance() {
+        // Pins: a malformed pinned policy fails closed before a fast-memory write
+        // can turn a restricted session into an unrestricted memory node.
+        let session = session_with_knowledge_policy(AgentKnowledgePolicy {
+            write_barrier: Some(InformationBarrierId::parse("deal-alpha").expect("valid barrier")),
+            ..AgentKnowledgePolicy::default()
+        });
+
+        assert!(matches!(
+            pinned_write_barrier(&session),
+            Err(FastError::Core(MoaError::ValidationError(_)))
+        ));
+    }
+
     #[tokio::test]
     async fn runtime_fast_ctx_reuses_configured_ingestion_embedder() {
         // Pins: installed slow, fast, and entity paths share one provider client;
@@ -1229,7 +1307,7 @@ mod tests {
         let mut config = MoaConfig::default();
         config.memory.vector.embedder.name = "gemini:gemini-embedding-2".to_string();
         config.providers.google.api_key = "test-google-key".to_string();
-        let runtime = crate::IngestRuntime::from_config(lazy_pool(), &config)
+        let runtime = crate::IngestRuntime::from_config(lazy_pool(), test_kms(), &config)
             .expect("configured runtime should build without a provider call");
         let slow_embedder = runtime
             .embedder()
@@ -1260,7 +1338,7 @@ mod tests {
         // dedicated missing-embedder boundary before attempting provider or DB I/O.
         let mut config = MoaConfig::default();
         config.memory.vector.embedder.name = "disabled".to_string();
-        let runtime = crate::IngestRuntime::from_config(lazy_pool(), &config)
+        let runtime = crate::IngestRuntime::from_config(lazy_pool(), test_kms(), &config)
             .expect("disabled embedding should leave fast graph access available");
         let ctx = runtime_fast_ctx_from_runtime(
             &runtime,
@@ -1275,6 +1353,7 @@ mod tests {
             text: "the api uses postgres".to_string(),
             label: NodeLabel::Fact,
             supersedes_specific: None,
+            barrier: None,
             actor_id: Uuid::from_u128(4),
             actor_kind: "user".to_string(),
         };
@@ -1300,6 +1379,7 @@ mod tests {
                 turn_seq: 1,
                 attempted: "memory_search".to_string(),
                 failure: "timeout".to_string(),
+                barrier: None,
                 actor_id: Uuid::from_u128(4),
                 actor_kind: "system".to_string(),
             },
@@ -1343,7 +1423,7 @@ mod tests {
         // disabled; only a vector-producing operation asks for an embedder.
         let mut config = MoaConfig::default();
         config.memory.vector.embedder.name = "disabled".to_string();
-        let runtime = crate::IngestRuntime::from_config(lazy_pool(), &config)
+        let runtime = crate::IngestRuntime::from_config(lazy_pool(), test_kms(), &config)
             .expect("disabled embedding should not disable graph deletion");
 
         let fast = runtime_fast_ctx_from_runtime(

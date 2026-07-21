@@ -305,7 +305,7 @@ struct FactDraft {
     object: String,
     answer: String,
     supersedes: Vec<String>,
-    pii_class: PiiClass,
+    pii_class: SensitivityClass,
     expected_redacted: bool,
 }
 
@@ -425,7 +425,7 @@ fn schedule_tenant_facts(
             object: old_target.to_string(),
             answer: format!("Before the update, {component} deployed to {old_target}."),
             supersedes: Vec::new(),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         },
     )?;
@@ -444,7 +444,7 @@ fn schedule_tenant_facts(
             object: new_target.to_string(),
             answer: format!("The latest deploy target for {component} is {new_target}."),
             supersedes: vec![deploy_old_fact_id.clone()],
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         },
     )?;
@@ -463,7 +463,7 @@ fn schedule_tenant_facts(
             object: runbook.to_string(),
             answer: format!("{component} deploys require {runbook}."),
             supersedes: Vec::new(),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         },
     )?;
@@ -484,7 +484,7 @@ fn schedule_tenant_facts(
             object: cache_a.to_string(),
             answer: format!("{component} has a conflicting cache backend claim: {cache_a}."),
             supersedes: Vec::new(),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         },
     )?;
@@ -504,7 +504,7 @@ fn schedule_tenant_facts(
             object: cache_b.to_string(),
             answer: format!("{component} has a conflicting cache backend claim: {cache_b}."),
             supersedes: Vec::new(),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         },
     )?;
@@ -529,7 +529,7 @@ fn schedule_tenant_facts(
             object: old_on_call.to_string(),
             answer: format!("At that time, {old_on_call} was primary on-call for {component}."),
             supersedes: Vec::new(),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         },
     )?;
@@ -554,7 +554,7 @@ fn schedule_tenant_facts(
             object: new_on_call.to_string(),
             answer: format!("{new_on_call} is now primary on-call for {component}."),
             supersedes: vec![temporal_old_fact_id.clone()],
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         },
     )?;
@@ -630,7 +630,7 @@ fn schedule_user_facts(
             object: repository.to_string(),
             answer: private_answer.clone(),
             supersedes: Vec::new(),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         },
     )?;
@@ -656,7 +656,7 @@ fn schedule_user_facts(
             object: format!("{style}; editor={editor}"),
             answer: preference_answer.clone(),
             supersedes: Vec::new(),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         },
     )?;
@@ -688,7 +688,7 @@ fn schedule_user_facts(
             object: email,
             answer: pii_answer.clone(),
             supersedes: Vec::new(),
-            pii_class: PiiClass::Pii,
+            pii_class: SensitivityClass::Pii,
             expected_redacted: true,
         },
     )?;
@@ -727,7 +727,7 @@ fn schedule_user_facts(
                 object: library.to_string(),
                 answer: format!("{service} depends on {library}."),
                 supersedes: Vec::new(),
-                pii_class: PiiClass::None,
+                pii_class: SensitivityClass::None,
                 expected_redacted: false,
             },
         )?;
@@ -761,7 +761,7 @@ fn schedule_user_facts(
                     object: library.to_string(),
                     answer: format!("{service} depends on {library}."),
                     supersedes: Vec::new(),
-                    pii_class: PiiClass::None,
+                    pii_class: SensitivityClass::None,
                     expected_redacted: false,
                 },
             )?;
@@ -795,7 +795,7 @@ fn schedule_user_facts(
                 object: team.to_string(),
                 answer: format!("The {team} team owns {library}."),
                 supersedes: Vec::new(),
-                pii_class: PiiClass::None,
+                pii_class: SensitivityClass::None,
                 expected_redacted: false,
             },
         )?;

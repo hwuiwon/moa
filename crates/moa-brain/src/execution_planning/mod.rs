@@ -240,7 +240,7 @@ async fn plan_generated(
             audits,
         );
     }
-    if first.classification != ClassifiedCompileOutcome::Rejected
+    if !should_attempt_repair(first.classification, &first.outcome.report)
         || request.config.planner_repair_attempts == 0
     {
         return Ok(classified_terminal(first.classification, audits));
@@ -591,12 +591,12 @@ fn classify_validation_report(
         .filter(|issue| issue.severity == ExecutionValidationSeverity::Error)
         .map(|issue| issue.code.as_str())
         .collect::<Vec<_>>();
-    if error_codes.iter().any(|code| {
-        matches!(
-            *code,
-            "invalid_run_input" | "empty_objective" | "goal_structure"
-        )
-    }) {
+    if error_codes.contains(&"goal_structure") {
+        ClassifiedCompileOutcome::Rejected
+    } else if error_codes
+        .iter()
+        .any(|code| matches!(*code, "invalid_run_input" | "empty_objective"))
+    {
         ClassifiedCompileOutcome::NeedsInput
     } else if error_codes.iter().any(|code| {
         code.contains("authorization")
@@ -611,6 +611,24 @@ fn classify_validation_report(
     } else {
         ClassifiedCompileOutcome::Rejected
     }
+}
+
+fn should_attempt_repair(
+    classification: ClassifiedCompileOutcome,
+    report: &ExecutionValidationReport,
+) -> bool {
+    classification == ClassifiedCompileOutcome::Rejected
+        && !report.issues.iter().any(|issue| {
+            issue.severity == ExecutionValidationSeverity::Error
+                && matches!(
+                    issue.code.as_str(),
+                    "goal_structure"
+                        | "unchecked_requirement"
+                        | "unchecked_constraint"
+                        | "unknown_completion_requirement"
+                        | "unknown_completion_constraint"
+                )
+        })
 }
 
 fn compiler_audit_report(report: &ExecutionValidationReport) -> Result<ExecutionAuditReport> {
@@ -948,7 +966,7 @@ pub async fn plan_amendment(
     if first.classification == ClassifiedCompileOutcome::Accepted {
         return admitted_amendment(candidate, candidate_hash, first, audits);
     }
-    if first.classification != ClassifiedCompileOutcome::Rejected
+    if !should_attempt_repair(first.classification, &first.outcome.report)
         || request.config.planner_repair_attempts == 0
     {
         return Ok(amendment_classified_terminal(first.classification, audits));

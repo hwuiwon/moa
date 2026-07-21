@@ -291,6 +291,7 @@ impl Session for SessionImpl {
     ) -> Result<(), HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "execution_run_started");
+        let identity = require_identity(&ctx)?;
         let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         let delivery = delivery.into_inner();
         let run_uid = delivery.started.run_uid;
@@ -312,7 +313,7 @@ impl Session for SessionImpl {
         if !terminal_replay {
             let session_id = parse_session_key(ctx.key())?;
             sync_status(&ctx, session_id, &state).await?;
-            dispatch_execution_run(&ctx, &state, run_uid)?;
+            dispatch_execution_run(&ctx, &state, run_uid, identity)?;
         }
         Ok(())
     }

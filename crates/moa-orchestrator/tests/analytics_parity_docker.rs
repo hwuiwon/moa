@@ -288,12 +288,11 @@ async fn analytics_parity_all_datasets_docker() -> TestResult<()> {
                     diff_responses(&dataset.id, &label, &pg_response, &ch_response)?;
                 }
                 (Err(pg_error), Err(ch_error)) => {
-                    // Both backends reject the query the same way (e.g. a shared
-                    // validation error) — not a parity violation.
-                    eprintln!(
-                        "parity: {}/{} rejected by both backends (pg: {pg_error}; ch: {ch_error})",
+                    return Err(format!(
+                        "parity battery generated an invalid query for {}/{}: pg={pg_error}; ch={ch_error}",
                         dataset.id, label
-                    );
+                    )
+                    .into());
                 }
                 (pg_result, ch_result) => {
                     return Err(format!(
@@ -902,12 +901,23 @@ fn build_battery(
     let dims = role_fields(dataset, AnalyticsFieldRole::Dimension);
     let measures = role_fields(dataset, AnalyticsFieldRole::Measure);
 
+    let bounded_time_filter = dataset
+        .default_time_field
+        .as_deref()
+        .map(|field| AnalyticsFilter {
+            field: field.to_string(),
+            operator: AnalyticsFilterOperator::Between,
+            value: Some(AnalyticsCell::Json(json!([
+                (Utc::now() - Duration::days(2)).to_rfc3339(),
+                (Utc::now() + Duration::days(1)).to_rfc3339(),
+            ]))),
+        });
     let base = |dataset_id: &str| AnalyticsQueryRequest {
         dataset: dataset_id.to_string(),
         tenant_id: Some(tenant_id),
         dimensions: Vec::new(),
         measures: Vec::new(),
-        filters: Vec::new(),
+        filters: bounded_time_filter.clone().into_iter().collect(),
         order_by: Vec::new(),
         limit: Some(1000),
     };

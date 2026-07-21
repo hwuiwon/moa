@@ -7,6 +7,7 @@ use super::tools::{
     anthropic_tool_result_block, anthropic_tool_use_block, provider_native_tool_json,
 };
 use super::*;
+use crate::core::schema::compile_for_anthropic_output;
 
 pub(super) fn build_request_body(
     request: &CompletionRequest,
@@ -249,7 +250,7 @@ fn anthropic_output_config(format: &JsonResponseFormat) -> Value {
     json!({
         "format": {
             "type": "json_schema",
-            "schema": format.schema,
+            "schema": compile_for_anthropic_output(&format.schema),
         }
     })
 }

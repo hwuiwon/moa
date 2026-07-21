@@ -5,13 +5,13 @@
 use std::sync::Arc;
 
 use moa_brain::{
-    GraphMemoryPipelineOptions, TurnResult,
+    BrainTurnRequest, GraphMemoryPipelineOptions, TurnResult,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    config::MoaConfig, error::Result, events::Event, traits::LLMProvider, traits::SessionStore,
-    types::contact::SessionActorRef, types::events_stream::EventRange,
-    types::identifiers::TenantId, types::session::SessionMeta,
+    config::MoaConfig, error::Result, events::Event, traits::Identity, traits::IdentityType,
+    traits::LLMProvider, traits::SessionStore, types::contact::SessionActorRef,
+    types::events_stream::EventRange, types::identifiers::TenantId, types::session::SessionMeta,
 };
 use moa_providers::{build_provider_from_config, resolve_provider_selection};
 use moa_session::testing;
@@ -44,13 +44,18 @@ async fn live_brain_turn_completes() -> Result<()> {
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);
     let provider: Arc<dyn LLMProvider> = build_provider_from_config(&config)?;
+    let identity = Identity {
+        identity_type: IdentityType::Operator,
+        id: uuid::Uuid::now_v7(),
+        tenant_id: TenantId::new(),
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    };
     let session_id = store
         .create_session(SessionMeta {
-            tenant_id: TenantId::new(),
+            tenant_id: identity.tenant_id,
             model: config.models.main.clone().into(),
-            created_by: Some(SessionActorRef::Identity {
-                id: uuid::Uuid::now_v7(),
-            }),
+            created_by: Some(SessionActorRef::Identity { id: identity.id }),
             ..SessionMeta::default()
         })
         .await?;
@@ -59,6 +64,7 @@ async fn live_brain_turn_completes() -> Result<()> {
         store.clone(),
         GraphMemoryPipelineOptions {
             graph_pool: store.pool().clone(),
+            kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
             shared_graph_memory_retriever: None,
             retrieval_embedder: None,
             shared_skill_injector: None,
@@ -81,7 +87,15 @@ async fn live_brain_turn_completes() -> Result<()> {
         )
         .await?;
 
-    let turn_result = run_brain_turn(session_id, store.clone(), provider, &pipeline, None).await?;
+    let turn_result = run_brain_turn(BrainTurnRequest {
+        identity,
+        session_id,
+        session_store: store.clone(),
+        llm_provider: provider,
+        pipeline: &pipeline,
+        tool_router: None,
+    })
+    .await?;
     let events = store.get_events(session_id, EventRange::all()).await?;
     let response_text = events.into_iter().find_map(|record| match record.event {
         Event::BrainResponse { text, .. } => Some(text),

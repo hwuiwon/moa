@@ -1,10 +1,11 @@
 //! Deterministic DTOs and extract/chunk helpers for graph-memory ingestion.
 
 use chrono::{DateTime, Utc};
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     types::contact::ContactId, types::identifiers::SessionId, types::identifiers::TenantId,
+    types::memory::InformationBarrierId,
 };
-use moa_memory_graph::PiiClass;
 use moa_memory_pii::PiiSpan;
 use moa_memory_types::{FactCategory, FactEdgeLabel};
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,18 @@ pub struct SessionTurn {
     pub dominant_pii_class: String,
     /// Timestamp at which the turn was finalized.
     pub finalized_at: DateTime<Utc>,
+    /// Optional information-barrier the ingestion session is running under (for
+    /// example a deal-room session).
+    ///
+    /// Every graph node written from this turn — facts and their resolved
+    /// entities — inherits this tag on `moa.node_index.barrier`, making the node
+    /// retrievable only by callers cleared for the barrier (see
+    /// [`moa_memory_graph::NodeWriteIntent::barrier`]). `None` (the common case)
+    /// leaves nodes unrestricted under the existing tenant/contact tiers. The
+    /// value is a classification label, not sensitive content, and is defaulted
+    /// on the wire so turns emitted before this field existed still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub barrier: Option<InformationBarrierId>,
 }
 
 /// A transcript chunk processed by extraction.
@@ -102,7 +115,7 @@ pub struct ClassifiedFact {
     /// Extracted fact payload.
     pub fact: ExtractedFact,
     /// Aggregate PII class for the fact summary.
-    pub pii_class: PiiClass,
+    pub pii_class: SensitivityClass,
     /// PII spans returned by the classifier.
     pub pii_spans: Vec<PiiSpan>,
 }
@@ -406,6 +419,7 @@ mod tests {
             transcript: transcript.to_string(),
             dominant_pii_class: "none".to_string(),
             finalized_at: Utc::now(),
+            barrier: None,
         }
     }
 

@@ -67,7 +67,6 @@ const K_TRIAL_UID: &str = "trial_uid";
 const K_TRIAL_KEY: &str = "trial_key";
 const K_STATUS: &str = "status";
 const K_SESSION_ID: &str = "session_id";
-const SESSION_AUTHZ_PROPAGATION_DELAY: Duration = Duration::from_millis(750);
 
 /// Workflow input for one behavior-lab simulator trial.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -315,8 +314,7 @@ async fn run_trial(
     .await?;
     ctx.set(K_STATUS, Json(trial.status));
 
-    let simulator_context =
-        load_simulator_context(ctx, request.tenant_id, trial.clone(), pool).await?;
+    let simulator_context = load_simulator_context(ctx, trial.clone(), pool).await?;
     match trial.target_kind {
         ExperimentTargetKind::AgentLoop => {
             run_agent_loop_trial(
@@ -398,10 +396,6 @@ fn annotate_trial_record_span(trial: &ExperimentTrialRecord) {
         "moa.experiment.score_run_id",
         trial.score_run_id.to_string(),
     );
-}
-
-fn tenant_scope(tenant_id: TenantId) -> ActionRuleScope {
-    ActionRuleScope::Tenant { tenant_id }
 }
 
 fn parse_payload<T>(field: &'static str, value: Value) -> Result<T, HandlerError>

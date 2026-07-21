@@ -6,7 +6,9 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
 moa-core = { workspace = true }
+moa-crypto = { workspace = true }
 moa-db = { workspace = true }
 moa-memory-graph = { workspace = true }
 reqwest.workspace = true
@@ -19,7 +21,6 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
-chrono.workspace = true
 moa-session = { workspace = true }
 tokio.workspace = true
 wiremock.workspace = true

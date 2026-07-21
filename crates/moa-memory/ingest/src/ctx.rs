@@ -7,6 +7,7 @@ use std::{
 };
 
 use moa_core::{config::MoaConfig, error::MoaError, traits::EmbeddingProvider};
+use moa_crypto::KeyManagementProvider;
 use moa_memory_graph::GraphStore;
 use moa_memory_pii::{HeuristicPiiClassifier, OpenAiPrivacyFilterClassifier, PiiClassifier};
 use moa_memory_vector::{VectorStore, VectorStoreFactory};
@@ -108,6 +109,8 @@ impl IngestRuntimeFingerprint {
 /// Scope-specific dependencies used by ingestion helpers.
 #[derive(Clone)]
 pub struct IngestCtx {
+    /// Shared KMS used by every scope-specific graph store created for this ingest.
+    pub kms: Arc<dyn KeyManagementProvider>,
     /// Graph store used for atomic graph writes.
     pub graph: Arc<dyn GraphStore>,
     /// Vector store used for candidate retrieval and vector writes.
@@ -133,6 +136,7 @@ impl IngestCtx {
     #[must_use]
     pub fn new(
         pool: PgPool,
+        kms: Arc<dyn KeyManagementProvider>,
         graph: Arc<dyn GraphStore>,
         vector: Arc<dyn VectorStore>,
         embedder: Arc<dyn EmbeddingProvider>,
@@ -141,6 +145,7 @@ impl IngestCtx {
     ) -> Self {
         Self::new_with_extractor(
             pool,
+            kms,
             graph,
             vector,
             embedder,
@@ -152,8 +157,10 @@ impl IngestCtx {
 
     /// Creates an ingestion context with an explicit fact extractor.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_extractor(
         pool: PgPool,
+        kms: Arc<dyn KeyManagementProvider>,
         graph: Arc<dyn GraphStore>,
         vector: Arc<dyn VectorStore>,
         embedder: Arc<dyn EmbeddingProvider>,
@@ -162,6 +169,7 @@ impl IngestCtx {
         extractor: Arc<dyn FactExtractor>,
     ) -> Self {
         Self {
+            kms,
             graph,
             vector,
             embedder,
@@ -206,6 +214,7 @@ impl IngestCtx {
 #[derive(Clone)]
 pub struct IngestRuntime {
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     pii_service_url: Option<String>,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
     pii_classifier: Arc<dyn PiiClassifier>,
@@ -228,9 +237,12 @@ impl IngestRuntime {
     /// Returns an error when the default embedder selector is invalid or its
     /// client cannot be constructed. Missing credentials keep ingestion in
     /// no-vector mode.
-    pub fn new(pool: PgPool) -> std::result::Result<Self, IngestRuntimeInstallError> {
+    pub fn new(
+        pool: PgPool,
+        kms: Arc<dyn KeyManagementProvider>,
+    ) -> std::result::Result<Self, IngestRuntimeInstallError> {
         let default_config = MoaConfig::default();
-        Self::from_config(pool, &default_config)
+        Self::from_config(pool, kms, &default_config)
     }
 
     /// Creates a runtime from a Postgres pool and shared MOA config.
@@ -242,6 +254,7 @@ impl IngestRuntime {
     /// credentials install a no-vector runtime instead.
     pub fn from_config(
         pool: PgPool,
+        kms: Arc<dyn KeyManagementProvider>,
         config: &MoaConfig,
     ) -> std::result::Result<Self, IngestRuntimeInstallError> {
         let (extractor, extractor_name) = extractor_from_config(config);
@@ -269,6 +282,7 @@ impl IngestRuntime {
         let pii_classifier = build_shared_pii_classifier(config.memory.pii_service_url.as_deref());
         Ok(Self {
             pool,
+            kms,
             pii_service_url: config.memory.pii_service_url.clone(),
             embedder,
             pii_classifier,
@@ -312,6 +326,27 @@ impl IngestRuntime {
         self
     }
 
+    /// Returns a copy of this runtime with explicit fast-path classification and
+    /// embedding dependencies.
+    ///
+    /// This dependency-injection seam keeps exported fast-memory integration
+    /// tests hermetic while preserving the same installed-runtime entry point
+    /// used by production hosts.
+    #[must_use]
+    pub fn with_fast_path_dependencies(
+        mut self,
+        embedder: Arc<dyn EmbeddingProvider>,
+        pii_classifier: Arc<dyn PiiClassifier>,
+    ) -> Self {
+        self.fingerprint.embedder_available = true;
+        self.fingerprint.embedder_model_id = Some(embedder.model_id().to_string());
+        self.fingerprint.embedder_model_version = Some(embedder.model_version());
+        self.fingerprint.embedder_dimensions = Some(embedder.dimensions());
+        self.embedder = Some(embedder);
+        self.pii_classifier = pii_classifier;
+        self
+    }
+
     /// Returns a copy of this runtime that uses the provided entity merge verifier.
     #[must_use]
     pub fn with_entity_merge_verifier(self, verifier: Arc<dyn EntityMergeVerifier>) -> Self {
@@ -322,6 +357,12 @@ impl IngestRuntime {
     #[must_use]
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Returns the process-shared KMS used by all ingestion graph stores.
+    #[must_use]
+    pub fn kms(&self) -> Arc<dyn KeyManagementProvider> {
+        self.kms.clone()
     }
 
     /// Returns the configured PII classifier sidecar URL.
@@ -402,7 +443,7 @@ impl IngestRuntime {
     }
 
     fn is_compatible_with(&self, other: &Self) -> bool {
-        self.fingerprint == other.fingerprint
+        Arc::ptr_eq(&self.kms, &other.kms) && self.fingerprint == other.fingerprint
     }
 
     fn summary(&self) -> String {
@@ -550,16 +591,18 @@ pub fn install_runtime(
 /// Installs the process-local ingestion runtime from a Postgres pool.
 pub fn install_runtime_with_pool(
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
 ) -> std::result::Result<(), IngestRuntimeInstallError> {
-    install_runtime(IngestRuntime::new(pool)?)
+    install_runtime(IngestRuntime::new(pool, kms)?)
 }
 
 /// Installs the process-local ingestion runtime from a Postgres pool and shared config.
 pub fn install_runtime_with_config(
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     config: &MoaConfig,
 ) -> std::result::Result<(), IngestRuntimeInstallError> {
-    install_runtime(IngestRuntime::from_config(pool, config)?)
+    install_runtime(IngestRuntime::from_config(pool, kms, config)?)
 }
 
 /// Returns the installed process-local ingestion runtime.
@@ -579,10 +622,11 @@ fn hash_debug(value: &impl std::fmt::Debug) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::{Arc, OnceLock};
 
     use moa_core::{config::MoaConfig, error::MoaError};
+    use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
     use sqlx::postgres::PgPoolOptions;
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Id, Record};
@@ -591,6 +635,12 @@ mod tests {
     use super::{IngestRuntime, IngestRuntimeInstallError, install_runtime};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn test_kms() -> Arc<dyn KeyManagementProvider> {
+        static KMS: OnceLock<Arc<dyn KeyManagementProvider>> = OnceLock::new();
+        KMS.get_or_init(|| Arc::new(LocalKmsProvider::new()))
+            .clone()
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct CapturedWarning {
@@ -663,7 +713,7 @@ mod tests {
         config.memory.vector.embedder.output_dim = 1_024;
         config.providers.google.api_key = "test-google-key".to_string();
 
-        let runtime = IngestRuntime::from_config(lazy_pool(), &config)
+        let runtime = IngestRuntime::from_config(lazy_pool(), test_kms(), &config)
             .expect("configured Gemini ingestion runtime should build without a provider call");
         let fact_embedder = runtime
             .embedder()
@@ -699,7 +749,7 @@ mod tests {
         let captured = subscriber.warnings.clone();
 
         let runtime = tracing::subscriber::with_default(subscriber, || {
-            IngestRuntime::from_config(lazy_pool(), &config)
+            IngestRuntime::from_config(lazy_pool(), test_kms(), &config)
         })
         .expect("missing selected credential should preserve no-vector ingestion");
 
@@ -739,7 +789,7 @@ mod tests {
         let captured = subscriber.warnings.clone();
 
         let runtime = tracing::subscriber::with_default(subscriber, || {
-            IngestRuntime::from_config(lazy_pool(), &config)
+            IngestRuntime::from_config(lazy_pool(), test_kms(), &config)
         })
         .expect("disabled ingestion embedder should preserve no-vector ingestion");
 
@@ -771,7 +821,7 @@ mod tests {
         config.memory.vector.embedder.name = "gemini:not-a-real-model".to_string();
         config.providers.google.api_key = "test-google-key".to_string();
 
-        let Err(error) = IngestRuntime::from_config(lazy_pool(), &config) else {
+        let Err(error) = IngestRuntime::from_config(lazy_pool(), test_kms(), &config) else {
             panic!("invalid selected ingestion model should fail runtime construction");
         };
 
@@ -788,7 +838,7 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://localhost/moa_test")
             .expect("lazy test pool should not connect");
-        let runtime = IngestRuntime::new(pool).expect("default runtime should build");
+        let runtime = IngestRuntime::new(pool, test_kms()).expect("default runtime should build");
 
         let first = runtime.contradiction_detector();
         let second = runtime.contradiction_detector();
@@ -805,17 +855,17 @@ mod tests {
         let mut config = MoaConfig::default();
         config.memory.extraction.enabled = true;
 
-        let missing = IngestRuntime::from_config(pool.clone(), &config)
+        let missing = IngestRuntime::from_config(pool.clone(), test_kms(), &config)
             .expect("missing extraction credential should keep the heuristic extractor");
         assert_eq!(missing.extractor_name(), "heuristic");
 
         config.providers.openai.api_key = "test-openai-key".to_string();
-        let credentialed = IngestRuntime::from_config(pool.clone(), &config)
+        let credentialed = IngestRuntime::from_config(pool.clone(), test_kms(), &config)
             .expect("configured extraction credential should build the runtime");
         assert_eq!(credentialed.extractor_name(), "model");
 
         config.memory.extraction.enabled = false;
-        let disabled = IngestRuntime::from_config(pool, &config)
+        let disabled = IngestRuntime::from_config(pool, test_kms(), &config)
             .expect("disabled extraction should build the runtime");
         assert_eq!(disabled.extractor_name(), "heuristic");
     }
@@ -841,14 +891,14 @@ mod tests {
             .expect("lazy test pool should not connect");
         let mut config = MoaConfig::default();
         config.memory.pii_service_url = Some("http://pii-a.test".to_string());
-        let installed = IngestRuntime::from_config(pool.clone(), &config)
+        let installed = IngestRuntime::from_config(pool.clone(), test_kms(), &config)
             .expect("first runtime configuration should build");
 
         install_runtime(installed.clone()).expect("first runtime install should succeed");
         install_runtime(installed).expect("compatible runtime reinstall should be idempotent");
 
         config.memory.pii_service_url = Some("http://pii-b.test".to_string());
-        let requested = IngestRuntime::from_config(pool, &config)
+        let requested = IngestRuntime::from_config(pool, test_kms(), &config)
             .expect("second runtime configuration should build");
         let error = install_runtime(requested)
             .expect_err("incompatible runtime install should fail clearly");

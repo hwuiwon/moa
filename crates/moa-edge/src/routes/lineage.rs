@@ -19,7 +19,9 @@ use moa_core::{
     types::identifiers::TenantId, types::identifiers::UserId, types::memory::RlsContext,
 };
 use moa_lineage_audit::admin as lineage_audit_admin;
-use moa_lineage_audit::{AuditRootSigner, LocalAuditRootSigner, SigningKey};
+use moa_lineage_audit::{
+    AuditRootSeed, AuditRootSigner, LocalAuditRootSigner, PerTenantAuditRootSigner, SigningKey,
+};
 use moa_lineage_sink::admin as lineage_sink_admin;
 use sqlx::{Postgres, QueryBuilder, Row};
 
@@ -370,12 +372,31 @@ fn lineage_record_from_row(
 fn configured_audit_root_signer(
     config: &ComplianceConfig,
 ) -> Result<Arc<dyn AuditRootSigner>, Response> {
+    // Prefer the per-tenant signer when a deployment root seed is configured so
+    // each tenant's audit root is signed and verified with a key derived from
+    // that seed and the tenant's storage partition.
+    if let Some(root_seed_raw) = config.lineage_audit_root_seed_hex.as_deref() {
+        let seed = decode_audit_root_seed("MOA_LINEAGE_AUDIT_ROOT_SEED_HEX", root_seed_raw)?;
+        return Ok(Arc::new(PerTenantAuditRootSigner::new(
+            AuditRootSeed::from_bytes(seed),
+        )));
+    }
     let signing_key = configured_signing_key_from_config(
         "MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX",
         config.lineage_audit_signing_key_hex.as_deref(),
         config.lineage_audit_signing_key_id.clone(),
     )?;
     Ok(Arc::new(LocalAuditRootSigner::new(signing_key)))
+}
+
+fn decode_audit_root_seed(key_env: &str, raw: &str) -> Result<[u8; 32], Response> {
+    let bytes = decode_signing_key_material(key_env, raw)?;
+    bytes.as_slice().try_into().map_err(|_| {
+        route_error(format!(
+            "{key_env} must decode to exactly 32 bytes, got {}",
+            bytes.len()
+        ))
+    })
 }
 
 fn configured_signing_key_from_config(

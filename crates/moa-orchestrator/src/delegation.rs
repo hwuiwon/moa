@@ -48,6 +48,8 @@ pub(crate) enum DelegationParent<'a> {
         session_id: SessionId,
         /// Session metadata used to initialize root children.
         meta: &'a SessionMeta,
+        /// Exact authenticated identity admitted for the root turn.
+        identity: &'a moa_core::traits::Identity,
     },
 }
 
@@ -221,8 +223,13 @@ async fn reserve_and_start_child(
 ) -> Result<ReservedWorker, HandlerError> {
     let task = request.task.clone();
     let budget_tokens = request.budget_tokens;
-    let DelegationParent::RootSession { session_id, meta } = parent;
-    let reservation = reserve_root_child(ctx, session_id, meta, request, idempotency_step).await?;
+    let DelegationParent::RootSession {
+        session_id,
+        meta,
+        identity,
+    } = parent;
+    let reservation =
+        reserve_root_child(ctx, session_id, meta, identity, request, idempotency_step).await?;
 
     moa_core::coordination_counters::record_vo_send();
     crate::restate_identity::replay_safe_request(
@@ -239,9 +246,17 @@ async fn reserve_root_child(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     meta: &SessionMeta,
+    identity: &moa_core::traits::Identity,
     request: WorkerChildRequest,
     idempotency_step: &'static str,
 ) -> Result<ReservedWorker, HandlerError> {
+    if identity.tenant_id != meta.tenant_id {
+        return Err(TerminalError::new_with_code(
+            409,
+            "delegation identity tenant does not match the parent session",
+        )
+        .into());
+    }
     let children = session_child_refs(ctx, session_id).await?;
     let hash = validate_dispatch_limits(0, &children, &request.task, &request.tool_subset)?;
     validate_dispatch_budget(request.budget_tokens, None)?;
@@ -263,6 +278,7 @@ async fn reserve_root_child(
     let task = request.task.clone();
     let budget_tokens = request.budget_tokens;
     let initial_message = request.into_initial_message(
+        identity.clone(),
         session_id,
         1,
         meta.tenant_id,

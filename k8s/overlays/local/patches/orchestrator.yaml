@@ -105,14 +105,14 @@
     name: MOA_DEREGISTER_ON_SHUTDOWN
     value: "false"
 - op: add
-  path: /spec/template/spec/containers/0/volumeMounts
+  path: /spec/template/spec/containers/0/volumeMounts/-
   value:
-    - name: loadtest-scripts
-      mountPath: /loadtest-scripts
-      readOnly: true
+    name: loadtest-scripts
+    mountPath: /loadtest-scripts
+    readOnly: true
 - op: add
-  path: /spec/template/spec/volumes
+  path: /spec/template/spec/volumes/-
   value:
-    - name: loadtest-scripts
-      configMap:
-        name: moa-loadtest-scripts
+    name: loadtest-scripts
+    configMap:
+      name: moa-loadtest-scripts

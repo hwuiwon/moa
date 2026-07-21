@@ -8,11 +8,21 @@ use moa_brain::{
     lineage::emit_context_lineage, pipeline::history::HISTORY_SNAPSHOT_METADATA_KEY,
 };
 use moa_core::{
-    error::Result, events::Event, events::EventType, session_engine::session_requires_processing,
-    session_replay::record_pipeline_compile_duration, traits::SessionStore,
-    types::completion::CompletionRequest, types::context::WorkingContext,
-    types::events_stream::EventRange, types::events_stream::EventRecord, types::hands::SandboxFile,
-    types::identifiers::SessionId, types::query_rewrite::QueryRewriteResult,
+    error::MoaError,
+    error::Result,
+    events::Event,
+    events::EventType,
+    session_engine::session_requires_processing,
+    session_replay::record_pipeline_compile_duration,
+    traits::Identity,
+    traits::SessionStore,
+    types::completion::CompletionRequest,
+    types::context::{TURN_ID_METADATA_KEY, WorkingContext},
+    types::events_stream::EventRange,
+    types::events_stream::EventRecord,
+    types::hands::SandboxFile,
+    types::identifiers::SessionId,
+    types::query_rewrite::QueryRewriteResult,
     types::snapshot::ContextSnapshot,
 };
 use moa_lineage_citation::ChunkRef;
@@ -70,12 +80,18 @@ pub(crate) struct PreparedTurnRequestOutput {
 pub(crate) async fn prepare_turn_request(
     session_id: SessionId,
     turn_id: TurnId,
+    identity: Identity,
     active_user_sequence_num: Option<u64>,
     cached_query_rewrite: Option<QueryRewriteCacheEntry>,
 ) -> Result<PreparedTurnRequestOutput> {
     let ctx = OrchestratorCtx::current();
     let session_store = ctx.session_store();
     let session = session_store.get_session(session_id).await?;
+    if identity.tenant_id != session.tenant_id {
+        return Err(MoaError::PermissionDenied(
+            "turn identity tenant does not match the loaded session tenant".to_string(),
+        ));
+    }
     let recent_events = session_store
         .get_events(session_id, EventRange::recent(TURN_EVENT_TAIL_LIMIT))
         .await?;
@@ -127,6 +143,7 @@ pub(crate) async fn prepare_turn_request(
         session_store.clone(),
         GraphMemoryPipelineOptions {
             graph_pool: ctx.graph_pool(),
+            kms: ctx.kms(),
             shared_graph_memory_retriever: Some(ctx.graph_memory_retriever()),
             retrieval_embedder: None,
             shared_skill_injector: Some(ctx.skill_injector()),
@@ -139,6 +156,7 @@ pub(crate) async fn prepare_turn_request(
         },
     );
     let mut context = WorkingContext::new(&session, capabilities);
+    context.set_caller_identity(identity);
     let active_user_turn = active_user_turn_text(&recent_events, active_user_sequence_num);
     context.set_recent_events(recent_events);
     if let Some(sequence_num) = active_user_sequence_num {
@@ -150,7 +168,20 @@ pub(crate) async fn prepare_turn_request(
         // re-enter fact extraction.
         context.insert_metadata(USER_TURN_METADATA_KEY, serde_json::json!(user_turn));
     }
-    context.insert_metadata("_moa.turn_id", serde_json::json!(turn_id.0.to_string()));
+    context.insert_metadata(
+        TURN_ID_METADATA_KEY,
+        serde_json::json!(turn_id.0.to_string()),
+    );
+    if let Some(agent_context) = context.agent_context.as_ref() {
+        let policy = agent_context.parsed_policy_snapshot()?;
+        policy.knowledge_policy.validate()?;
+        if let Some(write_barrier) = policy.knowledge_policy.write_barrier {
+            context.insert_metadata(
+                crate::services::llm_gateway::MEMORY_WRITE_BARRIER_METADATA_KEY,
+                serde_json::json!(write_barrier),
+            );
+        }
+    }
     if let Some(cache) = cached_query_rewrite
         .filter(|cache| Some(cache.user_sequence_num) == active_user_sequence_num)
     {

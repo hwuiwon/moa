@@ -24,6 +24,14 @@ const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         name: "V000313__authz_outbox_claims.sql",
         sql: include_str!("../migrations/postgres/V000313__authz_outbox_claims.sql"),
     },
+    SchemaMigration {
+        name: "V000338__token_vault_connections.sql",
+        sql: include_str!("../migrations/postgres/V000338__token_vault_connections.sql"),
+    },
+    SchemaMigration {
+        name: "V000341__oauth_authorization_server.sql",
+        sql: include_str!("../migrations/postgres/V000341__oauth_authorization_server.sql"),
+    },
 ];
 
 const ORCHESTRATOR_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {
@@ -31,10 +39,16 @@ const ORCHESTRATOR_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {
     sql: include_str!("../migrations/postgres/V000201__orchestrator_baseline.sql"),
 }];
 
-const OCSF_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {
-    name: "V000301__ocsf_baseline.sql",
-    sql: include_str!("../migrations/postgres/V000301__ocsf_baseline.sql"),
-}];
+const OCSF_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
+    SchemaMigration {
+        name: "V000301__ocsf_baseline.sql",
+        sql: include_str!("../migrations/postgres/V000301__ocsf_baseline.sql"),
+    },
+    SchemaMigration {
+        name: "V000345__ocsf_retrieval_idempotency.sql",
+        sql: include_str!("../migrations/postgres/V000345__ocsf_retrieval_idempotency.sql"),
+    },
+];
 
 const REFINERY_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5246_4e59;
 

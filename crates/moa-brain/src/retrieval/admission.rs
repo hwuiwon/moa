@@ -2,12 +2,13 @@
 
 use std::str::FromStr;
 
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     error::MoaError, error::Result, types::agent::AgentKnowledgePolicy,
     types::agent::AgentKnowledgeScopeMode, types::contact::ContactId,
     types::context::WorkingContext, types::identifiers::TenantId, types::session::SessionMeta,
 };
-use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
+use moa_memory_graph::{NodeIndexRow, NodeLabel};
 use moa_memory_types::MemoryScope;
 
 use super::{RetrievalHit, SourceTier};
@@ -163,11 +164,11 @@ impl MemoryAdmissionPolicy {
             .retrieval_budget
             .and_then(|limit| usize::try_from(limit).ok())
             .filter(|limit| *limit > 0)
-            .unwrap_or(default_limit)
+            .map_or(default_limit, |budget| budget.min(default_limit))
     }
 
     /// Resolves the maximum PII class visible under the pinned knowledge policy.
-    pub fn max_pii_class(&self) -> Result<PiiClass> {
+    pub fn max_pii_class(&self) -> Result<SensitivityClass> {
         let Some(value) = self
             .agent_policy
             .pii_floor
@@ -175,9 +176,9 @@ impl MemoryAdmissionPolicy {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         else {
-            return Ok(PiiClass::Restricted);
+            return Ok(SensitivityClass::Restricted);
         };
-        PiiClass::from_str(value)
+        SensitivityClass::from_str(value)
             .map_err(|error| MoaError::ValidationError(format!("invalid agent pii_floor: {error}")))
     }
 
@@ -236,7 +237,7 @@ impl MemoryAdmissionPolicy {
             && matches_string_filter(filters, "pii_classes", node.pii_class.as_str())
             && self
                 .max_pii_class()
-                .is_ok_and(|max_pii_class| pii_rank(node.pii_class) <= pii_rank(max_pii_class))
+                .is_ok_and(|max_pii_class| node.pii_class.rank() <= max_pii_class.rank())
     }
 }
 
@@ -261,15 +262,6 @@ fn source_tier_rank(tier: SourceTier) -> u8 {
     match tier {
         SourceTier::TenantKnowledge => 0,
         SourceTier::UserMemory => 1,
-    }
-}
-
-fn pii_rank(class: PiiClass) -> i32 {
-    match class {
-        PiiClass::None => 0,
-        PiiClass::Pii => 1,
-        PiiClass::Phi => 2,
-        PiiClass::Restricted => 3,
     }
 }
 
@@ -315,7 +307,7 @@ mod tests {
                 None,
                 NodeLabel::Document,
                 "tenant",
-                PiiClass::None,
+                SensitivityClass::None,
                 "doc",
             ),
             node(
@@ -324,7 +316,7 @@ mod tests {
                 None,
                 NodeLabel::Chunk,
                 "tenant",
-                PiiClass::None,
+                SensitivityClass::None,
                 "chunk",
             ),
             node(
@@ -333,7 +325,7 @@ mod tests {
                 None,
                 NodeLabel::ContactGroup,
                 "tenant",
-                PiiClass::None,
+                SensitivityClass::None,
                 "group",
             ),
             node(
@@ -342,7 +334,7 @@ mod tests {
                 None,
                 NodeLabel::Fact,
                 "tenant",
-                PiiClass::None,
+                SensitivityClass::None,
                 "admin fact",
             ),
             node(
@@ -351,7 +343,7 @@ mod tests {
                 Some(contact_id),
                 NodeLabel::Fact,
                 "contact",
-                PiiClass::None,
+                SensitivityClass::None,
                 "mine",
             ),
             node(
@@ -360,7 +352,7 @@ mod tests {
                 Some(other_contact_id),
                 NodeLabel::Fact,
                 "contact",
-                PiiClass::None,
+                SensitivityClass::None,
                 "other",
             ),
             node(
@@ -369,7 +361,7 @@ mod tests {
                 None,
                 NodeLabel::Chunk,
                 "tenant",
-                PiiClass::None,
+                SensitivityClass::None,
                 "other tenant",
             ),
         ];
@@ -414,7 +406,7 @@ mod tests {
             None,
             NodeLabel::Chunk,
             "tenant",
-            PiiClass::None,
+            SensitivityClass::None,
             "chunk",
         );
         let operational = node(
@@ -423,7 +415,7 @@ mod tests {
             None,
             NodeLabel::Fact,
             "tenant",
-            PiiClass::None,
+            SensitivityClass::None,
             "fact",
         );
         let contact = node(
@@ -432,7 +424,7 @@ mod tests {
             Some(contact_id),
             NodeLabel::Fact,
             "contact",
-            PiiClass::None,
+            SensitivityClass::None,
             "contact",
         );
 
@@ -479,7 +471,7 @@ mod tests {
             Some(contact_id),
             NodeLabel::Fact,
             "contact",
-            PiiClass::Pii,
+            SensitivityClass::Pii,
             "allowed",
         );
         let wrong_name = node(
@@ -488,7 +480,7 @@ mod tests {
             Some(contact_id),
             NodeLabel::Fact,
             "contact",
-            PiiClass::Pii,
+            SensitivityClass::Pii,
             "blocked",
         );
         let too_sensitive = node(
@@ -497,7 +489,7 @@ mod tests {
             Some(contact_id),
             NodeLabel::Fact,
             "contact",
-            PiiClass::Phi,
+            SensitivityClass::Phi,
             "allowed",
         );
         let tenant_chunk = node(
@@ -506,7 +498,7 @@ mod tests {
             None,
             NodeLabel::Chunk,
             "tenant",
-            PiiClass::Pii,
+            SensitivityClass::Pii,
             "allowed",
         );
 
@@ -515,9 +507,10 @@ mod tests {
         assert!(!admission.admits_node(&too_sensitive));
         assert!(!admission.admits_node(&tenant_chunk));
         assert_eq!(admission.result_limit(8), 2);
+        assert_eq!(admission.result_limit(1), 1);
         assert_eq!(
             admission.max_pii_class().expect("PII floor should parse"),
-            PiiClass::Pii
+            SensitivityClass::Pii
         );
     }
 
@@ -577,7 +570,7 @@ mod tests {
         contact_id: Option<ContactId>,
         label: NodeLabel,
         scope: &str,
-        pii_class: PiiClass,
+        pii_class: SensitivityClass,
         name: &str,
     ) -> NodeIndexRow {
         let now = Utc

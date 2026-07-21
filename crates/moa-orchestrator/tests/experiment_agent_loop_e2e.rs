@@ -66,6 +66,9 @@ fn spawn_orchestrator(
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
         .env("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true")
+        // Opt into the ephemeral in-process KMS so the fail-closed durability
+        // guard permits startup (production uses a persistent postgres KMS).
+        .env("MOA_KMS_ALLOW_EPHEMERAL", "true")
         .env("MOA_RUNTIME_CACHE_REDIS_URL", "redis://127.0.0.1:10051/0")
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env(
@@ -542,6 +545,13 @@ fn write_scripted_fixture(path: &Path, final_text: &str) -> Result<()> {
                 "tool_calls": []
             }
         },
+        "keyed": [{
+            "match": "You classify one user turn into MOA's public execution decision.",
+            "completion": {
+                "content": r#"{"label":"execute","strategy":"inline","rationale":"The turn requires bounded execution.","confidence_bps":9500,"missing_inputs":[]}"#,
+                "tool_calls": []
+            }
+        }],
         "responses": [
             {
                 "completion": {

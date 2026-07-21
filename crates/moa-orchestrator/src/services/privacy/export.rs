@@ -37,7 +37,7 @@ pub(super) async fn execute_privacy_export(
     if request.reason.trim().is_empty() {
         return Err(TerminalError::new_with_code(400, "--reason is required").into());
     }
-    consume_approval_jti(&pool, &claims).await?;
+    consume_approval_jti(&pool, tenant_id.0, &claims).await?;
     let storage_partition_id = storage_partition_id_for_tenant(tenant_id);
     let resolved = resolve_privacy_subjects(
         &pool,

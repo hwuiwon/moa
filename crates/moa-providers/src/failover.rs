@@ -21,7 +21,6 @@ use moa_core::{
     types::completion::CompletionRequest, types::completion::CompletionStream,
     types::identifiers::ModelId, types::model::ModelCapabilities,
 };
-use tokio::sync::mpsc;
 
 /// Buffer size for the failover forwarding stream.
 const FORWARD_STREAM_BUFFER: usize = 64;
@@ -190,26 +189,22 @@ fn failover_reason(error: &MoaError) -> Option<&'static str> {
 
 /// Builds a stream that yields `first` and then forwards the rest of `inner`,
 /// preserving `inner`'s final response (and thus its model attribution).
-fn prepend_and_forward(first: CompletionContent, mut inner: CompletionStream) -> CompletionStream {
-    let (tx, rx) = mpsc::channel(FORWARD_STREAM_BUFFER);
-    let completion = tokio::spawn(async move {
+fn prepend_and_forward(first: CompletionContent, inner: CompletionStream) -> CompletionStream {
+    inner.transform(FORWARD_STREAM_BUFFER, move |mut inner, tx| async move {
         if tx.send(Ok(first)).await.is_err() {
-            inner.abort();
             return Err(MoaError::ProviderError(
                 "completion stream receiver closed before forwarding started".to_string(),
             ));
         }
         while let Some(item) = inner.next().await {
             if tx.send(item).await.is_err() {
-                inner.abort();
                 return Err(MoaError::ProviderError(
                     "completion stream receiver closed while forwarding".to_string(),
                 ));
             }
         }
         inner.into_response().await
-    });
-    CompletionStream::new(rx, completion)
+    })
 }
 
 /// Emits a structured tracing event and a counter for one failover hop.

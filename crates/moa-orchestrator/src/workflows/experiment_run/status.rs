@@ -9,13 +9,13 @@ pub(super) async fn status_response(
     request: ExperimentRunStatusRequest,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     let tenant_id = request.tenant_id;
-    let scope = tenant_scope(tenant_id);
     let store = ExperimentStore::new(pool.clone());
     let mut run = store
-        .load_run(&scope, request.run_uid)
+        .load_run_for_workflow(tenant_id, request.run_uid)
         .await
         .map_err(moa_error_to_handler_error)?
         .ok_or_else(|| run_not_found(request.run_uid))?;
+    let scope = run.scope;
 
     if plan_revision_uid_from_run(&run).is_some() {
         let aggregate = aggregate_plan_status_from_store(pool.clone(), scope, run.run_uid).await?;

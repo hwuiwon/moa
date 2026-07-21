@@ -293,6 +293,7 @@ impl WorkerChildRequest {
     #[allow(clippy::too_many_arguments)]
     pub fn into_initial_message(
         self,
+        identity: crate::traits::Identity,
         parent_session: SessionId,
         depth: u32,
         tenant_id: TenantId,
@@ -301,6 +302,7 @@ impl WorkerChildRequest {
     ) -> WorkerMessage {
         WorkerMessage::InitialTask(Box::new(WorkerInitialTask {
             task: self.task,
+            identity,
             tool_subset: self.tool_subset,
             budget_tokens: self.budget_tokens,
             max_turns: self.max_turns,

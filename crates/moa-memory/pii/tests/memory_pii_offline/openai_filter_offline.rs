@@ -1,6 +1,6 @@
 //! Wiremock offline counterpart for the privacy-filter sidecar live coverage.
 
-use moa_memory_graph::PiiClass;
+use moa_core::types::security::SensitivityClass;
 use moa_memory_pii::{OpenAiPrivacyFilterClassifier, PiiClassifier};
 use serde_json::json;
 use wiremock::matchers::{body_string_contains, method, path};
@@ -51,14 +51,14 @@ async fn openai_filter_offline_classifies_private_and_clean_text() {
         .classify("My email is jane.doe@example.com and my API secret is sk-test-1234567890.")
         .await
         .expect("classify private text with wiremock sidecar");
-    assert_eq!(private.class, PiiClass::Restricted, "{private:?}");
+    assert_eq!(private.class, SensitivityClass::Restricted, "{private:?}");
     assert_eq!(private.spans.len(), 2);
 
     let clean = classifier
         .classify("the auth service uses JWT")
         .await
         .expect("classify clean text with wiremock sidecar");
-    assert_eq!(clean.class, PiiClass::None, "{clean:?}");
+    assert_eq!(clean.class, SensitivityClass::None, "{clean:?}");
 }
 
 #[tokio::test]
@@ -98,7 +98,7 @@ async fn openai_filter_offline_drops_spans_below_category_threshold() {
 
     assert_eq!(
         result.class,
-        PiiClass::None,
+        SensitivityClass::None,
         "sub-threshold SSN span must not escalate the class: {result:?}"
     );
     assert_eq!(result.spans.len(), 1, "the span is still surfaced");
@@ -108,7 +108,7 @@ async fn openai_filter_offline_drops_spans_below_category_threshold() {
 #[tokio::test]
 async fn openai_filter_offline_abstain_forces_pii_class() {
     // Pins classify_inner's abstain branch: when the model reports
-    // `"abstained": true`, MOA fails closed to PiiClass::Pii regardless of the
+    // `"abstained": true`, MOA fails closed to SensitivityClass::Pii regardless of the
     // (here empty) span set, and surfaces the abstained flag to callers.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -133,7 +133,7 @@ async fn openai_filter_offline_abstain_forces_pii_class() {
 
     assert_eq!(
         result.class,
-        PiiClass::Pii,
+        SensitivityClass::Pii,
         "an abstained model response must fail closed to Pii: {result:?}"
     );
     assert!(result.abstained, "{result:?}");

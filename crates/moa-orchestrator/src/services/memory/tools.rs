@@ -14,9 +14,15 @@ use std::time::Instant;
 use async_trait::async_trait;
 use moa_brain::retrieval::{MemoryAdmissionPolicy, RetrievalHit};
 use moa_core::{
-    config::MoaConfig, error::MoaError, error::Result, traits::MemoryRetrievalExecutor,
-    types::session::SessionMeta, types::tools::ToolOutput,
+    config::MoaConfig,
+    error::MoaError,
+    error::Result,
+    traits::{Identity, MemoryRetrievalExecutor},
+    types::memory::InformationBarrierClearances,
+    types::session::SessionMeta,
+    types::tools::ToolOutput,
 };
+use moa_crypto::KeyManagementProvider;
 use moa_memory_graph::EdgeLabel;
 use restate_sdk::prelude::HandlerError;
 use serde::Deserialize;
@@ -37,37 +43,54 @@ const MEMORY_SEARCH_LIMIT: u32 = 8;
 const MAX_NAVIGATE_HOPS: u8 = 3;
 
 /// Cloud runtime implementation of the read-only memory retrieval tools.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OrchestratorMemoryRetrievalExecutor {
     pool: sqlx::PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     config: Arc<MoaConfig>,
 }
 
 impl OrchestratorMemoryRetrievalExecutor {
     /// Creates the production memory-tool executor with its graph and retrieval configuration.
     #[must_use]
-    pub fn new(pool: sqlx::PgPool, config: Arc<MoaConfig>) -> Self {
-        Self { pool, config }
+    pub fn new(
+        pool: sqlx::PgPool,
+        kms: Arc<dyn KeyManagementProvider>,
+        config: Arc<MoaConfig>,
+    ) -> Self {
+        Self { pool, kms, config }
     }
 
-    /// Executes one agentic memory tool with explicit runtime dependencies.
-    ///
-    /// Embedded hosts and DB integration tests use this entry point so the
-    /// production executor can be exercised without installing process-global
-    /// orchestrator state.
-    pub async fn execute_retrieval_tool_with_runtime(
+    async fn run_retrieval_tool(
         &self,
         session: &SessionMeta,
+        caller_identity: &Identity,
+        retrieval_operation_id: &str,
         tool_name: &str,
         input: &Value,
-        pool: &sqlx::PgPool,
-        config: &MoaConfig,
     ) -> Result<ToolOutput> {
         let started = Instant::now();
         let policy = MemoryAdmissionPolicy::from_session(session)?;
+        let clearances = session_clearances(session)?;
+        if caller_identity.tenant_id != session.tenant_id {
+            return Err(MoaError::PermissionDenied(
+                "memory retrieval identity does not match the pinned session tenant".to_string(),
+            ));
+        }
+        let context = MemoryToolInvocation {
+            pool: &self.pool,
+            kms: &self.kms,
+            config: self.config.as_ref(),
+            session,
+            identity: caller_identity,
+            retrieval_operation_id,
+            policy: &policy,
+            clearances: &clearances,
+            started,
+        };
         match tool_name {
-            "memory_search" => memory_search_tool(pool, config, &policy, input, started).await,
-            "memory_navigate" => memory_navigate_tool(pool, &policy, input, started).await,
+            "memory_search" => memory_search_tool(&context, input).await,
+            "memory_navigate" => memory_navigate_tool(&context, input).await,
             other => Err(MoaError::ToolError(format!(
                 "unknown memory retrieval tool `{other}`"
             ))),
@@ -80,18 +103,32 @@ impl MemoryRetrievalExecutor for OrchestratorMemoryRetrievalExecutor {
     async fn execute_retrieval_tool(
         &self,
         session: &SessionMeta,
+        caller_identity: &Identity,
+        retrieval_operation_id: &str,
         tool_name: &str,
         input: &Value,
     ) -> Result<ToolOutput> {
-        self.execute_retrieval_tool_with_runtime(
+        self.run_retrieval_tool(
             session,
+            caller_identity,
+            retrieval_operation_id,
             tool_name,
             input,
-            &self.pool,
-            self.config.as_ref(),
         )
         .await
     }
+}
+
+struct MemoryToolInvocation<'a> {
+    pool: &'a sqlx::PgPool,
+    kms: &'a Arc<dyn KeyManagementProvider>,
+    config: &'a MoaConfig,
+    session: &'a SessionMeta,
+    identity: &'a Identity,
+    retrieval_operation_id: &'a str,
+    policy: &'a MemoryAdmissionPolicy,
+    clearances: &'a InformationBarrierClearances,
+    started: Instant,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,11 +150,8 @@ struct NavigateInput {
 }
 
 async fn memory_search_tool(
-    pool: &sqlx::PgPool,
-    config: &MoaConfig,
-    policy: &MemoryAdmissionPolicy,
+    context: &MemoryToolInvocation<'_>,
     input: &Value,
-    started: Instant,
 ) -> Result<ToolOutput> {
     let params: SearchInput = serde_json::from_value(input.clone())
         .map_err(|error| MoaError::ToolError(error.to_string()))?;
@@ -125,7 +159,7 @@ async fn memory_search_tool(
     if query.is_empty() {
         return Ok(ToolOutput::error(
             "memory_search requires a non-empty query.",
-            started.elapsed(),
+            context.started.elapsed(),
         ));
     }
     if let Some(requested) = params.scope.as_deref()
@@ -133,18 +167,35 @@ async fn memory_search_tool(
     {
         return Ok(ToolOutput::error(
             "memory_search only supports scope `auto`; the current session's scope is always used.",
-            started.elapsed(),
+            context.started.elapsed(),
         ));
     }
 
-    let hits = search_hits_for_tool(pool, config, policy, query, MEMORY_SEARCH_LIMIT)
-        .await
-        .map_err(handler_error_to_tool_error)?;
+    let hits = search_hits_for_tool(
+        context.pool,
+        context.kms,
+        context.config,
+        context.policy,
+        query,
+        MEMORY_SEARCH_LIMIT,
+        (*context.clearances).clone(),
+    )
+    .await
+    .map_err(handler_error_to_tool_error)?;
+    audit_tool_access(
+        context.pool,
+        context.session,
+        context.identity,
+        context.retrieval_operation_id,
+        &hits.iter().map(|hit| hit.uid).collect::<Vec<_>>(),
+        "memory_search",
+    )
+    .await?;
     let payload: Vec<Value> = hits.iter().map(search_hit_json).collect();
     Ok(ToolOutput::json(
         format!("Found {} memory hit(s).", payload.len()),
         json!({ "hits": payload }),
-        started.elapsed(),
+        context.started.elapsed(),
     ))
 }
 
@@ -196,10 +247,8 @@ fn hit_excerpt(hit: &RetrievalHit) -> String {
 }
 
 async fn memory_navigate_tool(
-    pool: &sqlx::PgPool,
-    policy: &MemoryAdmissionPolicy,
+    context: &MemoryToolInvocation<'_>,
     input: &Value,
-    started: Instant,
 ) -> Result<ToolOutput> {
     let params: NavigateInput = serde_json::from_value(input.clone())
         .map_err(|error| MoaError::ToolError(error.to_string()))?;
@@ -209,9 +258,26 @@ async fn memory_navigate_tool(
         _ => None,
     };
 
-    let neighbors = neighbors_for_tool(pool, policy, params.node_uid, hops, edge_filter)
-        .await
-        .map_err(handler_error_to_tool_error)?;
+    let neighbors = neighbors_for_tool(
+        context.pool,
+        context.kms,
+        context.policy,
+        params.node_uid,
+        hops,
+        edge_filter,
+        (*context.clearances).clone(),
+    )
+    .await
+    .map_err(handler_error_to_tool_error)?;
+    audit_tool_access(
+        context.pool,
+        context.session,
+        context.identity,
+        context.retrieval_operation_id,
+        &neighbors.iter().map(|node| node.uid).collect::<Vec<_>>(),
+        "memory_navigate",
+    )
+    .await?;
     let payload: Vec<Value> = neighbors
         .iter()
         .map(|row| {
@@ -226,7 +292,7 @@ async fn memory_navigate_tool(
     Ok(ToolOutput::json(
         format!("Found {} neighbor(s).", payload.len()),
         json!({ "node_uid": params.node_uid, "hops": hops, "neighbors": payload }),
-        started.elapsed(),
+        context.started.elapsed(),
     ))
 }
 
@@ -243,4 +309,53 @@ fn parse_edge_labels(labels: &[String]) -> Result<Vec<EdgeLabel>> {
 /// Converts an internal retrieval `HandlerError` into a tool-visible error.
 fn handler_error_to_tool_error(error: HandlerError) -> MoaError {
     MoaError::ToolError(format!("{error:?}"))
+}
+
+fn session_clearances(session: &SessionMeta) -> Result<InformationBarrierClearances> {
+    session
+        .agent_context
+        .as_ref()
+        .ok_or_else(|| {
+            MoaError::ValidationError("memory retrieval requires a pinned agent policy".to_string())
+        })?
+        .information_barrier_clearances()
+}
+
+async fn audit_tool_access(
+    pool: &sqlx::PgPool,
+    session: &SessionMeta,
+    identity: &Identity,
+    retrieval_operation_id: &str,
+    node_uids: &[Uuid],
+    source_tier: &str,
+) -> Result<()> {
+    let (scope_tier, scope_uid) = match session.contact.as_ref() {
+        Some(contact) => (
+            "contact".to_string(),
+            format!(
+                "memory:contact:{}:{}",
+                session.tenant_id, contact.contact_id
+            ),
+        ),
+        None => (
+            "tenant".to_string(),
+            format!("memory:tenant:{}", session.tenant_id),
+        ),
+    };
+    let access = moa_ocsf::MemoryDataAccess::from_session(
+        identity,
+        session,
+        moa_ocsf::MemoryDataAccessDetails {
+            retrieval_operation_id: format!("tool_call:{retrieval_operation_id}"),
+            node_uids: node_uids.to_vec(),
+            scope_uid,
+            scope_tier,
+            source_tiers: vec![source_tier.to_string()],
+            turn_uid: None,
+        },
+    );
+    moa_ocsf::emit_data_access(pool, session.tenant_id, access)
+        .await
+        .map_err(|error| MoaError::StorageError(format!("memory access audit failed: {error}")))?;
+    Ok(())
 }

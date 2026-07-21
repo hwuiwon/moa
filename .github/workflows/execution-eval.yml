@@ -102,6 +102,7 @@ jobs:
         env:
           MOA_ORCHESTRATOR_BIN: ${{ github.workspace }}/target/debug/moa-orchestrator-bin
           MOA_CLOUD_HANDS_ALLOW_LOCAL: "true"
+          MOA_KMS_ALLOW_EPHEMERAL: "true"
         run: |
           cargo nextest run -p moa-orchestrator --locked \
             --features provider-overrides,integration,execution-planning-failpoints \
@@ -113,6 +114,7 @@ jobs:
         env:
           MOA_ORCHESTRATOR_BIN: ${{ github.workspace }}/target/debug/moa-orchestrator-bin
           MOA_CLOUD_HANDS_ALLOW_LOCAL: "true"
+          MOA_KMS_ALLOW_EPHEMERAL: "true"
         run: |
           cargo nextest run -p moa-orchestrator --locked \
             --features provider-overrides,integration,execution-planning-failpoints \

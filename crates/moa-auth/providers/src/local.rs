@@ -30,7 +30,9 @@ impl AuthProvider for LocalAuthProvider {
             Credential::UserSessionToken(token) => {
                 authenticate_user_session(&self.pool, token).await
             }
-            Credential::BearerJwt(_) => Err(AuthError::NotConfigured),
+            Credential::BearerJwt(_) | Credential::OAuthAccessToken(_) => {
+                Err(AuthError::NotConfigured)
+            }
         }
     }
 

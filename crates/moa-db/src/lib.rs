@@ -1,8 +1,11 @@
 //! Database helpers shared by MOA storage crates.
 
 use moa_core::{
-    error::MoaError, error::Result, types::contact::ContactId, types::identifiers::TenantId,
-    types::memory::RlsContext,
+    error::MoaError,
+    error::Result,
+    types::contact::ContactId,
+    types::identifiers::TenantId,
+    types::memory::{InformationBarrierClearances, RlsContext},
 };
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
@@ -10,7 +13,25 @@ struct DbScopeGucs {
     tenant_id: Option<String>,
     storage_partition_id: Option<String>,
     contact_id: Option<String>,
+    /// Comma-delimited cleared information-barrier tags for the need-to-know
+    /// read policy. `None`/empty installs an empty clearance (fail closed).
+    cleared_barriers: Option<String>,
     control_plane: bool,
+}
+
+/// Serializes cleared information-barrier tags into the comma-delimited form the
+/// `moa.cleared_barriers` GUC and the `rd_barrier_need_to_know` RLS policy parse.
+///
+/// A comma is the list delimiter, so any tag containing one is DROPPED rather
+/// than silently split into spurious clearances. Dropping is fail-closed: the
+/// caller is simply not treated as cleared for that malformed tag, which can
+/// only hide barriered rows, never leak them.
+fn join_cleared_barriers(cleared: &InformationBarrierClearances) -> String {
+    cleared
+        .iter()
+        .map(|tag| tag.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Transaction wrapper that installs MOA row-level-security GUCs before use.
@@ -63,6 +84,7 @@ impl<'p> ScopedConn<'p> {
                 tenant_id: None,
                 storage_partition_id: None,
                 contact_id: None,
+                cleared_barriers: None,
                 control_plane: true,
             },
         )
@@ -98,6 +120,7 @@ impl<'p> ScopedConn<'p> {
                     .map(|contact_id| contact_id.to_string())
                     .unwrap_or_default(),
             ),
+            cleared_barriers: Some(join_cleared_barriers(ctx.cleared_barriers())),
             control_plane: false,
         }
     }
@@ -112,13 +135,15 @@ impl<'p> ScopedConn<'p> {
                 pg_catalog.set_config('moa.tenant_id', $1, true),
                 pg_catalog.set_config('moa.storage_partition_id', $2, true),
                 pg_catalog.set_config('moa.contact_id', $3, true),
-                pg_catalog.set_config('moa.control_plane', $4, true)
+                pg_catalog.set_config('moa.control_plane', $4, true),
+                pg_catalog.set_config('moa.cleared_barriers', $5, true)
             "#,
         )
         .bind(gucs.tenant_id.as_deref().unwrap_or(""))
         .bind(gucs.storage_partition_id.as_deref().unwrap_or(""))
         .bind(gucs.contact_id.as_deref().unwrap_or(""))
         .bind(if gucs.control_plane { "true" } else { "false" })
+        .bind(gucs.cleared_barriers.as_deref().unwrap_or(""))
         .execute(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;

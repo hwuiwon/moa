@@ -1298,6 +1298,11 @@ async fn elapsed_reservation_persists_typed_failure_and_run_finalizes() -> Resul
                 tenant_id: session.tenant_id,
                 contact_id: None,
                 session_id,
+                identity: test
+                    .client()
+                    .identity()
+                    .context("fixture client identity")?
+                    .clone(),
             },
         )
         .await

@@ -71,6 +71,7 @@ impl KnowledgeService {
             status: ConnectionStatus::Active,
             metadata: account.metadata,
             source_selection: normalize_source_selection(request.source_selection),
+            information_barrier: request.information_barrier,
             created_at: now,
             updated_at: now,
             last_synced_at: None,

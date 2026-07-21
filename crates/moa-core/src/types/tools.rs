@@ -7,8 +7,7 @@ use serde_json::Value;
 
 use super::{
     action_policy::ActionClass, action_policy::ActionPolicyEffect, action_policy::RiskLevel,
-    events_stream::ClaimCheck, hands::SandboxFile, identifiers::SessionId, identifiers::TenantId,
-    identifiers::ToolCallId, identifiers::UserId,
+    events_stream::ClaimCheck, hands::SandboxFile, identifiers::SessionId, identifiers::ToolCallId,
 };
 
 fn default_tool_max_output_tokens() -> u32 {
@@ -437,6 +436,8 @@ impl ToolOutput {
 pub struct ToolCallRequest {
     /// Stable MOA tool-call identifier used for event-log correlation and replay.
     pub tool_call_id: ToolCallId,
+    /// Exact authenticated caller and delegation provenance admitted for this call.
+    pub caller_identity: crate::traits::Identity,
     /// Provider-issued tool-use identifier when the request originated from an LLM turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_tool_use_id: Option<String>,
@@ -447,13 +448,8 @@ pub struct ToolCallRequest {
     /// Active per-turn canary that must not appear in tool input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_canary: Option<String>,
-    /// Owning session when the tool call is part of a durable MOA turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<SessionId>,
-    /// Tenant scope used when the call is executed without a persisted session.
-    pub tenant_id: TenantId,
-    /// User scope used when the call is executed without a persisted session.
-    pub user_id: UserId,
+    /// Exact persisted session that owns the durable tool call.
+    pub session_id: SessionId,
     /// Durable trusted sandbox file manifest selected during context compilation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
@@ -515,7 +511,44 @@ pub struct ToolPolicyInput {
 mod tests {
     use std::time::Duration;
 
-    use super::{ClaimCheck, ToolArtifactStream, ToolContent, ToolOutput};
+    use uuid::Uuid;
+
+    use super::{ClaimCheck, ToolArtifactStream, ToolCallRequest, ToolContent, ToolOutput};
+    use crate::{
+        traits::{Identity, IdentityType},
+        types::identifiers::{SessionId, TenantId, ToolCallId},
+    };
+
+    #[test]
+    fn tool_call_request_requires_persisted_session_identity() {
+        // Pins: every durable tool execution names its exact persisted session on the wire.
+        let request = ToolCallRequest {
+            tool_call_id: ToolCallId::new(),
+            caller_identity: Identity {
+                identity_type: IdentityType::Operator,
+                id: Uuid::now_v7(),
+                tenant_id: TenantId::new(),
+                api_key_id: None,
+                acting_on_behalf_of: None,
+            },
+            provider_tool_use_id: None,
+            tool_name: "memory_search".to_string(),
+            input: serde_json::json!({}),
+            active_canary: None,
+            session_id: SessionId::new(),
+            trusted_sandbox_manifest: None,
+            worker_id: None,
+        };
+        let mut wire = serde_json::to_value(request).expect("serialize request");
+        wire.as_object_mut()
+            .expect("tool request should serialize as an object")
+            .remove("session_id");
+
+        let error = serde_json::from_value::<ToolCallRequest>(wire)
+            .expect_err("missing persisted session id must fail decoding");
+
+        assert!(error.to_string().contains("missing field `session_id`"));
+    }
 
     #[test]
     fn tool_output_text_creates_single_text_block() {

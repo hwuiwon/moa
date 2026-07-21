@@ -1,8 +1,10 @@
 //! Atomic graph write protocol for relational rows, vectors, and changelog records.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
+use moa_core::types::{memory::InformationBarrierId, security::SensitivityClass};
+use moa_crypto::{EncryptionContext, EncryptionRequest};
 use moa_memory_vector::{VECTOR_DIMENSION, VectorItem, VectorStore};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -14,14 +16,166 @@ use crate::{
     changelog::{ChangelogRecord, write_and_bump},
     edge::{EdgeLabel, EdgeWriteIntent},
     node::{
-        ExistingSupersessionIntent, NodeEmbeddingIntent, NodeExpiryIntent, NodeLabel,
-        NodePropertyUpdateIntent, NodeReinforcementIntent, NodeWriteIntent, PiiClass,
+        ExistingSupersessionIntent, NodeContentUpdateIntent, NodeEmbeddingIntent, NodeExpiryIntent,
+        NodeLabel, NodeReinforcementIntent, NodeWriteIntent,
     },
 };
 
 /// Maximum attempts for a write transaction that aborts on a Postgres
 /// serialization deadlock (SQLSTATE `40P01`).
 const MAX_DEADLOCK_RETRIES: u32 = 5;
+
+/// Placeholder written into the indexed plaintext `name` column of a
+/// restricted/PHI node, so the generated `name_tsv` full-text index only ever
+/// sees this token and never the sealed secret.
+pub(crate) const REDACTED_NAME_PLACEHOLDER: &str = "[RESTRICTED]";
+
+/// Placeholder written into the indexed plaintext `properties_summary` column of
+/// a restricted/PHI node, keeping the generated `properties_tsv` index free of
+/// the sealed secret.
+fn redacted_properties() -> Value {
+    json!({ "redacted": true })
+}
+
+/// Whether a node's classification requires its content to be sealed at rest.
+///
+/// Restricted and PHI content is stored as envelope ciphertext with only a
+/// placeholder in the indexed plaintext columns; `none`/`pii` rows are unchanged.
+pub(crate) fn is_sealed_class(pii_class: SensitivityClass) -> bool {
+    matches!(
+        pii_class,
+        SensitivityClass::Restricted | SensitivityClass::Phi
+    )
+}
+
+/// Version of the plaintext document stored inside `content_sealed`.
+pub(crate) const SEALED_CONTENT_VERSION: u8 = 1;
+
+/// Complete mutable content encrypted as one atomic document.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct SealedNodeContent {
+    /// Payload format version.
+    pub(crate) version: u8,
+    /// Human-readable node name.
+    pub(crate) name: String,
+    /// Dynamic node properties.
+    pub(crate) properties: Value,
+}
+
+/// The indexed plaintext columns plus any sealed ciphertext for one node write.
+///
+/// Produced by [`prepare_node_fields`] in the intent-prep phase and consumed by
+/// [`insert_node_index`]. For `none`/`pii` nodes it carries the real name and
+/// properties with no ciphertext; for `restricted`/`phi` nodes it carries the
+/// redaction placeholders plus the sealed blobs and flags the embedding for
+/// exclusion.
+struct PreparedNodeFields {
+    /// Value bound into the indexed plaintext `name` column.
+    name: String,
+    /// Value bound into the indexed plaintext `properties_summary` column.
+    properties: Value,
+    /// Envelope ciphertext of the complete content document, or `None`.
+    content_sealed: Option<Vec<u8>>,
+}
+
+/// Seals one node's restricted/PHI content ahead of the SQL transaction.
+///
+/// This is the intent-prep step: it performs async KMS + AEAD work only and
+/// touches no database rows, so it can run before `begin_required()` and must
+/// never participate in row-lock ordering or the bulk deadlock-retry loop. For
+/// `none`/`pii` nodes it is a cheap identity (no crypto). For `restricted`/`phi`
+/// nodes it seals one versioned `{name, properties}` payload under the node's
+/// explicit `(tenant, data_subject_id)` KEK and substitutes redaction
+/// placeholders into the indexed plaintext columns. Restricted content with an
+/// embedding is rejected rather than silently dropping caller input.
+async fn prepare_node_fields(
+    store: &PostgresGraphStore,
+    intent: &NodeWriteIntent,
+    tenant_id: Uuid,
+) -> Result<PreparedNodeFields> {
+    prepare_node_fields_batch(store, std::slice::from_ref(intent), &[tenant_id])
+        .await?
+        .pop()
+        .ok_or_else(|| GraphError::Conflict("node preparation returned no fields".to_string()))
+}
+
+/// Prepares a node batch and performs one KMS call per `(tenant, subject)` group.
+async fn prepare_node_fields_batch(
+    store: &PostgresGraphStore,
+    intents: &[NodeWriteIntent],
+    tenant_ids: &[Uuid],
+) -> Result<Vec<PreparedNodeFields>> {
+    if intents.len() != tenant_ids.len() {
+        return Err(GraphError::Conflict(
+            "node preparation tenant cardinality mismatch".to_string(),
+        ));
+    }
+
+    let mut prepared = intents
+        .iter()
+        .map(|intent| {
+            if is_sealed_class(intent.pii_class) {
+                None
+            } else {
+                Some(PreparedNodeFields {
+                    name: intent.name.clone(),
+                    properties: intent.properties.clone(),
+                    content_sealed: None,
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut groups: BTreeMap<(Uuid, Uuid), Vec<(usize, EncryptionRequest)>> = BTreeMap::new();
+
+    for (index, (intent, tenant_id)) in intents.iter().zip(tenant_ids).enumerate() {
+        if !is_sealed_class(intent.pii_class) {
+            continue;
+        }
+        if intent.embedding.is_some() {
+            return Err(GraphError::SealedEmbedding);
+        }
+        let payload = serde_json::to_vec(&SealedNodeContent {
+            version: SEALED_CONTENT_VERSION,
+            name: intent.name.clone(),
+            properties: intent.properties.clone(),
+        })?;
+        let context = EncryptionContext::new(
+            *tenant_id,
+            intent.data_subject_id,
+            intent.uid.to_string(),
+            intent.pii_class.as_str(),
+        );
+        groups
+            .entry((*tenant_id, intent.data_subject_id))
+            .or_default()
+            .push((index, EncryptionRequest::new(payload, context)));
+    }
+
+    for requests in groups.into_values() {
+        let encryption_requests = requests
+            .iter()
+            .map(|(_, request)| request.clone())
+            .collect::<Vec<_>>();
+        let ciphertexts =
+            moa_crypto::encrypt_batch(store.kms().as_ref(), &encryption_requests).await?;
+        for ((index, _), ciphertext) in requests.into_iter().zip(ciphertexts) {
+            prepared[index] = Some(PreparedNodeFields {
+                name: REDACTED_NAME_PLACEHOLDER.to_string(),
+                properties: redacted_properties(),
+                content_sealed: Some(ciphertext.to_bytes()),
+            });
+        }
+    }
+
+    prepared
+        .into_iter()
+        .map(|fields| {
+            fields.ok_or_else(|| {
+                GraphError::Conflict("sealed node preparation returned no fields".to_string())
+            })
+        })
+        .collect()
+}
 
 /// Returns whether `error` is a Postgres deadlock (`40P01`).
 ///
@@ -47,15 +201,91 @@ fn is_deadlock(error: &GraphError) -> bool {
 /// Exponential in the attempt with per-call jitter so two writers that collided
 /// do not re-collide on an identical retry schedule.
 async fn deadlock_backoff(attempt: u32) {
-    let base_ms = 4_u64.saturating_mul(1_u64 << attempt.min(5));
-    let jitter_ms = (std::time::Instant::now().elapsed().subsec_nanos() as u64) % 8;
-    tokio::time::sleep(std::time::Duration::from_millis(base_ms + jitter_ms)).await;
+    tokio::time::sleep(full_jitter_delay(4, 128, attempt, rand::random())).await;
+}
+
+/// Computes full-jitter exponential backoff from a deterministic random sample.
+///
+/// The returned delay is uniformly selected from zero through the capped
+/// exponential ceiling. Passing the sample explicitly keeps the policy exactly
+/// unit-testable while callers use operating-system randomness.
+pub(crate) fn full_jitter_delay(
+    base_ms: u64,
+    cap_ms: u64,
+    attempt: u32,
+    sample: u64,
+) -> std::time::Duration {
+    let multiplier = 1_u64.checked_shl(attempt.min(63)).unwrap_or(u64::MAX);
+    let ceiling = base_ms.saturating_mul(multiplier).min(cap_ms);
+    let delay = if ceiling == u64::MAX {
+        sample
+    } else {
+        sample % (ceiling + 1)
+    };
+    std::time::Duration::from_millis(delay)
+}
+
+/// Extends the transaction-local read clearances with barriers authored by this write.
+///
+/// PostgreSQL applies the restrictive `node_index` SELECT policy while resolving
+/// `INSERT .. ON CONFLICT`, so a writer must be able to see the barrier-tagged
+/// row it is inserting or de-duplicating. The value remains transaction-local
+/// and is derived only from validated write intents; it never grants a caller a
+/// durable or request-wide read clearance.
+async fn install_write_barriers(
+    conn: &mut PgConnection,
+    barriers: impl IntoIterator<Item = InformationBarrierId>,
+) -> Result<()> {
+    let mut barriers = barriers
+        .into_iter()
+        .map(|barrier| barrier.as_str().to_owned())
+        .collect::<Vec<_>>();
+    barriers.sort_unstable();
+    barriers.dedup();
+    if barriers.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"
+        SELECT pg_catalog.set_config(
+            'moa.cleared_barriers',
+            array_to_string(
+                ARRAY(
+                    SELECT DISTINCT barrier
+                    FROM unnest(moa.current_cleared_barriers() || $1::TEXT[])
+                        AS authored(barrier)
+                    ORDER BY barrier
+                ),
+                ','
+            ),
+            true
+        )
+        "#,
+    )
+    .bind(&barriers)
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 /// Creates a graph node, sidecar row, optional vector, and changelog row atomically.
 pub async fn create_node(store: &PostgresGraphStore, intent: NodeWriteIntent) -> Result<Uuid> {
+    validate_node_scope(&intent)?;
+    let (tenant_id, contact_id) = runtime_ids_for_node(store, &intent)?;
+    // Seal restricted content before opening the transaction: the KMS round trip
+    // must not run while a database transaction is held.
+    let prepared = prepare_node_fields(store, &intent, tenant_id).await?;
     let mut conn = store.begin_required().await?;
-    let uid = create_node_in_conn(store, conn.as_mut(), intent).await?;
+    let uid = write_created_node(
+        store,
+        conn.as_mut(),
+        &intent,
+        &prepared,
+        tenant_id,
+        contact_id,
+    )
+    .await?;
     conn.commit().await?;
     Ok(uid)
 }
@@ -67,10 +297,27 @@ pub async fn create_node_in_conn(
     intent: NodeWriteIntent,
 ) -> Result<Uuid> {
     validate_node_scope(&intent)?;
-    let vector_item = vector_item_from_intent(&intent)?;
+    let (tenant_id, contact_id) = runtime_ids_for_node(store, &intent)?;
+    // Seal up front (async KMS + CPU, no rows touched) so the caller's transaction
+    // does no encryption work while holding locks.
+    let prepared = prepare_node_fields(store, &intent, tenant_id).await?;
+    write_created_node(store, conn, &intent, &prepared, tenant_id, contact_id).await
+}
 
-    insert_node_index(store, &mut *conn, &intent).await?;
-    if let Some(item) = vector_item.as_ref() {
+/// Writes one prepared node row, its optional vector, and its changelog row.
+///
+/// Restricted/PHI embeddings are rejected during preparation so sealed content
+/// is neither full-text nor semantically searchable.
+async fn write_created_node(
+    store: &PostgresGraphStore,
+    conn: &mut PgConnection,
+    intent: &NodeWriteIntent,
+    prepared: &PreparedNodeFields,
+    tenant_id: Uuid,
+    contact_id: Option<Uuid>,
+) -> Result<Uuid> {
+    insert_node_index(&mut *conn, intent, prepared, tenant_id, contact_id).await?;
+    if let Some(item) = vector_item_from_intent(intent)? {
         ensure_storage_partition_embedder_state(
             &mut *conn,
             intent.storage_partition_id.as_deref(),
@@ -80,10 +327,14 @@ pub async fn create_node_in_conn(
         .await?;
         let vector = require_vector_store(store)?;
         vector
-            .upsert_in_tx(&mut *conn, std::slice::from_ref(item))
+            .upsert_in_tx(&mut *conn, std::slice::from_ref(&item))
             .await?;
     }
-    write_and_bump(&mut *conn, create_changelog(&intent, None)).await?;
+    write_and_bump(
+        &mut *conn,
+        create_changelog(intent, &prepared.properties, None),
+    )
+    .await?;
 
     Ok(intent.uid)
 }
@@ -126,14 +377,35 @@ pub async fn bulk_create_nodes(
     let mut contact_ids: Vec<Option<Uuid>> = Vec::with_capacity(count);
     let mut names = Vec::with_capacity(count);
     let mut pii_classes = Vec::with_capacity(count);
+    let mut barriers: Vec<Option<String>> = Vec::with_capacity(count);
     let mut confidences: Vec<Option<f64>> = Vec::with_capacity(count);
     let mut reference_counts = Vec::with_capacity(count);
     let mut valid_froms = Vec::with_capacity(count);
     let mut properties = Vec::with_capacity(count);
+    // Redaction-safe properties (placeholder for sealed rows) reused for each
+    // node's changelog outbox row so the changelog never carries the secret.
+    let mut changelog_properties: Vec<Value> = Vec::with_capacity(count);
+    let mut data_subject_ids = Vec::with_capacity(count);
+    let mut content_sealed: Vec<Option<Vec<u8>>> = Vec::with_capacity(count);
     let mut vector_items = Vec::new();
     let mut vector_state_seeds = Vec::new();
-    for intent in &intents {
-        let (tenant_id, contact_id) = runtime_ids_for_node(store, intent)?;
+    // Intent-prep phase: encrypt restricted/PHI content here, before the
+    // deadlock-retry transaction loop below. This does async KMS + CPU work and
+    // touches no database rows, so it neither changes the uid-sorted lock order
+    // nor runs inside a retry (the sealed bytes are captured in these arrays and
+    // reused verbatim on every retry — content is never re-encrypted).
+    let runtime_ids = intents
+        .iter()
+        .map(|intent| runtime_ids_for_node(store, intent))
+        .collect::<Result<Vec<_>>>()?;
+    let runtime_tenant_ids = runtime_ids
+        .iter()
+        .map(|(tenant_id, _)| *tenant_id)
+        .collect::<Vec<_>>();
+    let prepared_batch = prepare_node_fields_batch(store, &intents, &runtime_tenant_ids).await?;
+    for ((intent, (tenant_id, contact_id)), prepared) in
+        intents.iter().zip(runtime_ids).zip(prepared_batch)
+    {
         if let Some(item) = vector_item_from_intent(intent)? {
             vector_state_seeds.push((
                 intent.storage_partition_id.clone(),
@@ -148,12 +420,22 @@ pub async fn bulk_create_nodes(
         user_ids.push(intent.contact_id.clone());
         tenant_ids.push(tenant_id);
         contact_ids.push(contact_id);
-        names.push(intent.name.clone());
+        data_subject_ids.push(intent.data_subject_id);
+        names.push(prepared.name);
         pii_classes.push(intent.pii_class.as_str().to_string());
+        barriers.push(
+            intent
+                .barrier
+                .as_ref()
+                .map(InformationBarrierId::as_str)
+                .map(ToOwned::to_owned),
+        );
         confidences.push(intent.confidence);
         reference_counts.push(reference_count_from_properties(&intent.properties));
         valid_froms.push(intent.valid_from);
-        properties.push(serde_json::to_string(&intent.properties)?);
+        properties.push(serde_json::to_string(&prepared.properties)?);
+        changelog_properties.push(prepared.properties);
+        content_sealed.push(prepared.content_sealed);
     }
 
     // The whole write is idempotent (node INSERT is `ON CONFLICT DO NOTHING`
@@ -163,6 +445,11 @@ pub async fn bulk_create_nodes(
     loop {
         let outcome: Result<()> = async {
             let mut conn = store.begin_required().await?;
+            install_write_barriers(
+                conn.as_mut(),
+                intents.iter().filter_map(|intent| intent.barrier.clone()),
+            )
+            .await?;
             // Node uids are identity-derived (content hash for knowledge chunks,
             // fact identity for memory facts), so a uid conflict means another
             // writer created the same entity concurrently — e.g. two documents
@@ -172,15 +459,18 @@ pub async fn bulk_create_nodes(
                 r#"
                 INSERT INTO moa.node_index
                     (uid, label, storage_partition_id, user_id, tenant_id, contact_id, name, pii_class,
-                     confidence, reference_count, valid_from, properties_summary)
+                     barrier, confidence, reference_count, valid_from, properties_summary,
+                     data_subject_id, content_sealed)
                 SELECT n.uid, n.label, n.storage_partition_id, n.user_id, n.tenant_id, n.contact_id,
-                       n.name, n.pii_class, n.confidence, n.reference_count, n.valid_from,
-                       n.properties::JSONB
+                       n.name, n.pii_class, n.barrier, n.confidence, n.reference_count, n.valid_from,
+                       n.properties::JSONB, n.data_subject_id, n.content_sealed
                 FROM UNNEST(
                     $1::UUID[], $2::TEXT[], $3::TEXT[], $4::TEXT[], $5::UUID[], $6::UUID[], $7::TEXT[],
-                    $8::TEXT[], $9::DOUBLE PRECISION[], $10::BIGINT[], $11::TIMESTAMPTZ[], $12::TEXT[]
+                    $8::TEXT[], $9::DOUBLE PRECISION[], $10::BIGINT[], $11::TIMESTAMPTZ[], $12::TEXT[],
+                    $13::UUID[], $14::BYTEA[], $15::TEXT[]
                 ) AS n(uid, label, storage_partition_id, user_id, tenant_id, contact_id, name, pii_class,
-                       confidence, reference_count, valid_from, properties)
+                       confidence, reference_count, valid_from, properties, data_subject_id, content_sealed,
+                       barrier)
                 ON CONFLICT (uid) DO NOTHING
                 "#,
             )
@@ -196,6 +486,9 @@ pub async fn bulk_create_nodes(
             .bind(&reference_counts)
             .bind(&valid_froms)
             .bind(&properties)
+            .bind(&data_subject_ids)
+            .bind(&content_sealed)
+            .bind(&barriers)
             .execute(conn.as_mut())
             .await?;
 
@@ -215,8 +508,12 @@ pub async fn bulk_create_nodes(
                 vector.upsert_in_tx(conn.as_mut(), &vector_items).await?;
             }
 
-            for intent in &intents {
-                write_and_bump(conn.as_mut(), create_changelog(intent, None)).await?;
+            for (intent, changelog_props) in intents.iter().zip(&changelog_properties) {
+                write_and_bump(
+                    conn.as_mut(),
+                    create_changelog(intent, changelog_props, None),
+                )
+                .await?;
             }
 
             conn.commit().await?;
@@ -260,6 +557,9 @@ pub async fn supersede_node_in_conn(
     mut new: NodeWriteIntent,
 ) -> Result<Uuid> {
     validate_node_scope(&new)?;
+    let (tenant_id, contact_id) = runtime_ids_for_node(store, &new)?;
+    // Seal the replacement's restricted content before any locking SQL runs.
+    let prepared = prepare_node_fields(store, &new, tenant_id).await?;
     let (current_uid, old) = fetch_current_supersession_target(&mut *conn, old_uid).await?;
     ensure_same_scope(&new, &old, "supersession nodes must share the same scope")?;
     if new.valid_from <= old.valid_from {
@@ -278,7 +578,7 @@ pub async fn supersede_node_in_conn(
     )
     .await?;
     close_incident_edges(&mut *conn, current_uid, new.valid_from).await?;
-    insert_node_index(store, &mut *conn, &new).await?;
+    insert_node_index(&mut *conn, &new, &prepared, tenant_id, contact_id).await?;
     insert_supersedes_edge_index(
         store,
         &mut *conn,
@@ -335,7 +635,11 @@ pub async fn supersede_node_in_conn(
         },
     )
     .await?;
-    write_and_bump(&mut *conn, create_changelog(&new, Some(old_change))).await?;
+    write_and_bump(
+        &mut *conn,
+        create_changelog(&new, &prepared.properties, Some(old_change)),
+    )
+    .await?;
 
     Ok(new.uid)
 }
@@ -542,10 +846,10 @@ pub(crate) async fn expire_node(
     Ok(true)
 }
 
-/// Updates one active graph node's mutable properties atomically.
-pub(crate) async fn update_node_properties(
+/// Replaces one active graph node's mutable content atomically.
+pub(crate) async fn update_node_content(
     store: &PostgresGraphStore,
-    intent: NodePropertyUpdateIntent,
+    intent: NodeContentUpdateIntent,
 ) -> Result<()> {
     if !intent.properties.is_object() {
         return Err(GraphError::Conflict(
@@ -563,15 +867,48 @@ pub(crate) async fn update_node_properties(
             intent.uid
         )));
     }
+    let barrier = old
+        .barrier
+        .as_deref()
+        .map(InformationBarrierId::parse)
+        .transpose()
+        .map_err(|error| GraphError::Conflict(error.to_string()))?;
+    let replacement = NodeWriteIntent {
+        uid: intent.uid,
+        label: old.label,
+        storage_partition_id: old.storage_partition_id.clone(),
+        contact_id: old.contact_id.clone(),
+        data_subject_id: old.data_subject_id,
+        name: intent.name.clone(),
+        pii_class: old.pii_class,
+        barrier,
+        confidence: intent.confidence,
+        valid_from: old.valid_from,
+        properties: intent.properties.clone(),
+        embedding: None,
+        embedding_model: None,
+        embedding_model_version: None,
+        embedding_text: None,
+        scope: old.scope.clone(),
+        actor_id: intent.actor_id.clone(),
+        actor_kind: intent.actor_kind.clone(),
+    };
+    let prepared = prepare_node_fields(store, &replacement, old.tenant_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE moa.node_index
-        SET properties_summary = $1
-        WHERE uid = $2
+        SET name = $1,
+            properties_summary = $2,
+            content_sealed = $3,
+            confidence = COALESCE($4, confidence)
+        WHERE uid = $5
           AND valid_to IS NULL
         "#,
     )
-    .bind(&intent.properties)
+    .bind(&prepared.name)
+    .bind(&prepared.properties)
+    .bind(prepared.content_sealed.as_deref())
+    .bind(intent.confidence)
     .bind(intent.uid)
     .execute(conn.as_mut())
     .await?;
@@ -595,7 +932,7 @@ pub(crate) async fn update_node_properties(
             target_uid: intent.uid,
             payload: json!({
                 "before": old.properties_summary,
-                "after": intent.properties,
+                "after": prepared.properties,
             }),
             redaction_marker: None,
             pii_class: old.pii_class.as_str().to_string(),
@@ -642,7 +979,7 @@ pub async fn reinforce_node_in_conn(
                 COALESCE(confidence, 0.5),
                 LEAST(COALESCE(confidence, 0.5) + $2, $3)
             ),
-            properties_summary = properties_summary - 'base_confidence',
+            base_confidence = NULL,
             last_accessed_at = now()
         WHERE uid = $1
           AND valid_to IS NULL
@@ -671,6 +1008,9 @@ pub(crate) async fn upsert_node_embedding(
             intent.uid
         )));
     }
+    if is_sealed_class(node.pii_class) {
+        return Err(GraphError::SealedEmbedding);
+    }
     let vector = require_vector_store(store)?;
     ensure_storage_partition_embedder_state(
         conn.as_mut(),
@@ -686,7 +1026,7 @@ pub(crate) async fn upsert_node_embedding(
                 uid: intent.uid,
                 user_id: node.contact_id.clone(),
                 label: node.label.as_str().to_string(),
-                pii_class: node.pii_class.as_str().to_string(),
+                pii_class: node.pii_class,
                 embedding: intent.embedding,
                 embedding_model: intent.embedding_model.clone(),
                 embedding_model_version: intent.embedding_model_version,
@@ -1098,18 +1438,27 @@ fn ensure_same_scope(a: &impl ScopeTriple, b: &impl ScopeTriple, message: &str) 
     }
 }
 
+/// Inserts one `moa.node_index` row from already-prepared fields.
+///
+/// Pure SQL: encryption happened earlier in [`prepare_node_fields`], so this
+/// binds the indexed plaintext (`prepared.name`/`prepared.properties`, which are
+/// redaction placeholders for sealed rows) alongside the sealed ciphertext
+/// columns. `reference_count` is derived from the real `intent.properties`
+/// because it is routing metadata, not sensitive content.
 async fn insert_node_index(
-    store: &PostgresGraphStore,
     conn: &mut PgConnection,
     intent: &NodeWriteIntent,
+    prepared: &PreparedNodeFields,
+    tenant_id: Uuid,
+    contact_id: Option<Uuid>,
 ) -> Result<()> {
-    let (tenant_id, contact_id) = runtime_ids_for_node(store, intent)?;
+    install_write_barriers(conn, intent.barrier.iter().cloned()).await?;
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, storage_partition_id, user_id, tenant_id, contact_id, name, pii_class, confidence,
-             reference_count, valid_from, properties_summary)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            (uid, label, storage_partition_id, user_id, tenant_id, contact_id, name, pii_class, barrier,
+             confidence, reference_count, valid_from, properties_summary, data_subject_id, content_sealed)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         "#,
     )
     .bind(intent.uid)
@@ -1118,12 +1467,15 @@ async fn insert_node_index(
     .bind(intent.contact_id.as_deref())
     .bind(tenant_id)
     .bind(contact_id)
-    .bind(&intent.name)
+    .bind(&prepared.name)
     .bind(intent.pii_class.as_str())
+    .bind(intent.barrier.as_ref().map(InformationBarrierId::as_str))
     .bind(intent.confidence)
     .bind(reference_count_from_properties(&intent.properties))
     .bind(intent.valid_from)
-    .bind(&intent.properties)
+    .bind(&prepared.properties)
+    .bind(intent.data_subject_id)
+    .bind(prepared.content_sealed.as_deref())
     .execute(conn)
     .await?;
     Ok(())
@@ -1133,17 +1485,20 @@ fn runtime_ids_for_node(
     store: &PostgresGraphStore,
     intent: &NodeWriteIntent,
 ) -> Result<(Uuid, Option<Uuid>)> {
-    if let Some(scope) = store.scope() {
-        return Ok((scope.tenant_id().0, scope.contact_id().map(|id| id.0)));
+    let (tenant_id, contact_id) = runtime_ids_from_parts(
+        store,
+        intent.storage_partition_id.as_deref(),
+        intent.contact_id.as_deref(),
+        "nodes",
+    )?;
+    let expected_subject_id = contact_id.unwrap_or(tenant_id);
+    if intent.data_subject_id != expected_subject_id {
+        return Err(GraphError::DataSubjectMismatch {
+            actual: intent.data_subject_id,
+            expected: expected_subject_id,
+        });
     }
-
-    let Some(storage_partition_id) = intent.storage_partition_id.as_deref() else {
-        return Err(GraphError::Conflict(
-            "tenant-owned graph nodes require tenant scope".to_string(),
-        ));
-    };
-    let tenant_id = parse_uuid(storage_partition_id, "storage partition", "tenant_id")?;
-    Ok((tenant_id, None))
+    Ok((tenant_id, contact_id))
 }
 
 fn runtime_ids_from_parts(
@@ -1223,6 +1578,9 @@ fn vector_item_from_intent(intent: &NodeWriteIntent) -> Result<Option<VectorItem
     let Some(embedding) = intent.embedding.clone() else {
         return Ok(None);
     };
+    if is_sealed_class(intent.pii_class) {
+        return Err(GraphError::SealedEmbedding);
+    }
     let Some(embedding_model) = intent.embedding_model.clone() else {
         return Err(GraphError::MissingEmbeddingMetadata);
     };
@@ -1233,7 +1591,7 @@ fn vector_item_from_intent(intent: &NodeWriteIntent) -> Result<Option<VectorItem
         uid: intent.uid,
         user_id: intent.contact_id.clone(),
         label: intent.label.as_str().to_string(),
-        pii_class: intent.pii_class.as_str().to_string(),
+        pii_class: intent.pii_class,
         embedding,
         embedding_model,
         embedding_model_version,
@@ -1274,7 +1632,17 @@ fn require_vector_store(store: &PostgresGraphStore) -> Result<&dyn VectorStore> 
     })
 }
 
-fn create_changelog(intent: &NodeWriteIntent, cause_change_id: Option<i64>) -> ChangelogRecord {
+/// Builds the create-node changelog record.
+///
+/// `properties` is the redaction-safe projection (`PreparedNodeFields::properties`):
+/// for restricted/PHI nodes it is the placeholder, never the sealed secret, so
+/// the append-only `graph_changelog` outbox (which also drives vector sync) never
+/// carries plaintext restricted content.
+fn create_changelog(
+    intent: &NodeWriteIntent,
+    properties: &Value,
+    cause_change_id: Option<i64>,
+) -> ChangelogRecord {
     ChangelogRecord {
         storage_partition_id: intent.storage_partition_id.clone(),
         contact_id: intent.contact_id.clone(),
@@ -1285,7 +1653,7 @@ fn create_changelog(intent: &NodeWriteIntent, cause_change_id: Option<i64>) -> C
         target_kind: "node".to_string(),
         target_label: intent.label.as_str().to_string(),
         target_uid: intent.uid,
-        payload: json!({ "after": intent.properties }),
+        payload: json!({ "after": properties }),
         redaction_marker: None,
         pii_class: intent.pii_class.as_str().to_string(),
         audit_metadata: None,
@@ -1313,8 +1681,8 @@ fn hash_properties(properties: Option<&Value>) -> Result<String> {
 async fn fetch_stored_node(conn: &mut PgConnection, uid: Uuid) -> Result<Option<StoredNode>> {
     let row = sqlx::query(
         r#"
-        SELECT label, storage_partition_id, user_id, scope, pii_class, valid_from,
-               valid_to, properties_summary
+        SELECT label, storage_partition_id, user_id, tenant_id, data_subject_id, scope, pii_class,
+               barrier, valid_from, valid_to, properties_summary
         FROM moa.node_index
         WHERE uid = $1
         FOR UPDATE
@@ -1379,8 +1747,11 @@ fn stored_node_from_row(row: sqlx::postgres::PgRow) -> Result<StoredNode> {
         label: label_text.parse()?,
         storage_partition_id: row.try_get("storage_partition_id")?,
         contact_id: row.try_get("user_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        data_subject_id: row.try_get("data_subject_id")?,
         scope: row.try_get("scope")?,
         pii_class: pii_class_text.parse()?,
+        barrier: row.try_get("barrier")?,
         valid_from: row.try_get("valid_from")?,
         valid_to: row.try_get("valid_to")?,
         properties_summary: row.try_get("properties_summary")?,
@@ -1392,9 +1763,27 @@ struct StoredNode {
     label: NodeLabel,
     storage_partition_id: Option<String>,
     contact_id: Option<String>,
+    tenant_id: Uuid,
+    data_subject_id: Uuid,
     scope: String,
-    pii_class: PiiClass,
+    pii_class: SensitivityClass,
+    barrier: Option<String>,
     valid_from: DateTime<Utc>,
     valid_to: Option<DateTime<Utc>>,
     properties_summary: Option<Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::full_jitter_delay;
+
+    #[test]
+    fn full_jitter_delay_is_bounded_and_sample_driven() {
+        // Pins: deadlock peers do not share a deterministic fixed delay, and
+        // the exponential ceiling is capped on later attempts.
+        assert_eq!(full_jitter_delay(4, 128, 0, 0).as_millis(), 0);
+        assert_eq!(full_jitter_delay(4, 128, 0, 4).as_millis(), 4);
+        assert_eq!(full_jitter_delay(4, 128, 5, 128).as_millis(), 128);
+        assert!(full_jitter_delay(4, 128, 40, u64::MAX).as_millis() <= 128);
+    }
 }

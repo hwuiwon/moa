@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_brain::{
-    GraphMemoryPipelineOptions,
+    BrainTurnRequest, GraphMemoryPipelineOptions,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
@@ -249,6 +249,7 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
             store.clone(),
             GraphMemoryPipelineOptions {
                 graph_pool: store.pool().clone(),
+                kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
                 shared_graph_memory_retriever: None,
                 retrieval_embedder: None,
                 shared_skill_injector: None,
@@ -270,6 +271,7 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
         .await?;
         run_turn(
             store.clone(),
+            test_identity(tenant_id_from_storage_partition_id(&storage_partition_id)),
             session_id,
             provider.clone(),
             &pipeline,
@@ -279,6 +281,7 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
         .await?;
         run_turn(
             store.clone(),
+            test_identity(tenant_id_from_storage_partition_id(&storage_partition_id)),
             session_id,
             provider.clone(),
             &pipeline,
@@ -288,6 +291,7 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
         .await?;
         run_turn(
             store.clone(),
+            test_identity(tenant_id_from_storage_partition_id(&storage_partition_id)),
             session_id,
             provider,
             &pipeline,
@@ -421,7 +425,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);
     let tool_router = Arc::new(
-        ToolRouter::from_config(&sonnet_config)
+        ToolRouter::from_config(&sonnet_config, None)
             .await?
             .with_rule_store(store.clone())
             .with_session_store(store.clone()),
@@ -450,6 +454,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
             store.clone(),
             GraphMemoryPipelineOptions {
                 graph_pool: store.pool().clone(),
+                kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
                 shared_graph_memory_retriever: None,
                 retrieval_embedder: None,
                 shared_skill_injector: None,
@@ -471,6 +476,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     .await?;
     run_turn(
         store.clone(),
+        test_identity(tenant_id_from_storage_partition_id(&storage_partition_id)),
         session_a,
         sonnet_provider.clone(),
         &sonnet_pipeline,
@@ -480,6 +486,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     .await?;
     run_turn(
         store.clone(),
+        test_identity(tenant_id_from_storage_partition_id(&storage_partition_id)),
         session_a,
         sonnet_provider.clone(),
         &sonnet_pipeline,
@@ -489,6 +496,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     .await?;
     run_turn(
         store.clone(),
+        test_identity(tenant_id_from_storage_partition_id(&storage_partition_id)),
         session_a,
         sonnet_provider.clone(),
         &sonnet_pipeline,
@@ -510,6 +518,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
             store.clone(),
             GraphMemoryPipelineOptions {
                 graph_pool: store.pool().clone(),
+                kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
                 shared_graph_memory_retriever: None,
                 retrieval_embedder: None,
                 shared_skill_injector: None,
@@ -530,6 +539,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     .await?;
     run_turn(
         store.clone(),
+        test_identity(tenant_id_from_storage_partition_id(&storage_partition_id)),
         session_b,
         cross_session_provider.clone(),
         &cross_session_pipeline,
@@ -556,6 +566,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
             store.clone(),
             GraphMemoryPipelineOptions {
                 graph_pool: store.pool().clone(),
+                kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
                 shared_graph_memory_retriever: None,
                 retrieval_embedder: None,
                 shared_skill_injector: None,
@@ -576,6 +587,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     .await?;
     run_turn(
         store.clone(),
+        test_identity(tenant_id_from_storage_partition_id(&storage_partition_id)),
         session_c,
         cold_session_provider.clone(),
         &cold_session_pipeline,
@@ -585,6 +597,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     .await?;
     run_turn(
         store.clone(),
+        test_identity(tenant_id_from_storage_partition_id(&storage_partition_id)),
         session_c,
         cold_session_provider.clone(),
         &cold_session_pipeline,
@@ -607,6 +620,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         store.clone(),
         GraphMemoryPipelineOptions {
             graph_pool: store.pool().clone(),
+            kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
             shared_graph_memory_retriever: None,
             retrieval_embedder: None,
             shared_skill_injector: None,
@@ -620,6 +634,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     );
     run_turn(
         store.clone(),
+        test_identity(tenant_id_from_storage_partition_id(&storage_partition_id)),
         session_a,
         opus_provider.clone(),
         &opus_pipeline,
@@ -629,6 +644,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     .await?;
     run_turn(
         store.clone(),
+        test_identity(tenant_id_from_storage_partition_id(&storage_partition_id)),
         session_a,
         opus_provider.clone(),
         &opus_pipeline,
@@ -753,6 +769,7 @@ fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
 
 async fn run_turn(
     store: Arc<dyn SessionStore>,
+    identity: moa_core::traits::Identity,
     session_id: moa_core::types::identifiers::SessionId,
     provider: Arc<dyn LLMProvider>,
     pipeline: &moa_brain::ContextPipeline,
@@ -769,11 +786,29 @@ async fn run_turn(
         )
         .await?;
 
-    let result = run_brain_turn(session_id, store.clone(), provider, pipeline, tool_router).await?;
+    let result = run_brain_turn(BrainTurnRequest {
+        identity,
+        session_id,
+        session_store: store.clone(),
+        llm_provider: provider,
+        pipeline,
+        tool_router,
+    })
+    .await?;
 
     assert_eq!(result, moa_brain::TurnResult::Complete);
     let _events = store.get_events(session_id, EventRange::all()).await?;
     Ok(())
+}
+
+fn test_identity(tenant_id: TenantId) -> moa_core::traits::Identity {
+    moa_core::traits::Identity {
+        identity_type: moa_core::traits::IdentityType::Operator,
+        id: Uuid::from_u128(0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c411),
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    }
 }
 
 fn repo_root() -> Result<PathBuf> {

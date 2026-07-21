@@ -16,6 +16,7 @@ futures-util.workspace = true
 metrics.workspace = true
 moa-artifacts = { workspace = true }
 moa-core = { workspace = true }
+moa-crypto = { workspace = true }
 moa-db = { workspace = true }
 moa-execution = { workspace = true }
 moa-hands = { workspace = true, optional = true }
@@ -27,6 +28,7 @@ moa-memory-pii = { workspace = true }
 moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
 moa-observability = { workspace = true }
+moa-ocsf = { workspace = true }
 moa-providers = { workspace = true }
 moa-security = { workspace = true }
 moka.workspace = true

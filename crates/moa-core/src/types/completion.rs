@@ -2,12 +2,12 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Formatter};
+use std::future::Future;
 
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use crate::error::{MoaError, Result};
 
@@ -260,16 +260,15 @@ impl CompletionResponse {
 
 /// Streaming provider response wrapper.
 ///
-/// NOTE: This type wraps async runtime primitives (`tokio::sync::mpsc`,
-/// `tokio::task::JoinHandle`, and `CancellationToken`) and would ideally live
+/// NOTE: This type wraps async runtime primitives (`tokio::sync::mpsc` and
+/// `tokio::task::JoinHandle`) and would ideally live
 /// alongside provider implementations. It remains in `moa-core` because the
 /// `LLMProvider` trait is also defined in `moa-core` and returns this type
 /// directly, so moving it out would either create a crate cycle or force a
 /// broader trait redesign.
 pub struct CompletionStream {
     receiver: mpsc::Receiver<Result<CompletionContent>>,
-    completion: JoinHandle<Result<CompletionResponse>>,
-    cancel_token: Option<CancellationToken>,
+    completion: Option<JoinHandle<Result<CompletionResponse>>>,
 }
 
 impl CompletionStream {
@@ -280,9 +279,23 @@ impl CompletionStream {
     ) -> Self {
         Self {
             receiver,
-            completion,
-            cancel_token: None,
+            completion: Some(completion),
         }
+    }
+
+    /// Wraps this stream in a cancellation-safe asynchronous transform.
+    ///
+    /// Dropping the returned stream aborts the transform task, which drops this
+    /// input stream and aborts its provider task in turn. Decorators therefore do
+    /// not need to duplicate forwarding-task ownership or cancellation logic.
+    pub fn transform<F, Fut>(self, capacity: usize, transform: F) -> Self
+    where
+        F: FnOnce(Self, mpsc::Sender<Result<CompletionContent>>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<CompletionResponse>> + Send + 'static,
+    {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        let completion = tokio::spawn(transform(self, tx));
+        Self::new(rx, completion)
     }
 
     /// Creates a replayable stream from a fully buffered response.
@@ -309,31 +322,43 @@ impl CompletionStream {
     }
 
     /// Drains the remaining stream and returns the final aggregated response.
-    pub async fn collect(mut self) -> Result<CompletionResponse> {
+    pub async fn collect(self) -> Result<CompletionResponse> {
+        self.into_response().await
+    }
+
+    /// Drains pending blocks before waiting for the final aggregated response.
+    ///
+    /// Draining is required even when the caller only wants the response because
+    /// the producer may be blocked on a bounded stream channel.
+    pub async fn into_response(mut self) -> Result<CompletionResponse> {
         while let Some(block) = self.receiver.recv().await {
             block?;
         }
-
         self.await_completion().await
     }
 
-    /// Waits for the provider task to finish and returns the final aggregated response.
-    pub async fn into_response(self) -> Result<CompletionResponse> {
-        self.await_completion().await
-    }
-
-    /// Aborts the underlying provider task and signals cooperative cancellation.
+    /// Aborts the underlying provider task.
     pub fn abort(&self) {
-        if let Some(cancel_token) = &self.cancel_token {
-            cancel_token.cancel();
+        if let Some(completion) = &self.completion {
+            completion.abort();
         }
-        self.completion.abort();
     }
 
-    async fn await_completion(self) -> Result<CompletionResponse> {
-        self.completion.await.map_err(|error| {
+    async fn await_completion(mut self) -> Result<CompletionResponse> {
+        let completion = self.completion.take().ok_or_else(|| {
+            MoaError::ProviderError("completion task was already consumed".to_string())
+        })?;
+        completion.await.map_err(|error| {
             MoaError::ProviderError(format!("completion task failed to join: {error}"))
         })?
+    }
+}
+
+impl Drop for CompletionStream {
+    fn drop(&mut self) {
+        if let Some(completion) = self.completion.take() {
+            completion.abort();
+        }
     }
 }
 
@@ -346,6 +371,8 @@ impl fmt::Debug for CompletionStream {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -403,9 +430,13 @@ mod tests {
 
     #[tokio::test]
     async fn completion_stream_abort_stops_completion_task() {
-        let (_tx, rx) = mpsc::channel(1);
+        let (tx, rx) = mpsc::channel(1);
         let completion = tokio::spawn(async move {
+            // The producer owns the sender, so aborting the producer closes the
+            // channel before `into_response` drains it.
+            let sender = tx;
             sleep(TokioDuration::from_secs(30)).await;
+            drop(sender);
             Ok(CompletionResponse {
                 text: "late".to_string(),
                 content: vec![CompletionContent::Text("late".to_string())],
@@ -424,5 +455,67 @@ mod tests {
             .await
             .expect_err("aborted completion task should not resolve successfully");
         assert!(matches!(error, MoaError::ProviderError(message) if message.contains("join")));
+    }
+
+    #[tokio::test]
+    async fn into_response_drains_capacity_limited_stream() {
+        // Pins: waiting only for the final response cannot deadlock a producer on channel capacity.
+        let (tx, rx) = mpsc::channel(1);
+        let completion = tokio::spawn(async move {
+            for index in 0..8 {
+                tx.send(Ok(CompletionContent::Text(index.to_string())))
+                    .await
+                    .expect("stream receiver remains alive");
+            }
+            Ok(CompletionResponse {
+                text: "done".to_string(),
+                content: vec![CompletionContent::Text("done".to_string())],
+                stop_reason: StopReason::EndTurn,
+                model: ModelId::new("test"),
+                usage: TokenUsage::default(),
+                duration_ms: 1,
+                thought_signature: None,
+            })
+        });
+
+        let response = CompletionStream::new(rx, completion)
+            .into_response()
+            .await
+            .expect("drain then join");
+        assert_eq!(response.text, "done");
+    }
+
+    #[tokio::test]
+    async fn dropping_a_transform_aborts_the_source_task() {
+        // Pins: cancellation propagates through decorator layers without pod-local correctness state.
+        let dropped = Arc::new(AtomicBool::new(false));
+        let marker = Arc::clone(&dropped);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (_tx, rx) = mpsc::channel(1);
+        let completion = tokio::spawn(async move {
+            struct MarkDrop(Arc<AtomicBool>);
+            impl Drop for MarkDrop {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::SeqCst);
+                }
+            }
+            let _mark = MarkDrop(marker);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+            unreachable!("pending task only exits through cancellation")
+        });
+        let transformed =
+            CompletionStream::new(rx, completion).transform(1, |mut inner, tx| async move {
+                while let Some(item) = inner.next().await {
+                    if tx.send(item).await.is_err() {
+                        break;
+                    }
+                }
+                inner.into_response().await
+            });
+        started_rx.await.expect("source task started");
+        drop(transformed);
+        tokio::task::yield_now().await;
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

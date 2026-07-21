@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use moa_core::{config::MoaConfig, error::MoaError, traits::LLMProvider};
+use moa_core::{config::MoaConfig, traits::LLMProvider, types::provider::ProviderId};
 
 use crate::{AnthropicProvider, GeminiProvider, OpenAIProvider};
 
@@ -18,39 +18,6 @@ pub const REWRITER_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
 pub const REWRITER_OPENAI_MODEL: &str = "gpt-5.4-nano";
 /// Default Google model for query rewriting.
 pub const REWRITER_GOOGLE_MODEL: &str = "gemini-3-flash-preview";
-
-/// Stable provider id used in routing, configuration, and registry keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ProviderId {
-    /// `OpenAI` GPT/o-series models.
-    OpenAI,
-    /// Anthropic Claude models.
-    Anthropic,
-    /// Google Gemini models.
-    Google,
-}
-
-impl ProviderId {
-    /// Returns the stable provider-name string used in config and telemetry.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::OpenAI => "openai",
-            Self::Anthropic => "anthropic",
-            Self::Google => "google",
-        }
-    }
-
-    /// Returns the descriptor for this provider id.
-    #[must_use]
-    pub fn descriptor(self) -> &'static ProviderDescriptor {
-        match self {
-            Self::OpenAI => &OPENAI_DESCRIPTOR,
-            Self::Anthropic => &ANTHROPIC_DESCRIPTOR,
-            Self::Google => &GOOGLE_DESCRIPTOR,
-        }
-    }
-}
 
 /// Factory used to construct a provider from runtime config and a model id.
 pub type ConfigProviderFactory =
@@ -128,10 +95,17 @@ const GOOGLE_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
 /// Returns the provider descriptor for a stable provider name.
 #[must_use]
 pub fn provider_descriptor_by_name(provider_name: &str) -> Option<&'static ProviderDescriptor> {
-    let provider_name = provider_name.trim();
-    PROVIDER_DESCRIPTORS
-        .iter()
-        .find(|descriptor| descriptor.explicit_prefix == provider_name)
+    provider_name.trim().parse().ok().map(provider_descriptor)
+}
+
+/// Returns the provider-owned routing descriptor for `id`.
+#[must_use]
+pub const fn provider_descriptor(id: ProviderId) -> &'static ProviderDescriptor {
+    match id {
+        ProviderId::OpenAI => &OPENAI_DESCRIPTOR,
+        ProviderId::Anthropic => &ANTHROPIC_DESCRIPTOR,
+        ProviderId::Google => &GOOGLE_DESCRIPTOR,
+    }
 }
 
 /// Splits a `provider:model` override into provider id and model id.
@@ -215,23 +189,13 @@ fn is_openai_model(model: &str) -> bool {
         || model.starts_with("o4")
 }
 
-impl std::str::FromStr for ProviderId {
-    type Err = MoaError;
-
-    fn from_str(provider_name: &str) -> Result<Self, Self::Err> {
-        provider_descriptor_by_name(provider_name)
-            .map(|descriptor| descriptor.id)
-            .ok_or_else(|| MoaError::ConfigError(format!("unsupported provider '{provider_name}'")))
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use moa_core::types::provider::ProviderId;
+
     use crate::core::models::CATALOG;
 
-    use super::{
-        ProviderId, infer_provider_id, provider_descriptor_by_name, split_explicit_provider,
-    };
+    use super::{infer_provider_id, provider_descriptor_by_name, split_explicit_provider};
 
     #[test]
     fn descriptors_cover_catalog_provider_names() {

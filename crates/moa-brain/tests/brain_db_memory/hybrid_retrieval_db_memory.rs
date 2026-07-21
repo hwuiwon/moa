@@ -5,13 +5,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     types::contact::ContactId, types::identifiers::SessionId, types::identifiers::TenantId,
 };
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
-    PostgresGraphStore,
+    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore,
 };
 use moa_memory_ingest::{
     ExtractedFact, ExtractedFactScopeHint, IngestCtx, RrfPlusJudgeDetector, ScriptedFactExtractor,
@@ -92,7 +92,7 @@ async fn query_retrieval_ctx_defaults_reranker_off_and_requires_explicit_opt_in(
         scope_context.clone(),
     ));
     let graph: Arc<dyn GraphStore> = Arc::new(
-        PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context)
+        PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context, super::test_kms())
             .with_vector_store(vector.clone()),
     );
     let hybrid = Arc::new(
@@ -108,7 +108,7 @@ async fn query_retrieval_ctx_defaults_reranker_off_and_requires_explicit_opt_in(
         &planning,
         &embedder,
         &cached,
-        PiiClass::Restricted,
+        SensitivityClass::Restricted,
     );
 
     assert!(!ctx.use_reranker);
@@ -147,7 +147,7 @@ struct FixedPiiClassifier;
 impl PiiClassifier for FixedPiiClassifier {
     async fn classify(&self, _text: &str) -> Result<PiiResult, PiiError> {
         Ok(PiiResult {
-            class: PiiClass::None,
+            class: SensitivityClass::None,
             spans: Vec::<PiiSpan>::new(),
             model_version: "hybrid-retrieval-test".to_string(),
             abstained: false,
@@ -173,7 +173,8 @@ fn utc(value: &str) -> DateTime<Utc> {
 fn graph_store(pool: &PgPool, storage_partition_id: &str) -> PostgresGraphStore {
     let scope = tenant_scope(storage_partition_id);
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
-    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
+    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope, super::test_kms())
+        .with_vector_store(Arc::new(vector))
 }
 
 fn user_graph_store(
@@ -183,7 +184,8 @@ fn user_graph_store(
 ) -> PostgresGraphStore {
     let scope = contact_scope(storage_partition_id, user_id);
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
-    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
+    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope, super::test_kms())
+        .with_vector_store(Arc::new(vector))
 }
 
 fn scripted_user_fact(summary: &str) -> ExtractedFact {
@@ -221,14 +223,17 @@ fn node_intent(
     embedding: Option<Vec<f32>>,
 ) -> NodeWriteIntent {
     NodeWriteIntent {
+        barrier: None,
         uid: Uuid::now_v7(),
+        data_subject_id: Uuid::parse_str(storage_partition_id)
+            .expect("storage partition fixture should be a tenant UUID"),
         label,
         storage_partition_id: Some(storage_partition_id.to_string()),
         contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "summary": name, "source": "hybrid_retrieval_test" }),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         confidence: Some(0.9),
         valid_from: Utc::now(),
         embedding,
@@ -241,6 +246,8 @@ fn node_intent(
 }
 
 async fn seed_filler_rows(pool: &PgPool, storage_partition_id: &str, prefix: &str, count: usize) {
+    let data_subject_id = Uuid::parse_str(storage_partition_id)
+        .expect("storage partition fixture should be a tenant UUID");
     let ctx = tenant_scope(storage_partition_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
@@ -251,14 +258,15 @@ async fn seed_filler_rows(pool: &PgPool, storage_partition_id: &str, prefix: &st
         .expect("set app role");
 
     let mut builder = QueryBuilder::<Postgres>::new(
-        "INSERT INTO moa.node_index (uid, label, storage_partition_id, name, pii_class, confidence) ",
+        "INSERT INTO moa.node_index (uid, label, storage_partition_id, data_subject_id, name, pii_class, confidence) ",
     );
     builder.push_values(0..count, |mut row, index| {
         row.push_bind(Uuid::now_v7())
             .push_bind(NodeLabel::Fact.as_str())
             .push_bind(storage_partition_id)
+            .push_bind(data_subject_id)
             .push_bind(format!("{prefix} filler operational note {index}"))
-            .push_bind(PiiClass::None.as_str())
+            .push_bind(SensitivityClass::None.as_str())
             .push_bind(0.5_f64);
     });
     builder
@@ -553,13 +561,14 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
     )
     .with_assume_app_role(true);
     let request = RetrievalRequest {
+        cleared_barriers: Default::default(),
         seeds: vec![seed_uid],
         query_text: exact_text.to_string(),
         query_embedding: deterministic_vector(exact_text),
         scope,
         label_filter: Some(vec![NodeLabel::Fact]),
         label_boost: None,
-        max_pii_class: PiiClass::Restricted,
+        max_pii_class: SensitivityClass::Restricted,
         k_final: 5,
         use_reranker: false,
         strategy: None,
@@ -602,13 +611,14 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
 
     let graph_only_hits = retriever
         .retrieve(RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: vec![seed_uid],
             query_text: String::new(),
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 5,
             use_reranker: false,
             strategy: None,
@@ -631,13 +641,14 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
 
     let graph_disabled_hits = retriever
         .retrieve(RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: vec![seed_uid],
             query_text: String::new(),
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 5,
             use_reranker: false,
             strategy: None,
@@ -659,6 +670,132 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
     let _ = graph.hard_purge(exact_uid, "redacted:hybrid-test").await;
     let _ = graph.hard_purge(related_uid, "redacted:hybrid-test").await;
     let _ = graph.hard_purge(seed_uid, "redacted:hybrid-test").await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn barrier_cleared_agent_retrieves_node_uncleared_fails_closed_db_memory() {
+    // Pins: the agent's cleared-barrier set on a `RetrievalRequest` threads
+    // through the scoped retrieval legs' `moa.cleared_barriers` GUC end to end, so
+    // a barriered node is retrieved only when the request is cleared for its tag.
+    // An empty clearance (fail closed) and a non-matching clearance both hide it,
+    // while a NULL-barrier sibling stays visible throughout. This proves the
+    // agent-policy -> request -> GUC threading over the production `retrieve`
+    // path; lower-level tests already prove the underlying RLS at the SQL level. Mutation
+    // check: revert the final `hydrate_nodes` clearances in `hybrid.rs` back to
+    // `&[]` and the cleared-agent assertion below fails.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = test_storage_partition_id();
+    let graph = graph_store(session_store.pool(), &storage_partition_id);
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
+
+    let barriered_text = "deal alpha restricted acquisition memo";
+    let mut barriered = node_intent(
+        &storage_partition_id,
+        NodeLabel::Fact,
+        barriered_text,
+        Some(deterministic_vector(barriered_text)),
+    );
+    barriered.barrier = Some(
+        moa_core::types::memory::InformationBarrierId::parse("deal-alpha").expect("valid barrier"),
+    );
+    let barriered_uid = graph
+        .create_node(barriered)
+        .await
+        .expect("create barriered node");
+
+    let public_text = "deal alpha public roster note";
+    let public = node_intent(
+        &storage_partition_id,
+        NodeLabel::Fact,
+        public_text,
+        Some(deterministic_vector(barriered_text)),
+    );
+    let public_uid = graph.create_node(public).await.expect("create public node");
+
+    let scope = tenant_memory_scope(&storage_partition_id);
+    let vector: Arc<PgvectorStore> = Arc::new(PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(&storage_partition_id),
+    ));
+    let retriever = HybridRetriever::new(
+        session_store.pool().clone(),
+        Arc::new(graph.clone()),
+        vector,
+    )
+    .with_assume_app_role(true);
+
+    let make_request = |cleared: Vec<&str>| RetrievalRequest {
+        cleared_barriers: cleared
+            .into_iter()
+            .map(|barrier| {
+                moa_core::types::memory::InformationBarrierId::parse(barrier)
+                    .expect("valid barrier")
+            })
+            .collect(),
+        seeds: Vec::new(),
+        query_text: barriered_text.to_string(),
+        query_embedding: deterministic_vector(barriered_text),
+        scope: scope.clone(),
+        label_filter: Some(vec![NodeLabel::Fact]),
+        label_boost: None,
+        max_pii_class: SensitivityClass::Restricted,
+        k_final: 10,
+        use_reranker: false,
+        strategy: None,
+        as_of: None,
+        ranking_reference_time: None,
+        lineage: None,
+        disable_leg_timeouts: false,
+        disable_graph_expansion: false,
+        window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
+    };
+
+    let cleared_hits = retriever
+        .retrieve(make_request(vec!["deal-alpha"]))
+        .await
+        .expect("cleared agent retrieval");
+    assert!(
+        cleared_hits.iter().any(|hit| hit.uid == barriered_uid),
+        "an agent cleared for deal-alpha must retrieve its barriered node: {cleared_hits:?}"
+    );
+    assert!(
+        cleared_hits.iter().any(|hit| hit.uid == public_uid),
+        "the null-barrier sibling must be visible to the cleared agent: {cleared_hits:?}"
+    );
+
+    let uncleared_hits = retriever
+        .retrieve(make_request(Vec::new()))
+        .await
+        .expect("uncleared agent retrieval");
+    assert!(
+        uncleared_hits.iter().all(|hit| hit.uid != barriered_uid),
+        "empty clearance must hide the barriered node (fail closed): {uncleared_hits:?}"
+    );
+    assert!(
+        uncleared_hits.iter().any(|hit| hit.uid == public_uid),
+        "the null-barrier sibling must stay visible under empty clearance: {uncleared_hits:?}"
+    );
+
+    let wrong_hits = retriever
+        .retrieve(make_request(vec!["deal-beta"]))
+        .await
+        .expect("non-matching clearance retrieval");
+    assert!(
+        wrong_hits.iter().all(|hit| hit.uid != barriered_uid),
+        "a non-matching clearance must not reveal the barriered node: {wrong_hits:?}"
+    );
+
+    let _ = graph
+        .hard_purge(barriered_uid, "redacted:barrier-test")
+        .await;
+    let _ = graph.hard_purge(public_uid, "redacted:barrier-test").await;
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await
@@ -737,13 +874,14 @@ async fn duplicate_crowding_keeps_distinct_supporting_knowledge_chunk() {
         .with_assume_app_role(true);
     let hits = retriever
         .retrieve(RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: query.to_string(),
             query_embedding: deterministic_vector(query),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 3,
             use_reranker: false,
             strategy: None,
@@ -849,13 +987,14 @@ async fn parent_document_retrieval_hydrates_ordinal_adjacent_neighbors() {
         .with_assume_app_role(true);
     let hits = retriever
         .retrieve(RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: query.to_string(),
             query_embedding: deterministic_vector(query),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 5,
             use_reranker: false,
             strategy: None,
@@ -953,11 +1092,16 @@ async fn reinforced_fact_survives_consolidation_while_idle_one_off_expires_from_
             workspace_scope.clone(),
         ));
         let graph = Arc::new(
-            PostgresGraphStore::scoped_for_app_role(pool.clone(), workspace_scope.clone())
-                .with_vector_store(vector.clone()),
+            PostgresGraphStore::scoped_for_app_role(
+                pool.clone(),
+                workspace_scope.clone(),
+                super::test_kms(),
+            )
+            .with_vector_store(vector.clone()),
         );
         IngestCtx::new(
             pool.clone(),
+            super::test_kms(),
             graph,
             vector,
             Arc::new(RerankerDefaultEmbedder),
@@ -974,6 +1118,7 @@ async fn reinforced_fact_survives_consolidation_while_idle_one_off_expires_from_
         transcript: "conversational transcript".to_string(),
         dominant_pii_class: "none".to_string(),
         finalized_at: utc(finalized_at),
+        barrier: None,
     };
 
     let first = ingest_turn_direct_with_ctx(
@@ -1011,6 +1156,7 @@ async fn reinforced_fact_survives_consolidation_while_idle_one_off_expires_from_
 
     let outcome = moa_memory_lifecycle::consolidate_tenant(
         &pool,
+        super::test_kms(),
         tenant_id,
         moa_memory_lifecycle::ConsolidationOptions::default(),
         now,
@@ -1033,13 +1179,14 @@ async fn reinforced_fact_survives_consolidation_while_idle_one_off_expires_from_
     )
     .with_assume_app_role(true);
     let request = |query: &str| RetrievalRequest {
+        cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: query.to_string(),
         query_embedding: deterministic_vector(query),
         scope: contact_memory_scope(&storage_partition_id, user),
         label_filter: Some(vec![NodeLabel::Fact]),
         label_boost: None,
-        max_pii_class: PiiClass::Restricted,
+        max_pii_class: SensitivityClass::Restricted,
         k_final: 25,
         use_reranker: false,
         strategy: None,
@@ -1129,13 +1276,14 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
         workspace_scope.clone(),
     ));
     let ingest_graph = Arc::new(
-        PostgresGraphStore::scoped_for_app_role(pool.clone(), workspace_scope)
+        PostgresGraphStore::scoped_for_app_role(pool.clone(), workspace_scope, super::test_kms())
             .with_vector_store(ingest_vector.clone()),
     );
     let summary = "The user prefers the private green deployment dashboard";
     let fact = scripted_user_fact(summary);
     let ctx = IngestCtx::new(
         pool.clone(),
+        super::test_kms(),
         ingest_graph,
         ingest_vector,
         Arc::new(RerankerDefaultEmbedder),
@@ -1153,6 +1301,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
             transcript: format!("user: {summary}"),
             dominant_pii_class: "none".to_string(),
             finalized_at: utc("2026-05-07T12:00:00Z"),
+            barrier: None,
         },
     )
     .await
@@ -1166,13 +1315,14 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
         HybridRetriever::new(pool.clone(), Arc::new(owner_graph), Arc::new(owner_vector))
             .with_assume_app_role(true)
             .retrieve(RetrievalRequest {
+                cleared_barriers: Default::default(),
                 seeds: Vec::new(),
                 query_text: summary.to_string(),
                 query_embedding: deterministic_vector(summary),
                 scope: contact_memory_scope(&storage_partition_id, user_a),
                 label_filter: Some(vec![NodeLabel::Fact]),
                 label_boost: None,
-                max_pii_class: PiiClass::Restricted,
+                max_pii_class: SensitivityClass::Restricted,
                 k_final: 25,
                 use_reranker: false,
                 strategy: None,
@@ -1199,13 +1349,14 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
         HybridRetriever::new(pool.clone(), Arc::new(other_graph), Arc::new(other_vector))
             .with_assume_app_role(true)
             .retrieve(RetrievalRequest {
+                cleared_barriers: Default::default(),
                 seeds: Vec::new(),
                 query_text: summary.to_string(),
                 query_embedding: deterministic_vector(summary),
                 scope: contact_memory_scope(&storage_partition_id, user_b),
                 label_filter: Some(vec![NodeLabel::Fact]),
                 label_boost: None,
-                max_pii_class: PiiClass::Restricted,
+                max_pii_class: SensitivityClass::Restricted,
                 k_final: 25,
                 use_reranker: false,
                 strategy: None,
@@ -1270,13 +1421,14 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
     .with_assume_app_role(true);
     let scope = tenant_memory_scope(&storage_partition_id);
     let historical = RetrievalRequest {
+        cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: old_name.to_string(),
         query_embedding: Vec::new(),
         scope: scope.clone(),
         label_filter: Some(vec![NodeLabel::Fact]),
         label_boost: None,
-        max_pii_class: PiiClass::Restricted,
+        max_pii_class: SensitivityClass::Restricted,
         k_final: 5,
         use_reranker: false,
         strategy: None,
@@ -1301,13 +1453,14 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
     assert_eq!(hits[0].node.valid_to, Some(replacement.valid_from));
 
     let current = RetrievalRequest {
+        cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: old_name.to_string(),
         query_embedding: Vec::new(),
         scope,
         label_filter: Some(vec![NodeLabel::Fact]),
         label_boost: None,
-        max_pii_class: PiiClass::Restricted,
+        max_pii_class: SensitivityClass::Restricted,
         k_final: 5,
         use_reranker: false,
         strategy: None,
@@ -1388,13 +1541,14 @@ async fn temporal_turbopuffer_as_of_uses_pgvector_without_calling_turbopuffer() 
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: String::new(),
             query_embedding: deterministic_vector(fact),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 5,
             use_reranker: false,
             strategy: None,
@@ -1480,13 +1634,14 @@ async fn temporal_dual_read_as_of_uses_pgvector_without_calling_turbopuffer() {
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: String::new(),
             query_embedding: deterministic_vector(fact),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 5,
             use_reranker: false,
             strategy: None,
@@ -1579,13 +1734,14 @@ async fn turbopuffer_backend_uses_bm25_for_lexical_candidates_db_memory() {
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "abc-123".to_string(),
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 5,
             use_reranker: false,
             strategy: None,
@@ -1670,13 +1826,14 @@ async fn turbopuffer_backend_keeps_postgres_lexical_for_fact_candidates_db_memor
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "fact-456".to_string(),
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 5,
             use_reranker: false,
             strategy: None,
@@ -1766,13 +1923,14 @@ async fn turbopuffer_bm25_error_falls_back_to_postgres_lexical_db_memory() {
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "xyz-987".to_string(),
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 5,
             use_reranker: false,
             strategy: None,
@@ -1841,13 +1999,14 @@ async fn lexical_prefix_fallback_matches_word_prefix_when_primary_misses_db_memo
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "auth".to_string(),
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 5,
             use_reranker: false,
             strategy: None,
@@ -1897,7 +2056,10 @@ async fn lexical_fallback_matches_structured_predicate_in_properties_db_memory()
     // the structured predicate stored in properties_summary.
     let node_uid = graph
         .create_node(NodeWriteIntent {
+            barrier: None,
             uid: Uuid::now_v7(),
+            data_subject_id: Uuid::parse_str(&storage_partition_id)
+                .expect("storage partition fixture should be a tenant UUID"),
             label: NodeLabel::Fact,
             storage_partition_id: Some(storage_partition_id.clone()),
             contact_id: None,
@@ -1908,7 +2070,7 @@ async fn lexical_fallback_matches_structured_predicate_in_properties_db_memory()
                 "predicate": "private_repository",
                 "source": "structured_predicate_test"
             }),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             confidence: Some(0.9),
             valid_from: Utc::now(),
             embedding: None,
@@ -1934,13 +2096,14 @@ async fn lexical_fallback_matches_structured_predicate_in_properties_db_memory()
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "Which private work repository should you use for me?".to_string(),
             query_embedding: Vec::new(),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 5,
             use_reranker: false,
             strategy: None,

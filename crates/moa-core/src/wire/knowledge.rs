@@ -1,6 +1,7 @@
 //! Tenant knowledge-base service wire DTOs.
 
 use crate::types::identifiers::TenantId;
+use crate::types::memory::InformationBarrierId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,6 +57,9 @@ pub struct KnowledgeExchangeTokenRequest {
     /// Provider-native selected source state collected by the frontend.
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub source_selection: Value,
+    /// Source-owned information barrier assigned to this connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub information_barrier: Option<InformationBarrierId>,
 }
 
 /// Response payload for a completed linked-account token exchange.

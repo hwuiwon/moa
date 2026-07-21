@@ -78,8 +78,9 @@ use openfga::{
 };
 use postgres::{ensure_postgres_image, start_postgres_container, wait_for_postgres};
 use process::{
-    OrchestratorRestartConfig, OrchestratorSpawnConfig, locate_orchestrator_binary, pick_free_port,
-    read_child_logs, repo_root, spawn_orchestrator, terminate_child, wait_for_orchestrator_health,
+    FixtureBinarySnapshot, OrchestratorRestartConfig, OrchestratorSpawnConfig,
+    locate_orchestrator_binary, pick_free_port, read_child_logs, repo_root, spawn_orchestrator,
+    terminate_child, wait_for_orchestrator_health,
 };
 use redis::{start_redis_container, wait_for_redis};
 use restate::{
@@ -108,6 +109,7 @@ pub struct OrchestratorTestFixture {
     _openfga: Option<ContainerAsync<GenericImage>>,
     _redis: Option<ContainerAsync<GenericImage>>,
     orchestrator: Mutex<Option<Child>>,
+    _orchestrator_binary_snapshot: Option<FixtureBinarySnapshot>,
     restart_config: Option<OrchestratorRestartConfig>,
     fixture_capability: Option<fixture_capability::FixtureCapabilityRuntime>,
     otlp_capture: Option<OtlpCapture>,
@@ -230,6 +232,7 @@ impl OrchestratorTestFixture {
             _openfga: None,
             _redis: None,
             orchestrator: Mutex::new(None),
+            _orchestrator_binary_snapshot: None,
             restart_config: None,
             fixture_capability: None,
             otlp_capture: None,
@@ -342,7 +345,11 @@ impl OrchestratorTestFixture {
                     "name": "fixture-capability",
                     "transport": "http",
                     "url": runtime.endpoint(),
-                    "trust_tool_annotations": true
+                    "trust_tool_annotations": true,
+                    // This loopback fixture intentionally accepts arbitrary synthetic
+                    // lifecycle payloads; production MCP servers retain the fail-closed
+                    // empty allowlist unless operators explicitly configure otherwise.
+                    "allowed_data_classes": ["pii", "phi", "restricted"]
                 }]))
                 .context("serialize fixture MCP server configuration")?;
                 extra_env.push(("MOA_MCP_SERVERS_JSON".to_string(), mcp_servers));
@@ -360,7 +367,7 @@ impl OrchestratorTestFixture {
         .await
         .context("start fixture OTLP collector")?;
 
-        let orchestrator_bin = locate_orchestrator_binary(&repo_root).await?;
+        let orchestrator_binary_snapshot = locate_orchestrator_binary(&repo_root).await?;
         let orchestrator_port = pick_free_port()?;
         let health_port = pick_free_port()?;
         let scim_port = pick_free_port()?;
@@ -369,7 +376,7 @@ impl OrchestratorTestFixture {
                 .as_ref()
                 .zip(script_path.as_ref())
                 .map(|(journal_path, script_path)| OrchestratorRestartConfig {
-                    binary: orchestrator_bin.clone(),
+                    binary: orchestrator_binary_snapshot.path().to_path_buf(),
                     port: orchestrator_port,
                     health_port,
                     scim_port,
@@ -387,7 +394,7 @@ impl OrchestratorTestFixture {
         let mut orchestrator_guard = match &restart_config {
             Some(config) => config.spawn()?,
             None => spawn_orchestrator(OrchestratorSpawnConfig {
-                binary: &orchestrator_bin,
+                binary: orchestrator_binary_snapshot.path(),
                 port: orchestrator_port,
                 health_port,
                 scim_port,
@@ -433,6 +440,7 @@ impl OrchestratorTestFixture {
             _openfga: openfga_container,
             _redis: redis_container,
             orchestrator: Mutex::new(Some(orchestrator)),
+            _orchestrator_binary_snapshot: Some(orchestrator_binary_snapshot),
             restart_config,
             fixture_capability,
             otlp_capture: Some(otlp_capture),
@@ -770,12 +778,7 @@ fn identity_subject(identity: &Identity) -> String {
     if let Some(api_key_id) = identity.api_key_id {
         return format!("api_key:{api_key_id}");
     }
-    match identity.identity_type {
-        IdentityType::Operator => format!("operator:{}", identity.id),
-        IdentityType::Agent => format!("agent:{}", identity.id),
-        IdentityType::Service => format!("service:{}", identity.id),
-        IdentityType::Contact => format!("contact:{}", identity.id),
-    }
+    format!("{}:{}", identity.identity_type.as_str(), identity.id)
 }
 
 fn fixture_agent_context() -> AgentContext {
@@ -913,6 +916,7 @@ mod tests {
             _openfga: None,
             _redis: None,
             orchestrator: Mutex::new(None),
+            _orchestrator_binary_snapshot: None,
             restart_config: None,
             fixture_capability: None,
             otlp_capture: None,

@@ -116,6 +116,72 @@ impl OutboxPoller {
         Ok(applied)
     }
 
+    /// Delivers the current desired state for one exact OpenFGA object.
+    ///
+    /// This is the synchronous visibility barrier used after committing a
+    /// product row and its authorization tuples. It snapshots exact row and
+    /// generation receipts, accepts already-succeeded receipts, and may take
+    /// over a pending or in-flight receipt from another replica. Dead letters
+    /// are never revived. OpenFGA tuple operations are idempotent and the
+    /// generation-fenced success update ensures only the snapshotted desired
+    /// state is completed. No process-local notification or poll interval
+    /// participates in correctness.
+    pub async fn flush_object(&self, object: &str) -> Result<usize, AuthzError> {
+        let receipts: Vec<OutboxReceiptState> = sqlx::query_as(
+            r#"
+            SELECT id, generation, status
+            FROM authz_outbox
+            WHERE tuple_object = $1
+            ORDER BY id
+            "#,
+        )
+        .bind(object)
+        .fetch_all(&self.pool)
+        .await?;
+        if receipts.is_empty() {
+            return Ok(0);
+        }
+
+        let mut satisfied = 0usize;
+        for receipt in receipts {
+            if receipt.status == "succeeded" {
+                satisfied += 1;
+                continue;
+            }
+            if receipt.status == "dead_letter" {
+                return Err(AuthzError::Ambiguous(format!(
+                    "authorization receipt {} generation {} is dead-lettered",
+                    receipt.id, receipt.generation
+                )));
+            }
+            let Some(claim) = self.claim_receipt(&receipt).await? else {
+                if missed_claim_is_satisfied(self.receipt_status(&receipt).await?.as_deref()) {
+                    satisfied += 1;
+                    continue;
+                }
+                return Err(AuthzError::Ambiguous(format!(
+                    "authorization receipt {} generation {} changed while flushing {object}",
+                    receipt.id, receipt.generation
+                )));
+            };
+            if let Err(error) = self.apply_row(&claim.row).await {
+                self.record_failure(&claim, &error).await?;
+                return Err(error);
+            }
+            if !self.record_success(&claim).await? {
+                if missed_claim_is_satisfied(self.receipt_status(&receipt).await?.as_deref()) {
+                    satisfied += 1;
+                    continue;
+                }
+                return Err(AuthzError::Ambiguous(format!(
+                    "authorization tuple changed while flushing {object}"
+                )));
+            }
+            satisfied += 1;
+        }
+        Ok(satisfied)
+    }
+
     async fn claim_batch(&self) -> Result<Vec<ClaimedOutboxRow>, AuthzError> {
         let lease_token = Uuid::new_v4();
         let claimed: Vec<ClaimedOutboxRecord> = sqlx::query_as(
@@ -156,6 +222,46 @@ impl OutboxPoller {
         .fetch_all(&self.pool)
         .await?;
         Ok(claimed.into_iter().map(ClaimedOutboxRow::from).collect())
+    }
+
+    async fn claim_receipt(
+        &self,
+        receipt: &OutboxReceiptState,
+    ) -> Result<Option<ClaimedOutboxRow>, AuthzError> {
+        let lease_token = Uuid::new_v4();
+        let claimed: Option<ClaimedOutboxRecord> = sqlx::query_as(
+            r#"
+            UPDATE authz_outbox
+            SET status = 'in_flight',
+                lease_token = $2,
+                lease_expires_at = NOW() + ($3 || ' milliseconds')::INTERVAL,
+                updated_at = NOW()
+            WHERE id = $1
+              AND generation = $4
+              AND status IN ('pending', 'in_flight')
+            RETURNING id, op, tuple_user, tuple_relation, tuple_object,
+                      attempts, generation, lease_token
+            "#,
+        )
+        .bind(receipt.id)
+        .bind(lease_token)
+        .bind(duration_millis_string(self.cfg.lease_duration))
+        .bind(receipt.generation)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(claimed.map(ClaimedOutboxRow::from))
+    }
+
+    async fn receipt_status(
+        &self,
+        receipt: &OutboxReceiptState,
+    ) -> Result<Option<String>, AuthzError> {
+        sqlx::query_scalar("SELECT status FROM authz_outbox WHERE id = $1 AND generation = $2")
+            .bind(receipt.id)
+            .bind(receipt.generation)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(AuthzError::from)
     }
 
     async fn apply_row(&self, row: &OutboxRow) -> Result<(), AuthzError> {
@@ -224,15 +330,7 @@ impl OutboxPoller {
         // concurrent desired-state change (which reactivated the row at a higher
         // generation) is never overwritten with stale retry/dead-letter state.
         if next_attempts >= self.cfg.max_attempts {
-            tracing::error!(
-                id = %row.id,
-                tuple = %claim.tuple_display(),
-                generation = row.generation,
-                attempts = next_attempts,
-                error = %error,
-                "outbox row exhausted retries; moving to dead_letter"
-            );
-            sqlx::query(
+            let result = sqlx::query(
                 r#"
                 UPDATE authz_outbox
                 SET status='dead_letter',
@@ -254,21 +352,28 @@ impl OutboxPoller {
             .bind(row.generation)
             .execute(&self.pool)
             .await?;
-            metrics::counter!("moa_authz_outbox_dead_letters_total").increment(1);
+            if result.rows_affected() == 1 {
+                tracing::error!(
+                    id = %row.id,
+                    tuple = %claim.tuple_display(),
+                    generation = row.generation,
+                    attempts = next_attempts,
+                    error = %error,
+                    "outbox row exhausted retries; moving to dead_letter"
+                );
+                metrics::counter!("moa_authz_outbox_dead_letters_total").increment(1);
+            } else {
+                tracing::debug!(
+                    id = %row.id,
+                    generation = row.generation,
+                    "outbox failure ignored after lease or generation changed"
+                );
+            }
             return Ok(());
         }
 
         let backoff = self.backoff_for(next_attempts);
-        tracing::warn!(
-            id = %row.id,
-            tuple = %claim.tuple_display(),
-            generation = row.generation,
-            attempts = next_attempts,
-            backoff_ms = backoff.as_millis() as u64,
-            error = %error,
-            "outbox row failed; backing off"
-        );
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE authz_outbox
             SET status='pending',
@@ -292,7 +397,24 @@ impl OutboxPoller {
         .bind(row.generation)
         .execute(&self.pool)
         .await?;
-        metrics::counter!("moa_authz_outbox_retries_total").increment(1);
+        if result.rows_affected() == 1 {
+            tracing::warn!(
+                id = %row.id,
+                tuple = %claim.tuple_display(),
+                generation = row.generation,
+                attempts = next_attempts,
+                backoff_ms = backoff.as_millis() as u64,
+                error = %error,
+                "outbox row failed; backing off"
+            );
+            metrics::counter!("moa_authz_outbox_retries_total").increment(1);
+        } else {
+            tracing::debug!(
+                id = %row.id,
+                generation = row.generation,
+                "outbox failure ignored after lease or generation changed"
+            );
+        }
         Ok(())
     }
 
@@ -330,6 +452,13 @@ impl OutboxPoller {
         let millis = (self.cfg.backoff_base.as_millis() as u64).saturating_mul(multiplier);
         Duration::from_millis(millis).min(self.cfg.backoff_cap)
     }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct OutboxReceiptState {
+    id: Uuid,
+    generation: i64,
+    status: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -405,4 +534,28 @@ fn limit_i64(limit: usize) -> i64 {
 
 fn duration_millis_string(duration: Duration) -> String {
     duration.as_millis().to_string()
+}
+
+fn missed_claim_is_satisfied(status: Option<&str>) -> bool {
+    status == Some("succeeded")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::missed_claim_is_satisfied;
+
+    #[test]
+    fn missed_claim_accepts_only_same_generation_success() {
+        // Pins: after an exact `(id, generation)` claim loses a replica race,
+        // only a re-read `succeeded` state satisfies the visibility barrier.
+        assert!(missed_claim_is_satisfied(Some("succeeded")));
+        for status in [
+            None,
+            Some("pending"),
+            Some("in_flight"),
+            Some("dead_letter"),
+        ] {
+            assert!(!missed_claim_is_satisfied(status), "status={status:?}");
+        }
+    }
 }

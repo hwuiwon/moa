@@ -3,8 +3,9 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use moa_core::types::memory::RlsContext;
+use moa_core::types::memory::{InformationBarrierId, RlsContext};
 use moa_core::{config::MoaConfig, traits::EmbeddingProvider, types::identifiers::TenantId};
+use moa_crypto::KeyManagementProvider;
 use moa_knowledge::{
     chunking::ChunkingConfig,
     domain::{KnowledgeSyncRun, ParseInput, ParsedDocument, RecordPage},
@@ -53,6 +54,7 @@ pub trait KnowledgeIngestionRunner: Send + Sync {
 #[derive(Clone)]
 pub struct ProductionKnowledgeIngestionRunner {
     pool: sqlx::PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     config: MoaConfig,
     content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
 }
@@ -60,9 +62,10 @@ pub struct ProductionKnowledgeIngestionRunner {
 impl ProductionKnowledgeIngestionRunner {
     /// Creates a production ingestion runner from the shared graph pool and runtime config.
     #[must_use]
-    pub fn new(pool: sqlx::PgPool, config: MoaConfig) -> Self {
+    pub fn new(pool: sqlx::PgPool, kms: Arc<dyn KeyManagementProvider>, config: MoaConfig) -> Self {
         Self {
             pool,
+            kms,
             config,
             content_fetcher: None,
         }
@@ -91,10 +94,12 @@ impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
         let parser_label = selected_parser_label(&self.config, run);
         let pipeline = build_ingestion_pipeline(
             self.pool.clone(),
+            self.kms.clone(),
             run.tenant_id,
             &self.config,
             provider.to_string(),
             parser_label,
+            run.information_barrier.clone(),
             self.content_fetcher.clone(),
         )?;
         pipeline
@@ -114,10 +119,12 @@ impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
         // needed for this pipeline.
         let pipeline = build_ingestion_pipeline(
             self.pool.clone(),
+            self.kms.clone(),
             run.tenant_id,
             &self.config,
             provider.to_string(),
             parser_label,
+            run.information_barrier.clone(),
             None,
         )?;
         pipeline
@@ -139,15 +146,24 @@ type ProductionKnowledgeIngestionPipeline = KnowledgeIngestionPipeline<
     MemoryKnowledgeGraphWriter<PostgresGraphStore>,
 >;
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the production factory keeps storage, KMS, scope, parser, and content dependencies explicit"
+)]
 fn build_ingestion_pipeline(
     pool: sqlx::PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     tenant_id: TenantId,
     config: &MoaConfig,
     provider: String,
     parser_label: String,
+    information_barrier: Option<InformationBarrierId>,
     content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
 ) -> Result<ProductionKnowledgeIngestionPipeline, KnowledgeServiceError> {
     let scope = RlsContext::tenant(tenant_id);
+    let graph_scope = scope
+        .clone()
+        .with_cleared_barriers(information_barrier.clone().into_iter().collect());
     let repository = Arc::new(PostgresKnowledgeRepository::scoped(
         pool.clone(),
         scope.clone(),
@@ -159,16 +175,18 @@ fn build_ingestion_pipeline(
     ));
     let vector_backend = VectorStoreFactory::from_config(config).transactional_graph_backend(
         pool.clone(),
-        scope.clone(),
+        graph_scope.clone(),
         false,
     );
     let graph_store = Arc::new(
-        PostgresGraphStore::scoped(pool, scope).with_vector_store(vector_backend.vector_store()),
+        PostgresGraphStore::scoped(pool, graph_scope, kms)
+            .with_vector_store(vector_backend.vector_store()),
     );
     let graph = Arc::new(MemoryKnowledgeGraphWriter::new(
         graph_store,
         MemoryScope::Tenant { tenant_id },
         "knowledge_sync_ingestion",
+        information_barrier,
     ));
     Ok(KnowledgeIngestionPipeline::new(
         repository,

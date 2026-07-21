@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{types::contact::ContactId, types::identifiers::UserId};
-use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass, PostgresGraphStore};
+use moa_memory_graph::{NodeIndexRow, NodeLabel, PostgresGraphStore};
 use moa_memory_ingest::{
     FactExtractor, IngestApplyReport, IngestCtx, SessionTurn, chunk_turn, fact_hash,
     ingest_turn_direct_with_ctx,
@@ -472,7 +473,7 @@ fn match_by_source_overlap(candidates: &[NodeIndexRow], fact: &LedgerFact) -> Ve
             let predicate_matches = !predicate_tokens.is_empty()
                 && token_overlap_count(&candidate_tokens, &predicate_tokens) > 0;
             let redacted_pii_match = fact.expected_redacted
-                && candidate.pii_class != PiiClass::None
+                && candidate.pii_class != SensitivityClass::None
                 && (subject_matches || predicate_matches);
             redacted_pii_match || (object_matches && (subject_matches || predicate_matches))
         })
@@ -557,6 +558,7 @@ async fn expected_fact_hashes(
         transcript: source.turn.transcript.clone(),
         dominant_pii_class: fact.pii_class.as_str().to_string(),
         finalized_at: fact.valid_from,
+        barrier: None,
     };
     let chunks = chunk_turn(&turn, CHUNK_TARGET_TOKENS, CHUNK_OVERLAP_TOKENS).map_err(|error| {
         EvalError::InvalidConfig(format!(
@@ -668,11 +670,12 @@ fn ingest_ctx_for_turn(base: &IngestCtx, turn: &SessionTurn) -> IngestCtx {
         scope.clone(),
     ));
     let graph = Arc::new(
-        PostgresGraphStore::scoped_for_app_role(base.pool.clone(), scope)
+        PostgresGraphStore::scoped_for_app_role(base.pool.clone(), scope, base.kms.clone())
             .with_vector_store(vector.clone()),
     );
     IngestCtx::new(
         base.pool.clone(),
+        base.kms.clone(),
         graph,
         vector,
         base.embedder.clone(),
@@ -704,7 +707,7 @@ fn pii_status(fact: &LedgerFact, nodes: &[NodeIndexRow]) -> GoldPiiStatus {
                 stored_text_parts.push_str(&object);
             }
             let stored_text = normalize_match_text(&stored_text_parts);
-            let class_redacted = node.pii_class != PiiClass::None;
+            let class_redacted = node.pii_class != SensitivityClass::None;
             let object_absent =
                 sensitive_object.is_empty() || !stored_text.contains(&sensitive_object);
             if class_redacted && object_absent {
@@ -873,6 +876,7 @@ pub(crate) fn session_turn(
         transcript: source.turn.transcript.clone(),
         dominant_pii_class: dominant_pii_class(source.turn, facts)?,
         finalized_at: turn_finalized_at(source.turn, facts)?,
+        barrier: None,
     })
 }
 
@@ -880,7 +884,7 @@ pub(crate) fn dominant_pii_class(
     turn: &SyntheticTurn,
     facts: &HashMap<&str, &LedgerFact>,
 ) -> Result<String> {
-    let mut rank = 0_u8;
+    let mut rank = 0;
     let mut class = "none";
     for fact_id in &turn.fact_ids {
         let fact = facts.get(fact_id.as_str()).ok_or_else(|| {
@@ -889,22 +893,13 @@ pub(crate) fn dominant_pii_class(
                 turn.turn_seq, fact_id
             ))
         })?;
-        let candidate_rank = pii_rank(fact.pii_class);
+        let candidate_rank = fact.pii_class.rank();
         if candidate_rank > rank {
             rank = candidate_rank;
             class = fact.pii_class.as_str();
         }
     }
     Ok(class.to_string())
-}
-
-fn pii_rank(class: PiiClass) -> u8 {
-    match class {
-        PiiClass::None => 0,
-        PiiClass::Pii => 1,
-        PiiClass::Phi => 2,
-        PiiClass::Restricted => 3,
-    }
 }
 
 pub(crate) fn turn_finalized_at(
@@ -1118,13 +1113,13 @@ mod tests {
             "alice@example.com",
         );
         fact.expected_redacted = true;
-        fact.pii_class = PiiClass::Pii;
+        fact.pii_class = SensitivityClass::Pii;
         let mut candidate = node_row(
             6,
             "User 00 uses contact email [EMAIL_REDACTED]",
             "[EMAIL_REDACTED]",
         );
-        candidate.pii_class = PiiClass::Pii;
+        candidate.pii_class = SensitivityClass::Pii;
 
         let matches = match_by_source_overlap(std::slice::from_ref(&candidate), &fact);
 
@@ -1214,7 +1209,7 @@ mod tests {
             prior_successes: None,
             source_session_id: SessionId(uuid::Uuid::from_u128(1)),
             source_turn_seq: 1,
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         }
     }
@@ -1227,7 +1222,7 @@ mod tests {
             contact_id: None,
             scope: "tenant".to_string(),
             name: summary.to_string(),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             valid_to: None,
             valid_from: timestamp(),
             properties_summary: Some(json!({

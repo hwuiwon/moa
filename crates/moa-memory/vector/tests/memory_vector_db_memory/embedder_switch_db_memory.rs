@@ -2,6 +2,7 @@
 
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_db::ScopedConn;
 use moa_memory_vector::{
     Error, PgvectorStore, VECTOR_DIMENSION, VectorItem, VectorQuery, VectorStore,
@@ -56,7 +57,7 @@ fn item(
         uid,
         user_id: None,
         label: "Fact".to_string(),
-        pii_class: "none".to_string(),
+        pii_class: SensitivityClass::None,
         embedding,
         embedding_model: model.to_string(),
         embedding_model_version: version,
@@ -77,13 +78,16 @@ async fn scoped_conn<'a>(pool: &'a PgPool, storage_partition_id: &str) -> Scoped
 }
 
 async fn seed_node_index(pool: &PgPool, storage_partition_id: &str, uid: Uuid) {
+    let data_subject_id = Uuid::parse_str(storage_partition_id)
+        .expect("embedder storage partition fixture should be a tenant UUID");
     let mut conn = scoped_conn(pool, storage_partition_id).await;
     sqlx::query(
-        "INSERT INTO moa.node_index (uid, label, storage_partition_id, name, pii_class) \
-         VALUES ($1, 'Fact', $2, $3, 'none')",
+        "INSERT INTO moa.node_index (uid, label, storage_partition_id, data_subject_id, name, pii_class) \
+         VALUES ($1, 'Fact', $2, $3, $4, 'none')",
     )
     .bind(uid)
     .bind(storage_partition_id)
+    .bind(data_subject_id)
     .bind(format!("embedder switch {uid}"))
     .execute(conn.as_mut())
     .await
@@ -126,7 +130,7 @@ fn query(storage_partition_id: &str, embedding: Vec<f32>) -> VectorQuery {
         embedding,
         k: 5,
         label_filter: Some(vec!["Fact".to_string()]),
-        max_pii_class: "restricted".to_string(),
+        max_pii_class: SensitivityClass::Restricted,
         include_global: false,
         as_of: None,
     }

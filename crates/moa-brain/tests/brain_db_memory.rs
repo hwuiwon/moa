@@ -1,5 +1,15 @@
 //! Consolidated `_db_memory`-lane integration harness for moa-brain.
 
+use std::sync::{Arc, OnceLock};
+
+use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
+
+fn test_kms() -> Arc<dyn KeyManagementProvider> {
+    static KMS: OnceLock<Arc<dyn KeyManagementProvider>> = OnceLock::new();
+    KMS.get_or_init(|| Arc::new(LocalKmsProvider::new()))
+        .clone()
+}
+
 mod support;
 
 #[path = "brain_db_memory/artifact_skill_injection_db_memory.rs"]

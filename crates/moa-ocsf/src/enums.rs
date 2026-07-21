@@ -10,12 +10,16 @@ pub mod class_uid {
     pub const AUTHORIZATION: i32 = 3003;
     /// Entity Management.
     pub const ENTITY_MANAGEMENT: i32 = 3004;
+    /// Datastore Activity (memory data-access transparency).
+    pub const DATASTORE_ACTIVITY: i32 = 6005;
 }
 
 /// OCSF category UIDs.
 pub mod category_uid {
     /// Identity & Access Management.
     pub const IAM: i32 = 3;
+    /// Application Activity.
+    pub const APPLICATION_ACTIVITY: i32 = 6;
 }
 
 /// OCSF severity IDs.
@@ -80,6 +84,12 @@ pub mod entity_activity {
     pub const DELETE: i32 = 4;
     /// Other entity activity.
     pub const OTHER: i32 = 99;
+}
+
+/// Datastore Activity activity IDs.
+pub mod datastore_activity {
+    /// Read (a data-access / retrieval read of stored records).
+    pub const READ: i32 = 1;
 }
 
 /// Account Change activity IDs.

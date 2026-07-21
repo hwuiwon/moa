@@ -5,18 +5,22 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{types::memory::RlsContext, types::identifiers::SessionId, types::identifiers::StoragePartitionId, types::identifiers::UserId, traits::EmbeddingProvider};
+use moa_core::types::security::SensitivityClass;
+use moa_core::{
+    traits::EmbeddingProvider, types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId, types::identifiers::UserId, types::memory::RlsContext,
+};
 use moa_db::ScopedConn;
+use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_eval::memory_eval::{
     BootstrapConfig, CorpusProfile, GoldPiiStatus, GoldResolutionStatus, LedgerFact,
     MemoryRetrievalEvalOptions, RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K,
     SyntheticSession, SyntheticTurn, TranscriptStyle, build_cached_embedding_fixtures,
-    generate_memory_eval_corpus,
-    read_gold_nodes_jsonl, resolve_gold_nodes, run_memory_retrieval_eval,
-    tenant_id_from_storage_partition_id, write_embeddings_jsonl, write_gold_nodes_jsonl,
-    write_memory_eval_corpus,
+    generate_memory_eval_corpus, read_gold_nodes_jsonl, resolve_gold_nodes,
+    run_memory_retrieval_eval, tenant_id_from_storage_partition_id, write_embeddings_jsonl,
+    write_gold_nodes_jsonl, write_memory_eval_corpus,
 };
-use moa_memory_graph::{PostgresGraphStore, NodeLabel, PiiClass};
+use moa_memory_graph::{NodeLabel, PostgresGraphStore};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, IngestCtx, IngestError,
 };
@@ -65,7 +69,7 @@ struct GoldResolutionNoPiiClassifier;
 impl PiiClassifier for GoldResolutionNoPiiClassifier {
     async fn classify(&self, _text: &str) -> Result<PiiResult, PiiError> {
         Ok(PiiResult {
-            class: PiiClass::None,
+            class: SensitivityClass::None,
             spans: Vec::<PiiSpan>::new(),
             model_version: "gold-resolution-no-pii".to_string(),
             abstained: false,
@@ -83,7 +87,7 @@ impl ContradictionDetector for GoldResolutionInsertOnlyDetector {
         _fact_text: &str,
         _embedding: &[f32],
         _label: NodeLabel,
-        _pii_class: PiiClass,
+        _pii_class: SensitivityClass,
         _ctx: &ContradictionContext,
     ) -> Result<Conflict, IngestError> {
         Ok(Conflict::Insert)
@@ -100,6 +104,7 @@ impl ContradictionDetector for GoldResolutionInsertOnlyDetector {
 
 struct GoldResolutionStack {
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     database_url: String,
     schema_name: String,
 }
@@ -111,6 +116,7 @@ impl GoldResolutionStack {
             .map_err(Box::<dyn Error + Send + Sync>::from)?;
         Ok(Self {
             pool: session_store.pool().clone(),
+            kms: Arc::new(LocalKmsProvider::new()),
             database_url,
             schema_name,
         })
@@ -125,11 +131,16 @@ impl GoldResolutionStack {
             scope.clone(),
         ));
         let graph = Arc::new(
-            PostgresGraphStore::scoped_for_app_role(self.pool.clone(), scope)
+            PostgresGraphStore::scoped_for_app_role(
+                self.pool.clone(),
+                scope,
+                self.kms.clone(),
+            )
                 .with_vector_store(vector.clone()),
         );
         Ok(IngestCtx::new(
             self.pool.clone(),
+            self.kms.clone(),
             graph,
             vector,
             Arc::new(GoldResolutionEmbedder),
@@ -523,7 +534,7 @@ fn gold_fact(spec: GoldFactSpec) -> LedgerFact {
         prior_successes: None,
         source_session_id: spec.source_session_id,
         source_turn_seq: spec.source_turn_seq,
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         expected_redacted: false,
     }
 }

@@ -37,14 +37,14 @@ domain crates rather than moving into `moa-core`.
 | Crate | Owns |
 |---|---|
 | `moa-memory/types` | Memory-specific runtime scopes such as `MemoryScope` and `ScopeTier`, plus conversion into `moa_core::types::memory::RlsContext` at memory boundaries |
-| `moa-memory/graph` | Relational graph-primary storage, `GraphStore`, `PostgresGraphStore`, node/edge labels, write intents, `PiiClass`, changelog rows, lexical index types |
+| `moa-memory/graph` | Relational graph-primary storage, `GraphStore`, `PostgresGraphStore`, node/edge labels, write intents, changelog rows, lexical index types |
 | `moa-memory/vector` | Embedding and vector-index abstractions, `VectorStore`, `PgvectorStore`, `TurbopufferStore`, vector query/result DTOs |
 | `moa-memory/pii` | Privacy classification and redaction clients, `PiiClassifier`, `PiiResult`, `PiiSpan`, `PiiCategory` |
 | `moa-memory/ingest` | Ingestion DTOs, `IngestionVO`, fast memory writes, contradiction detection |
 
-`PiiClass` lives in `moa-memory/graph` because it is persisted on graph nodes
-and used for retrieval filtering. The classifier crate re-exports it but does
-not define its own privacy class enum.
+`moa_core::types::security::SensitivityClass` is the sole sensitivity type. It
+is persisted on graph nodes and used across graph, vector, classifier,
+governance, and retrieval boundaries without crate-local aliases or re-exports.
 
 ### Auth crates
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    error::MoaError, error::Result, events::Event, traits::SessionStore,
+    error::MoaError, error::Result, events::Event, traits::Identity, traits::SessionStore,
     types::action_policy::ActionPolicyEffect, types::completion::ToolCallContent,
     types::completion::ToolInvocation, types::events_stream::EventRecord,
     types::identifiers::SessionId, types::identifiers::ToolCallId,
@@ -37,6 +37,7 @@ pub(super) struct DurableToolFailure {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_tool_call(
+    caller_identity: &Identity,
     session_id: SessionId,
     session: &SessionMeta,
     session_store: Arc<dyn SessionStore>,
@@ -141,6 +142,7 @@ pub(super) async fn handle_tool_call(
                 detail: None,
             }));
             execute_tool(
+                caller_identity,
                 session_id,
                 session,
                 session_store,
@@ -254,6 +256,7 @@ pub(super) async fn handle_tool_call(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_tool(
+    caller_identity: &Identity,
     session_id: SessionId,
     session: &SessionMeta,
     session_store: Arc<dyn SessionStore>,
@@ -296,8 +299,16 @@ pub(super) async fn execute_tool(
         moa.tool.duration_ms = tracing::field::Empty,
     );
     let started_at = Instant::now();
+    let mut execution_call = call.clone();
+    execution_call.id = Some(tool_id.to_string());
     let execution_result = tool_router
-        .execute_authorized_with_cancel(session, call, cancel_token, hard_cancel_token)
+        .execute_authorized_with_cancel(
+            session,
+            caller_identity,
+            &execution_call,
+            cancel_token,
+            hard_cancel_token,
+        )
         .instrument(tool_span.clone())
         .await;
     let duration_ms = started_at.elapsed().as_millis() as i64;

@@ -3,9 +3,10 @@
 use chrono::{DateTime, Duration, Utc};
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    EdgeLabel, EdgeWriteIntent, GraphStore, GraphWalkScoring, NodeLabel, NodeWriteIntent, PiiClass,
+    EdgeLabel, EdgeWriteIntent, GraphStore, GraphWalkScoring, NodeLabel, NodeWriteIntent,
     PostgresGraphStore,
 };
 use moa_session::testing;
@@ -44,6 +45,7 @@ async fn graph_store_create_node_projects_relational_node_index_row() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
+        super::test_kms(),
     );
 
     let created = graph
@@ -86,20 +88,22 @@ async fn graph_store_create_node_projects_relational_node_index_row() {
 
 async fn seed_node(pool: &sqlx::PgPool, storage_partition_id: &str, uid: Uuid, name: &str) {
     let ctx = tenant_scope(storage_partition_id);
+    let data_subject_id = ctx.tenant_id().0;
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin scoped seed transaction");
     set_app_role(conn.as_mut()).await;
     sqlx::query(
         "INSERT INTO moa.node_index \
-         (uid, label, storage_partition_id, name, pii_class, confidence) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
+         (uid, label, storage_partition_id, data_subject_id, name, pii_class, confidence) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(uid)
     .bind(NodeLabel::Fact.as_str())
     .bind(storage_partition_id)
+    .bind(data_subject_id)
     .bind(name)
-    .bind(PiiClass::None.as_str())
+    .bind(SensitivityClass::None.as_str())
     .bind(0.99_f64)
     .execute(conn.as_mut())
     .await
@@ -129,14 +133,16 @@ fn node_intent(
     valid_from: DateTime<Utc>,
 ) -> NodeWriteIntent {
     NodeWriteIntent {
+        barrier: None,
         uid,
+        data_subject_id: tenant_scope(storage_partition_id).tenant_id().0,
         label,
         storage_partition_id: Some(storage_partition_id.to_string()),
         contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "source": "read_smoke" }),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         confidence: Some(0.99),
         valid_from,
         embedding: None,
@@ -241,6 +247,7 @@ async fn read_smoke_get_node_and_lookup_seeds() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
+        super::test_kms(),
     );
     let row = graph
         .get_node(uid)
@@ -295,6 +302,7 @@ async fn lookup_seeds_prefers_exact_name_over_same_shape_siblings() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
+        super::test_kms(),
     );
     let seeds = graph
         .lookup_seeds("audit-shipper-dep-0-0-0", 10, None)
@@ -323,6 +331,7 @@ async fn graph_neighbors_with_no_as_of_returns_active_rows_only() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
+        super::test_kms(),
     );
     let (old_uid, new_uid, target_uid, _, _) =
         create_superseded_neighbor_case(&graph, &storage_partition_id, &run_id).await;
@@ -354,6 +363,7 @@ async fn graph_neighbors_as_of_returns_superseded_node_inside_window() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
+        super::test_kms(),
     );
     let (old_uid, _, target_uid, old_valid_from, _) =
         create_superseded_neighbor_case(&graph, &storage_partition_id, &run_id).await;
@@ -389,6 +399,7 @@ async fn lookup_seeds_as_of_includes_invalidated_node_inside_window() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
+        super::test_kms(),
     );
     let (old_uid, new_uid, _, old_valid_from, _) =
         create_superseded_neighbor_case(&graph, &storage_partition_id, &run_id).await;
@@ -430,6 +441,7 @@ async fn expand_seeds_returns_two_hop_fact_via_shared_entity() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
+        super::test_kms(),
     );
     let valid_from = utc("2026-02-01T00:00:00Z");
     let source_uid = Uuid::now_v7();
@@ -534,6 +546,7 @@ async fn expand_seeds_reaches_both_edge_directions_from_one_seed() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
+        super::test_kms(),
     );
     let valid_from = utc("2026-02-01T00:00:00Z");
     let seed_uid = Uuid::now_v7();
@@ -623,6 +636,7 @@ async fn expand_seeds_traverses_incoming_subject_edge_from_fact_seed() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
+        super::test_kms(),
     );
     let valid_from = utc("2026-02-01T00:00:00Z");
     let seed_uid = Uuid::now_v7();
@@ -733,6 +747,7 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
+        super::test_kms(),
     );
     let old_valid_from = utc("2026-02-01T00:00:00Z");
     let new_valid_from = utc("2026-04-01T00:00:00Z");

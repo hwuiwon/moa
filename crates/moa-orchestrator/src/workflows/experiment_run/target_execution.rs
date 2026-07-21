@@ -68,6 +68,7 @@ struct CompiledExperimentTemplate {
 pub(super) async fn run_agent_loop_target(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
+    scope: ActionRuleScope,
     prompt: String,
     session_id: Option<SessionId>,
     agent: Option<AgentSessionSelection>,
@@ -77,10 +78,9 @@ pub(super) async fn run_agent_loop_target(
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     let variant = parse_payload::<ExperimentVariant>("variant", request.variant.clone())?;
-    let scope = tenant_scope(request.tenant_id);
     persist_run_status(
         ctx,
-        request.tenant_id,
+        scope,
         request.run_uid,
         ExperimentRunStatus::Running,
         None,
@@ -113,8 +113,6 @@ pub(super) async fn run_agent_loop_target(
             )
             .call()
             .await?;
-            // The session authz tuples are applied through the normal outbox poller.
-            ctx.sleep(Duration::from_millis(750)).await?;
             session_id
         }
     };
@@ -158,6 +156,7 @@ pub(super) async fn run_agent_loop_target(
 pub(super) async fn run_execution_template_target(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
+    scope: ActionRuleScope,
     template: PinnedExecutionTemplateRef,
     objective: String,
     input: Value,
@@ -179,10 +178,9 @@ pub(super) async fn run_execution_template_target(
         )
         .into());
     }
-    let scope = tenant_scope(request.tenant_id);
     persist_run_status(
         ctx,
-        request.tenant_id,
+        scope,
         request.run_uid,
         ExperimentRunStatus::Running,
         None,
@@ -295,7 +293,7 @@ pub(super) async fn run_execution_template_target(
         execution_run_uid,
     )
     .await?;
-    finalize_run_status(ctx, request.tenant_id, request.run_uid, status, error, pool).await?;
+    finalize_run_status(ctx, scope, request.run_uid, status, error, pool).await?;
 
     run_status_response(
         ctx,
@@ -363,16 +361,24 @@ async fn ensure_execution_session(
     let init_pool = pool.clone();
     let init_meta = meta.clone();
     let identity = request.identity.clone();
+    let fga = crate::handlers::authz_shim::require_fga_client()?;
     let initialized = ctx
         .run(|| async move {
-            crate::services::session_store::inner::initialize_internal_execution_session_atomic(
+            let initialized = crate::services::session_store::inner::initialize_internal_execution_session_atomic(
                 store.as_ref(),
                 &init_pool,
                 init_meta,
-                identity,
+                identity.clone(),
             )
-            .await
-            .map(Json::from)
+            .await?;
+            crate::services::session_store::inner::ensure_session_authz_visible(
+                &init_pool,
+                &fga,
+                &identity,
+                initialized,
+            )
+            .await?;
+            Ok::<_, HandlerError>(Json::from(initialized))
         })
         .name("experiment_initialize_internal_execution_session")
         .await?
@@ -399,23 +405,14 @@ async fn ensure_execution_session(
 
 async fn finalize_run_status(
     ctx: &WorkflowContext<'_>,
-    tenant_id: TenantId,
+    scope: ActionRuleScope,
     run_uid: Uuid,
     status: ExperimentRunStatus,
     error: Option<String>,
     pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
     let completed_at = durable_utc_now(ctx, "experiment_utc_now").await?;
-    persist_run_status(
-        ctx,
-        tenant_id,
-        run_uid,
-        status,
-        error,
-        Some(completed_at),
-        pool,
-    )
-    .await
+    persist_run_status(ctx, scope, run_uid, status, error, Some(completed_at), pool).await
 }
 
 async fn create_new_session(
@@ -427,20 +424,34 @@ async fn create_new_session(
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<(SessionId, SessionMeta), HandlerError> {
+    let prepare_identity = request.identity.clone();
+    let prepare_pool = pool.clone();
+    let meta = ctx
+        .run(|| async move {
+            let mut meta = new_session_meta(tenant_id, model, &prepare_identity)?;
+            let agent_context =
+                resolve_agent_context_for_session(prepare_pool, &meta, &agent).await?;
+            apply_agent_model_policy(&mut meta, &agent_context)?;
+            meta.agent_context = Some(agent_context);
+            Ok::<_, HandlerError>(Json::from(meta))
+        })
+        .name("experiment_prepare_session")
+        .await?
+        .into_inner();
     let store = session_store.clone();
     let pool = pool.clone();
     let identity = request.identity.clone();
+    let fga = crate::handlers::authz_shim::require_fga_client()?;
     Ok(ctx
         .run(|| async move {
-            let mut meta = new_session_meta(tenant_id, model, &identity)?;
-            let agent_context =
-                resolve_agent_context_for_session(pool.clone(), &meta, &agent).await?;
-            apply_agent_model_policy(&mut meta, &agent_context)?;
-            meta.agent_context = Some(agent_context);
             let session_id =
-                create_session_for_identity(store.as_ref(), &pool, meta.clone(), identity)
+                create_session_for_identity(store.as_ref(), &pool, meta.clone(), identity.clone())
                     .await
                     .map_err(non_retryable_handler_error)?;
+            crate::services::session_store::inner::ensure_session_authz_visible(
+                &pool, &fga, &identity, session_id,
+            )
+            .await?;
             Ok::<_, HandlerError>(Json::from((session_id, meta)))
         })
         .name("experiment_create_session")

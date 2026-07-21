@@ -11,10 +11,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_brain::pipeline::ContextPipeline;
 use moa_brain::pipeline::memory::OFFER_RETRIEVAL_TOOLS_METADATA_KEY;
-use moa_brain::{TurnResult, run_brain_turn};
+use moa_brain::{BrainTurnRequest, TurnResult, run_brain_turn};
 use moa_core::{
-    config::MoaConfig, error::Result, events::Event, traits::ContextProcessor, traits::LLMProvider,
-    traits::MemoryRetrievalExecutor, traits::SessionStore, types::completion::CompletionContent,
+    config::MoaConfig, error::Result, events::Event, traits::ContextProcessor, traits::Identity,
+    traits::IdentityType, traits::LLMProvider, traits::MemoryRetrievalExecutor,
+    traits::SessionStore, types::completion::CompletionContent,
     types::completion::CompletionRequest, types::completion::CompletionResponse,
     types::completion::CompletionStream, types::completion::StopReason,
     types::completion::TokenUsage, types::completion::ToolCallContent,
@@ -97,6 +98,8 @@ impl MemoryRetrievalExecutor for TestRetrievalExecutor {
     async fn execute_retrieval_tool(
         &self,
         _session: &SessionMeta,
+        _caller_identity: &Identity,
+        _retrieval_operation_id: &str,
         tool_name: &str,
         _input: &Value,
     ) -> Result<ToolOutput> {
@@ -269,6 +272,7 @@ fn request_tool_names(request: &CompletionRequest) -> Vec<String> {
 async fn run_capturing_turn(offer: bool) -> Vec<String> {
     let config = MoaConfig::default();
     let session = session_meta("agentic-memory-gate", "claude-sonnet-4-6");
+    let identity = test_identity(session.tenant_id);
     let session_id = session.id;
     let store = Arc::new(MockSessionStore::new(session, Vec::new()));
     store
@@ -292,13 +296,14 @@ async fn run_capturing_turn(offer: bool) -> Vec<String> {
     let pipeline = pipeline_with_gate(&config, store.clone(), tool_router.tool_schemas(), offer);
     let provider = Arc::new(CapturingProvider::new());
 
-    let result = run_brain_turn(
+    let result = run_brain_turn(BrainTurnRequest {
+        identity,
         session_id,
-        store.clone(),
-        provider.clone(),
-        &pipeline,
-        Some(tool_router),
-    )
+        session_store: store.clone(),
+        llm_provider: provider.clone(),
+        pipeline: &pipeline,
+        tool_router: Some(tool_router),
+    })
     .await
     .unwrap();
     assert_eq!(result, TurnResult::Complete);
@@ -339,6 +344,7 @@ async fn offered_memory_search_executes_and_returns_provenance() {
     // source_uri) so tool-derived answers stay citable.
     let config = MoaConfig::default();
     let session = session_meta("agentic-memory-exec", "claude-sonnet-4-6");
+    let identity = test_identity(session.tenant_id);
     let session_id = session.id;
     let store = Arc::new(MockSessionStore::new(session, Vec::new()));
     store
@@ -362,13 +368,14 @@ async fn offered_memory_search_executes_and_returns_provenance() {
     let pipeline = pipeline_with_gate(&config, store.clone(), tool_router.tool_schemas(), true);
     let provider = Arc::new(MemorySearchThenEndProvider::default());
 
-    let result = run_brain_turn(
+    let result = run_brain_turn(BrainTurnRequest {
+        identity,
         session_id,
-        store.clone(),
-        provider.clone(),
-        &pipeline,
-        Some(tool_router),
-    )
+        session_store: store.clone(),
+        llm_provider: provider.clone(),
+        pipeline: &pipeline,
+        tool_router: Some(tool_router),
+    })
     .await
     .unwrap();
     assert_eq!(result, TurnResult::Complete);
@@ -403,4 +410,14 @@ async fn offered_memory_search_executes_and_returns_provenance() {
         hit["source_uri"],
         json!("https://kb.example.invalid/rotation")
     );
+}
+
+fn test_identity(tenant_id: moa_core::types::identifiers::TenantId) -> Identity {
+    Identity {
+        identity_type: IdentityType::Operator,
+        id: Uuid::from_u128(1),
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    }
 }

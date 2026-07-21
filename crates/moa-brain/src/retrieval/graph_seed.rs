@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass, push_validity_filter};
+use moa_memory_graph::{NodeIndexRow, NodeLabel, push_validity_filter};
 use moa_memory_types::MemoryScope;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -111,7 +111,15 @@ pub(crate) async fn hydrate_graph_seed_rows(
             .map(|(uid, _, _)| *uid)
             .filter(|uid| seen.insert(*uid)),
     );
-    hydrate_nodes(pool, &req.scope, &uids, assume_app_role, req.as_of).await
+    hydrate_nodes(
+        pool,
+        &req.scope,
+        &req.cleared_barriers,
+        &uids,
+        assume_app_role,
+        req.as_of,
+    )
+    .await
 }
 
 /// Looks up exact semantic entity graph seeds for explicit slow policies.
@@ -136,7 +144,7 @@ pub(crate) async fn semantic_entity_seed_uids(
         return Ok(Vec::new());
     }
 
-    let mut conn = begin_scoped(pool, &req.scope, assume_app_role).await?;
+    let mut conn = begin_scoped(pool, &req.scope, &req.cleared_barriers, assume_app_role).await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid
@@ -160,7 +168,7 @@ pub(crate) async fn semantic_entity_seed_uids(
                 ELSE 4
               END <= "#,
     );
-    builder.push_bind(semantic_seed_pii_rank(req.max_pii_class));
+    builder.push_bind(req.max_pii_class.rank());
     builder.push(
         r#"
         ORDER BY (
@@ -203,15 +211,6 @@ fn semantic_entity_seed_terms(query_text: &str) -> Vec<String> {
         .filter(|term| !STOP_WORDS.contains(&term.as_str()))
         .take(SEMANTIC_ENTITY_GRAPH_SEED_LIMIT)
         .collect()
-}
-
-const fn semantic_seed_pii_rank(class: PiiClass) -> i32 {
-    match class {
-        PiiClass::None => 0,
-        PiiClass::Pii => 1,
-        PiiClass::Phi => 2,
-        PiiClass::Restricted => 3,
-    }
 }
 
 fn exact_phase_one_seed_uids(rows: &[NodeIndexRow], query_text: &str) -> HashSet<Uuid> {
@@ -261,6 +260,7 @@ fn interim_graph_seed_strengths(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use moa_core::types::security::SensitivityClass;
 
     use super::*;
 
@@ -427,7 +427,7 @@ mod tests {
             contact_id: None,
             scope: "tenant".to_string(),
             name: name.to_string(),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             valid_to: None,
             valid_from: Utc::now(),
             properties_summary: None,

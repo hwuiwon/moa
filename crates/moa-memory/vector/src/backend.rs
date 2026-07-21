@@ -14,9 +14,10 @@ use crate::{
     Error, PgvectorStore, Result, TurbopufferStore, VectorItem, VectorQuery, VectorStore,
     VectorSyncOperation, VectorSyncReport,
     sync::{
-        VECTOR_SYNC_POST_COMMIT_LIMIT, VectorSyncJob, claim_pending_vector_sync,
-        enqueue_external_vector_sync, fetch_current_vector_items, mark_vector_sync_failed_batch,
-        mark_vector_sync_processed_batch, redrive_dead_lettered_vector_sync,
+        VECTOR_SYNC_POST_COMMIT_LIMIT, VectorSyncJob, begin_vector_sync_remote_guard,
+        claim_pending_vector_sync, enqueue_external_vector_sync, fetch_current_vector_items,
+        mark_vector_sync_failed_batch, mark_vector_sync_processed_batch,
+        redrive_dead_lettered_vector_sync,
     },
 };
 
@@ -184,32 +185,47 @@ impl VectorStoreFactory {
         };
 
         for (storage_partition_id, jobs) in group_jobs_by_partition(jobs) {
-            let target = match self
+            let Some(remote_guard) =
+                begin_vector_sync_remote_guard(pool, &storage_partition_id).await?
+            else {
+                let job_refs = jobs.iter().collect::<Vec<_>>();
+                mark_vector_sync_processed_batch(pool, &job_refs).await?;
+                report.skipped += jobs.len() as u64;
+                continue;
+            };
+            if remote_guard.is_fenced() {
+                let job_refs = jobs.iter().collect::<Vec<_>>();
+                mark_vector_sync_processed_batch(pool, &job_refs).await?;
+                report.skipped += jobs.len() as u64;
+                remote_guard.finish().await?;
+                continue;
+            }
+
+            match self
                 .external_for_storage_partition(pool, &storage_partition_id)
                 .await
             {
-                Ok(Some(target)) => target,
+                Ok(Some(target)) => {
+                    self.drain_external_sync_partition(
+                        pool,
+                        target,
+                        &storage_partition_id,
+                        &jobs,
+                        &mut report,
+                    )
+                    .await?;
+                }
                 Ok(None) => {
                     let job_refs = jobs.iter().collect::<Vec<_>>();
                     mark_vector_sync_processed_batch(pool, &job_refs).await?;
                     report.skipped += jobs.len() as u64;
-                    continue;
                 }
                 Err(error) => {
                     let job_refs = jobs.iter().collect::<Vec<_>>();
                     fail_vector_sync_jobs(pool, &job_refs, &error, &mut report).await?;
-                    continue;
                 }
-            };
-
-            self.drain_external_sync_partition(
-                pool,
-                target,
-                &storage_partition_id,
-                &jobs,
-                &mut report,
-            )
-            .await?;
+            }
+            remote_guard.finish().await?;
         }
 
         Ok(report)

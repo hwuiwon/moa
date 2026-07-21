@@ -510,9 +510,15 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use moa_core::{
-        types::events_stream::ClaimCheck, types::events_stream::EventFilter,
-        types::identifiers::SessionId, types::identifiers::TenantId, types::session::SessionFilter,
-        types::session::SessionMeta, types::session::SessionStatus, types::session::SessionSummary,
+        traits::{Identity, IdentityType},
+        types::events_stream::ClaimCheck,
+        types::events_stream::EventFilter,
+        types::identifiers::SessionId,
+        types::identifiers::TenantId,
+        types::session::SessionFilter,
+        types::session::SessionMeta,
+        types::session::SessionStatus,
+        types::session::SessionSummary,
     };
 
     use super::*;
@@ -651,8 +657,11 @@ mod tests {
                 "line 1\nline 2\nline 3\n".to_string(),
             )]),
         };
+        let caller_identity = test_identity(session.tenant_id);
         let ctx = ToolContext {
             session: &session,
+            caller_identity: &caller_identity,
+            tool_call_id: None,
             lineage: &moa_core::traits::NULL_LINEAGE_HANDLE,
             session_store: Some(&store),
             cancel_token: None,
@@ -697,8 +706,11 @@ mod tests {
             )],
             artifacts: std::collections::HashMap::new(),
         };
+        let caller_identity = test_identity(session.tenant_id);
         let ctx = ToolContext {
             session: &session,
+            caller_identity: &caller_identity,
+            tool_call_id: None,
             lineage: &moa_core::traits::NULL_LINEAGE_HANDLE,
             session_store: Some(&store),
             cancel_token: None,
@@ -720,5 +732,15 @@ mod tests {
 
         assert!(output.to_text().contains("line 3"));
         assert!(output.to_text().contains(">  3 | needle"));
+    }
+
+    fn test_identity(tenant_id: TenantId) -> Identity {
+        Identity {
+            identity_type: IdentityType::Operator,
+            id: Uuid::from_u128(1),
+            tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        }
     }
 }

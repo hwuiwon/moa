@@ -12,6 +12,11 @@ use moa_core::{
 use tokio::sync::RwLock;
 
 /// MCP credential resolver that reads real credentials from a vault only at call time.
+///
+/// This is the outbound-to-external-MCP boundary: it resolves per-call
+/// credentials from the vault. Data-class egress governance lives on the tool
+/// router in `moa-hands`, which drives [`crate::mcp_egress::McpEgressGuard`]
+/// directly before dispatch — not here.
 pub struct MCPCredentialProxy {
     vault: Arc<dyn CredentialVault>,
 }

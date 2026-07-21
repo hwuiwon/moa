@@ -7,6 +7,9 @@ include!("brain_turn_support/db.rs");
 #[cfg(feature = "eval-harness")]
 include!("brain_turn_support/session_search.rs");
 
+#[cfg(feature = "eval-harness")]
+use moa_brain::BrainTurnRequest;
+
 static BRAIN_TURN_SESSION_SEARCH_DB_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
 
@@ -233,13 +236,14 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
     );
     let llm = Arc::new(SessionSearchArtifactLlmProvider::new(old_tool_id));
 
-    let result = run_brain_turn(
-        session.id,
-        store.clone(),
-        llm.clone(),
-        &pipeline,
-        Some(tool_router),
-    )
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id: session.id,
+        session_store: store.clone(),
+        llm_provider: llm.clone(),
+        pipeline: &pipeline,
+        tool_router: Some(tool_router),
+    })
     .await
     .unwrap();
 
@@ -333,13 +337,14 @@ async fn auto_mode_repeated_tool_runs_without_persisted_action_policy_rules() {
     );
     let llm = Arc::new(RepeatingToolLlmProvider::default());
 
-    let first = run_brain_turn(
+    let first = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(test_tenant_id()),
         session_id,
-        store.clone(),
-        llm.clone(),
-        &pipeline,
-        Some(tool_router.clone()),
-    )
+        session_store: store.clone(),
+        llm_provider: llm.clone(),
+        pipeline: &pipeline,
+        tool_router: Some(tool_router.clone()),
+    })
     .await
     .unwrap();
     assert_eq!(first, TurnResult::Complete);
@@ -363,13 +368,14 @@ async fn auto_mode_repeated_tool_runs_without_persisted_action_policy_rules() {
         .await
         .unwrap();
 
-    let final_result = run_brain_turn(
+    let final_result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(test_tenant_id()),
         session_id,
-        store.clone(),
-        llm.clone(),
-        &pipeline,
-        Some(tool_router),
-    )
+        session_store: store.clone(),
+        llm_provider: llm.clone(),
+        pipeline: &pipeline,
+        tool_router: Some(tool_router),
+    })
     .await
     .unwrap();
 

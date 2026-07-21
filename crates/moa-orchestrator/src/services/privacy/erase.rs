@@ -1,14 +1,18 @@
 //! Privacy erasure orchestration across graph memory and PII vault state.
 
 use moa_core::wire::privacy::{ContactErasureScope, PrivacyEraseResponse, PrivacyEraseStatus};
-use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::UserId};
+use moa_core::{
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::identifiers::UserId,
+};
 use moa_lineage_audit::PiiVault;
 use moa_memory_pii::erasure::{
-    EraseCandidate, GraphErasureAudit, delete_subject_digests, delete_subject_retrieval_lineage,
-    enumerate_erase_candidates, hard_purge_erase_candidates,
+    EraseCandidate, GraphErasureAudit, crypto_shred_erased_subject, delete_subject_digests,
+    delete_subject_retrieval_lineage, enumerate_erase_candidates, hard_purge_erase_candidates,
 };
 use restate_sdk::prelude::*;
 use serde_json::json;
+use sqlx::PgPool;
 
 use super::context::{PrivacyEraseContext, PrivacySubject};
 use super::repository::{
@@ -45,12 +49,32 @@ pub async fn run_privacy_erase(
     )
     .await?;
     validate_contact_erasure_scope(&ctx, resolved.kind)?;
+
+    // Legal hold overrides right-to-erasure: if any included subject (or the
+    // tenant) is under an active hold, refuse the erase before enumerating,
+    // claiming the approval JTI, or writing anything. Failing closed here keeps
+    // the erase atomic (nothing is partially erased then blocked), leaves the
+    // approval token unspent so a retry after release still verifies, and lets a
+    // later request resume normally once the hold is lifted.
+    if subjects_under_legal_hold(&ctx, &resolved.subjects).await? {
+        return Ok(blocked_by_legal_hold_response(&ctx));
+    }
+
     let candidate_groups = enumerate_subject_erase_candidates(&ctx, &resolved.subjects).await?;
     let candidates = flatten_erase_candidates(&candidate_groups);
 
     if ctx.dry_run {
         return Ok(dry_run_response(&ctx, &candidates));
     }
+
+    // Four-eyes gate: when the tenant policy requires dual control for erasure,
+    // consume a distinct second-admin approval bound to this exact request before
+    // any destructive work. Fails closed (403) when no valid approval exists, so
+    // nothing is purged or crypto-shredded without it. A no-op when the policy is
+    // off, preserving the single-admin erasure behavior. Placed after the dry-run
+    // short-circuit so a dry run never consumes an approval, and before
+    // `claim_erasure_job` so the destructive path is never entered unapproved.
+    ensure_erase_dual_control(&ctx).await?;
 
     // Bind the approval JTI to one durable, resumable job. A Restate re-execution
     // of the same request resumes from the persisted stage instead of hitting a
@@ -72,7 +96,40 @@ pub async fn run_privacy_erase(
         job.candidate_count
     };
 
+    let destruction_subjects = resolved
+        .subjects
+        .iter()
+        .map(|subject| subject.target_uid)
+        .collect::<Vec<_>>();
+    let destruction_operation_id = destruction_operation_id(ctx.tenant_id, &destruction_subjects);
+    match moa_memory_pii::legal_hold::start_destruction(
+        &ctx.pool,
+        ctx.tenant_id,
+        &destruction_subjects,
+        &destruction_operation_id,
+        DUAL_CONTROL_OPERATION_ERASE,
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(moa_memory_pii::legal_hold::LegalHoldError::ActiveHold) => {
+            return Ok(blocked_by_legal_hold_response(&ctx));
+        }
+        Err(error) => return Err(handler_error(error)),
+    }
+
     if job.completed {
+        // `complete_erasure_job` and the fence completion are separate durable
+        // commits. A crash between them resumes here, so close that gap before
+        // reporting success instead of leaving an in-progress fence forever.
+        moa_memory_pii::legal_hold::complete_destruction(
+            &ctx.pool,
+            ctx.tenant_id,
+            &destruction_subjects,
+            &destruction_operation_id,
+        )
+        .await
+        .map_err(handler_error)?;
         return Ok(erase_response(
             &ctx,
             candidate_count,
@@ -87,10 +144,19 @@ pub async fn run_privacy_erase(
         &candidate_groups,
         candidate_count,
         job,
+        &destruction_operation_id,
     )
     .await?;
 
     complete_erasure_job(&ctx.pool, &ctx.claims.jti, &progress).await?;
+    moa_memory_pii::legal_hold::complete_destruction(
+        &ctx.pool,
+        ctx.tenant_id,
+        &destruction_subjects,
+        &destruction_operation_id,
+    )
+    .await
+    .map_err(handler_error)?;
 
     Ok(erase_response(&ctx, candidate_count, &candidates, progress))
 }
@@ -103,24 +169,66 @@ async fn run_erasure_stages(
     candidate_groups: &[(PrivacySubject, Vec<EraseCandidate>)],
     candidate_count: u64,
     job: ClaimedErasureJob,
+    destruction_operation_id: &str,
 ) -> Result<ErasureJobProgress, HandlerError> {
     let mut progress = job.progress;
+    let destruction_subjects = subjects
+        .iter()
+        .map(|subject| subject.target_uid)
+        .collect::<Vec<_>>();
 
     if progress.stage == ErasureJobStage::Vault {
+        let guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
+            &ctx.pool,
+            ctx.tenant_id,
+            &destruction_subjects,
+            destruction_operation_id,
+        )
+        .await
+        .map_err(handler_error)?;
         progress.pii_vault_erased = erase_pii_vault_subjects(ctx, subjects).await?;
+        guard.finish().await.map_err(handler_error)?;
         progress.stage = ErasureJobStage::Graph;
         save_erasure_job_progress(&ctx.pool, &ctx.claims.jti, &progress).await?;
     }
 
     if progress.stage == ErasureJobStage::Graph {
+        let graph_guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
+            &ctx.pool,
+            ctx.tenant_id,
+            &destruction_subjects,
+            destruction_operation_id,
+        )
+        .await
+        .map_err(handler_error)?;
         for (subject, subject_candidates) in candidate_groups {
-            if subject_candidates.is_empty() {
-                continue;
-            }
             hard_purge_erase_candidates(
                 &ctx.pool,
                 &graph_erasure_audit(ctx, subject),
                 subject_candidates,
+            )
+            .await
+            .map_err(handler_error)?;
+        }
+        graph_guard.finish().await.map_err(handler_error)?;
+        // Defense-in-depth: after hard-purging the live rows, destroy each
+        // subject's per-subject KEK so any sealed restricted/PHI content is
+        // cryptographically unrecoverable even where a `DELETE` cannot reach
+        // (backups, read replicas, WAL). Idempotent, so a resumed Graph stage
+        // re-shreds harmlessly; every subject is shredded even when it had no
+        // enumerated live candidates.
+        //
+        // `subject.target_uid` is the write-time `subject_id` (a contact's
+        // UUID), matching how the graph write path keyed the KEK. KMS is a
+        // required context dependency: erasure fails instead of silently
+        // skipping crypto-shred when composition is incomplete.
+        for subject in subjects {
+            crypto_shred_erased_subject(
+                &ctx.pool,
+                ctx.kms.as_ref(),
+                ctx.tenant_id,
+                subject.target_uid,
+                destruction_operation_id,
             )
             .await
             .map_err(handler_error)?;
@@ -134,6 +242,14 @@ async fn run_erasure_stages(
     }
 
     if progress.stage == ErasureJobStage::Digest {
+        let guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
+            &ctx.pool,
+            ctx.tenant_id,
+            &destruction_subjects,
+            destruction_operation_id,
+        )
+        .await
+        .map_err(handler_error)?;
         let mut deleted = 0u64;
         for subject in subjects {
             deleted = deleted.saturating_add(
@@ -142,12 +258,21 @@ async fn run_erasure_stages(
                     .map_err(handler_error)?,
             );
         }
+        guard.finish().await.map_err(handler_error)?;
         progress.digest_deleted = deleted;
         progress.stage = ErasureJobStage::Lineage;
         save_erasure_job_progress(&ctx.pool, &ctx.claims.jti, &progress).await?;
     }
 
     if progress.stage == ErasureJobStage::Lineage {
+        let guard = moa_memory_pii::legal_hold::begin_destruction_stage_guard(
+            &ctx.pool,
+            ctx.tenant_id,
+            &destruction_subjects,
+            destruction_operation_id,
+        )
+        .await
+        .map_err(handler_error)?;
         let mut deleted = 0u64;
         for subject in subjects {
             deleted = deleted.saturating_add(
@@ -156,12 +281,26 @@ async fn run_erasure_stages(
                     .map_err(handler_error)?,
             );
         }
+        guard.finish().await.map_err(handler_error)?;
         progress.lineage_deleted = deleted;
         progress.stage = ErasureJobStage::Done;
         save_erasure_job_progress(&ctx.pool, &ctx.claims.jti, &progress).await?;
     }
 
     Ok(progress)
+}
+
+fn destruction_operation_id(tenant_id: TenantId, subjects: &[uuid::Uuid]) -> String {
+    let mut subjects = subjects.to_vec();
+    subjects.sort_unstable();
+    subjects.dedup();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"moa.privacy.subject-erasure-fence.v1");
+    hasher.update(tenant_id.0.as_bytes());
+    for subject in subjects {
+        hasher.update(subject.as_bytes());
+    }
+    format!("v1:blake3:{}", hasher.finalize().to_hex())
 }
 
 /// Builds a stable fingerprint of the request parameters bound to one approval
@@ -174,6 +313,76 @@ fn request_fingerprint(ctx: &PrivacyEraseContext) -> String {
         ctx.contact_erasure_scope,
         &ctx.reason,
     )
+}
+
+/// Dual-control operation type identifying a privacy erasure.
+pub const DUAL_CONTROL_OPERATION_ERASE: &str = "privacy.erase";
+
+/// Builds the canonical dual-control operation reference for one erasure request.
+///
+/// The first admin's `request` and the erase execute path derive this from the
+/// same parameters (tenant, subject, scope, reason) so a second admin's approval
+/// binds to exactly one erasure and cannot be redeemed for a different one. It
+/// reuses the erasure request fingerprint, so the dual-control approval is keyed
+/// to the same request identity as the durable erasure job.
+#[must_use]
+pub fn erase_operation_ref(
+    tenant_id: TenantId,
+    subject_user_id: &str,
+    contact_erasure_scope: Option<ContactErasureScope>,
+    reason: &str,
+) -> String {
+    fingerprint_parts(
+        &tenant_id.to_string(),
+        subject_user_id,
+        contact_erasure_scope,
+        reason,
+    )
+}
+
+/// Enforces the four-eyes dual-control gate for one erasure when the tenant policy
+/// requires it, consuming a distinct second-admin approval bound to this request.
+///
+/// Returns `Ok(())` immediately when dual control is not required (single-admin
+/// erasure is unchanged). When required, it consumes an approval keyed to the
+/// erasure request fingerprint, using the approval-token JTI as the idempotency
+/// key so a durable re-execution of this same erasure is admitted without a second
+/// approval. Fails closed (403) when no valid, distinct approval exists.
+pub async fn ensure_erase_dual_control(ctx: &PrivacyEraseContext) -> Result<(), HandlerError> {
+    if !ctx.require_dual_control {
+        return Ok(());
+    }
+    let operation_ref = erase_operation_ref(
+        ctx.tenant_id,
+        &ctx.subject_user_id,
+        ctx.contact_erasure_scope,
+        &ctx.reason,
+    );
+    consume_erase_approval(&ctx.pool, ctx.tenant_id, &operation_ref, &ctx.claims.jti).await
+}
+
+async fn consume_erase_approval(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    operation_ref: &str,
+    consumer_ref: &str,
+) -> Result<(), HandlerError> {
+    crate::services::dual_control::consume_approval_for(
+        pool,
+        tenant_id,
+        DUAL_CONTROL_OPERATION_ERASE,
+        operation_ref,
+        consumer_ref,
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(
+            tenant_id = %tenant_id,
+            operation_type = DUAL_CONTROL_OPERATION_ERASE,
+            "privacy erase refused: dual-control approval unavailable"
+        );
+        error.into_handler_error()
+    })
 }
 
 fn fingerprint_parts(
@@ -230,6 +439,50 @@ mod tests {
             base,
             fingerprint_parts("tenant-2", "contact:abc", None, "gdpr erasure")
         );
+    }
+}
+
+/// Returns true when any included subject is under an active legal hold.
+///
+/// Checks every resolved subject (the primary subject and any linked contacts)
+/// because the erase is one atomic operation: a hold on any of them must block
+/// the whole request rather than partially erase the unheld ones.
+async fn subjects_under_legal_hold(
+    ctx: &PrivacyEraseContext,
+    subjects: &[PrivacySubject],
+) -> Result<bool, HandlerError> {
+    for subject in subjects {
+        if moa_memory_pii::legal_hold::active_hold_for(&ctx.pool, ctx.tenant_id, subject.target_uid)
+            .await
+            .map_err(handler_error)?
+        {
+            tracing::warn!(
+                tenant_id = %ctx.tenant_id,
+                subject_provenance = subject.provenance.as_str(),
+                "privacy erase blocked by active legal hold"
+            );
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Builds the terminal response returned when a legal hold blocks the erase.
+///
+/// Reports zero erased counts and the [`PrivacyEraseStatus::BlockedByLegalHold`]
+/// status so a caller sees the refusal explicitly rather than a silent success.
+fn blocked_by_legal_hold_response(ctx: &PrivacyEraseContext) -> PrivacyEraseResponse {
+    PrivacyEraseResponse {
+        tenant_id: ctx.tenant_id,
+        subject_user_id: UserId::new(ctx.subject_user_id.clone()),
+        status: PrivacyEraseStatus::BlockedByLegalHold,
+        candidate_count: 0,
+        erased_count: 0,
+        pii_vault_erased: 0,
+        digest_deleted: 0,
+        lineage_deleted: 0,
+        dry_run: ctx.dry_run,
+        sample: Vec::new(),
     }
 }
 

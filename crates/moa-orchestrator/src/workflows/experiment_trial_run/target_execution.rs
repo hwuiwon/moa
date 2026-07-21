@@ -263,7 +263,6 @@ async fn ensure_agent_loop_session(
             )
             .call()
             .await?;
-            ctx.sleep(SESSION_AUTHZ_PROPAGATION_DELAY).await?;
             session_id
         }
     };
@@ -505,16 +504,24 @@ async fn ensure_execution_session(
     let init_pool = pool.clone();
     let init_meta = meta.clone();
     let identity = request.identity.clone();
+    let fga = crate::handlers::authz_shim::require_fga_client()?;
     let initialized = ctx
         .run(|| async move {
-            crate::services::session_store::inner::initialize_internal_execution_session_atomic(
+            let initialized = crate::services::session_store::inner::initialize_internal_execution_session_atomic(
                 store.as_ref(),
                 &init_pool,
                 init_meta,
-                identity,
+                identity.clone(),
             )
-            .await
-            .map(Json::from)
+            .await?;
+            crate::services::session_store::inner::ensure_session_authz_visible(
+                &init_pool,
+                &fga,
+                &identity,
+                initialized,
+            )
+            .await?;
+            Ok::<_, HandlerError>(Json::from(initialized))
         })
         .name("experiment_trial_initialize_internal_execution_session")
         .await?
@@ -991,20 +998,34 @@ async fn create_new_session(
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<(SessionId, SessionMeta), HandlerError> {
+    let prepare_identity = identity.clone();
+    let prepare_pool = pool.clone();
+    let meta = ctx
+        .run(|| async move {
+            let mut meta = new_session_meta(tenant_id, model, &prepare_identity)?;
+            let agent_context =
+                resolve_agent_context_for_session(prepare_pool, &meta, &agent).await?;
+            apply_agent_model_policy(&mut meta, &agent_context)?;
+            meta.agent_context = Some(agent_context);
+            Ok::<_, HandlerError>(Json::from(meta))
+        })
+        .name("experiment_trial_prepare_session")
+        .await?
+        .into_inner();
     let store = session_store.clone();
     let pool = pool.clone();
     let identity = identity.clone();
+    let fga = crate::handlers::authz_shim::require_fga_client()?;
     Ok(ctx
         .run(|| async move {
-            let mut meta = new_session_meta(tenant_id, model, &identity)?;
-            let agent_context =
-                resolve_agent_context_for_session(pool.clone(), &meta, &agent).await?;
-            apply_agent_model_policy(&mut meta, &agent_context)?;
-            meta.agent_context = Some(agent_context);
             let session_id =
-                create_session_for_identity(store.as_ref(), &pool, meta.clone(), identity)
+                create_session_for_identity(store.as_ref(), &pool, meta.clone(), identity.clone())
                     .await
                     .map_err(non_retryable_handler_error)?;
+            crate::services::session_store::inner::ensure_session_authz_visible(
+                &pool, &fga, &identity, session_id,
+            )
+            .await?;
             Ok::<_, HandlerError>(Json::from((session_id, meta)))
         })
         .name("experiment_trial_create_session")

@@ -84,6 +84,8 @@ pub struct RunWorkerTurnRequest {
     pub worker_id: String,
     /// Stable turn identifier and workflow key.
     pub turn_id: String,
+    /// Exact identity inherited from the root turn that created this worker.
+    pub identity: Identity,
     /// Optional turn-iteration cap for this child turn workflow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,

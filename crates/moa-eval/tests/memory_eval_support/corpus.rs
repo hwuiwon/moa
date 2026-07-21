@@ -5,19 +5,21 @@ use std::error::Error;
 
 use chrono::{DateTime, Utc};
 use moa_brain::planning::parse_temporal;
-use moa_core::{error::MoaError, types::identifiers::StoragePartitionId, types::identifiers::UserId, traits::EmbeddingProvider};
+use moa_core::types::security::SensitivityClass;
+use moa_core::{
+    error::MoaError, traits::EmbeddingProvider, types::identifiers::StoragePartitionId,
+    types::identifiers::UserId,
+};
 use moa_eval::memory_eval::{
     CORPUS_SCHEMA_VERSION, CachedEmbeddingProvider, CorpusManifest, CorpusProfile,
-    EmbeddingInputKind, GeneratedMemoryEvalCorpus, LedgerFact, Probe, ProbeType,
-    SyntheticSession, SyntheticTurn, TranscriptStyle, build_cached_embedding_fixtures,
-    embedding_text_hash, generate_memory_eval_corpus,
-    read_embedding_inputs_jsonl, read_embeddings_jsonl, read_ledger_jsonl, read_manifest_json,
-    read_probes_jsonl, read_sessions_jsonl, validate_corpus, write_embeddings_jsonl,
-    write_ledger_jsonl, write_manifest_json, write_memory_eval_corpus, write_probes_jsonl,
-    write_sessions_jsonl,
+    EmbeddingInputKind, GeneratedMemoryEvalCorpus, LedgerFact, Probe, ProbeType, SyntheticSession,
+    SyntheticTurn, TranscriptStyle, build_cached_embedding_fixtures, embedding_text_hash,
+    generate_memory_eval_corpus, read_embedding_inputs_jsonl, read_embeddings_jsonl,
+    read_ledger_jsonl, read_manifest_json, read_probes_jsonl, read_sessions_jsonl, validate_corpus,
+    write_embeddings_jsonl, write_ledger_jsonl, write_manifest_json, write_memory_eval_corpus,
+    write_probes_jsonl, write_sessions_jsonl,
 };
 use moa_eval_core::EvalError;
-use moa_memory_graph::PiiClass;
 use moa_memory_types::ScopeTier;
 use moa_memory_vector::VECTOR_DIMENSION;
 
@@ -84,7 +86,7 @@ fn assert_ledger_first_fact_classes(ledger: &[LedgerFact]) {
     assert!(
         ledger.iter().any(|fact| fact.scope == ScopeTier::Contact
             && fact.predicate == "private_repository"
-            && fact.pii_class == PiiClass::None),
+            && fact.pii_class == SensitivityClass::None),
         "ledger should include user-private facts"
     );
     assert!(
@@ -100,7 +102,7 @@ fn assert_ledger_first_fact_classes(ledger: &[LedgerFact]) {
     assert!(
         ledger
             .iter()
-            .any(|fact| fact.pii_class == PiiClass::Pii && fact.expected_redacted),
+            .any(|fact| fact.pii_class == SensitivityClass::Pii && fact.expected_redacted),
         "ledger should include PII facts"
     );
 
@@ -218,7 +220,7 @@ fn realistic_corpus() -> (
             prior_successes: None,
             source_session_id: alice_session,
             source_turn_seq: 1,
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         },
         LedgerFact {
@@ -238,7 +240,7 @@ fn realistic_corpus() -> (
             prior_successes: None,
             source_session_id: alice_session,
             source_turn_seq: 2,
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         },
         LedgerFact {
@@ -258,7 +260,7 @@ fn realistic_corpus() -> (
             prior_successes: None,
             source_session_id: alice_session,
             source_turn_seq: 3,
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         },
         LedgerFact {
@@ -278,7 +280,7 @@ fn realistic_corpus() -> (
             prior_successes: None,
             source_session_id: bob_session,
             source_turn_seq: 1,
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         },
         LedgerFact {
@@ -298,7 +300,7 @@ fn realistic_corpus() -> (
             prior_successes: None,
             source_session_id: alice_session,
             source_turn_seq: 4,
-            pii_class: PiiClass::Pii,
+            pii_class: SensitivityClass::Pii,
             expected_redacted: true,
         },
     ];

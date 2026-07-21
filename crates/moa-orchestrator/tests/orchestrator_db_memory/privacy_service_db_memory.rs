@@ -6,17 +6,21 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::wire::privacy::{ContactErasureScope, PrivacyEraseStatus};
 use moa_core::{types::contact::ContactId, types::identifiers::TenantId};
+use moa_crypto::{EncryptionContext, KeyManagementProvider, LocalKmsProvider};
 use moa_lineage_audit::PiiVault;
-use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
+use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore};
 use moa_memory_pii::erasure::begin_app_scoped_tx;
 use moa_memory_vector::PgvectorStore;
+use moa_orchestrator::services::dual_control::{self, DualControlError};
 use moa_orchestrator::services::privacy::repository::collect_privacy_export_data_sections;
 use moa_orchestrator::services::privacy::{
-    ApprovalClaims, ApprovalTokenVerifier, Ed25519ManifestSigner, PrivacyEraseContext,
-    PrivacyExportContext, PrivacySubject, PrivacySubjectProvenance, ensure_jti_inserted,
-    finalize_archive_to_bytes, run_privacy_erase, write_export_readme, write_manifest,
+    ApprovalClaims, ApprovalTokenVerifier, DUAL_CONTROL_OPERATION_ERASE, Ed25519ManifestSigner,
+    PrivacyEraseContext, PrivacyExportContext, PrivacySubject, PrivacySubjectProvenance,
+    ensure_jti_inserted, erase_operation_ref, finalize_archive_to_bytes, run_privacy_erase,
+    write_export_readme, write_manifest,
 };
 use moa_session::testing;
 use serde_json::json;
@@ -26,6 +30,12 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 static PRIVACY_ERASE_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+fn test_kms() -> Arc<dyn KeyManagementProvider> {
+    static KMS: std::sync::OnceLock<Arc<dyn KeyManagementProvider>> = std::sync::OnceLock::new();
+    KMS.get_or_init(|| Arc::new(LocalKmsProvider::new()))
+        .clone()
+}
 
 fn signing_key() -> SigningKey {
     SigningKey::from_bytes(&[7_u8; 32])
@@ -82,25 +92,29 @@ fn tenant_workspace() -> (Uuid, String) {
 fn erase_test_graph(pool: &PgPool, tenant_id: Uuid, contact_id: Uuid) -> PostgresGraphStore {
     let scope = RlsContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
-    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
+    PostgresGraphStore::scoped_for_app_role(pool.clone(), scope, test_kms())
+        .with_vector_store(Arc::new(vector))
 }
 
 fn erase_test_intent(storage_partition_id: &str, user_id: &str, name: &str) -> NodeWriteIntent {
     let storage_partition_id = Some(storage_partition_id.to_string());
     NodeWriteIntent {
+        barrier: None,
         uid: Uuid::now_v7(),
         label: NodeLabel::Fact,
         storage_partition_id,
         contact_id: Some(user_id.to_string()),
+        data_subject_id: Uuid::parse_str(user_id.strip_prefix("contact:").unwrap_or(user_id))
+            .expect("contact fixture UUID"),
         scope: "contact".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "user_id": user_id, "source": "privacy_erase_test" }),
-        pii_class: PiiClass::Phi,
+        pii_class: SensitivityClass::Phi,
         confidence: Some(0.95),
         valid_from: Utc::now(),
-        embedding: Some(basis_vector()),
-        embedding_model: Some("test-model".to_string()),
-        embedding_model_version: Some(1),
+        embedding: None,
+        embedding_model: None,
+        embedding_model_version: None,
         embedding_text: None,
         actor_id: user_id.to_string(),
         actor_kind: "contact".to_string(),
@@ -124,6 +138,35 @@ async fn create_erase_test_node(
         .create_node(intent)
         .await
         .expect("create erase fixture");
+    uid
+}
+
+/// Seeds an erase fixture whose node RETAINS its vector embedding.
+///
+/// `erase_test_intent` classifies nodes `Phi`, and the write path rejects any
+/// vector embedding for `restricted`/`phi` content. Tests that assert embedding
+/// erasure therefore use an unsealed attributable node with a real embedding.
+async fn create_embedded_erase_test_node(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    contact_id: Uuid,
+    storage_partition_id: &str,
+    user_id: &str,
+    name: &str,
+) -> Uuid {
+    seed_workspace_embedder_state(pool, tenant_id, storage_partition_id, user_id, "test-model")
+        .await;
+    let graph = erase_test_graph(pool, tenant_id, contact_id);
+    let mut intent = erase_test_intent(storage_partition_id, user_id, name);
+    intent.pii_class = SensitivityClass::None;
+    intent.embedding = Some(basis_vector());
+    intent.embedding_model = Some("test-model".to_string());
+    intent.embedding_model_version = Some(1);
+    let uid = intent.uid;
+    graph
+        .create_node(intent)
+        .await
+        .expect("create embedded erase fixture");
     uid
 }
 
@@ -368,6 +411,7 @@ async fn privacy_erase_dry_run() {
     let before_changelog = total_erase_changelog_count(store.pool(), &storage_partition_id).await;
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
+        kms: test_kms(),
         tenant_id: TenantId::from(tenant_id),
         storage_partition_id: storage_partition_id.clone(),
         subject_user: subject,
@@ -377,6 +421,7 @@ async fn privacy_erase_dry_run() {
         contact_erasure_scope: None,
         claims: valid_claims_for(subject, tenant_id, "erase"),
         pii_vault_secret: None,
+        require_dual_control: false,
     };
 
     let response = run_privacy_erase(ctx).await.expect("run dry erase");
@@ -406,7 +451,7 @@ async fn privacy_erase_basic() {
         .expect("create isolated test store");
     let (tenant_id, storage_partition_id) = tenant_workspace();
     let subject = Uuid::now_v7();
-    let uid = create_erase_test_node(
+    let uid = create_embedded_erase_test_node(
         store.pool(),
         tenant_id,
         subject,
@@ -417,8 +462,16 @@ async fn privacy_erase_basic() {
     .await;
     seed_pii_vault_subject(store.pool(), &storage_partition_id, &subject.to_string()).await;
     assert_eq!(embedding_count(store.pool(), uid).await, 1);
+    let kms = test_kms();
+    let encryption_context =
+        EncryptionContext::new(tenant_id, subject, "privacy-shred-proof", "restricted");
+    let ciphertext =
+        moa_crypto::encrypt(kms.as_ref(), b"must become unreadable", &encryption_context)
+            .await
+            .expect("seal privacy-shred proof");
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
+        kms: kms.clone(),
         tenant_id: TenantId::from(tenant_id),
         storage_partition_id: storage_partition_id.clone(),
         subject_user: subject,
@@ -428,6 +481,7 @@ async fn privacy_erase_basic() {
         contact_erasure_scope: None,
         claims: valid_claims_for(subject, tenant_id, "erase"),
         pii_vault_secret: Some(pii_vault_secret()),
+        require_dual_control: false,
     };
 
     let response = run_privacy_erase(ctx).await.expect("run erasure");
@@ -436,19 +490,168 @@ async fn privacy_erase_basic() {
     assert_eq!(response.pii_vault_erased, 1);
     assert_eq!(node_count(store.pool(), uid).await, 0);
     assert_eq!(embedding_count(store.pool(), uid).await, 0);
+    assert!(matches!(
+        moa_crypto::decrypt(kms.as_ref(), &ciphertext, &encryption_context).await,
+        Err(moa_crypto::Error::CryptoShredded(_))
+    ));
     assert_eq!(
         erased_pii_vault_subject_count(store.pool(), &storage_partition_id, &subject.to_string())
             .await,
         1
     );
     assert_eq!(
-        erase_changelog_count(store.pool(), &storage_partition_id, uid).await,
-        1
+        total_erase_changelog_count(store.pool(), &storage_partition_id).await,
+        1,
+        "erasure retains one redacted subject-level audit record"
     );
     assert_eq!(
         erase_changelog_count(store.pool(), &storage_partition_id, subject).await,
         1
     );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_erase_blocked_by_subject_legal_hold_db_memory() {
+    // Pins: an active legal hold on a subject blocks erasure entirely (fail
+    // closed) — no graph node is purged and no erase changelog row is written —
+    // and releasing the hold lets the same subject be erased. Mutation check:
+    // forcing active_hold_for to return false makes this assert Completed with a
+    // purged node instead of BlockedByLegalHold, so the test fails.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    let uid = create_erase_test_node(
+        store.pool(),
+        tenant_id,
+        subject,
+        &storage_partition_id,
+        &subject.to_string(),
+        "held erasure fact",
+    )
+    .await;
+
+    let hold = moa_memory_pii::legal_hold::place_hold(
+        store.pool(),
+        TenantId::from(tenant_id),
+        Some(subject),
+        "Acme v. MOA litigation hold",
+        "ops-admin",
+    )
+    .await
+    .expect("place legal hold");
+
+    let held_ctx = || PrivacyEraseContext {
+        pool: store.pool().clone(),
+        kms: test_kms(),
+        tenant_id: TenantId::from(tenant_id),
+        storage_partition_id: storage_partition_id.clone(),
+        subject_user: subject,
+        subject_user_id: subject.to_string(),
+        reason: "GDPR Art.17 request".to_string(),
+        dry_run: false,
+        contact_erasure_scope: None,
+        claims: valid_claims_for(subject, tenant_id, "erase"),
+        pii_vault_secret: None,
+        require_dual_control: false,
+    };
+
+    let blocked = run_privacy_erase(held_ctx()).await.expect("run held erase");
+    assert!(matches!(
+        blocked.status,
+        PrivacyEraseStatus::BlockedByLegalHold
+    ));
+    assert_eq!(blocked.erased_count, 0);
+    assert_eq!(blocked.candidate_count, 0);
+    // The subject's node survives and nothing was purged under the hold.
+    assert_eq!(node_count(store.pool(), uid).await, 1);
+    assert_eq!(
+        total_erase_changelog_count(store.pool(), &storage_partition_id).await,
+        0
+    );
+
+    // Releasing the hold lets the same subject be erased.
+    let released = moa_memory_pii::legal_hold::release_hold(
+        store.pool(),
+        TenantId::from(tenant_id),
+        hold.id,
+        "ops-admin",
+    )
+    .await
+    .expect("release legal hold");
+    assert!(released, "active hold must release");
+
+    let response = run_privacy_erase(held_ctx())
+        .await
+        .expect("run erase after release");
+    assert!(matches!(response.status, PrivacyEraseStatus::Completed));
+    assert_eq!(response.erased_count, 1);
+    assert_eq!(node_count(store.pool(), uid).await, 0);
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_erase_blocked_by_tenant_wide_legal_hold_db_memory() {
+    // Pins: a tenant-wide legal hold (subject_id NULL) blocks erasure of any
+    // subject in the tenant, not just one named subject.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    let uid = create_erase_test_node(
+        store.pool(),
+        tenant_id,
+        subject,
+        &storage_partition_id,
+        &subject.to_string(),
+        "tenant-wide held fact",
+    )
+    .await;
+
+    moa_memory_pii::legal_hold::place_hold(
+        store.pool(),
+        TenantId::from(tenant_id),
+        None,
+        "tenant-wide preservation order",
+        "ops-admin",
+    )
+    .await
+    .expect("place tenant-wide hold");
+
+    let ctx = PrivacyEraseContext {
+        pool: store.pool().clone(),
+        kms: test_kms(),
+        tenant_id: TenantId::from(tenant_id),
+        storage_partition_id: storage_partition_id.clone(),
+        subject_user: subject,
+        subject_user_id: subject.to_string(),
+        reason: "GDPR Art.17 request".to_string(),
+        dry_run: false,
+        contact_erasure_scope: None,
+        claims: valid_claims_for(subject, tenant_id, "erase"),
+        pii_vault_secret: None,
+        require_dual_control: false,
+    };
+
+    let blocked = run_privacy_erase(ctx).await.expect("run held erase");
+    assert!(matches!(
+        blocked.status,
+        PrivacyEraseStatus::BlockedByLegalHold
+    ));
+    assert_eq!(node_count(store.pool(), uid).await, 1);
 
     drop(store);
     testing::cleanup_test_schema(&database_url, &schema_name)
@@ -476,6 +679,7 @@ async fn privacy_erase_idempotent() {
     .await;
     let first = PrivacyEraseContext {
         pool: store.pool().clone(),
+        kms: test_kms(),
         tenant_id: TenantId::from(tenant_id),
         storage_partition_id: storage_partition_id.clone(),
         subject_user: subject,
@@ -485,11 +689,13 @@ async fn privacy_erase_idempotent() {
         contact_erasure_scope: None,
         claims: valid_claims_for(subject, tenant_id, "erase"),
         pii_vault_secret: None,
+        require_dual_control: false,
     };
     run_privacy_erase(first).await.expect("first erasure");
     let after_first = total_erase_changelog_count(store.pool(), &storage_partition_id).await;
     let second = PrivacyEraseContext {
         pool: store.pool().clone(),
+        kms: test_kms(),
         tenant_id: TenantId::from(tenant_id),
         storage_partition_id: storage_partition_id.clone(),
         subject_user: subject,
@@ -499,6 +705,7 @@ async fn privacy_erase_idempotent() {
         contact_erasure_scope: None,
         claims: valid_claims_for(subject, tenant_id, "erase"),
         pii_vault_secret: None,
+        require_dual_control: false,
     };
 
     let response = run_privacy_erase(second).await.expect("second erasure");
@@ -541,6 +748,7 @@ async fn privacy_erase_same_request_replay_resumes_db_memory() {
     let claims = valid_claims_for(subject, tenant_id, "erase");
     let make_ctx = || PrivacyEraseContext {
         pool: store.pool().clone(),
+        kms: test_kms(),
         tenant_id: TenantId::from(tenant_id),
         storage_partition_id: storage_partition_id.clone(),
         subject_user: subject,
@@ -550,12 +758,24 @@ async fn privacy_erase_same_request_replay_resumes_db_memory() {
         contact_erasure_scope: None,
         claims: claims.clone(),
         pii_vault_secret: None,
+        require_dual_control: false,
     };
 
     let first = run_privacy_erase(make_ctx()).await.expect("first erase");
     assert_eq!(first.candidate_count, 1);
     assert_eq!(first.erased_count, 1);
     assert_eq!(node_count(store.pool(), uid).await, 0);
+
+    // Simulate a crash after the durable erasure job completed but before its
+    // separate destruction-fence completion commit was journaled.
+    sqlx::query(
+        "UPDATE moa.destruction_operation_fence SET status = 'in_progress', committed_at = NULL WHERE tenant_id = $1 AND subject_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(subject)
+    .execute(store.pool())
+    .await
+    .expect("reopen destruction fence to simulate commit gap");
 
     // Identical request replays the same JTI: resume, do not reject.
     let replay = run_privacy_erase(make_ctx())
@@ -564,6 +784,15 @@ async fn privacy_erase_same_request_replay_resumes_db_memory() {
     assert!(matches!(replay.status, PrivacyEraseStatus::Completed));
     assert_eq!(replay.candidate_count, 1);
     assert_eq!(replay.erased_count, 1);
+    let fence_status: String = sqlx::query_scalar(
+        "SELECT status FROM moa.destruction_operation_fence WHERE tenant_id = $1 AND subject_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(subject)
+    .fetch_one(store.pool())
+    .await
+    .expect("load resumed destruction fence");
+    assert_eq!(fence_status, "committed");
 
     drop(store);
     testing::cleanup_test_schema(&database_url, &schema_name)
@@ -595,6 +824,7 @@ async fn privacy_erase_deletes_digest_and_lineage_db_memory() {
 
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
+        kms: test_kms(),
         tenant_id: TenantId::from(tenant_id),
         storage_partition_id: storage_partition_id.clone(),
         subject_user: subject,
@@ -604,6 +834,7 @@ async fn privacy_erase_deletes_digest_and_lineage_db_memory() {
         contact_erasure_scope: None,
         claims: valid_claims_for(subject, tenant_id, "erase"),
         pii_vault_secret: None,
+        require_dual_control: false,
     };
 
     let response = run_privacy_erase(ctx).await.expect("run erasure");
@@ -707,6 +938,7 @@ async fn approval_jti_replay_blocked_through_erase_db_memory() {
     let claims = valid_claims_for(subject, tenant_id, "erase");
     let first = PrivacyEraseContext {
         pool: store.pool().clone(),
+        kms: test_kms(),
         tenant_id: TenantId::from(tenant_id),
         storage_partition_id: storage_partition_id.clone(),
         subject_user: subject,
@@ -716,6 +948,7 @@ async fn approval_jti_replay_blocked_through_erase_db_memory() {
         contact_erasure_scope: None,
         claims: claims.clone(),
         pii_vault_secret: None,
+        require_dual_control: false,
     };
     let first_response = run_privacy_erase(first)
         .await
@@ -724,6 +957,7 @@ async fn approval_jti_replay_blocked_through_erase_db_memory() {
 
     let replay = PrivacyEraseContext {
         pool: store.pool().clone(),
+        kms: test_kms(),
         tenant_id: TenantId::from(tenant_id),
         storage_partition_id: storage_partition_id.clone(),
         subject_user: subject,
@@ -733,6 +967,7 @@ async fn approval_jti_replay_blocked_through_erase_db_memory() {
         contact_erasure_scope: None,
         claims,
         pii_vault_secret: None,
+        require_dual_control: false,
     };
 
     let error = run_privacy_erase(replay)
@@ -771,6 +1006,7 @@ async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
     .await;
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
+        kms: test_kms(),
         tenant_id: TenantId::from(tenant_a),
         storage_partition_id: workspace_a.clone(),
         subject_user: subject,
@@ -780,6 +1016,7 @@ async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
         contact_erasure_scope: None,
         claims: valid_claims_for(subject, tenant_a, "erase"),
         pii_vault_secret: None,
+        require_dual_control: false,
     };
 
     let response = run_privacy_erase(ctx)
@@ -790,7 +1027,8 @@ async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
     assert_eq!(node_count(store.pool(), uid_b).await, 1);
     assert_eq!(
         total_erase_changelog_count(store.pool(), &workspace_a).await,
-        0
+        1,
+        "the target tenant retains one redacted audit record for the erase attempt"
     );
 
     drop(store);
@@ -827,6 +1065,7 @@ async fn privacy_erase_contact_requires_explicit_scope() {
     .await;
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
+        kms: test_kms(),
         tenant_id: TenantId::from(tenant_id),
         storage_partition_id: storage_partition_id.clone(),
         subject_user: contact_id,
@@ -836,6 +1075,7 @@ async fn privacy_erase_contact_requires_explicit_scope() {
         contact_erasure_scope: None,
         claims: valid_claims_for(contact_id, tenant_id, "erase"),
         pii_vault_secret: None,
+        require_dual_control: false,
     };
 
     let error = run_privacy_erase(ctx)
@@ -896,6 +1136,7 @@ async fn privacy_erase_unverified_contact_only() {
     .await;
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
+        kms: test_kms(),
         tenant_id: TenantId::from(tenant_id),
         storage_partition_id: storage_partition_id.clone(),
         subject_user: contact_id,
@@ -905,6 +1146,7 @@ async fn privacy_erase_unverified_contact_only() {
         contact_erasure_scope: Some(ContactErasureScope::SpecifiedContact),
         claims: valid_claims_for(contact_id, tenant_id, "erase"),
         pii_vault_secret: None,
+        require_dual_control: false,
     };
 
     let response = run_privacy_erase(ctx).await.expect("erase contact");
@@ -967,6 +1209,7 @@ async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
     let subject_user_id = contact_user_id(contact_id);
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
+        kms: test_kms(),
         tenant_id: TenantId::from(tenant_id),
         storage_partition_id: storage_partition_id.clone(),
         subject_user: contact_id,
@@ -976,6 +1219,7 @@ async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
         contact_erasure_scope: Some(ContactErasureScope::SpecifiedAndLinkedContacts),
         claims: valid_claims_for_user_id(&subject_user_id, tenant_id, "erase"),
         pii_vault_secret: None,
+        require_dual_control: false,
     };
 
     let response = run_privacy_erase(ctx)
@@ -1212,4 +1456,377 @@ async fn privacy_export_archive_round_trip() {
     assert!(names.iter().any(|name| name == "export/manifest.json"));
     assert!(names.iter().any(|name| name == "export/manifest.sig"));
     assert!(names.iter().any(|name| name == "export/facts.jsonl"));
+}
+
+async fn dual_control_request_count(pool: &PgPool, tenant_id: Uuid) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.dual_control_request WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await
+    .expect("count dual-control requests")
+}
+
+#[tokio::test]
+async fn privacy_erase_executes_after_distinct_dual_control_approval_db_memory() {
+    // Pins: with the dual-control policy ON, an erasure executes only after a
+    // SECOND, DISTINCT tenant admin approves the specific request. request(admin A)
+    // -> approve(admin B, B != A) -> erase purges the subject's graph node and
+    // consumes the approval. Mutation check: dropping the consume step in
+    // ensure_erase_dual_control would let the erase run without an approval, which
+    // the fail-closed test below independently pins.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    let uid = create_erase_test_node(
+        store.pool(),
+        tenant_id,
+        subject,
+        &storage_partition_id,
+        &subject.to_string(),
+        "dual-control erasure fact",
+    )
+    .await;
+    let reason = "GDPR Art.17 request";
+    let operation_ref = erase_operation_ref(
+        TenantId::from(tenant_id),
+        &subject.to_string(),
+        None,
+        reason,
+    );
+    let admin_a = Uuid::now_v7().to_string();
+    let admin_b = Uuid::now_v7().to_string();
+
+    let request_id = dual_control::request(
+        store.pool(),
+        TenantId::from(tenant_id),
+        DUAL_CONTROL_OPERATION_ERASE,
+        &operation_ref,
+        &admin_a,
+    )
+    .await
+    .expect("first admin raises dual-control request");
+    dual_control::approve(
+        store.pool(),
+        TenantId::from(tenant_id),
+        request_id,
+        &admin_b,
+    )
+    .await
+    .expect("distinct second admin approves");
+
+    let ctx = PrivacyEraseContext {
+        pool: store.pool().clone(),
+        kms: test_kms(),
+        tenant_id: TenantId::from(tenant_id),
+        storage_partition_id: storage_partition_id.clone(),
+        subject_user: subject,
+        subject_user_id: subject.to_string(),
+        reason: reason.to_string(),
+        dry_run: false,
+        contact_erasure_scope: None,
+        claims: valid_claims_for(subject, tenant_id, "erase"),
+        pii_vault_secret: None,
+        require_dual_control: true,
+    };
+
+    let response = run_privacy_erase(ctx)
+        .await
+        .expect("erase executes after distinct approval");
+    assert!(matches!(response.status, PrivacyEraseStatus::Completed));
+    assert_eq!(response.erased_count, 1);
+    assert_eq!(node_count(store.pool(), uid).await, 0);
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn dual_control_rejects_self_approval_segregation_of_duties_db_memory() {
+    // Pins: segregation of duties. A dual-control request cannot be approved by the
+    // same operator that raised it. approve() rejects it with SelfApproval, leaves
+    // the request pending, and a DISTINCT admin can still approve it afterward.
+    // Mutation check: removing the `approver == requested_by` guard in approve()
+    // makes this return Ok (or a Storage error from the DB backstop constraint)
+    // instead of SelfApproval, so the assertion fails.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, _storage_partition_id) = tenant_workspace();
+    let admin_a = Uuid::now_v7().to_string();
+
+    let request_id = dual_control::request(
+        store.pool(),
+        TenantId::from(tenant_id),
+        DUAL_CONTROL_OPERATION_ERASE,
+        "operation-ref-sod",
+        &admin_a,
+    )
+    .await
+    .expect("first admin raises dual-control request");
+
+    let error = dual_control::approve(
+        store.pool(),
+        TenantId::from(tenant_id),
+        request_id,
+        &admin_a,
+    )
+    .await
+    .expect_err("a request must not be approvable by its own requester");
+    assert!(
+        matches!(error, DualControlError::SelfApproval),
+        "expected SelfApproval, got {error:?}"
+    );
+
+    // The rejected self-approval left the request pending, so a distinct admin can
+    // still approve it.
+    let admin_b = Uuid::now_v7().to_string();
+    dual_control::approve(
+        store.pool(),
+        TenantId::from(tenant_id),
+        request_id,
+        &admin_b,
+    )
+    .await
+    .expect("a distinct admin can approve the still-pending request");
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_erase_fails_closed_without_dual_control_approval_db_memory() {
+    // Pins: with the policy ON and no distinct approval available, erasure is
+    // refused (fail closed, 403) before any destructive work — the subject's node
+    // survives and no erase changelog row is written.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    let uid = create_erase_test_node(
+        store.pool(),
+        tenant_id,
+        subject,
+        &storage_partition_id,
+        &subject.to_string(),
+        "unapproved erasure fact",
+    )
+    .await;
+
+    let ctx = PrivacyEraseContext {
+        pool: store.pool().clone(),
+        kms: test_kms(),
+        tenant_id: TenantId::from(tenant_id),
+        storage_partition_id: storage_partition_id.clone(),
+        subject_user: subject,
+        subject_user_id: subject.to_string(),
+        reason: "GDPR Art.17 request".to_string(),
+        dry_run: false,
+        contact_erasure_scope: None,
+        claims: valid_claims_for(subject, tenant_id, "erase"),
+        pii_vault_secret: None,
+        require_dual_control: true,
+    };
+
+    let error = run_privacy_erase(ctx)
+        .await
+        .expect_err("erase must be refused when dual control is required but unapproved");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("dual-control approval"),
+        "expected a dual-control fail-closed refusal, got: {rendered}"
+    );
+
+    // Fail closed: nothing was purged.
+    assert_eq!(node_count(store.pool(), uid).await, 1);
+    assert_eq!(
+        total_erase_changelog_count(store.pool(), &storage_partition_id).await,
+        0
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_erase_policy_off_needs_no_dual_control_db_memory() {
+    // Pins: with the policy OFF (the default), erasure keeps its single-admin
+    // behavior — it executes with no dual-control request or approval present at
+    // all, so enabling the feature does not regress existing erasure.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    let uid = create_erase_test_node(
+        store.pool(),
+        tenant_id,
+        subject,
+        &storage_partition_id,
+        &subject.to_string(),
+        "policy-off erasure fact",
+    )
+    .await;
+
+    let ctx = PrivacyEraseContext {
+        pool: store.pool().clone(),
+        kms: test_kms(),
+        tenant_id: TenantId::from(tenant_id),
+        storage_partition_id: storage_partition_id.clone(),
+        subject_user: subject,
+        subject_user_id: subject.to_string(),
+        reason: "GDPR Art.17 request".to_string(),
+        dry_run: false,
+        contact_erasure_scope: None,
+        claims: valid_claims_for(subject, tenant_id, "erase"),
+        pii_vault_secret: None,
+        require_dual_control: false,
+    };
+
+    let response = run_privacy_erase(ctx)
+        .await
+        .expect("erase executes without dual control when the policy is off");
+    assert!(matches!(response.status, PrivacyEraseStatus::Completed));
+    assert_eq!(response.erased_count, 1);
+    assert_eq!(node_count(store.pool(), uid).await, 0);
+    assert_eq!(
+        dual_control_request_count(store.pool(), tenant_id).await,
+        0,
+        "policy-off erasure must not require any dual-control row"
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_dual_control_digest_and_cross_pool_consumption_are_race_safe_db_memory() {
+    // Pins: the stored operation reference contains no raw request fields;
+    // same-consumer retries both succeed after serialization, while two distinct
+    // consumers racing one approval produce exactly one success.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let tenant_id = TenantId::new();
+    let subject = Uuid::now_v7();
+    let raw_ref =
+        format!("tenant={tenant_id}|subject={subject}|reason=highly-sensitive-legal-reason");
+    let requester = Uuid::now_v7().to_string();
+    let approver = Uuid::now_v7().to_string();
+    let request_id = dual_control::request(
+        store.pool(),
+        tenant_id,
+        DUAL_CONTROL_OPERATION_ERASE,
+        &raw_ref,
+        &requester,
+    )
+    .await
+    .expect("request approval");
+    dual_control::approve(store.pool(), tenant_id, request_id, &approver)
+        .await
+        .expect("approve request");
+    let stored: String =
+        sqlx::query_scalar("SELECT operation_ref FROM moa.dual_control_request WHERE id = $1")
+            .bind(request_id)
+            .fetch_one(store.pool())
+            .await
+            .expect("load stored operation digest");
+    assert!(stored.starts_with("v1:blake3:"));
+    assert_eq!(stored.len(), "v1:blake3:".len() + 64);
+    assert!(!stored.contains(&tenant_id.to_string()));
+    assert!(!stored.contains(&subject.to_string()));
+    assert!(!stored.contains("highly-sensitive-legal-reason"));
+
+    let pool_a = PgPool::connect(&database_url)
+        .await
+        .expect("connect consumer pool A");
+    let pool_b = PgPool::connect(&database_url)
+        .await
+        .expect("connect consumer pool B");
+    let (same_a, same_b) = tokio::join!(
+        dual_control::consume_approval_for(
+            &pool_a,
+            tenant_id,
+            DUAL_CONTROL_OPERATION_ERASE,
+            &raw_ref,
+            "same-consumer"
+        ),
+        dual_control::consume_approval_for(
+            &pool_b,
+            tenant_id,
+            DUAL_CONTROL_OPERATION_ERASE,
+            &raw_ref,
+            "same-consumer"
+        )
+    );
+    assert!(same_a.is_ok(), "first same-consumer result: {same_a:?}");
+    assert!(same_b.is_ok(), "second same-consumer result: {same_b:?}");
+
+    let other_ref = format!("{raw_ref}|operation=two");
+    let other_request = dual_control::request(
+        store.pool(),
+        tenant_id,
+        DUAL_CONTROL_OPERATION_ERASE,
+        &other_ref,
+        &requester,
+    )
+    .await
+    .expect("request competing approval");
+    dual_control::approve(store.pool(), tenant_id, other_request, &approver)
+        .await
+        .expect("approve competing request");
+    let (different_a, different_b) = tokio::join!(
+        dual_control::consume_approval_for(
+            &pool_a,
+            tenant_id,
+            DUAL_CONTROL_OPERATION_ERASE,
+            &other_ref,
+            "consumer-a"
+        ),
+        dual_control::consume_approval_for(
+            &pool_b,
+            tenant_id,
+            DUAL_CONTROL_OPERATION_ERASE,
+            &other_ref,
+            "consumer-b"
+        )
+    );
+    assert_eq!(
+        [different_a.is_ok(), different_b.is_ok()]
+            .into_iter()
+            .filter(|success| *success)
+            .count(),
+        1,
+        "exactly one different consumer may win"
+    );
+    for error in [different_a, different_b]
+        .into_iter()
+        .filter_map(Result::err)
+    {
+        assert!(matches!(error, DualControlError::NoValidApproval));
+    }
+
+    pool_a.close().await;
+    pool_b.close().await;
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
 }

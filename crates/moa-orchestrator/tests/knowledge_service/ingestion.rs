@@ -82,8 +82,12 @@ async fn mock_connector_end_to_end_db_memory() {
         .await
         .expect("bootstrap isolated mock connector DB");
     let pool = db.store().pool().clone();
+    let kms: Arc<dyn moa_crypto::KeyManagementProvider> =
+        Arc::new(moa_crypto::LocalKmsProvider::new());
     let tenant_id = TenantId::from(Uuid::now_v7());
     let contact_id = ContactId::new();
+    let information_barrier =
+        InformationBarrierId::parse("knowledge-restricted").expect("valid barrier");
     let merge_provider = Arc::new(Task14LinkedIntegrationProvider::new(
         "merge",
         "crm",
@@ -111,6 +115,7 @@ async fn mock_connector_end_to_end_db_memory() {
             provider: "merge".to_string(),
             exchange_token: "merge-public-token".to_string(),
             source_selection: json!({}),
+            information_barrier: Some(information_barrier.clone()),
         })
         .await
         .expect("merge link should store one fake connection");
@@ -120,6 +125,7 @@ async fn mock_connector_end_to_end_db_memory() {
             provider: "nango".to_string(),
             exchange_token: "nango-public-token".to_string(),
             source_selection: json!({}),
+            information_barrier: Some(information_barrier.clone()),
         })
         .await
         .expect("nango link should store one fake connection");
@@ -157,15 +163,22 @@ async fn mock_connector_end_to_end_db_memory() {
         scope.clone(),
     ));
     seed_task14_embedder_state(&pool, tenant_id).await;
-    let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
+    let graph_scope = scope
+        .clone()
+        .with_cleared_barriers([information_barrier.clone()].into_iter().collect());
+    let vector = Arc::new(PgvectorStore::new_for_app_role(
+        pool.clone(),
+        graph_scope.clone(),
+    ));
     let graph_store = Arc::new(
-        PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
+        PostgresGraphStore::scoped_for_app_role(pool.clone(), graph_scope, kms.clone())
             .with_vector_store(vector),
     );
     let graph_writer = Arc::new(MemoryKnowledgeGraphWriter::new(
         graph_store.clone(),
         MemoryScope::Tenant { tenant_id },
         "task14-mock-connector",
+        Some(information_barrier.clone()),
     ));
     let pipeline = KnowledgeIngestionPipeline::new(
         repository.clone(),
@@ -236,6 +249,68 @@ async fn mock_connector_end_to_end_db_memory() {
         )
         .await
         .expect("nango fake records should ingest");
+    let merge_run = repository
+        .get_sync_run(merge_sync.sync_run_uid)
+        .await
+        .expect("read merge sync run")
+        .expect("merge sync run should exist");
+    assert_eq!(
+        merge_run.information_barrier,
+        Some(information_barrier.clone()),
+        "the run must retain the connection barrier snapshot"
+    );
+    let (node_count, tagged_count): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT count(*), count(*) FILTER (WHERE barrier = $2)
+        FROM moa.node_index
+        WHERE tenant_id = $1
+          AND valid_to IS NULL
+        "#,
+    )
+    .bind(tenant_id.0)
+    .bind(information_barrier.as_str())
+    .fetch_one(&pool)
+    .await
+    .expect("count barrier-tagged knowledge nodes");
+    assert!(
+        node_count > 0,
+        "knowledge ingestion should create graph nodes"
+    );
+    assert_eq!(
+        tagged_count, node_count,
+        "every knowledge-sync node must carry the run's authoritative barrier"
+    );
+    let node_uids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT uid FROM moa.node_index WHERE tenant_id = $1 AND valid_to IS NULL ORDER BY uid",
+    )
+    .bind(tenant_id.0)
+    .fetch_all(&pool)
+    .await
+    .expect("load knowledge node UIDs");
+    let uncleared_graph = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope, kms.clone());
+    assert!(
+        uncleared_graph
+            .bulk_get_nodes(&node_uids)
+            .await
+            .expect("read knowledge nodes without clearance")
+            .is_empty(),
+        "knowledge nodes must fail closed without the source barrier clearance"
+    );
+    let cleared_graph = PostgresGraphStore::scoped_for_app_role(
+        pool.clone(),
+        RlsContext::tenant(tenant_id)
+            .with_cleared_barriers([information_barrier.clone()].into_iter().collect()),
+        kms,
+    );
+    assert_eq!(
+        cleared_graph
+            .bulk_get_nodes(&node_uids)
+            .await
+            .expect("read knowledge nodes with clearance")
+            .len(),
+        node_uids.len(),
+        "source clearance must reveal all nodes from the sync run"
+    );
     complete_sync_run(&repository, merge_sync.sync_run_uid)
         .await
         .expect("complete merge sync run");
@@ -673,6 +748,7 @@ async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_inges
             status: ConnectionStatus::Active,
             metadata: json!({ "safe": "connection" }),
             source_selection: json!({}),
+            information_barrier: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_synced_at: Some(modified_after),
@@ -812,6 +888,7 @@ async fn knowledge_auto_sync_record_listing_failure_marks_sync_retryable_db_memo
             status: ConnectionStatus::Active,
             metadata: json!({ "safe": "connection" }),
             source_selection: json!({}),
+            information_barrier: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_synced_at: Some(modified_after),
@@ -885,6 +962,7 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
             connection_uid,
             parser: Some("native".to_string()),
             max_records: Some(3),
+            information_barrier: None,
             status: SyncRunStatus::ProviderSynced,
             records_seen: 0,
             records_changed: 0,
@@ -909,6 +987,7 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
             status: ConnectionStatus::Active,
             metadata: json!({}),
             source_selection: json!({}),
+            information_barrier: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_synced_at: Some(modified_after),

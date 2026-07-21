@@ -19,6 +19,7 @@ tokio = { workspace = true, features = ["fs", "rt", "macros", "sync", "time"] }
 tokio-util = { workspace = true }
 sqlx = { workspace = true, features = ["tls-rustls", "chrono", "uuid", "json"] }
 object_store.workspace = true
+zeroize = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 uuid = { workspace = true }

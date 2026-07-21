@@ -7,6 +7,7 @@ pub(super) struct Stack {
     pub(super) database_url: String,
     pub(super) schema_name: String,
     pub(super) pool: PgPool,
+    pub(super) kms: Arc<dyn KeyManagementProvider>,
     pub(super) embedder: Arc<dyn EmbeddingProvider>,
     pub(super) tenants: Vec<TenantFixture>,
     pub(super) retrievers: Vec<Arc<TenantRetriever>>,
@@ -40,6 +41,7 @@ impl Stack {
             database_url,
             schema_name,
             pool,
+            kms: Arc::new(LocalKmsProvider::new()),
             embedder,
             tenants: Vec::new(),
             retrievers: Vec::new(),
@@ -55,8 +57,9 @@ impl Stack {
                 self.pool.clone(),
                 scope.clone(),
             ));
-            let graph = PostgresGraphStore::scoped_for_app_role(self.pool.clone(), scope)
-                .with_vector_store(vector);
+            let graph =
+                PostgresGraphStore::scoped_for_app_role(self.pool.clone(), scope, self.kms.clone())
+                    .with_vector_store(vector);
 
             let fact_texts = (0..cfg.facts_per_tenant)
                 .map(|fact_index| fact_text(tenant_index, fact_index))
@@ -72,7 +75,9 @@ impl Stack {
                 }
                 graph
                     .create_node(NodeWriteIntent {
+                        barrier: None,
                         uid,
+                        data_subject_id: tenant_id.0,
                         label: NodeLabel::Fact,
                         storage_partition_id: Some(
                             StoragePartitionId::for_tenant(tenant_id).to_string(),
@@ -86,7 +91,7 @@ impl Stack {
                             "fact_index": fact_index,
                             "source": "perf_gate",
                         }),
-                        pii_class: PiiClass::None,
+                        pii_class: SensitivityClass::None,
                         confidence: Some(0.9),
                         valid_from: Utc::now(),
                         embedding: Some(embedding),
@@ -113,7 +118,13 @@ impl Stack {
         self.retrievers = self
             .tenants
             .iter()
-            .map(|tenant| Arc::new(TenantRetriever::new(self.pool.clone(), tenant.tenant_id)))
+            .map(|tenant| {
+                Arc::new(TenantRetriever::new(
+                    self.pool.clone(),
+                    self.kms.clone(),
+                    tenant.tenant_id,
+                ))
+            })
             .collect();
     }
 
@@ -137,14 +148,14 @@ pub(super) struct TenantRetriever {
 }
 
 impl TenantRetriever {
-    fn new(pool: PgPool, tenant_id: TenantId) -> Self {
+    fn new(pool: PgPool, kms: Arc<dyn KeyManagementProvider>, tenant_id: TenantId) -> Self {
         let scope_ctx = RlsContext::tenant(tenant_id);
         let vector = Arc::new(PgvectorStore::new_for_app_role(
             pool.clone(),
             scope_ctx.clone(),
         ));
         let graph = Arc::new(
-            PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_ctx)
+            PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_ctx, kms)
                 .with_vector_store(vector.clone()),
         );
         let hybrid = HybridRetriever::new(pool.clone(), graph, vector).with_assume_app_role(true);
@@ -163,13 +174,14 @@ impl TenantRetriever {
             temporal_filter: None,
         };
         let request = RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: query.text.clone(),
             query_embedding: query.embedding.clone(),
             scope: self.scope.clone(),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 5,
             use_reranker: false,
             strategy: Some(Strategy::Both),

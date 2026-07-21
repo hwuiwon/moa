@@ -3,6 +3,7 @@
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use moa_core::types::{memory::InformationBarrierId, security::SensitivityClass};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgConnection, Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
@@ -25,7 +26,7 @@ pub struct NodeIndexRow {
     /// Human-readable node name used for seed lookup.
     pub name: String,
     /// PII handling class for retrieval filtering.
-    pub pii_class: PiiClass,
+    pub pii_class: SensitivityClass,
     /// End of validity for soft-deleted or superseded nodes.
     pub valid_to: Option<DateTime<Utc>>,
     /// Start of the node's application-time validity interval.
@@ -66,6 +67,42 @@ impl<'r> FromRow<'r, PgRow> for NodeIndexRow {
 pub(crate) const NODE_INDEX_COLUMNS: &str = "uid, label, storage_partition_id, user_id, scope, name, pii_class, \
      valid_to, valid_from, properties_summary, last_accessed_at, \
      COALESCE(quality_score, 0.5) AS quality_score";
+
+/// Extra `moa.node_index` columns a [`SealedNodeRow`] needs on top of
+/// [`NODE_INDEX_COLUMNS`] to open restricted/PHI content at the read boundary:
+/// the sealed ciphertext plus the `(tenant_id, data_subject_id)` identity used
+/// to rebuild the encryption context. Must stay in sync with
+/// [`SealedNodeRow::from_row`].
+pub(crate) const SEALED_NODE_INDEX_EXTRA_COLUMNS: &str =
+    "content_sealed, tenant_id, data_subject_id";
+
+/// One `moa.node_index` row plus the sealed-content columns needed to decrypt it.
+///
+/// The read path decodes into this at the SQL boundary, then a single
+/// centralized store helper opens any restricted/PHI content and yields a
+/// plaintext [`NodeIndexRow`]; the sealed blobs never leave the graph crate.
+pub(crate) struct SealedNodeRow {
+    /// The projected node row. For a sealed row, `name` and `properties_summary`
+    /// hold the redaction placeholder until decryption populates the real values.
+    pub(crate) row: NodeIndexRow,
+    /// One envelope ciphertext containing versioned `{name, properties}` content.
+    pub(crate) content_sealed: Option<Vec<u8>>,
+    /// Owning tenant id used in the encryption context.
+    pub(crate) tenant_id: Option<Uuid>,
+    /// Authoritative subject sidecar used to select the KEK.
+    pub(crate) data_subject_id: Option<Uuid>,
+}
+
+impl<'r> FromRow<'r, PgRow> for SealedNodeRow {
+    fn from_row(row: &'r PgRow) -> std::result::Result<Self, sqlx::Error> {
+        Ok(Self {
+            row: NodeIndexRow::from_row(row)?,
+            content_sealed: row.try_get("content_sealed")?,
+            tenant_id: row.try_get("tenant_id")?,
+            data_subject_id: row.try_get("data_subject_id")?,
+        })
+    }
+}
 
 /// Supported graph node labels for graph memory nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
@@ -132,47 +169,6 @@ impl FromStr for NodeLabel {
     }
 }
 
-/// PII class attached to graph nodes for retrieval filtering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
-#[serde(rename_all = "snake_case")]
-pub enum PiiClass {
-    /// No sensitive data is known on the node.
-    None,
-    /// Personally identifiable information.
-    Pii,
-    /// Protected health information.
-    Phi,
-    /// Restricted data that needs explicit policy handling.
-    Restricted,
-}
-
-impl PiiClass {
-    /// Returns the canonical SQL string.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Pii => "pii",
-            Self::Phi => "phi",
-            Self::Restricted => "restricted",
-        }
-    }
-}
-
-impl FromStr for PiiClass {
-    type Err = GraphError;
-
-    fn from_str(value: &str) -> Result<Self> {
-        match value {
-            "none" => Ok(Self::None),
-            "pii" => Ok(Self::Pii),
-            "phi" => Ok(Self::Phi),
-            "restricted" => Ok(Self::Restricted),
-            other => Err(GraphError::UnknownPiiClass(other.to_string())),
-        }
-    }
-}
-
 /// Intent to create or supersede one graph-memory node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeWriteIntent {
@@ -184,6 +180,12 @@ pub struct NodeWriteIntent {
     pub storage_partition_id: Option<String>,
     /// Contact scope inside a tenant for contact-private rows.
     pub contact_id: Option<String>,
+    /// Authoritative encryption and erasure subject.
+    ///
+    /// Contact-owned data uses the contact UUID; tenant-owned non-contact data
+    /// uses the tenant UUID. This field is mandatory and is never inferred from
+    /// dynamic properties or sealed content.
+    pub data_subject_id: Uuid,
     /// Expected scope tier: `global`, `tenant`, or `contact`.
     pub scope: String,
     /// Human-readable node name projected into `moa.node_index`.
@@ -191,7 +193,18 @@ pub struct NodeWriteIntent {
     /// Node properties stored in the relational projection.
     pub properties: serde_json::Value,
     /// PII handling class for retrieval filtering.
-    pub pii_class: PiiClass,
+    pub pii_class: SensitivityClass,
+    /// Optional information-barrier / need-to-know tag persisted to
+    /// `moa.node_index.barrier`.
+    ///
+    /// `None` (the common case) leaves the node unrestricted under the existing
+    /// three tiers. A `Some(tag)` node is retrievable only by a caller whose
+    /// `moa.cleared_barriers` clearance set contains the tag (fail-closed
+    /// need-to-know, enforced by the `rd_barrier_need_to_know` RLS policy). The
+    /// tag is a classification label, not sensitive content, so it is stored in
+    /// plaintext alongside `pii_class` and never sealed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub barrier: Option<InformationBarrierId>,
     /// Optional model or extraction confidence.
     pub confidence: Option<f64>,
     /// Start of the bitemporal validity interval.
@@ -211,12 +224,14 @@ pub struct NodeWriteIntent {
     pub actor_kind: String,
 }
 
-/// Intent to update one active graph node's stored properties in place.
+/// Intent to replace one active graph node's complete mutable content in place.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NodePropertyUpdateIntent {
+pub struct NodeContentUpdateIntent {
     /// Stable graph-node identity to update.
     pub uid: Uuid,
-    /// Replacement node properties stored in the SQL sidecar.
+    /// Replacement human-readable name.
+    pub name: String,
+    /// Replacement node properties.
     pub properties: serde_json::Value,
     /// Replacement confidence. `None` preserves the existing sidecar confidence.
     pub confidence: Option<f64>,
@@ -305,12 +320,36 @@ pub async fn lookup_seed_by_name<'e, E>(
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
+    // Direct-executor callers (the lexical store, offline tests) receive rows
+    // without decryption; restricted/PHI content is excluded from `name_tsv`, so
+    // a real name query never matches those rows. Store-scoped read paths use
+    // [`lookup_seed_candidates`] and decrypt centrally instead.
+    Ok(lookup_seed_candidates(executor, name, limit, as_of)
+        .await?
+        .into_iter()
+        .filter(|sealed| !crate::write::is_sealed_class(sealed.row.pii_class))
+        .map(|sealed| sealed.row)
+        .collect())
+}
+
+/// Looks up graph nodes by name, returning the sealed-content projection so the
+/// store can open restricted/PHI content at the read boundary. See
+/// [`lookup_seed_by_name`] for the ranking contract.
+pub(crate) async fn lookup_seed_candidates<'e, E>(
+    executor: E,
+    name: &str,
+    limit: i64,
+    as_of: Option<DateTime<Utc>>,
+) -> Result<Vec<SealedNodeRow>>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     if limit <= 0 {
         return Ok(Vec::new());
     }
 
     let mut builder = QueryBuilder::<Postgres>::new(format!(
-        "\n        SELECT {NODE_INDEX_COLUMNS}\n        FROM moa.node_index\n        WHERE "
+        "\n        SELECT {NODE_INDEX_COLUMNS}, {SEALED_NODE_INDEX_EXTRA_COLUMNS}\n        FROM moa.node_index\n        WHERE "
     ));
     crate::push_validity_filter(&mut builder, None, as_of);
     builder.push(
@@ -342,7 +381,7 @@ where
     builder.push_bind(limit);
 
     builder
-        .build_query_as::<NodeIndexRow>()
+        .build_query_as::<SealedNodeRow>()
         .fetch_all(executor)
         .await
         .map_err(GraphError::from)
@@ -368,6 +407,33 @@ pub async fn lookup_seeds_by_names<'e, E>(
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
+    // See [`lookup_seed_by_name`]: this direct-executor wrapper drops the sealed
+    // projection. Store-scoped read paths call [`lookup_seed_candidate_batches`].
+    Ok(lookup_seed_candidate_batches(executor, names, limit, as_of)
+        .await?
+        .into_iter()
+        .map(|bucket| {
+            bucket
+                .into_iter()
+                .filter(|sealed| !crate::write::is_sealed_class(sealed.row.pii_class))
+                .map(|sealed| sealed.row)
+                .collect()
+        })
+        .collect())
+}
+
+/// Batched seed lookup returning the sealed-content projection per name so the
+/// store can open restricted/PHI content centrally. Mirrors the ranking of
+/// [`lookup_seeds_by_names`].
+pub(crate) async fn lookup_seed_candidate_batches<'e, E>(
+    executor: E,
+    names: &[&str],
+    limit: i64,
+    as_of: Option<DateTime<Utc>>,
+) -> Result<Vec<Vec<SealedNodeRow>>>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     if names.is_empty() || limit <= 0 {
         return Ok(names.iter().map(|_| Vec::new()).collect());
     }
@@ -382,6 +448,8 @@ where
             SELECT "#,
     );
     builder.push(NODE_INDEX_COLUMNS);
+    builder.push(", ");
+    builder.push(SEALED_NODE_INDEX_EXTRA_COLUMNS);
     builder.push(
         r#"
             FROM moa.node_index
@@ -415,7 +483,7 @@ where
         .await
         .map_err(GraphError::from)?;
 
-    let mut results: Vec<Vec<NodeIndexRow>> = names.iter().map(|_| Vec::new()).collect();
+    let mut results: Vec<Vec<SealedNodeRow>> = names.iter().map(|_| Vec::new()).collect();
     for row in &rows {
         let ord: i64 = row.try_get("ord")?;
         let index = usize::try_from(ord - 1).map_err(|error| {
@@ -429,7 +497,7 @@ where
                 names.len()
             )));
         };
-        bucket.push(NodeIndexRow::from_row(row).map_err(GraphError::from)?);
+        bucket.push(SealedNodeRow::from_row(row).map_err(GraphError::from)?);
     }
     Ok(results)
 }
@@ -451,10 +519,10 @@ fn decode_node_label(value: String) -> std::result::Result<NodeLabel, sqlx::Erro
     NodeLabel::from_str(&value).map_err(decode_error)
 }
 
-fn decode_pii_class(value: String) -> std::result::Result<PiiClass, sqlx::Error> {
-    PiiClass::from_str(&value).map_err(decode_error)
+fn decode_pii_class(value: String) -> std::result::Result<SensitivityClass, sqlx::Error> {
+    SensitivityClass::from_str(&value).map_err(decode_error)
 }
 
-fn decode_error(error: GraphError) -> sqlx::Error {
+fn decode_error(error: impl std::error::Error + Send + Sync + 'static) -> sqlx::Error {
     sqlx::Error::Decode(Box::new(error))
 }

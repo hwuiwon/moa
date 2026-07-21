@@ -130,6 +130,8 @@ async fn exchange_stores_only_credential_reference_on_connection() {
         fake_ingestion_runner(),
         80,
     );
+    let information_barrier =
+        InformationBarrierId::parse("finance-restricted").expect("valid barrier");
 
     let response = service
         .exchange_public_token(KnowledgeExchangeTokenRequest {
@@ -141,6 +143,7 @@ async fn exchange_stores_only_credential_reference_on_connection() {
                     "selected_folder_ids": ["folder-1"]
                 }
             }),
+            information_barrier: Some(information_barrier.clone()),
         })
         .await
         .expect("token exchange should persist a connection");
@@ -170,6 +173,95 @@ async fn exchange_stores_only_credential_reference_on_connection() {
     );
     assert_eq!(response.provider, PROVIDER);
     assert_eq!(response.connector, CONNECTOR);
+    assert_eq!(
+        connection.information_barrier,
+        Some(information_barrier.clone())
+    );
+
+    let sync_run_uid = response
+        .sync_run_uid
+        .expect("token exchange should start a sync run");
+    let original_run = repository
+        .sync_run(sync_run_uid)
+        .expect("sync run should be stored");
+    assert_eq!(
+        original_run.information_barrier,
+        Some(information_barrier.clone())
+    );
+}
+
+#[tokio::test]
+async fn mid_sync_connection_barrier_change_keeps_persisted_run_snapshot_db_memory() {
+    // Pins: separate service replicas can update and read the same Postgres connection/run,
+    // while an in-flight run retains the barrier it claimed at creation time.
+    let db = moa_test_support::postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated connection snapshot DB");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let original_barrier =
+        InformationBarrierId::parse("finance-restricted").expect("valid original barrier");
+    let replacement_barrier =
+        InformationBarrierId::parse("legal-restricted").expect("valid replacement barrier");
+    let provider = Arc::new(FakeLinkedIntegrationProvider::default());
+    let service = KnowledgeService::from_postgres_pool(
+        pool.clone(),
+        Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider)),
+        Arc::new(FakeKnowledgeCredentialStore::default()),
+        fake_ingestion_runner(),
+        80,
+    );
+
+    let exchange = service
+        .exchange_public_token(KnowledgeExchangeTokenRequest {
+            tenant_id,
+            provider: PROVIDER.to_string(),
+            exchange_token: "public-token".to_string(),
+            source_selection: json!({}),
+            information_barrier: Some(original_barrier.clone()),
+        })
+        .await
+        .expect("token exchange should persist a connection and sync run");
+    let sync_run_uid = exchange
+        .sync_run_uid
+        .expect("token exchange should start a sync run");
+
+    let mutator = PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        RlsContext::tenant(tenant_id),
+    );
+    let mut connection = mutator
+        .get_connection(exchange.connection_uid)
+        .await
+        .expect("load persisted connection from a second repository")
+        .expect("persisted connection should exist");
+    connection.information_barrier = Some(replacement_barrier.clone());
+    mutator
+        .upsert_connection(connection)
+        .await
+        .expect("persist replacement connection barrier");
+
+    let reader =
+        PostgresKnowledgeRepository::scoped_for_app_role(pool, RlsContext::tenant(tenant_id));
+    assert_eq!(
+        reader
+            .get_connection(exchange.connection_uid)
+            .await
+            .expect("read updated connection from a third repository")
+            .expect("updated connection should exist")
+            .information_barrier,
+        Some(replacement_barrier)
+    );
+    assert_eq!(
+        reader
+            .get_sync_run(sync_run_uid)
+            .await
+            .expect("read persisted sync run from a third repository")
+            .expect("persisted sync run should exist")
+            .information_barrier,
+        Some(original_barrier),
+        "changing a connection mid-sync must not rewrite the run's barrier snapshot"
+    );
 }
 
 #[tokio::test]
@@ -193,6 +285,7 @@ async fn disconnect_connection_deletes_vault_ref_and_disables_connection() {
             provider: PROVIDER.to_string(),
             exchange_token: "public-token".to_string(),
             source_selection: json!({}),
+            information_barrier: None,
         })
         .await
         .expect("token exchange should persist a linked connection");

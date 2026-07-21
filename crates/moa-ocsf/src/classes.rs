@@ -191,6 +191,77 @@ pub struct AccountChangeEvent {
     pub user: User,
 }
 
+/// OCSF Datastore Activity event: one memory-retrieval data access.
+///
+/// Emitted once per retrieval operation as a summary — never once per node — so a
+/// compliance auditor can answer "who accessed what memory data, and when."
+/// Carries no node content or names; the accessed collection is identified only
+/// by its scope in [`Resource::uid`], and [`DataAccess`] holds the queryable
+/// count, tier, and turn linkage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataAccessEvent {
+    /// OCSF class UID.
+    pub class_uid: i32,
+    /// OCSF class name.
+    pub class_name: String,
+    /// OCSF category UID.
+    pub category_uid: i32,
+    /// OCSF category name.
+    pub category_name: String,
+    /// OCSF type UID.
+    pub type_uid: i64,
+    /// Activity ID.
+    pub activity_id: i32,
+    /// Activity name.
+    pub activity_name: String,
+    /// Severity ID.
+    pub severity_id: i32,
+    /// Severity label.
+    pub severity: String,
+    /// Event occurrence time.
+    pub time: DateTime<Utc>,
+    /// OCSF metadata.
+    pub metadata: Metadata,
+    /// Accessing principal and session.
+    pub actor: Actor,
+    /// Accessed memory collection (scope). Never carries node content or names.
+    pub resource: Resource,
+    /// MOA memory data-access transparency detail.
+    pub access: DataAccess,
+}
+
+/// MOA memory data-access detail attached to a [`DataAccessEvent`].
+///
+/// Records the queryable "what scope + how many + which turn" of one retrieval so
+/// the access record stays answerable without reading any node content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataAccess {
+    /// Replay-stable identity of this logical retrieval operation.
+    pub retrieval_operation_id: String,
+    /// Exact graph node UIDs returned by this retrieval, sorted and deduplicated.
+    pub node_uids: Vec<String>,
+    /// Memory scope tier read: `tenant` or `contact`.
+    pub scope_tier: String,
+    /// Storage partition (tenant boundary) the scoped read executed against.
+    pub storage_partition: String,
+    /// Source tiers touched by the retrieval, e.g. `tenant_knowledge`, `user_memory`.
+    pub source_tiers: Vec<String>,
+    /// Number of memory records the retrieval returned (summary count, not per node).
+    pub records_returned: u32,
+    /// Turn that triggered the retrieval, linking to retrieval lineage. Absent when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_uid: Option<String>,
+    /// Agent principal that performed the retrieval, when a configured agent is pinned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_uid: Option<String>,
+    /// API key that authenticated the access, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_uid: Option<String>,
+    /// Principal on whose behalf the actor ran, when delegated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acting_on_behalf_of_uid: Option<String>,
+}
+
 /// OCSF Entity Management event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityManagementEvent {

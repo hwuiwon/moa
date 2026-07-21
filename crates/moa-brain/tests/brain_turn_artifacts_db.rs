@@ -8,6 +8,9 @@ include!("brain_turn_support/db.rs");
 include!("brain_turn_support/artifacts.rs");
 
 #[cfg(feature = "eval-harness")]
+use moa_brain::BrainTurnRequest;
+
+#[cfg(feature = "eval-harness")]
 async fn allow_artifact_capture_bash(
     store: &moa_session::PostgresSessionStore,
     tenant_id: moa_core::types::identifiers::TenantId,
@@ -117,13 +120,14 @@ async fn run_brain_turn_uses_tool_result_search_for_artifact_backed_output() {
     );
     let llm = Arc::new(ArtifactRetrievalLlmProvider::default());
 
-    let result = run_brain_turn(
-        session.id,
-        store.clone(),
-        llm.clone(),
-        &pipeline,
-        Some(tool_router),
-    )
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id: session.id,
+        session_store: store.clone(),
+        llm_provider: llm.clone(),
+        pipeline: &pipeline,
+        tool_router: Some(tool_router),
+    })
     .await
     .unwrap();
 
@@ -222,13 +226,14 @@ async fn run_brain_turn_reads_stderr_stream_from_artifact_backed_output() {
     );
     let llm = Arc::new(ArtifactStderrLlmProvider::default());
 
-    let result = run_brain_turn(
-        session.id,
-        store.clone(),
-        llm.clone(),
-        &pipeline,
-        Some(tool_router),
-    )
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id: session.id,
+        session_store: store.clone(),
+        llm_provider: llm.clone(),
+        pipeline: &pipeline,
+        tool_router: Some(tool_router),
+    })
     .await
     .unwrap();
 

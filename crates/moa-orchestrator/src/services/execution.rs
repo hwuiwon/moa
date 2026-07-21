@@ -1001,9 +1001,15 @@ async fn planning_context_inner(
             }
         })
         .collect::<Result<Vec<_>, HandlerError>>()?;
-    let scope = ActionRuleScope::Tenant {
-        tenant_id: request.tenant_id,
-    };
+    let scope = request.contact_id.map_or(
+        ActionRuleScope::Tenant {
+            tenant_id: request.tenant_id,
+        },
+        |contact_id| ActionRuleScope::Contact {
+            tenant_id: request.tenant_id,
+            contact_id,
+        },
+    );
     let registry = ArtifactRegistry::new(pool.clone());
     let revisions = load_published_revisions(&registry, &scope)
         .await

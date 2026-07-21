@@ -542,7 +542,11 @@ impl KnowledgeService {
 
     /// Creates the config-backed production knowledge application service.
     #[must_use]
-    pub(crate) fn from_config(pool: sqlx::PgPool, config: &MoaConfig) -> Self {
+    pub(crate) fn from_config(
+        pool: sqlx::PgPool,
+        kms: Arc<dyn moa_crypto::KeyManagementProvider>,
+        config: &MoaConfig,
+    ) -> Self {
         Self::from_postgres_pool(
             pool.clone(),
             Arc::new(ConfigKnowledgeProviders::new(config.knowledge.clone())),
@@ -551,6 +555,7 @@ impl KnowledgeService {
             )),
             Arc::new(ProductionKnowledgeIngestionRunner::new(
                 pool,
+                kms,
                 config.clone(),
             )),
             config.knowledge.observability.max_object_preview_chars,

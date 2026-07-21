@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/moa-analytics",
     "crates/moa-core",
+    "crates/moa-crypto",
+    "crates/moa-dlp",
+    "crates/moa-kms",
     "crates/moa-execution",
     "crates/moa-db",
     "crates/moa-scoring",
@@ -50,6 +53,9 @@ members = [
 default-members = [
     "crates/moa-analytics",
     "crates/moa-core",
+    "crates/moa-crypto",
+    "crates/moa-dlp",
+    "crates/moa-kms",
     "crates/moa-execution",
     "crates/moa-db",
     "crates/moa-scoring",
@@ -108,6 +114,9 @@ moa-agents = { path = "crates/moa-agents" }
 moa-brain = { path = "crates/moa-brain" }
 moa-contacts = { path = "crates/moa-contacts" }
 moa-core = { path = "crates/moa-core" }
+moa-crypto = { path = "crates/moa-crypto" }
+moa-dlp = { path = "crates/moa-dlp" }
+moa-kms = { path = "crates/moa-kms" }
 moa-db = { path = "crates/moa-db" }
 moa-execution = { path = "crates/moa-execution" }
 moa-scoring = { path = "crates/moa-scoring" }
@@ -143,6 +152,7 @@ moa-skills = { path = "crates/moa-skills" }
 moa-test-support = { path = "crates/moa-test-support" }
 workspace-hack = { path = "crates/workspace-hack" }
 xtask = { path = "crates/xtask" }
+aes-gcm = "0.10"
 anyhow = "1"
 argon2 = "0.5"
 arrow = "53"
@@ -237,6 +247,7 @@ uuid = { version = "1", features = ["serde", "v5", "v7"] }
 webpki-root-certs = "1"
 wiremock = "0.6"
 testcontainers = "0.23"
+zeroize = "1"
 
 [workspace.metadata.hakari]
 hakari-package = "workspace-hack"

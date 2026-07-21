@@ -14,6 +14,7 @@ blake3.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 moa-core = { workspace = true }
+moa-crypto = { workspace = true }
 moa-db = { workspace = true }
 moa-memory-graph = { workspace = true }
 moa-memory-pii = { workspace = true }

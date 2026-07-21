@@ -82,8 +82,13 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("connect edge api-key database")?;
     let pool = Arc::new(pool);
-    let providers = moa_auth_providers::build_providers(&moa_config, pool.clone())
-        .context("build providers bundle")?;
+    let auth = moa_auth_providers::build_auth_provider(&moa_config, pool.clone())
+        .context("build authentication provider")?;
+    let oauth_server = Arc::new(
+        moa_auth_providers::OAuthServer::from_config(&moa_config.auth.oauth, pool.clone())
+            .await
+            .context("bootstrap OAuth authorization server")?,
+    );
     let fga = build_fga_client(&moa_config).context("build edge OpenFGA client")?;
     let session_store = moa_session::PostgresSessionStore::from_existing_pool_with_config(
         &moa_config,
@@ -94,7 +99,11 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         config: Arc::new(moa_config.clone()),
-        auth: providers.auth.clone(),
+        auth,
+        oauth_server,
+        oauth_access_tokens: Arc::new(moa_auth_providers::OAuthAccessTokenProvider::new(
+            pool.clone(),
+        )),
         fga: fga.map(Arc::new),
         auth0_webhook_secret: moa_config.auth.auth0_webhook_secret.clone(),
         knowledge_webhooks: knowledge_webhook_edge_config(&moa_config)

@@ -4,9 +4,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
-use moa_core::config::TurbopufferVectorType;
 use moa_core::{
-    config::MoaConfig, types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    config::{MoaConfig, TurbopufferVectorType},
+    types::{
+        identifiers::{StoragePartitionId, TenantId},
+        security::SensitivityClass,
+    },
 };
 use reqwest::{Client, Method};
 use secrecy::{ExposeSecret, SecretString};
@@ -15,7 +18,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    Error, Result, VECTOR_DIMENSION, VectorItem, VectorMatch, VectorQuery, VectorStore, pii_rank,
+    Error, Result, VECTOR_DIMENSION, VectorItem, VectorMatch, VectorQuery, VectorStore,
     validate_dimension,
 };
 
@@ -50,8 +53,8 @@ pub struct TurbopufferTextQuery {
     pub k: usize,
     /// Optional graph label allowlist.
     pub label_filter: Option<Vec<String>>,
-    /// Maximum allowed PII class using the hierarchy `none < pii < phi < restricted`.
-    pub max_pii_class: String,
+    /// Maximum allowed sensitivity using the hierarchy `none < pii < phi < restricted`.
+    pub max_pii_class: SensitivityClass,
     /// Whether global rows should remain eligible after RLS has scoped visibility.
     pub include_global: bool,
 }
@@ -266,13 +269,11 @@ impl TurbopufferStore {
             "top_k": query.k,
             "include_attributes": ["id"],
         });
-        if let Some(filters) = filter_expr(
+        body["filters"] = filter_expr(
             query.label_filter.as_deref(),
-            &query.max_pii_class,
+            query.max_pii_class,
             query.include_global,
-        )? {
-            body["filters"] = filters;
-        }
+        );
 
         let value = self
             .request_value_no_retry(Method::POST, query_path(&namespace), body)
@@ -351,12 +352,11 @@ impl VectorStore for TurbopufferStore {
         let storage_partition_id = self.storage_partition_id("upsert")?;
         for item in items {
             validate_dimension(&item.embedding)?;
-            pii_rank(&item.pii_class)?;
         }
 
         let namespace = self.namespace_for_storage_partition(storage_partition_id)?;
         self.ensure_namespace(&namespace).await?;
-        let upsert_rows = items.iter().map(upsert_row).collect::<Result<Vec<_>>>()?;
+        let upsert_rows = items.iter().map(upsert_row).collect::<Vec<_>>();
         let has_search_text = upsert_rows.iter().any(|row| row.get("content").is_some());
         let body = json!({
             "upsert_rows": upsert_rows,
@@ -392,13 +392,11 @@ impl VectorStore for TurbopufferStore {
             "top_k": query.k,
             "include_attributes": ["id"],
         });
-        if let Some(filters) = filter_expr(
+        body["filters"] = filter_expr(
             query.label_filter.as_deref(),
-            &query.max_pii_class,
+            query.max_pii_class,
             query.include_global,
-        )? {
-            body["filters"] = filters;
-        }
+        );
 
         let value = self
             .request_value(Method::POST, query_path(&namespace), body)
@@ -416,8 +414,7 @@ impl VectorStore for TurbopufferStore {
     }
 }
 
-fn upsert_row(item: &VectorItem) -> Result<Value> {
-    let pii_rank = pii_rank(&item.pii_class)?;
+fn upsert_row(item: &VectorItem) -> Value {
     let scope = if item.user_id.is_some() {
         "contact"
     } else {
@@ -427,8 +424,8 @@ fn upsert_row(item: &VectorItem) -> Result<Value> {
         "id": item.uid.to_string(),
         "vector": item.embedding,
         "label": item.label,
-        "pii_class": item.pii_class,
-        "pii_rank": pii_rank,
+        "pii_class": item.pii_class.as_str(),
+        "pii_rank": item.pii_class.rank(),
         "valid_to": item
             .valid_to
             .map(|value| value.to_rfc3339())
@@ -440,16 +437,16 @@ fn upsert_row(item: &VectorItem) -> Result<Value> {
     if let Some(text) = admitted_search_text(item) {
         row["content"] = json!(text);
     }
-    Ok(row)
+    row
 }
 
 fn filter_expr(
     label_filter: Option<&[String]>,
-    max_pii_class: &str,
+    max_pii_class: SensitivityClass,
     include_global: bool,
-) -> Result<Option<Value>> {
+) -> Value {
     let mut terms = vec![
-        json!(["pii_rank", "Lte", pii_rank(max_pii_class)?]),
+        json!(["pii_rank", "Lte", max_pii_class.rank()]),
         json!(["valid_to", "Eq", "open"]),
     ];
 
@@ -470,11 +467,7 @@ fn filter_expr(
         }
     }
 
-    Ok(match terms.len() {
-        0 => None,
-        1 => terms.pop(),
-        _ => Some(json!(["And", terms])),
-    })
+    json!(["And", terms])
 }
 
 fn admitted_search_text(item: &VectorItem) -> Option<&str> {
@@ -698,7 +691,7 @@ mod tests {
                 embedding: basis_vector(0),
                 k: 1,
                 label_filter: None,
-                max_pii_class: "restricted".to_string(),
+                max_pii_class: SensitivityClass::Restricted,
                 include_global: false,
                 as_of: None,
             })
@@ -715,7 +708,7 @@ mod tests {
             uid,
             user_id: None,
             label: "Fact".to_string(),
-            pii_class: "none".to_string(),
+            pii_class: SensitivityClass::None,
             embedding: basis_vector(0),
             embedding_model: "test-embed".to_string(),
             embedding_model_version: 1,

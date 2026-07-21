@@ -5,6 +5,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::guardrails::AgentGuardrailPolicy;
+use super::memory::{InformationBarrierClearances, InformationBarrierId};
 
 /// Built-in global default agent revision identifier.
 pub const SYSTEM_DEFAULT_AGENT_REVISION_UID: Uuid =
@@ -124,6 +125,20 @@ pub struct AgentKnowledgePolicy {
     /// Optional minimum PII handling floor label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pii_floor: Option<String>,
+    /// Information barriers this agent is cleared for (need-to-know).
+    ///
+    /// Each entry is a barrier tag the agent's memory retrieval may see. It is
+    /// threaded onto the retrieval request and installed as the
+    /// `moa.cleared_barriers` GUC so the `rd_barrier_need_to_know` RLS policy
+    /// reveals nodes tagged with a cleared barrier. An empty set fails closed:
+    /// barriered nodes stay hidden.
+    #[serde(default)]
+    pub cleared_barriers: InformationBarrierClearances,
+    /// Barrier assigned to new memory written by this agent.
+    ///
+    /// When present, this value must also appear in [`Self::cleared_barriers`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_barrier: Option<InformationBarrierId>,
 }
 
 impl Default for AgentKnowledgePolicy {
@@ -133,7 +148,23 @@ impl Default for AgentKnowledgePolicy {
             filters: Value::Object(Default::default()),
             retrieval_budget: None,
             pii_floor: None,
+            cleared_barriers: InformationBarrierClearances::new(),
+            write_barrier: None,
         }
+    }
+}
+
+impl AgentKnowledgePolicy {
+    /// Validates that the write barrier is included in this policy's clearances.
+    pub fn validate(&self) -> crate::error::Result<()> {
+        if let Some(write_barrier) = &self.write_barrier
+            && !self.cleared_barriers.contains(write_barrier)
+        {
+            return Err(crate::error::MoaError::ValidationError(format!(
+                "agent write barrier `{write_barrier}` is not included in cleared barriers"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -312,6 +343,17 @@ impl AgentContext {
         }
         serde_json::from_value(self.policy_snapshot.clone())
             .map_err(|error| crate::error::MoaError::SerializationError(error.to_string()))
+    }
+
+    /// Returns validated information-barrier clearances bound to this policy revision.
+    pub fn information_barrier_clearances(
+        &self,
+    ) -> crate::error::Result<InformationBarrierClearances> {
+        let knowledge_policy = self.parsed_policy_snapshot()?.knowledge_policy;
+        knowledge_policy.validate()?;
+        Ok(knowledge_policy
+            .cleared_barriers
+            .with_policy_revision(self.policy_hash.clone()))
     }
 
     /// Returns whether this pinned context allows a tool call by name.

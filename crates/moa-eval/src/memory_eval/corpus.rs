@@ -4,11 +4,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     types::identifiers::SessionId, types::identifiers::StoragePartitionId,
     types::identifiers::UserId,
 };
-use moa_memory_graph::PiiClass;
 use moa_memory_types::ScopeTier;
 use serde::{Deserialize, Serialize};
 
@@ -109,7 +109,7 @@ pub struct LedgerFact {
     /// Synthetic source turn sequence inside the session.
     pub source_turn_seq: u64,
     /// Privacy class expected after ingestion.
-    pub pii_class: PiiClass,
+    pub pii_class: SensitivityClass,
     /// Whether answer material should be redacted before scoring or display.
     pub expected_redacted: bool,
 }
@@ -521,11 +521,11 @@ where
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
+    use moa_core::types::security::SensitivityClass;
     use moa_core::{
         types::identifiers::SessionId, types::identifiers::StoragePartitionId,
         types::identifiers::UserId,
     };
-    use moa_memory_graph::PiiClass;
     use moa_memory_types::ScopeTier;
     use uuid::Uuid;
 
@@ -596,7 +596,7 @@ mod tests {
             prior_successes: None,
             source_session_id: SessionId(Uuid::from_u128(session_suffix)),
             source_turn_seq: 1,
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             expected_redacted: false,
         }
     }

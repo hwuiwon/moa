@@ -6,19 +6,22 @@ mod observability;
 mod providers;
 mod security;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::error::{MoaError, Result};
+use crate::types::provider::ProviderId;
 
 use observability::{deserialize_optional_headers, deserialize_optional_nonempty};
-use providers::deserialize_optional_list;
+use providers::{deserialize_optional_list, deserialize_optional_provider_ids};
 
 use super::{
-    AsyncAuthzKind, AuthProviderKind, AuthzEngine, McpServerConfig, MoaConfig, OtlpProtocol,
-    RuntimeCacheBackend, SessionAttachmentBackend, SessionBlobBackend, TokenVaultKind,
+    AsyncAuthzKind, AuthProviderKind, AuthzEngine, KmsProviderKind, McpServerConfig, MoaConfig,
+    OAuthClientConfig, OAuthRefreshConfig, OtlpProtocol, RuntimeCacheBackend,
+    SessionAttachmentBackend, SessionBlobBackend, TokenVaultKind,
 };
 
 /// Optional flat environment overrides for `MoaConfig`.
@@ -42,6 +45,8 @@ pub struct MoaEnvOverlay {
     /// `MOA_MCP_SERVERS_JSON`.
     #[serde(deserialize_with = "deserialize_optional_mcp_servers")]
     pub mcp_servers_json: Option<Vec<McpServerConfig>>,
+    /// `MOA_LLM_DLP_TOKENIZE_ENABLED`.
+    pub llm_dlp_tokenize_enabled: Option<bool>,
     /// `MOA_MODELS_MAIN`.
     pub models_main: Option<String>,
     /// `MOA_MODELS_AUXILIARY`.
@@ -89,6 +94,36 @@ pub struct MoaEnvOverlay {
     pub zeroentropy_max_inputs_per_min: Option<u32>,
     /// `MOA_ZEROENTROPY_MAX_CONCURRENT_REQUESTS`.
     pub zeroentropy_max_concurrent_requests: Option<u32>,
+    /// `MOA_ANTHROPIC_CAPABILITIES_ZERO_RETENTION`.
+    pub anthropic_capabilities_zero_retention: Option<bool>,
+    /// `MOA_ANTHROPIC_CAPABILITIES_PRIVATE_DEPLOYMENT`.
+    pub anthropic_capabilities_private_deployment: Option<bool>,
+    /// `MOA_ANTHROPIC_CAPABILITIES_DATA_RESIDENCY`.
+    pub anthropic_capabilities_data_residency: Option<String>,
+    /// `MOA_OPENAI_CAPABILITIES_ZERO_RETENTION`.
+    pub openai_capabilities_zero_retention: Option<bool>,
+    /// `MOA_OPENAI_CAPABILITIES_PRIVATE_DEPLOYMENT`.
+    pub openai_capabilities_private_deployment: Option<bool>,
+    /// `MOA_OPENAI_CAPABILITIES_DATA_RESIDENCY`.
+    pub openai_capabilities_data_residency: Option<String>,
+    /// `MOA_GOOGLE_CAPABILITIES_ZERO_RETENTION`.
+    pub google_capabilities_zero_retention: Option<bool>,
+    /// `MOA_GOOGLE_CAPABILITIES_PRIVATE_DEPLOYMENT`.
+    pub google_capabilities_private_deployment: Option<bool>,
+    /// `MOA_GOOGLE_CAPABILITIES_DATA_RESIDENCY`.
+    pub google_capabilities_data_residency: Option<String>,
+    /// `MOA_PROVIDERS_ROUTING_POLICY_REQUIRE_ZERO_RETENTION`.
+    pub providers_routing_policy_require_zero_retention: Option<bool>,
+    /// `MOA_PROVIDERS_ROUTING_POLICY_REQUIRE_PRIVATE_DEPLOYMENT`.
+    pub providers_routing_policy_require_private_deployment: Option<bool>,
+    /// `MOA_PROVIDERS_ROUTING_POLICY_ALLOWED_PROVIDERS`.
+    #[serde(deserialize_with = "deserialize_optional_provider_ids")]
+    pub providers_routing_policy_allowed_providers: Option<Vec<ProviderId>>,
+    /// `MOA_PROVIDERS_ROUTING_POLICY_DENIED_PROVIDERS`.
+    #[serde(deserialize_with = "deserialize_optional_provider_ids")]
+    pub providers_routing_policy_denied_providers: Option<Vec<ProviderId>>,
+    /// `MOA_PROVIDERS_ROUTING_POLICY_REQUIRED_RESIDENCY`.
+    pub providers_routing_policy_required_residency: Option<String>,
     /// `MOA_PROVIDERS_CONCURRENCY_SCOPE` (`local` | `global`).
     pub providers_concurrency_scope: Option<String>,
     /// `MOA_PROVIDERS_CONCURRENCY_DEFAULT_MAX_IN_FLIGHT`.
@@ -149,6 +184,21 @@ pub struct MoaEnvOverlay {
     pub auth_oidc_audience: Option<String>,
     /// `MOA_AUTH_OIDC_JWKS_URL`.
     pub auth_oidc_jwks_url: Option<String>,
+    /// `MOA_AUTH_OAUTH_ISSUER`.
+    pub auth_oauth_issuer: Option<String>,
+    /// `MOA_AUTH_OAUTH_RESOURCE`.
+    pub auth_oauth_resource: Option<String>,
+    /// `MOA_AUTH_OAUTH_AUTHORIZATION_REQUEST_TTL_SECONDS`.
+    pub auth_oauth_authorization_request_ttl_seconds: Option<i64>,
+    /// `MOA_AUTH_OAUTH_AUTHORIZATION_CODE_TTL_SECONDS`.
+    pub auth_oauth_authorization_code_ttl_seconds: Option<i64>,
+    /// `MOA_AUTH_OAUTH_ACCESS_TOKEN_TTL_SECONDS`.
+    pub auth_oauth_access_token_ttl_seconds: Option<i64>,
+    /// `MOA_AUTH_OAUTH_REFRESH_TOKEN_TTL_SECONDS`.
+    pub auth_oauth_refresh_token_ttl_seconds: Option<i64>,
+    /// `MOA_AUTH_OAUTH_CLIENTS_JSON`.
+    #[serde(deserialize_with = "deserialize_optional_oauth_clients")]
+    pub auth_oauth_clients_json: Option<Vec<OAuthClientConfig>>,
     /// `MOA_AUTH_CONTACT_TOKENS_ISSUER`.
     pub auth_contact_tokens_issuer: Option<String>,
     /// `MOA_AUTH_CONTACT_TOKENS_AUDIENCE`.
@@ -181,6 +231,17 @@ pub struct MoaEnvOverlay {
     pub authz_openfga_timeout_ms: Option<u64>,
     /// `MOA_TOKEN_VAULT_PROVIDER`.
     pub token_vault_provider: Option<TokenVaultKind>,
+    /// `MOA_TOKEN_VAULT_REFRESH_JSON`.
+    #[serde(deserialize_with = "deserialize_optional_token_vault_refresh")]
+    pub token_vault_refresh_json: Option<BTreeMap<String, OAuthRefreshConfig>>,
+    /// `MOA_KMS_PROVIDER`.
+    pub kms_provider: Option<KmsProviderKind>,
+    /// `MOA_KMS_ROOT_KEY_DIR`.
+    pub kms_root_key_dir: Option<PathBuf>,
+    /// `MOA_KMS_REQUIRED_GENERATION`.
+    pub kms_required_generation: Option<String>,
+    /// `MOA_KMS_ALLOW_EPHEMERAL`.
+    pub kms_allow_ephemeral: Option<bool>,
     /// `MOA_ASYNC_AUTHZ_PROVIDER`.
     pub async_authz_provider: Option<AsyncAuthzKind>,
     /// `MOA_ASYNC_AUTHZ_DEFAULT_TIMEOUT_SECS`.
@@ -197,8 +258,12 @@ pub struct MoaEnvOverlay {
     pub lineage_audit_signing_key_hex: Option<String>,
     /// `MOA_LINEAGE_AUDIT_SIGNING_KEY_ID`.
     pub lineage_audit_signing_key_id: Option<String>,
+    /// `MOA_LINEAGE_AUDIT_ROOT_SEED_HEX`.
+    pub lineage_audit_root_seed_hex: Option<String>,
     /// `MOA_PII_VAULT_SECRET_HEX`.
     pub pii_vault_secret_hex: Option<String>,
+    /// `MOA_REQUIRE_DUAL_CONTROL_FOR_ERASURE`.
+    pub require_dual_control_for_erasure: Option<bool>,
     /// `MOA_LOCAL_DOCKER_ENABLED`.
     pub local_docker_enabled: Option<bool>,
     /// `MOA_LOCAL_SANDBOX_DIR`.
@@ -728,19 +793,46 @@ fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
         .or_else(|| messaging::exact_overlay_path(field))
 }
 
+fn deserialize_optional_oauth_clients<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<OAuthClientConfig>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_json(deserializer, "MOA_AUTH_OAUTH_CLIENTS_JSON")
+}
+
+fn deserialize_optional_token_vault_refresh<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<BTreeMap<String, OAuthRefreshConfig>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_json(deserializer, "MOA_TOKEN_VAULT_REFRESH_JSON")
+}
+
 fn deserialize_optional_mcp_servers<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<Vec<McpServerConfig>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
+    deserialize_optional_json(deserializer, "MOA_MCP_SERVERS_JSON")
+}
+
+fn deserialize_optional_json<'de, D, T>(
+    deserializer: D,
+    env_name: &str,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
     let value = Option::<String>::deserialize(deserializer)?;
     value
         .map(|value| {
             serde_json::from_str(&value).map_err(|error| {
-                serde::de::Error::custom(format!(
-                    "MOA_MCP_SERVERS_JSON contains invalid JSON: {error}"
-                ))
+                serde::de::Error::custom(format!("{env_name} contains invalid JSON: {error}"))
             })
         })
         .transpose()
@@ -1320,6 +1412,9 @@ mod tests {
             ("MOA_AUTHZ_OPENFGA_TIMEOUT_MS", "2500"),
             ("MOA_AUTH_AUTH0_WEBHOOK_SECRET", "webhook-secret"),
             ("MOA_TOKEN_VAULT_PROVIDER", "auth0"),
+            ("MOA_KMS_PROVIDER", "postgres"),
+            ("MOA_KMS_ROOT_KEY_DIR", "/var/run/secrets/test-root-keys"),
+            ("MOA_KMS_REQUIRED_GENERATION", "generation-2"),
             ("MOA_ASYNC_AUTHZ_PROVIDER", "auth0"),
             ("MOA_ASYNC_AUTHZ_DEFAULT_TIMEOUT_SECS", "120"),
             ("MOA_AUDIT_SECURITY_EMIT_AUTHZ_ALLOWS", "true"),
@@ -1417,6 +1512,12 @@ mod tests {
         assert_eq!(openfga.model_id, "model-1");
         assert_eq!(openfga.timeout_ms, 2500);
         assert_eq!(config.token_vault.provider, TokenVaultKind::Auth0);
+        assert_eq!(config.kms.provider, KmsProviderKind::Postgres);
+        assert_eq!(
+            config.kms.root_key_dir,
+            PathBuf::from("/var/run/secrets/test-root-keys")
+        );
+        assert_eq!(config.kms.required_generation, "generation-2");
         assert_eq!(config.async_authz.provider, AsyncAuthzKind::Auth0);
         assert_eq!(config.async_authz.default_timeout_secs, 120);
         assert!(config.audit_security.emit_authz_allows);

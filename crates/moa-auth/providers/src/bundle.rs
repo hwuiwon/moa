@@ -1,4 +1,4 @@
-//! Provider bundle construction for authentication, token vault, and approvals.
+//! Independent builders for authentication, token vault, and approvals.
 
 use std::sync::Arc;
 
@@ -12,20 +12,7 @@ use moa_core::traits::{AsyncAuthzProvider, AuthProvider, TokenVaultProvider};
 use moa_core::traits::{AuthError, Credential, Identity};
 use thiserror::Error;
 
-/// Authentication-related provider trait objects constructed at startup.
-#[derive(Clone)]
-pub struct Providers {
-    /// Credential authentication provider.
-    pub auth: Arc<dyn AuthProvider>,
-    /// Third-party token vault provider.
-    pub token_vault: Arc<dyn TokenVaultProvider>,
-    /// Async human approval provider.
-    pub async_authz: Arc<dyn AsyncAuthzProvider>,
-    /// Optional MOA contact-token issuer and verifier.
-    pub contact_tokens: Option<Arc<crate::ContactTokenIssuer>>,
-}
-
-/// Provider bundle construction failures.
+/// Authentication component construction failures.
 #[derive(Debug, Error)]
 pub enum BuildError {
     /// Auth provider requires an unavailable feature.
@@ -48,19 +35,11 @@ pub enum BuildError {
     Provider(String),
 }
 
-/// Construct the configured provider bundle.
-pub fn build_providers(cfg: &MoaConfig, pool: Arc<sqlx::PgPool>) -> Result<Providers, BuildError> {
-    build_providers_with_resolver(cfg, pool, None)
-}
-
-/// Construct the configured provider bundle with an optional awakeable resolver.
-pub fn build_providers_with_resolver(
+/// Construct only the configured credential authentication provider.
+pub fn build_auth_provider(
     cfg: &MoaConfig,
     pool: Arc<sqlx::PgPool>,
-    #[cfg_attr(not(feature = "auth0"), allow(unused_variables))] awakeable_resolver: Option<
-        Arc<dyn AwakeableResolver>,
-    >,
-) -> Result<Providers, BuildError> {
+) -> Result<Arc<dyn AuthProvider>, BuildError> {
     let auth: Arc<dyn AuthProvider> = match cfg.auth.provider {
         AuthProviderKind::Local => Arc::new(crate::LocalAuthProvider::new(pool.clone())),
         AuthProviderKind::Disabled => Arc::new(crate::DisabledAuthProvider),
@@ -113,8 +92,28 @@ pub fn build_providers_with_resolver(
         }
     };
 
+    tracing::info!(auth = auth.name(), "authentication provider constructed");
+    Ok(auth)
+}
+
+/// Construct only the configured third-party token-vault provider.
+pub fn build_token_vault_provider(
+    cfg: &MoaConfig,
+    pool: Arc<sqlx::PgPool>,
+    kms: Arc<dyn moa_crypto::KeyManagementProvider>,
+) -> Result<Arc<dyn TokenVaultProvider>, BuildError> {
+    cfg.token_vault
+        .validate()
+        .map_err(|error| BuildError::Provider(error.to_string()))?;
     let token_vault: Arc<dyn TokenVaultProvider> = match cfg.token_vault.provider {
         TokenVaultKind::None => Arc::new(crate::NullTokenVaultProvider),
+        TokenVaultKind::Postgres => {
+            let mut vault = crate::PostgresTokenVaultProvider::new(pool.clone(), kms);
+            if let Some(refresher) = build_token_refresher(&cfg.token_vault)? {
+                vault = vault.with_refresher(refresher);
+            }
+            Arc::new(vault)
+        }
         TokenVaultKind::Auth0 => {
             #[cfg(feature = "auth0")]
             {
@@ -143,6 +142,21 @@ pub fn build_providers_with_resolver(
         }
     };
 
+    tracing::info!(
+        vault = token_vault.name(),
+        "token-vault provider constructed"
+    );
+    Ok(token_vault)
+}
+
+/// Construct only the configured asynchronous authorization provider.
+pub fn build_async_authz_provider(
+    cfg: &MoaConfig,
+    pool: Arc<sqlx::PgPool>,
+    #[cfg_attr(not(feature = "auth0"), allow(unused_variables))] awakeable_resolver: Option<
+        Arc<dyn AwakeableResolver>,
+    >,
+) -> Result<Arc<dyn AsyncAuthzProvider>, BuildError> {
     let async_authz: Arc<dyn AsyncAuthzProvider> = match cfg.async_authz.provider {
         AsyncAuthzKind::Builtin => Arc::new(crate::BuiltinAsyncAuthzProvider::new(pool)),
         AsyncAuthzKind::Auth0 => {
@@ -174,25 +188,16 @@ pub fn build_providers_with_resolver(
             }
         }
     };
-    let contact_tokens = build_optional_contact_issuer(cfg)?;
 
     tracing::info!(
-        auth = auth.name(),
-        vault = token_vault.name(),
         async_authz = async_authz.name(),
-        contact_tokens = contact_tokens.is_some(),
-        "providers bundle constructed"
+        "async authz provider constructed"
     );
-
-    Ok(Providers {
-        auth,
-        token_vault,
-        async_authz,
-        contact_tokens,
-    })
+    Ok(async_authz)
 }
 
-fn build_optional_contact_issuer(
+/// Construct the optional contact-token issuer from direct runtime config.
+pub fn build_contact_token_issuer(
     cfg: &MoaConfig,
 ) -> Result<Option<Arc<crate::ContactTokenIssuer>>, BuildError> {
     let private_key =
@@ -224,6 +229,37 @@ fn required_config_secret(env_name: &'static str, value: &str) -> Result<String,
         .map_err(|_| BuildError::MissingEnv(env_name.to_string()))
 }
 
+/// Build the optional OAuth refresher for the self-hosted token vault.
+///
+/// Returns `Ok(None)` when no connection has refresh settings, preserving the
+/// expired-token-fails-closed behavior. Otherwise resolves each connection's
+/// client secret directly from typed config and constructs the refresher.
+fn build_token_refresher(
+    cfg: &moa_core::config::TokenVaultConfig,
+) -> Result<Option<Arc<crate::TokenRefresher>>, BuildError> {
+    if cfg.refresh.is_empty() {
+        return Ok(None);
+    }
+    let mut endpoints = std::collections::HashMap::with_capacity(cfg.refresh.len());
+    for (connection, refresh) in &cfg.refresh {
+        let client_secret = refresh
+            .client_secret
+            .as_ref()
+            .map(|secret| secrecy::SecretString::new(secret.clone().into_boxed_str()));
+        endpoints.insert(
+            connection.clone(),
+            crate::OAuthRefreshEndpoint {
+                token_endpoint: refresh.token_endpoint.trim().to_string(),
+                client_id: refresh.client_id.trim().to_string(),
+                client_secret,
+            },
+        );
+    }
+    let refresher = crate::TokenRefresher::new(endpoints)
+        .map_err(|error| BuildError::Provider(error.to_string()))?;
+    Ok(Some(Arc::new(refresher)))
+}
+
 #[cfg(feature = "auth0")]
 struct HybridAuthProvider {
     local: Arc<dyn AuthProvider>,
@@ -242,9 +278,9 @@ impl HybridAuthProvider {
 impl AuthProvider for HybridAuthProvider {
     async fn authenticate(&self, credential: &Credential) -> Result<Identity, AuthError> {
         match credential {
-            Credential::ApiKey(_) | Credential::UserSessionToken(_) => {
-                self.local.authenticate(credential).await
-            }
+            Credential::ApiKey(_)
+            | Credential::UserSessionToken(_)
+            | Credential::OAuthAccessToken(_) => self.local.authenticate(credential).await,
             Credential::BearerJwt(_) => self.bearer.authenticate(credential).await,
         }
     }
@@ -268,7 +304,7 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://moa_owner:dev@127.0.0.1:1/moa")
             .expect("lazy pool should not connect");
-        let error = match build_providers(&config, Arc::new(pool)) {
+        let error = match build_auth_provider(&config, Arc::new(pool)) {
             Ok(_) => panic!("auth0 should be missing"),
             Err(error) => error,
         };
@@ -286,13 +322,12 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://moa_owner:dev@127.0.0.1:1/moa")
             .expect("lazy pool should not connect");
-        let providers =
-            build_providers(&config, Arc::new(pool)).expect("disabled auth should build");
+        let provider =
+            build_auth_provider(&config, Arc::new(pool)).expect("disabled auth should build");
 
-        assert_eq!(providers.auth.name(), "disabled");
-        assert!(!providers.auth.requires_credentials());
-        let identity = providers
-            .auth
+        assert_eq!(provider.name(), "disabled");
+        assert!(!provider.requires_credentials());
+        let identity = provider
             .authenticate(&Credential::ApiKey("ignored".to_string()))
             .await
             .expect("disabled auth accepts any credential");
@@ -303,5 +338,26 @@ mod tests {
             moa_core::types::identifiers::TenantId::from(uuid::Uuid::nil())
         );
         assert_eq!(identity.api_key_id, None);
+    }
+
+    #[test]
+    fn token_refresher_accepts_direct_client_secret() {
+        // Pins: refresh credentials are consumed directly from typed config;
+        // construction does not depend on a second environment-variable name.
+        let mut config = moa_core::config::TokenVaultConfig::default();
+        config.refresh.insert(
+            "github".to_string(),
+            moa_core::config::OAuthRefreshConfig {
+                token_endpoint: "https://github.com/login/oauth/access_token".to_string(),
+                client_id: "client-id".to_string(),
+                client_secret: Some("client-secret".to_string()),
+            },
+        );
+
+        assert!(
+            build_token_refresher(&config)
+                .expect("direct refresh config builds")
+                .is_some()
+        );
     }
 }

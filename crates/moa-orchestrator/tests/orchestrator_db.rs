@@ -12,6 +12,8 @@ mod api_keys_db;
 mod authz_admin_db;
 #[path = "orchestrator_db/authz_challenges_db.rs"]
 mod authz_challenges_db;
+#[path = "orchestrator_db/backfill_cli_db.rs"]
+mod backfill_cli_db;
 #[path = "orchestrator_db/contacts_db.rs"]
 mod contacts_db;
 #[path = "orchestrator_db/eval_run_status_db.rs"]

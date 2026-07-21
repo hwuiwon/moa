@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
+use moa_authz::{FgaClient, FgaConfig};
 use moa_core::{
     events::Event,
     traits::SessionStore,
@@ -28,7 +29,7 @@ use uuid::Uuid;
 use super::SessionStoreImpl;
 use super::inner::{
     change_contact_session_channel_atomic, create_session_for_identity,
-    initialize_contact_session_atomic,
+    ensure_session_authz_visible, initialize_contact_session_atomic,
 };
 
 #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
@@ -141,6 +142,73 @@ async fn create_session_for_identity_db_enqueues_owner_and_tenant_tuples() -> Re
                 tenant_id: Some(identity.tenant_id.0),
             },
         ]
+    );
+
+    cleanup(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+async fn session_authz_delivery_failure_remains_retryable_db() -> Result<()> {
+    // Pins: transient OpenFGA delivery failures stay retryable so Restate can
+    // resume a committed session instead of terminally failing its workflow.
+    let (service, database_url, schema_name) = test_service().await?;
+    install_authz_outbox(&service).await?;
+    let meta = test_session_meta("authz-retryable");
+    let stable_session_id = meta.id;
+    let tenant_id = meta.tenant_id;
+    let identity = Identity {
+        identity_type: IdentityType::Operator,
+        id: Uuid::new_v4(),
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    };
+    let session_id = create_session_for_identity(
+        service.store.as_ref(),
+        &service.pool,
+        meta.clone(),
+        identity.clone(),
+    )
+    .await
+    .map_err(into_anyhow)?;
+    let fga = FgaClient::new(FgaConfig {
+        url: "http://127.0.0.1:9".to_string(),
+        preshared_key: "test".to_string(),
+        store_id: "store".to_string(),
+        model_id: "model".to_string(),
+        timeout_ms: 50,
+    })?;
+
+    let error = ensure_session_authz_visible(&service.pool, &fga, &identity, session_id)
+        .await
+        .expect_err("unreachable OpenFGA should fail the visibility barrier");
+    let error = <restate_sdk::prelude::HandlerError as AsRef<
+        dyn std::error::Error + Send + Sync,
+    >>::as_ref(&error)
+    .to_string();
+    assert!(
+        error.starts_with("Retryable error:"),
+        "delivery failure must remain retryable: {error}"
+    );
+
+    let replayed_session_id =
+        create_session_for_identity(service.store.as_ref(), &service.pool, meta, identity)
+            .await
+            .map_err(into_anyhow)?;
+    assert_eq!(replayed_session_id, stable_session_id);
+    let session_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE id = $1")
+        .bind(stable_session_id.0)
+        .fetch_one(&service.pool)
+        .await?;
+    assert_eq!(session_rows, 1, "retry must reuse the journaled Session id");
+    let tuple_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM authz_outbox WHERE tuple_object = $1")
+            .bind(format!("session:{stable_session_id}"))
+            .fetch_one(&service.pool)
+            .await?;
+    assert_eq!(
+        tuple_rows, 2,
+        "retry must not duplicate authorization tuples"
     );
 
     cleanup(&database_url, &schema_name).await

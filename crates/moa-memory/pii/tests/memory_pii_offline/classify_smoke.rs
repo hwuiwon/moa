@@ -1,6 +1,6 @@
 //! Smoke coverage for the HTTP-backed PII classifier.
 
-use moa_memory_graph::PiiClass;
+use moa_core::types::security::SensitivityClass;
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiCategory, PiiClassifier, PiiSpan, PrivacyFilterThresholds,
     openai_filter::resolve_class,
@@ -57,7 +57,7 @@ async fn classify_smoke_maps_ssn_to_phi_and_clean_text_to_none() {
         .classify("My SSN is 123-45-6789")
         .await
         .expect("classify SSN text");
-    assert_eq!(ssn.class, PiiClass::Phi);
+    assert_eq!(ssn.class, SensitivityClass::Phi);
     assert_eq!(ssn.spans.len(), 1);
     assert_eq!(ssn.spans[0].category, PiiCategory::Ssn);
 
@@ -65,7 +65,7 @@ async fn classify_smoke_maps_ssn_to_phi_and_clean_text_to_none() {
         .classify("the auth service uses JWT")
         .await
         .expect("classify clean text");
-    assert_eq!(clean.class, PiiClass::None);
+    assert_eq!(clean.class, SensitivityClass::None);
     assert!(clean.spans.is_empty());
 }
 
@@ -77,7 +77,7 @@ async fn classifier_fails_closed_on_network_error() {
         .classify("network should fail")
         .await
         .expect("fail-closed classifier should return a result");
-    assert_eq!(result.class, PiiClass::Pii);
+    assert_eq!(result.class, SensitivityClass::Pii);
     assert!(result.abstained);
 }
 
@@ -100,5 +100,5 @@ fn real_model_aliases_map_to_moa_categories() {
         &[PiiSpan::new(0, 12, PiiCategory::Secret, 0.99)],
         PrivacyFilterThresholds::default(),
     );
-    assert_eq!(class, PiiClass::Restricted);
+    assert_eq!(class, SensitivityClass::Restricted);
 }

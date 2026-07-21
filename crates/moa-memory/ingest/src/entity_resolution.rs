@@ -5,9 +5,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{traits::EmbeddingProvider, types::identifiers::StoragePartitionId};
 use moa_db::ScopedConn;
-use moa_memory_graph::{NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_graph::{NodeIndexRow, NodeLabel, NodeWriteIntent};
 use moa_memory_types::normalize_entity_name;
 use moa_memory_vector::{VectorQuery, VectorStore};
 use serde_json::json;
@@ -230,7 +231,12 @@ impl EntityResolver {
                 (None, None, None)
             };
         let create = NodeWriteIntent {
+            barrier: request.barrier.cloned(),
             uid,
+            data_subject_id: request
+                .scope
+                .contact_id()
+                .map_or(request.scope.tenant_id().0, |contact_id| contact_id.0),
             label: NodeLabel::Entity,
             storage_partition_id: Some(
                 StoragePartitionId::for_tenant(request.scope.tenant_id()).to_string(),
@@ -322,7 +328,7 @@ impl EntityResolver {
         &self,
         pool: &PgPool,
         scope: &RlsContext,
-        pii_class: PiiClass,
+        pii_class: SensitivityClass,
         embedding: Vec<f32>,
     ) -> Result<Vec<EmbeddingCandidate>> {
         let Some(blocker) = &self.embedding_blocker else {
@@ -334,7 +340,7 @@ impl EntityResolver {
                 embedding,
                 k: EMBEDDING_BLOCK_K,
                 label_filter: Some(vec![NodeLabel::Entity.as_str().to_string()]),
-                max_pii_class: pii_class.as_str().to_string(),
+                max_pii_class: pii_class,
                 include_global: false,
                 as_of: None,
             })
@@ -455,7 +461,7 @@ pub struct EntityResolutionRequest<'a> {
     /// Extracted subject or object mention.
     pub name: &'a str,
     /// PII class inherited from the redacted fact.
-    pub pii_class: PiiClass,
+    pub pii_class: SensitivityClass,
     /// Confidence assigned to the entity node when one is created.
     pub confidence: f64,
     /// Application-time validity start for a newly created entity.
@@ -464,6 +470,10 @@ pub struct EntityResolutionRequest<'a> {
     pub actor_id: &'a str,
     /// Actor kind written to graph changelog rows.
     pub actor_kind: &'a str,
+    /// Information-barrier tag inherited from the ingestion session, persisted on
+    /// any newly created entity node so it is need-to-know restricted alongside
+    /// the fact that mentioned it. `None` leaves the entity unrestricted.
+    pub barrier: Option<&'a moa_core::types::memory::InformationBarrierId>,
     /// Embedding of the mention's normalized name, precomputed for the whole fact
     /// batch in one provider call.
     ///

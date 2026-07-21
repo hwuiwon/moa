@@ -31,6 +31,8 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+moa-memory-graph = { workspace = true }
+moa-memory-pii = { workspace = true }
 moa-session = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true

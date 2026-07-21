@@ -361,7 +361,7 @@ mod tests {
             contact_id: None,
             scope: "tenant".to_string(),
             name: name.to_string(),
-            pii_class: moa_memory_graph::PiiClass::None,
+            pii_class: moa_core::types::security::SensitivityClass::None,
             valid_to: None,
             valid_from: chrono::Utc::now(),
             properties_summary: Some(serde_json::json!({})),

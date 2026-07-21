@@ -540,9 +540,10 @@ fn current_trace_context() -> Option<ValidatedTraceContext> {
 
 #[cfg(test)]
 mod tests {
+    use moa_core::traits::{Identity, IdentityType};
     use moa_core::types::{
         action_policy::ExecutionTaskOrigin,
-        identifiers::{TenantId, ToolCallId, UserId},
+        identifiers::{TenantId, ToolCallId},
         tools::ToolCallRequest,
     };
     use serde_json::json;
@@ -560,13 +561,18 @@ mod tests {
         };
         let call = ToolCallRequest {
             tool_call_id: ToolCallId::new(),
+            caller_identity: Identity {
+                identity_type: IdentityType::Operator,
+                id: Uuid::from_u128(2),
+                tenant_id: TenantId::from(Uuid::from_u128(1)),
+                api_key_id: None,
+                acting_on_behalf_of: None,
+            },
             provider_tool_use_id: None,
             tool_name: "bash".to_string(),
             input: json!({"cmd": "printf reviewed"}),
             active_canary: None,
-            session_id: Some(moa_core::types::identifiers::SessionId::new()),
-            tenant_id: TenantId::from(Uuid::from_u128(1)),
-            user_id: UserId::new("owner"),
+            session_id: moa_core::types::identifiers::SessionId::new(),
             trusted_sandbox_manifest: None,
             worker_id: None,
         };

@@ -14,6 +14,9 @@ pub mod postgres;
 pub mod pricing;
 
 #[cfg(feature = "orchestrator-fixture")]
+pub mod process;
+
+#[cfg(feature = "orchestrator-fixture")]
 mod orchestrator_fixture;
 
 #[cfg(feature = "orchestrator-fixture")]

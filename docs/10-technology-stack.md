@@ -49,7 +49,7 @@ Build-graph boundaries keep optional tooling out of ordinary builds:
 | Execution plans | `serde_json`, `serde_canonical_json`, `blake3`, UUIDv5, and `jsonschema` 0.47 with Draft 2020-12 validation and remote/file retrieval disabled in `moa-execution` |
 | Scheduling | Restate `CronJob` virtual object |
 | Runtime cache | Redis-backed coordination for the orchestrator; in-process memory exists only for isolated local/test code |
-| Security | `secrecy`, `shell-words` |
+| Security | `secrecy`, `shell-words`; `moa-crypto` envelope encryption backed by Postgres KMS state and mounted generation keyrings |
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
 
@@ -122,6 +122,7 @@ and deployment setup. Key groups:
 | `MOA_MODELS_*` and `MOA_<PROVIDER>_API_KEY` | model routing and provider API keys |
 | `MOA_DATABASE_*` | Postgres URL, admin URL, pool settings, Neon branching |
 | `MOA_RUNTIME_CACHE_*` | runtime cache backend selection and Redis URL for shared transient coordination |
+| `MOA_KMS_*` | durable KMS provider, mounted generation-key directory, and required active generation |
 | `MOA_MEMORY_*`, `MOA_PII_SERVICE_URL`, and `MOA_TURBOPUFFER_*` | memory directory, embedding and reranker `provider:model` selectors, PII service, and Turbopuffer cloud vector backend credentials |
 | `MOA_KNOWLEDGE_*` | tenant knowledge provider enablement, parser selection, sync limits, and chunking limits |
 | `MOA_QUERY_REWRITE_*` | fail-open, retrieval-scoped query rewrite gating and timeout behavior |
@@ -174,7 +175,18 @@ MOA_DATABASE_URL=postgres://...
 MOA_RESTATE_ADMIN_URL=http://...
 MOA_RESTATE_INGRESS_URL=http://...
 MOA_OPENAI_API_KEY=... # or another configured provider key
+MOA_KMS_PROVIDER=postgres
+MOA_KMS_ROOT_KEY_DIR=/var/run/secrets/moa-kms/root-keys
+MOA_KMS_REQUIRED_GENERATION=primary
 ```
+
+Production Kubernetes provisions `moa-kms-root-keys` externally and mounts it
+read-only into orchestrator pods only. The edge never receives root-key
+material. The local Kustomize overlay and Docker Compose use a fixed public
+development-only key with the same Postgres KMS topology, so local encrypted
+data remains readable after process restarts and multi-container behavior
+matches production. Key rotation and the opt-in maintenance Jobs are documented
+in [KMS Root-Key Rotation](operations/kms-root-key-rotation.md).
 
 Configure Redis when runtime cache state should coordinate across replicas:
 

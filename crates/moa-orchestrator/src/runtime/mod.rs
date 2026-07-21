@@ -5,3 +5,4 @@ pub mod database;
 pub mod deps;
 pub mod endpoint;
 pub mod jobs;
+pub mod kms;

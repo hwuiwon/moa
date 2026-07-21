@@ -425,6 +425,7 @@ pub(super) fn dispatch_execution_run(
     ctx: &ObjectContext<'_>,
     state: &SessionVoState,
     run_uid: uuid::Uuid,
+    identity: moa_core::traits::Identity,
 ) -> Result<(), HandlerError> {
     let session_id = parse_session_key(ctx.key())?;
     let meta = state
@@ -438,6 +439,7 @@ pub(super) fn dispatch_execution_run(
                     tenant_id: meta.tenant_id,
                     contact_id: meta.contact.as_ref().map(|contact| contact.contact_id),
                     session_id,
+                    identity,
                 },
             )),
     )

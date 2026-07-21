@@ -5,13 +5,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_core::{
     config::CloudHandsConfig, config::MoaConfig, error::MoaError, error::Result,
-    traits::BuiltInTool, traits::ToolContext, types::action_policy::ActionClass,
-    types::action_policy::ActionPolicyEffect, types::action_policy::ActionPolicyRule,
-    types::action_policy::ActionRuleScope, types::action_policy::RiskLevel,
-    types::completion::ToolInvocation, types::identifiers::ModelId, types::identifiers::TenantId,
-    types::identifiers::UserId, types::session::SessionMeta, types::tools::IdempotencyClass,
-    types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolOutput,
-    types::tools::ToolPolicySpec,
+    traits::BuiltInTool, traits::Identity, traits::IdentityType, traits::ToolContext,
+    types::action_policy::ActionClass, types::action_policy::ActionPolicyEffect,
+    types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
+    types::action_policy::RiskLevel, types::completion::ToolInvocation,
+    types::identifiers::ModelId, types::identifiers::TenantId, types::identifiers::UserId,
+    types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::ToolDiffStrategy,
+    types::tools::ToolInputShape, types::tools::ToolOutput, types::tools::ToolPolicySpec,
 };
 use moa_hands::{McpDiscoveredTool, ToolRegistry, ToolRouter};
 use moa_security::ActionPolicyRuleStore;
@@ -31,9 +31,21 @@ const TOOL_EXECUTION_FAILED_STATUS: &str = "tool execution failed";
 
 fn session() -> SessionMeta {
     SessionMeta {
-        tenant_id: TenantId::new(),
+        tenant_id: identity().tenant_id,
         model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
+    }
+}
+
+fn identity() -> Identity {
+    Identity {
+        identity_type: IdentityType::Operator,
+        id: uuid::Uuid::from_u128(0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c421),
+        tenant_id: TenantId::from(uuid::Uuid::from_u128(
+            0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c422,
+        )),
+        api_key_id: None,
+        acting_on_behalf_of: None,
     }
 }
 
@@ -209,7 +221,7 @@ async fn local_route_without_opt_in_fails_closed() {
     let dir = tempdir().expect("tempdir should be created");
     config.local.sandbox_dir = dir.path().display().to_string();
 
-    let error = match ToolRouter::from_config(&config).await {
+    let error = match ToolRouter::from_config(&config, None).await {
         Ok(_) => panic!("local route without opt-in should fail closed"),
         Err(error) => error,
     };
@@ -238,7 +250,7 @@ async fn local_route_with_opt_in_registers_local_hands() {
     let dir = tempdir().expect("tempdir should be created");
     config.local.sandbox_dir = dir.path().display().to_string();
 
-    let router = ToolRouter::from_config(&config)
+    let router = ToolRouter::from_config(&config, None)
         .await
         .expect("local opt-in should allow router construction");
     assert!(router.has_tool("file_write"));
@@ -248,6 +260,7 @@ async fn local_route_with_opt_in_registers_local_hands() {
     router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -259,6 +272,7 @@ async fn local_route_with_opt_in_registers_local_hands() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
@@ -301,6 +315,7 @@ async fn tool_telemetry_redacts_raw_input_and_execution_errors_by_default() {
             let error = router
                 .execute_authorized(
                     &session(),
+                    &identity(),
                     &ToolInvocation {
                         id: None,
                         name: "secret_error".to_string(),
@@ -358,12 +373,13 @@ async fn local_hand_error_output_spans_redact_bodies_by_default() {
             config.local.docker_enabled = false;
             let dir = tempdir().expect("tempdir should be created");
             config.local.sandbox_dir = dir.path().display().to_string();
-            let router = ToolRouter::from_config(&config)
+            let router = ToolRouter::from_config(&config, None)
                 .await
                 .expect("local opt-in should allow router construction");
             let (_, output) = router
                 .execute_authorized(
                     &session(),
+                    &identity(),
                     &ToolInvocation {
                         id: None,
                         name: "bash".to_string(),

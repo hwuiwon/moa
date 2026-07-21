@@ -2,34 +2,26 @@
 
 mod signals;
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    error::MoaError, error::Result, events::Event, traits::LLMProvider, traits::LineageHandle,
-    traits::SessionStore, types::completion::CompletionContent, types::completion::StopReason,
-    types::context::WorkingContext, types::events_stream::EventRange,
-    types::events_stream::EventRecord, types::identifiers::SessionId,
-    types::observability::TraceContext, types::observability::genai_operation_name,
-    types::observability::genai_provider_name, types::provider::ModelTask,
-    types::runtime_events::RuntimeEvent, types::session::SessionMeta,
-    types::session::SessionSignal,
+    error::MoaError, error::Result, events::Event, types::completion::CompletionContent,
+    types::completion::StopReason, types::context::WorkingContext,
+    types::events_stream::EventRange, types::observability::TraceContext,
+    types::observability::genai_operation_name, types::observability::genai_provider_name,
+    types::provider::ModelTask, types::runtime_events::RuntimeEvent, types::session::SessionMeta,
 };
 use moa_hands::ToolRouter;
 use moa_lineage_core::TurnId;
 use moa_observability::{
     apply_trace_context_to_span, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
 };
-use tokio::sync::{broadcast, mpsc};
-use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use self::signals::{drain_signal_queue, handle_stream_signal};
 use crate::lineage::{emit_context_lineage, emit_generation_lineage};
-use crate::pipeline::ContextPipeline;
 use crate::turn::{StreamSignalDisposition, stream_completion_response};
 
-use super::StreamedTurnResult;
 use super::budget::enforce_tenant_budget;
 use super::context_build::{
     BuildTurnContextOptions, append_event, build_cache_report, build_turn_context,
@@ -37,25 +29,38 @@ use super::context_build::{
     turn_number_for_events,
 };
 use super::tool_dispatch::{DurableToolFailure, ToolCallOutcome, handle_tool_call};
+use super::{BrainTurnRequest, StreamedTurnRequest, StreamedTurnResult};
 
 const TURN_EVENT_TAIL_LIMIT: usize = 16;
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn run_streamed_turn_with_tools_mode(
-    session_id: SessionId,
-    session_store: Arc<dyn SessionStore>,
-    llm_provider: Arc<dyn LLMProvider>,
-    pipeline: &ContextPipeline,
-    tool_router: Option<Arc<ToolRouter>>,
-    runtime_tx: &broadcast::Sender<RuntimeEvent>,
-    event_tx: Option<&broadcast::Sender<EventRecord>>,
-    cancel_token: Option<CancellationToken>,
-    hard_cancel_token: Option<CancellationToken>,
-    mut signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
-    turn_requested: Option<&mut bool>,
-    soft_cancel_requested: Option<&mut bool>,
-    lineage: Arc<dyn LineageHandle>,
+pub(super) async fn run_streamed_turn(
+    request: StreamedTurnRequest<'_>,
 ) -> Result<StreamedTurnResult> {
+    let StreamedTurnRequest {
+        turn:
+            BrainTurnRequest {
+                identity,
+                session_id,
+                session_store,
+                llm_provider,
+                pipeline,
+                tool_router,
+            },
+        runtime_tx,
+        event_tx,
+        cancel_token,
+        hard_cancel_token,
+        signal_state,
+        lineage,
+    } = request;
+    let (mut signal_rx, turn_requested, soft_cancel_requested) = match signal_state {
+        Some(state) => (
+            Some(state.signal_rx),
+            Some(state.turn_requested),
+            Some(state.soft_cancel_requested),
+        ),
+        None => (None, None, None),
+    };
     let initial_session = session_store.get_session(session_id).await?;
     let initial_events = session_store
         .get_events(session_id, EventRange::recent(TURN_EVENT_TAIL_LIMIT))
@@ -101,6 +106,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 None => None,
             };
             let (mut ctx, active_canary) = build_turn_context(BuildTurnContextOptions {
+                identity: &identity,
                 session_id: &session_id,
                 session: &session,
                 session_store: &session_store,
@@ -295,6 +301,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                         CompletionContent::ToolCall(call) => {
                             saw_tool_request = true;
                             let outcome = handle_tool_call(
+                                &identity,
                                 session_id,
                                 &session,
                                 session_store.clone(),

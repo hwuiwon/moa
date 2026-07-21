@@ -1,6 +1,6 @@
 //! Wiremock offline counterpart for Turbopuffer vector-store live coverage.
 
-use moa_core::config::TurbopufferVectorType;
+use moa_core::{config::TurbopufferVectorType, types::security::SensitivityClass};
 use moa_memory_vector::{
     Error, TurbopufferStore, TurbopufferTextQuery, VECTOR_DIMENSION, VectorItem, VectorQuery,
     VectorStore,
@@ -50,7 +50,7 @@ async fn turbopuffer_offline_round_trip() {
             embedding: basis_vector(0),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: None,
         })
@@ -83,7 +83,7 @@ async fn turbopuffer_as_of_query_returns_unsupported_without_http_request() {
             embedding: basis_vector(0),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: Some(
                 chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
@@ -113,7 +113,7 @@ async fn turbopuffer_offline_query_enforces_pii_ceiling_and_excludes_global_scop
     // Pins the Turbopuffer-side privacy boundary: the knn request body must carry
     // the `pii_rank <= ceiling` term and, with include_global=false, the
     // `scope != global` term. Without these, the backend would return rows above
-    // the caller's PII ceiling or leak global-scope rows. `max_pii_class: "phi"`
+    // the caller's PII ceiling or leak global-scope rows. `SensitivityClass::Phi`
     // (rank 2) makes the ceiling meaningful (it excludes restricted=3).
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -131,7 +131,7 @@ async fn turbopuffer_offline_query_enforces_pii_ceiling_and_excludes_global_scop
             embedding: basis_vector(0),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "phi".to_string(),
+            max_pii_class: SensitivityClass::Phi,
             include_global: false,
             as_of: None,
         })
@@ -242,7 +242,7 @@ async fn turbopuffer_bm25_query_uses_content_rank_by_and_privacy_filters() {
             query_text: "abc-123 deployment runbook".to_string(),
             k: 7,
             label_filter: Some(vec!["Chunk".to_string()]),
-            max_pii_class: "phi".to_string(),
+            max_pii_class: SensitivityClass::Phi,
             include_global: false,
         })
         .await
@@ -300,7 +300,7 @@ async fn turbopuffer_bm25_empty_query_returns_empty_without_http_request() {
             query_text: "  ".to_string(),
             k: 10,
             label_filter: Some(vec!["Chunk".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
         })
         .await
@@ -399,7 +399,7 @@ fn test_item(uid: Uuid) -> VectorItem {
         uid,
         user_id: None,
         label: "Fact".to_string(),
-        pii_class: "none".to_string(),
+        pii_class: SensitivityClass::None,
         embedding: basis_vector(0),
         embedding_model: "test-embed".to_string(),
         embedding_model_version: 1,

@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: moa-kms-rewrap
+  namespace: moa-system
+  labels:
+    app.kubernetes.io/name: moa-kms-rewrap
+    app.kubernetes.io/part-of: moa
+    app.kubernetes.io/component: maintenance
+spec:
+  activeDeadlineSeconds: 3600
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: moa-kms-rewrap
+        app.kubernetes.io/part-of: moa
+        app.kubernetes.io/component: maintenance
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kms-rewrap
+          image: ghcr.io/hwuiwon/moa-orchestrator:latest
+          args:
+            - kms-rewrap
+            - --batch-size
+            - "100"
+          env:
+            - name: MOA_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moa-postgres
+                  key: url
+            - name: MOA_DATABASE_MAX_CONNECTIONS
+              value: "2"
+            - name: MOA_DATABASE_CONNECT_TIMEOUT_SECONDS
+              value: "10"
+            - name: MOA_KMS_PROVIDER
+              value: postgres
+            - name: MOA_KMS_ROOT_KEY_DIR
+              value: /var/run/secrets/moa-kms/root-keys
+            - name: MOA_KMS_REQUIRED_GENERATION
+              value: primary
+          volumeMounts:
+            - name: kms-root-keys
+              mountPath: /var/run/secrets/moa-kms/root-keys
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: kms-root-keys
+          secret:
+            secretName: moa-kms-root-keys

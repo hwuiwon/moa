@@ -2,6 +2,7 @@
 
 //! Live Turbopuffer integration tests.
 
+use moa_core::types::security::SensitivityClass;
 use moa_memory_vector::{TurbopufferStore, VECTOR_DIMENSION, VectorItem, VectorQuery, VectorStore};
 use uuid::Uuid;
 
@@ -36,7 +37,7 @@ async fn turbopuffer_live_round_trip() {
         uid,
         user_id: None,
         label: "Fact".to_string(),
-        pii_class: "none".to_string(),
+        pii_class: SensitivityClass::None,
         embedding: basis_vector(7),
         embedding_model: "live-test".to_string(),
         embedding_model_version: 1,
@@ -53,7 +54,7 @@ async fn turbopuffer_live_round_trip() {
             embedding: item.embedding,
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: None,
         })

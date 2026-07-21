@@ -945,10 +945,15 @@ mod tests {
 
     use async_trait::async_trait;
     use moa_core::{
-        traits::HandProvider, types::action_policy::ActionClass,
-        types::action_policy::ActionPolicyEffect, types::action_policy::RiskLevel,
-        types::completion::ToolInvocation, types::tools::IdempotencyClass,
-        types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolOutput,
+        traits::{HandProvider, Identity, IdentityType},
+        types::action_policy::ActionClass,
+        types::action_policy::ActionPolicyEffect,
+        types::action_policy::RiskLevel,
+        types::completion::ToolInvocation,
+        types::tools::IdempotencyClass,
+        types::tools::ToolDiffStrategy,
+        types::tools::ToolInputShape,
+        types::tools::ToolOutput,
         types::tools::ToolPolicySpec,
     };
     use serde_json::json;
@@ -1102,10 +1107,23 @@ mod tests {
     }
 
     fn session() -> SessionMeta {
+        let identity = identity();
         SessionMeta {
             id: moa_core::types::identifiers::SessionId::new(),
-            tenant_id: TenantId::new(),
+            tenant_id: identity.tenant_id,
             ..SessionMeta::default()
+        }
+    }
+
+    fn identity() -> Identity {
+        Identity {
+            identity_type: IdentityType::Operator,
+            id: uuid::Uuid::from_u128(0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c311),
+            tenant_id: TenantId::from(uuid::Uuid::from_u128(
+                0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c312,
+            )),
+            api_key_id: None,
+            acting_on_behalf_of: None,
         }
     }
 
@@ -1127,11 +1145,11 @@ mod tests {
         let second_router = router(provider.clone(), lease_store);
 
         first_router
-            .execute_authorized_with_recovery(&session, None, &bash_invocation())
+            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
             .await
             .expect("first router provisions and executes");
         second_router
-            .execute_authorized_with_recovery(&session, None, &bash_invocation())
+            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
             .await
             .expect("second router reuses durable lease");
 
@@ -1151,12 +1169,24 @@ mod tests {
         let right_router = router(provider.clone(), lease_store);
         let left_session = session.clone();
         let right_session = session;
+        let left_identity = identity();
+        let right_identity = identity();
         let left_invocation = bash_invocation();
         let right_invocation = bash_invocation();
 
         let (left, right) = tokio::join!(
-            left_router.execute_authorized_with_recovery(&left_session, None, &left_invocation),
-            right_router.execute_authorized_with_recovery(&right_session, None, &right_invocation)
+            left_router.execute_authorized_with_recovery(
+                &left_session,
+                &left_identity,
+                None,
+                &left_invocation
+            ),
+            right_router.execute_authorized_with_recovery(
+                &right_session,
+                &right_identity,
+                None,
+                &right_invocation
+            )
         );
 
         left.expect("left router should execute");
@@ -1175,7 +1205,7 @@ mod tests {
         let cleanup_router = router(provider.clone(), lease_store);
 
         first_router
-            .execute_authorized_with_recovery(&session, None, &bash_invocation())
+            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
             .await
             .expect("first router provisions and executes");
         cleanup_router.reclaim_hands(&session.id, None).await;
@@ -1192,7 +1222,7 @@ mod tests {
         let router = router(provider.clone(), lease_store.clone());
 
         router
-            .execute_authorized_with_recovery(&session, None, &bash_invocation())
+            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
             .await
             .expect("first execution provisions");
         let first = lease_store
@@ -1215,7 +1245,7 @@ mod tests {
         );
 
         router
-            .execute_authorized_with_recovery(&session, None, &bash_invocation())
+            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
             .await
             .expect("second execution reuses renewed lease");
         let renewed = lease_store
@@ -1242,7 +1272,12 @@ mod tests {
             .expect("mark lease stale");
         let replacement_result = tokio::time::timeout(
             Duration::from_secs(1),
-            router.execute_authorized_with_recovery(&session, None, &bash_invocation()),
+            router.execute_authorized_with_recovery(
+                &session,
+                &identity(),
+                None,
+                &bash_invocation(),
+            ),
         )
         .await;
         match replacement_result {
@@ -1282,7 +1317,7 @@ mod tests {
         let router = router(provider.clone(), lease_store.clone());
 
         let error = router
-            .execute_authorized_with_recovery(&session, None, &bash_invocation())
+            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
             .await
             .expect_err("activation fence loss should fail execution");
 
@@ -1310,7 +1345,7 @@ mod tests {
         let cleanup_router = router(provider.clone(), lease_store.clone());
 
         first_router
-            .execute_authorized_with_recovery(&session, None, &bash_invocation())
+            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
             .await
             .expect("provision before cleanup");
         cleanup_router.reclaim_hands(&session.id, None).await;

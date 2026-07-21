@@ -8,17 +8,20 @@
 //! used on hot request paths where an audit write must not gate the response.
 
 use crate::classes::{
-    AccountChangeEvent, Actor, AuthenticationEvent, AuthorizationEvent, EntityManagementEvent,
-    Metadata, NetworkEndpoint, Product, Resource, SCHEMA_VERSION, Session, User,
+    AccountChangeEvent, Actor, AuthenticationEvent, AuthorizationEvent, DataAccess,
+    DataAccessEvent, EntityManagementEvent, Metadata, NetworkEndpoint, Product, Resource,
+    SCHEMA_VERSION, Session, User,
 };
 use crate::enums::{
     account_activity, authn_activity, authn_status, authz_activity, authz_status, category_uid,
-    class_uid, entity_activity, severity_id,
+    class_uid, datastore_activity, entity_activity, severity_id,
 };
 use crate::signing;
 use chrono::{DateTime, Utc};
 use moa_core::traits::{Identity, IdentityType};
+use moa_core::types::context::WorkingContext;
 use moa_core::types::identifiers::TenantId;
+use moa_core::types::session::SessionMeta;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
@@ -27,6 +30,9 @@ use uuid::Uuid;
 /// Audit-event emission failures.
 #[derive(Debug, Error)]
 pub enum EmitError {
+    /// Caller supplied inconsistent or unstable audit identity.
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     /// Signing or key lookup failed.
     #[error("signing: {0}")]
     Signing(#[from] signing::SigningError),
@@ -55,18 +61,122 @@ struct EntityEventInput<'a> {
     comment: Option<&'a str>,
 }
 
+/// Inputs describing one memory-retrieval data access for transparency audit.
+///
+/// Built at the retrieval boundary where the caller identity, scope, and exact
+/// returned node IDs are known, then handed to [`emit_data_access`] (durable).
+/// It carries no node content or names, so the resulting audit event stays safe
+/// to ship and query.
+#[derive(Debug, Clone)]
+pub struct MemoryDataAccess {
+    identity: Identity,
+    session_uid: String,
+    retrieval_operation_id: String,
+    node_uids: Vec<Uuid>,
+    scope_uid: String,
+    scope_tier: String,
+    storage_partition: String,
+    source_tiers: Vec<String>,
+    turn_uid: Option<String>,
+    agent_uid: Option<String>,
+}
+
+/// Operation-specific fields for one memory data-access event.
+#[derive(Debug, Clone)]
+pub struct MemoryDataAccessDetails {
+    /// Replay-stable logical operation identifier supplied by the caller.
+    pub retrieval_operation_id: String,
+    /// Exact graph node UIDs returned by the retrieval.
+    pub node_uids: Vec<Uuid>,
+    /// Stable scope UID used as the OCSF resource UID and queryable target.
+    pub scope_uid: String,
+    /// Memory scope tier read: `tenant` or `contact`.
+    pub scope_tier: String,
+    /// Source tiers touched by the retrieval, e.g. `tenant_knowledge`, `user_memory`.
+    pub source_tiers: Vec<String>,
+    /// Turn that triggered the retrieval, when available.
+    pub turn_uid: Option<String>,
+}
+
+impl MemoryDataAccess {
+    /// Builds canonical access metadata from a durable session and authenticated caller.
+    #[must_use]
+    pub fn from_session(
+        identity: &Identity,
+        session: &SessionMeta,
+        details: MemoryDataAccessDetails,
+    ) -> Self {
+        Self::from_parts(
+            identity.clone(),
+            session.id.0,
+            session.tenant_id,
+            session
+                .agent_context
+                .as_ref()
+                .and_then(|agent| agent.agent_id),
+            details,
+        )
+    }
+
+    /// Builds canonical access metadata from a compiled working context.
+    pub fn from_working_context(
+        ctx: &WorkingContext,
+        details: MemoryDataAccessDetails,
+    ) -> Result<Self, EmitError> {
+        let identity = ctx.caller_identity.clone().ok_or_else(|| {
+            EmitError::InvalidInput(
+                "memory retrieval requires exact authenticated actor provenance".to_string(),
+            )
+        })?;
+        Ok(Self::from_parts(
+            identity,
+            ctx.session_id.0,
+            ctx.tenant_id,
+            ctx.agent_context.as_ref().and_then(|agent| agent.agent_id),
+            details,
+        ))
+    }
+
+    fn from_parts(
+        identity: Identity,
+        session_id: Uuid,
+        tenant_id: TenantId,
+        agent_id: Option<Uuid>,
+        mut details: MemoryDataAccessDetails,
+    ) -> Self {
+        let mut source_tiers = Vec::with_capacity(details.source_tiers.len());
+        for source_tier in details.source_tiers.drain(..) {
+            if !source_tiers.contains(&source_tier) {
+                source_tiers.push(source_tier);
+            }
+        }
+        Self {
+            identity,
+            session_uid: format!("session:{session_id}"),
+            retrieval_operation_id: details.retrieval_operation_id,
+            node_uids: details.node_uids,
+            scope_uid: details.scope_uid,
+            scope_tier: details.scope_tier,
+            storage_partition: tenant_id.to_string(),
+            source_tiers,
+            turn_uid: details.turn_uid,
+            agent_uid: agent_id.map(|agent_id| format!("agent:{agent_id}")),
+        }
+    }
+}
+
 impl ActorInput {
     /// Build an actor from an authenticated MOA identity.
     #[must_use]
     pub fn from_identity(identity: &Identity) -> Self {
-        let (prefix, type_id) = match identity.identity_type {
-            IdentityType::Operator => ("operator", 1),
-            IdentityType::Contact => ("contact", 2),
-            IdentityType::Agent => ("agent", 3),
-            IdentityType::Service => ("service", 4),
+        let type_id = match identity.identity_type {
+            IdentityType::Operator => 1,
+            IdentityType::Contact => 2,
+            IdentityType::Agent => 3,
+            IdentityType::Service => 4,
         };
         Self {
-            uid: format!("{prefix}:{}", identity.id),
+            uid: format!("{}:{}", identity.identity_type.as_str(), identity.id),
             type_id,
         }
     }
@@ -247,6 +357,129 @@ pub fn spawn_authz_decision(
         },
     );
     enqueue_event(tenant_id.0, &event, Some(object_uid.to_string()));
+}
+
+/// Emit a memory data-access event synchronously, failing closed.
+///
+/// Records one retrieval operation as a summary access event on the durable
+/// path. Callers must await this before consuming retrieved data.
+pub async fn emit_data_access(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    access: MemoryDataAccess,
+) -> Result<Uuid, EmitError> {
+    let mut access = access;
+    if access.retrieval_operation_id.trim().is_empty() {
+        return Err(EmitError::InvalidInput(
+            "retrieval operation id must not be empty".to_string(),
+        ));
+    }
+    if access.identity.tenant_id != tenant_id {
+        return Err(EmitError::InvalidInput(
+            "retrieval identity tenant does not match event tenant".to_string(),
+        ));
+    }
+    access.node_uids.sort_unstable();
+    access.node_uids.dedup();
+    let event = data_access_event(&access);
+    let value = serde_json::to_value(&event)?;
+    let mut tx = pool.begin().await?;
+    let (signing_key_id, signature_hex, event_jcs) =
+        signing::sign_tx(&mut tx, tenant_id.0, &value).await?;
+    let columns = EventColumns::from_value(&value);
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO security_events
+            (id, tenant_id, class_uid, activity_id, category_uid, severity_id,
+             type_uid, actor_user_uid, actor_session_uid, target_resource_uid,
+             event_jcs, signature_hex, signing_key_id, occurred_at,
+             retrieval_operation_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        ON CONFLICT (tenant_id, retrieval_operation_id)
+            WHERE retrieval_operation_id IS NOT NULL
+        DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(columns.id)
+    .bind(tenant_id.0)
+    .bind(columns.class_uid)
+    .bind(columns.activity_id)
+    .bind(columns.category_uid)
+    .bind(columns.severity_id)
+    .bind(columns.type_uid)
+    .bind(columns.actor_user_uid)
+    .bind(columns.actor_session_uid)
+    .bind(&access.scope_uid)
+    .bind(&event_jcs)
+    .bind(signature_hex)
+    .bind(signing_key_id)
+    .bind(columns.occurred_at)
+    .bind(&access.retrieval_operation_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let id = match inserted {
+        Some(id) => id,
+        None => sqlx::query_scalar(
+            "SELECT id FROM security_events WHERE tenant_id = $1 AND retrieval_operation_id = $2",
+        )
+        .bind(tenant_id.0)
+        .bind(&access.retrieval_operation_id)
+        .fetch_one(&mut *tx)
+        .await?,
+    };
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Build a Datastore Activity (Read) event from a memory data-access summary.
+fn data_access_event(access: &MemoryDataAccess) -> DataAccessEvent {
+    let actor = ActorInput::from_identity(&access.identity);
+    DataAccessEvent {
+        class_uid: class_uid::DATASTORE_ACTIVITY,
+        class_name: "Datastore Activity".to_string(),
+        category_uid: category_uid::APPLICATION_ACTIVITY,
+        category_name: "Application Activity".to_string(),
+        type_uid: type_uid(class_uid::DATASTORE_ACTIVITY, datastore_activity::READ),
+        activity_id: datastore_activity::READ,
+        activity_name: "Read".to_string(),
+        severity_id: severity_id::INFORMATIONAL,
+        severity: "Informational".to_string(),
+        time: Utc::now(),
+        metadata: metadata(),
+        actor: Actor {
+            user: User {
+                uid: actor.uid,
+                name: None,
+                email_addr: None,
+                type_id: actor.type_id,
+            },
+            session: Some(Session {
+                uid: access.session_uid.clone(),
+                created_time: None,
+            }),
+        },
+        resource: Resource {
+            uid: access.scope_uid.clone(),
+            name: None,
+            resource_type: "memory_graph".to_string(),
+        },
+        access: DataAccess {
+            retrieval_operation_id: access.retrieval_operation_id.clone(),
+            node_uids: access.node_uids.iter().map(Uuid::to_string).collect(),
+            scope_tier: access.scope_tier.clone(),
+            storage_partition: access.storage_partition.clone(),
+            source_tiers: access.source_tiers.clone(),
+            records_returned: u32::try_from(access.node_uids.len()).unwrap_or(u32::MAX),
+            turn_uid: access.turn_uid.clone(),
+            agent_uid: access.agent_uid.clone(),
+            api_key_uid: access.identity.api_key_id.map(|id| format!("api_key:{id}")),
+            acting_on_behalf_of_uid: access
+                .identity
+                .acting_on_behalf_of
+                .map(|id| format!("principal:{id}")),
+        },
+    }
 }
 
 /// Emit an API-key creation event in an existing transaction.

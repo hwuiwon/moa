@@ -1,6 +1,7 @@
 //! Tenant-configurable agent artifact definitions.
 
 use moa_core::types::guardrails::GuardrailMode;
+use moa_core::types::memory::{InformationBarrierClearances, InformationBarrierId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -137,6 +138,19 @@ pub struct KnowledgePolicy {
     /// Optional minimum PII handling floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pii_floor: Option<String>,
+    /// Information barriers this agent is cleared for (need-to-know).
+    ///
+    /// Operator-authored list of barrier tags this agent may see. Each entry
+    /// flows to the runtime `AgentKnowledgePolicy.cleared_barriers`, is threaded
+    /// onto the retrieval request, and installed as the `moa.cleared_barriers`
+    /// GUC so the `rd_barrier_need_to_know` RLS policy reveals nodes tagged with
+    /// a cleared barrier. Empty (the default) fails closed: barriered nodes stay
+    /// hidden.
+    #[serde(default)]
+    pub cleared_barriers: InformationBarrierClearances,
+    /// Barrier assigned to memory written from sessions pinned to this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_barrier: Option<InformationBarrierId>,
 }
 
 impl Default for KnowledgePolicy {
@@ -146,6 +160,8 @@ impl Default for KnowledgePolicy {
             filters: empty_object(),
             retrieval_budget: None,
             pii_floor: None,
+            cleared_barriers: InformationBarrierClearances::new(),
+            write_barrier: None,
         }
     }
 }

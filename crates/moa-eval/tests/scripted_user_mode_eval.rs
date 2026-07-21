@@ -12,8 +12,8 @@ use moa_core::{
 };
 use moa_eval::long_conversation::{ScriptedUserScript, run_scenario_with_provider};
 use moa_eval_core::{
-    ActionPolicyOverride, AgentConfig, EngineOptions, EvalStatus, LongConversationMode,
-    LongTestCase, TestCase, TestCaseKind, TestSuite,
+    ActionPolicyOverride, ActionPolicyRuleOverride, AgentConfig, EngineOptions, EvalStatus,
+    LongConversationMode, LongTestCase, TestCase, TestCaseKind, TestSuite,
 };
 use moa_lineage_core::{LineageEvent, ScoreValue as LineageScoreValue};
 use serde_json::json;
@@ -154,7 +154,14 @@ async fn scripted_user_runner_drives_tool_turn_and_checks_final_answer() -> Test
     };
     let agent_config = AgentConfig {
         name: "scripted-user-agent".to_string(),
-        permissions: ActionPolicyOverride::default(),
+        permissions: ActionPolicyOverride {
+            allow_rules: vec![ActionPolicyRuleOverride {
+                tool: "bash".to_string(),
+                pattern: "printf scripted tool ok".to_string(),
+                reason: Some("scripted-user fixture command".to_string()),
+            }],
+            ..ActionPolicyOverride::default()
+        },
         ..AgentConfig::default()
     };
     let mut base_config = MoaConfig::default();
@@ -203,7 +210,8 @@ async fn scripted_user_runner_drives_tool_turn_and_checks_final_answer() -> Test
             Event::ToolResult { output, success, .. }
                 if *success && output.to_text().contains("scripted tool ok")
         )),
-        "bash tool result was not persisted"
+        "bash tool result was not persisted; events: {:#?}",
+        report.events
     );
     Ok(())
 }

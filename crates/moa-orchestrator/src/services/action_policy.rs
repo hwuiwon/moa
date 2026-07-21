@@ -475,7 +475,7 @@ mod tests {
             (
                 "memory_write",
                 "memory_remember",
-                json!({"text": "decision"}),
+                json!({"items": [{"text": "decision"}]}),
                 ActionPolicyEffect::Allow,
                 false,
             ),

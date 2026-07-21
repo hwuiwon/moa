@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - kms-rewrap.yaml
+  - memory-sealing-backfill.yaml
+
+images:
+  - name: ghcr.io/hwuiwon/moa-orchestrator
+    newTag: latest

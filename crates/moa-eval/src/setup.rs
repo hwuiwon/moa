@@ -10,13 +10,14 @@ use moa_brain::{
     pipeline::identity::DEFAULT_IDENTITY_PROMPT,
 };
 use moa_core::{
-    config::MoaConfig, traits::ExperienceStore, traits::LLMProvider,
-    traits::LearningCandidateStore, traits::LineageHandle, traits::SegmentStore,
-    traits::SessionStore, types::action_policy::ActionPolicyEffect,
+    config::MoaConfig, traits::ExperienceStore, traits::Identity, traits::IdentityType,
+    traits::LLMProvider, traits::LearningCandidateStore, traits::LineageHandle,
+    traits::SegmentStore, traits::SessionStore, types::action_policy::ActionPolicyEffect,
     types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
     types::contact::SessionActorRef, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId, types::identifiers::UserId, types::session::SessionMeta,
 };
+use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_eval_core::{
     ActionPolicyOverride, ActionPolicyRuleOverride, AgentConfig, EvalError, InstructionOverride,
     Result,
@@ -57,6 +58,8 @@ pub struct AgentEnvironment {
     pub workspace_dir: PathBuf,
     /// Persisted session identifier for the run.
     pub session_id: moa_core::types::identifiers::SessionId,
+    /// Exact caller identity used by every harness turn in this run.
+    pub identity: Identity,
     /// Storage partition identifier used inside the run.
     pub storage_partition_id: StoragePartitionId,
     /// User identifier used inside the run.
@@ -143,6 +146,13 @@ pub(crate) async fn build_agent_environment_with_provider(
         })?;
 
     let tenant_id = eval_tenant_id_for_agent(&agent_config.name);
+    let identity = Identity {
+        identity_type: IdentityType::Operator,
+        id: Uuid::now_v7(),
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    };
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let user_id = UserId::new(DEFAULT_EVAL_USER);
     let lineage = Arc::new(EvalLineageHandle::default());
@@ -195,12 +205,13 @@ pub(crate) async fn build_agent_environment_with_provider(
 
         let session_meta = SessionMeta {
             tenant_id,
-            created_by: Some(SessionActorRef::Identity { id: Uuid::now_v7() }),
+            created_by: Some(SessionActorRef::Identity { id: identity.id }),
             model: llm_provider.capabilities().model_id.clone(),
             title: Some(agent_config.name.clone()),
             ..SessionMeta::default()
         };
         let session_id = session_store.create_session(session_meta).await?;
+        let kms: Arc<dyn KeyManagementProvider> = Arc::new(LocalKmsProvider::new());
 
         let pipeline = build_pipeline(
             base_config,
@@ -209,6 +220,7 @@ pub(crate) async fn build_agent_environment_with_provider(
                 session_store: session_store.clone(),
                 segment_store: segment_store.clone(),
                 graph_pool: database_pool.clone(),
+                kms,
                 llm_provider: llm_provider.clone(),
                 provider_registry: ProviderRegistry::from_config(base_config),
                 lineage: lineage.clone(),
@@ -227,6 +239,7 @@ pub(crate) async fn build_agent_environment_with_provider(
             pipeline,
             workspace_dir,
             session_id,
+            identity,
             storage_partition_id,
             user_id,
             lineage,
@@ -343,6 +356,7 @@ struct EvalPipelineDeps {
     session_store: Arc<dyn SessionStore>,
     segment_store: Arc<dyn SegmentStore>,
     graph_pool: sqlx::PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     llm_provider: Arc<dyn LLMProvider>,
     provider_registry: ProviderRegistry,
     lineage: Arc<dyn LineageHandle>,
@@ -373,6 +387,7 @@ async fn build_pipeline(
             deps.session_store,
             GraphMemoryPipelineOptions {
                 graph_pool: deps.graph_pool,
+                kms: deps.kms,
                 shared_graph_memory_retriever: None,
                 retrieval_embedder: None,
                 shared_skill_injector: None,

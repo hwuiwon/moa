@@ -1,17 +1,56 @@
 //! Postgres-backed checks for the set-based decay pass, the shared single-load
 //! consolidation pass, and the incremental consolidation cursor.
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
+use moa_core::types::security::SensitivityClass;
+use moa_core::{
+    traits::EmbeddingProvider, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::memory::RlsContext,
+};
+use moa_memory_graph::{
+    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore,
+};
 use moa_memory_lifecycle::{
     ConsolidationOptions, TenantConsolidationCursor, advance_consolidation_watermark,
     consolidate_tenant, decay_confidence, decay_target_confidence, expire_idle_facts,
     tenants_needing_consolidation,
 };
+use moa_memory_vector::VECTOR_DIMENSION;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
+use tokio::sync::Mutex;
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Default)]
+struct RecordingLifecycleEmbedder {
+    calls: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+impl RecordingLifecycleEmbedder {
+    async fn calls(&self) -> Vec<Vec<String>> {
+        self.calls.lock().await.clone()
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for RecordingLifecycleEmbedder {
+    fn model_id(&self) -> &str {
+        "lifecycle-sealed-regression"
+    }
+
+    fn dimensions(&self) -> usize {
+        VECTOR_DIMENSION
+    }
+
+    async fn embed(&self, inputs: &[String]) -> moa_core::error::Result<Vec<Vec<f32>>> {
+        self.calls.lock().await.push(inputs.to_vec());
+        Ok(inputs.iter().map(|_| vec![0.0; VECTOR_DIMENSION]).collect())
+    }
+}
 
 async fn configured_test_db() -> Option<TestDb> {
     std::env::var_os("MOA_DATABASE_URL")?;
@@ -188,9 +227,16 @@ async fn consolidate_tenant_shares_one_snapshot_and_is_idempotent_db_memory() {
     )
     .await;
 
-    let outcome = consolidate_tenant(pool, tenant_id, ConsolidationOptions::default(), now, None)
-        .await
-        .expect("first consolidation pass");
+    let outcome = consolidate_tenant(
+        pool,
+        super::test_kms(),
+        tenant_id,
+        ConsolidationOptions::default(),
+        now,
+        None,
+    )
+    .await
+    .expect("first consolidation pass");
 
     assert_eq!(outcome.merged, 1, "exactly one duplicate merged");
     assert_eq!(
@@ -204,12 +250,166 @@ async fn consolidate_tenant_shares_one_snapshot_and_is_idempotent_db_memory() {
     );
     assert_eq!(outcome.duplicates_remaining, 0);
 
-    let second = consolidate_tenant(pool, tenant_id, ConsolidationOptions::default(), now, None)
-        .await
-        .expect("second consolidation pass");
+    let second = consolidate_tenant(
+        pool,
+        super::test_kms(),
+        tenant_id,
+        ConsolidationOptions::default(),
+        now,
+        None,
+    )
+    .await
+    .expect("second consolidation pass");
     assert!(
         second.has_no_work(),
         "second consolidation pass must be idempotent, got {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn consolidation_excludes_sealed_entity_content_db_memory() {
+    // Pins: consolidation never treats restricted/PHI redaction placeholders as
+    // entity content. Alias promotion and embedding backfill leave the original
+    // ciphertext intact, and the real graph read boundary still opens the exact
+    // original name and properties after the pass.
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let pool = test_db.store().pool();
+    let embedder = Arc::new(RecordingLifecycleEmbedder::default());
+
+    for pii_class in [SensitivityClass::Restricted, SensitivityClass::Phi] {
+        let tenant_id = TenantId::new();
+        let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+        let graph = PostgresGraphStore::scoped_for_app_role(
+            pool.clone(),
+            RlsContext::tenant(tenant_id),
+            super::test_kms(),
+        );
+        let uid = Uuid::now_v7();
+        let name = format!("sealed {pii_class:?} entity");
+        let properties = json!({
+            "normalized_name": format!("sealed-{pii_class:?}-entity").to_lowercase(),
+            "private_identifier": Uuid::now_v7().to_string(),
+        });
+
+        graph
+            .create_node(NodeWriteIntent {
+                barrier: None,
+                uid,
+                data_subject_id: tenant_id.0,
+                label: NodeLabel::Entity,
+                storage_partition_id: Some(storage_partition_id.to_string()),
+                contact_id: None,
+                scope: "tenant".to_string(),
+                name: name.clone(),
+                properties: properties.clone(),
+                pii_class,
+                confidence: Some(0.9),
+                valid_from: Utc::now(),
+                embedding: None,
+                embedding_model: None,
+                embedding_model_version: None,
+                embedding_text: None,
+                actor_id: Uuid::now_v7().to_string(),
+                actor_kind: "system".to_string(),
+            })
+            .await
+            .expect("create sealed entity through graph boundary");
+        graph
+            .create_edge(EdgeWriteIntent {
+                uid: Uuid::now_v7(),
+                label: EdgeLabel::RelatesTo,
+                start_uid: uid,
+                end_uid: uid,
+                valid_from: Utc::now(),
+                properties: json!({ "alias_mention": "private entity alias" }),
+                storage_partition_id: Some(storage_partition_id.to_string()),
+                contact_id: None,
+                scope: "tenant".to_string(),
+                actor_id: Uuid::now_v7().to_string(),
+                actor_kind: "system".to_string(),
+            })
+            .await
+            .expect("create alias-bearing edge");
+
+        let outcome = consolidate_tenant(
+            pool,
+            super::test_kms(),
+            tenant_id,
+            ConsolidationOptions::default(),
+            Utc::now(),
+            Some(embedder.clone()),
+        )
+        .await
+        .expect("consolidation skips sealed entity content");
+        assert_eq!(outcome.entity_embeddings_backfilled, 0);
+        assert_eq!(outcome.aliases_promoted, 0);
+
+        let read = graph
+            .get_node(uid)
+            .await
+            .expect("read sealed entity through graph boundary")
+            .expect("sealed entity remains present");
+        assert_eq!(read.name, name);
+        assert_eq!(read.properties_summary, Some(properties));
+        assert_eq!(read.pii_class, pii_class);
+
+        let embedding_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM moa.embeddings WHERE uid = $1")
+                .bind(uid)
+                .fetch_one(pool)
+                .await
+                .expect("count sealed entity embeddings");
+        assert_eq!(embedding_count, 0, "sealed entity must not be embedded");
+
+        let outbox_upserts = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM moa.vector_sync_outbox WHERE uid = $1 AND op = 'upsert'",
+        )
+        .bind(uid)
+        .fetch_one(pool)
+        .await
+        .expect("count sealed entity vector upserts");
+        assert_eq!(outbox_upserts, 0, "sealed entity must not queue an upsert");
+
+        let changelog = sqlx::query(
+            r#"
+            SELECT op, payload, pii_class
+            FROM moa.graph_changelog
+            WHERE target_uid = $1
+            ORDER BY change_id
+            "#,
+        )
+        .bind(uid)
+        .fetch_all(pool)
+        .await
+        .expect("read sealed entity changelog");
+        assert_eq!(
+            changelog.len(),
+            1,
+            "consolidation must not rewrite sealed content"
+        );
+        assert_eq!(
+            changelog[0].try_get::<String, _>("op").expect("op"),
+            "create"
+        );
+        assert_eq!(
+            changelog[0]
+                .try_get::<Value, _>("payload")
+                .expect("payload"),
+            json!({ "after": { "redacted": true } })
+        );
+        assert_eq!(
+            changelog[0]
+                .try_get::<String, _>("pii_class")
+                .expect("pii_class"),
+            pii_class.as_str()
+        );
+    }
+
+    assert!(
+        embedder.calls().await.is_empty(),
+        "sealed placeholders must not reach the embedding provider"
     );
 }
 
@@ -297,10 +497,6 @@ async fn seed_fact(
     properties.insert("subject".to_string(), json!("service"));
     properties.insert("predicate".to_string(), json!("prefers"));
     properties.insert("object".to_string(), json!("value"));
-    if let Some(base) = base_confidence {
-        properties.insert("base_confidence".to_string(), json!(base));
-        properties.insert("confidence".to_string(), json!(confidence));
-    }
     insert_fact_row(
         pool,
         storage_partition_id,
@@ -312,6 +508,14 @@ async fn seed_fact(
         Value::Object(properties),
     )
     .await;
+    if let Some(base_confidence) = base_confidence {
+        sqlx::query("UPDATE moa.node_index SET base_confidence = $2 WHERE uid = $1")
+            .bind(uid)
+            .bind(base_confidence)
+            .execute(pool)
+            .await
+            .expect("seed confidence anchor sidecar");
+    }
     uid
 }
 
@@ -406,7 +610,7 @@ async fn idle_floor_facts_expire_bitemporally_and_rerun_is_noop_db_memory() {
     )
     .await;
 
-    let stats = expire_idle_facts(pool, &tenant_id, now, &opts)
+    let stats = expire_idle_facts(pool, super::test_kms(), &tenant_id, now, &opts)
         .await
         .expect("run idle expiry");
 
@@ -421,7 +625,7 @@ async fn idle_floor_facts_expire_bitemporally_and_rerun_is_noop_db_memory() {
     assert_eq!(node_validity(pool, idle_confident).await, (None, None));
 
     // Rerun at the same instant: closed rows leave the candidate set.
-    let second = expire_idle_facts(pool, &tenant_id, now, &opts)
+    let second = expire_idle_facts(pool, super::test_kms(), &tenant_id, now, &opts)
         .await
         .expect("rerun idle expiry");
     assert_eq!(second.expired_idle, 0, "expiry rerun must be a no-op");
@@ -431,10 +635,123 @@ async fn idle_floor_facts_expire_bitemporally_and_rerun_is_noop_db_memory() {
         expire_idle_days: 0,
         ..ConsolidationOptions::default()
     };
-    let none = expire_idle_facts(pool, &tenant_id, now, &disabled)
+    let none = expire_idle_facts(pool, super::test_kms(), &tenant_id, now, &disabled)
         .await
         .expect("run disabled expiry");
     assert_eq!(none.expired_idle, 0, "disabled expiry must not close facts");
+}
+
+#[tokio::test]
+async fn legal_hold_skips_held_subject_expiry_db_memory() {
+    // Pins: retention expiry skips a subject under an active legal hold. Two
+    // floor-bound idle facts qualify for expiry; a hold on one subject leaves its
+    // fact untouched while the unheld subject's fact still expires. Releasing the
+    // hold lets a later pass expire the previously-held fact.
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let pool = test_db.store().pool();
+    let tenant_id = TenantId::new();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+    let opts = ConsolidationOptions::default();
+    let now = Utc
+        .with_ymd_and_hms(2026, 6, 11, 0, 0, 0)
+        .single()
+        .expect("fixed timestamp");
+
+    let held_subject = Uuid::now_v7();
+    let unheld_subject = Uuid::now_v7();
+    // Both facts are floor-bound and idle past the 180-day window, so both would
+    // expire absent a hold.
+    let held_fact = seed_contact_fact(
+        pool,
+        &storage_partition_id,
+        tenant_id,
+        held_subject,
+        opts.decay_floor,
+        now - Duration::days(200),
+    )
+    .await;
+    let unheld_fact = seed_contact_fact(
+        pool,
+        &storage_partition_id,
+        tenant_id,
+        unheld_subject,
+        opts.decay_floor,
+        now - Duration::days(200),
+    )
+    .await;
+
+    let hold = moa_memory_pii::legal_hold::place_hold(
+        pool,
+        tenant_id,
+        Some(held_subject),
+        "preservation order",
+        "ops-admin",
+    )
+    .await
+    .expect("place legal hold");
+
+    let stats = expire_idle_facts(pool, super::test_kms(), &tenant_id, now, &opts)
+        .await
+        .expect("run expiry under hold");
+
+    assert_eq!(stats.expired_idle, 1, "only the unheld subject expires");
+    // The held subject's fact stays active; the unheld one is closed.
+    assert_eq!(node_validity(pool, held_fact).await, (None, None));
+    assert_eq!(node_validity(pool, unheld_fact).await.0, Some(now));
+
+    // Releasing the hold lets a later pass expire the previously-held fact.
+    let released = moa_memory_pii::legal_hold::release_hold(pool, tenant_id, hold.id, "ops-admin")
+        .await
+        .expect("release hold");
+    assert!(released);
+    let after_release = expire_idle_facts(pool, super::test_kms(), &tenant_id, now, &opts)
+        .await
+        .expect("run expiry after release");
+    assert_eq!(
+        after_release.expired_idle, 1,
+        "released subject now expires"
+    );
+    assert_eq!(node_validity(pool, held_fact).await.0, Some(now));
+}
+
+async fn seed_contact_fact(
+    pool: &PgPool,
+    storage_partition_id: &StoragePartitionId,
+    tenant_id: TenantId,
+    contact_id: Uuid,
+    confidence: f64,
+    last_accessed_at: DateTime<Utc>,
+) -> Uuid {
+    let uid = Uuid::now_v7();
+    let properties = json!({
+        "subject": "service",
+        "predicate": "prefers",
+        "object": "value",
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO moa.node_index
+            (uid, label, storage_partition_id, user_id, tenant_id, contact_id, name, pii_class,
+             data_subject_id, confidence, base_confidence, valid_from, last_accessed_at,
+             properties_summary)
+        VALUES ($1, 'Fact', $2, $3, $4, $5, $6, 'none', $5, $7, 0.9, $8, $8, $9)
+        "#,
+    )
+    .bind(uid)
+    .bind(storage_partition_id.as_str())
+    .bind(contact_id.to_string())
+    .bind(tenant_id.0)
+    .bind(contact_id)
+    .bind("service prefers value")
+    .bind(confidence)
+    .bind(last_accessed_at)
+    .bind(properties)
+    .execute(pool)
+    .await
+    .expect("seed contact fact row");
+    uid
 }
 
 async fn node_validity(pool: &PgPool, uid: Uuid) -> (Option<DateTime<Utc>>, Option<String>) {
@@ -464,9 +781,9 @@ async fn insert_fact_row(
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, storage_partition_id, tenant_id, name, pii_class, confidence,
+            (uid, label, storage_partition_id, tenant_id, data_subject_id, name, pii_class, confidence,
              valid_from, last_accessed_at, properties_summary)
-        VALUES ($1, 'Fact', $2, $3, $4, 'none', $5, $6, $6, $7)
+        VALUES ($1, 'Fact', $2, $3, $3, $4, 'none', $5, $6, $6, $7)
         "#,
     )
     .bind(uid)
@@ -529,17 +846,13 @@ async fn assert_confidence(pool: &PgPool, uid: Uuid, expected: f64) {
 }
 
 async fn base_confidence(pool: &PgPool, uid: Uuid) -> Option<f64> {
-    let properties = sqlx::query_scalar::<_, Option<Value>>(
-        "SELECT properties_summary FROM moa.node_index WHERE uid = $1",
+    sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT base_confidence FROM moa.node_index WHERE uid = $1",
     )
     .bind(uid)
     .fetch_one(pool)
     .await
-    .expect("read properties");
-    properties
-        .as_ref()
-        .and_then(|value| value.get("base_confidence"))
-        .and_then(Value::as_f64)
+    .expect("read base confidence sidecar")
 }
 
 async fn changelog_version(pool: &PgPool, storage_partition_id: &StoragePartitionId) -> i64 {

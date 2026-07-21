@@ -6,14 +6,17 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use futures_util::future::try_join_all;
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     error::MoaError, error::Result, traits::ContextProcessor, traits::EmbeddingProvider,
     traits::LineageHandle, traits::NullLineageHandle, traits::StageApply,
     types::context::ContextMessage, types::context::ContextSourceRef, types::context::ExcludedItem,
-    types::context::ProcessorOutput, types::context::WorkingContext, types::identifiers::SessionId,
+    types::context::ProcessorOutput, types::context::TURN_ID_METADATA_KEY,
+    types::context::WorkingContext, types::identifiers::SessionId,
     types::query_rewrite::QueryRewriteResult,
 };
-use moa_memory_graph::{GraphStore, PiiClass, PostgresGraphStore};
+use moa_crypto::KeyManagementProvider;
+use moa_memory_graph::{GraphStore, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::VectorStoreFactory;
 use sqlx::PgPool;
@@ -158,6 +161,32 @@ struct ScopeProbe<'a> {
     cached_hits: Option<Vec<RetrievalHit>>,
 }
 
+#[async_trait]
+trait MemoryAccessAuditor: Send + Sync {
+    async fn emit(
+        &self,
+        pool: &PgPool,
+        ctx: &WorkingContext,
+        policy: &MemoryAdmissionPolicy,
+        hits: &[RetrievalHit],
+    ) -> Result<()>;
+}
+
+struct DurableMemoryAccessAuditor;
+
+#[async_trait]
+impl MemoryAccessAuditor for DurableMemoryAccessAuditor {
+    async fn emit(
+        &self,
+        pool: &PgPool,
+        ctx: &WorkingContext,
+        policy: &MemoryAdmissionPolicy,
+        hits: &[RetrievalHit],
+    ) -> Result<()> {
+        emit_data_access_audit(pool, ctx, policy, hits).await
+    }
+}
+
 /// Injects graph-memory retrieval hits into the active turn context.
 pub struct GraphMemoryRetriever {
     pool: PgPool,
@@ -169,6 +198,7 @@ pub struct GraphMemoryRetriever {
     planner: crate::planning::QueryPlanner,
     scoped_runtimes: moka::future::Cache<MemoryScope, Arc<ScopedRetrievalRuntime>>,
     runtime_factory: Arc<dyn ScopedRetrievalRuntimeFactory>,
+    access_auditor: Arc<dyn MemoryAccessAuditor>,
 }
 
 /// Shared graph-memory retrieval stage backed by a process-wide retriever.
@@ -236,6 +266,7 @@ pub trait ScopedRetrievalRuntimeFactory: Send + Sync {
 }
 
 struct PostgresScopedRetrievalRuntimeFactory {
+    kms: Arc<dyn KeyManagementProvider>,
     /// Shared bounded enrichment worker handle, cloned into each scoped
     /// [`HybridRetriever`]. `None` when constructed outside a Tokio runtime.
     enrichment: Option<crate::retrieval::enrichment::EnrichmentHandle>,
@@ -258,9 +289,9 @@ impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
             vector_factory.pgvector_source(pool.clone(), scope_context.clone())
         };
         let graph_store = if assume_app_role {
-            PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context)
+            PostgresGraphStore::scoped_for_app_role(pool.clone(), scope_context, self.kms.clone())
         } else {
-            PostgresGraphStore::scoped(pool.clone(), scope_context)
+            PostgresGraphStore::scoped(pool.clone(), scope_context, self.kms.clone())
         };
         let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
         let hybrid = Arc::new(
@@ -291,8 +322,12 @@ impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
 impl GraphMemoryRetriever {
     /// Creates a graph-memory retriever backed by the shared Postgres pool.
     #[must_use]
-    pub fn new(pool: PgPool, embedder: Option<Arc<dyn EmbeddingProvider>>) -> Self {
-        Self::new_with_config(moa_core::config::MoaConfig::default(), pool, embedder)
+    pub fn new(
+        pool: PgPool,
+        kms: Arc<dyn KeyManagementProvider>,
+        embedder: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> Self {
+        Self::new_with_config(moa_core::config::MoaConfig::default(), pool, kms, embedder)
     }
 
     /// Creates a graph-memory retriever backed by the shared Postgres pool and runtime config.
@@ -300,6 +335,7 @@ impl GraphMemoryRetriever {
     pub fn new_with_config(
         config: moa_core::config::MoaConfig,
         pool: PgPool,
+        kms: Arc<dyn KeyManagementProvider>,
         embedder: Option<Arc<dyn EmbeddingProvider>>,
     ) -> Self {
         // F20: spawn the single shared bounded enrichment worker when a Tokio
@@ -317,7 +353,8 @@ impl GraphMemoryRetriever {
             result_limit: GRAPH_MEMORY_RESULTS,
             planner: crate::planning::QueryPlanner::new(),
             scoped_runtimes: build_scoped_runtime_cache(),
-            runtime_factory: Arc::new(PostgresScopedRetrievalRuntimeFactory { enrichment }),
+            runtime_factory: Arc::new(PostgresScopedRetrievalRuntimeFactory { kms, enrichment }),
+            access_auditor: Arc::new(DurableMemoryAccessAuditor),
         }
     }
 
@@ -350,6 +387,12 @@ impl GraphMemoryRetriever {
     ) -> Self {
         self.runtime_factory = runtime_factory;
         self.scoped_runtimes = build_scoped_runtime_cache();
+        self
+    }
+
+    #[cfg(test)]
+    fn with_access_auditor(mut self, access_auditor: Arc<dyn MemoryAccessAuditor>) -> Self {
+        self.access_auditor = access_auditor;
         self
     }
 
@@ -394,25 +437,7 @@ impl GraphMemoryRetriever {
         let (_, hits) = self
             .retrieve_admitted_hits(ctx, query, &policy, result_limit)
             .await?;
-        if hits.is_empty() {
-            return Ok(MemoryEvidenceResponse::empty());
-        }
-
-        let budgeted = render_memory_context_with_budget(&hits, request.evidence_token_budget);
-        let source_metadata = hits
-            .iter()
-            .map(memory_evidence_source_metadata)
-            .collect::<Result<Vec<_>>>()?;
-        debug_assert_eq!(budgeted.hit_count, budgeted.rendered.source_refs.len());
-        debug_assert!(budgeted.consumed_tokens <= request.evidence_token_budget);
-
-        Ok(MemoryEvidenceResponse {
-            hits,
-            rendered_evidence: budgeted.rendered.section,
-            consumed_evidence_tokens: budgeted.consumed_tokens,
-            source_refs: budgeted.rendered.source_refs,
-            source_metadata,
-        })
+        build_memory_evidence_response(hits, request.evidence_token_budget)
     }
 
     /// Runs the production router and returns ranked hits after shared admission.
@@ -440,6 +465,9 @@ impl GraphMemoryRetriever {
             }
             RetrievalStrategy::Skip => (Vec::new(), RetrievalProvenance::default()),
         };
+        self.access_auditor
+            .emit(&self.pool, ctx, policy, &hits)
+            .await?;
         lineage::emit_retrieval_lineage(
             self.lineage.as_ref(),
             ctx,
@@ -613,7 +641,7 @@ impl GraphMemoryRetriever {
         ctx: &WorkingContext,
         query: &str,
         scope_plan: &'a RetrievalScopePlan,
-        max_pii_class: PiiClass,
+        max_pii_class: SensitivityClass,
         result_limit: usize,
     ) -> Result<ScopeProbe<'a>> {
         let runtime = self.runtime_for_scope(scope_plan.scope()).await?;
@@ -633,7 +661,7 @@ impl GraphMemoryRetriever {
             max_pii_class,
             result_limit,
             false,
-        );
+        )?;
         let cached_hits = runtime
             .hybrid
             .retrieve_cached(&planned, &probe_request)
@@ -656,7 +684,7 @@ impl GraphMemoryRetriever {
         query: &str,
         probe: &ScopeProbe<'_>,
         query_embedding: &[f32],
-        max_pii_class: PiiClass,
+        max_pii_class: SensitivityClass,
         result_limit: usize,
     ) -> Result<RetrievalOutput> {
         let request = self.build_scope_request(
@@ -668,7 +696,7 @@ impl GraphMemoryRetriever {
             max_pii_class,
             result_limit,
             true,
-        );
+        )?;
         probe
             .runtime
             .hybrid
@@ -688,10 +716,10 @@ impl GraphMemoryRetriever {
         query_embedding: Vec<f32>,
         scope_plan: &RetrievalScopePlan,
         planned: &PlannedQuery,
-        max_pii_class: PiiClass,
+        max_pii_class: SensitivityClass,
         result_limit: usize,
         emit_storage_lineage: bool,
-    ) -> RetrievalRequest {
+    ) -> Result<RetrievalRequest> {
         let mut request = planned.clone().into_retrieval_request(
             query.to_string(),
             query_embedding,
@@ -708,6 +736,27 @@ impl GraphMemoryRetriever {
             rerank_window: ranking.rerank_window,
             abstain_below_window_evidence: ranking.abstain_below_window_evidence,
         };
+        // Source the running agent's complete information-barrier policy. This
+        // is the single point that populates request clearances; every scoped
+        // leg installs them as the `moa.cleared_barriers` GUC.
+        request.cleared_barriers = ctx
+            .agent_context
+            .as_ref()
+            .ok_or_else(|| {
+                MoaError::ValidationError(
+                    "memory retrieval requires a pinned agent context".to_string(),
+                )
+            })?
+            .information_barrier_clearances()
+            .map_err(|error| {
+                MoaError::ValidationError(format!(
+                    "memory retrieval requires a valid pinned agent policy: {error}"
+                ))
+            })?;
+        tracing::debug!(
+            cleared_barrier_count = request.cleared_barriers.len(),
+            "sourced agent information-barrier clearances for retrieval"
+        );
         if let Some(label_filter) = scope_plan.label_filter() {
             request.label_filter = Some(label_filter.to_vec());
         }
@@ -721,7 +770,7 @@ impl GraphMemoryRetriever {
         if emit_storage_lineage {
             request.lineage = Some(lineage_context_from_context(ctx));
         }
-        request
+        Ok(request)
     }
 
     /// Returns a per-scope retrieval runtime, reusing one from the bounded cache
@@ -745,6 +794,31 @@ impl GraphMemoryRetriever {
             .build_runtime(scope, &self.config, &self.pool, self.assume_app_role)
             .await
     }
+}
+
+fn build_memory_evidence_response(
+    hits: Vec<RetrievalHit>,
+    evidence_token_budget: usize,
+) -> Result<MemoryEvidenceResponse> {
+    if hits.is_empty() {
+        return Ok(MemoryEvidenceResponse::empty());
+    }
+
+    let budgeted = render_memory_context_with_budget(&hits, evidence_token_budget);
+    let source_metadata = hits
+        .iter()
+        .map(memory_evidence_source_metadata)
+        .collect::<Result<Vec<_>>>()?;
+    debug_assert_eq!(budgeted.hit_count, budgeted.rendered.source_refs.len());
+    debug_assert!(budgeted.consumed_tokens <= evidence_token_budget);
+
+    Ok(MemoryEvidenceResponse {
+        hits,
+        rendered_evidence: budgeted.rendered.section,
+        consumed_evidence_tokens: budgeted.consumed_tokens,
+        source_refs: budgeted.rendered.source_refs,
+        source_metadata,
+    })
 }
 
 /// Splits a backend retrieval output into its hits and lineage provenance.
@@ -992,6 +1066,78 @@ fn set_offer_retrieval_tools(
     );
 }
 
+/// Persists one signed OCSF data-access event before retrieved data is consumed.
+///
+/// One event per retrieval operation — never one per node — recording who read
+/// which memory scope, how many records were returned, and when, so a compliance
+/// auditor can answer "who accessed what data." It carries no node content or
+/// names. The insert is awaited and fail-closed because callers invoke this
+/// immediately after retrieval and before rendering, lineage, or cache-return use.
+async fn emit_data_access_audit(
+    pool: &PgPool,
+    ctx: &WorkingContext,
+    policy: &MemoryAdmissionPolicy,
+    hits: &[RetrievalHit],
+) -> Result<()> {
+    let (scope_tier, scope_uid) = data_access_scope(ctx);
+    let turn_id = ctx
+        .metadata()
+        .get(TURN_ID_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            MoaError::ValidationError(
+                "memory retrieval requires a replay-stable turn id".to_string(),
+            )
+        })?;
+    let access = moa_ocsf::MemoryDataAccess::from_working_context(
+        ctx,
+        moa_ocsf::MemoryDataAccessDetails {
+            retrieval_operation_id: format!("turn:{turn_id}"),
+            node_uids: hits.iter().map(|hit| hit.uid).collect(),
+            scope_uid,
+            scope_tier,
+            source_tiers: policy
+                .plans()
+                .iter()
+                .map(|plan| plan.source_tier().as_str().to_string())
+                .collect(),
+            turn_uid: data_access_turn_uid(ctx),
+        },
+    )
+    .map_err(|error| MoaError::PermissionDenied(error.to_string()))?;
+    moa_ocsf::emit_data_access(pool, ctx.tenant_id, access)
+        .await
+        .map_err(|error| MoaError::StorageError(format!("memory access audit failed: {error}")))?;
+    Ok(())
+}
+
+/// Derives the retrieval's memory scope tier and stable scope UID.
+///
+/// A contact session may read both tenant knowledge and its own contact memory;
+/// the contact tier is the privacy-relevant boundary, so a present contact
+/// classifies the access as contact-tier. `source_tiers` still records every tier
+/// actually searched.
+fn data_access_scope(ctx: &WorkingContext) -> (String, String) {
+    match ctx.contact.as_ref() {
+        Some(contact) => (
+            "contact".to_string(),
+            format!("memory:contact:{}:{}", ctx.tenant_id, contact.contact_id),
+        ),
+        None => (
+            "tenant".to_string(),
+            format!("memory:tenant:{}", ctx.tenant_id),
+        ),
+    }
+}
+
+/// Extracts the turn UID from the working-context turn metadata, when present.
+fn data_access_turn_uid(ctx: &WorkingContext) -> Option<String> {
+    ctx.metadata()
+        .get(TURN_ID_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .map(|turn_id| format!("turn:{turn_id}"))
+}
+
 fn extract_search_query(ctx: &WorkingContext) -> Option<String> {
     if let Some(query) = ctx
         .metadata()
@@ -1065,23 +1211,38 @@ mod tests {
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
+    use moa_core::types::security::SensitivityClass;
     use moa_core::{
-        traits::ContextProcessor, types::agent::AgentContext, types::agent::AgentKnowledgePolicy,
-        types::agent::AgentKnowledgeScopeMode, types::agent::AgentPolicySnapshot,
-        types::channel::Channel, types::contact::ContactId, types::contact::ContactRef,
-        types::contact::ContactVerificationState, types::context::ContextMessage,
-        types::context::WorkingContext, types::identifiers::ModelId, types::identifiers::SessionId,
-        types::identifiers::TenantId, types::model::ModelCapabilities, types::model::TokenPricing,
-        types::model::ToolCallFormat, types::query_rewrite::QueryRewriteResult,
+        traits::{ContextProcessor, Identity, IdentityType},
+        types::agent::AgentContext,
+        types::agent::AgentKnowledgePolicy,
+        types::agent::AgentKnowledgeScopeMode,
+        types::agent::AgentPolicySnapshot,
+        types::channel::Channel,
+        types::contact::ContactId,
+        types::contact::ContactRef,
+        types::contact::ContactVerificationState,
+        types::context::ContextMessage,
+        types::context::TURN_ID_METADATA_KEY,
+        types::context::WorkingContext,
+        types::identifiers::ModelId,
+        types::identifiers::SessionId,
+        types::identifiers::TenantId,
+        types::model::ModelCapabilities,
+        types::model::TokenPricing,
+        types::model::ToolCallFormat,
+        types::query_rewrite::QueryRewriteResult,
         types::session::SessionMeta,
     };
+    use moa_crypto::LocalKmsProvider;
     use moa_lineage_core::TurnId;
     use moa_memory_graph::{
         EdgeLabel, EdgeWriteIntent, GraphExpansionHit, GraphStore, NodeIndexRow, NodeLabel,
-        NodeWriteIntent, PiiClass,
+        NodeWriteIntent,
     };
     use moa_memory_types::MemoryScope;
     use serde_json::json;
@@ -1092,9 +1253,10 @@ mod tests {
     use crate::retrieval::{MemoryAdmissionPolicy, RetrievalScopePlan};
 
     use super::{
-        GraphMemoryRetriever, MemoryEvidenceRequest, ScopedRetrievalRuntime,
-        ScopedRetrievalRuntimeFactory, SharedGraphMemoryRetriever, extract_search_keywords,
-        extract_search_query, should_disable_graph_expansion,
+        GraphMemoryRetriever, MemoryAccessAuditor, MemoryEvidenceRequest, ScopedRetrievalRuntime,
+        ScopedRetrievalRuntimeFactory, SharedGraphMemoryRetriever, build_memory_evidence_response,
+        emit_data_access_audit, extract_search_keywords, extract_search_query,
+        should_disable_graph_expansion,
     };
 
     /// Wraps scripted hits in a retrieval output with empty diagnostics/provenance.
@@ -1113,8 +1275,34 @@ mod tests {
             .to_vec()
     }
 
+    fn clearances_from_session(
+        session: &SessionMeta,
+    ) -> moa_core::types::memory::InformationBarrierClearances {
+        session
+            .agent_context
+            .as_ref()
+            .expect("pinned agent context")
+            .information_barrier_clearances()
+            .expect("valid pinned clearances")
+    }
+
     #[derive(Debug)]
     struct NoopGraphStore;
+
+    struct NoopMemoryAccessAuditor;
+
+    #[async_trait]
+    impl MemoryAccessAuditor for NoopMemoryAccessAuditor {
+        async fn emit(
+            &self,
+            _pool: &sqlx::PgPool,
+            _ctx: &WorkingContext,
+            _policy: &MemoryAdmissionPolicy,
+            _hits: &[crate::retrieval::RetrievalHit],
+        ) -> moa_core::error::Result<()> {
+            Ok(())
+        }
+    }
 
     #[async_trait]
     impl GraphStore for NoopGraphStore {
@@ -1222,6 +1410,7 @@ mod tests {
         label_filter: Option<Vec<NodeLabel>>,
         label_boost: Option<Vec<NodeLabel>>,
         strategy: Option<Strategy>,
+        cleared_barriers: moa_core::types::memory::InformationBarrierClearances,
     }
 
     #[derive(Debug)]
@@ -1245,6 +1434,7 @@ mod tests {
                     label_filter: req.label_filter.clone(),
                     label_boost: req.label_boost.clone(),
                     strategy: req.strategy,
+                    cleared_barriers: req.cleared_barriers.clone(),
                 });
             Ok(test_output(
                 self.hits_by_scope
@@ -1411,6 +1601,7 @@ mod tests {
         let retrieve_calls = Arc::new(AtomicUsize::new(0));
         let retriever = GraphMemoryRetriever::new(
             pool,
+            Arc::new(LocalKmsProvider::new()),
             Some(Arc::new(CountingEmbedder {
                 calls: embed_calls.clone(),
             })),
@@ -1427,15 +1618,19 @@ mod tests {
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
-        let mut ctx = WorkingContext::new(&session, capabilities());
-        ctx.append_message(moa_core::types::context::ContextMessage::user(
-            "what is the cached answer",
-        ));
+        let ctx = WorkingContext::new(&session, capabilities());
 
+        let policy = MemoryAdmissionPolicy::from_working_context(&ctx)
+            .expect("test session should produce an admission policy");
         retriever
-            .process(&mut ctx)
+            .retrieve_hits(
+                &ctx,
+                "what is the cached answer".to_string(),
+                &policy,
+                policy.result_limit(10),
+            )
             .await
-            .expect("cache-hit retrieval should assemble context");
+            .expect("cache-hit retrieval should return without embedding");
 
         assert_eq!(
             embed_calls.load(Ordering::SeqCst),
@@ -1456,7 +1651,7 @@ mod tests {
             .connect_lazy("postgres://localhost/moa_test")
             .expect("lazy test pool should not connect");
         let shared = SharedGraphMemoryRetriever::new(std::sync::Arc::new(
-            GraphMemoryRetriever::new(pool, None),
+            GraphMemoryRetriever::new(pool, Arc::new(LocalKmsProvider::new()), None),
         ));
 
         assert_eq!(shared.name(), "graph_memory");
@@ -1473,11 +1668,10 @@ mod tests {
             .connect_lazy("postgres://localhost/moa_test")
             .expect("lazy test pool should not connect");
         let calls = Arc::new(AtomicUsize::new(0));
-        let retriever = GraphMemoryRetriever::new(pool, None).with_scoped_runtime_factory(
-            Arc::new(CountingRuntimeFactory {
+        let retriever = GraphMemoryRetriever::new(pool, Arc::new(LocalKmsProvider::new()), None)
+            .with_scoped_runtime_factory(Arc::new(CountingRuntimeFactory {
                 calls: calls.clone(),
-            }),
-        );
+            }));
         let tenant_id = TenantId::new();
         let contact_scope = MemoryScope::Contact {
             tenant_id,
@@ -1528,11 +1722,10 @@ mod tests {
             .connect_lazy("postgres://localhost/moa_test")
             .expect("lazy test pool should not connect");
         let calls = Arc::new(AtomicUsize::new(0));
-        let retriever = GraphMemoryRetriever::new(pool, None).with_scoped_runtime_factory(
-            Arc::new(CountingRuntimeFactory {
+        let retriever = GraphMemoryRetriever::new(pool, Arc::new(LocalKmsProvider::new()), None)
+            .with_scoped_runtime_factory(Arc::new(CountingRuntimeFactory {
                 calls: calls.clone(),
-            }),
-        );
+            }));
         let tenant_id = TenantId::new();
         let tenant_scope = MemoryScope::Tenant { tenant_id };
         let contact_scope = MemoryScope::Contact {
@@ -1656,7 +1849,10 @@ mod tests {
         };
         let mut ctx = WorkingContext::new(&session, capabilities());
         let turn_id = TurnId::new_v7();
-        ctx.insert_metadata("_moa.turn_id", serde_json::json!(turn_id.0.to_string()));
+        ctx.insert_metadata(
+            TURN_ID_METADATA_KEY,
+            serde_json::json!(turn_id.0.to_string()),
+        );
         ctx.insert_metadata("_moa.turn_seq", serde_json::json!(42));
 
         let lineage = super::lineage_context_from_context(&ctx);
@@ -1909,10 +2105,12 @@ mod tests {
             .expect("scripted retrieval should assemble context");
 
         let calls = calls.lock().expect("scripted retriever calls lock").clone();
+        let expected_clearances = clearances_from_session(&session);
         assert_eq!(
             calls,
             vec![
                 RecordedRetrievalRequest {
+                    cleared_barriers: expected_clearances.clone(),
                     scope: tenant_scope,
                     label_filter: Some(vec![
                         NodeLabel::Document,
@@ -1923,6 +2121,7 @@ mod tests {
                     strategy: Some(Strategy::VectorFirst),
                 },
                 RecordedRetrievalRequest {
+                    cleared_barriers: expected_clearances,
                     scope: MemoryScope::Contact {
                         tenant_id: session.tenant_id,
                         contact_id,
@@ -2001,10 +2200,12 @@ mod tests {
             .expect("scripted retrieval should assemble context");
 
         let calls = calls.lock().expect("scripted retriever calls lock").clone();
+        let expected_clearances = clearances_from_session(&session);
         assert_eq!(
             calls,
             vec![
                 RecordedRetrievalRequest {
+                    cleared_barriers: expected_clearances.clone(),
                     scope: tenant_scope,
                     label_filter: Some(vec![
                         NodeLabel::Document,
@@ -2015,6 +2216,7 @@ mod tests {
                     strategy: Some(Strategy::VectorFirst),
                 },
                 RecordedRetrievalRequest {
+                    cleared_barriers: expected_clearances,
                     scope: contact_scope,
                     label_filter: None,
                     label_boost: Some(vec![NodeLabel::Incident]),
@@ -2261,7 +2463,8 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://localhost/moa_test")
             .expect("lazy test pool should not connect");
-        let graph_memory = GraphMemoryRetriever::new(pool, None)
+        let graph_memory = GraphMemoryRetriever::new(pool, Arc::new(LocalKmsProvider::new()), None)
+            .with_access_auditor(Arc::new(NoopMemoryAccessAuditor))
             .with_scoped_runtime_factory(Arc::new(QueryScriptedRuntimeFactory { retriever }));
 
         let session = SessionMeta {
@@ -2431,13 +2634,19 @@ mod tests {
         ));
         let original_messages = ctx.messages.clone();
 
-        let response = retriever
-            .retrieve_evidence(
+        let policy = MemoryAdmissionPolicy::from_working_context(&ctx)
+            .expect("contact evidence admission policy");
+        let (hits, _) = retriever
+            .retrieve_hits(
                 &ctx,
-                MemoryEvidenceRequest::new("What does memory say about summaries?", 512),
+                "What does memory say about summaries?".to_string(),
+                &policy,
+                4,
             )
             .await
-            .expect("admitted evidence should render");
+            .expect("retrieve admitted evidence");
+        let response =
+            build_memory_evidence_response(hits, 512).expect("admitted evidence should render");
 
         assert_eq!(
             ctx.messages, original_messages,
@@ -2496,10 +2705,12 @@ mod tests {
             moa_core::types::context::estimate_text_tokens(&response.rendered_evidence)
         );
         assert!(response.consumed_evidence_tokens <= 512);
+        let expected_clearances = clearances_from_session(&session);
         assert_eq!(
             calls.lock().expect("scripted retriever calls lock").clone(),
             vec![
                 RecordedRetrievalRequest {
+                    cleared_barriers: expected_clearances.clone(),
                     scope: tenant_scope,
                     label_filter: Some(vec![
                         NodeLabel::Document,
@@ -2510,6 +2721,7 @@ mod tests {
                     strategy: Some(Strategy::VectorFirst),
                 },
                 RecordedRetrievalRequest {
+                    cleared_barriers: expected_clearances,
                     scope: contact_scope,
                     label_filter: None,
                     label_boost: None,
@@ -2547,12 +2759,18 @@ mod tests {
         let ctx = WorkingContext::new(&session, capabilities());
         let token_budget = 256;
 
-        let response = retriever
-            .retrieve_evidence(
+        let policy = MemoryAdmissionPolicy::from_working_context(&ctx)
+            .expect("tenant evidence admission policy");
+        let (hits, _) = retriever
+            .retrieve_hits(
                 &ctx,
-                MemoryEvidenceRequest::new("What is the rotation evidence?", token_budget),
+                "What is the rotation evidence?".to_string(),
+                &policy,
+                4,
             )
             .await
+            .expect("retrieve admitted evidence");
+        let response = build_memory_evidence_response(hits, token_budget)
             .expect("tight evidence budget should render a truncated hit");
 
         assert_eq!(response.hits.len(), 1, "top admitted hit should fit");
@@ -2608,22 +2826,20 @@ mod tests {
         let retriever = scripted_graph_memory_retriever(calls, hits_by_scope);
         let ctx = WorkingContext::new(&session, capabilities());
 
-        let default_response = retriever
-            .retrieve_evidence(
-                &ctx,
-                MemoryEvidenceRequest::new("What is the ranked evidence?", 256),
-            )
+        let policy = MemoryAdmissionPolicy::from_working_context(&ctx)
+            .expect("ranked evidence admission policy");
+        let (default_hits, _) = retriever
+            .retrieve_hits(&ctx, "What is the ranked evidence?".to_string(), &policy, 4)
             .await
             .expect("default evidence retrieval");
-        let expanded_response = retriever
-            .retrieve_evidence(
-                &ctx,
-                MemoryEvidenceRequest::new("What is the ranked evidence?", 256)
-                    .with_ranked_occurrence_depth(6)
-                    .expect("valid ranked occurrence depth"),
-            )
+        let default_response =
+            build_memory_evidence_response(default_hits, 256).expect("render default evidence");
+        let (expanded_hits, _) = retriever
+            .retrieve_hits(&ctx, "What is the ranked evidence?".to_string(), &policy, 6)
             .await
             .expect("expanded evidence retrieval");
+        let expanded_response =
+            build_memory_evidence_response(expanded_hits, 256).expect("render expanded evidence");
 
         assert_eq!(default_response.hits.len(), 4);
         assert_eq!(expanded_response.hits.len(), 6);
@@ -2708,6 +2924,89 @@ mod tests {
         );
     }
 
+    pub(super) async fn verify_agent_clearances_reach_retrieval_request() {
+        // Pins: the retrieval entry point sources the agent knowledge policy's
+        // information-barrier clearances onto every backend retrieval request,
+        // and an agent with no clearances stays fail-closed (empty).
+        let cleared_calls = Arc::new(Mutex::new(Vec::new()));
+        let cleared_retriever =
+            scripted_graph_memory_retriever(cleared_calls.clone(), HashMap::new());
+        let mut cleared_session = tenant_only_session();
+        cleared_session.agent_context =
+            Some(agent_context_with_knowledge_policy(AgentKnowledgePolicy {
+                cleared_barriers: [moa_core::types::memory::InformationBarrierId::parse(
+                    "deal-alpha",
+                )
+                .expect("valid barrier")]
+                .into_iter()
+                .collect(),
+                ..AgentKnowledgePolicy::default()
+            }));
+        let cleared_ctx = WorkingContext::new(&cleared_session, capabilities());
+        let cleared_policy = MemoryAdmissionPolicy::from_working_context(&cleared_ctx)
+            .expect("cleared agent policy");
+        cleared_retriever
+            .retrieve_hits(
+                &cleared_ctx,
+                "What is the deal-alpha status?".to_string(),
+                &cleared_policy,
+                4,
+            )
+            .await
+            .expect("cleared agent evidence retrieval");
+        let cleared_recorded = cleared_calls
+            .lock()
+            .expect("cleared calls lock")
+            .iter()
+            .map(|call| call.cleared_barriers.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            !cleared_recorded.is_empty(),
+            "a cleared agent must reach backend retrieval"
+        );
+        assert!(
+            cleared_recorded.iter().all(|barriers| {
+                barriers
+                    .iter()
+                    .map(moa_core::types::memory::InformationBarrierId::as_str)
+                    .collect::<Vec<_>>()
+                    == vec!["deal-alpha"]
+            }),
+            "every backend request must carry the agent's cleared barriers"
+        );
+
+        let default_calls = Arc::new(Mutex::new(Vec::new()));
+        let default_retriever =
+            scripted_graph_memory_retriever(default_calls.clone(), HashMap::new());
+        let default_session = tenant_only_session();
+        let default_ctx = WorkingContext::new(&default_session, capabilities());
+        let default_policy = MemoryAdmissionPolicy::from_working_context(&default_ctx)
+            .expect("default agent policy");
+        default_retriever
+            .retrieve_hits(
+                &default_ctx,
+                "What is the deal-alpha status?".to_string(),
+                &default_policy,
+                4,
+            )
+            .await
+            .expect("default agent evidence retrieval");
+        let default_recorded = default_calls
+            .lock()
+            .expect("default calls lock")
+            .iter()
+            .map(|call| call.cleared_barriers.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            !default_recorded.is_empty(),
+            "the default agent must still reach backend retrieval"
+        );
+        assert!(
+            default_recorded.iter().all(|barriers| barriers.is_empty()),
+            "an agent with no clearances must fail closed with an empty barrier set"
+        );
+    }
+
     fn scripted_graph_memory_retriever(
         calls: Arc<Mutex<Vec<RecordedRetrievalRequest>>>,
         hits_by_scope: HashMap<MemoryScope, Vec<crate::retrieval::RetrievalHit>>,
@@ -2719,7 +3018,8 @@ mod tests {
             calls,
             hits_by_scope,
         });
-        GraphMemoryRetriever::new(pool, None)
+        GraphMemoryRetriever::new(pool, Arc::new(LocalKmsProvider::new()), None)
+            .with_access_auditor(Arc::new(NoopMemoryAccessAuditor))
             .with_scoped_runtime_factory(Arc::new(ScriptedRuntimeFactory { retriever }))
     }
 
@@ -2765,7 +3065,7 @@ mod tests {
                 contact_id: contact_id.map(|id| id.to_string()),
                 scope: scope.to_string(),
                 name: name.to_string(),
-                pii_class: PiiClass::None,
+                pii_class: SensitivityClass::None,
                 valid_to: None,
                 valid_from: Utc::now(),
                 properties_summary: Some(json!({ "summary": summary })),
@@ -2773,6 +3073,47 @@ mod tests {
                 quality_score: 0.5,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn access_audit_database_failure_fails_retrieval_closed() {
+        // Pins: a retrieved hit cannot be consumed when its required signed
+        // access record cannot be persisted.
+        let session = tenant_only_session();
+        let mut ctx = WorkingContext::new(&session, capabilities());
+        ctx.set_caller_identity(Identity {
+            identity_type: IdentityType::Operator,
+            id: Uuid::now_v7(),
+            tenant_id: session.tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        });
+        ctx.insert_metadata(TURN_ID_METADATA_KEY, json!(Uuid::now_v7().to_string()));
+        let policy = MemoryAdmissionPolicy::from_working_context(&ctx)
+            .expect("tenant session should produce an admission policy");
+        let hit = retrieval_hit(
+            Uuid::now_v7(),
+            session.tenant_id,
+            None,
+            NodeLabel::Fact,
+            "tenant",
+            crate::retrieval::SourceTier::TenantKnowledge,
+            "audit failure",
+            "must not be consumed",
+            1.0,
+        );
+        let unavailable_pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(50))
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/moa")
+            .expect("lazy unavailable pool");
+
+        let error = emit_data_access_audit(&unavailable_pool, &ctx, &policy, &[hit])
+            .await
+            .expect_err("audit persistence failure must fail retrieval");
+        assert!(
+            matches!(error, moa_core::error::MoaError::StorageError(_)),
+            "audit failure should surface as a retrieval storage error: {error}"
+        );
     }
 
     fn section_between<'a>(content: &'a str, start: &str, end: &str) -> &'a str {
@@ -2860,6 +3201,13 @@ mod evidence {
     async fn disabled_policy_returns_empty_without_retrieval() {
         // Pins: disabled memory policy cannot be bypassed through the public seam.
         super::tests::verify_evidence_disabled_policy_returns_empty_without_retrieval().await;
+    }
+
+    #[tokio::test]
+    async fn agent_clearances_reach_retrieval_request() {
+        // Pins: the agent knowledge policy's barrier clearances thread onto the
+        // backend retrieval request, and no clearances fails closed.
+        super::tests::verify_agent_clearances_reach_retrieval_request().await;
     }
 }
 

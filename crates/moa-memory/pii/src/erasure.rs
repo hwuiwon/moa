@@ -5,14 +5,9 @@ use moa_core::{
     types::contact::ContactId, types::identifiers::StoragePartitionId, types::identifiers::TenantId,
 };
 use moa_db::ScopedConn;
-use moa_memory_graph::{
-    ChangelogRecord, PostgresGraphStore, write::hard_purge_with_audit, write_and_bump,
-};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
-
-const ERASE_CHUNK_SIZE: usize = 1000;
 
 /// Result type returned by memory erasure helpers.
 pub type Result<T> = std::result::Result<T, ErasureError>;
@@ -29,6 +24,9 @@ pub enum ErasureError {
     /// SQL operation failed.
     #[error("erasure sql: {0}")]
     Sqlx(#[from] sqlx::Error),
+    /// Cryptographic erasure (crypto-shred) of a subject KEK failed.
+    #[error("crypto-shred: {0}")]
+    Crypto(#[from] moa_crypto::Error),
 }
 
 /// One graph-memory candidate selected for privacy erasure.
@@ -67,26 +65,19 @@ pub async fn enumerate_erase_candidates(
     tenant_id: TenantId,
     subject_user_id: &str,
 ) -> Result<Vec<EraseCandidate>> {
-    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
-    let contact_user_id = contact_id_from_subject(subject_user_id)?.to_string();
+    let subject_id = contact_id_from_subject(subject_user_id)?.0;
     let mut tx = begin_app_scoped_tx(pool, tenant_id, subject_user_id).await?;
     let rows = sqlx::query_as::<_, EraseCandidate>(
         r#"
         SELECT uid, label, name, pii_class
         FROM moa.node_index
-        WHERE storage_partition_id = $1
-          AND (
-              user_id = $2
-              OR properties_summary->>'user_id' = $2
-              OR user_id = $3
-              OR properties_summary->>'user_id' = $3
-          )
+        WHERE tenant_id = $1
+          AND data_subject_id = $2
         ORDER BY uid
         "#,
     )
-    .bind(storage_partition_id)
-    .bind(subject_user_id)
-    .bind(contact_user_id)
+    .bind(tenant_id.0)
+    .bind(subject_id)
     .fetch_all(tx.as_mut())
     .await?;
     tx.commit().await?;
@@ -97,44 +88,78 @@ pub async fn enumerate_erase_candidates(
 pub async fn hard_purge_erase_candidates(
     pool: &PgPool,
     audit: &GraphErasureAudit,
-    candidates: &[EraseCandidate],
+    _candidates: &[EraseCandidate],
 ) -> Result<usize> {
-    if candidates.is_empty() {
-        return Ok(0);
+    let subject_id = contact_id_from_subject(&audit.subject_user_id)?.0;
+    if subject_id != audit.subject_user {
+        return Err(ErasureError::Scope(
+            moa_core::error::MoaError::ValidationError(
+                "privacy erasure audit subject UUID does not match subject_user_id".to_string(),
+            ),
+        ));
     }
+    let mut tx = begin_app_scoped_tx(pool, audit.tenant_id, &audit.subject_user_id).await?;
+    let result: Value = sqlx::query_scalar("SELECT moa.erase_memory_data_subject($1, $2, $3)")
+        .bind(audit.tenant_id.0)
+        .bind(subject_id)
+        .bind(erase_audit_metadata(audit))
+        .fetch_one(tx.as_mut())
+        .await?;
+    tx.commit().await?;
+    let erased = result
+        .get("nodes_deleted")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            ErasureError::Scope(moa_core::error::MoaError::StorageError(
+                "privacy erasure function returned no nodes_deleted count".to_string(),
+            ))
+        })?;
+    usize::try_from(erased).map_err(|error| {
+        ErasureError::Scope(moa_core::error::MoaError::StorageError(format!(
+            "privacy erasure node count overflow: {error}"
+        )))
+    })
+}
 
-    let graph = erase_graph_store(pool, audit.tenant_id, &audit.subject_user_id)?;
-    let redaction_marker = format!("erase:{}", audit.approval_token_jti);
-    let mut erased_count = 0usize;
-    for chunk in candidates.chunks(ERASE_CHUNK_SIZE) {
-        for candidate in chunk {
-            match hard_purge_with_audit(
-                &graph,
-                candidate.uid,
-                &redaction_marker,
-                Some(erase_audit_metadata(audit)),
-            )
-            .await
-            {
-                Ok(()) => {}
-                // Idempotent erasure: a node already absent — because a
-                // concurrent purge removed it or a resumed job re-enumerated
-                // remaining candidates — is completed progress, not a failure.
-                // Restart-after-partial-progress must not terminate on the first
-                // already-purged node.
-                Err(moa_memory_graph::GraphError::NotFound(_)) => {
-                    tracing::debug!(
-                        uid = %candidate.uid,
-                        "erase candidate already absent; treating as purged"
-                    );
-                }
-                Err(error) => return Err(error.into()),
-            }
-            erased_count = erased_count.saturating_add(1);
-        }
-    }
-    emit_erase_summary(pool, audit, erased_count).await?;
-    Ok(erased_count)
+/// Cryptographically erases one data subject's key-encryption key as erasure
+/// defense-in-depth.
+///
+/// This complements [`hard_purge_erase_candidates`]. Hard-purge deletes the live
+/// graph rows, but a restricted/PHI node's sealed content can also survive in
+/// backups, read replicas, or WAL that a `DELETE` cannot reach. Destroying the
+/// subject's per-subject KEK ([`moa_crypto::crypto_shred_subject`]) makes every
+/// record sealed under it permanently unrecoverable everywhere, without touching
+/// any ciphertext. It is idempotent — shredding an already-shredded or
+/// never-sealed subject succeeds — and leaves every other subject in the tenant
+/// decrypting normally.
+///
+/// The KEK is keyed by `(tenant_id, subject_id)` exactly as the write path sealed
+/// it, where `subject_id` is the contact/data-subject UUID.
+pub async fn crypto_shred_erased_subject(
+    pool: &PgPool,
+    kms: &dyn moa_crypto::KeyManagementProvider,
+    tenant_id: TenantId,
+    subject_id: Uuid,
+    operation_id: &str,
+) -> Result<()> {
+    // The fence is rechecked immediately before the irreversible KMS call. The
+    // transaction advisory guard stays held until the provider confirms shred,
+    // so a concurrent hold cannot cross this boundary on another replica.
+    let guard = crate::legal_hold::begin_destruction_stage_guard(
+        pool,
+        tenant_id,
+        &[subject_id],
+        operation_id,
+    )
+    .await
+    .map_err(|error| {
+        ErasureError::Scope(moa_core::error::MoaError::StorageError(error.to_string()))
+    })?;
+    moa_crypto::crypto_shred_subject(kms, tenant_id.0, subject_id).await?;
+    guard.finish().await.map_err(|error| {
+        ErasureError::Scope(moa_core::error::MoaError::StorageError(error.to_string()))
+    })?;
+    Ok(())
 }
 
 /// Deletes the subject's standing memory-digest rows during privacy erasure.
@@ -207,15 +232,6 @@ pub async fn begin_app_scoped_tx<'a>(
     Ok(tx)
 }
 
-fn erase_graph_store(
-    pool: &PgPool,
-    tenant_id: TenantId,
-    subject_user_id: &str,
-) -> Result<PostgresGraphStore> {
-    let scope = contact_scope_from_subject(tenant_id, subject_user_id)?;
-    Ok(PostgresGraphStore::scoped_for_app_role(pool.clone(), scope))
-}
-
 fn contact_scope_from_subject(tenant_id: TenantId, subject_user_id: &str) -> Result<RlsContext> {
     Ok(RlsContext::contact(
         tenant_id,
@@ -242,46 +258,4 @@ fn erase_audit_metadata(audit: &GraphErasureAudit) -> Value {
         "tenant_id": audit.tenant_id.to_string(),
         "op": "erase",
     })
-}
-
-async fn emit_erase_summary(
-    pool: &PgPool,
-    audit: &GraphErasureAudit,
-    erased_count: usize,
-) -> Result<()> {
-    let storage_partition_id = StoragePartitionId::for_tenant(audit.tenant_id).to_string();
-    let contact_id = contact_id_from_subject(&audit.subject_user_id)?;
-    let mut tx = begin_app_scoped_tx(pool, audit.tenant_id, &audit.subject_user_id).await?;
-    write_and_bump(
-        tx.as_mut(),
-        ChangelogRecord {
-            storage_partition_id: Some(storage_partition_id),
-            contact_id: Some(contact_id.to_string()),
-            scope: "contact".to_string(),
-            actor_id: Some(audit.approver_id.clone()),
-            actor_kind: "admin".to_string(),
-            op: "erase".to_string(),
-            target_kind: "contact".to_string(),
-            target_label: "User".to_string(),
-            target_uid: audit.subject_user,
-            payload: json!({
-                "reason": audit.reason.as_str(),
-                "subject_user_id": audit.subject_user_id.as_str(),
-                "erased_count": erased_count,
-            }),
-            redaction_marker: None,
-            pii_class: "phi".to_string(),
-            audit_metadata: Some(json!({
-                "approver_id": audit.approver_id.as_str(),
-                "approval_token_jti": audit.approval_token_jti.as_str(),
-                "subject_user_id": audit.subject_user_id.as_str(),
-                "tenant_id": audit.tenant_id.to_string(),
-                "op": "erase",
-            })),
-            cause_change_id: None,
-        },
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(())
 }

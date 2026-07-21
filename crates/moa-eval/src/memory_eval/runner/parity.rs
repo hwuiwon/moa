@@ -14,9 +14,10 @@ use moa_brain::pipeline::memory::{
     GraphMemoryRetriever, ScopedRetrievalRuntime, ScopedRetrievalRuntimeFactory,
 };
 use moa_brain::retrieval::CachedHybridRetriever;
+use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::channel::Channel;
 use moa_core::types::contact::{ContactRef, ContactVerificationState};
-use moa_core::types::context::WorkingContext;
+use moa_core::types::context::{TURN_ID_METADATA_KEY, WorkingContext};
 use moa_core::types::identifiers::{ModelId, SessionId};
 use moa_core::types::model::{ModelCapabilities, TokenPricing, ToolCallFormat};
 use moa_core::types::session::SessionMeta;
@@ -43,6 +44,7 @@ pub(super) const PARITY_EVIDENCE_TOKEN_BUDGET: usize = 2_048;
 /// stage 7 is exercised too.
 struct EvalScopedRetrievalRuntimeFactory {
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     ranking_config: RankingConfig,
     reranker: Arc<dyn Reranker>,
     exact_vector_search: bool,
@@ -66,8 +68,12 @@ impl ScopedRetrievalRuntimeFactory for EvalScopedRetrievalRuntimeFactory {
         let vector = Arc::new(vector_store);
         let graph_vector: Arc<dyn VectorStore> = vector.clone();
         let graph: Arc<dyn GraphStore> = Arc::new(
-            PostgresGraphStore::scoped_for_app_role(self.pool.clone(), scope_context)
-                .with_vector_store(graph_vector),
+            PostgresGraphStore::scoped_for_app_role(
+                self.pool.clone(),
+                scope_context,
+                self.kms.clone(),
+            )
+            .with_vector_store(graph_vector),
         );
         let hybrid = Arc::new(
             HybridRetriever::new(self.pool.clone(), graph.clone(), vector)
@@ -103,6 +109,7 @@ impl ParityProbeRetriever {
     /// Builds the shared stage-7 retriever over the isolated eval store.
     pub(super) fn new(
         pool: PgPool,
+        kms: Arc<dyn KeyManagementProvider>,
         embedder: Arc<dyn EmbeddingProvider>,
         reranker: Arc<dyn Reranker>,
         ranking_config: RankingConfig,
@@ -111,6 +118,7 @@ impl ParityProbeRetriever {
     ) -> Self {
         let factory = Arc::new(EvalScopedRetrievalRuntimeFactory {
             pool: pool.clone(),
+            kms: kms.clone(),
             ranking_config: ranking_config.clone(),
             reranker,
             exact_vector_search: deterministic_replay,
@@ -126,7 +134,7 @@ impl ParityProbeRetriever {
             .retrieval
             .ranking
             .abstain_below_window_evidence = window_policy.abstain_below_window_evidence;
-        let retriever = GraphMemoryRetriever::new_with_config(config, pool, Some(embedder))
+        let retriever = GraphMemoryRetriever::new_with_config(config, pool, kms, Some(embedder))
             .with_assume_app_role(true)
             .with_scoped_runtime_factory(factory);
         Self {
@@ -178,7 +186,10 @@ fn parity_working_context(probe: &Probe) -> WorkingContext {
     let tenant_id = tenant_id_from_storage_partition_id(&probe.storage_partition_id);
     let contact_id = contact_id_from_user_id(&probe.user_id);
     let session = SessionMeta {
-        id: SessionId::new(),
+        id: SessionId(stable_uuid_from_label(&format!(
+            "memory-eval-parity-session:{}",
+            probe.probe_id
+        ))),
         tenant_id,
         channel: Channel::Chat,
         model: ModelId::new("memory-eval-parity"),
@@ -196,7 +207,20 @@ fn parity_working_context(probe: &Probe) -> WorkingContext {
         }),
         ..SessionMeta::default()
     };
-    WorkingContext::new(&session, parity_model_capabilities())
+    let mut context = WorkingContext::new(&session, parity_model_capabilities());
+    context.set_caller_identity(Identity {
+        identity_type: IdentityType::Contact,
+        id: contact_id.0,
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    });
+    let turn_id = stable_uuid_from_label(&format!("memory-eval-parity-turn:{}", probe.probe_id));
+    context.insert_metadata(
+        TURN_ID_METADATA_KEY,
+        serde_json::Value::String(turn_id.to_string()),
+    );
+    context
 }
 
 /// Minimal model capabilities for the parity working context.

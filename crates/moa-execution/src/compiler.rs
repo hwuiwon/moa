@@ -495,6 +495,7 @@ fn validate_goal_plan_links(
         }
     }
 
+    let mut covered_requirements = HashSet::new();
     let mut covered_constraints = HashSet::new();
     for (check_index, check) in goal.completion_checks.iter().enumerate() {
         for (index, requirement_id) in check.requirement_ids.iter().enumerate() {
@@ -504,6 +505,8 @@ fn validate_goal_plan_links(
                     format!("goal.completion_checks[{check_index}].requirement_ids[{index}]"),
                     "completion-check requirement ID does not exist",
                 );
+            } else {
+                covered_requirements.insert(requirement_id.as_str());
             }
         }
         for (index, constraint_id) in check.constraint_ids.iter().enumerate() {
@@ -544,6 +547,16 @@ fn validate_goal_plan_links(
                 }
             }
             CompletionCheckKind::OutputSchema | CompletionCheckKind::AgentVerifier { .. } => {}
+        }
+    }
+
+    for (index, requirement) in goal.requirements.iter().enumerate() {
+        if !covered_requirements.contains(requirement.id.as_str()) {
+            report.error(
+                "unchecked_requirement",
+                format!("goal.requirements[{index}].id"),
+                "every requirement must be linked to at least one completion check",
+            );
         }
     }
 

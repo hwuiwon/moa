@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::wire::tools::ToolDescriptor;
 use moa_core::{
-    events::Event, events::EventType, traits::BuiltInTool, traits::ToolContext,
-    types::action_policy::ActionClass, types::action_policy::RiskLevel,
-    types::events_stream::EventRecord, types::hands::SandboxFile, types::identifiers::TenantId,
-    types::identifiers::ToolCallId, types::identifiers::UserId, types::tools::IdempotencyClass,
+    events::Event, events::EventType, traits::BuiltInTool, traits::Identity, traits::IdentityType,
+    traits::ToolContext, types::action_policy::ActionClass, types::action_policy::RiskLevel,
+    types::events_stream::EventRecord, types::hands::SandboxFile, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::identifiers::ToolCallId, types::tools::IdempotencyClass,
     types::tools::ToolCallRequest, types::tools::ToolDefinition, types::tools::ToolDiffStrategy,
     types::tools::ToolInputShape, types::tools::ToolOutput, types::tools::ToolPolicySpec,
     types::tools::TrustedSandboxFileEntry, types::tools::TrustedSandboxFileManifestPayload,
@@ -94,13 +94,18 @@ fn registry_with_tools(tools: Vec<Arc<dyn BuiltInTool>>) -> ToolRegistry {
 fn tool_request(tool_call_id: ToolCallId, tool_name: &str) -> ToolCallRequest {
     ToolCallRequest {
         tool_call_id,
+        caller_identity: Identity {
+            identity_type: IdentityType::Operator,
+            id: Uuid::from_u128(2),
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        },
         provider_tool_use_id: None,
         tool_name: tool_name.to_string(),
         input: json!({}),
         active_canary: None,
-        session_id: None,
-        tenant_id: TenantId::from(Uuid::from_u128(1)),
-        user_id: UserId::new("user-1"),
+        session_id: SessionId::new(),
         trusted_sandbox_manifest: None,
         worker_id: None,
     }

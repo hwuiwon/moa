@@ -8,12 +8,11 @@ use moa_core::traits::SessionRepository;
 use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::wire::tools::{ToolDescriptor, tool_descriptor};
 use moa_core::{
-    error::MoaError, error::ToolFailureClass, error::classify_tool_error, events::Event,
-    events::EventType, types::action_policy::ExecutionTaskOrigin,
-    types::completion::ToolInvocation, types::events_stream::ClaimCheck,
-    types::events_stream::EventRecord, types::hands::SandboxFile, types::identifiers::SessionId,
-    types::identifiers::TenantId, types::identifiers::ToolCallId, types::session::SessionMeta,
-    types::session::SessionStatus, types::tools::IdempotencyClass, types::tools::ToolCallRequest,
+    error::MoaError, error::ToolFailureClass, events::Event, events::EventType,
+    types::action_policy::ExecutionTaskOrigin, types::completion::ToolInvocation,
+    types::events_stream::ClaimCheck, types::events_stream::EventRecord, types::hands::SandboxFile,
+    types::identifiers::SessionId, types::identifiers::TenantId, types::identifiers::ToolCallId,
+    types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::ToolCallRequest,
     types::tools::ToolDefinition, types::tools::ToolOutput, types::tools::TrustedSandboxFileEntry,
     types::tools::TrustedSandboxFileManifestPayload, types::tools::TrustedSandboxFileManifestRef,
 };
@@ -23,7 +22,6 @@ use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use restate_sdk::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::turn::util::{blocked_canary_message, blocked_canary_tool_output};
@@ -166,6 +164,11 @@ impl ToolExecutorImpl {
         request: &ToolCallRequest,
         hand_scope: Option<&str>,
     ) -> moa_core::error::Result<ToolOutput> {
+        if request.caller_identity.tenant_id != session.tenant_id {
+            return Err(MoaError::PermissionDenied(
+                "tool caller identity does not match the loaded session tenant".to_string(),
+            ));
+        }
         let trusted_sandbox_files = self.trusted_sandbox_files_for_request(request).await?;
         if hand_scope.is_none() && request.tool_name == "file_read" {
             return Ok(
@@ -187,7 +190,12 @@ impl ToolExecutorImpl {
             .await;
         let (_hand_id, output) = self
             .router
-            .execute_authorized_with_recovery(session, hand_scope, &invocation)
+            .execute_authorized_with_recovery(
+                session,
+                &request.caller_identity,
+                hand_scope,
+                &invocation,
+            )
             .await?;
         Ok(output)
     }
@@ -199,12 +207,7 @@ impl ToolExecutorImpl {
         let Some(manifest) = request.trusted_sandbox_manifest.as_ref() else {
             return Ok(Vec::new());
         };
-        let session_id = request.session_id.ok_or_else(|| {
-            MoaError::ValidationError(format!(
-                "tool {} supplied trusted_sandbox_manifest without session_id",
-                request.tool_name
-            ))
-        })?;
+        let session_id = request.session_id;
         if let Some(store) = self.trusted_manifest_store.as_ref() {
             return store.load(session_id, manifest).await;
         }
@@ -267,6 +270,12 @@ impl ToolExecutor for ToolExecutorImpl {
         annotate_restate_handler_span("ToolExecutor", "execute");
         let request = request.into_inner();
         let session = resolve_session(&ctx, &request, self.session_store.clone()).await?;
+        if request.caller_identity.tenant_id != session.tenant_id {
+            return Err(TerminalError::new(
+                "tool caller identity does not match the loaded session tenant",
+            )
+            .into());
+        }
         annotate_tool_execution_span(&session, &request);
 
         let serialized_input = serde_json::to_string(&request.input)
@@ -305,12 +314,6 @@ impl ToolExecutor for ToolExecutorImpl {
                 return Ok(Json::from(output));
             }
         };
-        if let Err(error) = validate_request(&definition, &request) {
-            let output = ToolOutput::from(classify_tool_error(&error, 0));
-            append_tool_result_event(&ctx, &request, &output).await?;
-            return Ok(Json::from(output));
-        }
-
         if matches!(
             definition.idempotency_class,
             IdempotencyClass::NonIdempotent
@@ -370,16 +373,14 @@ impl ToolExecutor for ToolExecutorImpl {
         annotate_restate_handler_span("ToolExecutor", "execute_execution_task");
         let request = request.into_inner();
         let origin = require_execution_task_origin(&request)?;
-        let session_id = request.call.session_id.ok_or_else(|| {
-            TerminalError::new("execution task tool call requires owning session_id")
-        })?;
+        let session_id = request.call.session_id;
         let session = resolve_session(
             &ctx,
             &request.call,
             Some(self.required_session_repository()?),
         )
         .await?;
-        if session.id != session_id || session.tenant_id != request.call.tenant_id {
+        if session.id != session_id || session.tenant_id != request.call.caller_identity.tenant_id {
             return Err(TerminalError::new(
                 "execution task tool call does not match its owning session",
             )
@@ -405,10 +406,6 @@ impl ToolExecutor for ToolExecutorImpl {
                 reason: format!("unknown tool: {}", request.call.tool_name),
             })));
         };
-        if let Err(error) = validate_request(&definition, &request.call) {
-            return Ok(Json::from(ToolOutput::from(classify_tool_error(&error, 0))));
-        }
-
         let run_name = execution_task_tool_run_name(&definition, &request.call, origin);
         let hand_scope = execution_task_hand_scope(origin);
         let request_for_run = request.call.clone();
@@ -591,24 +588,6 @@ fn has_prior_tool_call_event(events: &[EventRecord], tool_call_id: ToolCallId) -
     })
 }
 
-fn validate_request(
-    definition: &ToolDefinition,
-    request: &ToolCallRequest,
-) -> moa_core::error::Result<()> {
-    if matches!(
-        definition.idempotency_class,
-        IdempotencyClass::NonIdempotent
-    ) && request.session_id.is_none()
-    {
-        return Err(MoaError::ValidationError(format!(
-            "tool {} requires session_id because it is non-idempotent",
-            request.tool_name
-        )));
-    }
-
-    Ok(())
-}
-
 fn agent_tool_policy_denied_output(
     session: &SessionMeta,
     request: &ToolCallRequest,
@@ -719,46 +698,20 @@ async fn resolve_session(
     request: &ToolCallRequest,
     session_store: Option<Arc<dyn SessionRepository>>,
 ) -> Result<SessionMeta, HandlerError> {
-    if let Some(session_id) = request.session_id {
-        let session_store = session_store.ok_or_else(|| {
-            TerminalError::new("tool executor session repository is not configured")
-        })?;
-        return Ok(ctx
-            .run(|| async move {
-                session_store
-                    .get_session(session_id)
-                    .await
-                    .map(Json::from)
-                    .map_err(HandlerError::from)
-            })
-            .name("tool_executor_get_session")
-            .await?
-            .into_inner());
-    }
-
-    Ok(SessionMeta {
-        id: synthetic_session_id(request.tenant_id),
-        tenant_id: request.tenant_id,
-        status: SessionStatus::Running,
-        ..SessionMeta::default()
-    })
-}
-
-fn synthetic_session_id(tenant_id: TenantId) -> SessionId {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"moa.orchestrator.synthetic_session.v1");
-    update_len_prefixed(&mut hasher, tenant_id.to_string().as_bytes());
-    let hash = hasher.finalize();
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    SessionId(Uuid::from_bytes(bytes))
-}
-
-fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
-    hasher.update(&(bytes.len() as u64).to_be_bytes());
-    hasher.update(bytes);
+    let session_store = session_store
+        .ok_or_else(|| TerminalError::new("tool executor session repository is not configured"))?;
+    let session_id = request.session_id;
+    Ok(ctx
+        .run(|| async move {
+            session_store
+                .get_session(session_id)
+                .await
+                .map(Json::from)
+                .map_err(HandlerError::from)
+        })
+        .name("tool_executor_get_session")
+        .await?
+        .into_inner())
 }
 
 async fn prior_non_idempotent_result_exists(
@@ -767,12 +720,7 @@ async fn prior_non_idempotent_result_exists(
     request: &ToolCallRequest,
     session_store: Arc<dyn SessionRepository>,
 ) -> Result<bool, HandlerError> {
-    let session_id = request.session_id.ok_or_else(|| {
-        moa_error_to_handler_error(MoaError::ValidationError(format!(
-            "tool {} requires session_id because it is non-idempotent",
-            request.tool_name
-        )))
-    })?;
+    let session_id = request.session_id;
     let storage_partition_id = storage_partition_id_for_session(session);
     let tool_call_id = request.tool_call_id;
     let exists = ctx
@@ -801,9 +749,7 @@ async fn prior_tool_call_event_exists(
     request: &ToolCallRequest,
     session_store: Option<Arc<dyn SessionRepository>>,
 ) -> Result<bool, HandlerError> {
-    let Some(session_id) = request.session_id else {
-        return Ok(false);
-    };
+    let session_id = request.session_id;
     let session_store = session_store
         .ok_or_else(|| TerminalError::new("tool executor session repository is not configured"))?;
 
@@ -839,9 +785,7 @@ async fn append_tool_call_event(
     ctx: &Context<'_>,
     request: &ToolCallRequest,
 ) -> Result<(), HandlerError> {
-    let Some(session_id) = request.session_id else {
-        return Ok(());
-    };
+    let session_id = request.session_id;
 
     crate::restate_identity::replay_safe_request(
         ctx.service_client::<RestateSessionStoreClient>()
@@ -869,9 +813,7 @@ async fn append_tool_result_event(
     request: &ToolCallRequest,
     output: &ToolOutput,
 ) -> Result<(), HandlerError> {
-    let Some(session_id) = request.session_id else {
-        return Ok(());
-    };
+    let session_id = request.session_id;
 
     crate::restate_identity::replay_safe_request(
         ctx.service_client::<RestateSessionStoreClient>()
@@ -900,9 +842,7 @@ async fn append_tool_error_event(
     definition: &ToolDefinition,
     error: String,
 ) -> Result<(), HandlerError> {
-    let Some(session_id) = request.session_id else {
-        return Ok(());
-    };
+    let session_id = request.session_id;
 
     crate::restate_identity::replay_safe_request(
         ctx.service_client::<RestateSessionStoreClient>()
@@ -931,9 +871,7 @@ async fn append_tool_canary_block_events(
     ctx: &Context<'_>,
     request: &ToolCallRequest,
 ) -> Result<(), HandlerError> {
-    let Some(session_id) = request.session_id else {
-        return Ok(());
-    };
+    let session_id = request.session_id;
 
     crate::restate_identity::replay_safe_request(
         ctx.service_client::<RestateSessionStoreClient>()
@@ -976,9 +914,7 @@ async fn append_agent_tool_policy_denied_event(
     request: &ToolCallRequest,
     output: &ToolOutput,
 ) -> Result<(), HandlerError> {
-    let Some(session_id) = request.session_id else {
-        return Ok(());
-    };
+    let session_id = request.session_id;
 
     crate::restate_identity::replay_safe_request(
         ctx.service_client::<RestateSessionStoreClient>()
@@ -1045,7 +981,7 @@ mod tests {
         types::identifiers::SessionId,
         types::identifiers::TenantId,
         types::identifiers::ToolCallId,
-        types::identifiers::UserId,
+        types::security::SensitivityClass,
         types::session::SessionMeta,
         types::tools::IdempotencyClass,
         types::tools::ToolCallRequest,
@@ -1057,6 +993,8 @@ mod tests {
         types::tools::TrustedSandboxFileManifestRef,
     };
     use moa_hands::{HandRoute, ToolRegistry, ToolRouter};
+    use moa_memory_pii::{MockClassifier, PiiResult};
+    use moa_security::McpEgressGuard;
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -1066,7 +1004,7 @@ mod tests {
         ExecutionTaskToolCallRequest, ToolExecutorImpl, TrustedSandboxFileManifestStore,
         agent_tool_policy_denied_output, blocked_canary_tool_output, execution_task_hand_scope,
         execution_task_tool_run_name, has_prior_tool_call_event, require_execution_task_origin,
-        root_trusted_file_read, synthetic_session_id,
+        root_trusted_file_read,
     };
 
     #[derive(Default)]
@@ -1171,18 +1109,6 @@ mod tests {
 
         assert!(has_prior_tool_call_event(&events, existing));
         assert!(!has_prior_tool_call_event(&events, ToolCallId::new()));
-    }
-
-    #[test]
-    fn synthetic_session_id_is_domain_stable_uuid() {
-        let session_id = synthetic_session_id(TenantId::from(Uuid::from_u128(1)));
-
-        assert_eq!(
-            session_id.0.to_string(),
-            "be49b430-9b14-407d-9e03-1e2a81dc8d8c"
-        );
-        assert_eq!(session_id.0.get_version_num(), 4);
-        assert_eq!(session_id.0.get_variant(), uuid::Variant::RFC4122);
     }
 
     #[test]
@@ -1311,15 +1237,28 @@ mod tests {
     fn tool_request(tool_name: &str) -> ToolCallRequest {
         ToolCallRequest {
             tool_call_id: ToolCallId::new(),
+            caller_identity: moa_core::traits::Identity {
+                identity_type: moa_core::traits::IdentityType::Operator,
+                id: Uuid::from_u128(2),
+                tenant_id: TenantId::from(Uuid::from_u128(1)),
+                api_key_id: None,
+                acting_on_behalf_of: None,
+            },
             provider_tool_use_id: Some("toolu_policy".to_string()),
             tool_name: tool_name.to_string(),
             input: serde_json::json!({}),
             active_canary: None,
-            session_id: None,
-            tenant_id: TenantId::from(Uuid::from_u128(1)),
-            user_id: UserId::new("user-1"),
+            session_id: SessionId::new(),
             trusted_sandbox_manifest: None,
             worker_id: None,
+        }
+    }
+
+    fn session_for_request(request: &ToolCallRequest) -> SessionMeta {
+        SessionMeta {
+            id: request.session_id,
+            tenant_id: request.caller_identity.tenant_id,
+            ..SessionMeta::default()
         }
     }
 
@@ -1396,8 +1335,17 @@ mod tests {
             url: Some(format!("http://{addr}")),
             credentials: None,
             trust_tool_annotations: false,
+            ..McpServerConfig::default()
         }];
-        let router = ToolRouter::from_config(&config)
+        let mcp_egress_guard = Arc::new(McpEgressGuard::new(Arc::new(MockClassifier {
+            fixed: PiiResult {
+                class: SensitivityClass::None,
+                spans: Vec::new(),
+                model_version: "tool-executor-test".to_string(),
+                abstained: false,
+            },
+        })));
+        let router = ToolRouter::from_config(&config, Some(mcp_egress_guard))
             .await
             .expect("build MCP router");
         let executor = ToolExecutorImpl::new(Arc::new(router));
@@ -1406,7 +1354,7 @@ mod tests {
         request.input = serde_json::json!({"item_key": "AAPL-10K"});
 
         let output = executor
-            .execute_buffered(&SessionMeta::default(), &request)
+            .execute_buffered(&session_for_request(&request), &request)
             .await
             .expect("reviewed MCP request should dispatch");
 
@@ -1478,13 +1426,18 @@ mod tests {
     ) -> ToolCallRequest {
         ToolCallRequest {
             tool_call_id: ToolCallId::new(),
+            caller_identity: moa_core::traits::Identity {
+                identity_type: moa_core::traits::IdentityType::Operator,
+                id: Uuid::from_u128(2),
+                tenant_id: TenantId::from(Uuid::from_u128(1)),
+                api_key_id: None,
+                acting_on_behalf_of: None,
+            },
             provider_tool_use_id: Some("provider-tool-use".to_string()),
             tool_name: "bash".to_string(),
             input: serde_json::json!({"cmd": "cat .moa/skills/test/SKILL.md"}),
             active_canary: None,
-            session_id: Some(SessionId::new()),
-            tenant_id: TenantId::from(Uuid::from_u128(1)),
-            user_id: UserId::new("user-1"),
+            session_id: SessionId::new(),
             trusted_sandbox_manifest: Some(manifest),
             worker_id,
         }
@@ -1497,7 +1450,7 @@ mod tests {
         let request = manifest_request(manifest, None);
 
         let output = executor
-            .execute_buffered(&SessionMeta::default(), &request)
+            .execute_buffered(&session_for_request(&request), &request)
             .await
             .expect("tool execution should use request manifest");
 
@@ -1513,7 +1466,7 @@ mod tests {
         let request = manifest_request(manifest, Some("worker-7".to_string()));
 
         let output = executor
-            .execute_buffered(&SessionMeta::default(), &request)
+            .execute_buffered(&session_for_request(&request), &request)
             .await
             .expect("worker tool execution should install its scoped manifest");
 
@@ -1558,7 +1511,7 @@ mod tests {
         request.input = serde_json::json!({ "items": [{ "text": "the sky is blue" }] });
 
         let output = executor
-            .execute_buffered(&SessionMeta::default(), &request)
+            .execute_buffered(&session_for_request(&request), &request)
             .await
             .expect("memory write should dispatch through the router");
 
@@ -1601,7 +1554,7 @@ mod tests {
         request.input = serde_json::json!({"path": ".moa/skills/test/SKILL.md"});
 
         let output = executor
-            .execute_buffered(&SessionMeta::default(), &request)
+            .execute_buffered(&session_for_request(&request), &request)
             .await
             .expect("root skill file_read should use request manifest");
 

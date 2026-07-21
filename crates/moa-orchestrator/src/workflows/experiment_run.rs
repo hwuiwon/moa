@@ -139,6 +139,7 @@ impl ExperimentRun for ExperimentRunImpl {
         if request.run_uid.to_string() != ctx.key() {
             return Err(TerminalError::new_with_code(404, "experiment run id mismatch").into());
         }
+        let scope = load_run_scope(&ctx, request.tenant_id, request.run_uid, &self.pool).await?;
 
         ctx.set(K_RUN_UID, Json(request.run_uid));
         ctx.set(K_TENANT_ID, Json(request.tenant_id));
@@ -147,7 +148,15 @@ impl ExperimentRun for ExperimentRunImpl {
         ctx.set(K_CANCEL_IDENTITY, Json(request.identity.clone()));
         annotate_run_span(&request, None);
 
-        match run_experiment_target(&ctx, request.clone(), &self.pool, &self.session_store).await {
+        match run_experiment_target(
+            &ctx,
+            request.clone(),
+            scope,
+            &self.pool,
+            &self.session_store,
+        )
+        .await
+        {
             Ok(response) => Ok(Json(response)),
             Err(error) => {
                 let message = handler_error_message(&error);
@@ -155,7 +164,7 @@ impl ExperimentRun for ExperimentRunImpl {
                 let failed_at = durable_utc_now(&ctx, "experiment_utc_now").await?;
                 if let Err(update_error) = persist_run_status(
                     &ctx,
-                    request.tenant_id,
+                    scope,
                     request.run_uid,
                     ExperimentRunStatus::Failed,
                     Some(message),
@@ -266,10 +275,16 @@ async fn load_active_trial_keys(
     pool: &sqlx::PgPool,
 ) -> Result<Vec<String>, HandlerError> {
     let pool = pool.clone();
-    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
-            let trials = ExperimentStore::new(pool)
+            let store = ExperimentStore::new(pool);
+            let scope = store
+                .load_run_for_workflow(tenant_id, run_uid)
+                .await
+                .map_err(moa_error_to_handler_error)?
+                .ok_or_else(|| run_not_found(run_uid))?
+                .scope;
+            let trials = store
                 .list_trials(&scope, run_uid, None, i64::MAX)
                 .await
                 .map_err(moa_error_to_handler_error)?;
@@ -288,11 +303,13 @@ async fn load_active_trial_keys(
 async fn run_experiment_target(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
+    scope: ActionRuleScope,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     if let Some(plan_revision_uid) = request.plan_revision_uid {
-        return run_experiment_plan(ctx, request, plan_revision_uid, pool, session_store).await;
+        return run_experiment_plan(ctx, request, scope, plan_revision_uid, pool, session_store)
+            .await;
     }
 
     match parse_payload::<ExperimentTarget>("target", request.target.clone())? {
@@ -307,6 +324,7 @@ async fn run_experiment_target(
             run_agent_loop_target(
                 ctx,
                 request,
+                scope,
                 prompt,
                 session_id,
                 agent,
@@ -328,6 +346,7 @@ async fn run_experiment_target(
             run_execution_template_target(
                 ctx,
                 request,
+                scope,
                 template,
                 objective,
                 input,
@@ -343,7 +362,7 @@ async fn run_experiment_target(
 
 async fn persist_run_status(
     ctx: &WorkflowContext<'_>,
-    tenant_id: TenantId,
+    scope: ActionRuleScope,
     run_uid: Uuid,
     status: ExperimentRunStatus,
     error: Option<String>,
@@ -351,7 +370,6 @@ async fn persist_run_status(
     pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
     let pool = pool.clone();
-    let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         update_run_status(pool, scope, run_uid, status, error, completed_at).await?;
         Ok::<_, HandlerError>(Json::from(()))
@@ -359,6 +377,27 @@ async fn persist_run_status(
     .name("experiment_update_run_status")
     .await?;
     Ok(())
+}
+
+async fn load_run_scope(
+    ctx: &WorkflowContext<'_>,
+    tenant_id: TenantId,
+    run_uid: Uuid,
+    pool: &sqlx::PgPool,
+) -> Result<ActionRuleScope, HandlerError> {
+    let pool = pool.clone();
+    Ok(ctx
+        .run(|| async move {
+            ExperimentStore::new(pool)
+                .load_run_for_workflow(tenant_id, run_uid)
+                .await
+                .map_err(moa_error_to_handler_error)?
+                .ok_or_else(|| run_not_found(run_uid))
+                .map(|run| Json::from(run.scope))
+        })
+        .name("experiment_load_run_scope")
+        .await?
+        .into_inner())
 }
 
 async fn persist_attached_session(
@@ -435,10 +474,6 @@ fn annotate_run_span(
     if let Some(target_kind) = target_kind {
         span.set_attribute("moa.experiment.target_kind", target_kind.as_str());
     }
-}
-
-fn tenant_scope(tenant_id: TenantId) -> ActionRuleScope {
-    ActionRuleScope::Tenant { tenant_id }
 }
 
 fn parse_payload<T>(field: &'static str, value: Value) -> Result<T, HandlerError>

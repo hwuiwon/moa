@@ -10,12 +10,11 @@ pub(super) struct SimulatorContext {
 
 pub(super) async fn load_simulator_context(
     ctx: &WorkflowContext<'_>,
-    tenant_id: TenantId,
     trial: ExperimentTrialRecord,
     pool: &sqlx::PgPool,
 ) -> Result<SimulatorContext, HandlerError> {
     let pool = pool.clone();
-    let scope = tenant_scope(tenant_id);
+    let scope = trial.scope;
     Ok(ctx
         .run(|| async move {
             build_simulator_context(pool, scope, trial)

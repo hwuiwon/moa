@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::security::SensitivityClass;
+
 /// Local runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -117,4 +119,12 @@ pub struct McpServerConfig {
     /// Whether standard MCP tool annotations from this server may affect retry safety.
     #[serde(default)]
     pub trust_tool_annotations: bool,
+    /// Data classes this external MCP server is permitted to receive.
+    ///
+    /// This is a conservative egress allowlist. When empty (the default for an
+    /// existing config), only [`SensitivityClass::None`] content may be sent to
+    /// the server; `pii`, `phi`, and `restricted` payloads are blocked unless the
+    /// operator explicitly lists them here.
+    #[serde(default)]
+    pub allowed_data_classes: Vec<SensitivityClass>,
 }

@@ -10,10 +10,18 @@ use std::{panic::AssertUnwindSafe, panic::resume_unwind};
 
 use futures_util::FutureExt;
 use moa_core::{
-    config::CloudHandsConfig, config::MoaConfig, error::MoaError, error::Result,
-    traits::HandProvider, types::completion::ToolInvocation, types::hands::HandHandle,
-    types::hands::HandResources, types::hands::HandSpec, types::hands::HandStatus,
-    types::identifiers::TenantId, types::session::SessionMeta,
+    config::CloudHandsConfig,
+    config::MoaConfig,
+    error::MoaError,
+    error::Result,
+    traits::{HandProvider, Identity, IdentityType},
+    types::completion::ToolInvocation,
+    types::hands::HandHandle,
+    types::hands::HandResources,
+    types::hands::HandSpec,
+    types::hands::HandStatus,
+    types::identifiers::TenantId,
+    types::session::SessionMeta,
 };
 use moa_hands::{E2BHandProvider, ToolRouter};
 use serde_json::json;
@@ -22,10 +30,21 @@ use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 
 fn session(_label: &str) -> SessionMeta {
+    let identity = identity();
     SessionMeta {
-        tenant_id: TenantId::new(),
+        tenant_id: identity.tenant_id,
         model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
+    }
+}
+
+fn identity() -> Identity {
+    Identity {
+        identity_type: IdentityType::Operator,
+        id: Uuid::from_u128(0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c341),
+        tenant_id: TenantId::from(Uuid::from_u128(0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c342)),
+        api_key_id: None,
+        acting_on_behalf_of: None,
     }
 }
 
@@ -287,7 +306,7 @@ async fn e2b_router_reuses_and_isolates() {
     let temp = tempdir().expect("tempdir");
     config.local.sandbox_dir = temp.path().join("sandbox").display().to_string();
 
-    let router = ToolRouter::from_config(&config)
+    let router = ToolRouter::from_config(&config, None)
         .await
         .expect("router should load E2B from config");
     let provider = E2BHandProvider::from_config(&config).expect("provider from config");
@@ -303,6 +322,7 @@ async fn e2b_router_reuses_and_isolates() {
         let (hand_id, write) = router
             .execute_authorized(
                 &session_one,
+                &identity(),
                 &ToolInvocation {
                     id: None,
                     name: "file_write".to_string(),
@@ -324,6 +344,7 @@ async fn e2b_router_reuses_and_isolates() {
         let (same_hand_id, read) = router
             .execute_authorized(
                 &session_one,
+                &identity(),
                 &ToolInvocation {
                     id: None,
                     name: "file_read".to_string(),
@@ -338,6 +359,7 @@ async fn e2b_router_reuses_and_isolates() {
         let (resumed_hand_id, resumed_read) = router
             .execute_authorized(
                 &session_one,
+                &identity(),
                 &ToolInvocation {
                     id: None,
                     name: "file_read".to_string(),
@@ -351,6 +373,7 @@ async fn e2b_router_reuses_and_isolates() {
         let (hand_two_id, second_write) = router
             .execute_authorized(
                 &session_two,
+                &identity(),
                 &ToolInvocation {
                     id: None,
                     name: "file_write".to_string(),
@@ -369,6 +392,7 @@ async fn e2b_router_reuses_and_isolates() {
         let missing_read = router
             .execute_authorized(
                 &session_two,
+                &identity(),
                 &ToolInvocation {
                     id: None,
                     name: "file_read".to_string(),
@@ -394,6 +418,7 @@ async fn e2b_router_reuses_and_isolates() {
         let (_, bash) = router
             .execute_authorized(
                 &session_two,
+                &identity(),
                 &ToolInvocation {
                     id: None,
                     name: "bash".to_string(),

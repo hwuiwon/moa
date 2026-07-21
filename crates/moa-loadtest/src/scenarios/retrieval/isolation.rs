@@ -93,7 +93,7 @@ pub(super) async fn attack_vector_oracle(stack: &Stack) -> Result<(), String> {
             embedding,
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
-            max_pii_class: "restricted".to_string(),
+            max_pii_class: SensitivityClass::Restricted,
             include_global: false,
             as_of: None,
         },

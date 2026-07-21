@@ -65,6 +65,7 @@ use crate::support::session_store_service::{
 };
 use moa_test_support::execution_audits::load_execution_planning_audits;
 use moa_test_support::postgres::test_database_url;
+use moa_test_support::process::TestChildGuard;
 
 #[path = "support/mod.rs"]
 mod support;
@@ -80,9 +81,8 @@ struct LiveActDelegationCase {
     prompt: &'static str,
     expected_markers: &'static [&'static str],
     min_spawned: usize,
-    min_wait_calls: usize,
-    min_spawns_before_first_wait: usize,
-    requires_spawn_after_first_wait: bool,
+    min_spawns_before_first_result: usize,
+    requires_spawn_after_first_result: bool,
 }
 
 #[derive(Default)]
@@ -193,6 +193,7 @@ async fn create_initialized_session(
 ) -> Result<InitializedSession> {
     let mut meta = test_session_meta(label);
     meta.model = ModelId::new(model);
+    meta.contact = None;
     meta.created_by = None;
     let storage_partition_id = storage_partition_id_from_meta(&meta);
     let mut identity = test_user_identity();
@@ -344,9 +345,14 @@ async fn run_case(case: LiveActDelegationCase) -> Result<()> {
     let orchestrator_log = memory_dir
         .path()
         .join(format!("orchestrator-{}.log", case.name));
-    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &orchestrator_log)?;
+    let _orchestrator = TestChildGuard::new(spawn_orchestrator(
+        ports,
+        &memory_dir,
+        &sandbox_dir,
+        &orchestrator_log,
+    )?);
 
-    let result = async {
+    async {
         wait_for_orchestrator_health(&client, ports.health, Duration::from_secs(60))
             .await
             .with_context(|| {
@@ -372,14 +378,19 @@ async fn run_case(case: LiveActDelegationCase) -> Result<()> {
         let events = session_events(&client, &ingress, &session.identity, session.session_id)
             .await
             .with_context(|| format!("fetch events for case {}", case.name))?;
-        verify_case(case, &events)
+        if let Err(error) = verify_case(case, &events) {
+            let audits = load_execution_planning_audits(&test_database_url(), session.session_id)
+                .await
+                .with_context(|| format!("load route diagnostics for case {}", case.name))?;
+            bail!(
+                "case {} failed delegation verification: {error:#}\nplanning audits: {audits:#?}\norchestrator log:\n{}",
+                case.name,
+                read_log(&orchestrator_log)
+            );
+        }
+        Ok(())
     }
-    .await;
-
-    let _ = orchestrator.kill();
-    let _ = orchestrator.wait();
-
-    result
+    .await
 }
 
 fn read_log(path: &Path) -> String {
@@ -415,7 +426,7 @@ fn verify_case(case: LiveActDelegationCase, events: &[EventRecord]) -> Result<()
         )
     })?;
 
-    assert!(
+    ensure!(
         observation.spawned.len() >= case.min_spawned,
         "case {} should spawn at least {} workers, got {}\n{}",
         case.name,
@@ -423,15 +434,7 @@ fn verify_case(case: LiveActDelegationCase, events: &[EventRecord]) -> Result<()
         observation.spawned.len(),
         describe_events(events)
     );
-    assert!(
-        observation.wait_calls.len() >= case.min_wait_calls,
-        "case {} should call wait_worker at least {} times, got {}\n{}",
-        case.name,
-        case.min_wait_calls,
-        observation.wait_calls.len(),
-        describe_events(events)
-    );
-    assert!(
+    ensure!(
         observation.worker_notifications.len() == observation.spawned.len(),
         "case {} should receive exactly one ordinary WorkerNotificationDelivered lifecycle report for each spawned worker; got {} notifications for {} workers\n{}",
         case.name,
@@ -440,33 +443,33 @@ fn verify_case(case: LiveActDelegationCase, events: &[EventRecord]) -> Result<()
         describe_events(events)
     );
 
-    let first_wait_seq = observation
-        .wait_calls
+    let first_result_seq = observation
+        .worker_notifications
         .iter()
         .map(|(seq, _)| *seq)
         .min()
-        .with_context(|| format!("case {} should wait for a worker result", case.name))?;
-    let spawns_before_first_wait = observation
+        .with_context(|| format!("case {} should receive a worker result", case.name))?;
+    let spawns_before_first_result = observation
         .spawn_calls
         .iter()
-        .filter(|(seq, _)| *seq < first_wait_seq)
+        .filter(|(seq, _)| *seq < first_result_seq)
         .count();
-    assert!(
-        spawns_before_first_wait >= case.min_spawns_before_first_wait,
-        "case {} should spawn at least {} independent conversational workers before the first wait, got {}\n{}",
+    ensure!(
+        spawns_before_first_result >= case.min_spawns_before_first_result,
+        "case {} should spawn at least {} independent conversational workers before the first result, got {}\n{}",
         case.name,
-        case.min_spawns_before_first_wait,
-        spawns_before_first_wait,
+        case.min_spawns_before_first_result,
+        spawns_before_first_result,
         describe_events(events)
     );
 
-    if case.requires_spawn_after_first_wait {
-        assert!(
+    if case.requires_spawn_after_first_result {
+        ensure!(
             observation
                 .spawn_calls
                 .iter()
-                .any(|(seq, _)| *seq > first_wait_seq),
-            "case {} should spawn a follow-up conversational worker after the earlier wait\n{}",
+                .any(|(seq, _)| *seq > first_result_seq),
+            "case {} should spawn a follow-up conversational worker after the earlier result\n{}",
             case.name,
             describe_events(events)
         );
@@ -481,7 +484,7 @@ fn verify_case(case: LiveActDelegationCase, events: &[EventRecord]) -> Result<()
         )
     })?;
     for marker in case.expected_markers {
-        assert!(
+        ensure!(
             final_text.contains(marker),
             "case {} final text should contain marker {marker:?}; final text: {final_text}",
             case.name
@@ -564,10 +567,9 @@ fn observe_case(case: LiveActDelegationCase, events: &[EventRecord]) -> CaseObse
 
 impl CaseObservation {
     fn worker_result_sequences(&self) -> Vec<u64> {
-        self.wait_calls
+        self.worker_notifications
             .iter()
             .map(|(seq, _)| *seq)
-            .chain(self.worker_notifications.iter().map(|(seq, _)| *seq))
             .collect()
     }
 }
@@ -668,10 +670,23 @@ fn tool_output_text(output: &moa_core::types::tools::ToolOutput) -> String {
 fn compact(text: &str) -> String {
     let mut value = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if value.len() > 320 {
-        value.truncate(320);
+        let mut end = 320;
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        value.truncate(end);
         value.push_str("...");
     }
     value
+}
+
+#[test]
+fn compact_diagnostic_truncates_on_utf8_boundary() {
+    // Pins: timeout diagnostics may contain provider text whose multibyte code point crosses the
+    // byte cap; rendering the diagnostic must not replace the underlying failure with a panic.
+    let prefix = "a".repeat(319);
+
+    assert_eq!(compact(&format!("{prefix}é")), format!("{prefix}..."));
 }
 
 fn case_act_parallel_two() -> LiveActDelegationCase {
@@ -687,9 +702,8 @@ fn case_act_parallel_two() -> LiveActDelegationCase {
         ),
         expected_markers: &["FINAL CASE-01", "PAL_LEVEL=YES", "SUM_13_29=42"],
         min_spawned: 2,
-        min_wait_calls: 2,
-        min_spawns_before_first_wait: 2,
-        requires_spawn_after_first_wait: false,
+        min_spawns_before_first_result: 2,
+        requires_spawn_after_first_result: false,
     }
 }
 
@@ -708,9 +722,8 @@ fn case_act_parallel_three() -> LiveActDelegationCase {
         ),
         expected_markers: &["FINAL CASE-02", "UPPER=MOA", "SORTED=abc", "VOWELS=5"],
         min_spawned: 3,
-        min_wait_calls: 3,
-        min_spawns_before_first_wait: 3,
-        requires_spawn_after_first_wait: false,
+        min_spawns_before_first_result: 3,
+        requires_spawn_after_first_result: false,
     }
 }
 
@@ -725,9 +738,8 @@ fn case_act_single_worker() -> LiveActDelegationCase {
         ),
         expected_markers: &["FINAL CASE-03", "PRODUCT=42"],
         min_spawned: 1,
-        min_wait_calls: 1,
-        min_spawns_before_first_wait: 1,
-        requires_spawn_after_first_wait: false,
+        min_spawns_before_first_result: 1,
+        requires_spawn_after_first_result: false,
     }
 }
 
@@ -743,9 +755,8 @@ fn case_act_follow_up_uses_prior_result() -> LiveActDelegationCase {
         ),
         expected_markers: &["FINAL CASE-04", "FACTORS=6,7", "PRODUCT=42"],
         min_spawned: 2,
-        min_wait_calls: 2,
-        min_spawns_before_first_wait: 1,
-        requires_spawn_after_first_wait: true,
+        min_spawns_before_first_result: 1,
+        requires_spawn_after_first_result: true,
     }
 }
 
@@ -763,9 +774,8 @@ fn case_act_parallel_then_follow_up() -> LiveActDelegationCase {
         ),
         expected_markers: &["TOTAL=42", "12", "4"],
         min_spawned: 3,
-        min_wait_calls: 2,
-        min_spawns_before_first_wait: 2,
-        requires_spawn_after_first_wait: true,
+        min_spawns_before_first_result: 2,
+        requires_spawn_after_first_result: true,
     }
 }
 
@@ -791,9 +801,8 @@ fn case_act_delegated_instructions() -> LiveActDelegationCase {
             "SKILL_TOTAL_LEN=6",
         ],
         min_spawned: 2,
-        min_wait_calls: 2,
-        min_spawns_before_first_wait: 2,
-        requires_spawn_after_first_wait: false,
+        min_spawns_before_first_result: 2,
+        requires_spawn_after_first_result: false,
     }
 }
 
@@ -815,9 +824,8 @@ fn case_act_independent_cross_checks() -> LiveActDelegationCase {
             "BOTH_VALID=true",
         ],
         min_spawned: 2,
-        min_wait_calls: 2,
-        min_spawns_before_first_wait: 2,
-        requires_spawn_after_first_wait: false,
+        min_spawns_before_first_result: 2,
+        requires_spawn_after_first_result: false,
     }
 }
 
@@ -833,9 +841,8 @@ fn case_act_follow_up_quality_check() -> LiveActDelegationCase {
         ),
         expected_markers: &["FINAL CASE-09", "DRAFT=DELTA", "QA=PASS"],
         min_spawned: 2,
-        min_wait_calls: 2,
-        min_spawns_before_first_wait: 1,
-        requires_spawn_after_first_wait: true,
+        min_spawns_before_first_result: 1,
+        requires_spawn_after_first_result: true,
     }
 }
 
@@ -859,9 +866,8 @@ fn case_act_parallel_four() -> LiveActDelegationCase {
             "TOTAL=42",
         ],
         min_spawned: 4,
-        min_wait_calls: 4,
-        min_spawns_before_first_wait: 4,
-        requires_spawn_after_first_wait: false,
+        min_spawns_before_first_result: 4,
+        requires_spawn_after_first_result: false,
     }
 }
 
@@ -932,7 +938,7 @@ struct SupplementaryLiveHarness {
     client: reqwest::Client,
     ingress: String,
     session: InitializedSession,
-    orchestrator: Child,
+    _orchestrator: TestChildGuard,
     orchestrator_log: std::path::PathBuf,
     _memory_dir: TempDir,
     _sandbox_dir: TempDir,
@@ -965,13 +971,13 @@ impl SupplementaryLiveHarness {
             .build()
             .context("build bounded supplementary live-provider HTTP client")?;
         let orchestrator_log = memory_dir.path().join(format!("orchestrator-{name}.log"));
-        let mut orchestrator = spawn_supplementary_orchestrator(
+        let orchestrator = TestChildGuard::new(spawn_supplementary_orchestrator(
             ports,
             &memory_dir,
             &sandbox_dir,
             &orchestrator_log,
             model,
-        )?;
+        )?);
 
         let setup = async {
             wait_for_orchestrator_health(&client, ports.health, Duration::from_secs(60))
@@ -992,17 +998,13 @@ impl SupplementaryLiveHarness {
                 client,
                 ingress,
                 session,
-                orchestrator,
+                _orchestrator: orchestrator,
                 orchestrator_log,
                 _memory_dir: memory_dir,
                 _sandbox_dir: sandbox_dir,
                 _restate_guard: restate_guard,
             }),
-            Err(error) => {
-                let _ = orchestrator.kill();
-                let _ = orchestrator.wait();
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -1088,8 +1090,11 @@ impl SupplementaryLiveHarness {
                 return Ok((started, events));
             }
             if Instant::now() >= deadline {
+                let audits = supplementary_planning_audits(self)
+                    .await
+                    .context("load planning audits after supplementary admission timeout")?;
                 bail!(
-                    "supplementary run was not admitted within {timeout:?}; log follows:\n{}\n{}",
+                    "supplementary run was not admitted within {timeout:?}; planning audits: {audits:#?}; log follows:\n{}\n{}",
                     read_log(&self.orchestrator_log),
                     describe_events(&events)
                 );
@@ -1235,13 +1240,6 @@ impl SupplementaryLiveHarness {
             }
             sleep(Duration::from_millis(500)).await;
         }
-    }
-}
-
-impl Drop for SupplementaryLiveHarness {
-    fn drop(&mut self) {
-        let _ = self.orchestrator.kill();
-        let _ = self.orchestrator.wait();
     }
 }
 
@@ -1716,7 +1714,7 @@ async fn assert_generated_plan_audits_and_authorization(
                     "planner model must be set"
                 );
                 ensure!(
-                    prompt_version == "execution-planner",
+                    prompt_version == "execution-planner-v3",
                     "planner prompt version drifted"
                 );
                 (

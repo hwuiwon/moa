@@ -89,6 +89,7 @@ impl AgentResolver {
         let tool_policy = tool_policy_from_definition(definition);
         let model_policy = model_policy_from_definition(&definition.model_policy);
         let knowledge_policy = knowledge_policy_from_definition(definition);
+        knowledge_policy.validate()?;
         let skill_policy = skill_policy_from_definition(&definition.skill_policy);
         let action_policy = action_policy_from_definition(&definition.action_policy);
         let guardrail_policy = guardrail_policy_from_definition(
@@ -387,6 +388,11 @@ fn knowledge_policy_from_definition(definition: &AgentDefinition) -> AgentKnowle
         filters: definition.knowledge_policy.filters.clone(),
         retrieval_budget: definition.knowledge_policy.retrieval_budget,
         pii_floor: definition.knowledge_policy.pii_floor.clone(),
+        // Operator-authored clearances flow from the definition to the runtime
+        // policy. The definition field defaults to empty, so an agent with no
+        // authored clearances stays fail-closed (sees no barriered data).
+        cleared_barriers: definition.knowledge_policy.cleared_barriers.clone(),
+        write_barrier: definition.knowledge_policy.write_barrier.clone(),
     }
 }
 
@@ -644,10 +650,61 @@ fn map_sqlx_error(error: sqlx::Error) -> MoaError {
 
 #[cfg(test)]
 mod tests {
-    use moa_artifacts::agent::{AgentPurpose, ToolPolicy};
+    use moa_artifacts::agent::{AgentPurpose, KnowledgePolicy, ToolPolicy};
     use moa_core::types::guardrails::GuardrailMode;
 
     use super::*;
+
+    #[test]
+    fn authored_clearance_reaches_runtime_knowledge_policy() {
+        // Pins: an operator-authored barrier clearance on the definition is copied
+        // onto the runtime knowledge policy the retrieval stage consumes.
+        let definition = AgentDefinition {
+            knowledge_policy: KnowledgePolicy {
+                cleared_barriers: [moa_core::types::memory::InformationBarrierId::parse(
+                    "deal-alpha",
+                )
+                .expect("valid barrier")]
+                .into_iter()
+                .collect(),
+                write_barrier: Some(
+                    moa_core::types::memory::InformationBarrierId::parse("deal-alpha")
+                        .expect("valid barrier"),
+                ),
+                ..KnowledgePolicy::default()
+            },
+            ..agent_definition()
+        };
+
+        let policy = knowledge_policy_from_definition(&definition);
+
+        assert_eq!(
+            policy
+                .cleared_barriers
+                .iter()
+                .map(moa_core::types::memory::InformationBarrierId::as_str)
+                .collect::<Vec<_>>(),
+            vec!["deal-alpha"]
+        );
+        assert_eq!(
+            policy
+                .write_barrier
+                .as_ref()
+                .map(|barrier| barrier.as_str()),
+            Some("deal-alpha")
+        );
+    }
+
+    #[test]
+    fn absent_clearance_fails_closed_with_empty_barriers() {
+        // Pins: a definition without authored clearances resolves to an empty
+        // clearance set so barriered data stays hidden (fail-closed default).
+        let definition = agent_definition();
+
+        let policy = knowledge_policy_from_definition(&definition);
+
+        assert!(policy.cleared_barriers.is_empty());
+    }
 
     #[test]
     fn enabled_guardrail_stage_snapshots_effective_fallback_model() {

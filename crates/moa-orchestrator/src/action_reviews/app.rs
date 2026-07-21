@@ -457,9 +457,14 @@ fn screen_review_tool_input(request: &ToolCallRequest) -> Result<(), TerminalErr
 mod tests {
     use chrono::Utc;
     use moa_core::{
-        types::action_policy::ActionClass, types::action_policy::ActionReviewDecision,
-        types::action_policy::ActionReviewStatus, types::identifiers::TenantId,
-        types::identifiers::ToolCallId, types::identifiers::UserId, types::tools::ToolCallRequest,
+        traits::{Identity, IdentityType},
+        types::action_policy::ActionClass,
+        types::action_policy::ActionReviewDecision,
+        types::action_policy::ActionReviewStatus,
+        types::identifiers::SessionId,
+        types::identifiers::TenantId,
+        types::identifiers::ToolCallId,
+        types::tools::ToolCallRequest,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -506,13 +511,12 @@ mod tests {
             status: ActionReviewStatus::Pending,
             tool_request: ToolCallRequest {
                 tool_call_id: original_tool_id,
+                caller_identity: test_identity(),
                 provider_tool_use_id: Some("provider-tool-use".to_string()),
                 tool_name: "bash".to_string(),
                 input: json!({"cmd": "printf ok"}),
                 active_canary: Some("canary-token".to_string()),
-                session_id: None,
-                tenant_id: TenantId::from(Uuid::from_u128(1)),
-                user_id: UserId::new("user-1"),
+                session_id: SessionId::new(),
                 trusted_sandbox_manifest: None,
                 worker_id: None,
             },
@@ -555,13 +559,12 @@ mod tests {
             status: ActionReviewStatus::Cleared,
             tool_request: ToolCallRequest {
                 tool_call_id: ToolCallId::new(),
+                caller_identity: test_identity(),
                 provider_tool_use_id: None,
                 tool_name: "bash".to_string(),
                 input: json!({}),
                 active_canary: None,
-                session_id: None,
-                tenant_id: TenantId::from(Uuid::from_u128(1)),
-                user_id: UserId::new("user-1"),
+                session_id: SessionId::new(),
                 trusted_sandbox_manifest: None,
                 worker_id: None,
             },
@@ -590,13 +593,12 @@ mod tests {
         // Pins: tenant action review storage rejects tool input that leaks the active canary.
         let request = ToolCallRequest {
             tool_call_id: ToolCallId::new(),
+            caller_identity: test_identity(),
             provider_tool_use_id: None,
             tool_name: "bash".to_string(),
             input: json!({"cmd": "printf secret-canary"}),
             active_canary: Some("secret-canary".to_string()),
-            session_id: None,
-            tenant_id: TenantId::from(Uuid::from_u128(1)),
-            user_id: UserId::new("user-1"),
+            session_id: SessionId::new(),
             trusted_sandbox_manifest: None,
             worker_id: None,
         };
@@ -610,5 +612,15 @@ mod tests {
                 .contains("blocked because it leaked a protected canary token"),
             "error should explain the canary screening failure: {error}"
         );
+    }
+
+    fn test_identity() -> Identity {
+        Identity {
+            identity_type: IdentityType::Operator,
+            id: Uuid::from_u128(2),
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        }
     }
 }

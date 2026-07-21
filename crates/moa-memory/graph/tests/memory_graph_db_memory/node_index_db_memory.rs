@@ -2,8 +2,9 @@
 
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_db::ScopedConn;
-use moa_memory_graph::{NodeLabel, PiiClass, bump_last_accessed, lookup_seed_by_name};
+use moa_memory_graph::{NodeLabel, bump_last_accessed, lookup_seed_by_name};
 use moa_session::testing;
 use moa_test_support::fixtures::stable_uuid_from_label;
 use sqlx::PgPool;
@@ -35,6 +36,7 @@ async fn insert_workspace_rows(
     count: usize,
 ) -> Vec<Uuid> {
     let ctx = tenant_scope(storage_partition_id);
+    let data_subject_id = ctx.tenant_id().0;
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin scoped node_index insert transaction");
@@ -46,14 +48,15 @@ async fn insert_workspace_rows(
         let name = format!("{prefix} auth service {storage_partition_id} {index}");
         sqlx::query(
             "INSERT INTO moa.node_index \
-             (uid, label, storage_partition_id, name, pii_class, confidence) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+             (uid, label, storage_partition_id, data_subject_id, name, pii_class, confidence) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(uid)
         .bind(label.as_str())
         .bind(storage_partition_id)
+        .bind(data_subject_id)
         .bind(name)
-        .bind(PiiClass::None.as_str())
+        .bind(SensitivityClass::None.as_str())
         .bind(0.91_f64)
         .execute(conn.as_mut())
         .await

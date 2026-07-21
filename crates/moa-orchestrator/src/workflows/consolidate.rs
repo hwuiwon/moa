@@ -8,6 +8,7 @@ use moa_core::{
     config::MoaConfig, traits::EmbeddingProvider, types::identifiers::TenantId,
     types::learning::LearningEntry,
 };
+use moa_crypto::KeyManagementProvider;
 use moa_memory_lifecycle::{
     BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, DigestStats,
     ExpiryStats, MergeStats, SweepStats, TenantConsolidationCursor,
@@ -183,6 +184,7 @@ pub trait Consolidate {
 #[derive(Clone)]
 pub struct ConsolidateImpl {
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     config: Arc<MoaConfig>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     session_store: Arc<PostgresSessionStore>,
@@ -193,12 +195,14 @@ impl ConsolidateImpl {
     #[must_use]
     pub fn new(
         pool: PgPool,
+        kms: Arc<dyn KeyManagementProvider>,
         config: Arc<MoaConfig>,
         embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
         session_store: Arc<PostgresSessionStore>,
     ) -> Self {
         Self {
             pool,
+            kms,
             config,
             embedding_provider,
             session_store,
@@ -219,6 +223,7 @@ impl Consolidate for ConsolidateImpl {
         let mut steps = RestateConsolidateSteps {
             ctx: &ctx,
             pool: self.pool.clone(),
+            kms: self.kms.clone(),
             config: self.config.clone(),
             embedding_provider: self.embedding_provider.clone(),
             session_store: self.session_store.clone(),
@@ -361,6 +366,7 @@ pub async fn run_consolidate_workflow(
 struct RestateConsolidateSteps<'ctx, 'workflow> {
     ctx: &'ctx WorkflowContext<'workflow>,
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     config: Arc<MoaConfig>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     session_store: Arc<PostgresSessionStore>,
@@ -416,10 +422,11 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         now: DateTime<Utc>,
     ) -> Result<MergeStats, HandlerError> {
         let pool = self.pool.clone();
+        let kms = self.kms.clone();
         let tenant_id = request.tenant_id;
         self.ctx
             .run(|| async move {
-                moa_memory_lifecycle::merge_duplicates(&pool, &tenant_id, now)
+                moa_memory_lifecycle::merge_duplicates(&pool, kms, &tenant_id, now)
                     .await
                     .map(Json::from)
                     .map_err(lifecycle_handler_error)
@@ -461,10 +468,11 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         now: DateTime<Utc>,
     ) -> Result<SweepStats, HandlerError> {
         let pool = self.pool.clone();
+        let kms = self.kms.clone();
         let tenant_id = request.tenant_id;
         self.ctx
             .run(|| async move {
-                moa_memory_lifecycle::sweep_contradictions(&pool, &tenant_id, now)
+                moa_memory_lifecycle::sweep_contradictions(&pool, kms, &tenant_id, now)
                     .await
                     .map(Json::from)
                     .map_err(lifecycle_handler_error)
@@ -481,11 +489,13 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         now: DateTime<Utc>,
     ) -> Result<ExpiryStats, HandlerError> {
         let pool = self.pool.clone();
+        let kms = self.kms.clone();
         let tenant_id = request.tenant_id;
         self.ctx
             .run(|| async move {
                 moa_memory_lifecycle::expire_idle_facts(
                     &pool,
+                    kms,
                     &tenant_id,
                     now,
                     &ConsolidationOptions::default(),
@@ -505,11 +515,12 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         request: &ConsolidateRequest,
     ) -> Result<BackfillStats, HandlerError> {
         let pool = self.pool.clone();
+        let kms = self.kms.clone();
         let tenant_id = request.tenant_id;
         let embedder = self.embedding_provider.clone();
         self.ctx
             .run(|| async move {
-                moa_memory_lifecycle::backfill_entities(&pool, &tenant_id, embedder)
+                moa_memory_lifecycle::backfill_entities(&pool, kms, &tenant_id, embedder)
                     .await
                     .map(Json::from)
                     .map_err(lifecycle_handler_error)

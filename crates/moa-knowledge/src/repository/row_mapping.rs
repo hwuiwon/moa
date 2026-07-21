@@ -60,6 +60,12 @@ pub(super) fn connection_from_row(row: &sqlx::postgres::PgRow) -> Result<Knowled
         status: connection_status(row.try_get("status").map_err(map_sqlx_error)?)?,
         metadata: row.try_get("metadata").map_err(map_sqlx_error)?,
         source_selection: row.try_get("source_selection").map_err(map_sqlx_error)?,
+        information_barrier: row
+            .try_get::<Option<String>, _>("information_barrier")
+            .map_err(map_sqlx_error)?
+            .map(InformationBarrierId::parse)
+            .transpose()
+            .map_err(map_moa_error)?,
         created_at: row.try_get("created_at").map_err(map_sqlx_error)?,
         updated_at: row.try_get("updated_at").map_err(map_sqlx_error)?,
         last_synced_at: row.try_get("last_synced_at").map_err(map_sqlx_error)?,
@@ -119,6 +125,12 @@ pub(super) fn sync_run_from_row(row: &sqlx::postgres::PgRow) -> Result<Knowledge
             .map(u32::try_from)
             .transpose()
             .map_err(map_int_error)?,
+        information_barrier: row
+            .try_get::<Option<String>, _>("information_barrier")
+            .map_err(map_sqlx_error)?
+            .map(InformationBarrierId::parse)
+            .transpose()
+            .map_err(map_moa_error)?,
         status: sync_run_status(row.try_get("status").map_err(map_sqlx_error)?)?,
         records_seen: u64::try_from(records_seen).map_err(map_int_error)?,
         records_changed: u64::try_from(records_changed).map_err(map_int_error)?,

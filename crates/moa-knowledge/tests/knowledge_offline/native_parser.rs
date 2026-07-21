@@ -46,6 +46,7 @@ fn parse_input(file_name: &str, mime_type: &str, text: &str) -> ParseInput {
         status: ConnectionStatus::Active,
         metadata: json!({}),
         source_selection: json!({}),
+        information_barrier: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
         last_synced_at: None,

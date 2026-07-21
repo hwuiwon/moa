@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use std::time::Duration;
 use thiserror::Error;
 use uuid::Uuid;
@@ -25,6 +26,33 @@ pub enum IdentityType {
     Agent,
     /// Internal service principal.
     Service,
+}
+
+impl IdentityType {
+    /// Returns the canonical lowercase identity type used in headers and storage.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Contact => "contact",
+            Self::Agent => "agent",
+            Self::Service => "service",
+        }
+    }
+}
+
+impl FromStr for IdentityType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "operator" => Ok(Self::Operator),
+            "contact" => Ok(Self::Contact),
+            "agent" => Ok(Self::Agent),
+            "service" => Ok(Self::Service),
+            other => Err(other.to_string()),
+        }
+    }
 }
 
 /// Authenticated caller identity propagated through MOA.
@@ -51,6 +79,13 @@ pub enum Credential {
     UserSessionToken(String),
     /// Bearer JWT from Auth0 or a generic OIDC provider.
     BearerJwt(String),
+    /// Opaque MOA-issued OAuth 2.1 access token (`moa_oauth_at_` prefix).
+    ///
+    /// Distinct from [`Credential::BearerJwt`] because the value is an opaque,
+    /// high-entropy string resolved by a database hash lookup, not a signed JWT
+    /// verified against a JWKS. The edge routes bearers by prefix so these never
+    /// reach the JWT/OIDC path.
+    OAuthAccessToken(String),
 }
 
 /// Authentication provider failures.
@@ -230,5 +265,19 @@ mod tests {
         assert_object_safe::<dyn AuthProvider>();
         assert_object_safe::<dyn TokenVaultProvider>();
         assert_object_safe::<dyn AsyncAuthzProvider>();
+    }
+
+    #[test]
+    fn identity_type_text_round_trips_canonical_values() {
+        // Pins: every identity header and persisted subject uses one canonical vocabulary.
+        for identity_type in [
+            IdentityType::Operator,
+            IdentityType::Contact,
+            IdentityType::Agent,
+            IdentityType::Service,
+        ] {
+            assert_eq!(identity_type.as_str().parse(), Ok(identity_type));
+        }
+        assert_eq!("user".parse::<IdentityType>(), Err("user".to_string()));
     }
 }

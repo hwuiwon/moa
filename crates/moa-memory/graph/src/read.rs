@@ -1,8 +1,9 @@
 //! Read-side implementation for the relational graph store.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use chrono::{DateTime, Utc};
+use moa_crypto::{Ciphertext, DecryptionRequest, EncryptionContext};
 use sqlx::{Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
@@ -10,8 +11,126 @@ use crate::{
     GraphError, GraphExpansionHit, GraphStore, GraphTraversalDirection, GraphWalkScoring,
     PostgresGraphStore,
     edge::{EdgeLabel, EdgeWriteIntent},
-    node::{NODE_INDEX_COLUMNS, NodeIndexRow, NodeLabel, NodeReinforcementIntent, NodeWriteIntent},
+    node::{
+        NODE_INDEX_COLUMNS, NodeIndexRow, NodeLabel, NodeReinforcementIntent, NodeWriteIntent,
+        SEALED_NODE_INDEX_EXTRA_COLUMNS, SealedNodeRow,
+    },
+    write::{SEALED_CONTENT_VERSION, SealedNodeContent, is_sealed_class},
 };
+
+impl PostgresGraphStore {
+    /// Opens restricted/PHI content on a batch of freshly fetched rows.
+    ///
+    /// This is the single decryption boundary shared by every read method that
+    /// projects node content (`get_node`, `bulk_get_nodes`, `neighbors`,
+    /// `lookup_seeds`, `lookup_seeds_batch`): each fetch decodes into
+    /// [`SealedNodeRow`] and funnels through here, so no read path can forget to
+    /// decrypt. `expand_seeds` is exempt because it returns only uid/label/scoring
+    /// (no sealed content); callers hydrate reached nodes through `bulk_get_nodes`,
+    /// which decrypts. Rows with no sealed content pass through untouched.
+    async fn decrypt_sealed_rows(
+        &self,
+        sealed: Vec<SealedNodeRow>,
+    ) -> Result<Vec<NodeIndexRow>, GraphError> {
+        let mut rows = sealed
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<Option<SealedNodeRow>>>();
+        let mut groups: BTreeMap<(Uuid, Uuid), Vec<(usize, DecryptionRequest)>> = BTreeMap::new();
+
+        for (index, sealed) in rows.iter().enumerate() {
+            let Some(sealed) = sealed.as_ref() else {
+                return Err(GraphError::Backfill(
+                    "decryption row slot was unexpectedly empty".to_string(),
+                ));
+            };
+            if !is_sealed_class(sealed.row.pii_class) {
+                if sealed.content_sealed.is_some() {
+                    return Err(GraphError::Backfill(format!(
+                        "unsealed node {} unexpectedly carries sealed content",
+                        sealed.row.uid
+                    )));
+                }
+                continue;
+            }
+            let tenant_id = sealed.tenant_id.ok_or_else(|| {
+                GraphError::Backfill(format!(
+                    "sealed node {} is missing tenant_id",
+                    sealed.row.uid
+                ))
+            })?;
+            let data_subject_id = sealed.data_subject_id.ok_or_else(|| {
+                GraphError::Backfill(format!(
+                    "sealed node {} is missing data_subject_id",
+                    sealed.row.uid
+                ))
+            })?;
+            let sealed_bytes = sealed.content_sealed.as_deref().ok_or_else(|| {
+                GraphError::Backfill(format!(
+                    "restricted node {} has not been sealed",
+                    sealed.row.uid
+                ))
+            })?;
+            let context = EncryptionContext::new(
+                tenant_id,
+                data_subject_id,
+                sealed.row.uid.to_string(),
+                sealed.row.pii_class.as_str(),
+            );
+            groups
+                .entry((tenant_id, data_subject_id))
+                .or_default()
+                .push((
+                    index,
+                    DecryptionRequest::new(Ciphertext::from_bytes(sealed_bytes)?, context),
+                ));
+        }
+
+        for requests in groups.into_values() {
+            let decrypt_requests = requests
+                .iter()
+                .map(|(_, request)| request.clone())
+                .collect::<Vec<_>>();
+            let plaintexts =
+                moa_crypto::decrypt_batch(self.kms.as_ref(), &decrypt_requests).await?;
+            for ((index, _), plaintext) in requests.into_iter().zip(plaintexts) {
+                let content: SealedNodeContent = serde_json::from_slice(&plaintext)?;
+                if content.version != SEALED_CONTENT_VERSION || !content.properties.is_object() {
+                    return Err(GraphError::Backfill(format!(
+                        "sealed node content at index {index} has an unsupported format"
+                    )));
+                }
+                let Some(sealed) = rows[index].as_mut() else {
+                    return Err(GraphError::Backfill(format!(
+                        "decryption row slot {index} was unexpectedly empty"
+                    )));
+                };
+                let row = &mut sealed.row;
+                row.name = content.name;
+                row.properties_summary = Some(content.properties);
+            }
+        }
+
+        rows.into_iter()
+            .map(|sealed| {
+                sealed.map(|sealed| sealed.row).ok_or_else(|| {
+                    GraphError::Backfill("decryption row slot was unexpectedly empty".to_string())
+                })
+            })
+            .collect()
+    }
+
+    /// Opens one row's restricted/PHI `name` and `properties_summary` in place.
+    ///
+    /// This delegates to the same grouped boundary as multi-row reads, which
+    /// validates sealed state and never accepts a plaintext restricted fallback.
+    async fn decrypt_sealed_row(&self, sealed: SealedNodeRow) -> Result<NodeIndexRow, GraphError> {
+        self.decrypt_sealed_rows(vec![sealed])
+            .await?
+            .pop()
+            .ok_or_else(|| GraphError::Backfill("single-row decrypt returned no row".to_string()))
+    }
+}
 
 #[async_trait::async_trait]
 impl GraphStore for PostgresGraphStore {
@@ -52,26 +171,31 @@ impl GraphStore for PostgresGraphStore {
     }
 
     async fn get_node(&self, uid: Uuid) -> Result<Option<NodeIndexRow>, GraphError> {
-        if let Some(mut conn) = self.begin().await? {
+        let sealed = if let Some(mut conn) = self.begin().await? {
             let row = fetch_node(conn.as_mut(), uid).await?;
             conn.commit().await?;
-            return Ok(row);
+            row
+        } else {
+            fetch_node(&self.pool, uid).await?
+        };
+        match sealed {
+            Some(sealed) => Ok(Some(self.decrypt_sealed_row(sealed).await?)),
+            None => Ok(None),
         }
-
-        fetch_node(&self.pool, uid).await
     }
 
     async fn bulk_get_nodes(&self, uids: &[Uuid]) -> Result<Vec<NodeIndexRow>, GraphError> {
         if uids.is_empty() {
             return Ok(Vec::new());
         }
-        if let Some(mut conn) = self.begin().await? {
+        let sealed = if let Some(mut conn) = self.begin().await? {
             let rows = fetch_nodes(conn.as_mut(), uids).await?;
             conn.commit().await?;
-            return Ok(rows);
-        }
-
-        fetch_nodes(&self.pool, uids).await
+            rows
+        } else {
+            fetch_nodes(&self.pool, uids).await?
+        };
+        self.decrypt_sealed_rows(sealed).await
     }
 
     async fn bulk_create_nodes(
@@ -96,21 +220,22 @@ impl GraphStore for PostgresGraphStore {
         };
         let edge_labels = edge_filter.map(edge_label_strings);
 
-        if let Some(mut conn) = self.begin().await? {
+        let sealed = if let Some(mut conn) = self.begin().await? {
             let rows = build_neighbors_query(seed, max_hops, edge_labels.as_deref(), as_of, limit)
-                .build_query_as::<NodeIndexRow>()
+                .build_query_as::<SealedNodeRow>()
                 .fetch_all(conn.as_mut())
                 .await
                 .map_err(GraphError::from)?;
             conn.commit().await?;
-            return Ok(rows);
-        }
-
-        build_neighbors_query(seed, max_hops, edge_labels.as_deref(), as_of, limit)
-            .build_query_as::<NodeIndexRow>()
-            .fetch_all(&self.pool)
-            .await
-            .map_err(GraphError::from)
+            rows
+        } else {
+            build_neighbors_query(seed, max_hops, edge_labels.as_deref(), as_of, limit)
+                .build_query_as::<SealedNodeRow>()
+                .fetch_all(&self.pool)
+                .await
+                .map_err(GraphError::from)?
+        };
+        self.decrypt_sealed_rows(sealed).await
     }
 
     async fn expand_seeds(
@@ -181,13 +306,15 @@ impl GraphStore for PostgresGraphStore {
         limit: i64,
         as_of: Option<DateTime<Utc>>,
     ) -> Result<Vec<NodeIndexRow>, GraphError> {
-        if let Some(mut conn) = self.begin().await? {
-            let rows = crate::node::lookup_seed_by_name(conn.as_mut(), name, limit, as_of).await?;
+        let sealed = if let Some(mut conn) = self.begin().await? {
+            let rows =
+                crate::node::lookup_seed_candidates(conn.as_mut(), name, limit, as_of).await?;
             conn.commit().await?;
-            return Ok(rows);
-        }
-
-        crate::node::lookup_seed_by_name(&self.pool, name, limit, as_of).await
+            rows
+        } else {
+            crate::node::lookup_seed_candidates(&self.pool, name, limit, as_of).await?
+        };
+        self.decrypt_sealed_rows(sealed).await
     }
 
     async fn lookup_seeds_batch(
@@ -199,14 +326,24 @@ impl GraphStore for PostgresGraphStore {
         if names.is_empty() || limit <= 0 {
             return Ok(names.iter().map(|_| Vec::new()).collect());
         }
-        if let Some(mut conn) = self.begin().await? {
+        let sealed = if let Some(mut conn) = self.begin().await? {
             let rows =
-                crate::node::lookup_seeds_by_names(conn.as_mut(), names, limit, as_of).await?;
+                crate::node::lookup_seed_candidate_batches(conn.as_mut(), names, limit, as_of)
+                    .await?;
             conn.commit().await?;
-            return Ok(rows);
-        }
+            rows
+        } else {
+            crate::node::lookup_seed_candidate_batches(&self.pool, names, limit, as_of).await?
+        };
 
-        crate::node::lookup_seeds_by_names(&self.pool, names, limit, as_of).await
+        // Decrypt per name-bucket so the returned shape (one Vec per input name)
+        // is preserved while restricted content is opened through the shared
+        // boundary.
+        let mut results = Vec::with_capacity(sealed.len());
+        for bucket in sealed {
+            results.push(self.decrypt_sealed_rows(bucket).await?);
+        }
+        Ok(results)
     }
 }
 
@@ -300,7 +437,8 @@ fn build_neighbors_query<'a>(
         SELECT node_row.uid, node_row.label, node_row.storage_partition_id, node_row.user_id,
                node_row.scope, node_row.name, node_row.pii_class, node_row.valid_to,
                node_row.valid_from, node_row.properties_summary, node_row.last_accessed_at,
-               COALESCE(node_row.quality_score, 0.5) AS quality_score
+               COALESCE(node_row.quality_score, 0.5) AS quality_score,
+               node_row.content_sealed, node_row.tenant_id, node_row.data_subject_id
         FROM reached
         JOIN moa.node_index AS node_row ON node_row.uid = reached.uid
         WHERE "#,
@@ -502,12 +640,13 @@ fn expansion_hits_from_rows(
         .collect()
 }
 
-async fn fetch_node<'e, E>(executor: E, uid: Uuid) -> Result<Option<NodeIndexRow>, GraphError>
+async fn fetch_node<'e, E>(executor: E, uid: Uuid) -> Result<Option<SealedNodeRow>, GraphError>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
-    sqlx::query_as::<_, NodeIndexRow>(&format!(
-        "SELECT {NODE_INDEX_COLUMNS} FROM moa.node_index WHERE uid = $1"
+    sqlx::query_as::<_, SealedNodeRow>(&format!(
+        "SELECT {NODE_INDEX_COLUMNS}, {SEALED_NODE_INDEX_EXTRA_COLUMNS} \
+         FROM moa.node_index WHERE uid = $1"
     ))
     .bind(uid)
     .fetch_optional(executor)
@@ -515,12 +654,13 @@ where
     .map_err(GraphError::from)
 }
 
-async fn fetch_nodes<'e, E>(executor: E, uids: &[Uuid]) -> Result<Vec<NodeIndexRow>, GraphError>
+async fn fetch_nodes<'e, E>(executor: E, uids: &[Uuid]) -> Result<Vec<SealedNodeRow>, GraphError>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
-    sqlx::query_as::<_, NodeIndexRow>(&format!(
-        "SELECT {NODE_INDEX_COLUMNS} FROM moa.node_index WHERE uid = ANY($1)"
+    sqlx::query_as::<_, SealedNodeRow>(&format!(
+        "SELECT {NODE_INDEX_COLUMNS}, {SEALED_NODE_INDEX_EXTRA_COLUMNS} \
+         FROM moa.node_index WHERE uid = ANY($1)"
     ))
     .bind(uids)
     .fetch_all(executor)

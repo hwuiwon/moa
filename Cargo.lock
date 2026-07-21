@@ -3461,28 +3461,36 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "async-trait",
+ "base64 0.22.1",
  "blake3",
  "chrono",
  "crc32fast",
+ "hex",
  "jsonwebtoken 9.3.1",
  "moa-auth-providers-auth0",
  "moa-authz",
  "moa-authz-schema",
  "moa-core",
+ "moa-crypto",
+ "moa-db",
  "moa-migrations",
  "moa-observability",
+ "moa-test-support",
  "moka",
  "rand 0.8.5",
  "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "strum",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
+ "wiremock",
  "workspace-hack",
 ]
 
@@ -3558,6 +3566,7 @@ dependencies = [
  "metrics",
  "moa-artifacts",
  "moa-core",
+ "moa-crypto",
  "moa-db",
  "moa-execution",
  "moa-hands",
@@ -3570,6 +3579,7 @@ dependencies = [
  "moa-memory-types",
  "moa-memory-vector",
  "moa-observability",
+ "moa-ocsf",
  "moa-providers",
  "moa-security",
  "moa-session",
@@ -3640,6 +3650,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "async-trait",
+ "rand 0.8.5",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "workspace-hack",
+ "zeroize",
+]
+
+[[package]]
 name = "moa-db"
 version = "0.1.0"
 dependencies = [
@@ -3647,6 +3672,18 @@ dependencies = [
  "moa-core",
  "sqlx",
  "tokio",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moa-dlp"
+version = "0.1.0"
+dependencies = [
+ "moa-memory-pii",
+ "rand 0.8.5",
+ "secrecy",
+ "thiserror 2.0.18",
+ "tracing",
  "workspace-hack",
 ]
 
@@ -3705,6 +3742,7 @@ dependencies = [
  "moa-artifacts",
  "moa-brain",
  "moa-core",
+ "moa-crypto",
  "moa-db",
  "moa-eval-core",
  "moa-execution",
@@ -3831,6 +3869,8 @@ dependencies = [
  "ignore",
  "jsonschema",
  "moa-core",
+ "moa-memory-graph",
+ "moa-memory-pii",
  "moa-observability",
  "moa-security",
  "moa-session",
@@ -3850,6 +3890,25 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "workspace-hack",
+]
+
+[[package]]
+name = "moa-kms"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "moa-core",
+ "moa-crypto",
+ "moa-db",
+ "moa-session",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "workspace-hack",
+ "zeroize",
 ]
 
 [[package]]
@@ -3913,6 +3972,7 @@ dependencies = [
  "tracing",
  "uuid",
  "workspace-hack",
+ "zeroize",
  "zip",
 ]
 
@@ -4013,6 +4073,7 @@ dependencies = [
  "moa-authz",
  "moa-brain",
  "moa-core",
+ "moa-crypto",
  "moa-db",
  "moa-memory-graph",
  "moa-memory-types",
@@ -4043,17 +4104,20 @@ dependencies = [
  "async-trait",
  "chrono",
  "moa-core",
+ "moa-crypto",
  "moa-db",
  "moa-memory-vector",
  "moa-session",
  "moa-test-support",
  "proptest",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
  "workspace-hack",
 ]
@@ -4068,6 +4132,7 @@ dependencies = [
  "futures-util",
  "metrics",
  "moa-core",
+ "moa-crypto",
  "moa-db",
  "moa-memory-graph",
  "moa-memory-pii",
@@ -4094,10 +4159,13 @@ dependencies = [
 name = "moa-memory-lifecycle"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "moa-brain",
  "moa-core",
+ "moa-crypto",
  "moa-memory-graph",
+ "moa-memory-pii",
  "moa-memory-types",
  "moa-memory-vector",
  "moa-test-support",
@@ -4118,6 +4186,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "moa-core",
+ "moa-crypto",
  "moa-db",
  "moa-memory-graph",
  "moa-session",
@@ -4153,6 +4222,7 @@ dependencies = [
  "chrono",
  "moa-core",
  "moa-db",
+ "moa-memory-pii",
  "moa-session",
  "moa-test-support",
  "pgvector",
@@ -4285,12 +4355,15 @@ dependencies = [
  "moa-brain",
  "moa-contacts",
  "moa-core",
+ "moa-crypto",
  "moa-db",
+ "moa-dlp",
  "moa-eval",
  "moa-eval-core",
  "moa-execution",
  "moa-experiments",
  "moa-hands",
+ "moa-kms",
  "moa-knowledge",
  "moa-lineage-audit",
  "moa-lineage-citation",
@@ -4340,12 +4413,16 @@ version = "0.1.0"
 dependencies = [
  "async-openai",
  "async-trait",
+ "blake3",
  "chrono",
  "eventsource-stream",
  "futures-util",
  "insta",
  "metrics",
  "moa-core",
+ "moa-dlp",
+ "moa-memory-graph",
+ "moa-memory-pii",
  "moa-observability",
  "moa-runtime-store",
  "opentelemetry",
@@ -4353,6 +4430,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
@@ -4395,8 +4473,11 @@ dependencies = [
  "chrono",
  "globset",
  "moa-core",
+ "moa-memory-graph",
+ "moa-memory-pii",
  "serde_json",
  "shell-words",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
@@ -4444,6 +4525,7 @@ dependencies = [
  "hex",
  "moa-artifacts",
  "moa-core",
+ "moa-crypto",
  "moa-db",
  "moa-eval-core",
  "moa-memory-graph",
@@ -8971,6 +9053,7 @@ dependencies = [
  "chrono",
  "moa-brain",
  "moa-core",
+ "moa-crypto",
  "moa-db",
  "moa-eval",
  "moa-knowledge",

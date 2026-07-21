@@ -3,7 +3,9 @@
 mod adapters;
 mod core;
 mod failover;
+mod governance;
 mod model_selection;
+mod provider_policy;
 mod registry;
 mod routing;
 
@@ -41,6 +43,10 @@ pub use embedding::{
     build_embedding_provider_from_config,
 };
 pub use failover::FailoverLLMProvider;
+pub use governance::{CachingPiiClassifier, GovernedLLMProvider};
+pub use provider_policy::{
+    DeploymentProviderPolicy, ProviderCapabilities, ProviderPolicyExclusion,
+};
 pub use registry::{ProviderRegistry, ResolvedProvider};
 pub use rerank::{
     COHERE_DEFAULT_RERANK_MODEL, CohereReranker, ConfiguredReranker, NOOP_RERANK_MODEL,
@@ -49,5 +55,5 @@ pub use rerank::{
 };
 pub use routing::{
     DEFAULT_ANTHROPIC_MODEL, DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_MODEL, PROVIDER_DESCRIPTORS,
-    ProviderDescriptor, ProviderId, infer_provider_id, provider_descriptor_by_name,
+    ProviderDescriptor, infer_provider_id, provider_descriptor, provider_descriptor_by_name,
 };

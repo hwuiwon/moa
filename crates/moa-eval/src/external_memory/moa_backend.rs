@@ -7,13 +7,20 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use moa_brain::pipeline::MemoryEvidenceRequest;
 use moa_brain::pipeline::memory::GraphMemoryRetriever;
-use moa_core::traits::EmbeddingProvider;
+use moa_core::traits::{EmbeddingProvider, Identity, IdentityType};
 use moa_core::{
-    types::contact::ContactId, types::contact::ContactRef,
-    types::contact::ContactVerificationState, types::context::WorkingContext,
-    types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
-    types::memory::RlsContext, types::model::ModelCapabilities, types::session::SessionMeta,
+    types::contact::ContactId,
+    types::contact::ContactRef,
+    types::contact::ContactVerificationState,
+    types::context::{TURN_ID_METADATA_KEY, WorkingContext},
+    types::identifiers::ModelId,
+    types::identifiers::SessionId,
+    types::identifiers::TenantId,
+    types::memory::RlsContext,
+    types::model::ModelCapabilities,
+    types::session::SessionMeta,
 };
+use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{GraphStore, PostgresGraphStore};
 use moa_memory_ingest::{
@@ -37,6 +44,7 @@ use super::{ExternalMemoryError, Result};
 /// MOA backend using production slow-path ingestion, lifecycle, admission, and rendering.
 pub struct MoaMemoryBackend {
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     embedder: Arc<dyn EmbeddingProvider>,
     extractor: Arc<dyn FactExtractor>,
     pii: Arc<dyn PiiClassifier>,
@@ -61,6 +69,7 @@ struct ActiveIsolation {
     external_sessions: HashMap<SessionId, String>,
     external_turns: HashMap<(SessionId, u64), String>,
     latest_timestamp: Option<DateTime<Utc>>,
+    retrieval_sequence: u64,
 }
 
 impl MoaMemoryBackend {
@@ -70,8 +79,10 @@ impl MoaMemoryBackend {
         embedder: Arc<dyn EmbeddingProvider>,
         consolidation: ConsolidationOptions,
     ) -> Result<Self> {
+        let kms: Arc<dyn KeyManagementProvider> = Arc::new(LocalKmsProvider::new());
         Self::new_with_dependencies(
             pool,
+            kms,
             embedder,
             Arc::new(HeuristicFactExtractor),
             Arc::new(HeuristicPiiClassifier),
@@ -86,6 +97,7 @@ impl MoaMemoryBackend {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_dependencies(
         pool: PgPool,
+        kms: Arc<dyn KeyManagementProvider>,
         embedder: Arc<dyn EmbeddingProvider>,
         extractor: Arc<dyn FactExtractor>,
         pii: Arc<dyn PiiClassifier>,
@@ -102,11 +114,13 @@ impl MoaMemoryBackend {
         let retriever = GraphMemoryRetriever::new_with_config(
             moa_core::config::MoaConfig::default(),
             pool.clone(),
+            kms.clone(),
             Some(embedder.clone()),
         )
         .with_assume_app_role(true);
         Ok(Self {
             pool,
+            kms,
             embedder,
             extractor,
             pii,
@@ -140,11 +154,12 @@ impl MoaMemoryBackend {
             scope.clone(),
         ));
         let graph: Arc<dyn GraphStore> = Arc::new(
-            PostgresGraphStore::scoped_for_app_role(self.pool.clone(), scope)
+            PostgresGraphStore::scoped_for_app_role(self.pool.clone(), scope, self.kms.clone())
                 .with_vector_store(vector.clone()),
         );
         let ingest_ctx = IngestCtx::new(
             self.pool.clone(),
+            self.kms.clone(),
             graph,
             vector,
             self.embedder.clone(),
@@ -165,6 +180,7 @@ impl MoaMemoryBackend {
             external_sessions: HashMap::new(),
             external_turns: HashMap::new(),
             latest_timestamp: None,
+            retrieval_sequence: 0,
         }
     }
 
@@ -187,7 +203,7 @@ impl MoaMemoryBackend {
             }),
             ..SessionMeta::default()
         };
-        WorkingContext::new(
+        let mut context = WorkingContext::new(
             &session,
             ModelCapabilities {
                 model_id: ModelId::new("external-memory-reader"),
@@ -195,7 +211,23 @@ impl MoaMemoryBackend {
                 max_output: 1_024,
                 ..ModelCapabilities::default()
             },
-        )
+        );
+        context.set_caller_identity(Identity {
+            identity_type: IdentityType::Contact,
+            id: active.contact_id.0,
+            tenant_id: active.tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        });
+        let turn_id = deterministic_uuid(
+            b"moa.external-memory.query-turn.v1",
+            &[
+                &active.query_session_id.to_string(),
+                &active.retrieval_sequence.to_string(),
+            ],
+        );
+        context.insert_metadata(TURN_ID_METADATA_KEY, Value::String(turn_id.to_string()));
+        context
     }
 }
 
@@ -253,6 +285,7 @@ impl ExternalMemoryBackend for MoaMemoryBackend {
                 transcript: turn.text.clone(),
                 dominant_pii_class: "none".to_string(),
                 finalized_at: turn.occurred_at,
+                barrier: None,
             },
         )
         .await
@@ -282,6 +315,7 @@ impl ExternalMemoryBackend for MoaMemoryBackend {
             .ok_or_else(|| "settle timestamp overflowed".to_string())?;
         consolidate_tenant(
             &self.pool,
+            self.kms.clone(),
             active.tenant_id,
             self.consolidation.clone(),
             now,
@@ -298,9 +332,10 @@ impl ExternalMemoryBackend for MoaMemoryBackend {
         evidence_token_budget: usize,
         ranked_occurrence_depth: usize,
     ) -> std::result::Result<EvidenceExport, String> {
-        let Some(active) = self.active.as_ref() else {
+        let Some(active) = self.active.as_mut() else {
             return Err("reset must run before retrieve".to_string());
         };
+        active.retrieval_sequence = active.retrieval_sequence.saturating_add(1);
         let context = Self::working_context(active);
         let response = self
             .retriever

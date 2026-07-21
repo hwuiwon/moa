@@ -5,13 +5,23 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use moa_core::{
-    error::Result, events::Event, session_replay::record_pipeline_compile_duration,
-    traits::LLMProvider, traits::SessionStore, types::completion::CompletionRequest,
-    types::completion::CompletionResponse, types::contact::SessionActorRef,
-    types::context::WorkingContext, types::events_stream::EventRecord,
-    types::identifiers::SessionId, types::observability::CacheReport,
-    types::observability::TraceContext, types::observability::stable_prefix_fingerprint,
-    types::session::SessionMeta, types::snapshot::ContextSnapshot,
+    error::Result,
+    events::Event,
+    session_replay::record_pipeline_compile_duration,
+    traits::Identity,
+    traits::LLMProvider,
+    traits::SessionStore,
+    types::completion::CompletionRequest,
+    types::completion::CompletionResponse,
+    types::contact::SessionActorRef,
+    types::context::{TURN_ID_METADATA_KEY, WorkingContext},
+    types::events_stream::EventRecord,
+    types::identifiers::SessionId,
+    types::observability::CacheReport,
+    types::observability::TraceContext,
+    types::observability::stable_prefix_fingerprint,
+    types::session::SessionMeta,
+    types::snapshot::ContextSnapshot,
 };
 use moa_lineage_core::TurnId;
 use moa_observability::{
@@ -28,6 +38,7 @@ use crate::pipeline::runtime_context::WORKSPACE_ROOT_METADATA_KEY;
 
 /// Inputs required to compile one turn's working context.
 pub(super) struct BuildTurnContextOptions<'a> {
+    pub identity: &'a Identity,
     pub session_id: &'a SessionId,
     pub session: &'a SessionMeta,
     pub session_store: &'a Arc<dyn SessionStore>,
@@ -44,9 +55,15 @@ pub(super) struct BuildTurnContextOptions<'a> {
 pub(super) async fn build_turn_context(
     options: BuildTurnContextOptions<'_>,
 ) -> Result<(WorkingContext, Option<String>)> {
+    if options.identity.tenant_id != options.session.tenant_id {
+        return Err(moa_core::error::MoaError::ValidationError(
+            "harness identity tenant does not match the session tenant".to_string(),
+        ));
+    }
     let mut ctx = WorkingContext::new(options.session, options.llm_provider.capabilities());
+    ctx.set_caller_identity(options.identity.clone());
     ctx.insert_metadata(
-        "_moa.turn_id",
+        TURN_ID_METADATA_KEY,
         serde_json::json!(options.turn_id.0.to_string()),
     );
     insert_trace_context_metadata(&mut ctx, options.trace_context);

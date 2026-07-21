@@ -16,8 +16,8 @@ use chrono::{DateTime, Duration, Utc};
 use moa_analytics::{AnalyticsClickHouseClient, AnalyticsService};
 use moa_core::config::ClickHouseConfig;
 use moa_core::wire::analytics::{
-    AnalyticsAggregation, AnalyticsCell, AnalyticsDimension, AnalyticsMeasure,
-    AnalyticsQueryRequest,
+    AnalyticsAggregation, AnalyticsCell, AnalyticsDimension, AnalyticsFilter,
+    AnalyticsFilterOperator, AnalyticsMeasure, AnalyticsQueryRequest,
 };
 use moa_core::{types::identifiers::TenantId, wire::analytics::AnalyticsQueryResponse};
 use moa_orchestrator::analytics_export::AnalyticsExporter;
@@ -79,7 +79,7 @@ async fn analytics_clickhouse_roundtrip_e2e() -> TestResult<()> {
                     aggregation: AnalyticsAggregation::Sum,
                     alias: Some("total_cost".to_string()),
                 }],
-                filters: Vec::new(),
+                filters: vec![recent_time_window("finished_at")],
                 order_by: Vec::new(),
                 limit: Some(10),
             },
@@ -113,7 +113,7 @@ async fn analytics_clickhouse_roundtrip_e2e() -> TestResult<()> {
                         alias: Some("tool_calls".to_string()),
                     },
                 ],
-                filters: Vec::new(),
+                filters: vec![recent_time_window("created_at")],
                 order_by: Vec::new(),
                 limit: Some(10),
             },
@@ -137,7 +137,7 @@ async fn analytics_clickhouse_roundtrip_e2e() -> TestResult<()> {
                     aggregation: AnalyticsAggregation::Count,
                     alias: Some("turn_count".to_string()),
                 }],
-                filters: Vec::new(),
+                filters: vec![recent_time_window("finished_at")],
                 order_by: Vec::new(),
                 limit: Some(10),
             },
@@ -167,6 +167,17 @@ fn numeric_cell(response: &AnalyticsQueryResponse, row: usize, col: usize) -> Op
     match response.rows.get(row)?.get(col)? {
         AnalyticsCell::Number(number) => number.as_f64(),
         _ => None,
+    }
+}
+
+fn recent_time_window(field: &str) -> AnalyticsFilter {
+    AnalyticsFilter {
+        field: field.to_string(),
+        operator: AnalyticsFilterOperator::Between,
+        value: Some(AnalyticsCell::Json(json!([
+            (Utc::now() - Duration::days(2)).to_rfc3339(),
+            (Utc::now() + Duration::days(1)).to_rfc3339(),
+        ]))),
     }
 }
 

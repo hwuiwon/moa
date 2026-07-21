@@ -151,12 +151,7 @@ fn headers(identity_type: IdentityType, api_key_id: Option<Uuid>) -> TestHeaders
 }
 
 fn identity_type_header(identity_type: IdentityType) -> &'static str {
-    match identity_type {
-        IdentityType::Operator => "operator",
-        IdentityType::Contact => "contact",
-        IdentityType::Agent => "agent",
-        IdentityType::Service => "service",
-    }
+    identity_type.as_str()
 }
 
 fn handler_error_text(error: HandlerError) -> String {

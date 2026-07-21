@@ -3,6 +3,7 @@
 use std::str::FromStr;
 
 use axum::Router;
+use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
@@ -111,7 +112,7 @@ pub(crate) fn router(
     );
 
     Router::new()
-        .nest_service("/mcp", service)
+        .route_service("/mcp", service)
         .route_layer(middleware::from_fn_with_state(state, authenticate_mcp))
 }
 
@@ -134,10 +135,37 @@ async fn authenticate_mcp(
 ) -> Response {
     let span = tracing::Span::current();
     crate::routes::adopt_client_trace_parent(&span, request.headers());
-    let identity = match authenticate_edge_request(&state, request.headers(), &span).await {
-        Ok(identity) => identity,
+    let principal = match authenticate_edge_request(&state, request.headers(), &span).await {
+        Ok(principal) => principal,
         Err(response) => return response,
     };
+    if let Some(oauth) = principal.oauth.as_ref() {
+        if oauth.resource != state.oauth_server.resource() {
+            span.record("http.status_code", 403_i64);
+            return (StatusCode::FORBIDDEN, "OAuth resource mismatch").into_response();
+        }
+        let (parts, body) = request.into_parts();
+        let body = match to_bytes(body, 1024 * 1024).await {
+            Ok(body) => body,
+            Err(_) => {
+                span.record("http.status_code", 400_i64);
+                return (StatusCode::BAD_REQUEST, "invalid MCP request body").into_response();
+            }
+        };
+        let required_scope = match super::required_oauth_scope(&parts.method, &body) {
+            Ok(scope) => scope,
+            Err(()) => {
+                span.record("http.status_code", 403_i64);
+                return (StatusCode::FORBIDDEN, "OAuth scope cannot be derived").into_response();
+            }
+        };
+        if !principal.has_oauth_scope(required_scope) {
+            span.record("http.status_code", 403_i64);
+            return (StatusCode::FORBIDDEN, "insufficient OAuth scope").into_response();
+        }
+        request = Request::from_parts(parts, Body::from(body));
+    }
+    let identity = principal.identity.clone();
     if matches!(
         identity.identity_type,
         IdentityType::Contact | IdentityType::Agent
@@ -166,6 +194,7 @@ async fn authenticate_mcp(
         tracing::field::debug(identity.identity_type),
     );
     span.record("moa.mcp.principal_id", tracing::field::display(identity.id));
+    request.extensions_mut().insert(principal);
     request.extensions_mut().insert(identity);
     let response = next.run(request).await;
     span.record("http.status_code", response.status().as_u16() as i64);

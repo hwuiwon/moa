@@ -23,6 +23,7 @@ async fn knowledge_service_accepts_injected_ingestion_runner_without_global_conf
         connection_uid,
         parser: Some("native".to_string()),
         max_records: Some(1),
+        information_barrier: None,
         status: SyncRunStatus::ProviderSynced,
         records_seen: 0,
         records_changed: 0,

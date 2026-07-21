@@ -41,6 +41,7 @@ pub(super) async fn ingest_documents_inner(
 ) -> Result<MemoryIngestResponse, HandlerError> {
     let started = Instant::now();
     let tenant_id = request.tenant_id;
+    let information_barrier = request.information_barrier.clone();
     let mut results = Vec::with_capacity(request.documents.len());
     // Enumerate the whole batch first so each document keeps its stable global index
     // (used for the synthetic session id and turn sequence) regardless of chunk boundaries.
@@ -56,6 +57,7 @@ pub(super) async fn ingest_documents_inner(
             let index = *index;
             let source_name = document.source_name.clone();
             let content = document.content.clone();
+            let information_barrier = information_barrier.clone();
             let session_id = document_ingest_session_id(tenant_id, contact_id, index, document);
             let turn = ctx
                 .run(|| async move {
@@ -67,6 +69,7 @@ pub(super) async fn ingest_documents_inner(
                         transcript: ingest_transcript(&source_name, &content),
                         dominant_pii_class: "none".to_string(),
                         finalized_at: Utc::now(),
+                        barrier: information_barrier,
                     }))
                 })
                 .name(format!("memory_ingest_prepare_{index}"))

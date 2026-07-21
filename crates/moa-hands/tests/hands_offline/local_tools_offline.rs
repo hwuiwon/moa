@@ -10,6 +10,7 @@ async fn file_read_reads_written_content() {
     router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -21,6 +22,7 @@ async fn file_read_reads_written_content() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
@@ -42,6 +44,7 @@ async fn str_replace_updates_only_the_target_region() {
     router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -57,6 +60,7 @@ async fn str_replace_updates_only_the_target_region() {
     let (_, replace_output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "str_replace".to_string(),
@@ -78,6 +82,7 @@ async fn str_replace_updates_only_the_target_region() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
@@ -102,6 +107,7 @@ async fn file_write_overwrite_returns_compact_diff() {
     router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -130,6 +136,7 @@ async fn file_write_overwrite_returns_compact_diff() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -156,6 +163,7 @@ async fn file_search_finds_files_by_glob() {
     router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -167,6 +175,7 @@ async fn file_search_finds_files_by_glob() {
     router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -179,6 +188,7 @@ async fn file_search_finds_files_by_glob() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
@@ -207,6 +217,7 @@ async fn file_search_skips_git_directory_contents() {
     router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -219,6 +230,7 @@ async fn file_search_skips_git_directory_contents() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
@@ -264,6 +276,7 @@ async fn file_search_skips_python_virtualenvs_in_remembered_workspace() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
@@ -309,6 +322,7 @@ async fn file_search_respects_moaignore_in_remembered_workspace() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
@@ -333,6 +347,7 @@ async fn file_search_truncates_pathological_match_sets() {
         router
             .execute_authorized(
                 &session,
+                &identity(),
                 &ToolInvocation {
                     id: None,
                     name: "file_write".to_string(),
@@ -349,6 +364,7 @@ async fn file_search_truncates_pathological_match_sets() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_search".to_string(),
@@ -392,6 +408,7 @@ async fn file_operations_reject_path_traversal() {
     let error = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
@@ -507,6 +524,7 @@ async fn bash_captures_stdout_and_stderr() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "bash".to_string(),
@@ -530,6 +548,7 @@ async fn bash_success_output_is_truncated_to_router_budget() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "bash".to_string(),
@@ -557,6 +576,7 @@ async fn bash_error_output_is_not_truncated() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "bash".to_string(),
@@ -589,6 +609,7 @@ async fn file_read_within_budget_is_not_router_truncated() {
     router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -601,6 +622,7 @@ async fn file_read_within_budget_is_not_router_truncated() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
@@ -634,6 +656,7 @@ async fn file_read_budget_override_truncates_large_results() {
     router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_write".to_string(),
@@ -646,6 +669,7 @@ async fn file_read_budget_override_truncates_large_results() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "file_read".to_string(),
@@ -672,6 +696,7 @@ async fn bash_respects_timeout() {
     let error = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "bash".to_string(),
@@ -704,7 +729,13 @@ async fn local_bash_hard_cancel_kills_running_process() {
         let cancel_token = cancel_token.clone();
         tokio::spawn(async move {
             router
-                .execute_authorized_with_cancel(&session, &invocation, None, Some(&cancel_token))
+                .execute_authorized_with_cancel(
+                    &session,
+                    &identity(),
+                    &invocation,
+                    None,
+                    Some(&cancel_token),
+                )
                 .await
         })
     };
@@ -858,6 +889,7 @@ async fn execute_authorized_rejects_unregistered_tool_name() {
     let error = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "does_not_exist".to_string(),

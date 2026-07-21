@@ -423,6 +423,7 @@ impl HybridRetriever {
         let nodes = hydrate_nodes(
             &self.pool,
             &req.scope,
+            &req.cleared_barriers,
             &fused_uids,
             self.assume_app_role,
             req.as_of,
@@ -1000,14 +1001,19 @@ fn is_fatal_graph_error(error: &GraphError) -> bool {
         | GraphError::BiTemporal(_)
         | GraphError::UnknownNodeLabel(_)
         | GraphError::UnknownEdgeLabel(_)
-        | GraphError::UnknownPiiClass(_)
+        | GraphError::SealedEmbedding
+        | GraphError::DataSubjectMismatch { .. }
+        | GraphError::Backfill(_)
         | GraphError::ChangelogScopeMismatch { .. }
         | GraphError::InvalidChangelogScope => true,
-        // Ordinary backend/query failures degrade this leg.
+        // Ordinary backend/query failures degrade this leg. A crypto failure
+        // opening sealed content is treated the same: a transient KMS/backend
+        // hiccup should degrade the leg rather than fatally abort retrieval.
         GraphError::GraphQuery(_)
         | GraphError::Sidecar(_)
         | GraphError::NotFound(_)
-        | GraphError::Json(_) => false,
+        | GraphError::Json(_)
+        | GraphError::Crypto(_) => false,
         // Delegate to the vector classification.
         GraphError::Vector(error) => is_fatal_vector_error(error),
     }
@@ -1018,7 +1024,7 @@ fn is_fatal_vector_error(error: &VectorError) -> bool {
         // Embedding/index shape, privacy, backend-capability, and configuration
         // invariants: retrying or degrading would hide a real misconfiguration.
         VectorError::DimensionMismatch { .. }
-        | VectorError::UnknownPiiClass(_)
+        | VectorError::InvalidSensitivityClass(_)
         | VectorError::EmbedderConfig(_)
         | VectorError::EmbedderMismatch { .. }
         | VectorError::StoragePartitionEmbedderStateMissing { .. }

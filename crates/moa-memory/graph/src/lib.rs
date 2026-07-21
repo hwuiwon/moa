@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use uuid::Uuid;
 
+pub mod backfill;
 pub mod changelog;
 pub mod edge;
 pub mod error;
@@ -21,9 +22,9 @@ pub use edge::{EdgeLabel, EdgeWriteIntent};
 pub use error::GraphError;
 pub use lexical::LexicalStore;
 pub use node::{
-    ExistingSupersessionIntent, NodeEmbeddingIntent, NodeExpiryIntent, NodeIndexRow, NodeLabel,
-    NodePropertyUpdateIntent, NodeReinforcementIntent, NodeWriteIntent, PiiClass,
-    bump_last_accessed, lookup_seed_by_name, lookup_seeds_by_names,
+    ExistingSupersessionIntent, NodeContentUpdateIntent, NodeEmbeddingIntent, NodeExpiryIntent,
+    NodeIndexRow, NodeLabel, NodeReinforcementIntent, NodeWriteIntent, bump_last_accessed,
+    lookup_seed_by_name, lookup_seeds_by_names,
 };
 pub use store::PostgresGraphStore;
 pub use validity::push_validity_filter;
@@ -153,7 +154,7 @@ pub trait GraphStore: Send + Sync {
     /// Reinforces one active node that ingestion re-observed.
     ///
     /// Bumps `confidence` one `step` toward `cap` without lowering a higher
-    /// confidence, drops the `base_confidence` decay anchor, and touches
+    /// confidence, clears the `base_confidence` sidecar anchor, and touches
     /// `last_accessed_at`. Returns `true` when an active row was updated. The
     /// default implementation rejects the call for stores without relational
     /// reinforcement support.

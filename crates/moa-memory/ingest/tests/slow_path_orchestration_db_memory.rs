@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::Duration;
+use moa_core::types::security::SensitivityClass;
 use moa_memory_graph::{EdgeLabel, GraphWalkScoring, NodeLabel};
 use moa_memory_ingest::{
     DeterministicEntityMergeVerifier, IngestError, ScriptedFactExtractor, TurnChunk, extract_facts,
@@ -16,12 +17,13 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use support::{
-    SLOW_PATH_CONTACT_ID, TEST_LOCK, active_tenant_entity_rows, active_tenant_fact_rows,
-    active_user_entity_rows, active_user_fact_rows, configured_test_db, contradiction_edge_count,
-    create_changelog_payloads, create_fact, entity_resolution_edges, entity_rows, fact_rows,
-    fixed_time, ingest_ctx, ingest_ctx_with_pii, node_confidence, node_ranking_state,
-    node_valid_to, relates_to_edges, set_node_ranking_state, supersede_protocol_count,
-    supersedes_edge_exists, turn, user_fact_rows,
+    FixedPiiClassifier, SLOW_PATH_CONTACT_ID, TEST_LOCK, active_tenant_entity_rows,
+    active_tenant_fact_rows, active_user_entity_rows, active_user_fact_rows,
+    active_user_node_uids_with_clearances, barriered_turn, configured_test_db,
+    contradiction_edge_count, create_changelog_payloads, create_fact, entity_resolution_edges,
+    entity_rows, fact_rows, fixed_time, ingest_ctx, ingest_ctx_with_pii, node_barrier,
+    node_confidence, node_ranking_state, node_valid_to, relates_to_edges, set_node_ranking_state,
+    supersede_protocol_count, supersedes_edge_exists, turn, user_fact_rows,
 };
 
 #[derive(Debug, Deserialize)]
@@ -118,6 +120,127 @@ async fn slow_path_ingests_simple_document_and_writes_expected_facts_to_graph() 
             .len(),
         0
     );
+}
+
+#[tokio::test]
+async fn slow_path_sealed_fact_and_entities_write_without_embeddings_db_memory() {
+    // Pins: a PHI fact remains ingestible and envelope-sealed while fact and
+    // entity embedding paths stay disabled, including entity resolution's
+    // configured single-name fallback.
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let storage_partition_id = Uuid::now_v7();
+    let ctx = ingest_ctx_with_pii(
+        test_db.store().pool(),
+        storage_partition_id,
+        Arc::new(FixedPiiClassifier {
+            class: SensitivityClass::Phi,
+        }),
+    )
+    .await
+    .with_entity_embedding_blocking(true);
+
+    let report = ingest_turn_direct_with_ctx(
+        ctx,
+        turn(storage_partition_id, "Fact: patient SSN is 123-45-6789", 52),
+    )
+    .await
+    .expect("sealed slow-path fact should ingest without semantic indexing");
+
+    assert_eq!(report.inserted, 1);
+    assert_eq!(report.superseded, 0);
+    assert_eq!(report.reinforced, 0);
+    assert_eq!(report.skipped, 0);
+    assert_eq!(report.failed, 0);
+    assert_eq!(
+        durable_ingest_counts(test_db.store().pool(), storage_partition_id).await,
+        DurableIngestCounts {
+            graph_nodes: 3,
+            graph_creates: 5,
+            vectors: 0,
+            dedup_rows: 1,
+        }
+    );
+}
+
+#[tokio::test]
+async fn slow_path_tags_ingested_nodes_with_session_barrier_db_memory() {
+    // Pins: ingesting a turn that runs under an information barrier tags every
+    // graph node it writes — the fact and the entities resolved from it — with
+    // that barrier on `moa.node_index.barrier`, while an unbarriered turn leaves
+    // those rows NULL (the pre-existing three-tier behavior).
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let pool = test_db.store().pool();
+
+    // Barriered ingestion: the fact and its resolved entities inherit the tag.
+    let barriered_partition = Uuid::now_v7();
+    let ctx = ingest_ctx(pool, barriered_partition).await;
+    let report = ingest_turn_direct_with_ctx(
+        ctx,
+        barriered_turn(barriered_partition, "Fact: API uses Redis", 1, "deal-alpha"),
+    )
+    .await
+    .expect("barriered slow-path ingestion");
+    assert_eq!(report.inserted, 1);
+
+    // The fact and its resolved entities are all hidden from an uncleared caller
+    // and visible — carrying the tag — only to one cleared for "deal-alpha".
+    let fact_uids = active_user_node_uids_with_clearances(
+        pool,
+        barriered_partition,
+        NodeLabel::Fact,
+        &["deal-alpha"],
+    )
+    .await;
+    assert_eq!(fact_uids.len(), 1);
+    for uid in fact_uids {
+        assert_eq!(
+            node_barrier(pool, barriered_partition, uid, &["deal-alpha"])
+                .await
+                .as_deref(),
+            Some("deal-alpha"),
+            "ingested fact node must carry the session barrier"
+        );
+    }
+    let entity_uids = active_user_node_uids_with_clearances(
+        pool,
+        barriered_partition,
+        NodeLabel::Entity,
+        &["deal-alpha"],
+    )
+    .await;
+    assert!(
+        !entity_uids.is_empty(),
+        "fact ingestion should resolve at least one entity node"
+    );
+    for uid in entity_uids {
+        assert_eq!(
+            node_barrier(pool, barriered_partition, uid, &["deal-alpha"])
+                .await
+                .as_deref(),
+            Some("deal-alpha"),
+            "entity node resolved under the barrier must inherit it"
+        );
+    }
+
+    // Unbarriered ingestion: fact and entity rows stay NULL, unchanged behavior,
+    // and are visible without any clearance.
+    let open_partition = Uuid::now_v7();
+    let open_ctx = ingest_ctx(pool, open_partition).await;
+    ingest_turn_direct_with_ctx(open_ctx, turn(open_partition, "Fact: API uses Redis", 1))
+        .await
+        .expect("unbarriered slow-path ingestion");
+    for row in active_user_fact_rows(pool, open_partition).await {
+        assert_eq!(node_barrier(pool, open_partition, row.uid, &[]).await, None);
+    }
+    for row in active_user_entity_rows(pool, open_partition).await {
+        assert_eq!(node_barrier(pool, open_partition, row.uid, &[]).await, None);
+    }
 }
 
 #[tokio::test]

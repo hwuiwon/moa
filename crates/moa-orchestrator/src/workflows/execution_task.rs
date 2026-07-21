@@ -142,6 +142,13 @@ impl ExecutionTask for ExecutionTaskImpl {
         if request.task_id.to_string() != ctx.key() {
             return Err(TerminalError::new_with_code(404, "execution task id mismatch").into());
         }
+        if request.identity.tenant_id != request.tenant_id {
+            return Err(TerminalError::new_with_code(
+                409,
+                "execution task identity tenant mismatch",
+            )
+            .into());
+        }
         let scope = execution_scope(&request);
         let mut operation_index = 0_u64;
         loop {
@@ -189,7 +196,8 @@ impl ExecutionTask for ExecutionTaskImpl {
                 _ => {}
             }
 
-            let outcome = execute_task(self, &ctx, &prepared.run, &prepared.task).await;
+            let outcome =
+                execute_task(self, &ctx, &request.identity, &prepared.run, &prepared.task).await;
             let outcome = match outcome {
                 Ok(outcome) => outcome,
                 Err(error) => ExecutionTaskOutcome {
@@ -540,12 +548,13 @@ async fn prepare_task(
 async fn execute_task(
     workflow: &ExecutionTaskImpl,
     ctx: &WorkflowContext<'_>,
+    identity: &moa_core::traits::Identity,
     run: &ExecutionRunRecord,
     task: &ExecutionTaskRecord,
 ) -> Result<ExecutionTaskOutcome, HandlerError> {
     match &task.kind {
         LogicalTaskKind::Capability { reference } => {
-            execute_capability(workflow, ctx, run, task, reference).await
+            execute_capability(workflow, ctx, identity, run, task, reference).await
         }
         LogicalTaskKind::Agent {
             instructions,
@@ -557,6 +566,7 @@ async fn execute_task(
                 workflow,
                 ctx,
                 AgentExecutionRequest {
+                    identity,
                     run,
                     task,
                     instructions,
@@ -585,6 +595,7 @@ async fn execute_task(
                 workflow,
                 ctx,
                 AgentExecutionRequest {
+                    identity,
                     run,
                     task,
                     instructions,
@@ -604,6 +615,7 @@ async fn execute_task(
 async fn execute_capability(
     workflow: &ExecutionTaskImpl,
     ctx: &WorkflowContext<'_>,
+    identity: &moa_core::traits::Identity,
     run: &ExecutionRunRecord,
     task: &ExecutionTaskRecord,
     reference: &CapabilityReference,
@@ -620,6 +632,7 @@ async fn execute_capability(
         workflow,
         ctx,
         CapabilityInvocationContext {
+            identity,
             run,
             task,
             capability,
@@ -656,6 +669,7 @@ async fn execute_capability(
 }
 
 struct AgentExecutionRequest<'a> {
+    identity: &'a moa_core::traits::Identity,
     run: &'a ExecutionRunRecord,
     task: &'a ExecutionTaskRecord,
     instructions: &'a str,
@@ -670,6 +684,7 @@ async fn execute_agent(
     request: AgentExecutionRequest<'_>,
 ) -> Result<ExecutionTaskOutcome, HandlerError> {
     let AgentExecutionRequest {
+        identity,
         run,
         task,
         instructions,
@@ -773,6 +788,7 @@ async fn execute_agent(
                 workflow,
                 ctx,
                 CapabilityInvocationContext {
+                    identity,
                     run,
                     task,
                     capability,
@@ -822,6 +838,7 @@ async fn execute_agent(
 }
 
 struct CapabilityInvocationContext<'a> {
+    identity: &'a moa_core::traits::Identity,
     run: &'a ExecutionRunRecord,
     task: &'a ExecutionTaskRecord,
     capability: &'a ExecutionCapability,
@@ -841,6 +858,7 @@ async fn invoke_capability_tool(
     call_index: u64,
 ) -> Result<CapabilityInvocationResult, HandlerError> {
     let CapabilityInvocationContext {
+        identity,
         run,
         task,
         capability,
@@ -872,6 +890,7 @@ async fn invoke_capability_tool(
         ctx,
         GovernedInvocationRequest {
             session,
+            identity,
             session_id: run.session_id,
             tool_id,
             tool_call: &tool_call,

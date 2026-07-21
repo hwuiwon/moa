@@ -6,7 +6,7 @@ use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
 use moa_artifacts::validation::validate_for_status;
 use moa_brain::{
-    GraphMemoryPipelineOptions, TurnResult,
+    BrainTurnRequest, GraphMemoryPipelineOptions, TurnResult,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
@@ -104,6 +104,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
         dyn_session_store.clone(),
         GraphMemoryPipelineOptions {
             graph_pool,
+            kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
             shared_graph_memory_retriever: None,
             retrieval_embedder: None,
             shared_skill_injector: None,
@@ -125,13 +126,14 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
         )
         .await?;
 
-    let result = run_brain_turn(
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(tenant_id),
         session_id,
-        dyn_session_store.clone(),
-        provider.clone(),
-        &pipeline,
-        Some(router),
-    )
+        session_store: dyn_session_store.clone(),
+        llm_provider: provider.clone(),
+        pipeline: &pipeline,
+        tool_router: Some(router),
+    })
     .await?;
     assert_eq!(result, TurnResult::Complete);
 
@@ -296,6 +298,7 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
         session_store.clone(),
         GraphMemoryPipelineOptions {
             graph_pool,
+            kms: Arc::new(moa_crypto::LocalKmsProvider::new()),
             shared_graph_memory_retriever: None,
             retrieval_embedder: None,
             shared_skill_injector: None,
@@ -317,13 +320,14 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
         )
         .await?;
 
-    let result = run_brain_turn(
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(tenant_id),
         session_id,
-        session_store.clone(),
-        provider.clone(),
-        &pipeline,
-        Some(router),
-    )
+        session_store: session_store.clone(),
+        llm_provider: provider.clone(),
+        pipeline: &pipeline,
+        tool_router: Some(router),
+    })
     .await?;
     assert_eq!(result, TurnResult::Complete);
 
@@ -336,6 +340,16 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
     assert_eq!(tool_results[0].1.to_text(), "Pinned v1 checklist.");
 
     testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+fn test_identity(tenant_id: TenantId) -> moa_core::traits::Identity {
+    moa_core::traits::Identity {
+        identity_type: moa_core::traits::IdentityType::Operator,
+        id: uuid::Uuid::from_u128(0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c415),
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    }
 }
 
 /// Opts this tenant into running the materialized `run.sh` helper without

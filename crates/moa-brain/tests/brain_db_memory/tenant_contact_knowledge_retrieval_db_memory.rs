@@ -9,17 +9,29 @@ use moa_brain::pipeline::memory::GraphMemoryRetriever;
 use moa_brain::planning::{PlannedQuery, Strategy};
 use moa_brain::retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest};
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
-    traits::ContextProcessor, traits::EmbeddingProvider, traits::LineageHandle,
-    types::channel::Channel, types::contact::ContactId, types::contact::ContactRef,
-    types::contact::ContactVerificationState, types::context::ContextMessage,
-    types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
-    types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
+    traits::ContextProcessor,
+    traits::EmbeddingProvider,
+    traits::Identity,
+    traits::IdentityType,
+    traits::LineageHandle,
+    types::channel::Channel,
+    types::contact::ContactId,
+    types::contact::ContactRef,
+    types::contact::ContactVerificationState,
+    types::context::{ContextMessage, TURN_ID_METADATA_KEY},
+    types::identifiers::ModelId,
+    types::identifiers::SessionId,
+    types::identifiers::TenantId,
+    types::model::ModelCapabilities,
+    types::model::TokenPricing,
+    types::model::ToolCallFormat,
     types::session::SessionMeta,
 };
 use moa_db::ScopedConn;
 use moa_lineage_core::{LineageEvent, RetrievalLineage};
-use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
+use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{
     PgvectorStore, PromotionOptions, TurbopufferStore, VECTOR_DIMENSION, VectorPartitionPromotion,
@@ -101,8 +113,13 @@ async fn mock_tenant_and_contact_retrieval() {
 
     let session = contact_session(tenant_id, contact_id);
     let mut ctx = moa_core::types::context::WorkingContext::new(&session, capabilities());
+    ctx.set_caller_identity(authenticated_identity(
+        tenant_id,
+        IdentityType::Contact,
+        contact_id.0,
+    ));
     ctx.insert_metadata(
-        "_moa.turn_id",
+        TURN_ID_METADATA_KEY,
         serde_json::json!(Uuid::now_v7().to_string()),
     );
     ctx.append_message(ContextMessage::user(
@@ -112,6 +129,7 @@ async fn mock_tenant_and_contact_retrieval() {
     let retriever = GraphMemoryRetriever::new_with_config(
         abstention_disabled_config(),
         pool.clone(),
+        super::test_kms(),
         Some(Arc::new(TestEmbedder)),
     )
     .with_assume_app_role(true)
@@ -230,8 +248,13 @@ async fn mock_tenant_and_contact_retrieval() {
     let tenant_session = tenant_only_session(tenant_id);
     let mut tenant_ctx =
         moa_core::types::context::WorkingContext::new(&tenant_session, capabilities());
+    tenant_ctx.set_caller_identity(authenticated_identity(
+        tenant_id,
+        IdentityType::Operator,
+        Uuid::now_v7(),
+    ));
     tenant_ctx.insert_metadata(
-        "_moa.turn_id",
+        TURN_ID_METADATA_KEY,
         serde_json::json!(Uuid::now_v7().to_string()),
     );
     tenant_ctx.append_message(ContextMessage::user("Find the pto runbook answer"));
@@ -239,6 +262,7 @@ async fn mock_tenant_and_contact_retrieval() {
     let tenant_retriever = GraphMemoryRetriever::new_with_config(
         abstention_disabled_config(),
         pool.clone(),
+        super::test_kms(),
         Some(Arc::new(TestEmbedder)),
     )
     .with_assume_app_role(true)
@@ -302,6 +326,170 @@ async fn mock_tenant_and_contact_retrieval() {
             other_contact_fact_uid,
             "redacted:tenant-contact-knowledge-test",
         )
+        .await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn retrieval_records_one_data_access_audit_event_per_operation_db_memory() {
+    // Pins: a protected memory retrieval emits exactly ONE OCSF data-access
+    // (Datastore Activity 6005) event — a per-operation summary, never one per
+    // node — recording the accessing contact, the tenant/contact scope, and the
+    // returned-record count, while carrying no node content or name. A non-Skip
+    // retrieval that returned zero records still records the access attempt with
+    // count 0. Mutation check: delete the `emit_data_access_audit` call in
+    // `GraphMemoryRetriever::retrieve_admitted_hits` and the "exactly one event"
+    // assertion below fails.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool().clone();
+
+    // Scenario 1: a contact retrieval that returns one record.
+    let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
+    seed_storage_partition_embedder_state(&pool, tenant_id)
+        .await
+        .expect("seed tenant vector embedder state");
+    let contact_graph = graph_store(pool.clone(), RlsContext::contact(tenant_id, contact_id));
+    let secret_summary = "current contact prefers blue deployment windows";
+    let node_name = "contact deployment preference answer";
+    let contact_fact_uid = contact_graph
+        .create_node(node_intent(
+            tenant_id,
+            Some(contact_id),
+            NodeLabel::Fact,
+            node_name,
+            json!({ "summary": secret_summary }),
+        ))
+        .await
+        .expect("create current contact fact");
+
+    let session = contact_session(tenant_id, contact_id);
+    let mut ctx = moa_core::types::context::WorkingContext::new(&session, capabilities());
+    ctx.set_caller_identity(authenticated_identity(
+        tenant_id,
+        IdentityType::Contact,
+        contact_id.0,
+    ));
+    let turn_id = Uuid::now_v7();
+    ctx.insert_metadata(TURN_ID_METADATA_KEY, json!(turn_id.to_string()));
+    ctx.append_message(ContextMessage::user(
+        "Find the contact deployment preference answer",
+    ));
+    let retriever = GraphMemoryRetriever::new_with_config(
+        abstention_disabled_config(),
+        pool.clone(),
+        super::test_kms(),
+        Some(Arc::new(TestEmbedder)),
+    )
+    .with_assume_app_role(true)
+    .with_result_limit(6);
+    let output = retriever
+        .process(&mut ctx)
+        .await
+        .expect("graph memory retrieval should assemble context");
+    let admitted = output
+        .items_included
+        .iter()
+        .filter(|item| item.starts_with("graph:"))
+        .count();
+    assert!(
+        admitted >= 1,
+        "retrieval should admit the seeded contact fact: {output:?}"
+    );
+
+    let event = await_data_access_event(&pool, tenant_id).await;
+    assert_eq!(
+        data_access_event_count(&pool, tenant_id).await,
+        1,
+        "exactly one data-access event per retrieval operation (not one per node)"
+    );
+    assert_eq!(
+        event.actor_user_uid.as_deref(),
+        Some(format!("contact:{contact_id}").as_str()),
+        "the accessing contact must be the queryable actor"
+    );
+    assert_eq!(
+        event.target_resource_uid.as_deref(),
+        Some(format!("memory:contact:{tenant_id}:{contact_id}").as_str()),
+        "the accessed scope must be the queryable target resource"
+    );
+    let payload: Value = serde_json::from_slice(&event.event_jcs).expect("event_jcs is JSON");
+    assert_eq!(payload["access"]["scope_tier"], json!("contact"));
+    assert_eq!(
+        payload["access"]["turn_uid"],
+        json!(format!("turn:{turn_id}")),
+        "the triggering turn links the access to retrieval lineage"
+    );
+    let records_returned = payload["access"]["records_returned"]
+        .as_u64()
+        .expect("records_returned present");
+    assert!(
+        records_returned >= 1,
+        "returned-record count reflects the admitted hits: {payload}"
+    );
+    let jcs_text = String::from_utf8_lossy(&event.event_jcs);
+    assert!(
+        !jcs_text.contains(secret_summary),
+        "node content must never appear in the access event: {jcs_text}"
+    );
+    assert!(
+        !jcs_text.contains(node_name),
+        "node name must never appear in the access event: {jcs_text}"
+    );
+
+    // Scenario 2: a non-Skip retrieval against an empty scope still records an
+    // access attempt with a zero record count.
+    let empty_tenant_id = TenantId::new();
+    let empty_contact_id = ContactId::new();
+    seed_storage_partition_embedder_state(&pool, empty_tenant_id)
+        .await
+        .expect("seed empty tenant vector embedder state");
+    let empty_session = contact_session(empty_tenant_id, empty_contact_id);
+    let mut empty_ctx =
+        moa_core::types::context::WorkingContext::new(&empty_session, capabilities());
+    empty_ctx.set_caller_identity(authenticated_identity(
+        empty_tenant_id,
+        IdentityType::Contact,
+        empty_contact_id.0,
+    ));
+    empty_ctx.insert_metadata(TURN_ID_METADATA_KEY, json!(Uuid::now_v7().to_string()));
+    empty_ctx.append_message(ContextMessage::user(
+        "Find the contact deployment preference answer",
+    ));
+    let empty_retriever = GraphMemoryRetriever::new_with_config(
+        abstention_disabled_config(),
+        pool.clone(),
+        super::test_kms(),
+        Some(Arc::new(TestEmbedder)),
+    )
+    .with_assume_app_role(true)
+    .with_result_limit(6);
+    empty_retriever
+        .process(&mut empty_ctx)
+        .await
+        .expect("empty retrieval should still run");
+    let empty_event = await_data_access_event(&pool, empty_tenant_id).await;
+    assert_eq!(
+        data_access_event_count(&pool, empty_tenant_id).await,
+        1,
+        "the zero-record retrieval records exactly one access attempt"
+    );
+    let empty_payload: Value =
+        serde_json::from_slice(&empty_event.event_jcs).expect("event_jcs is JSON");
+    assert_eq!(
+        empty_payload["access"]["records_returned"],
+        json!(0),
+        "a zero-record retrieval still records the access attempt"
+    );
+
+    let _ = contact_graph
+        .hard_purge(contact_fact_uid, "redacted:data-access-audit-test")
         .await;
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)
@@ -650,7 +838,51 @@ async fn vector_promotion_bumps_retrieval_cache_version() {
 
 fn graph_store(pool: PgPool, scope: RlsContext) -> PostgresGraphStore {
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
-    PostgresGraphStore::scoped_for_app_role(pool, scope).with_vector_store(vector)
+    PostgresGraphStore::scoped_for_app_role(pool, scope, super::test_kms())
+        .with_vector_store(vector)
+}
+
+/// One persisted memory data-access (Datastore Activity 6005) audit event.
+struct DataAccessRow {
+    actor_user_uid: Option<String>,
+    target_resource_uid: Option<String>,
+    event_jcs: Vec<u8>,
+}
+
+/// Counts persisted data-access audit events for a tenant.
+async fn data_access_event_count(pool: &PgPool, tenant_id: TenantId) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM security_events WHERE tenant_id = $1 AND class_uid = 6005",
+    )
+    .bind(tenant_id.0)
+    .fetch_one(pool)
+    .await
+    .expect("count data-access events")
+}
+
+/// Polls for the single data-access event for `tenant_id`, tolerating the
+/// background audit writer's batched, best-effort flush.
+async fn await_data_access_event(pool: &PgPool, tenant_id: TenantId) -> DataAccessRow {
+    for _ in 0..100 {
+        let row: Option<(Option<String>, Option<String>, Vec<u8>)> = sqlx::query_as(
+            "SELECT actor_user_uid, target_resource_uid, event_jcs \
+             FROM security_events WHERE tenant_id = $1 AND class_uid = 6005 \
+             ORDER BY occurred_at DESC LIMIT 1",
+        )
+        .bind(tenant_id.0)
+        .fetch_optional(pool)
+        .await
+        .expect("query data-access event");
+        if let Some((actor_user_uid, target_resource_uid, event_jcs)) = row {
+            return DataAccessRow {
+                actor_user_uid,
+                target_resource_uid,
+                event_jcs,
+            };
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("data-access event for tenant {tenant_id} never landed");
 }
 
 /// Runtime config with memory-stage whole-window abstention disabled.
@@ -709,7 +941,9 @@ fn node_intent(
     properties: serde_json::Value,
 ) -> NodeWriteIntent {
     NodeWriteIntent {
+        barrier: None,
         uid: Uuid::now_v7(),
+        data_subject_id: contact_id.map_or(tenant_id.0, |contact_id| contact_id.0),
         label,
         storage_partition_id: Some(tenant_id.to_string()),
         contact_id: contact_id.map(|id| id.to_string()),
@@ -720,7 +954,7 @@ fn node_intent(
         },
         name: name.to_string(),
         properties,
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         confidence: Some(0.95),
         valid_from: Utc::now(),
         embedding: Some(test_embedding(name)),
@@ -938,13 +1172,14 @@ fn planned_chunk_query(tenant_id: TenantId, _query: &str) -> PlannedQuery {
 
 fn tenant_chunk_request(tenant_id: TenantId, query: &str) -> RetrievalRequest {
     RetrievalRequest {
+        cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: query.to_string(),
         query_embedding: test_embedding(query),
         scope: tenant_memory_scope(tenant_id),
         label_filter: Some(vec![NodeLabel::Chunk]),
         label_boost: None,
-        max_pii_class: PiiClass::Restricted,
+        max_pii_class: SensitivityClass::Restricted,
         k_final: 5,
         use_reranker: false,
         strategy: Some(Strategy::Both),
@@ -1010,6 +1245,16 @@ fn contact_session(tenant_id: TenantId, contact_id: ContactId) -> SessionMeta {
             verified_contact_point_ids: Vec::new(),
         }),
         ..SessionMeta::default()
+    }
+}
+
+fn authenticated_identity(tenant_id: TenantId, identity_type: IdentityType, id: Uuid) -> Identity {
+    Identity {
+        identity_type,
+        id,
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
     }
 }
 

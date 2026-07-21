@@ -1,6 +1,7 @@
 //! Graph and vector persistence for tenant knowledge ingestion.
 
 use super::*;
+use moa_core::types::memory::InformationBarrierId;
 
 /// Graph write report returned by the tenant-knowledge graph sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -34,16 +35,23 @@ pub struct MemoryKnowledgeGraphWriter<G> {
     graph: Arc<G>,
     scope: MemoryScope,
     actor_id: String,
+    information_barrier: Option<InformationBarrierId>,
 }
 
 impl<G> MemoryKnowledgeGraphWriter<G> {
     /// Creates a graph writer using an existing scoped graph store.
     #[must_use]
-    pub fn new(graph: Arc<G>, scope: MemoryScope, actor_id: impl Into<String>) -> Self {
+    pub fn new(
+        graph: Arc<G>,
+        scope: MemoryScope,
+        actor_id: impl Into<String>,
+        information_barrier: Option<InformationBarrierId>,
+    ) -> Self {
         Self {
             graph,
             scope,
             actor_id: actor_id.into(),
+            information_barrier,
         }
     }
 }
@@ -100,14 +108,16 @@ where
             let embedding = embeddings.get(&node.uid).cloned();
             let embedding_text = embedding.as_ref().and_then(|_| node.embedding_text.clone());
             create_intents.push(NodeWriteIntent {
+                barrier: self.information_barrier.clone(),
                 uid: node.uid,
+                data_subject_id: self.scope.tenant_id().0,
                 label: node_label(&node.label)?,
                 storage_partition_id: Some(self.scope.tenant_id().0.to_string()),
                 contact_id: None,
                 scope: "tenant".to_string(),
                 name: node_name(&node.label, &properties),
                 properties,
-                pii_class: PiiClass::None,
+                pii_class: SensitivityClass::None,
                 confidence: Some(node.confidence.unwrap_or(0.95)),
                 valid_from: Utc::now(),
                 embedding,

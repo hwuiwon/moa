@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use moa_memory_graph::PiiClass;
+use moa_core::types::security::SensitivityClass;
 use moa_memory_pii::{OpenAiPrivacyFilterClassifier, PiiClassifier};
 
 fn live_service_url() -> String {
@@ -28,7 +28,7 @@ async fn live_sidecar_classifies_private_and_clean_text() {
     assert!(
         matches!(
             private.class,
-            PiiClass::Pii | PiiClass::Phi | PiiClass::Restricted
+            SensitivityClass::Pii | SensitivityClass::Phi | SensitivityClass::Restricted
         ),
         "{private:?}"
     );
@@ -38,5 +38,5 @@ async fn live_sidecar_classifies_private_and_clean_text() {
         .classify("the auth service uses JWT")
         .await
         .expect("classify clean text with live sidecar");
-    assert_eq!(clean.class, PiiClass::None, "{clean:?}");
+    assert_eq!(clean.class, SensitivityClass::None, "{clean:?}");
 }

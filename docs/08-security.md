@@ -104,6 +104,27 @@ and rejects reuse. Until MOA has a shared durable grant store, code must not
 expose MCP credential grants across requests or depend on another Kubernetes
 replica being able to resolve them.
 
+## Encryption And Key Management
+
+Persisted restricted/PHI memory and self-hosted token-vault values use envelope
+encryption. Postgres owns shared generation metadata and per-subject wrapped
+KEKs; Kubernetes supplies generation-named root-key files through the
+externally provisioned `moa-kms-root-keys` Secret. Root keys are never stored in
+Postgres, configuration values, logs, or model-visible context.
+
+All orchestrator replicas and opt-in encryption maintenance Jobs mount the same
+keyring read-only at `/var/run/secrets/moa-kms/root-keys` and select the
+Postgres KMS provider. The edge has no KMS responsibility and must not receive
+that Secret. Startup/readiness fails when the configured required generation is
+not database-active or a generation referenced by a live KEK is absent from the
+mounted ring; there is no production fallback to per-process keys.
+
+Root-key rotation is additive and generation-aware: mount the new key alongside
+all referenced historical keys, activate and rewrap in bounded resumable work,
+retire an unreferenced old generation, then remove its file. See
+[KMS Root-Key Rotation](operations/kms-root-key-rotation.md) for the required
+rolling-deployment order and maintenance Jobs.
+
 ## Sandbox Tiers
 
 | Tier | Isolation | Default use |

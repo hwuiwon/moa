@@ -8,6 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_core::config::MemoryExtractionConfig;
 use moa_core::config::MoaConfig;
+use moa_core::types::provider::ProviderId;
 use moa_memory_graph::NodeIndexRow;
 use moa_memory_ingest::{
     COMPATIBLE_PROMPT_VERSIONS, EXTRACTION_PROMPT_VERSION, EntityMergeFixtureRecord,
@@ -15,7 +16,7 @@ use moa_memory_ingest::{
     ModelEntityMergeVerifier, ModelFactExtractor, RecordedFact, RecordedFactExtractor, chunk_hash,
     chunk_turn, merge_fixture_key,
 };
-use moa_providers::{ProviderId, resolve_provider_selection};
+use moa_providers::resolve_provider_selection;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};

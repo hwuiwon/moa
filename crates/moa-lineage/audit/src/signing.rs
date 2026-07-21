@@ -6,9 +6,21 @@ use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey as DalekSigningKey, Verifier, VerifyingKey};
 use serde::Serialize;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::error::{AuditError, Result};
 use moa_lineage_core::chain::canonical_json_bytes;
+
+/// Stable `key_id()` reported by the per-tenant signer as a whole. Individual
+/// roots carry a partition-specific label from [`per_tenant_key_label`].
+const PER_TENANT_SIGNER_KEY_ID: &str = "audit-root:per-tenant";
+
+/// Label prefix applied to per-tenant audit-root signing keys.
+const PER_TENANT_KEY_LABEL_PREFIX: &str = "audit-root:";
+
+/// Domain-separation tag mixed into per-tenant seed derivation so the root seed
+/// cannot be confused with any other key material derived from the same bytes.
+const PER_TENANT_SEED_DOMAIN: &[u8] = b"moa.lineage.audit.per-tenant-root.v1";
 
 /// Canonical payload signed for a published audit root.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -85,6 +97,15 @@ impl AuditRootSignature {
 pub trait AuditRootSigner: Send + Sync {
     /// Returns the stable signing key identifier.
     fn key_id(&self) -> &str;
+
+    /// Returns the signing key label expected for one storage partition.
+    ///
+    /// Single-key signers ignore the partition and return their global
+    /// [`key_id`](Self::key_id); per-tenant signers derive a partition-specific
+    /// label so verification binds each root to its tenant's key.
+    fn key_id_for(&self, _storage_partition_id: &str) -> String {
+        self.key_id().to_string()
+    }
 
     /// Returns the Ed25519 verifying key bytes when locally available.
     fn verifying_key(&self) -> Result<[u8; 32]>;
@@ -191,6 +212,124 @@ impl AuditRootSigner for LocalAuditRootSigner {
     }
 }
 
+/// Deployment root seed used to derive per-tenant audit-root signing keys.
+///
+/// The seed is a deployment secret. It is held in a zeroizing wrapper, is never
+/// logged, and is never serialized; only derived per-tenant labels and key
+/// identifiers are safe to record.
+#[derive(Clone)]
+pub struct AuditRootSeed(Zeroizing<[u8; 32]>);
+
+impl AuditRootSeed {
+    /// Wraps 32 bytes of deployment secret material as a root seed.
+    #[must_use]
+    pub fn from_bytes(seed: [u8; 32]) -> Self {
+        Self(Zeroizing::new(seed))
+    }
+}
+
+impl std::fmt::Debug for AuditRootSeed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuditRootSeed(<redacted>)")
+    }
+}
+
+/// Returns the per-tenant signing key label for one storage partition.
+#[must_use]
+pub fn per_tenant_key_label(storage_partition_id: &str) -> String {
+    format!("{PER_TENANT_KEY_LABEL_PREFIX}{storage_partition_id}")
+}
+
+/// Deterministically derives a per-tenant Ed25519 seed from the deployment root
+/// seed and a storage partition id.
+///
+/// Uses a BLAKE3 keyed hash (a PRF) with the root seed as the key and a
+/// domain-separated storage partition id as the message, so distinct partitions
+/// yield independent 32-byte seeds and the same inputs always reproduce the same
+/// seed. Compromise of one tenant's derived key reveals nothing about the root
+/// seed or any other tenant's key.
+fn derive_tenant_seed(root_seed: &[u8; 32], storage_partition_id: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_keyed(root_seed);
+    hasher.update(PER_TENANT_SEED_DOMAIN);
+    hasher.update(&[0x00]);
+    hasher.update(storage_partition_id.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+/// Per-tenant audit-root signer that derives a distinct Ed25519 key per storage
+/// partition from a single deployment root seed.
+///
+/// Each tenant's published audit root is signed with a key derived from
+/// `(root_seed, storage_partition_id)`, so one tenant's key compromise cannot
+/// forge another tenant's trail, and each tenant can independently verify its
+/// own chain. Derivation is deterministic, so no per-tenant key needs to be
+/// stored: the same root seed reproduces the exact verifying key.
+#[derive(Clone)]
+pub struct PerTenantAuditRootSigner {
+    root_seed: AuditRootSeed,
+}
+
+impl PerTenantAuditRootSigner {
+    /// Creates a per-tenant signer from a deployment root seed.
+    #[must_use]
+    pub fn new(root_seed: AuditRootSeed) -> Self {
+        Self { root_seed }
+    }
+
+    /// Derives the full Ed25519 signing key (label and key material) for one
+    /// storage partition. This is the key an audit-root publisher signs with.
+    #[must_use]
+    pub fn signing_key_for(&self, storage_partition_id: &str) -> SigningKey {
+        let seed = derive_tenant_seed(&self.root_seed.0, storage_partition_id);
+        SigningKey::from_seed(per_tenant_key_label(storage_partition_id), seed)
+    }
+
+    /// Derives the Ed25519 verifying key bytes for one storage partition.
+    #[must_use]
+    pub fn verifying_key_for(&self, storage_partition_id: &str) -> [u8; 32] {
+        self.signing_key_for(storage_partition_id)
+            .verifying_key_bytes()
+    }
+
+    /// Verifies an audit-root signature against the tenant key derived from the
+    /// payload's storage partition.
+    ///
+    /// A payload signed for one tenant fails verification here for any other
+    /// tenant, and any payload mutation invalidates the signature.
+    pub fn verify_root(&self, payload: &AuditRootSignaturePayload, signature: &[u8]) -> Result<()> {
+        let verifying_key = self.verifying_key_for(&payload.storage_partition_id);
+        verify_audit_root_signature(payload, signature, &verifying_key)
+    }
+}
+
+#[async_trait]
+impl AuditRootSigner for PerTenantAuditRootSigner {
+    fn key_id(&self) -> &str {
+        PER_TENANT_SIGNER_KEY_ID
+    }
+
+    fn key_id_for(&self, storage_partition_id: &str) -> String {
+        per_tenant_key_label(storage_partition_id)
+    }
+
+    fn verifying_key(&self) -> Result<[u8; 32]> {
+        Err(AuditError::Invalid(
+            "per-tenant audit-root signer has no single verifying key; \
+             derive one per storage partition with verifying_key_for"
+                .to_string(),
+        ))
+    }
+
+    async fn sign_root(&self, payload: &AuditRootSignaturePayload) -> Result<AuditRootSignature> {
+        let signing_key = self.signing_key_for(&payload.storage_partition_id);
+        Ok(AuditRootSignature {
+            key_id: signing_key.label().to_string(),
+            verifying_key: signing_key.verifying_key_bytes(),
+            signature: signing_key.sign_audit_root(payload)?,
+        })
+    }
+}
+
 pub(crate) fn verify_audit_root_signature(
     payload: &AuditRootSignaturePayload,
     signature: &[u8],
@@ -206,7 +345,10 @@ pub(crate) fn verify_audit_root_signature(
 
 #[cfg(test)]
 mod tests {
-    use super::{AuditRootSignaturePayload, AuditRootSigner, LocalAuditRootSigner, SigningKey};
+    use super::{
+        AuditRootSeed, AuditRootSignaturePayload, AuditRootSigner, LocalAuditRootSigner,
+        PerTenantAuditRootSigner, SigningKey, verify_audit_root_signature,
+    };
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -283,5 +425,121 @@ mod tests {
             "COMPLIANCE",
             key_id,
         )
+    }
+
+    fn per_tenant_payload(storage_partition_id: &str, label: &str) -> AuditRootSignaturePayload {
+        AuditRootSignaturePayload::new(
+            Uuid::now_v7(),
+            storage_partition_id,
+            Utc::now(),
+            Utc::now(),
+            42,
+            &[9_u8; 32],
+            Utc::now(),
+            "COMPLIANCE",
+            label,
+        )
+    }
+
+    #[tokio::test]
+    async fn per_tenant_signer_derives_distinct_keys_labels_and_signatures() {
+        // Pins: one deployment root seed yields a distinct Ed25519 key, label,
+        // and signature per storage partition, so one tenant's compromised key
+        // cannot forge another tenant's audit root.
+        let signer = PerTenantAuditRootSigner::new(AuditRootSeed::from_bytes([3_u8; 32]));
+
+        let key_a = signer.verifying_key_for("tenant-a");
+        let key_b = signer.verifying_key_for("tenant-b");
+        assert_ne!(
+            key_a, key_b,
+            "distinct partitions must derive distinct keys"
+        );
+
+        let label_a = signer.key_id_for("tenant-a");
+        let label_b = signer.key_id_for("tenant-b");
+        assert_eq!(label_a, "audit-root:tenant-a");
+        assert_ne!(
+            label_a, label_b,
+            "distinct partitions must derive distinct labels"
+        );
+
+        let payload_a = per_tenant_payload("tenant-a", &label_a);
+        let payload_b = per_tenant_payload("tenant-b", &label_b);
+        let signed_a = signer.sign_root(&payload_a).await.expect("sign tenant a");
+        let signed_b = signer.sign_root(&payload_b).await.expect("sign tenant b");
+
+        assert_ne!(
+            signed_a.signature, signed_b.signature,
+            "distinct partitions must produce distinct signatures"
+        );
+        assert_eq!(signed_a.key_id, label_a);
+        assert_eq!(signed_a.verifying_key, key_a);
+
+        signed_a
+            .verify_payload(&payload_a)
+            .expect("tenant a signature should verify under tenant a key");
+        signed_b
+            .verify_payload(&payload_b)
+            .expect("tenant b signature should verify under tenant b key");
+    }
+
+    #[tokio::test]
+    async fn per_tenant_signer_key_derivation_is_deterministic() {
+        // Pins: the same (root seed, storage partition) reproduces the identical
+        // verifying key, so no per-tenant key needs to be stored to verify.
+        let seed = [7_u8; 32];
+        let signer_one = PerTenantAuditRootSigner::new(AuditRootSeed::from_bytes(seed));
+        let signer_two = PerTenantAuditRootSigner::new(AuditRootSeed::from_bytes(seed));
+
+        assert_eq!(
+            signer_one.verifying_key_for("tenant-a"),
+            signer_two.verifying_key_for("tenant-a"),
+            "same root seed + partition must reproduce the identical verifying key"
+        );
+
+        let label = signer_one.key_id_for("tenant-a");
+        let payload = per_tenant_payload("tenant-a", &label);
+        let signed = signer_one.sign_root(&payload).await.expect("sign");
+        signer_two
+            .verify_root(&payload, &signed.signature)
+            .expect("independently reproduced key should verify the signature");
+    }
+
+    #[tokio::test]
+    async fn per_tenant_signer_root_does_not_verify_under_other_tenant_key() {
+        // Pins: a root signed for tenant A must not verify under tenant B's
+        // derived key, so a per-tenant key compromise cannot forge cross-tenant.
+        let signer = PerTenantAuditRootSigner::new(AuditRootSeed::from_bytes([9_u8; 32]));
+        let label_a = signer.key_id_for("tenant-a");
+        let payload_a = per_tenant_payload("tenant-a", &label_a);
+        let signed_a = signer.sign_root(&payload_a).await.expect("sign tenant a");
+
+        let key_b = signer.verifying_key_for("tenant-b");
+        assert!(
+            verify_audit_root_signature(&payload_a, &signed_a.signature, &key_b).is_err(),
+            "a root signed for tenant A must not verify under tenant B's derived key"
+        );
+    }
+
+    #[tokio::test]
+    async fn per_tenant_signer_rejects_payload_tampering() {
+        // Pins: mutating the signed payload (record_count) invalidates the
+        // per-tenant signature under the tenant-aware verification path.
+        let signer = PerTenantAuditRootSigner::new(AuditRootSeed::from_bytes([11_u8; 32]));
+        let label = signer.key_id_for("tenant-a");
+        let payload = per_tenant_payload("tenant-a", &label);
+        let signed = signer.sign_root(&payload).await.expect("sign");
+
+        let mut tampered = payload.clone();
+        tampered.record_count += 1;
+
+        assert!(
+            signer.verify_root(&tampered, &signed.signature).is_err(),
+            "record-count tampering must invalidate the per-tenant signature"
+        );
+        assert!(
+            signed.verify_payload(&tampered).is_err(),
+            "record-count tampering must invalidate the returned signature"
+        );
     }
 }

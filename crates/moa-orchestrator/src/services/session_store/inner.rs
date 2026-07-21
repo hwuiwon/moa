@@ -2,7 +2,9 @@
 
 use super::*;
 use moa_agents::AgentResolver;
-use moa_authz::{enqueue, enqueue_raw};
+use moa_authz::{
+    AuthzError, FgaClient, OutboxPoller, PollerConfig, enqueue, enqueue_raw, fga_subject,
+};
 use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
 use moa_core::{
     events::Event,
@@ -18,6 +20,47 @@ use moa_core::{
 };
 use moa_session::SessionChannelBindingReplacement;
 use sqlx::{Postgres, Transaction};
+
+/// Flushes one session's committed authorization tuples and verifies that the
+/// creating identity is visible as a participant before the session is used.
+///
+/// The outbox row and its generation remain the cross-replica authority. The
+/// targeted flush may take over a concurrent background lease, so correctness
+/// does not depend on a particular pod or polling interval.
+pub(crate) async fn ensure_session_authz_visible(
+    pool: &sqlx::PgPool,
+    fga: &FgaClient,
+    identity: &Identity,
+    session_id: SessionId,
+) -> Result<(), HandlerError> {
+    let object = format!("{}:{session_id}", ObjectType::Session);
+    let delivered = OutboxPoller::new(pool.clone(), fga.clone(), PollerConfig::default())
+        .flush_object(&object)
+        .await
+        .map_err(HandlerError::from)?;
+    if delivered == 0 {
+        return Err(TerminalError::new_with_code(
+            503,
+            "session authorization tuples were not committed",
+        )
+        .into());
+    }
+
+    let visible = fga
+        .check(
+            &fga_subject(identity),
+            &Relation::Participant.to_string(),
+            &object,
+        )
+        .await
+        .map_err(HandlerError::from)?;
+    if !visible {
+        return Err(HandlerError::from(AuthzError::Ambiguous(
+            "session authorization tuples are not visible".to_string(),
+        )));
+    }
+    Ok(())
+}
 
 /// Enqueues the authorization outbox tuples that grant a session's first caller
 /// ownership plus the tenant and (optional) contact parent edges.

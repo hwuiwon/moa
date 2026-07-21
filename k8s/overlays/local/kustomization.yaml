@@ -26,6 +26,12 @@ secretGenerator:
       - region=us-east-1
       - access-key-id=moaadmin
       - secret-access-key=moa-local-dev-secret
+  # Fixed, checked-in development material keeps encrypted local data readable
+  # across pod/cluster restarts. It must never be reused outside local overlays.
+  - name: moa-kms-root-keys
+    namespace: moa-system
+    files:
+      - primary=kms-root-keys/primary
 
 images:
   - name: ghcr.io/hwuiwon/moa-orchestrator

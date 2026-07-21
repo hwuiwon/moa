@@ -29,6 +29,11 @@ impl TestApiClient {
         self
     }
 
+    /// Returns the exact identity attached to this test client.
+    pub fn identity(&self) -> Option<&Identity> {
+        self.identity.as_ref()
+    }
+
     /// Persists one session metadata row.
     pub async fn create_session(&self, meta: SessionMeta) -> Result<SessionId> {
         self.post_call("/SessionStore/create_session", &meta).await
@@ -172,14 +177,8 @@ impl TestApiClient {
         let Some(identity) = &self.identity else {
             return request;
         };
-        let identity_type = match identity.identity_type {
-            IdentityType::Operator => "operator",
-            IdentityType::Agent => "agent",
-            IdentityType::Service => "service",
-            IdentityType::Contact => "contact",
-        };
         let mut request = request
-            .header("x-moa-identity-type", identity_type)
+            .header("x-moa-identity-type", identity.identity_type.as_str())
             .header("x-moa-identity-id", identity.id.to_string())
             .header("x-moa-tenant-id", identity.tenant_id.to_string());
         if let Some(api_key_id) = identity.api_key_id {

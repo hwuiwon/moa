@@ -24,6 +24,7 @@ use crate::support::session_store_service::{
     get_events_request, storage_partition_id_from_meta, test_session_meta,
 };
 use moa_test_support::postgres::test_database_url;
+use moa_test_support::process::TestChildGuard;
 
 #[path = "support/mod.rs"]
 mod support;
@@ -75,7 +76,7 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
     };
 
     let ports = reserve_orchestrator_ports()?;
-    let mut orchestrator = spawn_orchestrator(ports)?;
+    let _orchestrator = TestChildGuard::new(spawn_orchestrator(ports)?);
     let endpoint_url = deployment_endpoint_url(ports.restate);
     let pool = PgPool::connect(&test_database_url())
         .await
@@ -88,6 +89,11 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
         let ingress = ingress.as_str();
         let meta = test_session_meta("llm-gateway-e2e");
         let storage_partition_id = storage_partition_id_from_meta(&meta);
+        let contact_id = meta
+            .contact
+            .as_ref()
+            .context("LLM gateway fixture session must carry a contact")?
+            .contact_id;
         let mut identity = test_user_identity();
         identity.tenant_id = meta.tenant_id;
         grant_tenant_operator(&identity, &storage_partition_id).await?;
@@ -113,11 +119,12 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
             "_moa.tenant_id".to_string(),
             json!(storage_partition_id.to_string()),
         );
-        metadata.insert(
-            "_moa.contact_id".to_string(),
-            json!(identity.id.to_string()),
-        );
+        metadata.insert("_moa.contact_id".to_string(), json!(contact_id.to_string()));
         metadata.insert("_moa.channel".to_string(), json!(meta.channel.as_str()));
+        metadata.insert(
+            "_moa.user_turn".to_string(),
+            json!("What is 2 + 2? Answer briefly."),
+        );
 
         let request = CompletionRequest {
             model: Some(model.into()),
@@ -168,8 +175,6 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
     }
     .await;
 
-    let _ = orchestrator.kill();
-    let _ = orchestrator.wait();
     pool.close().await;
 
     result

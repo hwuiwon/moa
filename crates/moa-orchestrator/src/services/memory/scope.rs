@@ -1,10 +1,7 @@
 //! User and contact scope validation for memory service requests.
 
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::{
-    types::contact::ContactId, types::identifiers::TenantId, types::identifiers::UserId,
-};
-use moa_memory_types::MemoryScope;
+use moa_core::{types::contact::ContactId, types::identifiers::UserId};
 
 /// User-scope validation error for memory requests.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -28,31 +25,6 @@ pub fn effective_user_id(identity: &Identity) -> Option<UserId> {
             .acting_on_behalf_of
             .map(|user_id| UserId::new(user_id.to_string())),
         IdentityType::Service | IdentityType::Contact => None,
-    }
-}
-
-/// Builds the memory read scope after validating any requested user scope.
-pub fn checked_memory_scope(
-    tenant_id: TenantId,
-    requested_contact_id: Option<ContactId>,
-    identity: &Identity,
-) -> Result<MemoryScope, UserScopeError> {
-    match requested_contact_id {
-        Some(requested) => {
-            if identity.identity_type == IdentityType::Contact
-                && ContactId(identity.id) != requested
-            {
-                return Err(UserScopeError::Mismatch {
-                    requested: UserId::new(requested.to_string()),
-                    effective: identity.id.to_string(),
-                });
-            }
-            Ok(MemoryScope::Contact {
-                tenant_id,
-                contact_id: requested,
-            })
-        }
-        None => Ok(MemoryScope::Tenant { tenant_id }),
     }
 }
 

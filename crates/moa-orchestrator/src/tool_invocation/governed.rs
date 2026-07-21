@@ -21,7 +21,6 @@ use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
-use crate::delegation::storage_user_id;
 use crate::services::{
     action_policy::{
         ActionPolicyClient, PrepareActionReviewRequest, PreparedActionReview,
@@ -64,6 +63,8 @@ pub(crate) enum GovernedInvocationOrigin<'a> {
 pub(crate) struct GovernedInvocationRequest<'a> {
     /// Session metadata used for policy and execution.
     pub(crate) session: &'a SessionMeta,
+    /// Exact authenticated caller and delegation provenance admitted for this call.
+    pub(crate) identity: &'a moa_core::traits::Identity,
     /// Session event stream that receives tool events.
     pub(crate) session_id: SessionId,
     /// Stable tool call id for event correlation.
@@ -440,13 +441,12 @@ fn tool_call_request(
 ) -> ToolCallRequest {
     ToolCallRequest {
         tool_call_id: request.tool_id,
+        caller_identity: request.identity.clone(),
         provider_tool_use_id: invocation.id.clone(),
         tool_name: invocation.name.clone(),
         input: invocation.input.clone(),
         active_canary: request.active_canary.map(ToOwned::to_owned),
-        session_id: Some(request.session_id),
-        tenant_id: request.session.tenant_id,
-        user_id: storage_user_id(request.session),
+        session_id: request.session_id,
         trusted_sandbox_manifest: request.trusted_sandbox_manifest.cloned(),
         worker_id: match request.origin {
             GovernedInvocationOrigin::RootTurn => None,
@@ -608,13 +608,22 @@ async fn append_session_event(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::sync::LazyLock;
 
     use moa_core::{
-        types::action_policy::CapabilityProvenance, types::completion::ToolCallContent,
-        types::completion::ToolInvocation, types::contact::ContactId, types::contact::ContactRef,
-        types::contact::ContactVerificationState, types::contact::SessionActorRef,
-        types::identifiers::TenantId, types::identifiers::ToolCallId, types::identifiers::UserId,
-        types::session::SessionMeta, types::tools::TrustedSandboxFileEntry,
+        traits::{Identity, IdentityType},
+        types::action_policy::CapabilityProvenance,
+        types::completion::ToolCallContent,
+        types::completion::ToolInvocation,
+        types::contact::ContactId,
+        types::contact::ContactRef,
+        types::contact::ContactVerificationState,
+        types::contact::SessionActorRef,
+        types::identifiers::TenantId,
+        types::identifiers::ToolCallId,
+        types::identifiers::UserId,
+        types::session::SessionMeta,
+        types::tools::TrustedSandboxFileEntry,
         types::tools::TrustedSandboxFileManifestRef,
     };
     use moa_test_support::fixtures::contact_ref_fixture;
@@ -627,6 +636,14 @@ mod tests {
         pending_review_output, prepare_action_review_request, tool_call_request,
     };
     use crate::delegation::storage_user_id;
+
+    static TEST_IDENTITY: LazyLock<Identity> = LazyLock::new(|| Identity {
+        identity_type: IdentityType::Operator,
+        id: Uuid::from_u128(20),
+        tenant_id: TenantId::from(Uuid::from_u128(10)),
+        api_key_id: Some(Uuid::from_u128(21)),
+        acting_on_behalf_of: Some(Uuid::from_u128(22)),
+    });
 
     fn test_session_meta() -> SessionMeta {
         SessionMeta {
@@ -657,6 +674,7 @@ mod tests {
     ) -> GovernedInvocationRequest<'a> {
         GovernedInvocationRequest {
             session,
+            identity: &TEST_IDENTITY,
             session_id: session.id,
             tool_id: ToolCallId(Uuid::from_u128(30)),
             tool_call,
@@ -868,9 +886,8 @@ mod tests {
         assert_eq!(tool_request.tool_name, "file_read");
         assert_eq!(tool_request.input, json!({"path": "README.md"}));
         assert_eq!(tool_request.active_canary.as_deref(), Some("canary"));
-        assert_eq!(tool_request.session_id, Some(session.id));
-        assert_eq!(tool_request.tenant_id, session.tenant_id);
-        assert_eq!(tool_request.user_id, UserId::new(contact_id.to_string()));
+        assert_eq!(tool_request.session_id, session.id);
+        assert_eq!(tool_request.caller_identity, *TEST_IDENTITY);
         assert_eq!(tool_request.trusted_sandbox_manifest, None);
         assert_eq!(tool_request.worker_id, None);
     }

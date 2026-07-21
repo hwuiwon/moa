@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::types::identifiers::TenantId;
+use moa_core::types::memory::InformationBarrierId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -21,6 +22,9 @@ pub struct KnowledgeSyncRun {
     /// Optional provider-record limit for this run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_records: Option<u32>,
+    /// Connection information barrier snapshotted when this run was claimed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub information_barrier: Option<InformationBarrierId>,
     /// Current run status.
     pub status: SyncRunStatus,
     /// Number of source records observed.

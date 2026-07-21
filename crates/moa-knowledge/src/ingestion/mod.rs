@@ -18,9 +18,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use moa_core::traits::EmbeddingProvider;
-use moa_memory_graph::{
-    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
-};
+use moa_core::types::security::SensitivityClass;
+use moa_memory_graph::{EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent};
 use moa_memory_types::MemoryScope;
 use serde_json::{Value, json};
 use tracing::{Instrument, Span};

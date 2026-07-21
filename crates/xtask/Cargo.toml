@@ -12,6 +12,7 @@ eval-tools = [
     "dep:blake3",
     "dep:chrono",
     "dep:moa-core",
+    "dep:moa-crypto",
     "dep:moa-brain",
     "dep:moa-db",
     "dep:moa-eval",
@@ -39,6 +40,7 @@ async-trait = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 moa-core = { workspace = true, optional = true }
+moa-crypto = { workspace = true, optional = true }
 moa-brain = { workspace = true, optional = true }
 moa-db = { workspace = true, optional = true }
 moa-eval = { workspace = true, optional = true }

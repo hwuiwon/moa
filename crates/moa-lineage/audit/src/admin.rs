@@ -278,11 +278,11 @@ pub async fn verify_audit_root_window(
     root: &AuditRootRow,
     signing: &dyn AuditRootSigner,
 ) -> Result<VerificationReport> {
-    if root.signing_key_label != signing.key_id() {
+    let expected_label = signing.key_id_for(&root.storage_partition_id);
+    if root.signing_key_label != expected_label {
         return Err(AuditError::Invalid(format!(
-            "audit root signing key label mismatch: stored={}, configured={}",
+            "audit root signing key label mismatch: stored={}, configured={expected_label}",
             root.signing_key_label,
-            signing.key_id()
         )));
     }
     if root.object_lock_mode.trim().is_empty() {
@@ -365,7 +365,9 @@ fn load_compliance_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<Complian
 mod tests {
     use super::{AuditRootRow, ComplianceRow, verify_audit_root_window, verify_compliance_rows};
     use crate::blake3_merkle_root;
-    use crate::{AuditError, LocalAuditRootSigner};
+    use crate::{
+        AuditError, AuditRootSeed, AuditRootSigner, LocalAuditRootSigner, PerTenantAuditRootSigner,
+    };
     use chrono::Utc;
     use moa_lineage_core::chain::HashChain;
     use serde_json::json;
@@ -531,5 +533,98 @@ mod tests {
             .expect_err("metadata tampering should fail");
 
         assert!(matches!(error, crate::AuditError::Signature));
+    }
+
+    #[tokio::test]
+    async fn verify_audit_root_window_accepts_per_tenant_signed_root() {
+        // Pins: a root signed with a tenant's derived key verifies under the
+        // per-tenant signer, including the partition-scoped signing-key label.
+        let signer = PerTenantAuditRootSigner::new(AuditRootSeed::from_bytes([15_u8; 32]));
+        let partition = "tenant-storage-partition";
+        let signing_key = signer.signing_key_for(partition);
+        let payload = json!({"record": {"kind": "only"}});
+        let (hash, prev_hash) = HashChain::link(None, &payload).expect("hash should compute");
+        let root_hash =
+            blake3_merkle_root(&[hash.as_bytes().to_vec()]).expect("root should compute");
+        let now = Utc::now();
+        let mut root = AuditRootRow {
+            root_id: Uuid::now_v7(),
+            storage_partition_id: partition.to_string(),
+            window_start: now,
+            window_end: now,
+            merkle_root: root_hash.as_bytes().to_vec(),
+            record_count: 1,
+            signature: Vec::new(),
+            signing_key_label: signing_key.label().to_string(),
+            s3_object_etag: "manifest-hash".to_string(),
+            object_lock_mode: "COMPLIANCE".to_string(),
+            retain_until: now,
+        };
+        root.signature = signing_key
+            .sign_audit_root(&root.signature_payload())
+            .expect("signature should compute");
+
+        let rows = vec![ComplianceRow {
+            turn_id: Uuid::now_v7(),
+            record_kind: 1,
+            ts: now,
+            payload,
+            integrity_hash: hash.as_bytes().to_vec(),
+            prev_hash: prev_hash.map(|hash| hash.as_bytes().to_vec()),
+        }];
+
+        let report = verify_audit_root_window(rows, &root, &signer)
+            .await
+            .expect("per-tenant signed root should verify");
+
+        assert_eq!(report.records, 1);
+    }
+
+    #[tokio::test]
+    async fn verify_audit_root_window_rejects_root_signed_by_other_tenant_key() {
+        // Pins: verification does not weaken cross-tenant — a root carrying tenant
+        // A's label but signed with another tenant's derived key fails the
+        // signature check even though the label check passes.
+        let signer = PerTenantAuditRootSigner::new(AuditRootSeed::from_bytes([16_u8; 32]));
+        let partition = "tenant-a";
+        let other_tenant_key = signer.signing_key_for("tenant-b");
+        let payload = json!({"record": {"kind": "only"}});
+        let (hash, prev_hash) = HashChain::link(None, &payload).expect("hash should compute");
+        let root_hash =
+            blake3_merkle_root(&[hash.as_bytes().to_vec()]).expect("root should compute");
+        let now = Utc::now();
+        let mut root = AuditRootRow {
+            root_id: Uuid::now_v7(),
+            storage_partition_id: partition.to_string(),
+            window_start: now,
+            window_end: now,
+            merkle_root: root_hash.as_bytes().to_vec(),
+            record_count: 1,
+            signature: Vec::new(),
+            // Attacker sets the correct per-tenant label so the label check passes.
+            signing_key_label: signer.key_id_for(partition),
+            s3_object_etag: "manifest-hash".to_string(),
+            object_lock_mode: "COMPLIANCE".to_string(),
+            retain_until: now,
+        };
+        // ...but signs with tenant B's derived key.
+        root.signature = other_tenant_key
+            .sign_audit_root(&root.signature_payload())
+            .expect("signature should compute");
+
+        let rows = vec![ComplianceRow {
+            turn_id: Uuid::now_v7(),
+            record_kind: 1,
+            ts: now,
+            payload,
+            integrity_hash: hash.as_bytes().to_vec(),
+            prev_hash: prev_hash.map(|hash| hash.as_bytes().to_vec()),
+        }];
+
+        let error = verify_audit_root_window(rows, &root, &signer)
+            .await
+            .expect_err("a cross-tenant forged signature must fail verification");
+
+        assert!(matches!(error, AuditError::Signature));
     }
 }

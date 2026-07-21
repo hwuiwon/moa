@@ -3,6 +3,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::traits::Identity;
+
 use super::super::{
     identifiers::{AgentSignalId, ModelId, SessionId, TenantId, UserId},
     tools::TrustedSandboxFileManifestRef,
@@ -19,6 +21,8 @@ pub type AgentPath = String;
 pub struct WorkerInitialTask {
     /// Primary task the child should work on.
     pub task: String,
+    /// Exact authenticated identity inherited from the root turn.
+    pub identity: Identity,
     /// Tool names the child is allowed to invoke.
     pub tool_subset: Vec<String>,
     /// Token budget allocated to the child.

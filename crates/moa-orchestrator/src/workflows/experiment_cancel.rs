@@ -1,6 +1,6 @@
 //! Shared cancellation fan-out for experiment run and trial workflows.
 
-use moa_core::traits::{Identity, IdentityType};
+use moa_core::traits::Identity;
 use moa_core::types::contact::ContactId;
 use moa_core::types::identifiers::{SessionId, TenantId};
 use moa_execution::wire::{ExecutionCancelRequest, ExecutionRunRequest};
@@ -132,7 +132,7 @@ fn with_identity_headers<'a, Req, Res>(
     let request = request
         .header(
             "x-moa-identity-type".to_string(),
-            identity_type_header(identity.identity_type).to_string(),
+            identity.identity_type.as_str().to_string(),
         )
         .header("x-moa-identity-id".to_string(), identity.id.to_string())
         .header(
@@ -151,18 +151,10 @@ fn with_identity_headers<'a, Req, Res>(
     }
 }
 
-fn identity_type_header(identity_type: IdentityType) -> &'static str {
-    match identity_type {
-        IdentityType::Operator => "operator",
-        IdentityType::Agent => "agent",
-        IdentityType::Service => "service",
-        IdentityType::Contact => "contact",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use moa_core::traits::IdentityType;
 
     fn identity() -> Identity {
         Identity {

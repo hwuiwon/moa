@@ -120,6 +120,13 @@ impl ExecutionRun for ExecutionRunImpl {
         if request.run_uid.to_string() != ctx.key() {
             return Err(TerminalError::new_with_code(404, "execution run id mismatch").into());
         }
+        if request.identity.tenant_id != request.tenant_id {
+            return Err(TerminalError::new_with_code(
+                409,
+                "execution run identity tenant mismatch",
+            )
+            .into());
+        }
         ctx.set(K_PROCESSED_WAKE_EPOCH, Json::from(0_u64));
         ctx.set(K_AWAITED_WAKE_EPOCH, Json::from(0_u64));
         let scope = execution_scope(&request);
@@ -1004,6 +1011,7 @@ async fn drive_once(
                         tenant_id: task.tenant_id,
                         contact_id: task.contact_id,
                         session_id: snapshot.run.session_id,
+                        identity: request.identity.clone(),
                     })
                     .collect(),
             })
@@ -1936,6 +1944,13 @@ mod tests {
             tenant_id,
             contact_id: None,
             session_id,
+            identity: moa_core::traits::Identity {
+                identity_type: moa_core::traits::IdentityType::Operator,
+                id: Uuid::from_u128(1),
+                tenant_id,
+                api_key_id: None,
+                acting_on_behalf_of: None,
+            },
         };
         let prepared = prepare_amendment_planning(
             &repository,

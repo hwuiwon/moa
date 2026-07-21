@@ -297,6 +297,47 @@ fn compile_rejects_malformed_deliverable_schema() {
 }
 
 #[test]
+fn compile_requires_every_requirement_in_at_least_one_completion_check() {
+    // Pins: compiler admission rejects an unchecked requirement while allowing different check
+    // kinds to divide requirement coverage according to what each check actually verifies.
+    let mut request = valid_request();
+    request.goal.requirements.push(ExecutionRequirement {
+        id: "req_two".to_string(),
+        description: "Return the validated order result".to_string(),
+    });
+    for node in &mut request.plan.nodes {
+        node.requirement_ids.push("req_two".to_string());
+    }
+
+    let rejected = compile(request.clone());
+
+    assert!(rejected.compiled.is_none());
+    assert_eq!(
+        rejected.report.issues,
+        vec![ExecutionValidationIssue {
+            severity: ExecutionValidationSeverity::Error,
+            code: "unchecked_requirement".to_string(),
+            path: "goal.requirements[1].id".to_string(),
+            message: "every requirement must be linked to at least one completion check"
+                .to_string(),
+        }]
+    );
+
+    request.goal.completion_checks.push(CompletionCheck {
+        id: "required_nodes".to_string(),
+        description: "Validate the node serving the second requirement".to_string(),
+        requirement_ids: vec!["req_two".to_string()],
+        constraint_ids: Vec::new(),
+        kind: CompletionCheckKind::RequiredNodes {
+            node_ids: vec!["output".to_string()],
+        },
+    });
+    let accepted = compile(request);
+    assert!(accepted.compiled.is_some(), "{:?}", accepted.report.issues);
+    assert!(accepted.report.issues.is_empty());
+}
+
+#[test]
 fn compile_rejects_every_reference_outside_catalog_or_authorization() {
     // Pins: catalog and authorization envelopes are independent compiler admission gates.
     let mut outside_catalog = valid_request();

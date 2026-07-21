@@ -7,13 +7,15 @@ use std::sync::Arc;
 use chrono::Utc;
 use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     config::MoaConfig, traits::EmbeddingProvider, types::contact::ContactId,
     types::identifiers::SessionId, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId,
 };
+use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_db::ScopedConn;
-use moa_memory_graph::{PiiClass, PostgresGraphStore};
+use moa_memory_graph::PostgresGraphStore;
 use moa_memory_ingest::{SessionTurn, ingest_turn_direct_with_pool};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{
@@ -94,6 +96,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
 
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let pool = session_store.pool().clone();
+    let kms: Arc<dyn KeyManagementProvider> = Arc::new(LocalKmsProvider::new());
     let tenant_id = TenantId::new();
     let contact_id = ContactId::new();
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
@@ -116,9 +119,10 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         transcript,
         dominant_pii_class: "none".to_string(),
         finalized_at: Utc::now(),
+        barrier: None,
     };
 
-    let ingest = ingest_turn_direct_with_pool(pool.clone(), turn)
+    let ingest = ingest_turn_direct_with_pool(pool.clone(), kms.clone(), turn)
         .await
         .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
     assert!(
@@ -175,11 +179,13 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     let graph = Arc::new(PostgresGraphStore::scoped_for_app_role(
         pool.clone(),
         contact_scope,
+        kms,
     ));
     let retriever = HybridRetriever::new(pool.clone(), graph, retrieval_pgvector)
         .with_turbopuffer(Some(turbopuffer.clone()))
         .with_assume_app_role(true);
     let req = RetrievalRequest {
+        cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: query_text.to_string(),
         query_embedding,
@@ -189,7 +195,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         },
         label_filter: None,
         label_boost: None,
-        max_pii_class: PiiClass::Restricted,
+        max_pii_class: SensitivityClass::Restricted,
         k_final: 5,
         use_reranker: false,
         strategy: None,

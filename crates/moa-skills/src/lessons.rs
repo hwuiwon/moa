@@ -2,9 +2,10 @@
 
 use chrono::Utc;
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{error::MoaError, error::Result, types::identifiers::StoragePartitionId};
 use moa_db::ScopedConn;
-use moa_memory_graph::{NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
+use moa_memory_graph::{NodeLabel, NodeWriteIntent, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use serde_json::json;
 use uuid::Uuid;
@@ -77,7 +78,11 @@ pub async fn learn_lesson(
 
     let lesson_uid = Uuid::now_v7();
     let intent = NodeWriteIntent {
+        barrier: None,
         uid: lesson_uid,
+        data_subject_id: scope_context
+            .contact_id()
+            .map_or(scope_context.tenant_id().0, |contact_id| contact_id.0),
         label: NodeLabel::Lesson,
         storage_partition_id: storage_partition_id.clone(),
         contact_id: contact_id.clone(),
@@ -88,7 +93,7 @@ pub async fn learn_lesson(
             "summary": summary,
             "skill_uid": skill_uid.to_string(),
         }),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         confidence: Some(1.0),
         valid_from: Utc::now(),
         embedding: None,
@@ -119,6 +124,8 @@ fn map_graph_error(error: moa_memory_graph::GraphError) -> MoaError {
 mod tests {
     use super::*;
     use moa_core::types::identifiers::TenantId;
+    use moa_crypto::LocalKmsProvider;
+    use std::sync::Arc;
 
     /// Builds a lesson context whose pool is never connected.
     ///
@@ -130,7 +137,11 @@ mod tests {
         let scope = MemoryScope::Tenant {
             tenant_id: TenantId::from(Uuid::nil()),
         };
-        let graph = PostgresGraphStore::scoped_for_app_role(pool, RlsContext::from(scope.clone()));
+        let graph = PostgresGraphStore::scoped_for_app_role(
+            pool,
+            RlsContext::from(scope.clone()),
+            Arc::new(LocalKmsProvider::new()),
+        );
         (LessonContext::new(graph), scope)
     }
 

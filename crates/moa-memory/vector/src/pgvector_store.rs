@@ -8,7 +8,7 @@ use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::{
-    Error, Result, VECTOR_DIMENSION, VectorItem, VectorMatch, VectorQuery, VectorStore, pii_rank,
+    Error, Result, VECTOR_DIMENSION, VectorItem, VectorMatch, VectorQuery, VectorStore,
     validate_dimension,
 };
 
@@ -239,7 +239,7 @@ impl VectorStore for PgvectorStore {
     async fn knn(&self, query: &VectorQuery) -> Result<Vec<VectorMatch>> {
         let storage_partition_id = self.storage_partition_id();
         let limit = i64::try_from(query.k).map_err(|_| Error::QueryLimitTooLarge(query.k))?;
-        let max_pii_rank = pii_rank(&query.max_pii_class)?;
+        let max_pii_rank = query.max_pii_class.rank();
         if limit <= 0 {
             return Ok(Vec::new());
         }
@@ -494,7 +494,6 @@ async fn upsert_items(
 ) -> Result<()> {
     for item in items {
         validate_dimension(&item.embedding)?;
-        pii_rank(&item.pii_class)?;
         let halfvec = HalfVector::from_f32_slice(&item.embedding);
         sqlx::query(
             r#"
@@ -516,7 +515,7 @@ async fn upsert_items(
         .bind(storage_partition_id)
         .bind(item.user_id.as_deref())
         .bind(&item.label)
-        .bind(&item.pii_class)
+        .bind(item.pii_class.as_str())
         .bind(halfvec)
         .bind(&item.embedding_model)
         .bind(item.embedding_model_version)

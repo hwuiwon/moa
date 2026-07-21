@@ -292,6 +292,8 @@ fn turn_scope_from_request(request: &CompletionRequest) -> Option<(TenantId, Con
 /// re-enter fact extraction, and requests without a durable user turn (worker
 /// sub-requests, internal jobs) never write conversational memory.
 pub(crate) const USER_TURN_METADATA_KEY: &str = "_moa.user_turn";
+/// Metadata key carrying the pinned agent policy's validated memory write barrier.
+pub(crate) const MEMORY_WRITE_BARRIER_METADATA_KEY: &str = "_moa.memory_write_barrier";
 
 pub(crate) fn session_turn_from_completion_request(
     request: &CompletionRequest,
@@ -312,6 +314,10 @@ pub(crate) fn session_turn_from_completion_request(
         dominant_pii_class: dominant_pii_class_hint(&transcript).to_string(),
         transcript,
         finalized_at,
+        barrier: string_metadata(request, MEMORY_WRITE_BARRIER_METADATA_KEY)
+            .map(moa_core::types::memory::InformationBarrierId::parse)
+            .transpose()
+            .ok()?,
     })
 }
 
@@ -373,7 +379,10 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{USER_TURN_METADATA_KEY, session_turn_from_completion_request};
+    use super::{
+        MEMORY_WRITE_BARRIER_METADATA_KEY, USER_TURN_METADATA_KEY,
+        session_turn_from_completion_request,
+    };
 
     #[test]
     fn session_turn_contact_id_matches_turn_author() {
@@ -391,6 +400,10 @@ mod tests {
         metadata.insert(
             USER_TURN_METADATA_KEY.to_string(),
             json!("My email is user-alpha@example.com."),
+        );
+        metadata.insert(
+            MEMORY_WRITE_BARRIER_METADATA_KEY.to_string(),
+            json!("deal-alpha"),
         );
         let request = CompletionRequest {
             model: None,
@@ -420,6 +433,10 @@ mod tests {
         assert_eq!(turn.turn_seq, 42);
         assert_eq!(turn.finalized_at, finalized_at);
         assert_eq!(turn.dominant_pii_class, "pii");
+        assert_eq!(
+            turn.barrier.as_ref().map(|barrier| barrier.as_str()),
+            Some("deal-alpha")
+        );
         assert_eq!(turn.transcript, "user: My email is user-alpha@example.com.");
         assert!(!turn.transcript.contains("system policy"));
         assert!(!turn.transcript.contains("prior assistant answer"));

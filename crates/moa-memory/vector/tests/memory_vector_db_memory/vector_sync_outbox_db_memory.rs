@@ -1,8 +1,17 @@
 //! Integration coverage for external vector-backend sync outbox behavior.
 
-use moa_core::{config::MoaConfig, types::identifiers::TenantId, types::memory::RlsContext};
+use std::{sync::Arc, time::Duration};
+
+use moa_core::{
+    config::MoaConfig,
+    types::{identifiers::TenantId, memory::RlsContext, security::SensitivityClass},
+};
 use moa_db::ScopedConn;
-use moa_memory_vector::{VECTOR_DIMENSION, VectorItem, VectorStoreFactory, VectorSyncReport};
+use moa_memory_pii::legal_hold::start_destruction;
+use moa_memory_vector::{
+    VECTOR_DIMENSION, VectorItem, VectorStoreFactory, VectorSyncReport,
+    sync::{has_active_vector_sync_claims, has_active_vector_sync_claims_in_tx},
+};
 use moa_session::testing;
 use serde_json::json;
 use sqlx::PgPool;
@@ -27,7 +36,7 @@ fn vector_item(uid: Uuid, embedding_model: &str) -> VectorItem {
         uid,
         user_id: None,
         label: "Fact".to_string(),
-        pii_class: "none".to_string(),
+        pii_class: SensitivityClass::None,
         embedding: basis_vector(0),
         embedding_model: embedding_model.to_string(),
         embedding_model_version: 1,
@@ -88,18 +97,22 @@ async fn seed_storage_partition_state(
 }
 
 async fn insert_node_index_row(pool: &PgPool, storage_partition_id: &str, item: &VectorItem) {
+    let tenant_id =
+        Uuid::parse_str(storage_partition_id).expect("test storage partition id is a tenant UUID");
     let mut conn = scoped_conn(pool, storage_partition_id).await;
     sqlx::query(
         r#"
-        INSERT INTO moa.node_index (uid, label, storage_partition_id, name, pii_class)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO moa.node_index
+            (uid, label, storage_partition_id, name, pii_class, data_subject_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
         "#,
     )
     .bind(item.uid)
     .bind(&item.label)
     .bind(storage_partition_id)
     .bind(format!("vector sync {}", item.uid))
-    .bind(&item.pii_class)
+    .bind(item.pii_class.as_str())
+    .bind(tenant_id)
     .execute(conn.as_mut())
     .await
     .expect("insert node_index row");
@@ -366,6 +379,302 @@ async fn post_commit_sync_drains_only_current_storage_partition_db_memory() {
     assert!(
         String::from_utf8_lossy(&requests[0].body).contains(&item_a.uid.to_string()),
         "post-commit drain should only send partition A row"
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn tenant_fence_keeps_expired_pre_fence_claim_from_reupserting_db_memory() {
+    // Pins: a lease claimed before tenant destruction remains visible to the purge waiter, but
+    // once that lease expires the durable tenant fence prevents every pod from reclaiming and
+    // applying the stale upsert after external-vector deletion has quiesced.
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = store.pool().clone();
+    let server = MockServer::start().await;
+    let (partition, item, factory) = setup_pending_upsert(&pool, server.uri()).await;
+    let tenant_id = Uuid::parse_str(&partition).expect("partition should be a tenant UUID");
+    let pre_fence_claim_token = Uuid::now_v7();
+
+    let claimed = sqlx::query_as::<_, (Uuid, bool, i32)>(
+        r#"
+        UPDATE moa.vector_sync_outbox
+           SET claim_token = $2,
+               claim_expires_at = now() + INTERVAL '5 minutes',
+               processing_started_at = now(),
+               attempts = 1
+         WHERE uid = $1
+        RETURNING claim_token, claim_expires_at > now(), attempts
+        "#,
+    )
+    .bind(item.uid)
+    .bind(pre_fence_claim_token)
+    .fetch_one(&pool)
+    .await
+    .expect("simulate a pre-fence vector-sync claim");
+    assert_eq!(claimed, (pre_fence_claim_token, true, 1));
+
+    let mut fence_conn = scoped_conn(&pool, &partition).await;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+    )
+    .bind(tenant_id)
+    .execute(fence_conn.as_mut())
+    .await
+    .expect("lock tenant destruction boundary");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.destruction_operation_fence
+            (tenant_id, subject_id, operation_id, operation_kind)
+        VALUES ($1, NULL, $2, 'tenant.purge')
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(format!("purge-{tenant_id}"))
+    .execute(fence_conn.as_mut())
+    .await
+    .expect("persist tenant-wide destruction fence");
+    fence_conn
+        .commit()
+        .await
+        .expect("commit tenant-wide destruction fence");
+
+    let visible_lease = sqlx::query_as::<_, (Option<Uuid>, bool, bool)>(
+        r#"
+        SELECT claim_token,
+               claim_expires_at > now(),
+               processed_at IS NULL
+          FROM moa.vector_sync_outbox
+         WHERE uid = $1
+        "#,
+    )
+    .bind(item.uid)
+    .fetch_one(&pool)
+    .await
+    .expect("read pre-fence lease after fence commit");
+    assert_eq!(
+        visible_lease,
+        (Some(pre_fence_claim_token), true, true),
+        "purge must be able to observe and wait for the pre-fence lease"
+    );
+    assert!(
+        has_active_vector_sync_claims(&pool, &partition)
+            .await
+            .expect("check active claim through pool helper"),
+        "pool quiescence check must see the pre-fence lease"
+    );
+    let mut quiescence_conn = scoped_conn(&pool, &partition).await;
+    assert!(
+        has_active_vector_sync_claims_in_tx(quiescence_conn.as_mut(), &partition)
+            .await
+            .expect("check active claim in purge transaction"),
+        "same-transaction quiescence check must see the pre-fence lease"
+    );
+    quiescence_conn
+        .commit()
+        .await
+        .expect("commit quiescence check");
+
+    sqlx::query("UPDATE moa.vector_sync_outbox SET claim_expires_at = NULL WHERE uid = $1")
+        .bind(item.uid)
+        .execute(&pool)
+        .await
+        .expect("simulate malformed claim without an expiry");
+    assert!(
+        has_active_vector_sync_claims(&pool, &partition)
+            .await
+            .expect("check no-expiry claim through pool helper"),
+        "a claimed row without an expiry must fail closed as active"
+    );
+
+    sqlx::query(
+        "UPDATE moa.vector_sync_outbox SET claim_expires_at = now() - INTERVAL '1 second' WHERE uid = $1",
+    )
+    .bind(item.uid)
+    .execute(&pool)
+    .await
+    .expect("expire pre-fence lease to simulate quiescence");
+    assert!(
+        !has_active_vector_sync_claims(&pool, &partition)
+            .await
+            .expect("check expired claim through pool helper"),
+        "an expired claim is quiescent"
+    );
+
+    let report = factory
+        .drain_external_sync(&pool, 10)
+        .await
+        .expect("fenced drain should complete without claiming work");
+    assert_eq!(report, VectorSyncReport::default());
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    assert_eq!(
+        requests.len(),
+        0,
+        "an expired pre-fence claim must not upsert after destruction quiesces"
+    );
+
+    let final_claim = sqlx::query_as::<_, (Option<Uuid>, i32, bool)>(
+        r#"
+        SELECT claim_token, attempts, processed_at IS NULL
+          FROM moa.vector_sync_outbox
+         WHERE uid = $1
+        "#,
+    )
+    .bind(item.uid)
+    .fetch_one(&pool)
+    .await
+    .expect("read fenced vector-sync claim");
+    assert_eq!(
+        final_claim,
+        (Some(pre_fence_claim_token), 1, true),
+        "the claimant must leave the pre-fence lease durable for purge cleanup"
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn tenant_fence_waits_for_remote_upsert_and_claim_settlement_db_memory() {
+    // Pins: the vector drainer holds the shared tenant destruction lock across remote I/O and
+    // durable claim settlement, so a concurrent purge fence cannot commit before the upsert and
+    // then let that pre-fence upsert land after purge deletion.
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = store.pool().clone();
+    let server = MockServer::start().await;
+    let remote_started = Arc::new(tokio::sync::Notify::new());
+    let responder_started = remote_started.clone();
+    Mock::given(method("POST"))
+        .and(body_string_contains("upsert_rows"))
+        .respond_with(move |_: &wiremock::Request| {
+            responder_started.notify_one();
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(2))
+                .set_body_json(json!({ "rows_affected": 1, "rows_upserted": 1 }))
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("deletes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "rows_affected": 1 })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let (partition, item, factory) = setup_pending_upsert(&pool, server.uri()).await;
+    let tenant_id = Uuid::parse_str(&partition).expect("partition should be a tenant UUID");
+
+    let drain_pool = pool.clone();
+    let drain_factory = factory.clone();
+    let drain_task =
+        tokio::spawn(async move { drain_factory.drain_external_sync(&drain_pool, 10).await });
+
+    tokio::time::timeout(Duration::from_secs(2), remote_started.notified())
+        .await
+        .expect("vector drainer should reach remote I/O while holding the destruction lock");
+
+    let fence_pool = pool.clone();
+    let mut fence_task = tokio::spawn(async move {
+        start_destruction(
+            &fence_pool,
+            TenantId::from(tenant_id),
+            &[],
+            &format!("remote-order-{tenant_id}"),
+            "tenant.purge",
+        )
+        .await
+        .expect("start destruction after remote upsert settles");
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut fence_task)
+            .await
+            .is_err(),
+        "tenant purge fence must wait while remote upsert and claim settlement hold the lock"
+    );
+
+    let report = drain_task
+        .await
+        .expect("join vector drain")
+        .expect("complete vector drain");
+    assert_eq!(
+        report,
+        VectorSyncReport {
+            attempted: 1,
+            succeeded: 1,
+            skipped: 0,
+            failed: 0,
+            dead_lettered: 0,
+        }
+    );
+    fence_task.await.expect("join tenant destruction fence");
+
+    factory
+        .turbopuffer()
+        .expect("test factory should configure Turbopuffer")
+        .delete_in_storage_partition(&partition, &[item.uid])
+        .await
+        .expect("purge-side external delete must run after destruction wins the lock");
+
+    let state = sqlx::query_as::<_, (bool, bool)>(
+        r#"
+        SELECT outbox.processed_at IS NOT NULL,
+               EXISTS (
+                   SELECT 1 FROM moa.destruction_operation_fence
+                    WHERE tenant_id = $2 AND subject_id IS NULL
+               )
+          FROM moa.vector_sync_outbox AS outbox
+         WHERE outbox.uid = $1
+        "#,
+    )
+    .bind(item.uid)
+    .bind(tenant_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read settled claim and destruction fence");
+    assert_eq!(
+        state,
+        (true, true),
+        "claim settlement must precede the durable purge fence"
+    );
+
+    let retry = factory
+        .drain_external_sync(&pool, 10)
+        .await
+        .expect("post-fence drain should not claim work");
+    assert_eq!(retry, VectorSyncReport::default());
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "one upsert must precede one purge delete"
+    );
+    let request_bodies = requests
+        .iter()
+        .map(|request| String::from_utf8_lossy(&request.body))
+        .collect::<Vec<_>>();
+    assert!(
+        request_bodies[0].contains("upsert_rows"),
+        "the pre-fence request must be the upsert"
+    );
+    assert!(
+        request_bodies[1].contains("deletes"),
+        "the purge delete must be the last external mutation"
     );
 
     drop(store);

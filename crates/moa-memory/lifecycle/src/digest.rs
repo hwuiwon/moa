@@ -358,6 +358,9 @@ async fn active_digest_fact_rows(
         WHERE storage_partition_id = $1
           AND label = 'Fact'
           AND valid_to IS NULL
+          -- Standing digests materialize content, so sealed placeholders are
+          -- not eligible digest input.
+          AND pii_class NOT IN ('phi', 'restricted')
           AND scope IN ('contact', 'tenant')
           AND (confidence IS NULL OR confidence > $2)
         ORDER BY scope ASC, user_id ASC NULLS FIRST, valid_from DESC, uid ASC

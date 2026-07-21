@@ -9,7 +9,7 @@ use moa_core::types::memory::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     EdgeLabel, GraphExpansionHit, GraphStore, GraphTraversalDirection, GraphWalkScoring,
-    NodeIndexRow, NodeLabel, PiiClass, push_validity_filter,
+    NodeIndexRow, NodeLabel, push_validity_filter,
 };
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{TurbopufferStore, TurbopufferTextQuery, VectorQuery, VectorStore};
@@ -547,7 +547,7 @@ pub async fn vector_leg(
             embedding: req.query_embedding.clone(),
             k: leg_candidate_limit(req.k_final),
             label_filter: Some(effective_label_filter_values(req.label_filter.as_deref())),
-            max_pii_class: req.max_pii_class.as_str().to_string(),
+            max_pii_class: req.max_pii_class,
             include_global: true,
             as_of: req.as_of,
         })
@@ -577,7 +577,7 @@ pub async fn turbopuffer_bm25_leg(
             query_text: req.query_text.clone(),
             k: leg_candidate_limit(req.k_final),
             label_filter: Some(effective_label_filter_values(req.label_filter.as_deref())),
-            max_pii_class: req.max_pii_class.as_str().to_string(),
+            max_pii_class: req.max_pii_class,
             include_global: true,
         })
         .await?;
@@ -599,7 +599,7 @@ pub async fn lexical_leg(
         return Ok(Vec::new());
     }
 
-    let mut conn = begin_scoped(pool, &req.scope, assume_app_role).await?;
+    let mut conn = begin_scoped(pool, &req.scope, &req.cleared_barriers, assume_app_role).await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid
@@ -622,7 +622,7 @@ pub async fn lexical_leg(
                 ELSE 4
               END <= "#,
     );
-    builder.push_bind(pii_rank(req.max_pii_class));
+    builder.push_bind(req.max_pii_class.rank());
     builder.push(" AND label = ANY(");
     builder.push_bind(effective_label_filter_values(req.label_filter.as_deref()));
     builder.push(")");
@@ -721,7 +721,7 @@ async fn lexical_fallback_leg(
         return Ok(Vec::new());
     }
 
-    let mut conn = begin_scoped(pool, &req.scope, assume_app_role).await?;
+    let mut conn = begin_scoped(pool, &req.scope, &req.cleared_barriers, assume_app_role).await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid
@@ -746,7 +746,7 @@ async fn lexical_fallback_leg(
                 ELSE 4
               END <= "#,
     );
-    builder.push_bind(pii_rank(req.max_pii_class));
+    builder.push_bind(req.max_pii_class.rank());
     builder.push(" AND label = ANY(");
     builder.push_bind(effective_label_filter_values(req.label_filter.as_deref()));
     builder.push(")");
@@ -853,6 +853,7 @@ fn push_accessed_ordering(
 pub async fn hydrate_nodes(
     pool: &PgPool,
     scope: &MemoryScope,
+    cleared_barriers: &moa_core::types::memory::InformationBarrierClearances,
     uids: &[Uuid],
     assume_app_role: bool,
     as_of: Option<DateTime<Utc>>,
@@ -861,7 +862,7 @@ pub async fn hydrate_nodes(
         return Ok(Vec::new());
     }
 
-    let mut conn = begin_scoped(pool, scope, assume_app_role).await?;
+    let mut conn = begin_scoped(pool, scope, cleared_barriers, assume_app_role).await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
@@ -892,7 +893,8 @@ pub async fn bump_last_accessed(
         return Ok(());
     }
 
-    let mut conn = begin_scoped(&pool, &scope, assume_app_role).await?;
+    let empty_clearances = moa_core::types::memory::InformationBarrierClearances::new();
+    let mut conn = begin_scoped(&pool, &scope, &empty_clearances, assume_app_role).await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         "UPDATE moa.node_index SET last_accessed_at = now() WHERE uid = ANY(",
     );
@@ -937,7 +939,8 @@ pub async fn write_retrieval_lineage(
     }
     let tenant_id = scope.tenant_id();
     let contact_id = scope.contact_id();
-    let mut conn = begin_scoped(&pool, &scope, assume_app_role).await?;
+    let empty_clearances = moa_core::types::memory::InformationBarrierClearances::new();
+    let mut conn = begin_scoped(&pool, &scope, &empty_clearances, assume_app_role).await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         "INSERT INTO moa.retrieval_lineage \
          (tenant_id, contact_id, storage_partition_id, user_id, session_id, turn_seq, turn_id, uid, chunk_uid, document_version_uid, rank, retrieved_at) ",
@@ -999,12 +1002,20 @@ pub fn sort_fused(fused: &mut [(Uuid, f64, LegSources)]) {
 }
 
 /// Starts a scoped connection for sidecar reads.
+///
+/// `cleared_barriers` are the caller's information-barrier / need-to-know
+/// clearances, sourced from the running agent's knowledge policy and carried on
+/// the retrieval request; they install the `moa.cleared_barriers` GUC so the
+/// `rd_barrier_need_to_know` RLS policy can admit barriered `moa.node_index`
+/// rows. An empty clearance set fails closed: barriered nodes stay hidden.
 pub async fn begin_scoped<'a>(
     pool: &'a PgPool,
     scope: &MemoryScope,
+    cleared_barriers: &moa_core::types::memory::InformationBarrierClearances,
     assume_app_role: bool,
 ) -> Result<ScopedConn<'a>> {
-    let scope_context = RlsContext::from(scope.clone());
+    let scope_context =
+        RlsContext::from(scope.clone()).with_cleared_barriers(cleared_barriers.clone());
     let mut conn = ScopedConn::begin(pool, &scope_context).await?;
     if assume_app_role {
         sqlx::query("SET LOCAL ROLE moa_app")
@@ -1072,15 +1083,6 @@ fn add_leg_scores(
     }
 }
 
-fn pii_rank(class: PiiClass) -> i32 {
-    match class {
-        PiiClass::None => 0,
-        PiiClass::Pii => 1,
-        PiiClass::Phi => 2,
-        PiiClass::Restricted => 3,
-    }
-}
-
 fn effective_label_filter_values(label_filter: Option<&[NodeLabel]>) -> Vec<String> {
     match label_filter.filter(|labels| !labels.is_empty()) {
         Some(labels) => labels
@@ -1109,8 +1111,9 @@ mod tests {
     use async_trait::async_trait;
     use chrono::TimeZone;
     use moa_core::types::identifiers::TenantId;
+    use moa_core::types::security::SensitivityClass;
     use moa_memory_graph::{
-        EdgeLabel, GraphExpansionHit, GraphTraversalDirection, NodeIndexRow, NodeLabel, PiiClass,
+        EdgeLabel, GraphExpansionHit, GraphTraversalDirection, NodeIndexRow, NodeLabel,
     };
     use moa_memory_types::MemoryScope;
     use moa_memory_vector::{Error as VectorError, VectorItem, VectorMatch, VectorQuery};
@@ -1874,6 +1877,7 @@ mod tests {
 
     fn retrieval_request() -> RetrievalRequest {
         RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "who owns the dependency".to_string(),
             query_embedding: vec![0.1, 0.2],
@@ -1882,7 +1886,7 @@ mod tests {
             },
             label_filter: None,
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: 4,
             use_reranker: false,
             strategy: None,
@@ -2019,7 +2023,7 @@ mod tests {
             contact_id: None,
             scope: "tenant".to_string(),
             name: name.to_string(),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             valid_to: None,
             valid_from: chrono::Utc::now(),
             properties_summary: None,

@@ -495,15 +495,18 @@ async fn seed_node_index_row(
     name: &str,
     retrieved_at: chrono::DateTime<Utc>,
 ) {
+    let data_subject_id = Uuid::parse_str(storage_partition_id.as_str())
+        .expect("quality storage partition fixture should be a tenant UUID");
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, storage_partition_id, user_id, name, pii_class, confidence, valid_from, properties_summary)
-        VALUES ($1, 'Fact', $2, $3, $4, 'none', 0.9, $5, $6)
+            (uid, label, storage_partition_id, data_subject_id, user_id, name, pii_class, confidence, valid_from, properties_summary)
+        VALUES ($1, 'Fact', $2, $3, $4, $5, 'none', 0.9, $6, $7)
         "#,
     )
     .bind(node_uid)
     .bind(storage_partition_id.as_str())
+    .bind(data_subject_id)
     .bind(user_id.as_str())
     .bind(name)
     .bind(retrieved_at)

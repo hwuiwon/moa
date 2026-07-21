@@ -4,7 +4,9 @@ use axum::body::Bytes;
 use axum::http::{Method, Uri};
 use moa_core::types::identifiers::TenantId;
 
-use super::{RouteTranslation, translate_json_object_with_tenant_id};
+use super::{
+    RouteTranslation, translate_json_object_with_fields, translate_json_object_with_tenant_id,
+};
 
 pub(super) fn translate(
     method: &Method,
@@ -16,19 +18,28 @@ pub(super) fn translate(
         return None;
     }
     let translation = match uri.path() {
-        "/v1/memory/search" => {
-            translate_json_object_with_tenant_id(body, "/Memory/search", tenant_id)
-        }
-        "/v1/memory/show" => translate_json_object_with_tenant_id(body, "/Memory/show", tenant_id),
+        "/v1/memory/search" => translate_session_memory_request(body, "/Memory/search"),
+        "/v1/memory/show" => translate_session_memory_request(body, "/Memory/show"),
         "/v1/memory/ingest-documents" => {
             translate_json_object_with_tenant_id(body, "/Memory/ingest_documents", tenant_id)
         }
         "/v1/memory/retrieve-debug" => {
-            translate_json_object_with_tenant_id(body, "/Memory/retrieve_debug", tenant_id)
+            translate_session_memory_request(body, "/Memory/retrieve_debug")
         }
         _ => return None,
     };
     Some(translation)
+}
+
+fn translate_session_memory_request(body: &Bytes, target: &str) -> RouteTranslation {
+    translate_json_object_with_fields(
+        body,
+        target,
+        "bad memory route body",
+        "memory route body must be object",
+        "serialize memory route body failed",
+        [],
+    )
 }
 
 #[cfg(test)]
@@ -47,7 +58,7 @@ mod tests {
                 "/v1/memory/search",
                 "/Memory/search",
                 serde_json::json!({
-                    "tenant_id": test_tenant_json(),
+                    "session_id": "11111111-1111-1111-1111-111111111111",
                     "query": "auth",
                     "limit": 10
                 }),
@@ -56,7 +67,7 @@ mod tests {
                 "/v1/memory/show",
                 "/Memory/show",
                 serde_json::json!({
-                    "tenant_id": test_tenant_json(),
+                    "session_id": "11111111-1111-1111-1111-111111111111",
                     "uid": "22222222-2222-2222-2222-222222222222"
                 }),
             ),
@@ -72,7 +83,7 @@ mod tests {
                 "/v1/memory/retrieve-debug",
                 "/Memory/retrieve_debug",
                 serde_json::json!({
-                    "tenant_id": test_tenant_json(),
+                    "session_id": "11111111-1111-1111-1111-111111111111",
                     "query": "auth",
                     "limit": 5,
                     "no_flush_wait": true

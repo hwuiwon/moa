@@ -2,10 +2,11 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     types::contact::ContactId, types::identifiers::StoragePartitionId, types::identifiers::TenantId,
 };
-use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
+use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore};
 use moa_memory_lifecycle::merge_duplicates;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::json;
@@ -66,6 +67,7 @@ async fn duplicate_merge_keeps_contact_collisions_separate_db_memory() {
 
     let stats = merge_duplicates(
         test_db.store().pool(),
+        super::test_kms(),
         &tenant_id,
         base + Duration::hours(1),
     )
@@ -90,14 +92,17 @@ async fn create_contact_fact(
     let graph = PostgresGraphStore::scoped_for_app_role(
         pool.clone(),
         RlsContext::contact(tenant_id, contact_id),
+        super::test_kms(),
     );
     let uid = Uuid::now_v7();
     graph
         .create_node(NodeWriteIntent {
+            barrier: None,
             uid,
             label: NodeLabel::Fact,
             storage_partition_id: Some(StoragePartitionId::for_tenant(tenant_id).to_string()),
             contact_id: Some(contact_id.to_string()),
+            data_subject_id: contact_id.0,
             scope: "contact".to_string(),
             name: name.to_string(),
             properties: json!({
@@ -108,7 +113,7 @@ async fn create_contact_fact(
                 "fact_hash": fact_hash,
                 "source": "consolidation_contact_scope_db_memory",
             }),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             confidence: Some(0.9),
             valid_from,
             embedding: None,

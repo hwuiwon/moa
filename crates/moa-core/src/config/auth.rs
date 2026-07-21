@@ -23,6 +23,9 @@ pub struct AuthConfig {
     /// MOA-issued contact token settings.
     #[serde(default)]
     pub contact_tokens: ContactTokenConfig,
+    /// First-party OAuth 2.1 Authorization Server settings.
+    #[serde(default)]
+    pub oauth: OAuthServerConfig,
 }
 
 /// Supported authentication provider kinds.
@@ -77,6 +80,116 @@ pub struct OidcAuthConfig {
     pub audience: String,
     /// JWKS endpoint URL.
     pub jwks_url: String,
+}
+
+/// First-party OAuth 2.1 Authorization Server settings.
+///
+/// When [`OAuthServerConfig::clients`] is empty the Authorization Server has no
+/// registered client, so every `/oauth/*` request fails closed on client lookup.
+/// Configured clients are validated and converged into Postgres at startup;
+/// request-time lookup always uses that authoritative table. Dynamic client
+/// registration (RFC 7591) is a follow-up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthServerConfig {
+    /// Canonical authorization-server issuer URL.
+    pub issuer: String,
+    /// Exact RFC 8707 protected resource accepted by this server.
+    pub resource: String,
+    /// Lifetime of an unapproved authorization transaction, in seconds.
+    pub authorization_request_ttl_seconds: i64,
+    /// Lifetime of a single-use authorization code, in seconds. Keep short.
+    pub authorization_code_ttl_seconds: i64,
+    /// Lifetime of an issued access token, in seconds.
+    pub access_token_ttl_seconds: i64,
+    /// Lifetime of an issued refresh token, in seconds.
+    pub refresh_token_ttl_seconds: i64,
+    /// Statically configured OAuth clients.
+    #[serde(default)]
+    pub clients: Vec<OAuthClientConfig>,
+}
+
+impl Default for OAuthServerConfig {
+    fn default() -> Self {
+        Self {
+            issuer: "https://moa.local".to_string(),
+            resource: "https://moa.local/mcp".to_string(),
+            authorization_request_ttl_seconds: 300,
+            // 60s: an authorization code is redeemed immediately after the
+            // browser redirect, so the exposure window stays minimal.
+            authorization_code_ttl_seconds: 60,
+            access_token_ttl_seconds: 3600,
+            // 14 days: refresh tokens rotate on every use, so a leaked token is
+            // detectable and bounded by the rotation window.
+            refresh_token_ttl_seconds: 1_209_600,
+            clients: Vec::new(),
+        }
+    }
+}
+
+impl OAuthServerConfig {
+    /// Validate the authorization-server deployment contract.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_oauth_url("issuer", &self.issuer, "/")?;
+        validate_oauth_url("resource", &self.resource, "/mcp")?;
+        if self.authorization_request_ttl_seconds <= 0
+            || self.authorization_code_ttl_seconds <= 0
+            || self.access_token_ttl_seconds <= 0
+            || self.refresh_token_ttl_seconds <= 0
+        {
+            return Err("OAuth lifetimes must be positive".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn validate_oauth_url(field: &str, value: &str, expected_path: &str) -> Result<(), String> {
+    let parsed =
+        url::Url::parse(value).map_err(|error| format!("invalid OAuth {field}: {error}"))?;
+    if parsed.cannot_be_a_base()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.path() != expected_path
+    {
+        return Err(format!("invalid OAuth {field} URL"));
+    }
+    Ok(())
+}
+
+/// One statically registered OAuth client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthClientConfig {
+    /// Public client identifier presented on `/oauth/*` requests.
+    pub client_id: String,
+    /// Whether the client authenticates with a secret (`confidential`) or relies
+    /// solely on PKCE (`public`).
+    #[serde(default)]
+    pub client_type: OAuthClientType,
+    /// Exact redirect URIs the client may use; matched byte-for-byte.
+    pub redirect_uris: Vec<String>,
+    /// Scopes the client may request. An empty list allows no scopes.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Lowercase SHA-256 hex digest of the client secret, required for
+    /// `confidential` clients and ignored for `public` clients. The plaintext
+    /// secret is never stored.
+    #[serde(default)]
+    pub client_secret_sha256: Option<String>,
+}
+
+/// OAuth client authentication class.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum OAuthClientType {
+    /// PKCE-only client with no secret (e.g. native or single-page apps).
+    #[default]
+    Public,
+    /// Client that authenticates with a shared secret.
+    Confidential,
 }
 
 /// MOA-issued contact JWT settings.

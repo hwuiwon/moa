@@ -241,10 +241,10 @@ async fn contact_rls_blocks_other_contact_memory_reads_db() {
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, storage_partition_id, tenant_id, contact_id, name, pii_class, confidence, properties_summary)
+            (uid, label, storage_partition_id, tenant_id, contact_id, data_subject_id, name, pii_class, confidence, properties_summary)
         VALUES
-            ($1, 'Fact', $3, $4, $5, 'contact A memory', 'none', 0.9, $7),
-            ($2, 'Fact', $3, $4, $6, 'contact B memory', 'none', 0.9, $8)
+            ($1, 'Fact', $3, $4, $5, $5, 'contact A memory', 'none', 0.9, $7),
+            ($2, 'Fact', $3, $4, $6, $6, 'contact B memory', 'none', 0.9, $8)
         "#,
     )
     .bind(Uuid::now_v7())
@@ -284,11 +284,11 @@ async fn contact_rls_includes_tenant_shared_memory_rows_db() {
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, storage_partition_id, tenant_id, contact_id, name, pii_class, confidence, properties_summary)
+            (uid, label, storage_partition_id, tenant_id, contact_id, data_subject_id, name, pii_class, confidence, properties_summary)
         VALUES
-            ($1, 'Fact', $4, $5, NULL, 'tenant shared memory', 'none', 0.9, $8),
-            ($2, 'Fact', $4, $5, $6, 'contact A private memory', 'none', 0.9, $9),
-            ($3, 'Fact', $4, $5, $7, 'contact B private memory', 'none', 0.9, $10)
+            ($1, 'Fact', $4, $5, NULL, $5, 'tenant shared memory', 'none', 0.9, $8),
+            ($2, 'Fact', $4, $5, $6, $6, 'contact A private memory', 'none', 0.9, $9),
+            ($3, 'Fact', $4, $5, $7, $7, 'contact B private memory', 'none', 0.9, $10)
         "#,
     )
     .bind(tenant_shared_uid)

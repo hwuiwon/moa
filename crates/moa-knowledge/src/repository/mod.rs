@@ -9,7 +9,7 @@ mod sync;
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use moa_core::types::memory::RlsContext;
+use moa_core::types::memory::{InformationBarrierId, RlsContext};
 use moa_core::{
     types::contact::ContactId, types::identifiers::StoragePartitionId, types::identifiers::TenantId,
 };
@@ -467,8 +467,8 @@ impl KnowledgeDiscoveryStore for PostgresKnowledgeDiscoveryStore {
         let rows = sqlx::query(
             r#"
             SELECT connection_uid, tenant_id, provider, connector, provider_connection_id,
-                   credential_ref, status, metadata, source_selection, created_at, updated_at,
-                   last_synced_at
+                   credential_ref, status, metadata, source_selection, information_barrier,
+                   created_at, updated_at, last_synced_at
             FROM moa.knowledge_connections
             WHERE provider = $1
               AND ($2::TEXT IS NULL OR provider_config_key = $2)

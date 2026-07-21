@@ -339,7 +339,8 @@ pub(super) fn truncate_excerpt(excerpt: &str, max_tokens: usize) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
+    use moa_core::types::security::SensitivityClass;
+    use moa_memory_graph::{NodeIndexRow, NodeLabel};
     use serde_json::Value;
     use uuid::Uuid;
 
@@ -401,7 +402,7 @@ mod tests {
                 contact_id: None,
                 scope: "contact".to_string(),
                 name: "fact".to_string(),
-                pii_class: PiiClass::None,
+                pii_class: SensitivityClass::None,
                 valid_to: None,
                 valid_from: Utc::now(),
                 properties_summary: Some(serde_json::json!({ "summary": summary })),

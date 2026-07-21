@@ -401,7 +401,8 @@ fn decay_score(
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use moa_memory_graph::{NodeLabel, PiiClass};
+    use moa_core::types::security::SensitivityClass;
+    use moa_memory_graph::NodeLabel;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -987,7 +988,7 @@ mod tests {
             contact_id: None,
             scope: scope.to_string(),
             name: name.to_string(),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             valid_to: None,
             valid_from,
             properties_summary,

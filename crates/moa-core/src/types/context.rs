@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::traits::Identity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -13,6 +14,9 @@ use super::{
     events_stream::EventRecord, hands::SandboxFile, identifiers::SessionId, identifiers::TenantId,
     identifiers::ToolCallId, model::ModelCapabilities, session::SessionMeta, tools::ToolContent,
 };
+
+/// Metadata key carrying the replay-stable turn identifier across context stages.
+pub const TURN_ID_METADATA_KEY: &str = "_moa.turn_id";
 
 /// Role of a context message passed to the LLM.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,6 +360,9 @@ pub struct WorkingContext {
     /// Actor that created the session, when recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<SessionActorRef>,
+    /// Exact authenticated caller and delegation provenance admitted for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_identity: Option<Identity>,
     /// Configured agent policy pinned to this session, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_context: Option<AgentContext>,
@@ -385,12 +392,18 @@ impl WorkingContext {
             tenant_id: session.tenant_id,
             contact: session.contact.clone(),
             created_by: session.created_by.clone(),
+            caller_identity: None,
             agent_context: session.agent_context.clone(),
             tool_schemas: Vec::new(),
             metadata: HashMap::new(),
             trusted_sandbox_files: Vec::new(),
             recent_events: Vec::new(),
         }
+    }
+
+    /// Attaches the exact authenticated identity admitted by the turn boundary.
+    pub fn set_caller_identity(&mut self, identity: Identity) {
+        self.caller_identity = Some(identity);
     }
 
     /// Appends a system message and updates the approximate token count.

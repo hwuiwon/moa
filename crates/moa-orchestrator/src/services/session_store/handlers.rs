@@ -6,14 +6,8 @@ use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{
     authorize_tenant, require_fga_client, require_identity, translate_authz_error,
 };
-use moa_authz::{
-    AuthzCheckError, OutboxPoller, PollerConfig, fga_subject, require_authz_with_delegation,
-};
+use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use std::time::Duration;
-
-const SESSION_AUTHZ_VISIBILITY_ATTEMPTS: usize = 6;
-const SESSION_AUTHZ_VISIBILITY_DELAY: Duration = Duration::from_millis(25);
 
 impl RestateSessionStore for SessionStoreImpl {
     #[tracing::instrument(skip(self, ctx, meta))]
@@ -1162,47 +1156,14 @@ async fn ensure_session_authz_visible(
     identity: &moa_core::traits::Identity,
     session_id: SessionId,
 ) -> Result<(), HandlerError> {
-    let subject = fga_subject(identity);
-    let object = format!("{}:{session_id}", ObjectType::Session);
-    for attempt in 0..SESSION_AUTHZ_VISIBILITY_ATTEMPTS {
-        let visible = fga
-            .check(&subject, &Relation::Participant.to_string(), &object)
-            .await
-            .map_err(|error| translate_authz_error(AuthzCheckError::Engine(error)))?;
-        if visible {
-            return Ok(());
-        }
-
-        let poller = OutboxPoller::new(
-            pool.clone(),
-            fga.clone(),
-            PollerConfig {
-                batch_size: 128,
-                ..PollerConfig::default()
-            },
-        );
-        ctx.run(move || async move {
-            poller.tick().await.map_err(|error| {
-                HandlerError::from(TerminalError::new(format!(
-                    "authz outbox visibility drain: {error}"
-                )))
-            })?;
-            Ok::<(), HandlerError>(())
-        })
-        .name(format!("create_session_authz_visibility_{attempt}"))
-        .await?;
-
-        if attempt + 1 < SESSION_AUTHZ_VISIBILITY_ATTEMPTS {
-            tokio::time::sleep(SESSION_AUTHZ_VISIBILITY_DELAY).await;
-        }
-    }
-
-    Err(translate_authz_error(AuthzCheckError::Forbidden {
-        subject,
-        object_type: ObjectType::Session,
-        object_id: session_id.to_string(),
-        relation: Relation::Participant,
-    }))
+    let identity = identity.clone();
+    ctx.run(move || async move {
+        super::inner::ensure_session_authz_visible(&pool, &fga, &identity, session_id).await?;
+        Ok::<_, HandlerError>(Json::from(()))
+    })
+    .name("create_session_authz_visibility")
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]

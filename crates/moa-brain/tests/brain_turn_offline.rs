@@ -4,6 +4,8 @@ include!("brain_turn_support/common.rs");
 include!("brain_turn_support/pipeline.rs");
 include!("brain_turn_support/offline.rs");
 
+use moa_brain::{BrainTurnRequest, StreamedTurnRequest};
+
 #[path = "support/offline_session_store.rs"]
 mod offline_session_store;
 #[path = "support/openai_wiremock.rs"]
@@ -149,6 +151,61 @@ async fn execution_planning_terminal_provider_outputs_never_repair() {
         let requests = provider.recorded_requests();
         assert_eq!(requests.len(), 1);
         assert_initial_execution_planner_request(&requests[0]);
+    }
+}
+
+#[tokio::test]
+async fn execution_planning_immutable_goal_errors_are_compiler_rejected_without_repair() {
+    // Pins: model-authored defects in the frozen goal are neither missing user input nor
+    // repairable, so structural and completion-coverage errors terminate after one paid call.
+    let objective = "Prepare a durable report";
+    let mut invalid_structure =
+        serde_json::from_str::<serde_json::Value>(&execution_planning_candidate(objective, 1))
+            .expect("candidate fixture should be JSON");
+    invalid_structure["goal"]["requirements"][0]["id"] = json!("INVALID_ID");
+    let mut unchecked_requirement =
+        serde_json::from_str::<serde_json::Value>(&execution_planning_candidate(objective, 1))
+            .expect("candidate fixture should be JSON");
+    unchecked_requirement["goal"]["requirements"]
+        .as_array_mut()
+        .expect("goal requirements should be an array")
+        .push(json!({
+            "id": "req_unchecked",
+            "description": "Return supporting evidence."
+        }));
+    unchecked_requirement["plan"]["nodes"][0]["requirement_ids"]
+        .as_array_mut()
+        .expect("node requirement IDs should be an array")
+        .push(json!("req_unchecked"));
+
+    for invalid in [invalid_structure, unchecked_requirement] {
+        let provider = ScriptedProvider::new(MockLlmProvider.capabilities())
+            .push_text(invalid.to_string())
+            .push_text(execution_planning_candidate(objective, 1));
+
+        let result = moa_brain::execution_planning::plan_execution(
+            &provider,
+            execution_planning_request(objective),
+        )
+        .await
+        .expect("invalid goal should remain a typed terminal result");
+
+        assert!(matches!(
+            result.kind,
+            moa_brain::execution_planning::ExecutionPlanningResultKind::Unsupported { .. }
+        ));
+        assert_eq!(provider.recorded_requests().len(), 1);
+        assert_eq!(
+            execution_planner_outcomes(&result.audits),
+            vec![moa_core::types::execution_planning::ExecutionPlannerOutcome::CompilerRejected]
+        );
+        assert!(result.audits.iter().any(|audit| matches!(
+            &audit.payload,
+            moa_core::types::execution_planning::ExecutionPlanningAuditPayload::Compile {
+                outcome: moa_core::types::execution_planning::ExecutionCompileOutcome::Rejected,
+                ..
+            }
+        )));
     }
 }
 
@@ -777,14 +834,32 @@ fn assert_initial_execution_planner_request(
         request.native_web_search,
         moa_core::types::completion::NativeWebSearchPolicy::Disabled
     );
-    let format = request
-        .response_format
-        .as_ref()
-        .expect("planner must request strict structured output");
-    assert!(format.strict);
-    assert_eq!(format.name, "generated_execution_candidate");
+    assert!(
+        request.response_format.is_none(),
+        "planner free-form JSON values cannot use provider-native strict schemas"
+    );
+    let system_message = request
+        .messages
+        .first()
+        .expect("planner request must lead with its stable system message");
     assert_eq!(
-        format.schema,
+        system_message.role,
+        moa_core::types::context::MessageRole::System
+    );
+    let schema_start = system_message
+        .content
+        .find("<response_schema>")
+        .expect("planner system message must open the response schema")
+        + "<response_schema>".len();
+    let schema_end = system_message
+        .content
+        .find("</response_schema>")
+        .expect("planner system message must close the response schema");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            &system_message.content[schema_start..schema_end]
+        )
+        .expect("embedded planner response schema must be valid JSON"),
         serde_json::to_value(schemars::schema_for!(
             moa_artifacts::execution_plan::GeneratedExecutionCandidate
         ))
@@ -808,7 +883,7 @@ async fn offline_brain_turn_returns_response() -> moa_core::error::Result<()> {
     );
     let session = session_meta("offline-brain-turn", "gpt-5.4");
     let session_id = session.id;
-    let store = Arc::new(MockSessionStore::new(session, Vec::new()));
+    let store = Arc::new(MockSessionStore::new(session.clone(), Vec::new()));
     let pipeline = build_no_memory_test_pipeline(&config, store.clone());
 
     store
@@ -821,7 +896,15 @@ async fn offline_brain_turn_returns_response() -> moa_core::error::Result<()> {
         )
         .await?;
 
-    let turn_result = run_brain_turn(session_id, store.clone(), provider, &pipeline, None).await?;
+    let turn_result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id,
+        session_store: store.clone(),
+        llm_provider: provider,
+        pipeline: &pipeline,
+        tool_router: None,
+    })
+    .await?;
     let events = store.get_events(session_id, EventRange::all()).await?;
     let response_text = events.into_iter().find_map(|record| match record.event {
         Event::BrainResponse { text, .. } => Some(text),
@@ -864,9 +947,16 @@ async fn run_brain_turn_emits_brain_response_event() {
     let pipeline = build_no_memory_test_pipeline(&MoaConfig::default(), store.clone());
     let llm = Arc::new(MockLlmProvider);
 
-    let result = run_brain_turn(session.id, store.clone(), llm, &pipeline, None)
-        .await
-        .unwrap();
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id: session.id,
+        session_store: store.clone(),
+        llm_provider: llm,
+        pipeline: &pipeline,
+        tool_router: None,
+    })
+    .await
+    .unwrap();
 
     assert_eq!(result, TurnResult::Complete);
 
@@ -921,9 +1011,16 @@ async fn run_brain_turn_marks_cache_prefix_reuse_on_second_request() {
     let pipeline = build_no_memory_test_pipeline(&MoaConfig::default(), store.clone());
     let llm = Arc::new(MockLlmProvider);
 
-    run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline, None)
-        .await
-        .unwrap();
+    run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id: session.id,
+        session_store: store.clone(),
+        llm_provider: llm.clone(),
+        pipeline: &pipeline,
+        tool_router: None,
+    })
+    .await
+    .unwrap();
     store
         .emit_event(
             session.id,
@@ -934,9 +1031,16 @@ async fn run_brain_turn_marks_cache_prefix_reuse_on_second_request() {
         )
         .await
         .unwrap();
-    run_brain_turn(session.id, store.clone(), llm, &pipeline, None)
-        .await
-        .unwrap();
+    run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id: session.id,
+        session_store: store.clone(),
+        llm_provider: llm,
+        pipeline: &pipeline,
+        tool_router: None,
+    })
+    .await
+    .unwrap();
 
     let events = store.events.lock().await.clone();
     let second_report = events
@@ -995,9 +1099,16 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
     let pipeline = build_no_memory_test_pipeline(&config, store.clone());
     let llm = Arc::new(CapturingTextLlmProvider::new("should not run"));
 
-    let error = run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline, None)
-        .await
-        .expect_err("budget should stop the turn");
+    let error = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id: session.id,
+        session_store: store.clone(),
+        llm_provider: llm.clone(),
+        pipeline: &pipeline,
+        tool_router: None,
+    })
+    .await
+    .expect_err("budget should stop the turn");
     match error {
         moa_core::error::MoaError::BudgetExhausted(message) => {
             assert!(message.contains("Daily tenant budget exhausted"));
@@ -1066,9 +1177,16 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
     let pipeline = build_no_memory_test_pipeline(&config, store.clone());
     let llm = Arc::new(CapturingTextLlmProvider::new("still runs"));
 
-    let result = run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline, None)
-        .await
-        .expect("unlimited budget should allow the turn");
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id: session.id,
+        session_store: store.clone(),
+        llm_provider: llm.clone(),
+        pipeline: &pipeline,
+        tool_router: None,
+    })
+    .await
+    .expect("unlimited budget should allow the turn");
 
     assert_eq!(result, TurnResult::Complete);
     assert_eq!(llm.requests.lock().await.len(), 1);
@@ -1112,13 +1230,14 @@ async fn run_brain_turn_executes_tool_in_auto_mode() {
     );
     let llm = Arc::new(ToolLoopLlmProvider::default());
 
-    let result = run_brain_turn(
-        session.id,
-        store.clone(),
-        llm.clone(),
-        &pipeline,
-        Some(tool_router.clone()),
-    )
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id: session.id,
+        session_store: store.clone(),
+        llm_provider: llm.clone(),
+        pipeline: &pipeline,
+        tool_router: Some(tool_router.clone()),
+    })
     .await
     .unwrap();
 
@@ -1179,13 +1298,14 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_auto_mode_tool_e
     );
     let llm = Arc::new(OpenAiToolLoopLlmProvider::default());
 
-    let result = run_brain_turn(
-        session.id,
-        store.clone(),
-        llm.clone(),
-        &pipeline,
-        Some(tool_router.clone()),
-    )
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id: session.id,
+        session_store: store.clone(),
+        llm_provider: llm.clone(),
+        pipeline: &pipeline,
+        tool_router: Some(tool_router.clone()),
+    })
     .await
     .unwrap();
 
@@ -1244,13 +1364,14 @@ async fn run_brain_turn_persists_truncated_tool_result_metadata() {
     );
     let llm = Arc::new(LargeToolOutputLlmProvider::default());
 
-    let result = run_brain_turn(
-        session.id,
-        store.clone(),
-        llm.clone(),
-        &pipeline,
-        Some(tool_router.clone()),
-    )
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id: session.id,
+        session_store: store.clone(),
+        llm_provider: llm.clone(),
+        pipeline: &pipeline,
+        tool_router: Some(tool_router.clone()),
+    })
     .await
     .unwrap();
 
@@ -1304,9 +1425,16 @@ async fn run_brain_turn_records_tool_call_before_auto_allowed_tool_error() {
     );
     let llm = Arc::new(OpenAiFailedReadLoopLlmProvider::default());
 
-    let result = run_brain_turn(session.id, store.clone(), llm, &pipeline, Some(tool_router))
-        .await
-        .unwrap();
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id: session.id,
+        session_store: store.clone(),
+        llm_provider: llm,
+        pipeline: &pipeline,
+        tool_router: Some(tool_router),
+    })
+    .await
+    .unwrap();
 
     assert_eq!(result, TurnResult::Complete);
 
@@ -1437,9 +1565,16 @@ async fn run_policy_blocked_file_write_turn(
         final_text,
     ));
 
-    let result = run_brain_turn(session_id, store.clone(), llm, &pipeline, Some(tool_router))
-        .await
-        .unwrap();
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
+        session_id,
+        session_store: store.clone(),
+        llm_provider: llm,
+        pipeline: &pipeline,
+        tool_router: Some(tool_router),
+    })
+    .await
+    .unwrap();
     assert_eq!(result, TurnResult::Complete);
     assert!(
         !sandbox_dir.path().join("blocked-policy-write.txt").exists(),
@@ -1544,17 +1679,22 @@ async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execu
     );
     let (runtime_tx, mut runtime_rx) = broadcast::channel(64);
 
-    let streamed_result = run_streamed_turn(
-        session_id,
-        store.clone(),
-        Arc::new(ProviderToolResultTurnLlm),
-        &pipeline,
-        Some(tool_router),
-        &runtime_tx,
-        None,
-        None,
-        None,
-    )
+    let streamed_result = run_streamed_turn(StreamedTurnRequest {
+        turn: BrainTurnRequest {
+            identity: test_identity(session.tenant_id),
+            session_id,
+            session_store: store.clone(),
+            llm_provider: Arc::new(ProviderToolResultTurnLlm),
+            pipeline: &pipeline,
+            tool_router: Some(tool_router),
+        },
+        runtime_tx: &runtime_tx,
+        event_tx: None,
+        cancel_token: None,
+        hard_cancel_token: None,
+        signal_state: None,
+        lineage: Arc::new(moa_core::traits::NullLineageHandle),
+    })
     .await
     .unwrap();
 
@@ -1595,6 +1735,7 @@ async fn canary_leaks_in_tool_input_are_detected_and_blocked() {
         ..SessionMeta::default()
     };
     let session_id = session.id;
+    let tenant_id = session.tenant_id;
     let store = Arc::new(MockSessionStore::new(
         session,
         vec![EventRecord {
@@ -1621,9 +1762,16 @@ async fn canary_leaks_in_tool_input_are_detected_and_blocked() {
     );
     let llm = Arc::new(CanaryLeakLlmProvider::default());
 
-    let result = run_brain_turn(session_id, store.clone(), llm, &pipeline, Some(tool_router))
-        .await
-        .unwrap();
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(tenant_id),
+        session_id,
+        session_store: store.clone(),
+        llm_provider: llm,
+        pipeline: &pipeline,
+        tool_router: Some(tool_router),
+    })
+    .await
+    .unwrap();
 
     assert_eq!(result, TurnResult::Complete);
     let events = store
@@ -1663,6 +1811,7 @@ async fn tool_content_blocks_wrap_malicious_tool_results_as_untrusted_content() 
         ..SessionMeta::default()
     };
     let session_id = session.id;
+    let tenant_id = session.tenant_id;
     let store = Arc::new(MockSessionStore::new(
         session,
         vec![EventRecord {
@@ -1687,13 +1836,14 @@ async fn tool_content_blocks_wrap_malicious_tool_results_as_untrusted_content() 
     );
     let llm = Arc::new(MaliciousToolOutputLlmProvider::default());
 
-    let result = run_brain_turn(
+    let result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(tenant_id),
         session_id,
-        store.clone(),
-        llm.clone(),
-        &pipeline,
-        Some(tool_router),
-    )
+        session_store: store.clone(),
+        llm_provider: llm.clone(),
+        pipeline: &pipeline,
+        tool_router: Some(tool_router),
+    })
     .await
     .unwrap();
 
@@ -1787,7 +1937,7 @@ fn tool_content_blocks_wrap_malicious_tool_errors_as_untrusted_content() {
             retryable: false,
         },
     )];
-    let store = Arc::new(MockSessionStore::new(session, events.clone()));
+    let store = Arc::new(MockSessionStore::new(session.clone(), events.clone()));
     let history = HistoryCompiler::new(store);
 
     let (messages, _) = history
@@ -1849,17 +1999,22 @@ async fn streamed_turn_runtime_matches_buffered_response() {
     let streamed_provider = Arc::new(CapturingTextLlmProvider::new("Hello streamed world"));
     let (runtime_tx, mut runtime_rx) = broadcast::channel(64);
 
-    let streamed_result = run_streamed_turn(
-        session_id,
-        streamed_store.clone(),
-        streamed_provider,
-        &streamed_pipeline,
-        None,
-        &runtime_tx,
-        None,
-        None,
-        None,
-    )
+    let streamed_result = run_streamed_turn(StreamedTurnRequest {
+        turn: BrainTurnRequest {
+            identity: test_identity(session.tenant_id),
+            session_id,
+            session_store: streamed_store.clone(),
+            llm_provider: streamed_provider,
+            pipeline: &streamed_pipeline,
+            tool_router: None,
+        },
+        runtime_tx: &runtime_tx,
+        event_tx: None,
+        cancel_token: None,
+        hard_cancel_token: None,
+        signal_state: None,
+        lineage: Arc::new(moa_core::traits::NullLineageHandle),
+    })
     .await
     .unwrap();
 
@@ -1893,18 +2048,19 @@ async fn streamed_turn_runtime_matches_buffered_response() {
     assert_eq!(finished_text, Some("Hello streamed world".to_string()));
     assert_eq!(streamed_response, Some("Hello streamed world".to_string()));
 
-    let buffered_store = Arc::new(MockSessionStore::new(session, initial_events));
+    let buffered_store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
     let buffered_pipeline =
         build_no_memory_test_pipeline(&MoaConfig::default(), buffered_store.clone());
     let buffered_provider = Arc::new(CapturingTextLlmProvider::new("Hello streamed world"));
 
-    let buffered_result = run_brain_turn(
+    let buffered_result = run_brain_turn(BrainTurnRequest {
+        identity: test_identity(session.tenant_id),
         session_id,
-        buffered_store.clone(),
-        buffered_provider,
-        &buffered_pipeline,
-        None,
-    )
+        session_store: buffered_store.clone(),
+        llm_provider: buffered_provider,
+        pipeline: &buffered_pipeline,
+        tool_router: None,
+    })
     .await
     .unwrap();
 

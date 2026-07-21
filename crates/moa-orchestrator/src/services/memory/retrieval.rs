@@ -1,6 +1,5 @@
 //! Graph-memory retrieval, show, and debug-inspection orchestration.
 
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -9,50 +8,67 @@ use moa_brain::retrieval::{
     dedupe_and_rank_hits,
 };
 use moa_core::config::MoaConfig;
-use moa_core::traits::EmbeddingProvider;
+use moa_core::traits::{EmbeddingProvider, Identity};
+use moa_core::types::memory::InformationBarrierClearances;
+use moa_core::types::security::SensitivityClass;
+use moa_core::types::session::SessionMeta;
 use moa_core::wire::memory::{
     MemoryRetrieveDebugRequest, MemoryRetrieveDebugResponse, MemorySearchRequest,
     MemorySearchResponse, MemoryShowRequest, MemoryShowResponse,
 };
-use moa_memory_graph::{
-    EdgeLabel, GraphStore, NodeIndexRow, NodeLabel, PiiClass, PostgresGraphStore,
-};
+use moa_crypto::KeyManagementProvider;
+use moa_memory_graph::{EdgeLabel, GraphStore, NodeIndexRow, NodeLabel, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::VectorStoreFactory;
 use moa_observability::record_memory_operation;
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 use restate_sdk::prelude::*;
-use serde_json::Value;
 use uuid::Uuid;
 
 use super::memory_handler_error;
 use super::responses::memory_hit_from_retrieval;
 
+/// Session-bound provenance for one memory service read.
+pub(super) struct MemoryRequestProvenance {
+    pub(super) session: SessionMeta,
+    pub(super) identity: Identity,
+    pub(super) operation_id: String,
+}
+
+/// Shared storage dependencies for memory service reads.
+pub(super) struct MemoryServiceDeps<'a> {
+    pub(super) pool: &'a sqlx::PgPool,
+    pub(super) kms: &'a Arc<dyn KeyManagementProvider>,
+}
+
 /// Runs graph-memory search and maps ranked hits into the public response.
 pub(super) async fn search_inner(
     request: MemorySearchRequest,
-    scope: MemoryScope,
-    pool: &sqlx::PgPool,
+    provenance: MemoryRequestProvenance,
+    deps: MemoryServiceDeps<'_>,
     config: &MoaConfig,
 ) -> Result<MemorySearchResponse, HandlerError> {
     let started = Instant::now();
-    let (graph, retriever) = memory_stack(pool, config, &scope).await?;
-    let seeds = lookup_seed_uids(graph.as_ref(), &request.query, request.limit).await?;
-    let label_filter = parse_label_filter(request.label_filter)?;
-    let max_pii_class = parse_pii_class(request.max_pii_class)?;
-    let hits = retrieve_hits(
-        retriever.as_ref(),
-        RetrievalInputs {
-            seeds,
-            query: request.query.clone(),
-            limit: request.limit,
-            scope,
-            label_filter,
-            max_pii_class,
-            use_reranker: request.use_reranker,
-            disable_graph_expansion: false,
-        },
+    let policy =
+        MemoryAdmissionPolicy::from_session(&provenance.session).map_err(memory_handler_error)?;
+    let clearances = session_clearances(&provenance.session)?;
+    let scope = policy.traversal_scope();
+    let hits = search_hits_for_tool(
+        deps.pool,
+        deps.kms,
         config,
+        &policy,
+        &request.query,
+        request.limit,
+        clearances,
+    )
+    .await?;
+    audit_service_access(
+        &deps,
+        &provenance,
+        &scope,
+        &hits.iter().map(|hit| hit.uid).collect::<Vec<_>>(),
+        policy_source_tiers(&policy),
     )
     .await?;
     let result_count = hits.len() as u64;
@@ -67,13 +83,15 @@ pub(super) async fn search_inner(
 /// Loads one graph-memory node and bounded neighbor details.
 pub(super) async fn show_inner(
     request: MemoryShowRequest,
-    pool: &sqlx::PgPool,
+    provenance: MemoryRequestProvenance,
+    deps: MemoryServiceDeps<'_>,
 ) -> Result<MemoryShowResponse, HandlerError> {
     let started = Instant::now();
-    let scope = MemoryScope::Tenant {
-        tenant_id: request.tenant_id,
-    };
-    let graph = graph_store(pool, &scope);
+    let policy =
+        MemoryAdmissionPolicy::from_session(&provenance.session).map_err(memory_handler_error)?;
+    let clearances = session_clearances(&provenance.session)?;
+    let scope = policy.traversal_scope();
+    let graph = graph_store(deps.pool, deps.kms, &scope, &clearances);
     let node = graph
         .get_node(request.uid)
         .await
@@ -81,6 +99,11 @@ pub(super) async fn show_inner(
         .ok_or_else(|| {
             TerminalError::new_with_code(404, format!("node {} not found", request.uid))
         })?;
+    if !policy.admits_node(&node) {
+        return Err(
+            TerminalError::new_with_code(404, format!("node {} not found", request.uid)).into(),
+        );
+    }
     let neighbor_depth = request.neighbor_depth.min(3);
     let neighbors = if neighbor_depth == 0 {
         Vec::new()
@@ -89,7 +112,21 @@ pub(super) async fn show_inner(
             .neighbors(request.uid, neighbor_depth as u8, None, None)
             .await
             .map_err(memory_handler_error)?
+            .into_iter()
+            .filter(|neighbor| policy.admits_node(neighbor))
+            .collect()
     };
+
+    let mut node_uids = vec![node.uid];
+    node_uids.extend(neighbors.iter().map(|neighbor| neighbor.uid));
+    audit_service_access(
+        &deps,
+        &provenance,
+        &scope,
+        &node_uids,
+        policy_source_tiers(&policy),
+    )
+    .await?;
 
     let response = MemoryShowResponse {
         uid: node.uid,
@@ -124,38 +161,37 @@ pub(super) async fn show_inner(
 /// inline in the response instead.
 pub(super) async fn retrieve_debug_inner(
     request: MemoryRetrieveDebugRequest,
-    scope: MemoryScope,
-    pool: &sqlx::PgPool,
+    provenance: MemoryRequestProvenance,
+    deps: MemoryServiceDeps<'_>,
     config: &MoaConfig,
 ) -> Result<MemoryRetrieveDebugResponse, HandlerError> {
     let started = Instant::now();
-    let (graph, retriever) = memory_stack(pool, config, &scope).await?;
-    let seeds = lookup_seed_uids(graph.as_ref(), &request.query, request.limit).await?;
-    let query_embedding = debug_query_embedding_with_config(config, &request.query).await?;
-    let output = retriever
-        .retrieve_with_diagnostics(RetrievalRequest {
-            seeds: seeds.clone(),
-            query_text: request.query.clone(),
-            query_embedding,
-            scope,
-            label_filter: None,
-            label_boost: None,
-            max_pii_class: PiiClass::Restricted,
-            k_final: usize::try_from(request.limit).unwrap_or(usize::MAX),
-            use_reranker: true,
-            strategy: None,
-            as_of: None,
-            ranking_reference_time: None,
-            lineage: None,
-            disable_leg_timeouts: false,
-            disable_graph_expansion: false,
-            window_policy: moa_brain::retrieval::EvidenceWindowPolicy::default(),
-        })
-        .await
-        .map_err(memory_handler_error)?;
+    let policy =
+        MemoryAdmissionPolicy::from_session(&provenance.session).map_err(memory_handler_error)?;
+    let clearances = session_clearances(&provenance.session)?;
+    let scope = policy.traversal_scope();
+    let hits = search_hits_for_tool(
+        deps.pool,
+        deps.kms,
+        config,
+        &policy,
+        &request.query,
+        request.limit,
+        clearances,
+    )
+    .await?;
 
-    let diagnostics = serde_json::to_value(&output.diagnostics).unwrap_or(Value::Null);
-    let result_count = output.hits.len() as u64;
+    audit_service_access(
+        &deps,
+        &provenance,
+        &scope,
+        &hits.iter().map(|hit| hit.uid).collect::<Vec<_>>(),
+        policy_source_tiers(&policy),
+    )
+    .await?;
+
+    let diagnostics = serde_json::json!({ "policy_source": "pinned_session" });
+    let result_count = hits.len() as u64;
     record_memory_operation("retrieve_debug", "success", result_count, started.elapsed());
 
     Ok(MemoryRetrieveDebugResponse {
@@ -165,12 +201,8 @@ pub(super) async fn retrieve_debug_inner(
         lineage_enabled: false,
         no_flush_wait: request.no_flush_wait,
         lineage_turn: None,
-        seed_uids: seeds,
-        hits: output
-            .hits
-            .into_iter()
-            .map(memory_hit_from_retrieval)
-            .collect(),
+        seed_uids: Vec::new(),
+        hits: hits.into_iter().map(memory_hit_from_retrieval).collect(),
         diagnostics,
     })
 }
@@ -181,9 +213,10 @@ struct RetrievalInputs {
     limit: u32,
     scope: MemoryScope,
     label_filter: Option<Vec<NodeLabel>>,
-    max_pii_class: PiiClass,
+    max_pii_class: SensitivityClass,
     use_reranker: bool,
     disable_graph_expansion: bool,
+    clearances: InformationBarrierClearances,
 }
 
 /// Runs the same scoped hybrid retrieval the injection path uses for the
@@ -195,10 +228,12 @@ struct RetrievalInputs {
 /// a caller-supplied tenant or contact id.
 pub(super) async fn search_hits_for_tool(
     pool: &sqlx::PgPool,
+    kms: &Arc<dyn KeyManagementProvider>,
     config: &MoaConfig,
     policy: &MemoryAdmissionPolicy,
     query: &str,
     limit: u32,
+    clearances: InformationBarrierClearances,
 ) -> Result<Vec<RetrievalHit>, HandlerError> {
     if !policy.is_enabled() {
         return Ok(Vec::new());
@@ -209,7 +244,8 @@ pub(super) async fn search_hits_for_tool(
     let query_embedding = debug_query_embedding_with_config(config, query).await?;
     let mut admitted = Vec::new();
     for plan in policy.plans() {
-        let (graph, retriever) = memory_stack_with_runtime(pool, config, plan.scope()).await?;
+        let (graph, retriever) =
+            memory_stack_with_runtime(pool, kms, config, plan.scope(), &clearances).await?;
         let seeds = lookup_seed_uids(graph.as_ref(), query, retrieval_limit).await?;
         let hits = retrieve_hits_with_embedding(
             retriever.as_ref(),
@@ -222,6 +258,7 @@ pub(super) async fn search_hits_for_tool(
                 max_pii_class,
                 use_reranker: true,
                 disable_graph_expansion: plan.source_tier() == SourceTier::TenantKnowledge,
+                clearances: clearances.clone(),
             },
             query_embedding.clone(),
         )
@@ -238,15 +275,22 @@ pub(super) async fn search_hits_for_tool(
 /// agentic tool, applying the same RLS scope the injection path uses.
 pub(super) async fn neighbors_for_tool(
     pool: &sqlx::PgPool,
+    kms: &Arc<dyn KeyManagementProvider>,
     policy: &MemoryAdmissionPolicy,
     seed: Uuid,
     hops: u8,
     edge_filter: Option<Vec<EdgeLabel>>,
+    clearances: InformationBarrierClearances,
 ) -> Result<Vec<NodeIndexRow>, HandlerError> {
     if !policy.is_enabled() {
         return Ok(Vec::new());
     }
-    let graph = graph_store_with_pool(pool.clone(), &policy.traversal_scope());
+    let graph = graph_store_with_pool(
+        pool.clone(),
+        kms.clone(),
+        &policy.traversal_scope(),
+        &clearances,
+    );
     let Some(seed_node) = graph.get_node(seed).await.map_err(memory_handler_error)? else {
         return Ok(Vec::new());
     };
@@ -263,15 +307,6 @@ pub(super) async fn neighbors_for_tool(
         .collect())
 }
 
-async fn retrieve_hits(
-    retriever: &HybridRetriever,
-    inputs: RetrievalInputs,
-    config: &MoaConfig,
-) -> Result<Vec<RetrievalHit>, HandlerError> {
-    let query_embedding = debug_query_embedding_with_config(config, &inputs.query).await?;
-    retrieve_hits_with_embedding(retriever, inputs, query_embedding).await
-}
-
 async fn retrieve_hits_with_embedding(
     retriever: &HybridRetriever,
     inputs: RetrievalInputs,
@@ -279,6 +314,7 @@ async fn retrieve_hits_with_embedding(
 ) -> Result<Vec<RetrievalHit>, HandlerError> {
     retriever
         .retrieve(RetrievalRequest {
+            cleared_barriers: inputs.clearances,
             seeds: inputs.seeds,
             query_text: inputs.query,
             query_embedding,
@@ -343,56 +379,108 @@ async fn lookup_seed_uids(
         .map_err(memory_handler_error)
 }
 
-async fn memory_stack(
-    pool: &sqlx::PgPool,
-    config: &MoaConfig,
-    scope: &MemoryScope,
-) -> Result<(Arc<dyn GraphStore>, Arc<HybridRetriever>), HandlerError> {
-    memory_stack_with_runtime(pool, config, scope).await
-}
-
 async fn memory_stack_with_runtime(
     pool: &sqlx::PgPool,
+    kms: &Arc<dyn KeyManagementProvider>,
     config: &MoaConfig,
     scope: &MemoryScope,
+    clearances: &InformationBarrierClearances,
 ) -> Result<(Arc<dyn GraphStore>, Arc<HybridRetriever>), HandlerError> {
-    let graph = Arc::new(graph_store_with_pool(pool.clone(), scope));
+    let graph = Arc::new(graph_store_with_pool(
+        pool.clone(),
+        kms.clone(),
+        scope,
+        clearances,
+    ));
     let vector_factory = VectorStoreFactory::from_config(config);
-    let pgvector_source =
-        vector_factory.pgvector_source_for_app_role(pool.clone(), scope.to_rls_context());
+    let pgvector_source = vector_factory.pgvector_source_for_app_role(
+        pool.clone(),
+        scope
+            .to_rls_context()
+            .with_cleared_barriers(clearances.clone()),
+    );
     let retriever =
         HybridRetriever::from_config(config, pool.clone(), graph.clone(), pgvector_source)
             .with_assume_app_role(true);
     Ok((graph, Arc::new(retriever)))
 }
 
-fn graph_store(pool: &sqlx::PgPool, scope: &MemoryScope) -> PostgresGraphStore {
-    graph_store_with_pool(pool.clone(), scope)
+fn graph_store(
+    pool: &sqlx::PgPool,
+    kms: &Arc<dyn KeyManagementProvider>,
+    scope: &MemoryScope,
+    clearances: &InformationBarrierClearances,
+) -> PostgresGraphStore {
+    graph_store_with_pool(pool.clone(), kms.clone(), scope, clearances)
 }
 
-fn graph_store_with_pool(pool: sqlx::PgPool, scope: &MemoryScope) -> PostgresGraphStore {
-    PostgresGraphStore::scoped_for_app_role(pool, scope.to_rls_context())
+fn graph_store_with_pool(
+    pool: sqlx::PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
+    scope: &MemoryScope,
+    clearances: &InformationBarrierClearances,
+) -> PostgresGraphStore {
+    PostgresGraphStore::scoped_for_app_role(
+        pool,
+        scope
+            .to_rls_context()
+            .with_cleared_barriers(clearances.clone()),
+        kms,
+    )
 }
 
-fn parse_label_filter(labels: Vec<String>) -> Result<Option<Vec<NodeLabel>>, HandlerError> {
-    if labels.is_empty() {
-        return Ok(None);
-    }
-
-    labels
-        .into_iter()
-        .map(|label| {
-            NodeLabel::from_str(&label).map_err(|_| {
-                TerminalError::new_with_code(400, format!("unknown memory label `{label}`")).into()
-            })
-        })
-        .collect::<Result<Vec<_>, HandlerError>>()
-        .map(Some)
+async fn audit_service_access(
+    deps: &MemoryServiceDeps<'_>,
+    provenance: &MemoryRequestProvenance,
+    scope: &MemoryScope,
+    node_uids: &[Uuid],
+    source_tiers: Vec<String>,
+) -> Result<(), HandlerError> {
+    let (scope_tier, scope_uid) = match scope {
+        MemoryScope::Tenant { tenant_id } => {
+            ("tenant".to_string(), format!("memory:tenant:{tenant_id}"))
+        }
+        MemoryScope::Contact {
+            tenant_id,
+            contact_id,
+        } => (
+            "contact".to_string(),
+            format!("memory:contact:{tenant_id}:{contact_id}"),
+        ),
+    };
+    let access = moa_ocsf::MemoryDataAccess::from_session(
+        &provenance.identity,
+        &provenance.session,
+        moa_ocsf::MemoryDataAccessDetails {
+            retrieval_operation_id: provenance.operation_id.clone(),
+            node_uids: node_uids.to_vec(),
+            scope_uid,
+            scope_tier,
+            source_tiers,
+            turn_uid: None,
+        },
+    );
+    moa_ocsf::emit_data_access(deps.pool, provenance.session.tenant_id, access)
+        .await
+        .map_err(memory_handler_error)?;
+    Ok(())
 }
 
-fn parse_pii_class(value: Option<String>) -> Result<PiiClass, HandlerError> {
-    let value = value.unwrap_or_else(|| "restricted".to_string());
-    PiiClass::from_str(&value).map_err(|_| {
-        TerminalError::new_with_code(400, format!("unknown PII class `{value}`")).into()
-    })
+fn session_clearances(session: &SessionMeta) -> Result<InformationBarrierClearances, HandlerError> {
+    session
+        .agent_context
+        .as_ref()
+        .ok_or_else(|| {
+            TerminalError::new_with_code(409, "memory retrieval requires a pinned agent policy")
+        })?
+        .information_barrier_clearances()
+        .map_err(memory_handler_error)
+}
+
+fn policy_source_tiers(policy: &MemoryAdmissionPolicy) -> Vec<String> {
+    policy
+        .plans()
+        .iter()
+        .map(|plan| plan.source_tier().as_str().to_string())
+        .collect()
 }

@@ -3,9 +3,10 @@
 use chrono::{DateTime, Utc};
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
-    EdgeLabel, EdgeWriteIntent, GraphStore, GraphWalkScoring, NodeLabel, NodeWriteIntent, PiiClass,
+    EdgeLabel, EdgeWriteIntent, GraphStore, GraphWalkScoring, NodeLabel, NodeWriteIntent,
     PostgresGraphStore,
 };
 use moa_session::testing;
@@ -50,14 +51,16 @@ fn node_intent(
     name: &str,
 ) -> NodeWriteIntent {
     NodeWriteIntent {
+        barrier: None,
         uid,
+        data_subject_id: tenant_scope(storage_partition_id).tenant_id().0,
         label,
         storage_partition_id: Some(storage_partition_id.to_string()),
         contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "source": "knowledge_labels_db_memory" }),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         confidence: Some(0.98),
         valid_from: utc("2026-06-26T00:00:00Z"),
         embedding: None,
@@ -140,6 +143,7 @@ async fn knowledge_graph_labels_create_read_and_delete() {
     let graph = PostgresGraphStore::scoped_for_app_role(
         session_store.pool().clone(),
         tenant_scope(storage_partition_id.clone()),
+        super::test_kms(),
     );
 
     let source_uid = Uuid::now_v7();

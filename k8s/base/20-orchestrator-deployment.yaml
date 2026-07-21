@@ -52,6 +52,9 @@ spec:
               port: health
             failureThreshold: 30
             periodSeconds: 10
+          envFrom:
+            - configMapRef:
+                name: moa-runtime-config
           env:
             - name: RUST_LOG
               value: info
@@ -139,6 +142,10 @@ spec:
             # RestateDeployment operator registers it, then /_health/ready passes.
             - name: MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS
               value: "true"
+          volumeMounts:
+            - name: kms-root-keys
+              mountPath: /var/run/secrets/moa-kms/root-keys
+              readOnly: true
           resources:
             requests:
               cpu: "500m"
@@ -146,3 +153,7 @@ spec:
             limits:
               cpu: "2"
               memory: 4Gi
+      volumes:
+        - name: kms-root-keys
+          secret:
+            secretName: moa-kms-root-keys

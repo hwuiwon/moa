@@ -85,7 +85,9 @@ impl AuthProvider for Auth0AuthProvider {
     async fn authenticate(&self, credential: &Credential) -> Result<Identity, AuthError> {
         let token = match credential {
             Credential::BearerJwt(token) => token,
-            Credential::ApiKey(_) | Credential::UserSessionToken(_) => {
+            Credential::ApiKey(_)
+            | Credential::UserSessionToken(_)
+            | Credential::OAuthAccessToken(_) => {
                 return Err(AuthError::NotConfigured);
             }
         };
@@ -241,12 +243,44 @@ pub(crate) fn map_jwks_error(error: JwksError) -> AuthError {
 }
 
 pub(crate) fn parse_identity_type(value: Option<&str>) -> Result<IdentityType, AuthError> {
-    match value.unwrap_or("operator") {
-        "operator" => Ok(IdentityType::Operator),
-        "agent" => Ok(IdentityType::Agent),
-        "service" => Ok(IdentityType::Service),
-        other => Err(AuthError::Internal(format!(
-            "unknown identity_type: {other}"
-        ))),
+    let value = value.unwrap_or("operator");
+    let identity_type = value
+        .parse::<IdentityType>()
+        .map_err(|_| AuthError::Internal(format!("unknown identity_type: {value}")))?;
+    if identity_type == IdentityType::Contact {
+        return Err(AuthError::Internal(format!(
+            "unknown identity_type: {value}"
+        )));
+    }
+    Ok(identity_type)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_type_claim_uses_canonical_supported_vocabulary() {
+        // Pins: Auth0 principals cannot claim the tenant-contact identity class.
+        assert_eq!(
+            parse_identity_type(None).expect("default"),
+            IdentityType::Operator
+        );
+        assert_eq!(
+            parse_identity_type(Some("agent")).expect("agent"),
+            IdentityType::Agent
+        );
+        assert_eq!(
+            parse_identity_type(Some("service")).expect("service"),
+            IdentityType::Service
+        );
+        assert!(matches!(
+            parse_identity_type(Some("contact")),
+            Err(AuthError::Internal(message)) if message == "unknown identity_type: contact"
+        ));
+        assert!(matches!(
+            parse_identity_type(Some("user")),
+            Err(AuthError::Internal(message)) if message == "unknown identity_type: user"
+        ));
     }
 }

@@ -138,6 +138,9 @@ fn spawn_orchestrator(
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
+        .env("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true")
+        .env("MOA_KMS_ALLOW_EPHEMERAL", "true")
+        .env("MOA_RUNTIME_CACHE_REDIS_URL", "redis://127.0.0.1:10051/0")
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env(
             "MOA_PROVIDERS_OVERRIDE",
@@ -171,6 +174,9 @@ fn spawn_orchestrator_without_provider_override(
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
+        .env("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true")
+        .env("MOA_KMS_ALLOW_EPHEMERAL", "true")
+        .env("MOA_RUNTIME_CACHE_REDIS_URL", "redis://127.0.0.1:10051/0")
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env("MOA_SKIP_FGA", "true")
         .env_remove("MOA_PROVIDERS_OVERRIDE")
@@ -203,6 +209,9 @@ fn spawn_orchestrator_no_provider_override_with_fga(
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
+        .env("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true")
+        .env("MOA_KMS_ALLOW_EPHEMERAL", "true")
+        .env("MOA_RUNTIME_CACHE_REDIS_URL", "redis://127.0.0.1:10051/0")
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env("RUST_LOG", "info")
         .env_remove("MOA_PROVIDERS_OVERRIDE")
@@ -1334,6 +1343,13 @@ fn write_scripted_fixture(path: &Path) -> Result<()> {
                 "tool_calls": []
             }
         },
+        "keyed": [{
+            "match": "You classify one user turn into MOA's public execution decision.",
+            "completion": {
+                "content": r#"{"label":"execute","strategy":"inline","rationale":"The turn requires bounded execution.","confidence_bps":9500,"missing_inputs":[]}"#,
+                "tool_calls": []
+            }
+        }],
         "responses": [
             {
                 "completion": {

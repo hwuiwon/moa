@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
+use moa_core::types::provider::ProviderId;
 use moa_core::{
     config::MoaConfig, config::QueryRewriteConfig, error::MoaError, traits::LLMProvider,
     types::identifiers::ModelId, types::model::ModelCapabilities, types::provider::ModelTask,
@@ -21,10 +22,16 @@ use serde::Deserialize;
 #[cfg(feature = "scripted-provider")]
 use serde_json::Value;
 
+use moa_memory_pii::PiiClassifier;
+
 use crate::ModelRouter;
 use crate::core::models::find_model;
+use crate::governance::{CachingPiiClassifier, GovernedLLMProvider};
+use crate::provider_policy::{
+    DeploymentProviderPolicy, ProviderCapabilities, provider_capabilities,
+};
 use crate::routing::{
-    PROVIDER_DESCRIPTORS, ProviderDescriptor, ProviderId, infer_provider_id,
+    PROVIDER_DESCRIPTORS, ProviderDescriptor, infer_provider_id, provider_descriptor,
     provider_descriptor_by_name, split_explicit_provider,
 };
 #[cfg(feature = "scripted-provider")]
@@ -100,29 +107,196 @@ pub struct ResolvedProvider {
     pub model: ModelId,
 }
 
+/// Egress DLP governance attached to a registry.
+///
+/// When present, every provider the registry hands out is wrapped with a
+/// [`GovernedLLMProvider`] so restricted spans are tokenized before egress and
+/// detokenized on the response. Cloneable so the registry stays `Clone`.
+#[derive(Clone)]
+struct LlmDlpState {
+    /// Detector that produces the spans fed to the tokenizer. Wrapped in a
+    /// [`CachingPiiClassifier`] so frozen history is classified once, and shared
+    /// across every resolved provider so the cache persists across turns.
+    classifier: Arc<dyn PiiClassifier>,
+}
+
+/// Deployment-wide provider-routing state attached to a registry.
+///
+/// Bundles the active policy with the effective capabilities of each configured
+/// provider so the single routing gate ([`ProviderRegistry::provider_for_id`])
+/// can decide compliance without consulting config again. `None` on the registry
+/// means no deployment policy (a cheap early return, unchanged routing).
+#[derive(Clone)]
+struct DeploymentPolicyState {
+    /// The deployment-wide requirement every routed provider must satisfy.
+    policy: DeploymentProviderPolicy,
+    /// Effective capabilities per configured provider (conservative when unset).
+    capabilities: BTreeMap<ProviderId, ProviderCapabilities>,
+}
+
 /// Runtime registry for configured provider families.
 #[derive(Clone, Default)]
 pub struct ProviderRegistry {
     providers: BTreeMap<ProviderId, RegisteredProvider>,
     provider_cache: ProviderCache,
+    /// Optional egress DLP governance applied to every resolved provider.
+    llm_dlp: Option<LlmDlpState>,
+    /// Optional deployment provider routing policy. When set (active), the single
+    /// routing gate fails closed before building a non-compliant provider.
+    /// `None` = unchanged routing, zero overhead.
+    deployment_policy: Option<DeploymentPolicyState>,
 }
 
 impl ProviderRegistry {
     /// Builds a registry from configured provider API keys.
+    ///
+    /// Per-provider deployment capabilities are read from each provider's
+    /// credential config (conservative by default), and an active
+    /// `[providers.routing_policy]` policy is attached so routing is constrained to
+    /// compliant providers and fails closed. An inactive policy leaves routing
+    /// unchanged with zero overhead.
     #[must_use]
     pub fn from_config(config: &MoaConfig) -> Self {
         let config = Arc::new(config.clone());
         let mut registry = Self::default();
+        let mut capabilities = BTreeMap::new();
         for descriptor in PROVIDER_DESCRIPTORS {
             if configured_secret((descriptor.api_key)(&config)) {
-                let config = config.clone();
+                capabilities.insert(descriptor.id, provider_capabilities(&config, descriptor.id));
+                let build_config = config.clone();
                 registry.register_factory(
                     descriptor,
-                    Arc::new(move |model| (descriptor.build_from_config)(&config, model)),
+                    Arc::new(move |model| (descriptor.build_from_config)(&build_config, model)),
                 );
             }
         }
+
+        let policy = DeploymentProviderPolicy::from_config(&config.providers.routing_policy);
+        if policy.is_active() {
+            tracing::info!(
+                "deployment provider routing policy active; routing to compliant providers only"
+            );
+            registry.deployment_policy = Some(DeploymentPolicyState {
+                policy,
+                capabilities,
+            });
+        }
         registry
+    }
+
+    /// Attaches egress DLP governance so every provider this registry resolves is
+    /// wrapped with a [`GovernedLLMProvider`].
+    ///
+    /// This is the governed-provider composition point: the runtime calls it after building
+    /// the registry when `[llm_dlp].tokenize_enabled` is set. When it is not called,
+    /// providers are resolved directly with zero added overhead. Governance is a
+    /// thin outer decorator shared across all resolution paths (main, auxiliary,
+    /// rewriter, and each failover fallback), so all LLM egress is governed
+    /// uniformly.
+    #[must_use]
+    pub fn with_llm_dlp(
+        mut self,
+        classifier: Arc<dyn PiiClassifier>,
+        classifier_namespace: impl Into<String>,
+        classifier_model: impl Into<String>,
+    ) -> Self {
+        // Memoize the classifier once here so frozen history is classified a
+        // single time; the shared wrapper threads across every resolved provider
+        // so the cache persists across turns.
+        let classifier = Arc::new(CachingPiiClassifier::new(
+            classifier,
+            classifier_namespace,
+            classifier_model,
+        )) as Arc<dyn PiiClassifier>;
+        self.llm_dlp = Some(LlmDlpState { classifier });
+        // Any provider resolved before governance was attached would be cached
+        // un-governed; drop the cache so every subsequent resolution is wrapped.
+        if let Ok(mut cache) = self.provider_cache.write() {
+            cache.clear();
+        }
+        self
+    }
+
+    /// Wraps `provider` with egress governance when it is configured, otherwise
+    /// returns it unchanged (zero overhead).
+    fn govern(&self, provider: Arc<dyn LLMProvider>) -> Arc<dyn LLMProvider> {
+        match &self.llm_dlp {
+            Some(governor) => Arc::new(GovernedLLMProvider::new(
+                provider,
+                governor.classifier.clone(),
+            )),
+            None => provider,
+        }
+    }
+
+    /// Attaches a deployment-wide provider-routing policy so routing is constrained
+    /// to compliant providers and fails closed rather than falling back to a
+    /// non-compliant one.
+    ///
+    /// This is the composition point for constraining a restricted tenant to
+    /// zero-retention / private / self-hosted providers. When the policy is
+    /// inactive, or this is never called, routing is unchanged with zero
+    /// overhead. `[providers.routing_policy]` config is applied automatically by
+    /// [`from_config`](Self::from_config); this builder is for callers that
+    /// resolve a per-deployment policy themselves (or in tests). Providers start at
+    /// the conservative capability baseline; assert compliance with
+    /// [`with_provider_capabilities`](Self::with_provider_capabilities).
+    #[must_use]
+    pub fn with_deployment_policy(mut self, policy: DeploymentProviderPolicy) -> Self {
+        self.deployment_policy = policy.is_active().then_some(DeploymentPolicyState {
+            policy,
+            capabilities: BTreeMap::new(),
+        });
+        self
+    }
+
+    /// Asserts the effective deployment capabilities for one provider family, e.g.
+    /// to mark a self-hosted/static provider compliant.
+    ///
+    /// [`from_config`](Self::from_config) already derives capabilities from
+    /// credential config; this builder is for static/scripted registries and
+    /// tests. It is a no-op when no active policy has been attached (nothing to
+    /// govern).
+    #[must_use]
+    pub fn with_provider_capabilities(
+        mut self,
+        id: ProviderId,
+        capabilities: ProviderCapabilities,
+    ) -> Self {
+        if let Some(governor) = self.deployment_policy.as_mut() {
+            governor.capabilities.insert(id, capabilities);
+        }
+        self
+    }
+
+    /// The single routing gate: fails closed if an active deployment policy
+    /// excludes `id`.
+    ///
+    /// Every path that builds a concrete provider — main, auxiliary, rewriter, and
+    /// each failover fallback — passes through
+    /// [`provider_for_id`](Self::provider_for_id), which calls this before doing
+    /// any work, so a non-compliant provider can never be constructed or handed
+    /// out. Returns `Ok(())` when there is no active policy or the provider is
+    /// compliant.
+    fn enforce_deployment_policy(&self, id: ProviderId) -> moa_core::error::Result<()> {
+        let Some(governor) = &self.deployment_policy else {
+            return Ok(());
+        };
+        // Defer to the existing "provider is not configured" path when the family
+        // is absent; deployment policy only speaks to configured providers.
+        if !self.providers.contains_key(&id) {
+            return Ok(());
+        }
+        let capabilities = governor.capabilities.get(&id).cloned().unwrap_or_default();
+        if let Err(exclusion) = governor.policy.evaluate(id, &capabilities) {
+            tracing::warn!(
+                provider = id.as_str(),
+                reason = %exclusion,
+                "provider excluded by deployment provider policy; failing closed",
+            );
+            return Err(exclusion.into());
+        }
+        Ok(())
     }
 
     /// Builds a registry from preconstructed provider instances.
@@ -384,6 +558,10 @@ impl ProviderRegistry {
         id: ProviderId,
         model: &ModelId,
     ) -> moa_core::error::Result<ResolvedProvider> {
+        // Fail closed before any work: an active deployment policy must never let
+        // a non-compliant provider be built or cached.
+        self.enforce_deployment_policy(id)?;
+
         let cache_key = ProviderCacheKey {
             id,
             model: model.clone(),
@@ -400,7 +578,7 @@ impl ProviderRegistry {
             .build(model.as_str())?;
 
         let resolved = ResolvedProvider {
-            provider,
+            provider: self.govern(provider),
             model: model.clone(),
         };
         self.cache_provider(cache_key, resolved.clone());
@@ -482,7 +660,7 @@ impl ProviderRegistry {
     }
 
     fn register_static(&mut self, id: ProviderId, provider: Arc<dyn LLMProvider>) {
-        let descriptor = id.descriptor();
+        let descriptor = provider_descriptor(id);
         self.providers
             .insert(id, RegisteredProvider::from_static(descriptor, provider));
     }
@@ -759,7 +937,10 @@ mod tests {
         types::model::ModelCapabilities, types::model::TokenPricing, types::model::ToolCallFormat,
     };
 
-    use super::{ProviderFactory, ProviderId, ProviderRegistry};
+    use moa_core::config::DeploymentProviderPolicyConfig;
+
+    use super::{ProviderFactory, ProviderId, ProviderRegistry, provider_descriptor};
+    use crate::provider_policy::{DeploymentProviderPolicy, ProviderCapabilities};
 
     struct CacheTestProvider {
         model: String,
@@ -845,15 +1026,15 @@ mod tests {
         let builds = Arc::new(AtomicUsize::new(0));
         let mut registry = ProviderRegistry::default();
         registry.register_factory(
-            ProviderId::Anthropic.descriptor(),
+            provider_descriptor(ProviderId::Anthropic),
             model_factory(builds.clone()),
         );
         registry.register_factory(
-            ProviderId::OpenAI.descriptor(),
+            provider_descriptor(ProviderId::OpenAI),
             model_factory(builds.clone()),
         );
         registry.register_factory(
-            ProviderId::Google.descriptor(),
+            provider_descriptor(ProviderId::Google),
             model_factory(builds.clone()),
         );
 
@@ -871,7 +1052,7 @@ mod tests {
         let builds = Arc::new(AtomicUsize::new(0));
         let mut registry = ProviderRegistry::default();
         registry.register_factory(
-            ProviderId::OpenAI.descriptor(),
+            provider_descriptor(ProviderId::OpenAI),
             model_factory(builds.clone()),
         );
 
@@ -897,11 +1078,11 @@ mod tests {
         let builds = Arc::new(AtomicUsize::new(0));
         let mut registry = ProviderRegistry::default();
         registry.register_factory(
-            ProviderId::OpenAI.descriptor(),
+            provider_descriptor(ProviderId::OpenAI),
             model_factory(builds.clone()),
         );
         registry.register_factory(
-            ProviderId::Anthropic.descriptor(),
+            provider_descriptor(ProviderId::Anthropic),
             model_factory(builds.clone()),
         );
 
@@ -1059,5 +1240,146 @@ mod tests {
                 .contains("anthropic provider is not configured"),
             "unexpected error: {error}"
         );
+    }
+
+    /// Effective capabilities marking a provider as zero-retention compliant.
+    fn zero_retention() -> ProviderCapabilities {
+        ProviderCapabilities {
+            zero_retention: true,
+            ..ProviderCapabilities::default()
+        }
+    }
+
+    /// A policy that requires zero-retention providers.
+    fn require_zero_retention_policy() -> DeploymentProviderPolicy {
+        DeploymentProviderPolicy::from_config(&DeploymentProviderPolicyConfig {
+            require_zero_retention: true,
+            ..DeploymentProviderPolicyConfig::default()
+        })
+    }
+
+    #[test]
+    fn deployment_policy_routes_a_compliant_provider_and_blocks_the_rest() {
+        // Pins: under a zero-retention policy the single routing gate lets the
+        // compliant provider through and fails closed for the non-compliant one —
+        // a compliant provider is reachable when one exists, the other is blocked.
+        let registry = ProviderRegistry::with_static_providers(
+            Some(provider("claude-sonnet-4-6")),
+            Some(provider("gpt-5.4")),
+            None,
+        )
+        .with_deployment_policy(require_zero_retention_policy())
+        .with_provider_capabilities(ProviderId::Anthropic, zero_retention());
+
+        let resolved = registry
+            .provider_for_model(Some("claude-sonnet-4-6"))
+            .expect("the compliant provider must be reachable");
+        assert_eq!(
+            resolved.capabilities().model_id,
+            ModelId::new("claude-sonnet-4-6")
+        );
+
+        let Err(error) = registry.provider_for_model(Some("gpt-5.4")) else {
+            panic!("the non-compliant provider must fail closed, not be rerouted");
+        };
+        assert!(error.to_string().contains("zero-retention"), "{error}");
+    }
+
+    #[test]
+    fn deployment_policy_fails_closed_when_the_selected_provider_is_non_compliant() {
+        // Pins: with only non-compliant providers, resolution fails closed with a
+        // governance error rather than silently handing back a data-retaining
+        // provider.
+        let registry = ProviderRegistry::with_static_providers(
+            Some(provider("claude-sonnet-4-6")),
+            Some(provider("gpt-5.4")),
+            None,
+        )
+        .with_deployment_policy(require_zero_retention_policy());
+
+        // Both an explicit request and the default selection fail closed.
+        let Err(explicit) = registry.provider_for_model(Some("gpt-5.4")) else {
+            panic!("an explicit non-compliant model must fail closed");
+        };
+        assert!(
+            explicit.to_string().contains("zero-retention"),
+            "{explicit}"
+        );
+
+        let Err(default) = registry.provider_for_model(None) else {
+            panic!("the default non-compliant provider must fail closed, not fall back");
+        };
+        assert!(default.to_string().contains("excluded"), "{default}");
+    }
+
+    #[test]
+    fn no_deployment_policy_routing_is_unchanged() {
+        // Pins: with no deployment policy, default resolution keeps existing
+        // behavior (OpenAI wins on default priority) with zero overhead.
+        let registry = ProviderRegistry::with_static_providers(
+            Some(provider("claude-sonnet-4-6")),
+            Some(provider("gpt-5.4")),
+            None,
+        );
+
+        let resolved = registry
+            .provider_for_model(None)
+            .expect("ungoverned routing resolves normally");
+        assert_eq!(resolved.capabilities().model_id, ModelId::new("gpt-5.4"));
+    }
+
+    #[test]
+    fn deployment_policy_allowlist_fails_closed_for_an_unlisted_provider() {
+        // Pins: an allowlist fails closed for a provider that is not on it, while
+        // the allowlisted provider routes.
+        let policy = DeploymentProviderPolicy::from_config(&DeploymentProviderPolicyConfig {
+            allowed_providers: vec![ProviderId::Anthropic],
+            ..DeploymentProviderPolicyConfig::default()
+        });
+        let registry = ProviderRegistry::with_static_providers(
+            Some(provider("claude-sonnet-4-6")),
+            Some(provider("gpt-5.4")),
+            None,
+        )
+        .with_deployment_policy(policy);
+
+        let Err(error) = registry.provider_for_model(Some("gpt-5.4")) else {
+            panic!("an unlisted provider must be excluded");
+        };
+        assert!(error.to_string().contains("allowlist"), "{error}");
+
+        let resolved = registry
+            .provider_for_model(Some("claude-sonnet-4-6"))
+            .expect("the allowlisted provider routes");
+        assert_eq!(
+            resolved.capabilities().model_id,
+            ModelId::new("claude-sonnet-4-6")
+        );
+    }
+
+    #[test]
+    fn from_config_reads_capability_assertions_and_activates_policy() {
+        // Pins: an operator's zero-retention assertion on a credential plus an
+        // active policy in config produce a governed registry whose single gate
+        // fails closed for the non-compliant provider but admits the compliant one.
+        let mut config = moa_core::config::MoaConfig::default();
+        config.providers.openai.api_key = "openai-key".to_string();
+        config.providers.anthropic.api_key = "anthropic-key".to_string();
+        config.providers.anthropic.capabilities.zero_retention = true;
+        config.providers.routing_policy.require_zero_retention = true;
+
+        let registry = ProviderRegistry::from_config(&config);
+
+        // The compliant Anthropic provider passes the gate and builds.
+        registry
+            .provider_for_id(ProviderId::Anthropic, &ModelId::new("claude-sonnet-4-6"))
+            .expect("the zero-retention Anthropic provider must be reachable");
+
+        // The non-compliant OpenAI provider fails closed at the gate.
+        let Err(error) = registry.provider_for_id(ProviderId::OpenAI, &ModelId::new("gpt-5.4"))
+        else {
+            panic!("the non-compliant configured provider must fail closed");
+        };
+        assert!(error.to_string().contains("zero-retention"), "{error}");
     }
 }

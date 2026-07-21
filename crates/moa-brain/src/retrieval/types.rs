@@ -3,9 +3,10 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use moa_core::types::identifiers::SessionId;
+use moa_core::types::security::SensitivityClass;
+use moa_core::types::{identifiers::SessionId, memory::InformationBarrierClearances};
 use moa_lineage_core::TurnId;
-use moa_memory_graph::{GraphError, NodeIndexRow, NodeLabel, PiiClass};
+use moa_memory_graph::{GraphError, NodeIndexRow, NodeLabel};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::Error as VectorError;
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,13 @@ pub struct RetrievalRequest {
     pub query_embedding: Vec<f32>,
     /// Request memory scope used for sidecar RLS GUCs.
     pub scope: MemoryScope,
+    /// Information barriers the caller is cleared for (need-to-know).
+    ///
+    /// Sourced from the running agent's knowledge policy at the retrieval entry
+    /// point and installed as the `moa.cleared_barriers` GUC by every scoped
+    /// retrieval leg, so a cleared agent sees nodes tagged with a cleared
+    /// barrier. Empty fails closed: barriered nodes stay hidden.
+    pub cleared_barriers: InformationBarrierClearances,
     /// Optional HARD graph node label allowlist.
     ///
     /// Only ever set from structured, explicit input (a scope plan's
@@ -81,7 +89,7 @@ pub struct RetrievalRequest {
     /// keyword-guessed label the planner infers from query wording.
     pub label_boost: Option<Vec<NodeLabel>>,
     /// Maximum PII class visible to the caller.
-    pub max_pii_class: PiiClass,
+    pub max_pii_class: SensitivityClass,
     /// Number of final candidates to return.
     pub k_final: usize,
     /// Whether to apply Cohere-compatible reranking after RRF.

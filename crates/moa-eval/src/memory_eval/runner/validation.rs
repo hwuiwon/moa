@@ -88,6 +88,7 @@ pub(super) async fn extracted_embedding_texts(
                 transcript: turn.transcript.clone(),
                 dominant_pii_class: "none".to_string(),
                 finalized_at,
+                barrier: None,
             };
             let chunks = chunk_turn(&session_turn, CHUNK_TARGET_TOKENS, CHUNK_OVERLAP_TOKENS)
                 .map_err(|error| {

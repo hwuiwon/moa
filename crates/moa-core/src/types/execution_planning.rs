@@ -727,12 +727,6 @@ pub struct ExecutionRunStarted {
 impl ExecutionRunStarted {
     /// Validates the closed status/evidence matrix and plan-hash representation.
     pub fn validate(&self) -> Result<(), ExecutionPlanningContractError> {
-        if self.originating_user_sequence_num == 0 {
-            return Err(ExecutionPlanningContractError::InvalidField {
-                field: "originating_user_sequence_num".to_string(),
-                message: "must be greater than zero".to_string(),
-            });
-        }
         if self.plan_revision == 0 {
             return Err(ExecutionPlanningContractError::InvalidField {
                 field: "plan_revision".to_string(),
@@ -1667,7 +1661,7 @@ fn validate_hash(field: &str, value: &str) -> Result<(), ExecutionPlanningContra
     Ok(())
 }
 
-/// Serializes a value using MOA's canonical JSON formatter.
+/// Serializes a value using MOA's canonical JSON formatter and valid control escapes.
 pub fn canonical_json_bytes<T: Serialize>(
     value: &T,
 ) -> Result<Vec<u8>, ExecutionPlanningContractError> {
@@ -1676,7 +1670,29 @@ pub fn canonical_json_bytes<T: Serialize>(
     value
         .serialize(&mut serializer)
         .map_err(|error| ExecutionPlanningContractError::Json(error.to_string()))?;
-    Ok(serializer.into_inner())
+    let canonical = serializer.into_inner();
+    if !canonical.iter().any(|byte| *byte <= 0x1f) {
+        return Ok(canonical);
+    }
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut escaped = Vec::with_capacity(canonical.len());
+    for byte in canonical {
+        match byte {
+            b'\x08' => escaped.extend_from_slice(br"\b"),
+            b'\t' => escaped.extend_from_slice(br"\t"),
+            b'\n' => escaped.extend_from_slice(br"\n"),
+            b'\x0c' => escaped.extend_from_slice(br"\f"),
+            b'\r' => escaped.extend_from_slice(br"\r"),
+            control @ 0x00..=0x1f => {
+                escaped.extend_from_slice(br"\u00");
+                escaped.push(HEX[(control >> 4) as usize]);
+                escaped.push(HEX[(control & 0x0f) as usize]);
+            }
+            _ => escaped.push(byte),
+        }
+    }
+    Ok(escaped)
 }
 
 fn canonical_enum_string<T: Serialize>(
@@ -1764,6 +1780,47 @@ mod tests {
                 duration_micros: 0,
             }
         }
+    }
+
+    #[test]
+    fn canonical_json_bytes_escapes_newlines_and_tabs_and_round_trips() {
+        // Pins: multiline planner evidence remains valid canonical JSON without
+        // changing the established control-free representation.
+        let multiline = serde_json::json!({"text": "first\n\tsecond"});
+        let canonical = canonical_json_bytes(&multiline).expect("canonicalize multiline JSON");
+
+        assert_eq!(canonical, br#"{"text":"first\n\tsecond"}"#);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&canonical).expect("canonical JSON should parse"),
+            multiline
+        );
+        assert_eq!(
+            canonical_json_bytes(&serde_json::json!({"z": 2, "a": "plain"}))
+                .expect("canonicalize control-free JSON"),
+            br#"{"a":"plain","z":2}"#
+        );
+    }
+
+    #[test]
+    fn canonical_json_bytes_escapes_remaining_controls_with_lowercase_hex() {
+        // Pins: every other JSON-forbidden ASCII control uses a stable lowercase
+        // unicode escape and survives deserialization unchanged.
+        let controls = String::from_utf8(vec![
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0b, 0x0e, 0x0f, 0x10, 0x11, 0x12,
+            0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+        ])
+        .expect("ASCII controls are valid UTF-8");
+        let value = serde_json::json!({"value": controls});
+        let canonical = canonical_json_bytes(&value).expect("canonicalize ASCII controls");
+
+        assert_eq!(
+            canonical,
+            br#"{"value":"\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\u000b\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f"}"#
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&canonical).expect("canonical JSON should parse"),
+            value
+        );
     }
 
     #[test]
@@ -2117,11 +2174,12 @@ mod tests {
     }
 
     #[test]
-    fn execution_run_started_enforces_confirmation_shape() {
-        // Pins: queued and awaiting-confirmation admissions cannot exchange evidence shapes.
+    fn execution_run_started_accepts_zero_origin_and_enforces_confirmation_shape() {
+        // Pins: sequence zero is a valid first user event, while queued and
+        // awaiting-confirmation admissions cannot exchange evidence shapes.
         let queued = ExecutionRunStarted {
             run_uid: Uuid::nil(),
-            originating_user_sequence_num: 7,
+            originating_user_sequence_num: 0,
             plan_revision: 1,
             status: ExecutionRunAdmissionStatus::Queued,
             confirmation: None,

@@ -49,6 +49,7 @@ impl LoadedMemoryEvalCorpus {
 
 pub(crate) struct IsolatedEvalStore {
     pub(super) store: PostgresSessionStore,
+    pub(super) kms: Arc<dyn KeyManagementProvider>,
     pub(super) database_url: String,
     pub(super) schema_name: String,
 }
@@ -75,6 +76,7 @@ impl IsolatedEvalStore {
             };
         Ok(Self {
             store,
+            kms: Arc::new(LocalKmsProvider::new()),
             database_url,
             schema_name,
         })
@@ -98,12 +100,13 @@ impl IsolatedEvalStore {
             scope.clone(),
         ));
         let graph = Arc::new(
-            PostgresGraphStore::scoped_for_app_role(self.pool().clone(), scope)
+            PostgresGraphStore::scoped_for_app_role(self.pool().clone(), scope, self.kms.clone())
                 .with_vector_store(vector.clone()),
         );
         let entity_resolver = EntityResolver::for_app_role(entity_merge_verifier);
         IngestCtx::new(
             self.pool().clone(),
+            self.kms.clone(),
             graph,
             vector,
             embedder,
@@ -162,9 +165,9 @@ pub(super) fn deterministic_pii_result(text: &str) -> PiiResult {
 
     PiiResult {
         class: if spans.is_empty() {
-            PiiClass::None
+            SensitivityClass::None
         } else {
-            PiiClass::Pii
+            SensitivityClass::Pii
         },
         spans,
         model_version: "memory-eval-deterministic-pii-v1".to_string(),
@@ -182,7 +185,7 @@ impl ContradictionDetector for InsertOnlyContradictionDetector {
         _fact_text: &str,
         _embedding: &[f32],
         _label: moa_memory_graph::NodeLabel,
-        _pii_class: PiiClass,
+        _pii_class: SensitivityClass,
         _ctx: &ContradictionContext,
     ) -> std::result::Result<Conflict, IngestError> {
         Ok(Conflict::Insert)

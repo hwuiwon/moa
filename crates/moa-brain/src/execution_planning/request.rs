@@ -1,4 +1,4 @@
-//! Frozen planner inputs and strict provider request construction.
+//! Frozen planner inputs and schema-guided provider request construction.
 
 use std::time::Duration;
 
@@ -7,7 +7,7 @@ use moa_artifacts::execution_plan::{GeneratedAmendmentCandidate, GeneratedExecut
 use moa_core::{
     config::ExecutionConfig,
     types::{
-        completion::{CompletionRequest, JsonResponseFormat, NativeWebSearchPolicy},
+        completion::{CompletionRequest, NativeWebSearchPolicy},
         context::ContextMessage,
         execution_planning::{DurableUpgradeSignal, ExecutionTemplateInvocation},
         identifiers::ModelId,
@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Stable execution-planner prompt identifier.
-pub const EXECUTION_PLANNER_PROMPT_VERSION: &str = "execution-planner";
+pub const EXECUTION_PLANNER_PROMPT_VERSION: &str = "execution-planner-v3";
 /// Fixed maximum collected planner output tokens.
 pub const EXECUTION_PLANNER_MAX_OUTPUT_TOKENS: usize = 32_768;
 const EXECUTION_PLANNER_PROMPT: &str = include_str!("../prompts/execution_planner.txt");
@@ -152,10 +152,8 @@ fn build_initial_request(
             "\nRepair the candidate exactly once. Preserve immutable_goal byte-for-byte after canonicalization. Do not discover new authority or capabilities.\n<original_candidate>{original_candidate_json}</original_candidate>\n<immutable_goal>{immutable_goal_json}</immutable_goal>\n<compiler_report>{compiler_report_json}</compiler_report>"
         ));
     }
-    strict_request::<GeneratedExecutionCandidate>(
+    planner_request::<GeneratedExecutionCandidate>(
         request.planner_model.clone(),
-        "generated_execution_candidate",
-        "Generate one strict immutable execution goal and supported execution plan.",
         EXECUTION_PLANNER_PROMPT.to_string(),
         user_payload,
     )
@@ -199,10 +197,8 @@ pub fn amendment_completion_request(
             "\nRepair exactly once without new discovery.\n<original_amendment>{candidate}</original_amendment>\n<compiler_report>{report}</compiler_report>"
         ));
     }
-    strict_request::<GeneratedAmendmentCandidate>(
+    planner_request::<GeneratedAmendmentCandidate>(
         request.planner_model.clone(),
-        "generated_amendment_candidate",
-        "Generate one strict restricted execution-plan amendment.",
         system_prompt,
         user_payload,
     )
@@ -241,21 +237,24 @@ pub fn record_applied_planning_audit(result: &impl AppliedPlanningAuditMetric) {
     result.record_if_applied();
 }
 
-/// Builds one no-tools strict planner request from a cacheable system prompt and a
-/// per-turn user payload.
+/// Builds one no-tools planner request from a cacheable, schema-guided system
+/// prompt and a per-turn user payload.
 ///
 /// The static planner instructions live in the leading `system` message so provider
-/// prompt caching can reuse them across turns, while the per-turn frozen context and
-/// objective travel in a `user` message. Every provider adapter rejects a system-only
-/// request, so at least one non-system message is mandatory here.
-fn strict_request<T: schemars::JsonSchema>(
+/// prompt caching can reuse them across turns. Planner candidates contain free-form
+/// JSON values that provider-native strict schemas cannot represent faithfully, so the
+/// canonical generated schema is prompt guidance rather than a provider response format.
+/// The per-turn frozen context and objective travel in a `user` message. Every provider
+/// adapter rejects a system-only request, so at least one non-system message is mandatory.
+fn planner_request<T: schemars::JsonSchema>(
     model: ModelId,
-    schema_name: &str,
-    description: &str,
     system_prompt: String,
     user_payload: String,
 ) -> Result<CompletionRequest, serde_json::Error> {
-    let schema = serde_json::to_value(schema_for!(T))?;
+    let schema = serde_json::to_string(&schema_for!(T))?;
+    let system_prompt = format!(
+        "{system_prompt}\n\nReturn only one JSON object that conforms exactly to the canonical schema below. Do not include Markdown fences or explanatory text.\n<response_schema>{schema}</response_schema>"
+    );
     Ok(CompletionRequest {
         model: Some(model),
         messages: vec![
@@ -265,11 +264,7 @@ fn strict_request<T: schemars::JsonSchema>(
         tools: Vec::new(),
         max_output_tokens: Some(EXECUTION_PLANNER_MAX_OUTPUT_TOKENS),
         temperature: None,
-        response_format: Some(JsonResponseFormat::strict_json_schema(
-            schema_name,
-            description,
-            schema,
-        )),
+        response_format: None,
         native_web_search: NativeWebSearchPolicy::Disabled,
         metadata: std::collections::HashMap::new(),
     })
@@ -344,14 +339,60 @@ mod tests {
     }
 
     #[test]
-    fn execution_planning_strict_schema_is_recursive_and_request_disables_tools() {
-        // Pins: planner response shape is generated from the production artifact DTO.
-        let schema = serde_json::to_value(schema_for!(GeneratedExecutionCandidate))
-            .expect("serialize schema");
-        assert_eq!(schema["type"], "object");
-        assert_eq!(schema["additionalProperties"], false);
-        assert!(schema.to_string().contains("wait_signal"));
-        assert!(schema.to_string().contains("output"));
+    fn execution_planner_prompt_v3_pins_compiler_invariants() {
+        // Pins: the current emitted prompt version and its compiler-facing guidance
+        // change together so live planner provenance identifies this exact contract.
+        assert_eq!(EXECUTION_PLANNER_PROMPT_VERSION, "execution-planner-v3");
+        assert_eq!(
+            EXECUTION_PLANNER_PROMPT,
+            concat!(
+                "You are MOA's execution-plan compiler frontend. Return exactly the requested strict JSON schema.\n\n",
+                "Preserve the user's objective, scope, definitions, time range, universe, output form, evidence expectations, exclusions, and constraints as individually identifiable goal entries. Use only capabilities, skills, node kinds, and authority in the frozen context. Never invent a capability or permission. Produce an acyclic plan with explicit requirement coverage and completion checks. If the frozen contract cannot support the request, encode the gap in the strict candidate so deterministic compilation rejects it; do not answer the user directly.\n\n",
+                "Compiler invariants:\n",
+                "- Set `goal.objective` to the frozen `objective` byte-for-byte.\n",
+                "- Every goal-entry ID, completion-check ID, execution-node ID, and every ID referenced from those structures must match `[a-z][a-z0-9_-]{0,63}`.\n",
+                "- Link every requirement and every constraint to at least one completion check via `requirement_ids` and `constraint_ids`.\n",
+                "- Put every goal requirement ID in at least one completion check's `requirement_ids`. If the plan has only one completion check, it must list every requirement ID. For a simple `Agent`-to-`Output` plan, prefer one `OutputSchema` check listing all requirement IDs.\n",
+                "- Use only whole-value execution references: exactly `$.input` or `$.nodes.<id>.output`; never append field paths.\n",
+                "- When an `output` operation forwards another node's output, set the output node's `input` to `{}` and put `{\"$ref\":\"$.nodes.<id>.output\"}` directly in `operation.value`.\n",
+            )
+        );
+    }
+
+    #[test]
+    fn planner_requests_embed_production_schema_without_provider_format_or_tools() {
+        // Pins: free-form planner values remain valid because provider-native schema
+        // enforcement is disabled while the exact production schema stays in the
+        // cacheable system prompt for both candidate envelopes.
+        fn assert_request<T: schemars::JsonSchema>(system_prompt: &str) {
+            let request = planner_request::<T>(
+                ModelId::new("planner-model"),
+                system_prompt.to_string(),
+                "per-turn context".to_string(),
+            )
+            .expect("planner request should serialize the production schema");
+            let schema =
+                serde_json::to_string(&schema_for!(T)).expect("production schema should serialize");
+
+            assert_eq!(request.messages.len(), 2);
+            assert_eq!(
+                request.messages[0],
+                ContextMessage::system(format!(
+                    "{system_prompt}\n\nReturn only one JSON object that conforms exactly to the canonical schema below. Do not include Markdown fences or explanatory text.\n<response_schema>{schema}</response_schema>"
+                ))
+            );
+            assert_eq!(
+                request.messages[1],
+                ContextMessage::user("per-turn context")
+            );
+            assert!(request.response_format.is_none());
+            assert!(request.tools.is_empty());
+        }
+
+        assert_request::<GeneratedExecutionCandidate>(EXECUTION_PLANNER_PROMPT);
+        assert_request::<GeneratedAmendmentCandidate>(
+            "amendment planner instructions remain cacheable",
+        );
     }
 
     #[test]

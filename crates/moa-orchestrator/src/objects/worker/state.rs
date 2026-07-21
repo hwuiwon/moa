@@ -11,6 +11,7 @@ pub(super) const K_DEPTH: &str = "depth";
 pub(super) const K_BUDGET_REMAINING: &str = "budget_remaining";
 pub(super) const K_TOKENS_USED: &str = "tokens_used";
 pub(super) const K_TASK: &str = "task";
+pub(super) const K_IDENTITY: &str = "identity";
 pub(super) const K_TOOL_SUBSET: &str = "tool_subset";
 pub(super) const K_TENANT_ID: &str = "tenant_id";
 pub(super) const K_USER_ID: &str = "user_id";
@@ -133,6 +134,8 @@ pub struct WorkerVoState {
     pub tokens_used: u64,
     /// Original delegated task.
     pub task: Option<String>,
+    /// Exact authenticated identity inherited from the root turn.
+    pub identity: Option<moa_core::traits::Identity>,
     /// Tool names the child may invoke.
     pub tool_subset: Vec<String>,
     /// Tenant scope inherited from the parent.
@@ -212,6 +215,11 @@ impl WorkerVoState {
                 "worker max_turns must be at least 1".to_string(),
             ));
         }
+        if initial.identity.tenant_id != initial.tenant_id {
+            return Err(MoaError::ValidationError(
+                "worker identity tenant does not match the delegated tenant".to_string(),
+            ));
+        }
 
         self.status = Some(WorkerState::Running);
         self.parent_session = Some(initial.parent_session);
@@ -219,6 +227,7 @@ impl WorkerVoState {
         self.budget_remaining = initial.budget_tokens;
         self.tokens_used = 0;
         self.task = Some(initial.task.clone());
+        self.identity = Some(initial.identity.clone());
         self.tool_subset = initial.tool_subset.clone();
         self.tenant_id = Some(initial.tenant_id);
         self.user_id = Some(initial.user_id.clone());
@@ -253,6 +262,7 @@ impl WorkerVoState {
     pub(super) fn ensure_initialized(&self) -> moa_core::error::Result<()> {
         if self.parent_session.is_some()
             && self.task.is_some()
+            && self.identity.is_some()
             && self.tenant_id.is_some()
             && self.user_id.is_some()
             && self.model.is_some()
@@ -586,6 +596,7 @@ impl VoState for WorkerVoState {
                 .unwrap_or_default(),
             tokens_used: reader.get_json(K_TOKENS_USED).await?.unwrap_or_default(),
             task: reader.get_json(K_TASK).await?,
+            identity: reader.get_json(K_IDENTITY).await?,
             tool_subset: reader.get_json(K_TOOL_SUBSET).await?.unwrap_or_default(),
             tenant_id: reader.get_json(K_TENANT_ID).await?,
             user_id: reader.get_json(K_USER_ID).await?,
@@ -632,6 +643,7 @@ impl VoState for WorkerVoState {
         set_or_clear_scalar(ctx, K_BUDGET_REMAINING, self.budget_remaining, 0);
         set_or_clear_scalar(ctx, K_TOKENS_USED, self.tokens_used, 0);
         set_or_clear_opt(ctx, K_TASK, self.task.as_ref());
+        set_or_clear_opt(ctx, K_IDENTITY, self.identity.as_ref());
         set_or_clear_vec(ctx, K_TOOL_SUBSET, &self.tool_subset);
         set_or_clear_opt(ctx, K_TENANT_ID, self.tenant_id.as_ref());
         set_or_clear_opt(ctx, K_USER_ID, self.user_id.as_ref());
@@ -698,6 +710,12 @@ impl VoState for WorkerVoState {
             0,
         );
         set_changed_opt(ctx, K_TASK, self.task.as_ref(), baseline.task.as_ref());
+        set_changed_opt(
+            ctx,
+            K_IDENTITY,
+            self.identity.as_ref(),
+            baseline.identity.as_ref(),
+        );
         set_changed_vec(ctx, K_TOOL_SUBSET, &self.tool_subset, &baseline.tool_subset);
         set_changed_opt(
             ctx,
@@ -955,9 +973,14 @@ fn canonical_worker_reply_hash(reply: &serde_json::Value) -> Result<[u8; 32], Ha
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
-        types::identifiers::UserId, types::session::TurnOutcome,
-        types::worker::state::WorkerInitialTask, types::worker::state::WorkerMessage,
+        traits::{Identity, IdentityType},
+        types::identifiers::ModelId,
+        types::identifiers::SessionId,
+        types::identifiers::TenantId,
+        types::identifiers::UserId,
+        types::session::TurnOutcome,
+        types::worker::state::WorkerInitialTask,
+        types::worker::state::WorkerMessage,
     };
 
     use super::{
@@ -972,14 +995,22 @@ mod tests {
     };
 
     fn initial_task() -> WorkerMessage {
+        let tenant_id = TenantId::new();
         WorkerMessage::InitialTask(Box::new(WorkerInitialTask {
             task: "summarize repo status".to_string(),
+            identity: Identity {
+                identity_type: IdentityType::Operator,
+                id: uuid::Uuid::now_v7(),
+                tenant_id,
+                api_key_id: Some(uuid::Uuid::now_v7()),
+                acting_on_behalf_of: None,
+            },
             tool_subset: vec!["web_fetch".to_string()],
             budget_tokens: 512,
             max_turns: Some(3),
             parent_session: SessionId::new(),
             depth: 1,
-            tenant_id: TenantId::new(),
+            tenant_id,
             user_id: UserId::new("user-1"),
             model: ModelId::new("test-model"),
             trusted_sandbox_manifest: None,

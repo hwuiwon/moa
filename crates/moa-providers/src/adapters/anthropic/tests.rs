@@ -71,20 +71,31 @@ fn completion_request_serializes_to_anthropic_format() {
 #[test]
 fn completion_request_sets_structured_output_config() {
     let mut request = CompletionRequest::new("Return structured data.");
+    let canonical_schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "intent": {
+                "type": "string",
+                "enum": ["coding", "research", "unknown"]
+            },
+            "confidence": {
+                "oneOf": [
+                    {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100
+                    },
+                    { "type": "null" }
+                ]
+            }
+        },
+        "required": ["intent", "confidence"]
+    });
     request.response_format = Some(JsonResponseFormat::strict_json_schema(
         "query_rewrite_result",
         "Query rewrite result.",
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "intent": {
-                    "type": "string",
-                    "enum": ["coding", "research", "unknown"]
-                }
-            },
-            "required": ["intent"]
-        }),
+        canonical_schema.clone(),
     ));
 
     let body = build_request_body(
@@ -99,6 +110,23 @@ fn completion_request_sets_structured_output_config() {
     assert_eq!(
         body["output_config"]["format"]["schema"]["properties"]["intent"]["enum"],
         json!(["coding", "research", "unknown"])
+    );
+    assert_eq!(
+        body["output_config"]["format"]["schema"]["properties"]["confidence"],
+        json!({
+            "anyOf": [
+                { "type": "integer" },
+                { "type": "null" }
+            ]
+        })
+    );
+    assert_eq!(
+        request
+            .response_format
+            .as_ref()
+            .expect("canonical response format should remain present")
+            .schema,
+        canonical_schema
     );
 }
 

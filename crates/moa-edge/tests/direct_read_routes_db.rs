@@ -8,6 +8,7 @@ use axum::extract::State;
 use axum::routing::post;
 use chrono::{Duration, Utc};
 use moa_authz::{FgaClient, FgaConfig};
+use moa_core::config::{OAuthClientConfig, OAuthClientType, OAuthServerConfig};
 use moa_core::traits::{AuthError, AuthProvider, Credential, Identity, IdentityType};
 use moa_core::wire::analytics::{AnalyticsCatalogResponse, AnalyticsCell, AnalyticsQueryResponse};
 use moa_core::wire::lineage::LineageQueryResponse;
@@ -23,6 +24,7 @@ use moa_edge::routes::{self, AppState, KnowledgeWebhookEdgeConfig};
 use moa_session::{PostgresSessionStore, testing};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -80,6 +82,27 @@ struct PurgeUpstream {
 // Dashboard denial tests hold this narrow lock so one isolated pool is not
 // closed while another test's denied authz audit is still using it.
 static DASHBOARD_SESSIONS_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+const EDGE_OAUTH_CLIENT_ID: &str = "edge-test-client";
+const EDGE_OAUTH_RESOURCE: &str = "https://moa.test/mcp";
+
+fn edge_oauth_config() -> OAuthServerConfig {
+    OAuthServerConfig {
+        issuer: "https://moa.test".to_string(),
+        resource: EDGE_OAUTH_RESOURCE.to_string(),
+        authorization_request_ttl_seconds: 300,
+        authorization_code_ttl_seconds: 60,
+        access_token_ttl_seconds: 3600,
+        refresh_token_ttl_seconds: 7200,
+        clients: vec![OAuthClientConfig {
+            client_id: EDGE_OAUTH_CLIENT_ID.to_string(),
+            client_type: OAuthClientType::Public,
+            redirect_uris: vec!["https://app.example/callback".to_string()],
+            scopes: vec!["mcp:read".to_string(), "mcp:write".to_string()],
+            client_secret_sha256: None,
+        }],
+    }
+}
 
 async fn fga_check(
     State(state): State<FgaMockState>,
@@ -175,13 +198,24 @@ async fn start_edge_with_auth_and_upstream(
     let mut config = MoaConfig::default();
     config.database.url = database_url.to_string();
     config.database.schema = Some(schema_name.to_string());
+    config.auth.oauth = edge_oauth_config();
+    let pool = Arc::new(store.pool().clone());
+    let oauth_server = Arc::new(
+        moa_auth_providers::OAuthServer::from_config(&config.auth.oauth, pool.clone())
+            .await
+            .expect("bootstrap edge OAuth server"),
+    );
     let state = AppState {
         config: Arc::new(config),
         auth,
+        oauth_server,
+        oauth_access_tokens: Arc::new(moa_auth_providers::OAuthAccessTokenProvider::new(
+            pool.clone(),
+        )),
         fga: fga.map(Arc::new),
         auth0_webhook_secret: None,
         knowledge_webhooks: KnowledgeWebhookEdgeConfig::default(),
-        pool: Arc::new(store.pool().clone()),
+        pool,
         session_store: Arc::new(store.clone()),
         proxy: Arc::new(
             OrchestratorProxy::new(upstream).expect("proxy URL should be syntactically valid"),
@@ -203,6 +237,62 @@ async fn start_edge_with_auth_and_upstream(
         base_url: format!("http://{addr}"),
         server,
     }
+}
+
+async fn seed_oauth_access_token(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    token: &str,
+    scopes: &[&str],
+    resource: &str,
+) {
+    let token_hash = hex::encode(Sha256::digest(token.as_bytes()));
+    let refresh_hash = hex::encode(Sha256::digest(format!("{token}:refresh").as_bytes()));
+    let scopes = scopes
+        .iter()
+        .map(|scope| (*scope).to_string())
+        .collect::<Vec<_>>();
+    sqlx::query(
+        r#"
+        INSERT INTO oauth_tokens (
+            tenant_id, client_id, subject_id, subject_type, scopes, resource,
+            access_token_hash, access_token_expires_at,
+            refresh_token_hash, refresh_token_expires_at
+        )
+        VALUES ($1, $2, $3, 'operator', $4, $5, $6, NOW() + INTERVAL '1 hour',
+                $7, NOW() + INTERVAL '2 hours')
+        "#,
+    )
+    .bind(tenant_id.0)
+    .bind(EDGE_OAUTH_CLIENT_ID)
+    .bind(Uuid::now_v7())
+    .bind(scopes)
+    .bind(resource)
+    .bind(token_hash)
+    .bind(refresh_hash)
+    .execute(pool)
+    .await
+    .expect("seed OAuth access token");
+}
+
+async fn post_mcp_with_bearer(
+    client: &reqwest::Client,
+    edge: &EdgeServer,
+    path: &str,
+    token: &str,
+    body: Value,
+) -> reqwest::Response {
+    client
+        .post(format!("{}{path}", edge.base_url))
+        .header("Host", "localhost:10000")
+        .header("Origin", "http://localhost:10000")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("MCP-Protocol-Version", "2025-06-18")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&body)
+        .send()
+        .await
+        .expect("send OAuth MCP request")
 }
 
 async fn start_purge_upstream() -> PurgeUpstream {
@@ -316,6 +406,169 @@ async fn tenant_purge_denial_never_dispatches_workflow_db() {
         checks[0]["tuple_key"]["object"],
         json!(format!("tenant:{tenant_id}"))
     );
+
+    stop_server(edge.server).await;
+    stop_fga_mock(fga.server).await;
+    cleanup_test_store(store, database_url, schema_name).await;
+}
+
+#[tokio::test]
+async fn oauth_bearers_are_mcp_only_resource_bound_scoped_and_fga_checked_db() {
+    // Pins: OAuth access tokens are rejected from REST, require the exact MCP
+    // resource and annotation-derived scope, and still pass OpenFGA before MCP
+    // dispatch. Mutation check: moving OpenFGA before resource/scope checks adds
+    // checks for the first three denied requests; weakening any exact check lets
+    // its request reach JSON-RPC dispatch.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let tenant_id = TenantId::new();
+    let fga = start_fga_mock(true).await;
+    let edge = start_edge(
+        &store,
+        &database_url,
+        &schema_name,
+        identity(IdentityType::Operator, tenant_id),
+        Some(fga.client.clone()),
+    )
+    .await;
+
+    let wrong_resource_token = "moa_oauth_at_wrong_resource";
+    let read_token = "moa_oauth_at_read_only";
+    let write_token = "moa_oauth_at_write_only";
+    seed_oauth_access_token(
+        store.pool(),
+        tenant_id,
+        wrong_resource_token,
+        &["mcp:read"],
+        "https://other.example/mcp",
+    )
+    .await;
+    seed_oauth_access_token(
+        store.pool(),
+        tenant_id,
+        read_token,
+        &["mcp:read"],
+        EDGE_OAUTH_RESOURCE,
+    )
+    .await;
+    seed_oauth_access_token(
+        store.pool(),
+        tenant_id,
+        write_token,
+        &["mcp:write"],
+        EDGE_OAUTH_RESOURCE,
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let authorization_metadata: Value = client
+        .get(format!(
+            "{}/.well-known/oauth-authorization-server",
+            edge.base_url
+        ))
+        .send()
+        .await
+        .expect("fetch authorization-server metadata")
+        .error_for_status()
+        .expect("authorization-server metadata succeeds")
+        .json()
+        .await
+        .expect("decode authorization-server metadata");
+    assert_eq!(authorization_metadata["issuer"], json!("https://moa.test"));
+    assert_eq!(
+        authorization_metadata["authorization_endpoint"],
+        json!("https://moa.test/oauth/authorize")
+    );
+    assert_eq!(
+        authorization_metadata["token_endpoint"],
+        json!("https://moa.test/oauth/token")
+    );
+    let resource_metadata: Value = client
+        .get(format!(
+            "{}/.well-known/oauth-protected-resource/mcp",
+            edge.base_url
+        ))
+        .send()
+        .await
+        .expect("fetch protected-resource metadata")
+        .error_for_status()
+        .expect("protected-resource metadata succeeds")
+        .json()
+        .await
+        .expect("decode protected-resource metadata");
+    assert_eq!(resource_metadata["resource"], json!(EDGE_OAUTH_RESOURCE));
+    assert_eq!(
+        resource_metadata["authorization_servers"],
+        json!(["https://moa.test"])
+    );
+
+    let read_call = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": "sessions_list", "arguments": {} }
+    });
+    let write_call = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": { "name": "artifact_publish", "arguments": {} }
+    });
+
+    let wrong_resource = post_mcp_with_bearer(
+        &client,
+        &edge,
+        "/mcp",
+        wrong_resource_token,
+        read_call.clone(),
+    )
+    .await;
+    assert_eq!(wrong_resource.status(), StatusCode::FORBIDDEN);
+
+    let read_cannot_write =
+        post_mcp_with_bearer(&client, &edge, "/mcp", read_token, write_call.clone()).await;
+    assert_eq!(read_cannot_write.status(), StatusCode::FORBIDDEN);
+
+    let write_cannot_read =
+        post_mcp_with_bearer(&client, &edge, "/mcp", write_token, read_call.clone()).await;
+    assert_eq!(write_cannot_read.status(), StatusCode::FORBIDDEN);
+    assert!(
+        fga.checks.lock().await.is_empty(),
+        "resource and scope denials happen before OpenFGA"
+    );
+
+    for path in ["/mcp/", "/mcp/tools"] {
+        let noncanonical =
+            post_mcp_with_bearer(&client, &edge, path, read_token, read_call.clone()).await;
+        assert_eq!(
+            noncanonical.status(),
+            StatusCode::NOT_FOUND,
+            "OAuth bearer must not reach MCP through noncanonical path {path}"
+        );
+    }
+    assert!(
+        fga.checks.lock().await.is_empty(),
+        "noncanonical MCP paths are rejected before OpenFGA"
+    );
+
+    let read_allowed = post_mcp_with_bearer(&client, &edge, "/mcp", read_token, read_call).await;
+    assert_eq!(read_allowed.status(), StatusCode::OK);
+    let write_allowed = post_mcp_with_bearer(&client, &edge, "/mcp", write_token, write_call).await;
+    assert_eq!(write_allowed.status(), StatusCode::OK);
+    let checks = fga.checks.lock().await.clone();
+    assert_eq!(checks.len(), 2);
+    assert!(checks.iter().all(|check| {
+        check["tuple_key"]["relation"] == json!("operator")
+            && check["tuple_key"]["object"] == json!(format!("tenant:{tenant_id}"))
+    }));
+
+    let rest = client
+        .post(format!("{}/v1/memory/search", edge.base_url))
+        .header("Authorization", format!("Bearer {read_token}"))
+        .json(&json!({ "query": "auth" }))
+        .send()
+        .await
+        .expect("send REST request with OAuth bearer");
+    assert_eq!(rest.status(), StatusCode::UNAUTHORIZED);
 
     stop_server(edge.server).await;
     stop_fga_mock(fga.server).await;

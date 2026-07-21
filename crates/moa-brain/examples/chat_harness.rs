@@ -4,13 +4,15 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 use moa_brain::{
-    GraphMemoryPipelineOptions,
+    BrainTurnRequest, GraphMemoryPipelineOptions,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    config::MoaConfig, error::Result, events::Event, traits::LLMProvider, traits::SessionStore,
-    types::events_stream::EventRange, types::identifiers::TenantId, types::session::SessionMeta,
+    config::MoaConfig, error::Result, events::Event, traits::Identity, traits::IdentityType,
+    traits::LLMProvider, traits::SessionStore, types::events_stream::EventRange,
+    types::identifiers::TenantId, types::session::SessionMeta,
 };
+use moa_crypto::LocalKmsProvider;
 use moa_hands::ToolRouter;
 use moa_providers::build_provider_from_config;
 use moa_session::{PostgresSessionStore, testing};
@@ -23,13 +25,20 @@ async fn main() -> Result<()> {
     let store = Arc::new(store);
     let provider = build_provider_from_config(&config)?;
     let tool_router = Arc::new(
-        ToolRouter::from_config(&config)
+        ToolRouter::from_config(&config, None)
             .await?
             .with_session_store(store.clone()),
     );
+    let identity = Identity {
+        identity_type: IdentityType::Operator,
+        id: uuid::Uuid::now_v7(),
+        tenant_id: TenantId::new(),
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    };
     let session_id = store
         .create_session(SessionMeta {
-            tenant_id: TenantId::new(),
+            tenant_id: identity.tenant_id,
             model: config.models.main.clone().into(),
             ..SessionMeta::default()
         })
@@ -39,6 +48,7 @@ async fn main() -> Result<()> {
         store.clone(),
         GraphMemoryPipelineOptions {
             graph_pool: store.pool().clone(),
+            kms: Arc::new(LocalKmsProvider::new()),
             shared_graph_memory_retriever: None,
             retrieval_embedder: None,
             shared_skill_injector: None,
@@ -61,6 +71,7 @@ async fn main() -> Result<()> {
         println!("Type a prompt and press enter. Use /quit to exit.");
     } else {
         run_prompt(
+            &identity,
             session_id,
             store.clone(),
             provider.clone(),
@@ -91,6 +102,7 @@ async fn main() -> Result<()> {
         }
 
         run_prompt(
+            &identity,
             session_id,
             store.clone(),
             provider.clone(),
@@ -105,6 +117,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_prompt(
+    identity: &Identity,
     session_id: moa_core::types::identifiers::SessionId,
     store: Arc<PostgresSessionStore>,
     provider: Arc<dyn LLMProvider>,
@@ -124,13 +137,14 @@ async fn run_prompt(
         )
         .await?;
 
-    run_brain_turn(
+    run_brain_turn(BrainTurnRequest {
+        identity: identity.clone(),
         session_id,
-        store.clone(),
-        provider,
+        session_store: store.clone(),
+        llm_provider: provider,
         pipeline,
-        Some(tool_router),
-    )
+        tool_router: Some(tool_router),
+    })
     .await?;
 
     let response_texts = store

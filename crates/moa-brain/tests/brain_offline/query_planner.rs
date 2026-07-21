@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_brain::planning::{PlanningCtx, QueryPlanner, Strategy};
 use moa_core::types::identifiers::TenantId;
+use moa_core::types::security::SensitivityClass;
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphError, GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent,
-    PiiClass,
 };
 use moa_memory_types::MemoryScope;
 use uuid::Uuid;
@@ -54,7 +54,7 @@ async fn planner_classify_vector_query_and_builds_retrieval_request() {
     let request = planned.into_retrieval_request(
         "How often does the deploy fail?",
         vec![0.0; 1024],
-        PiiClass::Restricted,
+        SensitivityClass::Restricted,
         5,
         false,
     );
@@ -234,7 +234,7 @@ fn row(uid: Uuid, name: &str) -> NodeIndexRow {
         contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         valid_to: None,
         valid_from: Utc::now(),
         properties_summary: None,

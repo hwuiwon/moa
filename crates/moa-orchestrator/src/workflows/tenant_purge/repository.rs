@@ -3,11 +3,28 @@
 use moa_authz::{FgaClient, FgaTuple, enqueue_raw};
 use moa_authz_schema::TupleOp;
 use sqlx::{Postgres, Transaction};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PurgeBinding {
+    Tenant,
+    StoragePartition,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PurgeStep {
+    table: &'static str,
+    cleanup_sql: &'static str,
+    binding: PurgeBinding,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(super) enum RelationalPurgeOutcome {
+/// Outcome of the idempotent relational tenant-purge transaction.
+pub enum RelationalPurgeOutcome {
+    /// This invocation committed relational deletion.
     Committed,
+    /// The same operation had already committed relational deletion.
     AlreadyCommitted,
 }
 
@@ -23,7 +40,36 @@ struct AgentTupleTarget {
     operator_user_id: Option<Uuid>,
 }
 
-pub(super) async fn purge_relational(
+type InverseTuple = (String, String, String);
+
+/// Executes the fenced, catalog-checked relational tenant purge.
+pub async fn purge_relational(
+    pool: &sqlx::PgPool,
+    fga: &FgaClient,
+    tenant_id: Uuid,
+    operation_id: &str,
+) -> Result<RelationalPurgeOutcome, String> {
+    let tenant = moa_core::types::identifiers::TenantId::from(tenant_id);
+    let stage_guard =
+        moa_memory_pii::legal_hold::begin_destruction_stage_guard(pool, tenant, &[], operation_id)
+            .await
+            .map_err(|error| format!("relational destruction fence: {error}"))?;
+
+    let purge_result = purge_relational_transaction(pool, fga, tenant_id, operation_id).await;
+    let guard_result = stage_guard
+        .finish()
+        .await
+        .map_err(|error| format!("release relational destruction fence: {error}"));
+    match (purge_result, guard_result) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(purge_error), Err(guard_error)) => Err(format!(
+            "{purge_error}; additionally failed to {guard_error}"
+        )),
+    }
+}
+
+async fn purge_relational_transaction(
     pool: &sqlx::PgPool,
     fga: &FgaClient,
     tenant_id: Uuid,
@@ -33,6 +79,7 @@ pub(super) async fn purge_relational(
         .begin()
         .await
         .map_err(|error| format!("db begin: {error}"))?;
+    let operation = async {
     sqlx::query(
         r#"
         INSERT INTO moa.tenant_purge_operations (tenant_id, operation_id)
@@ -61,10 +108,21 @@ pub(super) async fn purge_relational(
         return Err("tenant purge operation id does not match its durable fence".to_string());
     }
     if status == "relationally_committed" {
-        tx.rollback()
-            .await
-            .map_err(|error| format!("release tenant purge fence: {error}"))?;
         return Ok(RelationalPurgeOutcome::AlreadyCommitted);
+    }
+    let storage_partition_id =
+        moa_core::types::identifiers::StoragePartitionId::for_tenant(tenant_id.into()).to_string();
+    if moa_memory_vector::sync::has_active_vector_sync_claims_in_tx(
+        &mut tx,
+        &storage_partition_id,
+    )
+    .await
+    .map_err(|error| format!("relational vector-sync claim check: {error}"))?
+    {
+        return Err(
+            "relational purge is waiting for active vector-sync claims to settle or expire"
+                .to_string(),
+        );
     }
 
     let user_ids = load_ids(
@@ -103,72 +161,85 @@ pub(super) async fn purge_relational(
             .map_err(|error| format!("load tenant agent tuples: {error}"))?;
     let agent_can_act_as_tuples = load_agent_can_act_as_tuples(fga, &agent_targets).await?;
 
-    enqueue_workspace_tuple(&mut tx, tenant_id).await?;
+    let mut inverse_tuples = BTreeSet::new();
+    enqueue_workspace_tuple(&mut tx, tenant_id, &mut inverse_tuples).await?;
     for user_id in &user_ids {
         for relation in ["admin", "operator"] {
-            enqueue_raw(
-                &mut *tx,
-                TupleOp::Delete,
-                &format!("operator:{user_id}"),
+            enqueue_inverse_tuple(
+                &mut tx,
+                tenant_id,
+                &mut inverse_tuples,
+                format!("operator:{user_id}"),
                 relation,
-                &format!("tenant:{tenant_id}"),
-                Some(tenant_id),
+                format!("tenant:{tenant_id}"),
+                "tenant user tuple delete",
             )
-            .await
-            .map_err(|error| format!("tenant user tuple delete: {error}"))?;
+            .await?;
         }
     }
     for key_id in &api_key_ids {
-        enqueue_api_key_tuples(&mut tx, tenant_id, *key_id).await?;
+        enqueue_api_key_tuples(&mut tx, tenant_id, *key_id, &mut inverse_tuples).await?;
     }
     for session_id in &session_ids {
-        enqueue_raw(
-            &mut *tx,
-            TupleOp::Delete,
-            &format!("tenant:{tenant_id}"),
+        enqueue_inverse_tuple(
+            &mut tx,
+            tenant_id,
+            &mut inverse_tuples,
+            format!("tenant:{tenant_id}"),
             "tenant",
-            &format!("session:{session_id}"),
-            Some(tenant_id),
+            format!("session:{session_id}"),
+            "session tenant tuple delete",
         )
-        .await
-        .map_err(|error| format!("session tenant tuple delete: {error}"))?;
+        .await?;
         for user_id in &user_ids {
             for relation in ["owner", "participant"] {
-                enqueue_raw(
-                    &mut *tx,
-                    TupleOp::Delete,
-                    &format!("operator:{user_id}"),
+                enqueue_inverse_tuple(
+                    &mut tx,
+                    tenant_id,
+                    &mut inverse_tuples,
+                    format!("operator:{user_id}"),
                     relation,
-                    &format!("session:{session_id}"),
-                    Some(tenant_id),
+                    format!("session:{session_id}"),
+                    "session user tuple delete",
                 )
-                .await
-                .map_err(|error| format!("session user tuple delete: {error}"))?;
+                .await?;
             }
         }
     }
     for target in &contact_targets {
         for relation in ["owner", "contact"] {
-            enqueue_raw(
-                &mut *tx,
-                TupleOp::Delete,
-                &format!("contact:{}", target.contact_id),
+            enqueue_inverse_tuple(
+                &mut tx,
+                tenant_id,
+                &mut inverse_tuples,
+                format!("contact:{}", target.contact_id),
                 relation,
-                &format!("session:{}", target.session_id),
-                Some(tenant_id),
+                format!("session:{}", target.session_id),
+                "session contact tuple delete",
             )
-            .await
-            .map_err(|error| format!("session contact tuple delete: {error}"))?;
+            .await?;
         }
     }
     for target in &agent_targets {
-        enqueue_agent_tuple_deletes(&mut tx, tenant_id, target, &agent_can_act_as_tuples).await?;
+        enqueue_agent_tuple_deletes(
+            &mut tx,
+            tenant_id,
+            target,
+            &agent_can_act_as_tuples,
+            &mut inverse_tuples,
+        )
+        .await?;
     }
 
-    let storage_partition_id =
-        moa_core::types::identifiers::StoragePartitionId::for_tenant(tenant_id.into()).to_string();
-    delete_tenant_rows(&mut tx, tenant_id, &storage_partition_id).await?;
+    delete_tenant_rows(
+        &mut tx,
+        tenant_id,
+        &storage_partition_id,
+        &inverse_tuples,
+    )
+    .await?;
     delete_tenant_record(&mut tx, tenant_id).await?;
+    assert_tenant_record_deleted(&mut tx, tenant_id).await?;
     sqlx::query(
         r#"
         UPDATE moa.tenant_purge_operations
@@ -181,10 +252,28 @@ pub(super) async fn purge_relational(
     .execute(&mut *tx)
     .await
     .map_err(|error| format!("commit tenant purge fence: {error}"))?;
-    tx.commit()
-        .await
-        .map_err(|error| format!("db commit: {error}"))?;
-    Ok(RelationalPurgeOutcome::Committed)
+        Ok(RelationalPurgeOutcome::Committed)
+    }
+    .await;
+
+    match operation {
+        Ok(RelationalPurgeOutcome::Committed) => tx
+            .commit()
+            .await
+            .map(|_| RelationalPurgeOutcome::Committed)
+            .map_err(|error| format!("db commit: {error}")),
+        Ok(RelationalPurgeOutcome::AlreadyCommitted) => tx
+            .rollback()
+            .await
+            .map(|_| RelationalPurgeOutcome::AlreadyCommitted)
+            .map_err(|error| format!("release tenant purge fence: {error}")),
+        Err(operation_error) => match tx.rollback().await {
+            Ok(()) => Err(operation_error),
+            Err(rollback_error) => Err(format!(
+                "{operation_error}; additionally failed to roll back tenant purge transaction: {rollback_error}"
+            )),
+        },
+    }
 }
 
 async fn load_ids(
@@ -221,23 +310,25 @@ async fn load_agent_can_act_as_tuples(
 async fn enqueue_workspace_tuple(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
+    inverse_tuples: &mut BTreeSet<InverseTuple>,
 ) -> Result<(), String> {
-    enqueue_raw(
-        &mut **tx,
-        TupleOp::Delete,
-        &format!("workspace:{}", moa_core::WORKSPACE_ID),
+    enqueue_inverse_tuple(
+        tx,
+        tenant_id,
+        inverse_tuples,
+        format!("workspace:{}", moa_core::WORKSPACE_ID),
         "workspace",
-        &format!("tenant:{tenant_id}"),
-        Some(tenant_id),
+        format!("tenant:{tenant_id}"),
+        "tenant workspace delete tuple",
     )
     .await
-    .map_err(|error| format!("tenant workspace delete tuple: {error}"))
 }
 
 async fn enqueue_api_key_tuples(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
     key_id: Uuid,
+    inverse_tuples: &mut BTreeSet<InverseTuple>,
 ) -> Result<(), String> {
     for (user, relation, object) in [
         (
@@ -256,16 +347,16 @@ async fn enqueue_api_key_tuples(
             format!("tenant:{tenant_id}"),
         ),
     ] {
-        enqueue_raw(
-            &mut **tx,
-            TupleOp::Delete,
-            &user,
+        enqueue_inverse_tuple(
+            tx,
+            tenant_id,
+            inverse_tuples,
+            user,
             &relation,
-            &object,
-            Some(tenant_id),
+            object,
+            "api key tuple delete",
         )
-        .await
-        .map_err(|error| format!("api key tuple delete: {error}"))?;
+        .await?;
     }
     Ok(())
 }
@@ -275,45 +366,69 @@ async fn enqueue_agent_tuple_deletes(
     tenant_id: Uuid,
     target: &AgentTupleTarget,
     can_act_as_tuples: &[FgaTuple],
+    inverse_tuples: &mut BTreeSet<InverseTuple>,
 ) -> Result<(), String> {
     let agent_object = format!("agent:{}", target.agent_id);
     for tuple in can_act_as_tuples
         .iter()
         .filter(|tuple| tuple.relation == "can_act_as" && tuple.object == agent_object)
     {
-        enqueue_raw(
-            &mut **tx,
-            TupleOp::Delete,
-            &tuple.user,
+        enqueue_inverse_tuple(
+            tx,
+            tenant_id,
+            inverse_tuples,
+            tuple.user.clone(),
             &tuple.relation,
-            &tuple.object,
-            Some(tenant_id),
+            tuple.object.clone(),
+            "agent delegation tuple delete",
         )
-        .await
-        .map_err(|error| format!("agent delegation tuple delete: {error}"))?;
+        .await?;
     }
+    enqueue_inverse_tuple(
+        tx,
+        tenant_id,
+        inverse_tuples,
+        format!("tenant:{tenant_id}"),
+        "tenant",
+        agent_object.clone(),
+        "agent tenant tuple delete",
+    )
+    .await?;
+    if let Some(operator_user_id) = target.operator_user_id {
+        enqueue_inverse_tuple(
+            tx,
+            tenant_id,
+            inverse_tuples,
+            format!("operator:{operator_user_id}"),
+            "operator",
+            agent_object,
+            "agent operator tuple delete",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn enqueue_inverse_tuple(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    inverse_tuples: &mut BTreeSet<InverseTuple>,
+    user: String,
+    relation: &str,
+    object: String,
+    context: &str,
+) -> Result<(), String> {
     enqueue_raw(
         &mut **tx,
         TupleOp::Delete,
-        &format!("tenant:{tenant_id}"),
-        "tenant",
-        &agent_object,
+        &user,
+        relation,
+        &object,
         Some(tenant_id),
     )
     .await
-    .map_err(|error| format!("agent tenant tuple delete: {error}"))?;
-    if let Some(operator_user_id) = target.operator_user_id {
-        enqueue_raw(
-            &mut **tx,
-            TupleOp::Delete,
-            &format!("operator:{operator_user_id}"),
-            "operator",
-            &agent_object,
-            Some(tenant_id),
-        )
-        .await
-        .map_err(|error| format!("agent operator tuple delete: {error}"))?;
-    }
+    .map_err(|error| format!("{context}: {error}"))?;
+    inverse_tuples.insert((user, relation.to_string(), object));
     Ok(())
 }
 
@@ -321,9 +436,19 @@ async fn delete_tenant_rows(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
     storage_partition_id: &str,
+    inverse_tuples: &BTreeSet<InverseTuple>,
 ) -> Result<(), String> {
     let tenant_deletes = [
+        "DELETE FROM oauth_tokens WHERE tenant_id = $1",
+        "DELETE FROM oauth_authorization_codes WHERE tenant_id = $1",
+        "DELETE FROM oauth_authorization_transactions WHERE tenant_id = $1",
+        "DELETE FROM token_vault_connections WHERE tenant_id = $1",
+        "DELETE FROM analytics.eval_run_status WHERE tenant_id = $1",
+        "DELETE FROM moa.dual_control_request WHERE tenant_id = $1",
+        "DELETE FROM moa.audit_jti_used WHERE tenant_id = $1",
+        "DELETE FROM moa.erasure_jobs WHERE tenant_id = $1",
         "DELETE FROM moa.knowledge_object_ingestion_claims WHERE tenant_id = $1",
+        "DELETE FROM moa.knowledge_semantic_graph_extractions WHERE tenant_id = $1",
         "DELETE FROM moa.knowledge_contact_group_memberships WHERE tenant_id = $1",
         "DELETE FROM moa.knowledge_contact_groups WHERE tenant_id = $1",
         "DELETE FROM moa.knowledge_chunks WHERE tenant_id = $1",
@@ -342,6 +467,15 @@ async fn delete_tenant_rows(
         "DELETE FROM builtin_pending_approvals WHERE tenant_id = $1",
         "DELETE FROM auth0_ciba_approvals WHERE session_id IN (SELECT id FROM sessions WHERE tenant_id = $1) OR deciding_user_id IN (SELECT id FROM users WHERE tenant_id = $1)",
         "DELETE FROM moa.hand_leases WHERE tenant_id = $1",
+        "DELETE FROM moa.execution_node_materialization WHERE tenant_id = $1",
+        "DELETE FROM moa.execution_planner_call_audit WHERE tenant_id = $1",
+        "DELETE FROM moa.execution_compile_audit WHERE tenant_id = $1",
+        "DELETE FROM moa.execution_route_audit WHERE tenant_id = $1",
+        "DELETE FROM moa.execution_action_review_outbox WHERE tenant_id = $1",
+        "DELETE FROM moa.execution_task WHERE tenant_id = $1",
+        "DELETE FROM moa.execution_template_admission WHERE tenant_id = $1",
+        "DELETE FROM moa.execution_run WHERE tenant_id = $1",
+        "DELETE FROM moa.execution_planning_context WHERE tenant_id = $1",
         "DELETE FROM session_agent_context WHERE tenant_id = $1",
         "DELETE FROM session_attachments WHERE tenant_id = $1",
         "DELETE FROM session_blobs WHERE tenant_id = $1",
@@ -364,25 +498,15 @@ async fn delete_tenant_rows(
         "DELETE FROM api_keys WHERE tenant_id = $1",
         "DELETE FROM users WHERE tenant_id = $1",
     ];
-    for statement in tenant_deletes {
-        sqlx::query(statement)
-            .bind(tenant_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| format!("{statement}: {error}"))?;
-    }
-
     let storage_deletes = [
+        "DELETE FROM analytics.eval_dataset_items WHERE storage_partition_id = $1",
         "DELETE FROM moa.agent_deployment WHERE storage_partition_id = $1",
         "DELETE FROM moa.agent_installation WHERE storage_partition_id = $1",
         "DELETE FROM moa.experiment_trial WHERE storage_partition_id = $1",
         "DELETE FROM moa.experiment_run_artifact_revision WHERE storage_partition_id = $1",
         "DELETE FROM moa.experiment_run WHERE storage_partition_id = $1",
         "DELETE FROM analytics.score_run WHERE storage_partition_id = $1",
-        "DELETE FROM moa.execution_template_admission WHERE tenant_id = $1::UUID",
-        "DELETE FROM moa.execution_action_review_outbox WHERE tenant_id = $1::UUID",
-        "DELETE FROM moa.execution_task WHERE tenant_id = $1::UUID",
-        "DELETE FROM moa.execution_run WHERE tenant_id = $1::UUID",
+        "DELETE FROM moa.skill_embedding WHERE storage_partition_id = $1",
         "DELETE FROM moa.artifact_file WHERE storage_partition_id = $1",
         "UPDATE moa.artifact SET latest_revision_uid = NULL WHERE storage_partition_id = $1",
         "DELETE FROM moa.artifact_revision WHERE storage_partition_id = $1",
@@ -403,18 +527,32 @@ async fn delete_tenant_rows(
         "DELETE FROM moa.memory_digests WHERE storage_partition_id = $1",
         "DELETE FROM moa.ingest_dlq WHERE storage_partition_id = $1",
         "DELETE FROM moa.ingest_dedup WHERE storage_partition_id = $1",
+        "DELETE FROM moa.vector_sync_outbox WHERE storage_partition_id = $1",
         "DELETE FROM moa.embeddings WHERE storage_partition_id = $1",
         "DELETE FROM moa.graph_changelog WHERE storage_partition_id = $1",
         "DELETE FROM moa.edge_index WHERE storage_partition_id = $1",
         "DELETE FROM moa.node_index WHERE storage_partition_id = $1",
         "DELETE FROM moa.storage_partition_state WHERE storage_partition_id = $1",
     ];
-    for statement in storage_deletes {
-        sqlx::query(statement)
-            .bind(storage_partition_id)
+    let purge_steps = tenant_deletes
+        .into_iter()
+        .map(|sql| purge_step(PurgeBinding::Tenant, sql))
+        .chain(
+            storage_deletes
+                .into_iter()
+                .map(|sql| purge_step(PurgeBinding::StoragePartition, sql)),
+        )
+        .collect::<Vec<_>>();
+    for step in &purge_steps {
+        let query = sqlx::query(step.cleanup_sql);
+        let query = match step.binding {
+            PurgeBinding::Tenant => query.bind(tenant_id),
+            PurgeBinding::StoragePartition => query.bind(storage_partition_id),
+        };
+        query
             .execute(&mut **tx)
             .await
-            .map_err(|error| format!("{statement}: {error}"))?;
+            .map_err(|error| format!("purge {}: {error}", step.table))?;
     }
 
     let session_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM sessions WHERE tenant_id = $1")
@@ -445,33 +583,232 @@ async fn delete_tenant_rows(
             .await
             .map_err(|error| format!("{statement}: {error}"))?;
     }
+    redact_intentional_residue(tx, tenant_id).await?;
+    assert_no_unapproved_residue(
+        tx,
+        tenant_id,
+        storage_partition_id,
+        &purge_steps,
+        inverse_tuples,
+    )
+    .await?;
     Ok(())
+}
+
+fn purge_step(binding: PurgeBinding, cleanup_sql: &'static str) -> PurgeStep {
+    let words = cleanup_sql.split_ascii_whitespace().collect::<Vec<_>>();
+    let table = match words.first().copied() {
+        Some("DELETE") => words.get(2).copied(),
+        Some("UPDATE") => words.get(1).copied(),
+        _ => None,
+    }
+    .unwrap_or("<invalid-purge-step>");
+    PurgeStep {
+        table,
+        cleanup_sql,
+        binding,
+    }
+}
+
+async fn redact_intentional_residue(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE moa.kek SET wrapped_kek = NULL, destroyed_at = COALESCE(destroyed_at, NOW()) WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("crypto-shred tenant KEK rows: {error}"))?;
+    sqlx::query(
+        "UPDATE moa.legal_hold SET subject_id = NULL, reason = '[REDACTED]', placed_by = '[REDACTED]', released_by = '[REDACTED]' WHERE tenant_id = $1 AND released_at IS NOT NULL",
+    )
+    .bind(tenant_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("redact released legal-hold tombstones: {error}"))?;
+    Ok(())
+}
+
+async fn assert_no_unapproved_residue(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    storage_partition_id: &str,
+    steps: &[PurgeStep],
+    inverse_tuples: &BTreeSet<InverseTuple>,
+) -> Result<(), String> {
+    assert_catalog_coverage(tx, steps).await?;
+    for step in steps {
+        if !step.cleanup_sql.starts_with("DELETE FROM ") {
+            continue;
+        }
+        let residue_sql = step
+            .cleanup_sql
+            .replacen("DELETE FROM", "SELECT count(*) FROM", 1);
+        let query = sqlx::query_scalar::<_, i64>(&residue_sql);
+        let count = match step.binding {
+            PurgeBinding::Tenant => query.bind(tenant_id),
+            PurgeBinding::StoragePartition => query.bind(storage_partition_id),
+        }
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| format!("residue check {}: {error}", step.table))?;
+        if count != 0 {
+            return Err(format!(
+                "tenant purge left {count} unapproved rows in {}",
+                step.table
+            ));
+        }
+    }
+
+    let invalid_kek: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM moa.kek WHERE tenant_id = $1 AND (wrapped_kek IS NOT NULL OR destroyed_at IS NULL)",
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("KEK residue check: {error}"))?;
+    let invalid_holds: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM moa.legal_hold WHERE tenant_id = $1 AND (subject_id IS NOT NULL OR released_at IS NULL OR reason <> '[REDACTED]' OR placed_by <> '[REDACTED]' OR released_by <> '[REDACTED]')",
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("legal-hold residue check: {error}"))?;
+    let (invalid_authz_outbox, missing_authz_outbox) =
+        authz_outbox_residue(tx, tenant_id, inverse_tuples).await?;
+    if invalid_kek != 0
+        || invalid_holds != 0
+        || invalid_authz_outbox != 0
+        || missing_authz_outbox != 0
+    {
+        return Err(format!(
+            "tenant purge left invalid intentional residue: kek={invalid_kek}, legal_hold={invalid_holds}, authz_outbox_invalid={invalid_authz_outbox}, authz_outbox_missing={missing_authz_outbox}"
+        ));
+    }
+    Ok(())
+}
+
+async fn authz_outbox_residue(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    inverse_tuples: &BTreeSet<InverseTuple>,
+) -> Result<(usize, usize), String> {
+    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT op, status, tuple_user, tuple_relation, tuple_object
+        FROM authz_outbox
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| format!("authz outbox residue check: {error}"))?;
+    let mut unmatched = inverse_tuples.clone();
+    let mut invalid = 0;
+    for (op, status, user, relation, object) in rows {
+        let identity = (user, relation, object);
+        if op != "delete" || status != "pending" || !unmatched.remove(&identity) {
+            invalid += 1;
+        }
+    }
+    Ok((invalid, unmatched.len()))
+}
+
+async fn assert_catalog_coverage(
+    tx: &mut Transaction<'_, Postgres>,
+    steps: &[PurgeStep],
+) -> Result<(), String> {
+    let mut registered = steps
+        .iter()
+        .map(|step| qualify_table(step.table))
+        .collect::<BTreeSet<_>>();
+    registered.extend(
+        [
+            "public.context_snapshots",
+            "public.events",
+            "public.sessions",
+            "moa.destruction_operation_fence",
+            "moa.kek",
+            "moa.legal_hold",
+            "moa.tenant_purge_operations",
+            "public.authz_outbox",
+            "public.tenants",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    let catalog = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT namespace.nspname, table_row.relname
+        FROM pg_catalog.pg_class AS table_row
+        JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = table_row.relnamespace
+        JOIN pg_catalog.pg_attribute AS column_row ON column_row.attrelid = table_row.oid
+        WHERE table_row.relkind IN ('r', 'p')
+          AND NOT table_row.relispartition
+          AND namespace.nspname IN ('public', 'moa', 'analytics', 'pii_vault')
+          AND column_row.attnum > 0
+          AND NOT column_row.attisdropped
+          AND column_row.attname IN ('tenant_id', 'storage_partition_id')
+        GROUP BY namespace.nspname, table_row.relname
+        ORDER BY namespace.nspname, table_row.relname
+        "#,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| format!("load tenant-owned table catalog: {error}"))?;
+    let uncovered = catalog
+        .into_iter()
+        .map(|(schema, table)| format!("{schema}.{table}"))
+        .filter(|table| !registered.contains(table))
+        .collect::<Vec<_>>();
+    if !uncovered.is_empty() {
+        return Err(format!(
+            "tenant purge catalog has unregistered tenant-owned tables: {}",
+            uncovered.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn qualify_table(table: &str) -> String {
+    if table.contains('.') {
+        table.to_string()
+    } else {
+        format!("public.{table}")
+    }
 }
 
 async fn delete_tenant_record(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
 ) -> Result<(), String> {
-    sqlx::query(
-        r#"
-        INSERT INTO tenants (id, slug, name, status, deleted_at)
-        VALUES ($1, $2, $3, 'deleted', NOW())
-        ON CONFLICT (id) DO UPDATE
-        SET status = 'deleted', deleted_at = NOW(), updated_at = NOW()
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(format!("deleted-{tenant_id}"))
-    .bind("deleted tenant")
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| format!("mark tenant deleted: {error}"))?;
     sqlx::query("DELETE FROM tenants WHERE id = $1")
         .bind(tenant_id)
         .execute(&mut **tx)
         .await
         .map_err(|error| format!("delete tenant row: {error}"))?;
     Ok(())
+}
+
+async fn assert_tenant_record_deleted(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+) -> Result<(), String> {
+    let residue: i64 = sqlx::query_scalar("SELECT count(*) FROM tenants WHERE id = $1")
+        .bind(tenant_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| format!("tenant record residue check: {error}"))?;
+    if residue == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "tenant purge left {residue} unapproved rows in tenants"
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -508,6 +845,18 @@ mod tests {
             .expect("insert purge test user");
     }
 
+    async fn start_test_destruction(pool: &sqlx::PgPool, tenant_id: Uuid, operation_id: &str) {
+        moa_memory_pii::legal_hold::start_destruction(
+            pool,
+            tenant_id.into(),
+            &[],
+            operation_id,
+            "tenant.purge",
+        )
+        .await
+        .expect("start durable tenant destruction fence");
+    }
+
     #[tokio::test]
     async fn relational_purge_is_idempotent_and_preserves_inverse_tuple_intent_db() {
         // Pins: a replay behind PostgreSQL commit skips row deletion and does not duplicate outbox intent.
@@ -517,6 +866,7 @@ mod tests {
         let user_id = Uuid::new_v4();
         let operation_id = format!("tenant-purge-{tenant_id}");
         seed_tenant(pool, tenant_id, user_id).await;
+        start_test_destruction(pool, tenant_id, &operation_id).await;
 
         assert_eq!(
             purge_relational(pool, &offline_fga(), tenant_id, &operation_id)
@@ -582,6 +932,7 @@ mod tests {
         let user_id = Uuid::new_v4();
         let operation_id = format!("tenant-purge-{tenant_id}");
         seed_tenant(pool, tenant_id, user_id).await;
+        start_test_destruction(pool, tenant_id, &operation_id).await;
         sqlx::query(
             r#"
             CREATE FUNCTION reject_test_tenant_delete() RETURNS trigger LANGUAGE plpgsql AS $$

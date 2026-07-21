@@ -13,20 +13,21 @@ pub(super) async fn upsert_connection(
         INSERT INTO moa.knowledge_connections (
             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
             provider_connection_id, connector, credential_ref, status, metadata,
-            source_selection, created_at, updated_at, last_synced_at
+            source_selection, information_barrier, created_at, updated_at, last_synced_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $5, $7, $8, $9, $10, $11, $12, $13)
+        VALUES ($1, $2, $3, $4, $5, $6, $5, $7, $8, $9, $10, $11, $12, $13, $14)
         ON CONFLICT (tenant_id, provider, provider_config_key, provider_connection_id)
         DO UPDATE SET
             credential_ref = EXCLUDED.credential_ref,
             status = EXCLUDED.status,
             metadata = EXCLUDED.metadata,
             source_selection = EXCLUDED.source_selection,
+            information_barrier = EXCLUDED.information_barrier,
             last_synced_at = EXCLUDED.last_synced_at,
             updated_at = EXCLUDED.updated_at
         RETURNING connection_uid, tenant_id, provider, connector, provider_connection_id,
-                  credential_ref, status, metadata, source_selection, created_at, updated_at,
-                  last_synced_at
+                  credential_ref, status, metadata, source_selection, information_barrier,
+                  created_at, updated_at, last_synced_at
         "#,
     )
     .bind(connection.connection_uid)
@@ -39,6 +40,12 @@ pub(super) async fn upsert_connection(
     .bind(connection.status.as_str())
     .bind(redact_provider_metadata(connection.metadata))
     .bind(normalize_source_selection(connection.source_selection))
+    .bind(
+        connection
+            .information_barrier
+            .as_ref()
+            .map(InformationBarrierId::as_str),
+    )
     .bind(connection.created_at)
     .bind(connection.updated_at)
     .bind(connection.last_synced_at)
@@ -57,8 +64,8 @@ pub(super) async fn get_connection(
     let row = sqlx::query(
         r#"
         SELECT connection_uid, tenant_id, provider, connector, provider_connection_id,
-               credential_ref, status, metadata, source_selection, created_at, updated_at,
-               last_synced_at
+               credential_ref, status, metadata, source_selection, information_barrier,
+               created_at, updated_at, last_synced_at
         FROM moa.knowledge_connections
         WHERE connection_uid = $1
         "#,
@@ -85,8 +92,8 @@ pub(super) async fn update_connection_source_selection(
             updated_at = now()
         WHERE connection_uid = $1
         RETURNING connection_uid, tenant_id, provider, connector, provider_connection_id,
-                  credential_ref, status, metadata, source_selection, created_at, updated_at,
-                  last_synced_at
+                  credential_ref, status, metadata, source_selection, information_barrier,
+                  created_at, updated_at, last_synced_at
         "#,
     )
     .bind(connection_uid)
@@ -113,7 +120,8 @@ pub(super) async fn list_connections(
         r#"
         SELECT c.connection_uid, c.tenant_id, c.provider, c.connector,
                c.provider_connection_id, c.credential_ref, c.status, c.metadata,
-               c.source_selection, c.created_at, c.updated_at, c.last_synced_at,
+               c.source_selection, c.information_barrier, c.created_at, c.updated_at,
+               c.last_synced_at,
                latest.status AS last_sync_status
         FROM moa.knowledge_connections c
         LEFT JOIN LATERAL (
@@ -153,8 +161,8 @@ pub(super) async fn disable_connection(
         WHERE tenant_id = $1
           AND connection_uid = $2
         RETURNING connection_uid, tenant_id, provider, connector, provider_connection_id,
-                  credential_ref, status, metadata, source_selection, created_at, updated_at,
-                  last_synced_at
+                  credential_ref, status, metadata, source_selection, information_barrier,
+                  created_at, updated_at, last_synced_at
         "#,
     )
     .bind(tenant_id.0)

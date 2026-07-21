@@ -14,7 +14,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
-use moa_core::types::memory::RlsContext;
+use moa_core::types::memory::{InformationBarrierId, RlsContext};
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     traits::EmbeddingProvider,
     types::contact::ContactId,
@@ -61,7 +62,7 @@ use moa_lineage_core::{
     BackendIntrospection, FusedHit, GraphPath, LineageEvent, RecordKind, RerankHit,
     RetrievalLineage, RetrievalSelectedHit, RetrievalStage, StageTimings, TurnId, VecHit,
 };
-use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PiiClass, PostgresGraphStore};
+use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_orchestrator::services::knowledge::{
@@ -313,6 +314,7 @@ fn fake_prepared_sync_run(
             connection_uid,
             parser: Some("native".to_string()),
             max_records: Some(max_records),
+            information_barrier: None,
             status: SyncRunStatus::ProviderSynced,
             records_seen: 0,
             records_changed: 0,
@@ -337,6 +339,7 @@ fn fake_prepared_sync_run(
             status: ConnectionStatus::Active,
             metadata: json!({}),
             source_selection: json!({}),
+            information_barrier: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_synced_at: None,
@@ -585,6 +588,7 @@ async fn create_provider_synced_run(
             connection_uid,
             parser: Some("task14".to_string()),
             max_records,
+            information_barrier: None,
             status: SyncRunStatus::ProviderSynced,
             records_seen: 0,
             records_changed: 0,
@@ -613,12 +617,18 @@ fn task14_ingestion_pipeline(
     let scope = RlsContext::tenant(tenant_id);
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let graph_store = Arc::new(
-        PostgresGraphStore::scoped_for_app_role(pool, scope.clone()).with_vector_store(vector),
+        PostgresGraphStore::scoped_for_app_role(
+            pool,
+            scope.clone(),
+            Arc::new(moa_crypto::LocalKmsProvider::new()),
+        )
+        .with_vector_store(vector),
     );
     let graph_writer = Arc::new(MemoryKnowledgeGraphWriter::new(
         graph_store,
         MemoryScope::Tenant { tenant_id },
         "knowledge-auto-sync-test",
+        None,
     ));
     Arc::new(KnowledgeIngestionPipeline::new(
         repository,
@@ -726,6 +736,7 @@ fn fixture_connection(tenant_id: TenantId) -> KnowledgeConnection {
         status: ConnectionStatus::Active,
         metadata: json!({ "safe": "connection" }),
         source_selection: json!({}),
+        information_barrier: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
         last_synced_at: None,
@@ -1031,7 +1042,9 @@ async fn create_contact_group_graph_node(
 ) -> moa_memory_graph::Result<Uuid> {
     graph
         .create_node(NodeWriteIntent {
+            barrier: None,
             uid: group.group_uid,
+            data_subject_id: tenant_id.0,
             label: NodeLabel::ContactGroup,
             storage_partition_id: Some(tenant_id.to_string()),
             contact_id: None,
@@ -1041,7 +1054,7 @@ async fn create_contact_group_graph_node(
                 "group_key": group.group_key,
                 "display_name": group.display_name,
             }),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             confidence: Some(0.95),
             valid_from: Utc::now(),
             embedding: None,
@@ -1993,6 +2006,15 @@ impl InMemoryKnowledgeRepository {
             .expect("repository state should not be poisoned")
             .sync_runs
             .len()
+    }
+
+    fn sync_run(&self, sync_run_uid: Uuid) -> Option<KnowledgeSyncRun> {
+        self.state
+            .lock()
+            .expect("repository state should not be poisoned")
+            .sync_runs
+            .get(&sync_run_uid)
+            .cloned()
     }
 
     fn step_count(&self) -> usize {

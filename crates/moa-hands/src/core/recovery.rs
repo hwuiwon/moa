@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use moa_core::{
     error::MoaError, error::Result, error::ToolFailureClass, error::classify_tool_error,
-    types::completion::ToolInvocation, types::hands::HandHandle, types::hands::SandboxTier,
-    types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::ToolDefinition,
-    types::tools::ToolOutput,
+    traits::Identity, types::completion::ToolInvocation, types::hands::HandHandle,
+    types::hands::SandboxTier, types::session::SessionMeta, types::tools::IdempotencyClass,
+    types::tools::ToolDefinition, types::tools::ToolOutput,
 };
 use moa_observability::{record_tool_failure, record_tool_reprovision, record_tool_retry};
 use tracing::Instrument;
@@ -43,6 +43,7 @@ impl ToolRouter {
     pub(super) async fn execute_authorized_with_recovery_inner(
         &self,
         session: &SessionMeta,
+        caller_identity: &Identity,
         worker_id: Option<&str>,
         invocation: &ToolInvocation,
     ) -> Result<(Option<String>, ToolOutput)> {
@@ -56,7 +57,13 @@ impl ToolRouter {
         match &registered_tool.execution {
             ToolExecution::BuiltIn(_) => {
                 let result = self
-                    .execute_builtin_once(session, invocation, &registered_tool.definition, None)
+                    .execute_builtin_once(
+                        session,
+                        caller_identity,
+                        invocation,
+                        &registered_tool.definition,
+                        None,
+                    )
                     .await;
                 Ok(match result {
                     Ok(output) => output,

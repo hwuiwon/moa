@@ -56,6 +56,7 @@ impl KnowledgeService {
             connection_uid: request.connection_uid,
             parser: request.parser,
             max_records: request.max_records,
+            information_barrier: connection.information_barrier.clone(),
             status: SyncRunStatus::Queued,
             records_seen: 0,
             records_changed: 0,

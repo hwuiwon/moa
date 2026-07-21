@@ -2,4 +2,4 @@
 source: crates/moa-analytics/tests/analytics_sql_offline.rs
 expression: compiled.sql
 ---
-SELECT d.model AS c0, d.turn_number AS c1, COUNT(*)::BIGINT AS c2, PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY d.llm_ms)::DOUBLE PRECISION AS c3, AVG(d.pipeline_ms)::DOUBLE PRECISION AS c4, AVG(d.llm_ttft_ms)::DOUBLE PRECISION AS c5, COALESCE(SUM(d.total_input_tokens), 0)::BIGINT AS c6 FROM analytics.turn_fact AS d WHERE d.tenant_id = $1::UUID AND d.channel = $2 AND d.finished_at BETWEEN $3::TIMESTAMPTZ AND $4::TIMESTAMPTZ GROUP BY 1, 2 ORDER BY c2 DESC LIMIT 50
+SELECT d.model AS c0, d.turn_number::BIGINT AS c1, COUNT(*)::BIGINT AS c2, PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY d.llm_ms)::DOUBLE PRECISION AS c3, AVG(d.pipeline_ms)::DOUBLE PRECISION AS c4, AVG(d.llm_ttft_ms)::DOUBLE PRECISION AS c5, COALESCE(SUM(d.total_input_tokens), 0)::BIGINT AS c6 FROM analytics.turn_fact AS d WHERE d.tenant_id = $1::UUID AND d.channel = $2 AND d.finished_at BETWEEN $3::TIMESTAMPTZ AND $4::TIMESTAMPTZ GROUP BY 1, 2 ORDER BY c2 DESC LIMIT 50

@@ -13,11 +13,13 @@
 //! retirement with a single renewal exemption.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use moa_core::{
     types::contact::ContactId, types::identifiers::TenantId, types::memory::RlsContext,
 };
+use moa_crypto::KeyManagementProvider;
 use moa_memory_graph::{ExistingSupersessionIntent, GraphStore, PostgresGraphStore};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
@@ -72,6 +74,7 @@ pub struct LessonCurationStats {
 /// deleted, so provenance is preserved.
 pub async fn curate_skill_lessons(
     pool: &PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     tenant_id: TenantId,
     now: DateTime<Utc>,
     opts: &LessonCurationOptions,
@@ -90,17 +93,23 @@ pub async fn curate_skill_lessons(
     for group in duplicate_groups(&lessons) {
         let canonical = &group[0];
         for duplicate in group.iter().skip(1) {
-            scoped_store(&mut stores, pool, tenant_id, duplicate.contact_id)
-                .close_existing_node_with_supersession(ExistingSupersessionIntent {
-                    old_uid: duplicate.uid,
-                    replacement_uid: canonical.uid,
-                    valid_to: duplicate.valid_from,
-                    invalidated_at: now,
-                    reason: "lesson_curation".to_string(),
-                    actor_id: CURATION_ACTOR.to_string(),
-                    actor_kind: CURATION_ACTOR_KIND.to_string(),
-                })
-                .await?;
+            scoped_store(
+                &mut stores,
+                pool,
+                kms.clone(),
+                tenant_id,
+                duplicate.contact_id,
+            )
+            .close_existing_node_with_supersession(ExistingSupersessionIntent {
+                old_uid: duplicate.uid,
+                replacement_uid: canonical.uid,
+                valid_to: duplicate.valid_from,
+                invalidated_at: now,
+                reason: "lesson_curation".to_string(),
+                actor_id: CURATION_ACTOR.to_string(),
+                actor_kind: CURATION_ACTOR_KIND.to_string(),
+            })
+            .await?;
             closed.insert(duplicate.uid);
             stats.merged += 1;
             // A canonical that absorbs a duplicate created within the retention
@@ -117,7 +126,7 @@ pub async fn curate_skill_lessons(
             continue;
         }
         if lesson.valid_from < cutoff {
-            scoped_store(&mut stores, pool, tenant_id, lesson.contact_id)
+            scoped_store(&mut stores, pool, kms.clone(), tenant_id, lesson.contact_id)
                 .invalidate_node(lesson.uid, "lesson_retired")
                 .await?;
             stats.retired += 1;
@@ -173,6 +182,7 @@ fn duplicate_groups(rows: &[LessonRow]) -> Vec<Vec<LessonRow>> {
 fn scoped_store<'a>(
     stores: &'a mut BTreeMap<Option<Uuid>, PostgresGraphStore>,
     pool: &PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     tenant_id: TenantId,
     contact_id: Option<Uuid>,
 ) -> &'a PostgresGraphStore {
@@ -181,7 +191,7 @@ fn scoped_store<'a>(
             Some(contact_id) => RlsContext::contact(tenant_id, ContactId(contact_id)),
             None => RlsContext::tenant(tenant_id),
         };
-        PostgresGraphStore::scoped(pool.clone(), scope)
+        PostgresGraphStore::scoped(pool.clone(), scope, kms)
     })
 }
 

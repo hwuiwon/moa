@@ -50,6 +50,7 @@ async fn session_search_finds_prior_events() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "session_search".to_string(),
@@ -114,6 +115,7 @@ async fn session_search_filters_error_events() {
     let (_, output) = router
         .execute_authorized(
             &session,
+            &identity(),
             &ToolInvocation {
                 id: None,
                 name: "session_search".to_string(),

@@ -1,74 +1,53 @@
 //! End-to-end slow-path ingestion coverage through a local Restate ingress.
 
-use std::fs::{self, File};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 use moa_core::{
-    config::MoaConfig, types::contact::ContactId, types::identifiers::SessionId,
+    config::MoaConfig,
+    types::contact::ContactId,
+    types::identifiers::SessionId,
     types::identifiers::TenantId,
+    types::memory::{InformationBarrierClearances, InformationBarrierId, RlsContext},
 };
+use moa_db::ScopedConn;
 use moa_memory_ingest::{IngestApplyReport, IngestRuntime, SessionTurn, should_ingest_degraded};
-use moa_test_support::postgres::test_database_url;
+use moa_test_support::{OrchestratorTestFixture, postgres::test_database_url};
+use serde_json::json;
 use sqlx::PgPool;
-use tempfile::TempDir;
-use tokio::sync::Mutex;
 use tokio::time::sleep;
-
-use crate::support::restate_runtime::{
-    OrchestratorPorts, deployment_endpoint_url, register_deployment, reserve_orchestrator_ports,
-    restate_admin_url,
-};
-
-#[path = "support/mod.rs"]
-mod support;
-
-static LIVE_E2E_LOCK: Mutex<()> = Mutex::const_new(());
 
 struct LiveIngestionHarness {
     client: reqwest::Client,
     pool: PgPool,
     ingress: String,
-    child: Child,
-    orchestrator_log: PathBuf,
-    _memory_dir: TempDir,
-    _sandbox_dir: TempDir,
+    _fixture: OrchestratorTestFixture,
 }
 
 impl LiveIngestionHarness {
-    async fn start() -> Result<Self> {
-        let admin_url = restate_admin_url();
-        let ingress = restate_ingress_url();
-        let ports = reserve_orchestrator_ports()?;
-        let endpoint_url = deployment_endpoint_url(ports.restate);
-        let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
-        let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
-        let orchestrator_log = memory_dir.path().join("orchestrator.log");
-        let pool = PgPool::connect(&test_database_url())
+    async fn start(database_url: &str) -> Result<Self> {
+        let pool = PgPool::connect(database_url)
             .await
             .context("connect to test Postgres")?;
-        let child = spawn_orchestrator(
-            ports,
-            &admin_url,
-            &memory_dir,
-            &sandbox_dir,
-            &orchestrator_log,
-        )?;
-
-        wait_for_live(ports.health).await?;
-        register_deployment(&admin_url, &endpoint_url).await?;
+        let fixture = OrchestratorTestFixture::with_script_and_env(
+            json!({
+                "default": {
+                    "content": "ok",
+                    "stop_reason": "end_turn"
+                }
+            }),
+            vec![("MOA_DATABASE_URL".to_string(), database_url.to_string())],
+        )
+        .await
+        .context("start shared orchestrator fixture for ingestion e2e")?;
+        let ingress = fixture.ingress_url.clone();
 
         Ok(Self {
             client: reqwest::Client::new(),
             pool,
             ingress,
-            child,
-            orchestrator_log,
-            _memory_dir: memory_dir,
-            _sandbox_dir: sandbox_dir,
+            _fixture: fixture,
         })
     }
 
@@ -83,10 +62,7 @@ impl LiveIngestionHarness {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            bail!(
-                "ingestion request should succeed; status={status} body={body}\n{}",
-                orchestrator_log_tail(&self.orchestrator_log)
-            );
+            bail!("ingestion request should succeed; status={status} body={body}");
         }
         response
             .json::<IngestApplyReport>()
@@ -94,84 +70,9 @@ impl LiveIngestionHarness {
             .context("decode ingestion report")
     }
 
-    async fn shutdown(mut self) {
-        self.stop();
+    async fn shutdown(self) {
         self.pool.close().await;
     }
-
-    fn stop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl Drop for LiveIngestionHarness {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-fn spawn_orchestrator(
-    ports: OrchestratorPorts,
-    admin_url: &str,
-    memory_dir: &TempDir,
-    sandbox_dir: &TempDir,
-    log_path: &Path,
-) -> Result<Child> {
-    let postgres_url = test_database_url();
-    let stdout = File::create(log_path).context("create ingestion e2e orchestrator log")?;
-    let stderr = stdout
-        .try_clone()
-        .context("clone ingestion e2e orchestrator log")?;
-
-    let mut command = Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"));
-    command
-        .arg("--port")
-        .arg(ports.restate.to_string())
-        .arg("--health-port")
-        .arg(ports.health.to_string())
-        .arg("--scim-port")
-        .arg(ports.scim.to_string())
-        .env("MOA_DATABASE_URL", postgres_url)
-        .env("MOA_RESTATE_ADMIN_URL", admin_url)
-        .env("MOA_RESTATE_INGRESS_URL", restate_ingress_url())
-        .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
-        .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
-        .env("MOA_LOCAL_DOCKER_ENABLED", "false")
-        .env_remove("MOA_COHERE_API_KEY")
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-
-    if let Ok(pii_url) = std::env::var("MOA_PII_SERVICE_URL") {
-        command.env("MOA_PII_SERVICE_URL", pii_url);
-    }
-
-    command
-        .spawn()
-        .context("spawn moa-orchestrator binary for ingestion e2e")
-}
-
-fn orchestrator_log_tail(log_path: &Path) -> String {
-    match fs::read_to_string(log_path) {
-        Ok(contents) if contents.trim().is_empty() => {
-            format!("orchestrator log {} was empty", log_path.display())
-        }
-        Ok(contents) => {
-            let lines = contents.lines().rev().take(120).collect::<Vec<_>>();
-            let tail = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
-            format!("orchestrator log tail from {}:\n{tail}", log_path.display())
-        }
-        Err(error) => format!(
-            "failed to read orchestrator log {}: {error}",
-            log_path.display()
-        ),
-    }
-}
-
-fn restate_ingress_url() -> String {
-    std::env::var("MOA_RESTATE_INGRESS_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:10010".to_string())
 }
 
 fn object_url(ingress: &str, turn: &SessionTurn) -> String {
@@ -201,6 +102,7 @@ fn realistic_turn() -> SessionTurn {
         .join("\n"),
         dominant_pii_class: "none".to_string(),
         finalized_at: Utc::now(),
+        barrier: None,
     }
 }
 
@@ -218,6 +120,7 @@ fn same_fact_turn(tenant_id: TenantId, session_id: SessionId, turn_seq: u64) -> 
         .join("\n"),
         dominant_pii_class: "none".to_string(),
         finalized_at: Utc::now(),
+        barrier: None,
     }
 }
 
@@ -238,6 +141,7 @@ fn low_pii_degraded_skip_turn() -> SessionTurn {
             .join("\n"),
             dominant_pii_class: "none".to_string(),
             finalized_at: Utc::now(),
+            barrier: None,
         };
         if !should_ingest_degraded(&turn) {
             return turn;
@@ -260,22 +164,8 @@ fn sensitive_degraded_turn() -> SessionTurn {
         .join("\n"),
         dominant_pii_class: "pii".to_string(),
         finalized_at: Utc::now(),
+        barrier: None,
     }
-}
-
-async fn wait_for_live(health_port: u16) -> Result<()> {
-    let url = format!("http://127.0.0.1:{health_port}/_health/live");
-    let client = reqwest::Client::new();
-    for _attempt in 0..60 {
-        if let Ok(response) = client.get(&url).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_secs(1)).await;
-    }
-
-    bail!("orchestrator live probe did not pass before timeout")
 }
 
 async fn wait_for_fact_count(pool: &PgPool, turn: &SessionTurn, expected: i64) -> Result<()> {
@@ -297,32 +187,75 @@ async fn fact_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT count(*)
-        FROM moa.node_index
-        WHERE storage_partition_id = $1
-          AND label = 'Fact'
-          AND properties_summary->>'source_session_id' = $2
+        FROM moa.node_index AS node
+        JOIN moa.ingest_dedup AS dedup
+          ON dedup.fact_uid = node.uid
+         AND dedup.storage_partition_id = node.storage_partition_id
+        WHERE dedup.storage_partition_id = $1
+          AND dedup.session_id = $2
+          AND dedup.turn_seq = $3
+          AND node.label = 'Fact'
         "#,
     )
     .bind(turn.tenant_id.to_string())
-    .bind(turn.session_id.to_string())
+    .bind(turn.session_id.0)
+    .bind(i64::try_from(turn.turn_seq).context("turn sequence fits i64")?)
     .fetch_one(pool)
     .await
     .context("count ingested fact nodes")
+}
+
+async fn visible_barrier_fact_count(
+    pool: &PgPool,
+    turn: &SessionTurn,
+    barrier: &InformationBarrierId,
+    clearances: InformationBarrierClearances,
+) -> Result<i64> {
+    let contact_id = turn
+        .contact_id
+        .context("conversation turn should carry a contact")?;
+    let scope = RlsContext::contact(turn.tenant_id, contact_id).with_cleared_barriers(clearances);
+    let mut conn = ScopedConn::begin_as_app(pool, &scope, true)
+        .await
+        .context("begin app-role barrier fact count")?;
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM moa.node_index
+        WHERE tenant_id = $1
+          AND label = 'Fact'
+          AND barrier = $2
+        "#,
+    )
+    .bind(turn.tenant_id.0)
+    .bind(barrier.as_str())
+    .fetch_one(conn.as_mut())
+    .await
+    .context("count visible barriered facts")?;
+    conn.commit()
+        .await
+        .context("commit app-role barrier fact count")?;
+    Ok(count)
 }
 
 async fn pii_fact_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT count(*)
-        FROM moa.node_index
-        WHERE storage_partition_id = $1
-          AND label = 'Fact'
-          AND pii_class <> 'none'
-          AND properties_summary->>'source_session_id' = $2
+        FROM moa.node_index AS node
+        JOIN moa.ingest_dedup AS dedup
+          ON dedup.fact_uid = node.uid
+         AND dedup.storage_partition_id = node.storage_partition_id
+        WHERE dedup.storage_partition_id = $1
+          AND dedup.session_id = $2
+          AND dedup.turn_seq = $3
+          AND node.label = 'Fact'
+          AND node.pii_class <> 'none'
         "#,
     )
     .bind(turn.tenant_id.to_string())
-    .bind(turn.session_id.to_string())
+    .bind(turn.session_id.0)
+    .bind(i64::try_from(turn.turn_seq).context("turn sequence fits i64")?)
     .fetch_one(pool)
     .await
     .context("count ingested pii fact nodes")
@@ -387,15 +320,20 @@ async fn changelog_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT count(*)
-        FROM moa.graph_changelog
-        WHERE storage_partition_id = $1
-          AND target_kind = 'node'
-          AND op = 'create'
-          AND payload->'after'->>'source_session_id' = $2
+        FROM moa.graph_changelog AS changelog
+        JOIN moa.ingest_dedup AS dedup
+          ON dedup.fact_uid = changelog.target_uid
+         AND dedup.storage_partition_id = changelog.storage_partition_id
+        WHERE dedup.storage_partition_id = $1
+          AND dedup.session_id = $2
+          AND dedup.turn_seq = $3
+          AND changelog.target_kind = 'node'
+          AND changelog.op = 'create'
         "#,
     )
     .bind(turn.tenant_id.to_string())
-    .bind(turn.session_id.to_string())
+    .bind(turn.session_id.0)
+    .bind(i64::try_from(turn.turn_seq).context("turn sequence fits i64")?)
     .fetch_one(pool)
     .await
     .context("count graph changelog rows")
@@ -404,16 +342,22 @@ async fn changelog_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
 async fn fact_summaries(pool: &PgPool, turn: &SessionTurn) -> Result<Vec<String>> {
     sqlx::query_scalar::<_, String>(
         r#"
-        SELECT properties_summary->>'summary'
-        FROM moa.node_index
-        WHERE storage_partition_id = $1
-          AND label = 'Fact'
-          AND properties_summary->>'source_session_id' = $2
-        ORDER BY properties_summary->>'summary'
+        SELECT node.properties_summary->>'summary'
+        FROM moa.node_index AS node
+        JOIN moa.ingest_dedup AS dedup
+          ON dedup.fact_uid = node.uid
+         AND dedup.storage_partition_id = node.storage_partition_id
+        WHERE dedup.storage_partition_id = $1
+          AND dedup.session_id = $2
+          AND dedup.turn_seq = $3
+          AND node.label = 'Fact'
+          AND node.properties_summary ? 'summary'
+        ORDER BY node.properties_summary->>'summary'
         "#,
     )
     .bind(turn.tenant_id.to_string())
-    .bind(turn.session_id.to_string())
+    .bind(turn.session_id.0)
+    .bind(i64::try_from(turn.turn_seq).context("turn sequence fits i64")?)
     .fetch_all(pool)
     .await
     .context("load fact summaries")
@@ -472,7 +416,8 @@ struct EmbedderMetadata {
 fn live_ingestion_embedder_metadata(pool: PgPool) -> Result<Option<EmbedderMetadata>> {
     let config = MoaConfig::load().context("load live ingestion config")?;
     let runtime =
-        IngestRuntime::from_config(pool, &config).context("build live ingestion runtime")?;
+        IngestRuntime::from_config(pool, Arc::new(moa_crypto::LocalKmsProvider::new()), &config)
+            .context("build live ingestion runtime")?;
     let Some(embedder) = runtime.embedder() else {
         return Ok(None);
     };
@@ -488,8 +433,7 @@ fn live_ingestion_embedder_metadata(pool: PgPool) -> Result<Option<EmbedderMetad
 #[tokio::test]
 #[ignore = "requires local restate-server, Postgres, and optional PII sidecar"]
 async fn complex_ingestion_turn_writes_facts_pii_changelog_and_dedup() -> Result<()> {
-    let _guard = LIVE_E2E_LOCK.lock().await;
-    let harness = LiveIngestionHarness::start().await?;
+    let harness = LiveIngestionHarness::start(&test_database_url()).await?;
     let turn = realistic_turn();
 
     let result = async {
@@ -532,8 +476,7 @@ async fn complex_ingestion_turn_writes_facts_pii_changelog_and_dedup() -> Result
 #[tokio::test]
 #[ignore = "requires local restate-server, Postgres, and optional PII sidecar"]
 async fn repeated_fact_text_in_new_sessions_does_not_collide_on_node_uid() -> Result<()> {
-    let _guard = LIVE_E2E_LOCK.lock().await;
-    let harness = LiveIngestionHarness::start().await?;
+    let harness = LiveIngestionHarness::start(&test_database_url()).await?;
     let tenant_id = TenantId::new();
     let first_turn = same_fact_turn(tenant_id, SessionId::new(), 10);
     let second_turn = same_fact_turn(tenant_id, SessionId::new(), 10);
@@ -565,8 +508,7 @@ async fn repeated_fact_text_in_new_sessions_does_not_collide_on_node_uid() -> Re
 #[tokio::test]
 #[ignore = "requires local restate-server, Postgres, and optional PII sidecar"]
 async fn degraded_workspace_skips_sampled_low_pii_turn_without_side_effects() -> Result<()> {
-    let _guard = LIVE_E2E_LOCK.lock().await;
-    let harness = LiveIngestionHarness::start().await?;
+    let harness = LiveIngestionHarness::start(&test_database_url()).await?;
     let turn = low_pii_degraded_skip_turn();
 
     let result = async {
@@ -597,8 +539,7 @@ async fn degraded_workspace_skips_sampled_low_pii_turn_without_side_effects() ->
 #[tokio::test]
 #[ignore = "requires local restate-server, Postgres, and optional PII sidecar"]
 async fn degraded_workspace_still_ingests_sensitive_turn() -> Result<()> {
-    let _guard = LIVE_E2E_LOCK.lock().await;
-    let harness = LiveIngestionHarness::start().await?;
+    let harness = LiveIngestionHarness::start(&test_database_url()).await?;
     let turn = sensitive_degraded_turn();
 
     let result = async {
@@ -633,8 +574,7 @@ async fn degraded_workspace_still_ingests_sensitive_turn() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires local restate-server, Postgres, and optional PII sidecar"]
 async fn ingestion_turn_round_trip_through_restate_is_idempotent() -> Result<()> {
-    let _guard = LIVE_E2E_LOCK.lock().await;
-    let harness = LiveIngestionHarness::start().await?;
+    let harness = LiveIngestionHarness::start(&test_database_url()).await?;
     let turn = same_fact_turn(TenantId::new(), SessionId::new(), 42);
 
     let result = async {
@@ -660,4 +600,54 @@ async fn ingestion_turn_round_trip_through_restate_is_idempotent() -> Result<()>
 
     harness.shutdown().await;
     result
+}
+
+#[tokio::test]
+#[ignore = "requires local restate-server, Postgres, and optional PII sidecar"]
+async fn conversation_ingest_uses_pinned_write_barrier_service_e2e() -> Result<()> {
+    // Pins: the internal conversation turn produced from a pinned agent policy
+    // keeps its typed write barrier through Restate ingestion and Postgres RLS.
+    let (database_url, schema_name) = moa_session::testing::provision_cloned_database()
+        .await
+        .context("create isolated conversation ingestion database")?;
+    let harness = LiveIngestionHarness::start(&database_url).await?;
+    let barrier = InformationBarrierId::parse("deal-alpha")?;
+    let mut turn = same_fact_turn(TenantId::new(), SessionId::new(), 84);
+    turn.barrier = Some(barrier.clone());
+
+    let result = async {
+        let report = harness.ingest(&turn).await?;
+        ensure!(
+            report.inserted == 3,
+            "unexpected barriered report: {report:?}"
+        );
+        ensure!(
+            visible_barrier_fact_count(
+                &harness.pool,
+                &turn,
+                &barrier,
+                InformationBarrierClearances::new(),
+            )
+            .await?
+                == 0,
+            "conversation facts must fail closed without clearance"
+        );
+        ensure!(
+            visible_barrier_fact_count(
+                &harness.pool,
+                &turn,
+                &barrier,
+                [barrier.clone()].into_iter().collect(),
+            )
+            .await?
+                == 3,
+            "conversation facts must be visible with the pinned clearance"
+        );
+        Ok(())
+    }
+    .await;
+
+    harness.shutdown().await;
+    let cleanup = moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await;
+    result.and(cleanup.map_err(anyhow::Error::from))
 }

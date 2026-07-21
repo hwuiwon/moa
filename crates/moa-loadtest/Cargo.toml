@@ -20,6 +20,7 @@ moa-auth-providers = { workspace = true }
 moa-authz = { workspace = true }
 moa-brain = { workspace = true }
 moa-core = { workspace = true }
+moa-crypto = { workspace = true }
 moa-db = { workspace = true }
 moa-memory-graph = { workspace = true }
 moa-memory-types = { workspace = true }

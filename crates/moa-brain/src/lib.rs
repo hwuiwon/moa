@@ -17,9 +17,8 @@ pub mod turn_segments;
 
 #[cfg(feature = "eval-harness")]
 pub use harness::{
-    StreamedTurnResult, TurnResult, run_brain_turn, run_brain_turn_with_lineage, run_streamed_turn,
-    run_streamed_turn_with_lineage, run_streamed_turn_with_signals,
-    run_streamed_turn_with_signals_and_lineage,
+    BrainTurnRequest, StreamedTurnRequest, StreamedTurnResult, StreamedTurnSignalState, TurnResult,
+    run_brain_turn, run_streamed_turn,
 };
 pub use pipeline::{
     ContextPipeline, GraphMemoryPipelineOptions, PipelineStageReport,

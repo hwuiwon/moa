@@ -12,22 +12,29 @@ auth0 = ["dep:moa-auth-providers-auth0"]
 [dependencies]
 argon2.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 blake3.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 crc32fast.workspace = true
+hex.workspace = true
 jsonwebtoken.workspace = true
 moa-authz.workspace = true
 moa-authz-schema.workspace = true
 moa-auth-providers-auth0 = { workspace = true, optional = true }
 moa-core.workspace = true
+moa-crypto.workspace = true
+moa-db.workspace = true
 moa-observability.workspace = true
 moka.workspace = true
 rand.workspace = true
+reqwest = { workspace = true, features = ["form"] }
 secrecy.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono"] }
 strum.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -36,5 +43,6 @@ workspace-hack = { workspace = true }
 
 [dev-dependencies]
 moa-migrations.workspace = true
-reqwest.workspace = true
+moa-test-support.workspace = true
 serde_json.workspace = true
+wiremock.workspace = true

@@ -1,25 +1,63 @@
 //! Orchestrator child-process build, spawn, health, and teardown helpers.
 
 use super::*;
+pub(super) use crate::process::TestChildGuard as ChildGuard;
+pub(super) use crate::process::terminate_child;
 
-const ORCHESTRATOR_FIXTURE_FEATURES: &str = "provider-overrides,integration";
+const ORCHESTRATOR_FIXTURE_FEATURES: &str =
+    "provider-overrides,integration,execution-planning-failpoints";
+const ORCHESTRATOR_FIXTURE_TARGET_DIR: &str = "orchestrator-fixture-failpoints";
 
-pub(super) async fn locate_orchestrator_binary(repo_root: &Path) -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("MOA_ORCHESTRATOR_BIN") {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return Ok(path);
-        }
-        bail!(
-            "MOA_ORCHESTRATOR_BIN points to missing file {}",
-            path.display()
-        );
+/// Immutable, fixture-owned copy of the selected orchestrator executable.
+pub(super) struct FixtureBinarySnapshot {
+    path: PathBuf,
+}
+
+impl FixtureBinarySnapshot {
+    /// Returns the executable path retained for initial spawn and recovery restarts.
+    pub(super) fn path(&self) -> &Path {
+        &self.path
     }
+}
 
+impl Drop for FixtureBinarySnapshot {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %self.path.display(),
+                %error,
+                "failed to remove fixture-owned orchestrator binary snapshot"
+            );
+        }
+    }
+}
+
+/// Selects the runner-provided executable or builds one, then snapshots its bytes.
+pub(super) async fn locate_orchestrator_binary(repo_root: &Path) -> Result<FixtureBinarySnapshot> {
     let target_dir = std::env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| repo_root.join("target"));
-    let candidate = target_dir.join("debug").join(format!(
+    if let Ok(configured) = std::env::var("MOA_ORCHESTRATOR_BIN") {
+        let candidate = PathBuf::from(configured);
+        let metadata = std::fs::metadata(&candidate).with_context(|| {
+            format!(
+                "MOA_ORCHESTRATOR_BIN points to unreadable path {}",
+                candidate.display()
+            )
+        })?;
+        if !metadata.is_file() {
+            bail!(
+                "MOA_ORCHESTRATOR_BIN must point to a regular file: {}",
+                candidate.display()
+            );
+        }
+        return snapshot_orchestrator_binary(&candidate, &target_dir);
+    }
+
+    let fixture_target_dir = target_dir.join(ORCHESTRATOR_FIXTURE_TARGET_DIR);
+    let candidate = fixture_target_dir.join("debug").join(format!(
         "moa-orchestrator-bin{}",
         std::env::consts::EXE_SUFFIX
     ));
@@ -27,6 +65,7 @@ pub(super) async fn locate_orchestrator_binary(repo_root: &Path) -> Result<PathB
         std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()),
     )
     .current_dir(repo_root)
+    .env("CARGO_TARGET_DIR", &fixture_target_dir)
     .args([
         "build",
         "-p",
@@ -45,13 +84,42 @@ pub(super) async fn locate_orchestrator_binary(repo_root: &Path) -> Result<PathB
         );
     }
     if candidate.exists() {
-        Ok(candidate)
+        snapshot_orchestrator_binary(&candidate, &fixture_target_dir)
     } else {
         Err(anyhow!(
             "built orchestrator binary but did not find {}",
             candidate.display()
         ))
     }
+}
+
+fn snapshot_orchestrator_binary(
+    candidate: &Path,
+    target_dir: &Path,
+) -> Result<FixtureBinarySnapshot> {
+    let debug_dir = target_dir.join("debug");
+    std::fs::create_dir_all(&debug_dir).with_context(|| {
+        format!(
+            "create orchestrator fixture snapshot directory {}",
+            debug_dir.display()
+        )
+    })?;
+    let fixture_binary = debug_dir.join(format!(
+        "moa-orchestrator-fixture-failpoints-{}-{}{}",
+        std::process::id(),
+        Uuid::now_v7().simple(),
+        std::env::consts::EXE_SUFFIX,
+    ));
+    std::fs::copy(candidate, &fixture_binary).with_context(|| {
+        format!(
+            "copy feature-qualified fixture binary from {} to {}",
+            candidate.display(),
+            fixture_binary.display()
+        )
+    })?;
+    Ok(FixtureBinarySnapshot {
+        path: fixture_binary,
+    })
 }
 
 pub(super) struct OrchestratorSpawnConfig<'a> {
@@ -113,32 +181,6 @@ impl OrchestratorRestartConfig {
     }
 }
 
-pub(super) struct ChildGuard {
-    child: Option<Child>,
-}
-
-impl ChildGuard {
-    pub(super) fn new(child: Child) -> Self {
-        Self { child: Some(child) }
-    }
-
-    pub(super) fn child_mut(&mut self) -> Option<&mut Child> {
-        self.child.as_mut()
-    }
-
-    pub(super) fn disarm(mut self) -> Option<Child> {
-        self.child.take()
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(child) = self.child.take() {
-            terminate_child(child);
-        }
-    }
-}
-
 pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<ChildGuard> {
     let mut command = Command::new(config.binary);
     command
@@ -164,6 +206,10 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         .env("MOA_RUNTIME_CACHE_BACKEND", "redis")
         .env("MOA_RUNTIME_CACHE_REDIS_URL", config.redis_url)
         .env("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true")
+        // The spawned orchestrator boots with the in-process ephemeral KMS; opt
+        // into it explicitly so the composition-root fail-closed durability guard
+        // does not reject startup (production uses a persistent postgres KMS).
+        .env("MOA_KMS_ALLOW_EPHEMERAL", "true")
         .env("MOA_AUTHZ_OPENFGA_URL", &config.fga_config.url)
         .env(
             "MOA_AUTHZ_OPENFGA_PRESHARED_KEY",
@@ -269,30 +315,6 @@ pub(super) fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-pub(super) fn terminate_child(mut child: Child) {
-    #[cfg(unix)]
-    {
-        use nix::sys::signal::{Signal, kill};
-        use nix::unistd::Pid;
-        let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = child.kill();
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(_) => return,
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +414,46 @@ mod tests {
             .expect_err("aborting guard-owning future should cancel it");
         assert!(error.is_cancelled());
         assert_terminated_or_cleanup(pid);
+    }
+
+    #[test]
+    fn fixture_binary_snapshots_are_isolated_stable_and_owned() {
+        // Pins: concurrent fixtures retain independent feature-qualified bytes across Cargo output
+        // replacement, and each snapshot is removed only when its owning fixture drops.
+        let target_dir = tempfile::tempdir().expect("create fixture target directory");
+        let debug_dir = target_dir.path().join("debug");
+        std::fs::create_dir(&debug_dir).expect("create fixture debug directory");
+        let candidate = debug_dir.join(format!(
+            "moa-orchestrator-bin{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        std::fs::write(&candidate, b"provider-overrides,integration,failpoints")
+            .expect("write feature-qualified candidate");
+
+        let first = snapshot_orchestrator_binary(&candidate, target_dir.path())
+            .expect("create first feature-qualified fixture snapshot");
+        let second = snapshot_orchestrator_binary(&candidate, target_dir.path())
+            .expect("create second feature-qualified fixture snapshot");
+        let first_path = first.path().to_path_buf();
+        let second_path = second.path().to_path_buf();
+        std::fs::write(&candidate, b"different concurrent cargo build")
+            .expect("replace mutable Cargo output");
+
+        assert_ne!(first_path, candidate);
+        assert_ne!(first_path, second_path);
+        assert_eq!(
+            std::fs::read(&first_path).expect("read first retained fixture snapshot"),
+            b"provider-overrides,integration,failpoints"
+        );
+        assert_eq!(
+            std::fs::read(&second_path).expect("read second retained fixture snapshot"),
+            b"provider-overrides,integration,failpoints"
+        );
+
+        drop(first);
+        assert!(!first_path.exists());
+        assert!(second_path.exists());
+        drop(second);
+        assert!(!second_path.exists());
     }
 }

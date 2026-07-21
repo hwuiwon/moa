@@ -10,11 +10,13 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::traits::{EmbeddingProvider, LLMProvider};
+use moa_core::types::provider::ProviderId;
 use moa_core::{
     config::MoaConfig, error::MoaError, types::completion::CompletionRequest,
     types::completion::CompletionResponse, types::context::ContextMessage,
     types::context::estimate_text_tokens, types::identifiers::ModelId,
 };
+use moa_crypto::LocalKmsProvider;
 use moa_eval::external_memory::answer::{
     AbsoluteJudgeResponse, AnswerScore, AnswerScoreOutcome, ExternalMemoryMode, ReaderResponse,
     SupportStatus, reader_fit_support, render_control_evidence, render_reader_prompt,
@@ -59,8 +61,8 @@ use moa_memory_lifecycle::ConsolidationOptions;
 use moa_memory_pii::HeuristicPiiClassifier;
 use moa_memory_vector::VECTOR_DIMENSION;
 use moa_providers::{
-    EmbedderConstructionRole, ProviderId, build_embedder_from_config,
-    build_provider_from_selection, provider_descriptor_by_name, resolve_provider_selection,
+    EmbedderConstructionRole, build_embedder_from_config, build_provider_from_selection,
+    provider_descriptor_by_name, resolve_provider_selection,
 };
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -605,6 +607,7 @@ async fn run_validated(
     let consolidation = ConsolidationOptions::default();
     let mut backend = MoaMemoryBackend::new_with_dependencies(
         pool.clone(),
+        Arc::new(LocalKmsProvider::new()),
         embedder,
         formation_inputs.extractor,
         Arc::new(HeuristicPiiClassifier),

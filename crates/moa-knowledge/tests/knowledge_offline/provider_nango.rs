@@ -34,6 +34,7 @@ fn connection() -> KnowledgeConnection {
         status: ConnectionStatus::Active,
         metadata: json!({ "safe": true }),
         source_selection: json!({}),
+        information_barrier: None,
         created_at: now,
         updated_at: now,
         last_synced_at: None,

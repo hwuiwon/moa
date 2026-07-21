@@ -223,7 +223,7 @@ run_without_provider_keys() {
 
 run_without_external_orchestrator() {
   echo
-  echo ">> env -u MOA_RESTATE_INGRESS_URL -u MOA_RESTATE_ADMIN_URL -u MOA_RESTATE_DEPLOYMENT_URI -u MOA_DATABASE_URL $*"
+  echo ">> env -u MOA_RESTATE_INGRESS_URL -u MOA_RESTATE_ADMIN_URL -u MOA_RESTATE_DEPLOYMENT_URI $*"
   local start=$SECONDS
   local status=0
   begin_timing_phase "env -u external orchestrator $*" "env -u external orchestrator $*" "${start}"
@@ -232,7 +232,6 @@ run_without_external_orchestrator() {
     -u MOA_RESTATE_INGRESS_URL \
     -u MOA_RESTATE_ADMIN_URL \
     -u MOA_RESTATE_DEPLOYMENT_URI \
-    -u MOA_DATABASE_URL \
     "$@"
   status=$?
   set -e
@@ -331,13 +330,17 @@ wait_for_restate_ports() {
   return 1
 }
 
-orchestrator_binary_path() {
+orchestrator_fixture_target_dir() {
   local target_dir="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}"
   case "${target_dir}" in
     /*) ;;
     *) target_dir="${REPO_ROOT}/${target_dir}" ;;
   esac
-  printf '%s/debug/moa-orchestrator-bin\n' "${target_dir%/}"
+  printf '%s/orchestrator-fixture-failpoints\n' "${target_dir%/}"
+}
+
+orchestrator_binary_path() {
+  printf '%s/debug/moa-orchestrator-bin\n' "$(orchestrator_fixture_target_dir)"
 }
 
 fga_request() {
@@ -639,12 +642,19 @@ export MOA_RESTATE_DEPLOYMENT_HOST="127.0.0.1"
 export MOA_PII_SERVICE_URL="${MOA_PII_SERVICE_URL:-http://127.0.0.1:10050}"
 export MOA_RUNTIME_CACHE_BACKEND="redis"
 export MOA_RUNTIME_CACHE_REDIS_URL="redis://127.0.0.1:10051/0"
+# Every e2e-spawned orchestrator boots with the in-process ephemeral KMS. Opt in
+# so the composition-root fail-closed durability guard permits startup; keys are
+# lost on restart, which is acceptable for these hermetic e2e runs. Production
+# uses a persistent postgres KMS instead of this flag.
+export MOA_KMS_ALLOW_EPHEMERAL=true
 
 CLEAN_E2E_TEST_THREADS="${MOA_CLEAN_E2E_TEST_THREADS:-4}"
 run cargo nextest run -p moa-orchestrator --locked --profile fast-pr --test-threads "${CLEAN_E2E_TEST_THREADS}" --no-tests fail
 run cargo nextest run -p moa-orchestrator --locked --profile db-session --no-tests fail
 run cargo nextest run -p moa-orchestrator --locked --profile db-memory --no-tests fail
-run cargo test -p moa-orchestrator --lib --locked --features "${ORCH_FEATURES}" runtime::endpoint::tests::skill_learning_feature_adds_skill_learning_workflow
+run cargo nextest run -p moa-orchestrator --lib --locked --features "${ORCH_FEATURES}" \
+  -E 'test(/^runtime::endpoint::tests::skill_learning_workflow_is_always_expected$/)' \
+  --no-tests fail
 run cargo test -p moa-orchestrator --test skill_learning_review_db --locked --features "${ORCH_FEATURES}" -- --test-threads="${CLEAN_E2E_TEST_THREADS}"
 run cargo test -p moa-brain --features eval-harness --test brain_turn_cache_replay_db_memory --locked
 run cargo test -p moa-eval --test golden_eval --locked
@@ -655,7 +665,9 @@ if [[ "${LIVE}" -eq 1 ]]; then
 
   run cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile restate-service-e2e --run-ignored ignored-only --no-tests fail
 
-  run cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features "${EXECUTION_EVAL_FEATURES}" --locked
+  FIXTURE_ORCHESTRATOR_TARGET_DIR="$(orchestrator_fixture_target_dir)"
+  run env CARGO_TARGET_DIR="${FIXTURE_ORCHESTRATOR_TARGET_DIR}" \
+    cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features "${EXECUTION_EVAL_FEATURES}" --locked
   MOA_ORCHESTRATOR_BIN="$(orchestrator_binary_path)"
   if [[ ! -f "${MOA_ORCHESTRATOR_BIN}" ]]; then
     echo "expected orchestrator binary was not built: ${MOA_ORCHESTRATOR_BIN}" >&2

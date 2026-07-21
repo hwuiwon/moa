@@ -67,6 +67,9 @@ moa-artifacts.workspace = true
 moa-brain = { workspace = true, features = ["eval-harness"] }
 moa-contacts = { workspace = true }
 moa-core = { workspace = true }
+moa-crypto = { workspace = true }
+moa-dlp = { workspace = true }
+moa-kms = { workspace = true }
 moa-execution = { workspace = true }
 moa-db = { workspace = true }
 moa-eval-core = { workspace = true }

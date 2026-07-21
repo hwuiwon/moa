@@ -1,7 +1,8 @@
 //! Durable vector-backend sync queue for external vector projections.
 
+use moa_db::ScopedConn;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{PgConnection, PgPool, Postgres, Row, pool::PoolConnection};
 use uuid::Uuid;
 
 use crate::{Error, Result, VectorItem, embedding_row::EmbeddingRow};
@@ -70,6 +71,31 @@ pub(crate) struct VectorSyncJob {
     pub operation: VectorSyncOperation,
 }
 
+/// Dedicated session lock held across one partition's remote vector I/O and claim settlement.
+pub(crate) struct VectorSyncRemoteGuard {
+    conn: PoolConnection<Postgres>,
+    tenant_id: Uuid,
+    fenced: bool,
+}
+
+impl VectorSyncRemoteGuard {
+    /// Returns whether tenant destruction began before this remote-I/O lock was acquired.
+    pub(crate) fn is_fenced(&self) -> bool {
+        self.fenced
+    }
+
+    /// Releases the session advisory lock after every claimed job has settled.
+    pub(crate) async fn finish(mut self) -> Result<()> {
+        sqlx::query(
+            "SELECT pg_advisory_unlock(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+        )
+        .bind(self.tenant_id)
+        .execute(&mut *self.conn)
+        .await?;
+        Ok(())
+    }
+}
+
 /// Enqueues external vector sync rows for a committed pgvector operation.
 pub(crate) async fn enqueue_external_vector_sync(
     conn: &mut PgConnection,
@@ -112,19 +138,66 @@ pub(crate) async fn claim_pending_vector_sync(
         return Ok(Vec::new());
     }
 
+    let mut conn = ScopedConn::begin_control_plane(pool).await?;
+    let tenant_ids = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT DISTINCT partition.tenant_id
+          FROM moa.vector_sync_outbox AS outbox
+          JOIN moa.storage_partition_state AS partition
+            ON partition.storage_partition_id = outbox.storage_partition_id
+         WHERE outbox.processed_at IS NULL
+           AND outbox.dead_lettered_at IS NULL
+           AND outbox.available_at <= now()
+           AND (outbox.claim_expires_at IS NULL OR outbox.claim_expires_at <= now())
+           AND ($2::text IS NULL OR outbox.storage_partition_id = $2)
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM moa.destruction_operation_fence AS fence
+                WHERE fence.tenant_id = partition.tenant_id
+                  AND fence.subject_id IS NULL
+                  AND fence.status IN ('in_progress', 'committed')
+           )
+         ORDER BY partition.tenant_id
+         LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .bind(storage_partition_id)
+    .fetch_all(conn.as_mut())
+    .await?;
+
+    for tenant_id in &tenant_ids {
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+        )
+        .bind(tenant_id)
+        .execute(conn.as_mut())
+        .await?;
+    }
+
     let rows = sqlx::query(
         r#"
         WITH selected AS (
-            SELECT sync_id
-              FROM moa.vector_sync_outbox
-             WHERE processed_at IS NULL
-               AND dead_lettered_at IS NULL
-               AND available_at <= now()
-               AND (claim_expires_at IS NULL OR claim_expires_at <= now())
-               AND ($2::text IS NULL OR storage_partition_id = $2)
-             ORDER BY sync_id
+            SELECT outbox.sync_id
+              FROM moa.vector_sync_outbox AS outbox
+              JOIN moa.storage_partition_state AS partition
+                ON partition.storage_partition_id = outbox.storage_partition_id
+             WHERE outbox.processed_at IS NULL
+               AND outbox.dead_lettered_at IS NULL
+               AND outbox.available_at <= now()
+               AND (outbox.claim_expires_at IS NULL OR outbox.claim_expires_at <= now())
+               AND ($2::text IS NULL OR outbox.storage_partition_id = $2)
+               AND partition.tenant_id = ANY($3::uuid[])
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM moa.destruction_operation_fence AS fence
+                    WHERE fence.tenant_id = partition.tenant_id
+                      AND fence.subject_id IS NULL
+                      AND fence.status IN ('in_progress', 'committed')
+               )
+             ORDER BY outbox.sync_id
              LIMIT $1
-             FOR UPDATE SKIP LOCKED
+             FOR UPDATE OF outbox SKIP LOCKED
         )
         UPDATE moa.vector_sync_outbox AS outbox
            SET attempts = outbox.attempts + 1,
@@ -143,8 +216,10 @@ pub(crate) async fn claim_pending_vector_sync(
     )
     .bind(limit)
     .bind(storage_partition_id)
-    .fetch_all(pool)
+    .bind(&tenant_ids)
+    .fetch_all(conn.as_mut())
     .await?;
+    conn.commit().await?;
 
     rows.into_iter()
         .map(|row| {
@@ -158,6 +233,107 @@ pub(crate) async fn claim_pending_vector_sync(
             })
         })
         .collect()
+}
+
+/// Acquires the tenant destruction boundary across remote vector I/O.
+///
+/// The dedicated connection is closed instead of returned to the pool on every
+/// exit, so cancellation cannot leak a session advisory lock to another pool
+/// borrower. A missing partition-state row returns `None`; without that durable
+/// routing state there is no configured external backend to call.
+pub(crate) async fn begin_vector_sync_remote_guard(
+    pool: &PgPool,
+    storage_partition_id: &str,
+) -> Result<Option<VectorSyncRemoteGuard>> {
+    let mut conn = pool.acquire().await?;
+    conn.close_on_drop();
+    sqlx::query(
+        r#"
+        SELECT pg_catalog.set_config('moa.tenant_id', '', false),
+               pg_catalog.set_config('moa.storage_partition_id', $1, false),
+               pg_catalog.set_config('moa.control_plane', 'true', false)
+        "#,
+    )
+    .bind(storage_partition_id)
+    .execute(&mut *conn)
+    .await?;
+
+    let Some(tenant_id) = sqlx::query_scalar::<_, Uuid>(
+        "SELECT tenant_id FROM moa.storage_partition_state WHERE storage_partition_id = $1",
+    )
+    .bind(storage_partition_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    sqlx::query(
+        "SELECT pg_advisory_lock(hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+    )
+    .bind(tenant_id)
+    .execute(&mut *conn)
+    .await?;
+    let fenced = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+              FROM moa.destruction_operation_fence
+             WHERE tenant_id = $1
+               AND subject_id IS NULL
+               AND status IN ('in_progress', 'committed')
+        )
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut *conn)
+    .await?;
+
+    Ok(Some(VectorSyncRemoteGuard {
+        conn,
+        tenant_id,
+        fenced,
+    }))
+}
+
+/// Returns whether a partition has a live vector-sync claim that purge must wait for.
+pub async fn has_active_vector_sync_claims(
+    pool: &PgPool,
+    storage_partition_id: &str,
+) -> Result<bool> {
+    let mut conn = ScopedConn::begin_control_plane(pool).await?;
+    sqlx::query("SELECT pg_catalog.set_config('moa.storage_partition_id', $1, true)")
+        .bind(storage_partition_id)
+        .execute(conn.as_mut())
+        .await?;
+    let active = has_active_vector_sync_claims_in_tx(conn.as_mut(), storage_partition_id).await?;
+    conn.commit().await?;
+    Ok(active)
+}
+
+/// Returns whether a partition has a live vector-sync claim in the caller's transaction.
+///
+/// A claim with no expiry is treated as active so malformed durable state fails
+/// closed instead of allowing tenant purge to race an unbounded worker.
+pub async fn has_active_vector_sync_claims_in_tx(
+    conn: &mut PgConnection,
+    storage_partition_id: &str,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+              FROM moa.vector_sync_outbox
+             WHERE storage_partition_id = $1
+               AND processed_at IS NULL
+               AND claim_token IS NOT NULL
+               AND (claim_expires_at IS NULL OR claim_expires_at > now())
+        )
+        "#,
+    )
+    .bind(storage_partition_id)
+    .fetch_one(conn)
+    .await?)
 }
 
 /// Marks claimed vector sync jobs as processed.

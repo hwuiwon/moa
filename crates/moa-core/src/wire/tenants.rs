@@ -26,6 +26,8 @@ pub struct TenantPurgeStatusRequest {
 pub enum TenantPurgeStatus {
     /// The workflow is admitted but relational deletion has not committed.
     Pending,
+    /// External vector rows were removed before relational source rows disappeared.
+    VectorsPurged,
     /// Product rows and inverse authorization tuples committed atomically.
     RelationallyCommitted,
     /// Configured ClickHouse lineage and analytics rows were purged.

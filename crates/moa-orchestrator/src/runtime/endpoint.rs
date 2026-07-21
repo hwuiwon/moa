@@ -134,6 +134,7 @@ pub struct RegisteredService {
 pub fn build_endpoint(
     session_store: Arc<moa_session::PostgresSessionStore>,
     pool: sqlx::PgPool,
+    kms: Arc<dyn moa_crypto::KeyManagementProvider>,
     fga_client: Option<FgaClient>,
     providers: Arc<ProviderRegistry>,
     tool_router: Arc<ToolRouter>,
@@ -198,8 +199,12 @@ pub fn build_endpoint(
         )
         .bind(GraphMemoryMaintImpl::new(pool.clone(), config.clone()).serve())
         .bind(
-            KnowledgeImpl::new(KnowledgeService::from_config(pool.clone(), config.as_ref()))
-                .serve(),
+            KnowledgeImpl::new(KnowledgeService::from_config(
+                pool.clone(),
+                kms.clone(),
+                config.as_ref(),
+            ))
+            .serve(),
         )
         .bind(
             LearningReviewImpl::new(
@@ -211,9 +216,17 @@ pub fn build_endpoint(
             )
             .serve(),
         )
-        .bind(MemoryImpl::new(pool.clone(), config.clone()).serve())
+        .bind(
+            MemoryImpl::new(
+                pool.clone(),
+                kms.clone(),
+                config.clone(),
+                session_store.clone(),
+            )
+            .serve(),
+        )
         .bind(NeonMaintImpl::new(config.clone()).serve())
-        .bind(PrivacyImpl::new(pool.clone(), config.compliance.clone()).serve())
+        .bind(PrivacyImpl::new(pool.clone(), config.compliance.clone(), kms.clone()).serve())
         .bind(SkillsImpl::new(pool.clone()).serve())
         .bind(CronJobImpl.serve())
         .bind(SessionImpl::new(session_store.clone(), session_limits.clone()).serve())
@@ -254,10 +267,11 @@ pub fn build_endpoint(
             )
             .serve(),
         )
-        .bind(KnowledgeSyncIngestionImpl::new(pool.clone(), config.clone()).serve())
+        .bind(KnowledgeSyncIngestionImpl::new(pool.clone(), kms.clone(), config.clone()).serve())
         .bind(
             ConsolidateImpl::new(
                 pool.clone(),
+                kms,
                 config.clone(),
                 embedding_provider,
                 session_store.clone(),

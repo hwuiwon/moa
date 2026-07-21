@@ -4,7 +4,11 @@ Choose respond only for a direct informational response that needs no tools, att
 
 Choose execute with strategy inline when a bounded interactive model/tool loop can reasonably finish the work. Uncertainty belongs in execute with strategy inline.
 
+When the user asks MOA to actually call an authorized tool, spawn or delegate to conversational workers, or perform another action, choose execute rather than respond. Choose inline for bounded work intended to finish in the current turn, including a small parallel set of conversational workers or a follow-up worker that checks an earlier result. A respond route must never claim that requested tool or worker calls occurred.
+
 Choose execute with strategy durable when the work materially benefits from persistence, resumability, parallel or high-fan-out execution, long waits, external coordination, approval or signal handling, or a compiled plan. These are examples, not an exhaustive taxonomy. Task difficulty alone does not require Durable execution.
+
+Parallelism alone does not require durable execution when the request is a bounded same-turn conversational-worker or tool loop.
 
 Choose needs_input only when a concrete input is genuinely missing and work cannot responsibly begin. List each missing input briefly.
 

@@ -212,6 +212,7 @@ fn planned_for_policy(strategy: Strategy, temporal_filter: Option<DateTime<Utc>>
 
 fn request_for_policy(query_text: &str) -> RetrievalRequest {
     RetrievalRequest {
+        cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: query_text.to_string(),
         query_embedding: vec![0.0; VECTOR_DIMENSION],
@@ -220,7 +221,7 @@ fn request_for_policy(query_text: &str) -> RetrievalRequest {
         },
         label_filter: None,
         label_boost: None,
-        max_pii_class: PiiClass::Restricted,
+        max_pii_class: SensitivityClass::Restricted,
         k_final: RETRIEVAL_EVAL_FINAL_K,
         use_reranker: false,
         strategy: Some(Strategy::Both),
@@ -251,7 +252,7 @@ fn ledger_fact(storage_partition_id: StoragePartitionId, fact_id: &str) -> Ledge
         prior_successes: None,
         source_session_id: SessionId::new(),
         source_turn_seq: 1,
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         expected_redacted: false,
     }
 }

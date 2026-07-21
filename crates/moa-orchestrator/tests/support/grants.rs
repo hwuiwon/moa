@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use moa_authz::{FgaClient, FgaConfig};
 use moa_authz_schema::TupleOp;
-use moa_core::traits::Identity;
+use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::identifiers::SessionId;
 use serde_json::json;
 
@@ -42,9 +42,21 @@ pub async fn grant_tenant_operator(
 
 /// Grant the test identity direct participation in one session.
 pub async fn grant_session_participant(identity: &Identity, session_id: SessionId) -> Result<()> {
+    if let (IdentityType::Agent, Some(operator_id)) =
+        (identity.identity_type, identity.acting_on_behalf_of)
+    {
+        apply_raw_tuple(
+            TupleOp::Write,
+            &format!("operator:{operator_id}"),
+            "can_act_as",
+            &format!("agent:{}", identity.id),
+        )
+        .await
+        .context("grant test agent delegation")?;
+    }
     apply_raw_tuple(
         TupleOp::Write,
-        &format!("operator:{}", identity.id),
+        &format!("{}:{}", identity.identity_type.as_str(), identity.id),
         "participant",
         &format!("session:{session_id}"),
     )

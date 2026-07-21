@@ -4,16 +4,17 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::Utc;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
-    config::MoaConfig, types::channel::Channel, types::contact::ContactId,
-    types::contact::ContactRef, types::contact::ContactVerificationState,
+    config::MoaConfig, traits::Identity, traits::IdentityType, traits::MemoryRetrievalExecutor,
+    types::channel::Channel, types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ContactVerificationState, types::contact::SessionActorRef,
     types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
     types::memory::RlsContext, types::session::SessionMeta, types::tools::ToolContent,
     types::tools::ToolOutput,
 };
 use moa_memory_graph::{
-    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
-    PostgresGraphStore,
+    EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore,
 };
 use moa_orchestrator::services::memory::OrchestratorMemoryRetrievalExecutor;
 use moa_session::testing;
@@ -28,14 +29,21 @@ async fn search_and_navigation_share_the_contact_memory_admission_boundary() {
         .await
         .expect("create isolated Postgres store");
     let pool = session_store.pool().clone();
+    let kms: Arc<dyn moa_crypto::KeyManagementProvider> =
+        Arc::new(moa_crypto::LocalKmsProvider::new());
     let tenant_id = TenantId::new();
     let contact_id = ContactId::new();
     let other_contact_id = ContactId::new();
-    let tenant_graph = graph_store(pool.clone(), RlsContext::tenant(tenant_id));
-    let contact_graph = graph_store(pool.clone(), RlsContext::contact(tenant_id, contact_id));
+    let tenant_graph = graph_store(pool.clone(), RlsContext::tenant(tenant_id), kms.clone());
+    let contact_graph = graph_store(
+        pool.clone(),
+        RlsContext::contact(tenant_id, contact_id),
+        kms.clone(),
+    );
     let other_contact_graph = graph_store(
         pool.clone(),
         RlsContext::contact(tenant_id, other_contact_id),
+        kms.clone(),
     );
 
     let tenant_chunk_uid = tenant_graph
@@ -96,16 +104,23 @@ async fn search_and_navigation_share_the_contact_memory_admission_boundary() {
         .expect("create admitted-to-hidden edge");
 
     let session = contact_session(tenant_id, contact_id);
+    let identity = Identity {
+        identity_type: IdentityType::Contact,
+        id: contact_id.0,
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    };
     let mut config = MoaConfig::default();
     config.memory.vector.embedder.name = "disabled".to_string();
-    let executor = OrchestratorMemoryRetrievalExecutor::new(pool.clone(), Arc::new(config.clone()));
+    let executor = OrchestratorMemoryRetrievalExecutor::new(pool.clone(), kms, Arc::new(config));
     let search = executor
-        .execute_retrieval_tool_with_runtime(
+        .execute_retrieval_tool(
             &session,
+            &identity,
+            "tool-call-search",
             "memory_search",
             &json!({ "query": "shared admission boundary answer" }),
-            &pool,
-            &config,
         )
         .await
         .expect("execute memory search");
@@ -117,12 +132,12 @@ async fn search_and_navigation_share_the_contact_memory_admission_boundary() {
     );
 
     let navigate = executor
-        .execute_retrieval_tool_with_runtime(
+        .execute_retrieval_tool(
             &session,
+            &identity,
+            "tool-call-navigate",
             "memory_navigate",
             &json!({ "node_uid": tenant_chunk_uid, "hops": 1 }),
-            &pool,
-            &config,
         )
         .await
         .expect("navigate from admitted tenant chunk");
@@ -134,22 +149,22 @@ async fn search_and_navigation_share_the_contact_memory_admission_boundary() {
     );
 
     let hidden_seed = executor
-        .execute_retrieval_tool_with_runtime(
+        .execute_retrieval_tool(
             &session,
+            &identity,
+            "tool-call-hidden-seed",
             "memory_navigate",
             &json!({ "node_uid": hidden_tenant_fact_uid, "hops": 1 }),
-            &pool,
-            &config,
         )
         .await
         .expect("navigate from hidden seed");
     let missing_seed = executor
-        .execute_retrieval_tool_with_runtime(
+        .execute_retrieval_tool(
             &session,
+            &identity,
+            "tool-call-missing-seed",
             "memory_navigate",
             &json!({ "node_uid": Uuid::now_v7(), "hops": 1 }),
-            &pool,
-            &config,
         )
         .await
         .expect("navigate from missing seed");
@@ -178,8 +193,12 @@ async fn search_and_navigation_share_the_contact_memory_admission_boundary() {
         .expect("drop isolated database");
 }
 
-fn graph_store(pool: sqlx::PgPool, scope: RlsContext) -> PostgresGraphStore {
-    PostgresGraphStore::scoped_for_app_role(pool, scope)
+fn graph_store(
+    pool: sqlx::PgPool,
+    scope: RlsContext,
+    kms: Arc<dyn moa_crypto::KeyManagementProvider>,
+) -> PostgresGraphStore {
+    PostgresGraphStore::scoped_for_app_role(pool, scope, kms)
 }
 
 fn node_intent(
@@ -190,7 +209,9 @@ fn node_intent(
     summary: &str,
 ) -> NodeWriteIntent {
     NodeWriteIntent {
+        barrier: None,
         uid: Uuid::now_v7(),
+        data_subject_id: contact_id.map_or(tenant_id.0, |contact_id| contact_id.0),
         label,
         storage_partition_id: Some(tenant_id.to_string()),
         contact_id: contact_id.map(|id| id.to_string()),
@@ -201,7 +222,7 @@ fn node_intent(
         },
         name: name.to_string(),
         properties: json!({ "summary": summary }),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         confidence: Some(0.95),
         valid_from: Utc::now(),
         embedding: None,
@@ -231,6 +252,7 @@ fn contact_session(tenant_id: TenantId, contact_id: ContactId) -> SessionMeta {
             session_ids: Vec::new(),
             verified_contact_point_ids: Vec::new(),
         }),
+        created_by: Some(SessionActorRef::Contact { id: contact_id }),
         ..SessionMeta::default()
     }
 }

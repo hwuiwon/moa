@@ -5,6 +5,7 @@ use std::{collections::HashSet, sync::Arc};
 use async_trait::async_trait;
 use moa_core::types::memory::RlsContext;
 use moa_core::{config::MoaConfig, traits::CredentialVault, types::identifiers::TenantId};
+use moa_crypto::KeyManagementProvider;
 use moa_knowledge::{
     domain::{
         KnowledgeConnection, KnowledgeSyncRun, ListChangedRecordsRequest, RecordPage, SyncRunStatus,
@@ -113,14 +114,15 @@ pub trait KnowledgeSyncIngestion {
 #[derive(Clone)]
 pub struct KnowledgeSyncIngestionImpl {
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     config: Arc<MoaConfig>,
 }
 
 impl KnowledgeSyncIngestionImpl {
     /// Creates a knowledge-sync workflow with its storage and provider configuration.
     #[must_use]
-    pub fn new(pool: PgPool, config: Arc<MoaConfig>) -> Self {
-        Self { pool, config }
+    pub fn new(pool: PgPool, kms: Arc<dyn KeyManagementProvider>, config: Arc<MoaConfig>) -> Self {
+        Self { pool, kms, config }
     }
 }
 
@@ -138,6 +140,7 @@ impl KnowledgeSyncIngestion for KnowledgeSyncIngestionImpl {
         let mut steps = RestateKnowledgeSyncIngestionSteps {
             ctx: &ctx,
             pool: self.pool.clone(),
+            kms: self.kms.clone(),
             config: self.config.clone(),
         };
         let report = run_knowledge_sync_ingestion_workflow(&mut steps, request).await?;
@@ -287,6 +290,7 @@ pub async fn run_knowledge_sync_ingestion_workflow(
 struct RestateKnowledgeSyncIngestionSteps<'ctx, 'workflow> {
     ctx: &'ctx WorkflowContext<'workflow>,
     pool: PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     config: Arc<MoaConfig>,
 }
 
@@ -422,6 +426,7 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
         page_index: u32,
     ) -> Result<KnowledgeSyncPageApplication, HandlerError> {
         let pool = self.pool.clone();
+        let kms = self.kms.clone();
         let config = self.config.clone();
         let run = prepared.run.clone();
         let provider_label = prepared.provider.clone();
@@ -430,8 +435,9 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
             .run(|| async move {
                 let content_fetcher =
                     build_record_content_fetcher(&config, &provider_label, connection);
-                let runner = ProductionKnowledgeIngestionRunner::new(pool, config.as_ref().clone())
-                    .with_content_fetcher(content_fetcher);
+                let runner =
+                    ProductionKnowledgeIngestionRunner::new(pool, kms, config.as_ref().clone())
+                        .with_content_fetcher(content_fetcher);
                 let report = runner
                     .ingest_record_page(&run, &page.provider, page.page)
                     .await
@@ -452,12 +458,14 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
         seen_source_ids: HashSet<String>,
     ) -> Result<KnowledgeSyncPageApplication, HandlerError> {
         let pool = self.pool.clone();
+        let kms = self.kms.clone();
         let config = self.config.clone();
         let run = prepared.run.clone();
         let provider = prepared.provider.clone();
         self.ctx
             .run(|| async move {
-                let runner = ProductionKnowledgeIngestionRunner::new(pool, config.as_ref().clone());
+                let runner =
+                    ProductionKnowledgeIngestionRunner::new(pool, kms, config.as_ref().clone());
                 let report = runner
                     .prune_unseen_objects(&run, &provider, &seen_source_ids)
                     .await

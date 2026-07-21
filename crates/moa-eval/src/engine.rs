@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
-use moa_brain::{StreamedTurnResult, run_streamed_turn_with_lineage};
+use moa_brain::{BrainTurnRequest, StreamedTurnRequest, StreamedTurnResult, run_streamed_turn};
 use moa_core::{
     config::MoaConfig, events::Event, traits::LLMProvider, types::events_stream::EventRange,
     types::runtime_events::RuntimeEvent,
@@ -375,18 +375,22 @@ async fn run_environment(
     let (runtime_tx, _) = broadcast::channel::<RuntimeEvent>(256);
 
     for turn_index in 0..MAX_AGENT_TURNS {
-        let outcome = run_streamed_turn_with_lineage(
-            environment.session_id,
-            environment.session_store.clone(),
-            environment.llm_provider.clone(),
-            &environment.pipeline,
-            Some(environment.tool_router.clone()),
-            &runtime_tx,
-            None,
-            Some(cancel_token.clone()),
-            Some(hard_cancel_token.clone()),
-            environment.lineage.clone(),
-        )
+        let outcome = run_streamed_turn(StreamedTurnRequest {
+            turn: BrainTurnRequest {
+                identity: environment.identity.clone(),
+                session_id: environment.session_id,
+                session_store: environment.session_store.clone(),
+                llm_provider: environment.llm_provider.clone(),
+                pipeline: &environment.pipeline,
+                tool_router: Some(environment.tool_router.clone()),
+            },
+            runtime_tx: &runtime_tx,
+            event_tx: None,
+            cancel_token: Some(cancel_token.clone()),
+            hard_cancel_token: Some(hard_cancel_token.clone()),
+            signal_state: None,
+            lineage: environment.lineage.clone(),
+        })
         .await?;
 
         match outcome {

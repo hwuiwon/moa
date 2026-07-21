@@ -75,6 +75,9 @@ fn spawn_orchestrator(
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
         .env("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true")
+        // Opt into the ephemeral in-process KMS so the fail-closed durability
+        // guard permits startup (production uses a persistent postgres KMS).
+        .env("MOA_KMS_ALLOW_EPHEMERAL", "true")
         .env("MOA_RUNTIME_CACHE_REDIS_URL", "redis://127.0.0.1:10051/0")
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env(
@@ -138,12 +141,12 @@ async fn execution_template_run_target_tenant_scoped_internal_session() -> Resul
 
         let session_id =
             experiment_execution_session_id(tenant_id, response.run_uid, response.score_run_id);
-        let delivery =
-            wait_for_execution_delivery(&client, ingress, &identity, session_id, objective).await?;
-
         let pool = PgPool::connect(&test_database_url())
             .await
             .context("connect to test Postgres")?;
+        let delivery =
+            wait_for_execution_delivery(&pool, &client, ingress, &identity, session_id, objective)
+                .await?;
         assert_internal_session_scope(&pool, session_id, tenant_id, None, &identity).await?;
         assert_execution_links(
             &pool,
@@ -264,7 +267,8 @@ async fn execution_template_run_target_contact_scoped_internal_session() -> Resu
 
         let session_id = experiment_execution_session_id(tenant_id, run.run_uid, score_run_id);
         let delivery =
-            wait_for_execution_delivery(&client, ingress, &identity, session_id, objective).await?;
+            wait_for_execution_delivery(&pool, &client, ingress, &identity, session_id, objective)
+                .await?;
         assert_internal_session_scope(&pool, session_id, tenant_id, Some(contact_id), &identity)
             .await?;
         assert_execution_links(
@@ -402,6 +406,7 @@ fn experiment_scorecard() -> ExperimentScorecard {
 }
 
 async fn wait_for_execution_delivery(
+    pool: &PgPool,
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
@@ -410,7 +415,10 @@ async fn wait_for_execution_delivery(
 ) -> Result<ExecutionDelivery> {
     let mut last_events = Vec::new();
     for _attempt in 0..90 {
-        let events = fetch_events(client, ingress, identity, session_id).await?;
+        let Some(events) = fetch_events(pool, client, ingress, identity, session_id).await? else {
+            sleep(Duration::from_secs(1)).await;
+            continue;
+        };
         let objectives = events
             .iter()
             .filter(|record| {
@@ -466,23 +474,46 @@ async fn wait_for_execution_delivery(
 }
 
 async fn fetch_events(
+    pool: &PgPool,
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     session_id: SessionId,
-) -> Result<Vec<EventRecord>> {
-    post_json_with_identity(
-        client,
-        ingress,
-        "SessionStore",
-        "get_events",
+) -> Result<Option<Vec<EventRecord>>> {
+    let response = with_identity(
+        client.post(service_url(ingress, "SessionStore", "get_events")),
         identity,
-        &get_events_request(session_id, EventRange::all()),
     )
-    .await?
-    .json::<Vec<EventRecord>>()
+    .json(&get_events_request(session_id, EventRange::all()))
+    .send()
     .await
-    .context("deserialize session events")
+    .context("call SessionStore/get_events")?;
+    let status = response.status();
+    if status.is_success() {
+        return response
+            .json::<Vec<EventRecord>>()
+            .await
+            .context("deserialize session events")
+            .map(Some);
+    }
+
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("<failed to read body: {error}>"));
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let session_exists =
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = $1)")
+                .bind(session_id.0)
+                .fetch_one(pool)
+                .await
+                .context("check whether the deterministic experiment session exists")?;
+        if !session_exists {
+            return Ok(None);
+        }
+    }
+
+    bail!("SessionStore/get_events returned {status}: {body}")
 }
 
 async fn assert_internal_session_scope(

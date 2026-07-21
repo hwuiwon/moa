@@ -3,8 +3,9 @@
 use chrono::{DateTime, Utc};
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_memory_graph::{
-    EdgeLabel, EdgeWriteIntent, GraphStore, GraphWalkScoring, NodeLabel, NodeWriteIntent, PiiClass,
+    EdgeLabel, EdgeWriteIntent, GraphStore, GraphWalkScoring, NodeLabel, NodeWriteIntent,
     PostgresGraphStore,
 };
 use moa_session::testing;
@@ -26,14 +27,16 @@ fn node_intent(
     valid_from: DateTime<Utc>,
 ) -> NodeWriteIntent {
     NodeWriteIntent {
+        barrier: None,
         uid: Uuid::now_v7(),
+        data_subject_id: tenant_scope(storage_partition_id).tenant_id().0,
         label,
         storage_partition_id: Some(storage_partition_id.to_string()),
         contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "source": "scored_walk" }),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         confidence: Some(0.99),
         valid_from,
         embedding: None,
@@ -80,6 +83,7 @@ async fn zero_prior_hub_fanout_is_pruned_in_walk_and_deep_paths_survive_with_sco
     let graph = PostgresGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(&storage_partition_id),
+        super::test_kms(),
     );
     let now = Utc::now();
     let seed_uid = graph

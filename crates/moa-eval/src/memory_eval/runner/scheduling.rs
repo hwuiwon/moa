@@ -31,6 +31,7 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
     let consolidation = if options.consolidate() {
         let outcome = run_eval_consolidation(
             store.pool(),
+            store.kms.clone(),
             &corpus.ledger,
             &gold_resolution,
             &fact_ids_by_uid,
@@ -99,6 +100,7 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
     let parity_retriever = options.parity().then(|| {
         ParityProbeRetriever::new(
             store.pool().clone(),
+            store.kms.clone(),
             providers.embedder.clone(),
             providers.reranker.clone(),
             options.ranking_config().clone(),
@@ -141,6 +143,7 @@ pub(super) async fn run_memory_retrieval_eval_in_store(
         } else {
             let retrieval = retrieve_probe(
                 store.pool(),
+                store.kms.clone(),
                 &planner,
                 providers.embedder.as_ref(),
                 providers.reranker.clone(),

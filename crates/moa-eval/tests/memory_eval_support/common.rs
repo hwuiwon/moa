@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use moa_brain::retrieval::{LegSources, RetrievalHit, SourceTier};
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     types::identifiers::SessionId, types::identifiers::StoragePartitionId,
     types::identifiers::UserId,
@@ -20,7 +21,7 @@ use moa_eval::memory_eval::{
     RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K, RetrievedCandidate, TranscriptStyle,
     aggregate_retrieval_eval_from_counts, candidates_from_retrieval_hits,
 };
-use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
+use moa_memory_graph::{NodeIndexRow, NodeLabel};
 use uuid::Uuid;
 
 pub(crate) fn utc(value: &str) -> DateTime<Utc> {
@@ -67,7 +68,7 @@ pub(crate) fn metric_node(uid: Uuid) -> NodeIndexRow {
         contact_id: Some("metrics-contact".to_string()),
         scope: "tenant".to_string(),
         name: format!("metric-node-{uid}"),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         valid_to: None,
         valid_from: utc("2026-05-01T00:00:00Z"),
         properties_summary: None,

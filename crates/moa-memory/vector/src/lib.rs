@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_core::types::security::SensitivityClass;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -42,9 +43,9 @@ pub enum Error {
         /// Actual number of dimensions.
         actual: usize,
     },
-    /// A PII class string is not part of the supported hierarchy.
-    #[error("unknown PII class `{0}`")]
-    UnknownPiiClass(String),
+    /// A persisted sensitivity class is not part of the supported hierarchy.
+    #[error("invalid sensitivity class `{0}`")]
+    InvalidSensitivityClass(String),
     /// The embedding response count did not match the input count.
     #[error("embedding response length mismatch: expected {expected}, got {actual}")]
     EmbeddingResponseLength {
@@ -212,7 +213,7 @@ impl Error {
     pub fn is_permanent(&self) -> bool {
         match self {
             Self::DimensionMismatch { .. }
-            | Self::UnknownPiiClass(_)
+            | Self::InvalidSensitivityClass(_)
             | Self::EmbeddingResponseLength { .. }
             | Self::EmbedderConfig(_)
             | Self::EmbedderMismatch { .. }
@@ -281,8 +282,8 @@ pub struct VectorItem {
     pub user_id: Option<String>,
     /// Graph vertex label.
     pub label: String,
-    /// PII class used by retrieval filters.
-    pub pii_class: String,
+    /// Sensitivity class used by retrieval filters.
+    pub pii_class: SensitivityClass,
     /// Dense 1024-dimensional embedding.
     pub embedding: Vec<f32>,
     /// Embedding model identifier.
@@ -304,8 +305,8 @@ pub struct VectorQuery {
     pub k: usize,
     /// Optional graph label allowlist.
     pub label_filter: Option<Vec<String>>,
-    /// Maximum allowed PII class using the hierarchy `none < pii < phi < restricted`.
-    pub max_pii_class: String,
+    /// Maximum allowed sensitivity using the hierarchy `none < pii < phi < restricted`.
+    pub max_pii_class: SensitivityClass,
     /// Whether global rows should remain eligible after RLS has scoped visibility.
     pub include_global: bool,
     /// Optional application-time filter for bitemporal retrieval.
@@ -362,15 +363,5 @@ pub(crate) fn validate_dimension(embedding: &[f32]) -> Result<()> {
             expected: VECTOR_DIMENSION,
             actual: embedding.len(),
         })
-    }
-}
-
-pub(crate) fn pii_rank(value: &str) -> Result<i32> {
-    match value {
-        "none" => Ok(0),
-        "pii" => Ok(1),
-        "phi" => Ok(2),
-        "restricted" => Ok(3),
-        other => Err(Error::UnknownPiiClass(other.to_string())),
     }
 }

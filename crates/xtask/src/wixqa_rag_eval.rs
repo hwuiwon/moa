@@ -17,7 +17,9 @@ use moa_brain::retrieval::{
     SourceObjectFeatureContributions,
 };
 use moa_core::traits::EmbeddingProvider;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{config::MoaConfig, types::identifiers::TenantId, types::memory::RlsContext};
+use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_db::ScopedConn;
 use moa_eval::kernel::cost::{
     COHERE_EMBED_V4_INPUT_USD_PER_MILLION_TOKENS, COHERE_RERANK_V4_FAST_USD_PER_SEARCH,
@@ -35,7 +37,7 @@ use moa_knowledge::ingestion::{
 };
 use moa_knowledge::parser::native::NativeDocumentParser;
 use moa_knowledge::repository::{KnowledgeRepository, PostgresKnowledgeRepository, SyncRunClaim};
-use moa_memory_graph::{NodeLabel, PiiClass, PostgresGraphStore};
+use moa_memory_graph::{NodeLabel, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{
     VectorPartitionPromotion, VectorStore, VectorStoreFactory, VectorSyncReport,
@@ -104,6 +106,7 @@ async fn run_async(options: Options) -> Result<RunSummary> {
     let pool = PgPool::connect(&config.database.url)
         .await
         .context("connect to MOA Postgres")?;
+    let kms: Arc<dyn KeyManagementProvider> = Arc::new(LocalKmsProvider::new());
     let ingestion_embedder =
         build_embedder_from_config(&config, EmbedderConstructionRole::Ingestion)
             .with_context(|| format!("build {} ingestion embedder", options.embedder_name))?;
@@ -150,6 +153,7 @@ async fn run_async(options: Options) -> Result<RunSummary> {
             connection_uid,
             &selected,
             &config,
+            kms.clone(),
             ingestion_embedder,
         )
         .await?;
@@ -173,6 +177,7 @@ async fn run_async(options: Options) -> Result<RunSummary> {
     };
     let query_run = retrieve_questions(RetrievalEvalInputs {
         pool: &pool,
+        kms,
         tenant_id,
         embedder: retrieval_embedder,
         selected: &selected,
@@ -534,6 +539,7 @@ async fn ingest_articles(
     connection_uid: Uuid,
     selected: &SelectedWorkload,
     config: &MoaConfig,
+    kms: Arc<dyn KeyManagementProvider>,
     embedder: Arc<dyn EmbeddingProvider>,
 ) -> Result<IngestionReport> {
     let scope = RlsContext::tenant(tenant_id);
@@ -558,6 +564,7 @@ async fn ingest_articles(
                 "question_count": selected.questions.len(),
             }),
             source_selection: json!({}),
+            information_barrier: None,
             created_at: now,
             updated_at: now,
             last_synced_at: None,
@@ -573,6 +580,7 @@ async fn ingest_articles(
         max_records: Some(
             u32::try_from(selected.articles.len()).context("selected article count fits u32")?,
         ),
+        information_barrier: None,
         status: SyncRunStatus::Ingesting,
         records_seen: 0,
         records_changed: 0,
@@ -599,12 +607,13 @@ async fn ingest_articles(
     let vector_factory = VectorStoreFactory::from_config(config);
     let vector_backend =
         vector_factory.transactional_graph_backend(pool.clone(), scope.clone(), true);
-    let graph_store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
+    let graph_store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone(), kms)
         .with_vector_store(vector_backend.vector_store());
     let graph_writer = Arc::new(MemoryKnowledgeGraphWriter::new(
         Arc::new(graph_store),
         MemoryScope::Tenant { tenant_id },
         "wixqa_rag_eval",
+        None,
     ));
     let pipeline = KnowledgeIngestionPipeline::new(
         repository.clone(),
@@ -683,6 +692,7 @@ async fn complete_sync_run(
 
 struct RetrievalEvalInputs<'a> {
     pool: &'a PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     tenant_id: TenantId,
     embedder: Arc<dyn EmbeddingProvider>,
     selected: &'a SelectedWorkload,
@@ -700,6 +710,7 @@ struct RetrievalEvalInputs<'a> {
 async fn retrieve_questions(inputs: RetrievalEvalInputs<'_>) -> Result<QueryRun> {
     let RetrievalEvalInputs {
         pool,
+        kms,
         tenant_id,
         embedder,
         selected,
@@ -719,6 +730,7 @@ async fn retrieve_questions(inputs: RetrievalEvalInputs<'_>) -> Result<QueryRun>
     let graph_store = Arc::new(PostgresGraphStore::scoped_for_app_role(
         pool.clone(),
         scope.clone(),
+        kms,
     ));
     // This harness sizes its own article-level window via --top-k and leaves
     // the request's default (off) `EvidenceWindowPolicy`, so the memory-lane
@@ -864,13 +876,14 @@ async fn retrieve_wixqa_output(
 ) -> Result<RetrievalOutput> {
     retriever
         .retrieve_with_diagnostics(RetrievalRequest {
+            cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: question.question.clone(),
             query_embedding,
             scope: memory_scope.clone(),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
-            max_pii_class: PiiClass::Restricted,
+            max_pii_class: SensitivityClass::Restricted,
             k_final: top_k,
             use_reranker,
             strategy: Some(Strategy::VectorFirst),
@@ -2686,7 +2699,7 @@ mod tests {
                 contact_id: None,
                 scope: "tenant".to_string(),
                 name: "support fact".to_string(),
-                pii_class: PiiClass::None,
+                pii_class: SensitivityClass::None,
                 valid_to: None,
                 valid_from: Utc::now(),
                 properties_summary: None,

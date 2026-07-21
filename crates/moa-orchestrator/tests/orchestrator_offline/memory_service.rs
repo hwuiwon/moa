@@ -5,10 +5,8 @@ use moa_core::wire::memory::MemoryIngestDocument;
 use moa_core::{
     types::contact::ContactId, types::identifiers::TenantId, types::identifiers::UserId,
 };
-use moa_memory_types::MemoryScope;
 use moa_orchestrator::services::memory::{
-    UserScopeError, checked_ingest_contact_id, checked_memory_scope, document_ingest_session_id,
-    effective_user_id,
+    UserScopeError, checked_ingest_contact_id, document_ingest_session_id, effective_user_id,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -32,55 +30,6 @@ fn agent_identity(agent_id: Uuid, acting_on_behalf_of: Uuid) -> Identity {
         api_key_id: None,
         acting_on_behalf_of: Some(acting_on_behalf_of),
     }
-}
-
-#[test]
-fn contact_memory_scope_uses_requested_contact_inside_tenant() {
-    // Pins: caller-supplied contact_id builds a contact-local memory scope inside the tenant.
-    let user_id =
-        Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("fixture user id parses");
-    let identity = user_identity(user_id);
-    let tenant_id = TenantId::new();
-    let contact_id = ContactId::new();
-
-    let scope = checked_memory_scope(tenant_id, Some(contact_id), &identity)
-        .expect("admin contact scope should be accepted");
-
-    assert_eq!(
-        scope,
-        MemoryScope::Contact {
-            tenant_id,
-            contact_id,
-        }
-    );
-}
-
-#[test]
-fn checked_memory_scope_rejects_mismatched_contact_identity() {
-    // Pins: contact callers cannot request another contact's memory scope.
-    let contact_uuid =
-        Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("fixture user id parses");
-    let other_id = ContactId(
-        Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("fixture contact id parses"),
-    );
-    let identity = Identity {
-        identity_type: IdentityType::Contact,
-        id: contact_uuid,
-        tenant_id: TenantId::new(),
-        api_key_id: None,
-        acting_on_behalf_of: None,
-    };
-
-    let error = checked_memory_scope(identity.tenant_id, Some(other_id), &identity)
-        .expect_err("mismatched contact scope should be rejected");
-
-    assert_eq!(
-        error,
-        UserScopeError::Mismatch {
-            requested: UserId::new(other_id.to_string()),
-            effective: contact_uuid.to_string(),
-        }
-    );
 }
 
 #[test]

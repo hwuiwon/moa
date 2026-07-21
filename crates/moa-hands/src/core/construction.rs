@@ -12,6 +12,7 @@ use moa_core::{
 };
 use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, EnvironmentCredentialVault, MCPCredentialProxy,
+    McpEgressGuard,
 };
 
 use crate::adapters::daytona::DaytonaHandProvider;
@@ -32,6 +33,7 @@ impl ToolRouter {
             mcp_clients: tokio::sync::RwLock::new(HashMap::new()),
             mcp_servers: HashMap::new(),
             mcp_proxy: None,
+            mcp_egress_guard: None,
             active_hands: tokio::sync::RwLock::new(HashMap::new()),
             preferred_hand_routes: tokio::sync::RwLock::new(HashMap::new()),
             hand_leases: None,
@@ -71,7 +73,16 @@ impl ToolRouter {
     }
 
     /// Creates a tool router from the loaded MOA config.
-    pub async fn from_config(config: &MoaConfig) -> Result<Self> {
+    pub async fn from_config(
+        config: &MoaConfig,
+        mcp_egress_guard: Option<Arc<McpEgressGuard>>,
+    ) -> Result<Self> {
+        if !config.mcp_servers.is_empty() && mcp_egress_guard.is_none() {
+            return Err(MoaError::ConfigError(
+                "configured MCP servers require an egress guard".to_string(),
+            ));
+        }
+
         let hand_routes = configured_hand_routes(config)?;
         if routes_include_local_provider(&hand_routes) && !local_provider_allowed(config) {
             return Err(MoaError::ConfigError(
@@ -133,6 +144,7 @@ impl ToolRouter {
         let mut router = Self {
             sandbox_root,
             local_provider,
+            mcp_egress_guard,
             ..Self::new(registry, providers)
         }
         .with_tool_output_config(config.tool_output.clone())

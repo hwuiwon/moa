@@ -7,8 +7,9 @@ use moa_brain::pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector};
 use moa_core::{
     config::MoaConfig,
     traits::LineageHandle,
-    traits::{EmbeddingProvider, Identity, IdentityType, RuntimeCacheStore, SessionRepository},
+    traits::{EmbeddingProvider, Identity, RuntimeCacheStore, SessionRepository},
 };
+use moa_crypto::KeyManagementProvider;
 use moa_hands::ToolRouter;
 use moa_providers::ProviderRegistry;
 use moa_session::PostgresSessionStore;
@@ -59,32 +60,19 @@ impl PersistenceDeps {
 #[derive(Clone)]
 pub struct AuthDeps {
     fga_client: Option<FgaClient>,
-    auth_providers: moa_auth_providers::Providers,
 }
 
 impl AuthDeps {
     /// Creates an authentication and authorization dependency group.
     #[must_use]
-    pub fn new(
-        fga_client: Option<FgaClient>,
-        auth_providers: moa_auth_providers::Providers,
-    ) -> Self {
-        Self {
-            fga_client,
-            auth_providers,
-        }
+    pub fn new(fga_client: Option<FgaClient>) -> Self {
+        Self { fga_client }
     }
 
     /// Returns the configured OpenFGA client, when authorization is enabled.
     #[must_use]
     pub fn fga_client(&self) -> Option<FgaClient> {
         self.fga_client.clone()
-    }
-
-    /// Returns the authentication provider bundle.
-    #[must_use]
-    pub fn auth_providers(&self) -> moa_auth_providers::Providers {
-        self.auth_providers.clone()
     }
 }
 
@@ -151,6 +139,7 @@ impl ToolDeps {
 /// Memory retrieval dependencies for context compilation and memory APIs.
 #[derive(Clone)]
 pub struct MemoryDeps {
+    kms: Arc<dyn KeyManagementProvider>,
     graph_memory_retriever: Arc<GraphMemoryRetriever>,
     skill_injector: Arc<SkillInjector>,
 }
@@ -159,13 +148,21 @@ impl MemoryDeps {
     /// Creates a memory dependency group.
     #[must_use]
     pub fn new(
+        kms: Arc<dyn KeyManagementProvider>,
         graph_memory_retriever: Arc<GraphMemoryRetriever>,
         skill_injector: Arc<SkillInjector>,
     ) -> Self {
         Self {
+            kms,
             graph_memory_retriever,
             skill_injector,
         }
+    }
+
+    /// Returns the key-management provider used by graph-memory owners.
+    #[must_use]
+    pub fn kms(&self) -> Arc<dyn KeyManagementProvider> {
+        self.kms.clone()
     }
 
     /// Returns the shared graph-memory retriever.
@@ -279,6 +276,12 @@ impl OrchestratorCtx {
         Self::current().graph_pool()
     }
 
+    /// Returns the current graph-memory key-management provider.
+    #[must_use]
+    pub fn current_kms() -> Arc<dyn KeyManagementProvider> {
+        Self::current().kms()
+    }
+
     /// Returns the current provider registry.
     #[must_use]
     pub fn current_provider_registry() -> Arc<ProviderRegistry> {
@@ -327,12 +330,6 @@ impl OrchestratorCtx {
         self.auth.fga_client()
     }
 
-    /// Returns the authentication provider bundle.
-    #[must_use]
-    pub fn auth_providers(&self) -> moa_auth_providers::Providers {
-        self.auth.auth_providers()
-    }
-
     /// Returns the provider registry from provider dependencies.
     #[must_use]
     pub fn provider_registry(&self) -> Arc<ProviderRegistry> {
@@ -355,6 +352,12 @@ impl OrchestratorCtx {
     #[must_use]
     pub fn tool_schemas(&self) -> Arc<Vec<Value>> {
         self.tools.schemas()
+    }
+
+    /// Returns the key-management provider from memory dependencies.
+    #[must_use]
+    pub fn kms(&self) -> Arc<dyn KeyManagementProvider> {
+        self.memory.kms()
     }
 
     /// Returns the graph-memory retriever from memory dependencies.
@@ -452,7 +455,7 @@ pub fn extract_identity(
         }
     };
 
-    let identity_type = parse_identity_type(raw_type)?;
+    let identity_type = raw_type.parse().map_err(IdentityHeaderError::UnknownType)?;
     let id = parse_uuid(raw_id, "x-moa-identity-id")?;
     let tenant_id =
         moa_core::types::identifiers::TenantId::from(parse_uuid(raw_tenant, "x-moa-tenant-id")?);
@@ -499,16 +502,6 @@ pub fn current_identity(
         "extracted request identity"
     );
     Ok(identity)
-}
-
-fn parse_identity_type(value: &str) -> Result<IdentityType, IdentityHeaderError> {
-    match value {
-        "operator" => Ok(IdentityType::Operator),
-        "contact" => Ok(IdentityType::Contact),
-        "agent" => Ok(IdentityType::Agent),
-        "service" => Ok(IdentityType::Service),
-        other => Err(IdentityHeaderError::UnknownType(other.to_string())),
-    }
 }
 
 fn parse_uuid(value: &str, header: &'static str) -> Result<Uuid, IdentityHeaderError> {

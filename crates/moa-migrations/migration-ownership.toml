@@ -111,12 +111,31 @@ name = "security_events"
 schema = "public"
 owner = "moa-ocsf"
 readers = ["services/audit-shipper"]
+notes = "OCSF event storage; retrieval idempotency DDL is owned by V000345."
 
 [[table]]
 name = "node_index"
 schema = "moa"
 owner = "moa-memory/graph"
 readers = ["moa-memory/lifecycle", "moa-memory/vector", "moa-brain", "moa-knowledge"]
+
+[[table]]
+name = "kek"
+schema = "moa"
+owner = "moa-kms"
+notes = "Per-(tenant, subject) key-encryption keys wrapped under a recorded root-key generation; DDL lives in moa-migrations."
+
+[[table]]
+name = "kms_root_key_generations"
+schema = "moa"
+owner = "moa-kms"
+notes = "Non-secret root-key generation lifecycle metadata."
+
+[[table]]
+name = "kms_root_key_state"
+schema = "moa"
+owner = "moa-kms"
+notes = "Singleton active root-key generation and activation CAS version."
 
 [[table]]
 name = "edge_index"
@@ -294,9 +313,26 @@ schema = "moa"
 owner = "moa-orchestrator"
 
 [[table]]
+name = "dual_control_request"
+schema = "moa"
+owner = "moa-orchestrator"
+
+[[table]]
 name = "erasure_jobs"
 schema = "moa"
 owner = "moa-memory/pii"
+
+[[table]]
+name = "legal_hold"
+schema = "moa"
+owner = "moa-memory/pii"
+readers = ["moa-orchestrator", "moa-memory/lifecycle"]
+
+[[table]]
+name = "destruction_operation_fence"
+schema = "moa"
+owner = "moa-memory/pii"
+readers = ["moa-orchestrator", "moa-memory/lifecycle"]
 
 [[table]]
 name = "experiment_run"
@@ -487,6 +523,40 @@ owner = "moa-session"
 name = "linked_connections"
 schema = "public"
 owner = "moa-auth/auth0"
+
+[[table]]
+name = "token_vault_connections"
+schema = "public"
+owner = "moa-auth/providers"
+notes = "Self-hosted token vault storing sealed third-party OAuth tokens."
+
+[[table]]
+name = "oauth_clients"
+schema = "public"
+owner = "moa-auth/providers"
+readers = ["moa-edge"]
+notes = "First-party OAuth 2.1 AS: database-authoritative bootstrapped clients."
+
+[[table]]
+name = "oauth_authorization_transactions"
+schema = "public"
+owner = "moa-auth/providers"
+readers = ["moa-edge"]
+notes = "First-party OAuth 2.1 AS: durable CSRF-bound resource-owner consent."
+
+[[table]]
+name = "oauth_authorization_codes"
+schema = "public"
+owner = "moa-auth/providers"
+readers = ["moa-edge"]
+notes = "First-party OAuth 2.1 AS: short-TTL single-use codes bound to consent, resource, and PKCE."
+
+[[table]]
+name = "oauth_tokens"
+schema = "public"
+owner = "moa-auth/providers"
+readers = ["moa-edge"]
+notes = "First-party OAuth 2.1 AS: resource-bound access/refresh grants stored by hash."
 
 [[table]]
 name = "local_user_credentials"

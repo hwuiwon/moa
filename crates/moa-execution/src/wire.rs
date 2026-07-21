@@ -13,6 +13,7 @@ use moa_core::events::{
     ExecutionFailureDisposition, ExecutionProgress, ExecutionTaskResultsRef,
     ExecutionTerminalSummary,
 };
+use moa_core::traits::Identity;
 use moa_core::types::{
     contact::ContactId,
     execution_planning::{ExecutionSourceProvenance, PinnedExecutionTemplateRef},
@@ -949,6 +950,8 @@ pub struct ExecutionRunWorkflowRequest {
     pub contact_id: Option<ContactId>,
     /// Parent session.
     pub session_id: SessionId,
+    /// Exact authenticated identity admitted when the run was launched.
+    pub identity: Identity,
 }
 
 /// Internal request that notifies a keyed run of a persisted scheduling change.
@@ -999,6 +1002,8 @@ pub struct ExecutionTaskWorkflowRequest {
     pub contact_id: Option<ContactId>,
     /// Parent session used for policy and model context.
     pub session_id: SessionId,
+    /// Exact authenticated identity inherited from the owning run workflow.
+    pub identity: Identity,
 }
 
 /// Encodes a cursor as canonical JSON in URL-safe unpadded base64.

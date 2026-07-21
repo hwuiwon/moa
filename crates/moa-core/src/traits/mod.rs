@@ -742,6 +742,8 @@ pub trait MemoryRetrievalExecutor: Send + Sync {
     async fn execute_retrieval_tool(
         &self,
         session: &SessionMeta,
+        caller_identity: &Identity,
+        retrieval_operation_id: &str,
         tool_name: &str,
         input: &Value,
     ) -> Result<ToolOutput>;
@@ -751,6 +753,10 @@ pub trait MemoryRetrievalExecutor: Send + Sync {
 pub struct ToolContext<'a> {
     /// Active session metadata.
     pub session: &'a SessionMeta,
+    /// Exact authenticated caller and delegation provenance admitted for this tool call.
+    pub caller_identity: &'a Identity,
+    /// Replay-stable identifier of the active tool call.
+    pub tool_call_id: Option<&'a str>,
     /// Hot-path lineage capture bridge.
     pub lineage: &'a dyn LineageHandle,
     /// Shared session store when the tool needs session-log access.

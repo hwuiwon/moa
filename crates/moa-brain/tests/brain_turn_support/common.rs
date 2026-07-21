@@ -19,6 +19,16 @@ fn test_tenant_id() -> TenantId {
     tenant_id_from_storage_partition_id(&StoragePartitionId::new("workspace"))
 }
 
+fn test_identity(tenant_id: TenantId) -> moa_core::traits::Identity {
+    moa_core::traits::Identity {
+        identity_type: moa_core::traits::IdentityType::Operator,
+        id: Uuid::from_u128(0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c401),
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    }
+}
+
 fn test_contact_id() -> ContactId {
     contact_id_from_label("user")
 }

@@ -17,12 +17,14 @@ use moa_brain::retrieval::{
     HybridRetriever, RankingConfig, RetrievalHit, RetrievalOutput, RetrievalRequest,
 };
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     config::MemoryDigestConfig, config::MemoryRankingConfig, config::MoaConfig,
     traits::EmbeddingProvider, types::contact::ContactId, types::identifiers::UserId,
 };
+use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_db::ScopedConn;
-use moa_memory_graph::{GraphStore, NodeIndexRow, PiiClass, PostgresGraphStore};
+use moa_memory_graph::{GraphStore, NodeIndexRow, PostgresGraphStore};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, DeterministicEntityMergeVerifier,
     EXTRACTION_PROMPT_VERSION, EmbeddedFact, EntityMergeFixtureRecord, EntityMergeVerifier,

@@ -6,6 +6,7 @@ use moa_core::{
     config::MoaConfig, traits::ContextProcessor, traits::EmbeddingProvider, traits::LLMProvider,
     traits::LineageHandle, traits::SegmentStore, traits::SessionStore,
 };
+use moa_crypto::KeyManagementProvider;
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 
 use super::agent_instructions::AgentInstructionProcessor;
@@ -24,6 +25,8 @@ use super::tools::ToolDefinitionProcessor;
 pub struct GraphMemoryPipelineOptions {
     /// Postgres pool used by graph retrieval.
     pub graph_pool: sqlx::PgPool,
+    /// Shared KMS used to open sealed graph-memory content.
+    pub kms: Arc<dyn KeyManagementProvider>,
     /// Optional process-wide graph-memory retriever reused across pipelines.
     pub shared_graph_memory_retriever: Option<Arc<GraphMemoryRetriever>>,
     /// Optional retrieval embedder used when building a graph-memory retriever locally.
@@ -49,6 +52,7 @@ pub struct GraphMemoryPipelineOptions {
 pub fn build_default_graph_memory_retriever(
     config: &MoaConfig,
     graph_pool: sqlx::PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     lineage: Arc<dyn LineageHandle>,
 ) -> Arc<GraphMemoryRetriever> {
     let retrieval_embedder = match build_embedder_from_config(
@@ -65,7 +69,7 @@ pub fn build_default_graph_memory_retriever(
         }
     };
 
-    build_graph_memory_retriever(config, graph_pool, retrieval_embedder, lineage)
+    build_graph_memory_retriever(config, graph_pool, kms, retrieval_embedder, lineage)
 }
 
 /// Builds a graph-memory retriever from caller-provided runtime dependencies.
@@ -73,11 +77,12 @@ pub fn build_default_graph_memory_retriever(
 pub fn build_graph_memory_retriever(
     config: &MoaConfig,
     graph_pool: sqlx::PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     retrieval_embedder: Option<Arc<dyn EmbeddingProvider>>,
     lineage: Arc<dyn LineageHandle>,
 ) -> Arc<GraphMemoryRetriever> {
     Arc::new(
-        GraphMemoryRetriever::new_with_config(config.clone(), graph_pool, retrieval_embedder)
+        GraphMemoryRetriever::new_with_config(config.clone(), graph_pool, kms, retrieval_embedder)
             .with_lineage(lineage),
     )
 }
@@ -91,6 +96,7 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
 ) -> ContextPipeline {
     let GraphMemoryPipelineOptions {
         graph_pool,
+        kms,
         shared_graph_memory_retriever,
         retrieval_embedder,
         shared_skill_injector,
@@ -128,11 +134,17 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
             build_graph_memory_retriever(
                 config,
                 graph_pool.clone(),
+                kms.clone(),
                 retrieval_embedder,
                 lineage.clone(),
             )
         } else {
-            build_default_graph_memory_retriever(config, graph_pool.clone(), lineage.clone())
+            build_default_graph_memory_retriever(
+                config,
+                graph_pool.clone(),
+                kms.clone(),
+                lineage.clone(),
+            )
         }
     });
     let vector_retrieval_available = graph_memory_retriever.has_vector_retrieval();

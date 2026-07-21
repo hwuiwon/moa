@@ -7,8 +7,11 @@
 
 #![allow(dead_code)]
 
+use std::sync::{Arc, OnceLock};
+
 use moa_core::types::memory::RlsContext;
 use moa_core::{error::MoaError, error::Result, types::action_policy::ActionRuleScope};
+use moa_crypto::{KeyManagementProvider, LocalKmsProvider};
 use moa_memory_graph::PostgresGraphStore;
 use moa_memory_types::MemoryScope;
 use moa_test_support::fixtures::tenant_id_from_storage_partition;
@@ -29,7 +32,11 @@ pub(crate) fn memory_scope(storage_partition_id: &str) -> MemoryScope {
 }
 
 pub(crate) fn graph_store(pool: &sqlx::PgPool, scope: &MemoryScope) -> PostgresGraphStore {
-    PostgresGraphStore::scoped_for_app_role(pool.clone(), RlsContext::from(scope.clone()))
+    static KMS: OnceLock<Arc<dyn KeyManagementProvider>> = OnceLock::new();
+    let kms = KMS
+        .get_or_init(|| Arc::new(LocalKmsProvider::new()))
+        .clone();
+    PostgresGraphStore::scoped_for_app_role(pool.clone(), RlsContext::from(scope.clone()), kms)
 }
 
 pub(crate) async fn set_app_role(conn: &mut PgConnection) -> Result<()> {

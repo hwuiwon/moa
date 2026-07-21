@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 /// Stable execution-route classifier prompt identifier.
-pub const EXECUTION_ROUTER_PROMPT_VERSION: &str = "execution-router";
+pub const EXECUTION_ROUTER_PROMPT_VERSION: &str = "execution-router-v2";
 /// Fixed maximum classifier output tokens.
 pub const EXECUTION_ROUTER_MAX_OUTPUT_TOKENS: usize = 256;
 /// Maximum collected classifier response bytes.
@@ -1163,6 +1163,28 @@ mod tests {
         );
         assert!(EXECUTION_ROUTER_PROMPT.contains("gathering any missing inputs"));
         assert!(EXECUTION_ROUTER_PROMPT.contains("recent_target_digest"));
+    }
+
+    #[test]
+    fn execution_router_prompt_routes_bounded_worker_requests_to_inline_execution_offline() {
+        // Pins: explicit same-turn worker/tool requests cannot be accepted as a
+        // direct response that merely claims the requested side effects occurred.
+        assert!(
+            EXECUTION_ROUTER_PROMPT.contains(
+                "spawn or delegate to conversational workers, or perform another action, choose execute rather than respond"
+            )
+        );
+        assert!(EXECUTION_ROUTER_PROMPT.contains(
+            "including a small parallel set of conversational workers or a follow-up worker"
+        ));
+        assert!(EXECUTION_ROUTER_PROMPT.contains(
+            "A respond route must never claim that requested tool or worker calls occurred"
+        ));
+        assert!(
+            EXECUTION_ROUTER_PROMPT.contains(
+                "Parallelism alone does not require durable execution when the request is a bounded same-turn"
+            )
+        );
     }
 
     #[tokio::test]

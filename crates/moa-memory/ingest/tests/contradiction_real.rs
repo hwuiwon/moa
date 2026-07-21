@@ -1,7 +1,8 @@
 //! Out-of-line tests for the real local contradiction detector.
 
 use chrono::{Duration, Utc};
-use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
+use moa_core::types::security::SensitivityClass;
+use moa_memory_graph::{NodeIndexRow, NodeLabel};
 use moa_memory_ingest::{Conflict, RrfPlusJudgeDetector};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -37,7 +38,7 @@ fn candidate_with(
         contact_id: None,
         scope: "tenant".to_string(),
         name: summary.to_string(),
-        pii_class: PiiClass::None,
+        pii_class: SensitivityClass::None,
         valid_to,
         valid_from: Utc::now() - Duration::days(1),
         properties_summary: Some(properties),

@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
+use moa_core::types::security::SensitivityClass;
 use moa_core::{error::MoaError, traits::EmbeddingProvider};
-use moa_memory_graph::{GraphError, GraphStore, NodeLabel, PiiClass};
+use moa_memory_graph::{GraphError, GraphStore, NodeLabel};
 use moa_memory_types::MemoryScope;
 use uuid::Uuid;
 
@@ -75,7 +76,7 @@ impl PlannedQuery {
         self,
         query_text: impl Into<String>,
         query_embedding: Vec<f32>,
-        max_pii_class: PiiClass,
+        max_pii_class: SensitivityClass,
         k_final: usize,
         use_reranker: bool,
     ) -> RetrievalRequest {
@@ -84,6 +85,10 @@ impl PlannedQuery {
             query_text: query_text.into(),
             query_embedding,
             scope: self.scope,
+            // Fail-closed default: the retrieval entry point sources the caller's
+            // information-barrier clearances from the agent knowledge policy and
+            // sets this before the request reaches a scoped leg.
+            cleared_barriers: Default::default(),
             // A planner-inferred label hint is a keyword guess, so it becomes a
             // SOFT ranking boost, never a hard filter. Callers with structured,
             // explicit label intent (a scope plan) set `label_filter` directly.
@@ -195,7 +200,7 @@ pub struct QueryRetrievalCtx<'a> {
     /// Planned retriever used after planning.
     pub hybrid: &'a dyn PlannedRetriever,
     /// Maximum PII class visible to the caller.
-    pub max_pii_class: PiiClass,
+    pub max_pii_class: SensitivityClass,
     /// Number of final hits requested.
     pub k_final: usize,
     /// Whether the retriever should call the configured reranker.
@@ -216,7 +221,7 @@ impl<'a> QueryRetrievalCtx<'a> {
         planning: &'a PlanningCtx,
         embedder: &'a dyn EmbeddingProvider,
         hybrid: &'a dyn PlannedRetriever,
-        max_pii_class: PiiClass,
+        max_pii_class: SensitivityClass,
     ) -> Self {
         Self {
             planner,
@@ -522,7 +527,7 @@ mod tests {
     use chrono::{DateTime, Utc};
 
     use super::{
-        NodeLabel, PiiClass, PlannedQuery, Strategy, classify_strategy, infer_label_hint,
+        NodeLabel, PlannedQuery, SensitivityClass, Strategy, classify_strategy, infer_label_hint,
         parse_temporal, should_skip_graph_expansion_for_direct_lookup,
     };
     use moa_core::types::identifiers::TenantId;
@@ -637,7 +642,7 @@ mod tests {
         let request = planned.into_retrieval_request(
             "what did we learn from the auth outage?",
             vec![0.0_f32; 4],
-            PiiClass::None,
+            SensitivityClass::None,
             5,
             false,
         );

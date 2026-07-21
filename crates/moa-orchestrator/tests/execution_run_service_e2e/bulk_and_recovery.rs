@@ -899,9 +899,33 @@ async fn wait_for_sql_count(
 
 async fn task_status_diagnostics(pool: &PgPool, run_uid: uuid::Uuid) -> Result<Value> {
     sqlx::query_scalar(
-        "SELECT COALESCE(jsonb_object_agg(status, count), '{}'::jsonb) \
-         FROM (SELECT status, COUNT(*) AS count FROM moa.execution_task \
-               WHERE run_uid = $1 GROUP BY status ORDER BY status) statuses",
+        r#"
+        SELECT jsonb_build_object(
+            'counts', (
+                SELECT COALESCE(jsonb_object_agg(status, count), '{}'::jsonb)
+                FROM (
+                    SELECT status, COUNT(*) AS count
+                    FROM moa.execution_task
+                    WHERE run_uid = $1
+                    GROUP BY status
+                    ORDER BY status
+                ) statuses
+            ),
+            'oldest_running', (
+                SELECT COALESCE(jsonb_agg(to_jsonb(running)), '[]'::jsonb)
+                FROM (
+                    SELECT task_id, node_id, item_key, attempt, generation,
+                           reserved_at, started_at, updated_at,
+                           FLOOR(EXTRACT(EPOCH FROM (NOW() - updated_at)))::bigint
+                               AS idle_seconds
+                    FROM moa.execution_task
+                    WHERE run_uid = $1 AND status = 'running'
+                    ORDER BY updated_at, task_id
+                    LIMIT 20
+                ) running
+            )
+        )
+        "#,
     )
     .bind(run_uid)
     .fetch_one(pool)

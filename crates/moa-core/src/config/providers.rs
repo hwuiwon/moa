@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::MoaError;
+use crate::types::provider::ProviderId;
 
 /// Where provider in-flight concurrency is coordinated.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,6 +182,9 @@ impl Default for ModelsConfig {
 /// keeps in flight at once. All three are enforced per API key in-process, so a
 /// multi-instance fleet sharing one key should divide the documented budget
 /// across instances.
+///
+/// Deployment capability assertions are grouped under
+/// [`capabilities`](Self::capabilities), separate from credentials and pacing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderCredentialConfig {
@@ -199,6 +203,18 @@ pub struct ProviderCredentialConfig {
     /// `0` opts back into unbounded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_requests: Option<u32>,
+    /// Operator-asserted deployment capabilities for this provider endpoint.
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderCapabilitiesConfig::is_conservative"
+    )]
+    pub capabilities: ProviderCapabilitiesConfig,
+}
+
+/// Serde predicate: skip serializing a conservative-`false` capability flag so a
+/// bare credential still round-trips to `{ "api_key": ... }`.
+fn is_conservative_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ProviderCredentialConfig {
@@ -209,6 +225,7 @@ impl ProviderCredentialConfig {
             max_requests_per_min: None,
             max_inputs_per_min: None,
             max_concurrent_requests: None,
+            capabilities: ProviderCapabilitiesConfig::default(),
         }
     }
 }
@@ -216,6 +233,110 @@ impl ProviderCredentialConfig {
 impl Default for ProviderCredentialConfig {
     fn default() -> Self {
         Self::new("")
+    }
+}
+
+/// Operator-asserted capabilities of one configured provider endpoint.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderCapabilitiesConfig {
+    /// Whether the endpoint guarantees no training on or retention of requests.
+    #[serde(default, skip_serializing_if = "is_conservative_false")]
+    pub zero_retention: bool,
+    /// Whether the endpoint is a private or self-hosted deployment.
+    #[serde(default, skip_serializing_if = "is_conservative_false")]
+    pub private_deployment: bool,
+    /// Contractual data-residency region, or `None` when none is asserted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_residency: Option<String>,
+}
+
+impl ProviderCapabilitiesConfig {
+    fn is_conservative(&self) -> bool {
+        !self.zero_retention && !self.private_deployment && self.data_residency.is_none()
+    }
+
+    fn validate(&self, provider: ProviderId) -> Result<(), MoaError> {
+        if self
+            .data_residency
+            .as_deref()
+            .is_some_and(|residency| residency.trim().is_empty())
+        {
+            return Err(MoaError::ConfigError(format!(
+                "providers.{provider}.capabilities.data_residency must be non-empty when set"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Deployment-wide provider-routing policy applied to every completion.
+///
+/// The runtime owns one provider registry for the deployment. This policy
+/// therefore constrains every tenant served by that registry; tenant-specific
+/// policy belongs at a request-scoped routing boundary, not in process config.
+///
+/// Every field is off by default, so a deployment with no policy routes exactly
+/// as before with zero added overhead. The policy is
+/// [`is_active`](Self::is_active) only when at least one constraint is set.
+///
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DeploymentProviderPolicyConfig {
+    /// Require the selected provider to assert zero request retention.
+    #[serde(default, skip_serializing_if = "is_conservative_false")]
+    pub require_zero_retention: bool,
+    /// Require the selected provider to assert a private/self-hosted deployment.
+    #[serde(default, skip_serializing_if = "is_conservative_false")]
+    pub require_private_deployment: bool,
+    /// Allowlist of provider ids. Empty means "no allowlist" (all providers may
+    /// be considered, subject to the other constraints); non-empty restricts
+    /// routing to exactly these providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_providers: Vec<ProviderId>,
+    /// Denylist of provider ids that must never serve this deployment, regardless of
+    /// any other constraint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_providers: Vec<ProviderId>,
+    /// Require the selected provider to assert this data-residency class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_residency: Option<String>,
+}
+
+impl DeploymentProviderPolicyConfig {
+    /// Returns whether any deployment constraint is set. When `false`, routing is
+    /// unchanged and pays zero overhead.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.require_zero_retention
+            || self.require_private_deployment
+            || !self.allowed_providers.is_empty()
+            || !self.denied_providers.is_empty()
+            || self.required_residency.is_some()
+    }
+
+    /// Validates residency and rejects contradictory allow/deny entries.
+    pub fn validate(&self) -> Result<(), MoaError> {
+        if self
+            .required_residency
+            .as_deref()
+            .is_some_and(|residency| residency.trim().is_empty())
+        {
+            return Err(MoaError::ConfigError(
+                "providers.routing_policy.required_residency must be non-empty when set"
+                    .to_string(),
+            ));
+        }
+        if let Some(provider) = self
+            .allowed_providers
+            .iter()
+            .find(|provider| self.denied_providers.contains(provider))
+        {
+            return Err(MoaError::ConfigError(format!(
+                "providers.routing_policy cannot both allow and deny provider '{provider}'"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -239,10 +360,13 @@ pub struct ProvidersConfig {
     /// First-byte, idle, and total deadlines for streaming LLM responses.
     #[serde(default)]
     pub stream_timeouts: ProviderStreamTimeoutConfig,
+    /// Deployment-wide provider-routing policy. Inactive by default.
+    #[serde(default)]
+    pub routing_policy: DeploymentProviderPolicyConfig,
 }
 
 impl ProvidersConfig {
-    /// Validates provider configuration, currently the concurrency settings.
+    /// Validates provider concurrency, stream timeouts, capabilities, and policy.
     pub fn validate(&self) -> Result<(), MoaError> {
         self.concurrency.validate()?;
         self.stream_timeouts.validate()?;
@@ -254,6 +378,12 @@ impl ProvidersConfig {
                     .to_string(),
             ));
         }
+        self.anthropic
+            .capabilities
+            .validate(ProviderId::Anthropic)?;
+        self.openai.capabilities.validate(ProviderId::OpenAI)?;
+        self.google.capabilities.validate(ProviderId::Google)?;
+        self.routing_policy.validate()?;
         Ok(())
     }
 }
@@ -261,10 +391,11 @@ impl ProvidersConfig {
 #[cfg(test)]
 mod tests {
     use crate::MoaError;
+    use crate::types::provider::ProviderId;
 
     use super::{
-        ConcurrencyScope, ProviderConcurrencyConfig, ProviderCredentialConfig,
-        ProviderStreamTimeoutConfig, ProvidersConfig,
+        ConcurrencyScope, DeploymentProviderPolicyConfig, ProviderConcurrencyConfig,
+        ProviderCredentialConfig, ProviderStreamTimeoutConfig, ProvidersConfig,
     };
 
     #[test]
@@ -375,6 +506,92 @@ mod tests {
             serialized,
             serde_json::json!({ "api_key": "only-key" }),
             "unset caps must be omitted, not serialized as null"
+        );
+    }
+
+    #[test]
+    fn provider_capabilities_default_conservative_and_are_omitted() {
+        // Pins: capability assertions default to the conservative value so a bare
+        // credential neither over-claims compliance nor changes on the wire, and
+        // an operator can assert compliance explicitly.
+        let defaulted = ProviderCredentialConfig::new("only-key");
+        assert!(!defaulted.capabilities.zero_retention);
+        assert!(!defaulted.capabilities.private_deployment);
+        assert_eq!(defaulted.capabilities.data_residency, None);
+
+        let serialized = serde_json::to_value(&defaulted).expect("serialize");
+        assert_eq!(serialized, serde_json::json!({ "api_key": "only-key" }));
+
+        let asserted: ProviderCredentialConfig = serde_json::from_value(serde_json::json!({
+            "api_key": "zdr-key",
+            "capabilities": {
+                "zero_retention": true,
+                "private_deployment": true,
+                "data_residency": "eu"
+            }
+        }))
+        .expect("credential with capability assertions should parse");
+        assert!(asserted.capabilities.zero_retention);
+        assert!(asserted.capabilities.private_deployment);
+        assert_eq!(asserted.capabilities.data_residency.as_deref(), Some("eu"));
+    }
+
+    #[test]
+    fn deployment_policy_is_active_only_when_a_constraint_is_set() {
+        // Pins: an empty policy is inactive (zero-overhead routing), and each
+        // individual constraint flips it active.
+        assert!(!DeploymentProviderPolicyConfig::default().is_active());
+        assert!(
+            DeploymentProviderPolicyConfig {
+                require_zero_retention: true,
+                ..DeploymentProviderPolicyConfig::default()
+            }
+            .is_active()
+        );
+        assert!(
+            DeploymentProviderPolicyConfig {
+                allowed_providers: vec![ProviderId::Anthropic],
+                ..DeploymentProviderPolicyConfig::default()
+            }
+            .is_active()
+        );
+        assert!(
+            DeploymentProviderPolicyConfig {
+                required_residency: Some("eu".to_string()),
+                ..DeploymentProviderPolicyConfig::default()
+            }
+            .is_active()
+        );
+    }
+
+    #[test]
+    fn deployment_policy_rejects_unknown_and_contradictory_provider_ids() {
+        // Pins: typed deployment policy rejects unknown ids during parsing and
+        // cannot simultaneously allow and deny one provider.
+        let good = DeploymentProviderPolicyConfig {
+            allowed_providers: vec![ProviderId::Anthropic],
+            denied_providers: vec![ProviderId::OpenAI],
+            ..DeploymentProviderPolicyConfig::default()
+        };
+        assert!(good.validate().is_ok());
+
+        let error = serde_json::from_value::<DeploymentProviderPolicyConfig>(
+            serde_json::json!({ "allowed_providers": ["anthropicc"] }),
+        )
+        .expect_err("unknown provider name must be rejected during parsing");
+        assert!(error.to_string().contains("anthropicc"), "{error}");
+
+        let overlap = DeploymentProviderPolicyConfig {
+            allowed_providers: vec![ProviderId::Anthropic],
+            denied_providers: vec![ProviderId::Anthropic],
+            ..DeploymentProviderPolicyConfig::default()
+        };
+        let error = overlap
+            .validate()
+            .expect_err("overlapping allow and deny entries must be rejected");
+        assert!(
+            error.to_string().contains("anthropic"),
+            "error names the contradictory provider: {error}"
         );
     }
 }

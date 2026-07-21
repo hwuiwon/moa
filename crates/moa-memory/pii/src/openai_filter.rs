@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use moa_memory_graph::PiiClass;
+use moa_core::types::security::SensitivityClass;
 use serde::Deserialize;
 use tracing::warn;
 
@@ -10,7 +10,7 @@ use crate::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, Result};
 
 const DEFAULT_MODEL_VERSION: &str = "openai/privacy-filter:v1.0";
 
-/// Confidence thresholds used to aggregate detected spans into a `PiiClass`.
+/// Confidence thresholds used to aggregate detected spans into a `SensitivityClass`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PrivacyFilterThresholds {
     /// Threshold for person-name spans.
@@ -108,7 +108,7 @@ impl PiiClassifier for OpenAiPrivacyFilterClassifier {
         match self.classify_inner(text).await {
             Ok(mut result) => {
                 if result.abstained {
-                    result.class = PiiClass::Pii;
+                    result.class = SensitivityClass::Pii;
                 }
                 Ok(result)
             }
@@ -138,7 +138,7 @@ impl OpenAiPrivacyFilterClassifier {
             .unwrap_or_else(|| self.model_version.clone());
         let spans = payload.into_spans()?;
         let class = if abstained {
-            PiiClass::Pii
+            SensitivityClass::Pii
         } else {
             resolve_class(&spans, self.thresholds)
         };
@@ -152,14 +152,14 @@ impl OpenAiPrivacyFilterClassifier {
 }
 
 /// Resolves MOA's aggregate privacy class from detected spans and thresholds.
-pub fn resolve_class(spans: &[PiiSpan], thresholds: PrivacyFilterThresholds) -> PiiClass {
+pub fn resolve_class(spans: &[PiiSpan], thresholds: PrivacyFilterThresholds) -> SensitivityClass {
     if spans.iter().any(|span| {
         matches!(
             span.category,
             PiiCategory::FinancialAccount | PiiCategory::Secret
         ) && span.confidence >= thresholds.threshold_for(span.category)
     }) {
-        return PiiClass::Restricted;
+        return SensitivityClass::Restricted;
     }
     if spans.iter().any(|span| {
         matches!(
@@ -167,15 +167,15 @@ pub fn resolve_class(spans: &[PiiSpan], thresholds: PrivacyFilterThresholds) -> 
             PiiCategory::Ssn | PiiCategory::MedicalRecord | PiiCategory::GovernmentId
         ) && span.confidence >= thresholds.threshold_for(span.category)
     }) {
-        return PiiClass::Phi;
+        return SensitivityClass::Phi;
     }
     if spans
         .iter()
         .any(|span| span.confidence >= thresholds.threshold_for(span.category))
     {
-        return PiiClass::Pii;
+        return SensitivityClass::Pii;
     }
-    PiiClass::None
+    SensitivityClass::None
 }
 
 fn normalize_base_url(base_url: String) -> String {

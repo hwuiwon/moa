@@ -5,13 +5,15 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use moa_core::types::memory::RlsContext;
+use moa_core::types::security::SensitivityClass;
 use moa_core::{
     config::MemoryDigestConfig, traits::EmbeddingProvider, types::contact::ContactId,
     types::identifiers::StoragePartitionId, types::identifiers::TenantId,
 };
+use moa_crypto::KeyManagementProvider;
 use moa_memory_graph::{
-    ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodeExpiryIntent, NodeLabel,
-    NodePropertyUpdateIntent, PiiClass, PostgresGraphStore,
+    ExistingSupersessionIntent, GraphError, NodeContentUpdateIntent, NodeEmbeddingIntent,
+    NodeExpiryIntent, NodeLabel, PostgresGraphStore,
 };
 use moa_memory_types::normalize_entity_name;
 use moa_memory_vector::VectorStoreFactory;
@@ -45,6 +47,9 @@ pub enum Error {
     /// Embedding provider call failed.
     #[error("embedding: {0}")]
     Embedding(#[from] moa_core::error::MoaError),
+    /// A legal-hold or destruction-fence operation failed.
+    #[error("legal hold: {0}")]
+    LegalHold(#[from] moa_memory_pii::legal_hold::LegalHoldError),
     /// Stored graph row was malformed.
     #[error("invalid graph row: {0}")]
     InvalidRow(String),
@@ -171,6 +176,7 @@ pub struct BackfillStats {
 /// Runs all v1 consolidation operations for one tenant.
 pub async fn consolidate_tenant(
     pool: &PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     tenant_id: TenantId,
     opts: ConsolidationOptions,
     now: DateTime<Utc>,
@@ -183,17 +189,18 @@ pub async fn consolidate_tenant(
     // decay is a set-based UPDATE and the digest re-reads post-decay confidence, so
     // neither of those passes consumes the in-memory snapshot.
     let facts = active_fact_rows(pool, &tenant_id).await?;
-    let (merge, merged_closed) = merge_duplicate_rows(pool, &facts, now).await?;
+    let (merge, merged_closed) = merge_duplicate_rows(pool, &kms, &facts, now).await?;
     let decay = decay_confidence(pool, &tenant_id, now, &opts).await?;
     let live_after_merge = facts
         .into_iter()
         .filter(|fact| !merged_closed.contains(&fact.uid))
         .collect::<Vec<_>>();
-    let (sweep, _swept_closed) = sweep_contradiction_rows(pool, &live_after_merge, now).await?;
+    let (sweep, _swept_closed) =
+        sweep_contradiction_rows(pool, &kms, &live_after_merge, now).await?;
     // Expiry runs after decay and the sweep so it sees post-decay confidence and
     // does not close a fact another pass would have superseded this run.
-    let expiry = expire_idle_facts(pool, &tenant_id, now, &opts).await?;
-    let backfill = backfill_entities(pool, &tenant_id, embedder).await?;
+    let expiry = expire_idle_facts(pool, kms.clone(), &tenant_id, now, &opts).await?;
+    let backfill = backfill_entities(pool, kms, &tenant_id, embedder).await?;
     let storage_partition_id = storage_partition_id(&tenant_id);
     let digest = rebuild_storage_digests(pool, &storage_partition_id, now, &opts.digest).await?;
 
@@ -214,11 +221,12 @@ pub async fn consolidate_tenant(
 /// Merges active exact-duplicate facts by `(tenant, contact, scope, fact_hash)`.
 pub async fn merge_duplicates(
     pool: &PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     tenant_id: &TenantId,
     now: DateTime<Utc>,
 ) -> Result<MergeStats> {
     let facts = active_fact_rows(pool, tenant_id).await?;
-    Ok(merge_duplicate_rows(pool, &facts, now).await?.0)
+    Ok(merge_duplicate_rows(pool, &kms, &facts, now).await?.0)
 }
 
 /// Merges exact-duplicate facts from a preloaded active-fact snapshot.
@@ -228,6 +236,7 @@ pub async fn merge_duplicates(
 /// before running the contradiction sweep.
 async fn merge_duplicate_rows(
     pool: &PgPool,
+    kms: &Arc<dyn KeyManagementProvider>,
     facts: &[LifecycleNodeRow],
     now: DateTime<Utc>,
 ) -> Result<(MergeStats, BTreeSet<Uuid>)> {
@@ -238,7 +247,7 @@ async fn merge_duplicate_rows(
         // Every row in a duplicate group shares the same `(tenant, contact, scope)`
         // ownership by construction, so the scoped store is built once per group
         // instead of once per invalidated node.
-        let store = scoped_graph_for(pool, group[0].scope_context());
+        let store = scoped_graph_for(pool, group[0].scope_context(), kms.clone());
         let canonical = &group[0];
         for duplicate in group.iter().skip(1) {
             close_into_existing(
@@ -294,11 +303,7 @@ pub async fn decay_confidence(
         WITH candidates AS (
             SELECT node.uid,
                    node.confidence AS current_conf,
-                   node.properties_summary,
-                   COALESCE(
-                       (node.properties_summary->>'base_confidence')::double precision,
-                       node.confidence
-                   ) AS base_conf,
+                   COALESCE(node.base_confidence, node.confidence) AS base_conf,
                    GREATEST(
                        TRUNC(EXTRACT(EPOCH FROM ($2::timestamptz - node.last_accessed_at))),
                        0
@@ -314,7 +319,6 @@ pub async fn decay_confidence(
         computed AS (
             SELECT uid,
                    current_conf,
-                   properties_summary,
                    LEAST(
                        GREATEST(
                            GREATEST(base_conf * power(0.5::double precision, idle_days / $4), $5),
@@ -325,26 +329,14 @@ pub async fn decay_confidence(
             FROM candidates
         ),
         to_update AS (
-            SELECT uid, current_conf, properties_summary, target
+            SELECT uid, current_conf, target
             FROM computed
             WHERE ABS(target - current_conf) > $6
         ),
         updated AS (
             UPDATE moa.node_index AS node
             SET confidence = tu.target,
-                properties_summary = jsonb_set(
-                    CASE
-                        WHEN node.properties_summary ? 'base_confidence'
-                            THEN COALESCE(node.properties_summary, '{}'::jsonb)
-                        ELSE jsonb_set(
-                            COALESCE(node.properties_summary, '{}'::jsonb),
-                            '{base_confidence}',
-                            to_jsonb(tu.current_conf)
-                        )
-                    END,
-                    '{confidence}',
-                    to_jsonb(tu.target)
-                )
+                base_confidence = COALESCE(node.base_confidence, tu.current_conf)
             FROM to_update AS tu
             WHERE node.uid = tu.uid
             RETURNING node.uid
@@ -391,6 +383,7 @@ pub async fn decay_confidence(
 /// rows leave the candidate set.
 pub async fn expire_idle_facts(
     pool: &PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     tenant_id: &TenantId,
     now: DateTime<Utc>,
     opts: &ConsolidationOptions,
@@ -410,7 +403,7 @@ pub async fn expire_idle_facts(
           AND ABS(confidence - $2) <= $3
           AND EXTRACT(EPOCH FROM ($4::timestamptz - last_accessed_at))
               >= ($5::double precision * 86400.0)
-        ORDER BY uid
+        ORDER BY contact_id NULLS FIRST, uid
         "#,
     )
     .bind(tenant_id.0)
@@ -431,13 +424,21 @@ pub async fn expire_idle_facts(
     for candidate in candidates {
         let uid: Uuid = candidate.try_get("uid")?;
         let contact_id: Option<Uuid> = candidate.try_get("contact_id")?;
+        // Hold the canonical tenant-then-subject advisory lock across the graph
+        // transaction. Hold-first therefore makes expiry wait and skip, while
+        // expiry-first completes before hold placement can commit.
+        let Some(guard) =
+            moa_memory_pii::legal_hold::begin_retention_guard(pool, *tenant_id, contact_id).await?
+        else {
+            continue;
+        };
         let scope = match contact_id {
             Some(contact_id) => RlsContext::contact(*tenant_id, ContactId(contact_id)),
             None => RlsContext::tenant(*tenant_id),
         };
         let store = stores
             .entry(contact_id)
-            .or_insert_with(|| scoped_graph_for(pool, scope));
+            .or_insert_with(|| scoped_graph_for(pool, scope, kms.clone()));
         let closed = store
             .expire_node(NodeExpiryIntent {
                 uid,
@@ -448,6 +449,7 @@ pub async fn expire_idle_facts(
                 actor_kind: CONSOLIDATION_ACTOR_KIND.to_string(),
             })
             .await?;
+        guard.finish().await?;
         if closed {
             expired_idle += 1;
         }
@@ -459,11 +461,12 @@ pub async fn expire_idle_facts(
 /// Supersedes older active contradictory facts using a deterministic newest-wins policy.
 pub async fn sweep_contradictions(
     pool: &PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     tenant_id: &TenantId,
     now: DateTime<Utc>,
 ) -> Result<SweepStats> {
     let facts = active_fact_rows(pool, tenant_id).await?;
-    Ok(sweep_contradiction_rows(pool, &facts, now).await?.0)
+    Ok(sweep_contradiction_rows(pool, &kms, &facts, now).await?.0)
 }
 
 /// Sweeps contradictory facts from a preloaded active-fact snapshot.
@@ -472,6 +475,7 @@ pub async fn sweep_contradictions(
 /// sweep, so callers sharing the snapshot can drop those rows from later passes.
 async fn sweep_contradiction_rows(
     pool: &PgPool,
+    kms: &Arc<dyn KeyManagementProvider>,
     facts: &[LifecycleNodeRow],
     now: DateTime<Utc>,
 ) -> Result<(SweepStats, BTreeSet<Uuid>)> {
@@ -481,7 +485,7 @@ async fn sweep_contradiction_rows(
     for group in contradiction_groups(facts) {
         // Every row in a contradiction group shares the same `(tenant, contact, scope)`
         // ownership, so the scoped store is built once per group.
-        let store = scoped_graph_for(pool, group[0].scope_context());
+        let store = scoped_graph_for(pool, group[0].scope_context(), kms.clone());
         let keeper = &group[0];
         for old in group.iter().skip(1) {
             let valid_to = if keeper.valid_from > old.valid_from {
@@ -506,6 +510,7 @@ async fn sweep_contradiction_rows(
 /// Backfills missing entity embeddings and promotes edge alias mentions to entity properties.
 pub async fn backfill_entities(
     pool: &PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     tenant_id: &TenantId,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
 ) -> Result<BackfillStats> {
@@ -528,7 +533,7 @@ pub async fn backfill_entities(
                 .collect::<Vec<_>>();
             let vectors = embedder.embed(&inputs).await?;
             for (entity, vector) in missing.into_iter().zip(vectors) {
-                scoped_graph_cached(&mut stores, pool, entity)
+                scoped_graph_cached(&mut stores, pool, kms.clone(), entity)
                     .upsert_node_embedding(NodeEmbeddingIntent {
                         uid: entity.uid,
                         embedding: vector,
@@ -555,6 +560,7 @@ pub async fn backfill_entities(
         let promoted = promote_aliases_for_entity(
             &mut stores,
             pool,
+            kms.clone(),
             entity,
             aliases_by_entity.remove(&entity.uid).unwrap_or_default(),
         )
@@ -828,21 +834,18 @@ pub fn decay_target_confidence(
 fn decay_target(
     fact: &LifecycleNodeRow,
     current: f64,
+    base_confidence: Option<f64>,
     now: DateTime<Utc>,
     opts: &ConsolidationOptions,
 ) -> Option<f64> {
-    let base = fact
-        .properties
-        .as_ref()
-        .and_then(|value| value.get("base_confidence"))
-        .and_then(Value::as_f64)
-        .unwrap_or(current);
+    let base = base_confidence.unwrap_or(current);
     decay_target_confidence(base, fact.last_accessed_at, now, opts)
 }
 
 async fn promote_aliases_for_entity(
     stores: &mut BTreeMap<Option<Uuid>, PostgresGraphStore>,
     pool: &PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     entity: &LifecycleNodeRow,
     aliases: BTreeSet<String>,
 ) -> Result<u64> {
@@ -871,9 +874,10 @@ async fn promote_aliases_for_entity(
         "aliases".to_string(),
         Value::Array(existing.into_iter().map(Value::String).collect()),
     );
-    scoped_graph_cached(stores, pool, entity)
-        .update_node_properties(NodePropertyUpdateIntent {
+    scoped_graph_cached(stores, pool, kms, entity)
+        .update_node_content(NodeContentUpdateIntent {
             uid: entity.uid,
+            name: entity.name.clone(),
             properties: Value::Object(properties),
             confidence: None,
             actor_id: CONSOLIDATION_ACTOR.to_string(),
@@ -981,6 +985,9 @@ async fn active_rows(
             WHERE node.tenant_id = $1
               AND node.label = $2
               AND node.valid_to IS NULL
+              -- Content-dependent maintenance must not interpret the fixed
+              -- sealed-content projection as plaintext node content.
+              AND node.pii_class NOT IN ('phi', 'restricted')
               AND ($3::timestamptz IS NULL OR (node.valid_from, node.uid) > ($3, $4::uuid))
             ORDER BY node.valid_from ASC, node.uid ASC
             LIMIT $5
@@ -1029,7 +1036,7 @@ fn lifecycle_row_from_sql(
         scope: row.try_get("scope")?,
         name: row.try_get("name")?,
         pii_class: pii_class
-            .parse::<PiiClass>()
+            .parse::<SensitivityClass>()
             .map_err(|error| Error::InvalidRow(error.to_string()))?,
         confidence: row.try_get("confidence")?,
         valid_from: row.try_get("valid_from")?,
@@ -1041,13 +1048,18 @@ fn lifecycle_row_from_sql(
     })
 }
 
-fn scoped_graph_for(pool: &PgPool, scope: RlsContext) -> PostgresGraphStore {
+fn scoped_graph_for(
+    pool: &PgPool,
+    scope: RlsContext,
+    kms: Arc<dyn KeyManagementProvider>,
+) -> PostgresGraphStore {
     let vector_backend = VectorStoreFactory::default().transactional_graph_backend(
         pool.clone(),
         scope.clone(),
         false,
     );
-    PostgresGraphStore::scoped(pool.clone(), scope).with_vector_store(vector_backend.vector_store())
+    PostgresGraphStore::scoped(pool.clone(), scope, kms)
+        .with_vector_store(vector_backend.vector_store())
 }
 
 /// Returns a scoped graph store for `row`, building and caching one store per
@@ -1056,11 +1068,12 @@ fn scoped_graph_for(pool: &PgPool, scope: RlsContext) -> PostgresGraphStore {
 fn scoped_graph_cached<'a>(
     stores: &'a mut BTreeMap<Option<Uuid>, PostgresGraphStore>,
     pool: &PgPool,
+    kms: Arc<dyn KeyManagementProvider>,
     row: &LifecycleNodeRow,
 ) -> &'a PostgresGraphStore {
     stores
         .entry(row.contact_id)
-        .or_insert_with(|| scoped_graph_for(pool, row.scope_context()))
+        .or_insert_with(|| scoped_graph_for(pool, row.scope_context(), kms))
 }
 
 fn normalized_entity_name(entity: &LifecycleNodeRow) -> String {
@@ -1081,7 +1094,7 @@ struct LifecycleNodeRow {
     contact_id: Option<Uuid>,
     scope: String,
     name: String,
-    pii_class: PiiClass,
+    pii_class: SensitivityClass,
     confidence: Option<f64>,
     valid_from: DateTime<Utc>,
     valid_to: Option<DateTime<Utc>>,
@@ -1236,13 +1249,9 @@ mod tests {
         let mut row = scoped_fact("a", Uuid::from_u128(0x100), None, "tenant", "h", -240);
         row.confidence = Some(0.8);
 
-        let first = decay_target(&row, 0.8, now, &opts).expect("target for idle fact");
-        row.properties
-            .as_mut()
-            .and_then(Value::as_object_mut)
-            .expect("properties object")
-            .insert("base_confidence".to_string(), json!(0.8));
-        let second = decay_target(&row, first, now, &opts).expect("target stays computable");
+        let first = decay_target(&row, 0.8, None, now, &opts).expect("target for idle fact");
+        let second =
+            decay_target(&row, first, Some(0.8), now, &opts).expect("target stays computable");
 
         assert!((first - second).abs() <= EPSILON);
         assert!(first < 0.8);
@@ -1261,7 +1270,7 @@ mod tests {
         let mut row = scoped_fact("a", Uuid::from_u128(0x100), None, "tenant", "h", -720);
         row.confidence = Some(0.5);
 
-        let target = decay_target(&row, 0.5, now, &opts).expect("target for idle fact");
+        let target = decay_target(&row, 0.5, None, now, &opts).expect("target for idle fact");
 
         assert_eq!(target, 0.25);
     }
@@ -1478,7 +1487,7 @@ mod tests {
             contact_id: spec.contact_id,
             scope: spec.scope.to_string(),
             name: spec.subject.to_string(),
-            pii_class: PiiClass::None,
+            pii_class: SensitivityClass::None,
             confidence: Some(0.9),
             valid_from: base + Duration::days(spec.day_offset),
             valid_to: None,

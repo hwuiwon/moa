@@ -11,6 +11,7 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::{any, get, patch, post};
 use chrono::{DateTime, Utc};
+use moa_auth_providers::oauth_access_token::AuthenticatedPrincipal;
 use moa_authz::{AuthzCheckError, FgaClient, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{AuthProvider, Credential, Identity};
@@ -44,6 +45,7 @@ pub(crate) mod dashboard;
 mod knowledge;
 pub(crate) mod lineage;
 mod memory;
+mod oauth;
 mod session;
 mod session_stream;
 mod tenant_accounts;
@@ -68,6 +70,10 @@ pub struct AppState {
     pub config: Arc<MoaConfig>,
     /// Credential resolver used for incoming requests.
     pub auth: Arc<dyn AuthProvider>,
+    /// Cached first-party OAuth authorization server.
+    pub oauth_server: Arc<moa_auth_providers::OAuthServer>,
+    /// One-pass resolver for first-party OAuth access tokens.
+    pub oauth_access_tokens: Arc<moa_auth_providers::OAuthAccessTokenProvider>,
     /// OpenFGA client used for direct edge authorization checks.
     pub fga: Option<Arc<FgaClient>>,
     /// Shared secret used to verify Auth0 connection-linked webhooks.
@@ -160,6 +166,25 @@ pub(crate) fn base_router(state: AppState) -> Router {
             post(auth_accounts::set_user_password),
         )
         .route("/v1/whoami", get(whoami::handle))
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth::protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth::protected_resource_metadata),
+        )
+        .route(
+            "/oauth/authorize",
+            get(oauth::authorize).post(oauth::authorize_decision),
+        )
+        .route("/oauth/token", post(oauth::token))
+        .route("/oauth/introspect", post(oauth::introspect))
+        .route("/oauth/revoke", post(oauth::revoke))
         .route("/v1/analytics/catalog", get(analytics::handle_catalog))
         .route("/v1/analytics/query", post(analytics::handle_query))
         .route("/v1/audit/verify", post(audit::handle_verify))
@@ -258,10 +283,15 @@ async fn handle_proxy(
 ) -> axum::response::Response {
     let span = tracing::Span::current();
     adopt_client_trace_parent(&span, &headers);
-    let identity = match authenticate_edge_request(&state, &headers, &span).await {
-        Ok(identity) => identity,
+    let principal = match authenticate_edge_request(&state, &headers, &span).await {
+        Ok(principal) => principal,
         Err(response) => return response,
     };
+    if principal.is_oauth() {
+        span.record("http.status_code", 401_i64);
+        return (StatusCode::UNAUTHORIZED, "OAuth bearer tokens are MCP-only").into_response();
+    }
+    let identity = principal.identity;
 
     let (method, path, body) =
         match translate_public_route(&method, &uri, &body, identity.tenant_id) {
@@ -301,7 +331,7 @@ pub(super) async fn authenticate_edge_request(
     state: &AppState,
     headers: &HeaderMap,
     span: &tracing::Span,
-) -> Result<Identity, Response> {
+) -> Result<AuthenticatedPrincipal, Response> {
     let credential = match credential_for_request(state.auth.as_ref(), headers) {
         Some(credential) => credential,
         None => {
@@ -318,38 +348,61 @@ pub(super) async fn authenticate_edge_request(
         }
     };
 
-    let identity = match state.auth.authenticate(&credential).await {
-        Ok(identity) => identity,
-        Err(error) => {
-            span.record(
-                "moa.edge.auth.provider",
-                tracing::field::display(state.auth.name()),
-            );
-            span.record("moa.edge.auth.result", "rejected");
-            moa_ocsf::spawn_authn_failure(
-                Uuid::nil(),
-                None,
-                state.auth.name(),
-                source_ip(headers),
-                &error.to_string(),
-            );
-            tracing::info!(error = %error, provider = state.auth.name(), "authentication rejected");
-            span.record("http.status_code", 401_i64);
-            return Err((StatusCode::UNAUTHORIZED, "invalid credential").into_response());
+    let (principal, provider_name) = match credential {
+        Credential::OAuthAccessToken(token) => {
+            match state.oauth_access_tokens.authenticate(&token).await {
+                Ok(principal) => (principal, state.oauth_access_tokens.name()),
+                Err(error) => {
+                    span.record("moa.edge.auth.provider", state.oauth_access_tokens.name());
+                    span.record("moa.edge.auth.result", "rejected");
+                    moa_ocsf::spawn_authn_failure(
+                        Uuid::nil(),
+                        None,
+                        state.oauth_access_tokens.name(),
+                        source_ip(headers),
+                        &error.to_string(),
+                    );
+                    span.record("http.status_code", 401_i64);
+                    return Err((StatusCode::UNAUTHORIZED, "invalid credential").into_response());
+                }
+            }
         }
+        credential => match state.auth.authenticate(&credential).await {
+            Ok(identity) => (
+                AuthenticatedPrincipal::from_identity(identity),
+                state.auth.name(),
+            ),
+            Err(error) => {
+                span.record(
+                    "moa.edge.auth.provider",
+                    tracing::field::display(state.auth.name()),
+                );
+                span.record("moa.edge.auth.result", "rejected");
+                moa_ocsf::spawn_authn_failure(
+                    Uuid::nil(),
+                    None,
+                    state.auth.name(),
+                    source_ip(headers),
+                    &error.to_string(),
+                );
+                tracing::info!(error = %error, provider = state.auth.name(), "authentication rejected");
+                span.record("http.status_code", 401_i64);
+                return Err((StatusCode::UNAUTHORIZED, "invalid credential").into_response());
+            }
+        },
     };
     span.record(
         "moa.edge.auth.provider",
-        tracing::field::display(state.auth.name()),
+        tracing::field::display(provider_name),
     );
     span.record("moa.edge.auth.result", "accepted");
     moa_ocsf::spawn_authn_success(
-        identity.tenant_id.0,
-        &identity,
-        state.auth.name(),
+        principal.identity.tenant_id.0,
+        &principal.identity,
+        provider_name,
         source_ip(headers),
     );
-    Ok(identity)
+    Ok(principal)
 }
 
 pub(super) async fn authenticate_direct_request(
@@ -359,7 +412,16 @@ pub(super) async fn authenticate_direct_request(
 ) -> Result<Identity, Response> {
     let span = tracing::Span::current();
     span.record("http.route", route);
-    authenticate_edge_request(state, headers, &span).await
+    if authorization_bearer_token(headers)
+        .as_deref()
+        .is_some_and(moa_auth_providers::looks_like_oauth_access_token)
+    {
+        span.record("http.status_code", 401_i64);
+        return Err((StatusCode::UNAUTHORIZED, "OAuth bearer tokens are MCP-only").into_response());
+    }
+    authenticate_edge_request(state, headers, &span)
+        .await
+        .map(|principal| principal.identity)
 }
 
 /// Adopts a client-supplied W3C trace context as the parent of the edge request
@@ -1102,6 +1164,12 @@ fn credential_from_bearer_token(token: String) -> Credential {
     if moa_auth_providers::looks_like_user_session_token(&token) {
         return Credential::UserSessionToken(token);
     }
+    // MOA-issued OAuth access tokens share the `moa_` namespace with API keys, so
+    // this more specific prefix must be checked first to route them to the opaque
+    // OAuth resolver rather than the CRC-validated API-key path.
+    if moa_auth_providers::looks_like_oauth_access_token(&token) {
+        return Credential::OAuthAccessToken(token);
+    }
     if token.starts_with("moa_") {
         return Credential::ApiKey(token);
     }
@@ -1659,6 +1727,26 @@ mod tests {
         assert_eq!(
             credential_for_request(&StrictAuth, &headers),
             Some(Credential::ApiKey("moa_dev_example".to_string()))
+        );
+    }
+
+    #[test]
+    fn oauth_access_token_bearer_routes_to_opaque_oauth_credential_not_api_key() {
+        // Pins: a moa_oauth_at_ bearer dispatches to the opaque OAuth resolver, not
+        // the API-key path it shares the moa_ namespace with, nor the JWT path.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            "Bearer moa_oauth_at_examplevalue"
+                .parse()
+                .expect("test auth header should parse"),
+        );
+
+        assert_eq!(
+            credential_for_request(&StrictAuth, &headers),
+            Some(Credential::OAuthAccessToken(
+                "moa_oauth_at_examplevalue".to_string()
+            ))
         );
     }
 
