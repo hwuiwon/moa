@@ -9,13 +9,6 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_retrieval::planning::Strategy;
-use moa_retrieval::retrieval::{
-    GraphCandidateCounts, GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy,
-    GraphSeedDiagnostics, GraphSeedSource, HybridRetriever, LexicalBackend, RetrievalHit,
-    RetrievalOutput, RetrievalRequest, SourceObjectFeatureContribution,
-    SourceObjectFeatureContributions,
-};
 use moa_config::MoaConfig;
 use moa_core::traits::EmbeddingProvider;
 use moa_core::types::security::SensitivityClass;
@@ -44,6 +37,13 @@ use moa_memory_vector::{
     VectorPartitionPromotion, VectorStore, VectorStoreFactory, VectorSyncReport,
 };
 use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
+use moa_retrieval::planning::Strategy;
+use moa_retrieval::retrieval::{
+    GraphCandidateCounts, GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy,
+    GraphSeedDiagnostics, GraphSeedSource, HybridRetriever, LexicalBackend, RetrievalHit,
+    RetrievalOutput, RetrievalRequest, SourceObjectFeatureContribution,
+    SourceObjectFeatureContributions,
+};
 use pgvector::HalfVector;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -2440,8 +2440,8 @@ fn elapsed_ms(started: Instant) -> u128 {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_retrieval::retrieval::{KnowledgeChunkHydration, LegSources, SourceTier};
     use moa_memory_graph::NodeIndexRow;
+    use moa_retrieval::retrieval::{KnowledgeChunkHydration, LegSources, SourceTier};
     use serde_json::Value;
 
     use super::*;
@@ -2582,28 +2582,11 @@ mod tests {
         // movements instead of burying them in per-query retrieval diagnostics.
         let object_uid = Uuid::from_u128(42);
         let mut diagnostics = GraphRetrievalDiagnostics::new(GraphRetrievalPolicy::SourceGraph);
-        diagnostics.source_object_ranking = moa_retrieval::retrieval::SourceObjectRankingDiagnostics {
-            enabled: true,
-            ranked_source_object_count: 2,
-            feature_totals: SourceObjectFeatureContributions {
-                max_fused_score: 1.0,
-                lexical_title: 0.05,
-                same_source_object_repeat: 0.02,
-                exact_title_match: 0.04,
-                typed_graph_evidence: 0.03,
-                adjacent_chunk_support: 0.01,
-                structural_only_penalty: -0.04,
-            },
-            top_source_objects: vec![SourceObjectFeatureContribution {
-                object_uid,
-                source_uri: Some("https://support.example.invalid/a".to_string()),
-                source_title: Some("Custom domains".to_string()),
-                chunk_count: 2,
-                rank_before_source_graph: Some(3),
-                rank_after_source_graph: 1,
-                rank_delta_after_minus_before: Some(-2),
-                score: 1.11,
-                features: SourceObjectFeatureContributions {
+        diagnostics.source_object_ranking =
+            moa_retrieval::retrieval::SourceObjectRankingDiagnostics {
+                enabled: true,
+                ranked_source_object_count: 2,
+                feature_totals: SourceObjectFeatureContributions {
                     max_fused_score: 1.0,
                     lexical_title: 0.05,
                     same_source_object_repeat: 0.02,
@@ -2612,10 +2595,28 @@ mod tests {
                     adjacent_chunk_support: 0.01,
                     structural_only_penalty: -0.04,
                 },
-                typed_graph_evidence_count: 1,
-                structural_only_graph_count: 1,
-            }],
-        };
+                top_source_objects: vec![SourceObjectFeatureContribution {
+                    object_uid,
+                    source_uri: Some("https://support.example.invalid/a".to_string()),
+                    source_title: Some("Custom domains".to_string()),
+                    chunk_count: 2,
+                    rank_before_source_graph: Some(3),
+                    rank_after_source_graph: 1,
+                    rank_delta_after_minus_before: Some(-2),
+                    score: 1.11,
+                    features: SourceObjectFeatureContributions {
+                        max_fused_score: 1.0,
+                        lexical_title: 0.05,
+                        same_source_object_repeat: 0.02,
+                        exact_title_match: 0.04,
+                        typed_graph_evidence: 0.03,
+                        adjacent_chunk_support: 0.01,
+                        structural_only_penalty: -0.04,
+                    },
+                    typed_graph_evidence_count: 1,
+                    structural_only_graph_count: 1,
+                }],
+            };
         let measurements = vec![QueryMeasurement {
             question: "how do I connect a custom domain?".to_string(),
             gold_article_ids: vec!["a".to_string()],

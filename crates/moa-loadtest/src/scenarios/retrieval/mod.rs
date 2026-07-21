@@ -19,10 +19,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use futures_util::future::try_join_all;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
-use moa_retrieval::{
-    planning::{PlannedQuery, Strategy},
-    retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest},
-};
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
@@ -34,6 +30,10 @@ use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStor
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_providers::CohereV4Embedder;
+use moa_retrieval::{
+    planning::{PlannedQuery, Strategy},
+    retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest},
+};
 use moa_session::{
     PostgresSessionStore,
     testing::{cleanup_test_schema, provision_cloned_database_from},

@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use moa_retrieval::retrieval::{GraphCandidateCounts, GraphRetrievalPolicy};
 use moa_memory_lifecycle::ConsolidationOutcome;
+use moa_retrieval::retrieval::{GraphCandidateCounts, GraphRetrievalPolicy};
 use serde::{Deserialize, Serialize};
 
 use super::rewrite::QueryRewriteSummary;

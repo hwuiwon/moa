@@ -4,11 +4,11 @@ use super::*;
 use crate::memory_eval::{
     CorpusProfile, TranscriptStyle, generate_memory_eval_corpus, write_memory_eval_corpus,
 };
-use moa_retrieval::planning::Strategy;
 use moa_core::{
     types::identifiers::SessionId, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId,
 };
+use moa_retrieval::planning::Strategy;
 
 #[derive(Debug)]
 struct PrDeterministicEmbedder;

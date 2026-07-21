@@ -11,10 +11,6 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
-use moa_retrieval::{
-    planning::{NerExtractor, PlanningCtx, QueryPlanner, QueryRetrievalCtx, retrieve_for_query},
-    retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalHit},
-};
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
@@ -33,6 +29,10 @@ use moa_memory_ingest::{
 use moa_memory_pii::{Error as PiiError, PiiClassifier, PiiResult, PiiSpan};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
+use moa_retrieval::{
+    planning::{NerExtractor, PlanningCtx, QueryPlanner, QueryRetrievalCtx, retrieve_for_query},
+    retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalHit},
+};
 use moa_session::testing;
 use serde::Deserialize;
 use sqlx::PgPool;

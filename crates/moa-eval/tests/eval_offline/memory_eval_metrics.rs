@@ -321,12 +321,12 @@ fn memory_eval_report_serializes_probe_graph_harm_path() -> TestResult {
     // Pins: memory eval reports explain graph harm per probe with seed and path identity.
     use std::collections::BTreeMap;
 
+    use moa_eval::memory_eval::{
+        GraphImpact, MemoryGraphDiagnostics, ProbeGraphComparison, ProbeGraphPathDiagnostic,
+    };
     use moa_retrieval::retrieval::{
         GraphCandidateCounts, GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy,
         GraphSeedDiagnostics, GraphSeedSource,
-    };
-    use moa_eval::memory_eval::{
-        GraphImpact, MemoryGraphDiagnostics, ProbeGraphComparison, ProbeGraphPathDiagnostic,
     };
 
     let seed_uid = Uuid::from_u128(0x6_0000);

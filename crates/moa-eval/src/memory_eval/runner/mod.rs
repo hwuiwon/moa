@@ -8,14 +8,6 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_retrieval::planning::{
-    PlannedQuery, PlanningCtx, QueryPlanner, parse_temporal,
-    should_skip_graph_expansion_for_direct_lookup,
-};
-use moa_retrieval::retrieval::{
-    EvidenceWindowPolicy, GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy,
-    HybridRetriever, RankingConfig, RetrievalHit, RetrievalOutput, RetrievalRequest,
-};
 use moa_config::MemoryDigestConfig;
 use moa_config::MemoryRankingConfig;
 use moa_config::MoaConfig;
@@ -42,6 +34,14 @@ use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorStore};
 use moa_providers::{
     COHERE_DEFAULT_RERANK_MODEL, ConfiguredReranker, EmbedderConstructionRole, NoopReranker,
     RerankHit, Reranker, build_embedder_from_config, build_reranker_from_config,
+};
+use moa_retrieval::planning::{
+    PlannedQuery, PlanningCtx, QueryPlanner, parse_temporal,
+    should_skip_graph_expansion_for_direct_lookup,
+};
+use moa_retrieval::retrieval::{
+    EvidenceWindowPolicy, GraphPathTrace, GraphRetrievalDiagnostics, GraphRetrievalPolicy,
+    HybridRetriever, RankingConfig, RetrievalHit, RetrievalOutput, RetrievalRequest,
 };
 use moa_session::PostgresSessionStore;
 use serde::{Deserialize, Serialize};

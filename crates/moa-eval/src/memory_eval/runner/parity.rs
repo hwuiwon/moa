@@ -13,7 +13,6 @@ use moa_brain::pipeline::MemoryEvidenceRequest;
 use moa_brain::pipeline::memory::{
     GraphMemoryRetriever, ScopedRetrievalRuntime, ScopedRetrievalRuntimeFactory,
 };
-use moa_retrieval::retrieval::CachedHybridRetriever;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::channel::Channel;
 use moa_core::types::contact::{ContactRef, ContactVerificationState};
@@ -21,6 +20,7 @@ use moa_core::types::context::{TURN_ID_METADATA_KEY, WorkingContext};
 use moa_core::types::identifiers::{ModelId, SessionId};
 use moa_core::types::model::{ModelCapabilities, TokenPricing, ToolCallFormat};
 use moa_core::types::session::SessionMeta;
+use moa_retrieval::retrieval::CachedHybridRetriever;
 
 /// Fixed evidence token budget used for parity-mode packing measurement.
 ///

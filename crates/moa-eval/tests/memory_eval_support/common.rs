@@ -8,7 +8,6 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
-use moa_retrieval::retrieval::{LegSources, RetrievalHit, SourceTier};
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
     types::identifiers::SessionId, types::identifiers::StoragePartitionId,
@@ -22,6 +21,7 @@ use moa_eval::memory_eval::{
     aggregate_retrieval_eval_from_counts, candidates_from_retrieval_hits,
 };
 use moa_memory_graph::{NodeIndexRow, NodeLabel};
+use moa_retrieval::retrieval::{LegSources, RetrievalHit, SourceTier};
 use uuid::Uuid;
 
 pub(crate) fn utc(value: &str) -> DateTime<Utc> {
