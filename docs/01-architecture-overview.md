@@ -470,7 +470,7 @@ policy.
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
 | Runtime cache | Redis or memory | optional TTL cache/coordination for pacing and transient references; memory is per-process and non-authoritative |
 | Optional checkpoints | Neon | branch manager for database checkpoints |
-| Security events | Postgres and S3 | OCSF v1.3 events in `security_events`, shipped to tenant audit buckets |
+| Security events | Postgres | Signed OCSF v1.3 events in `security_events` |
 
 The central migration inventory currently contains 119 `CREATE TABLE`
 statements covering 111 logical top-level table families. Every family has one
@@ -535,10 +535,9 @@ behavior boundary; there are no procedural macros or implicit handler guards.
 
 ### Audit
 
-OCSF v1.3 security events are written synchronously to a Postgres
-`security_events` table. The existing `services/audit-shipper` service ships
-those events to S3 with per-tenant bucket routing and Object Lock compliance
-mode. Operational setup is documented in
+OCSF v1.3 security events are signed per tenant and written to the Postgres
+`security_events` table by a bounded, non-blocking background sink. Operational
+setup is documented in
 [`docs/operations/ocsf-audit.md`](operations/ocsf-audit.md).
 
 ## Eval, Experiments, And Insights

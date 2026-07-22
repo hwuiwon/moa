@@ -12,7 +12,7 @@ fn live_service_url() -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires docker compose up -d moa-pii-service and model weights"]
+#[ignore = "requires docker compose --profile pii up -d moa-pii-service and model weights"]
 async fn live_sidecar_classifies_private_and_clean_text() {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))

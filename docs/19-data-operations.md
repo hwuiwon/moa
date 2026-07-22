@@ -341,37 +341,21 @@ across export-state rows. Existing timestamp-backed datasets continue to use
 
 ## Audit Log Retention
 
-MOA keeps two audit trails for graph memory:
+MOA keeps two local audit trails for graph memory:
 
 - `moa.graph_changelog`: queryable in-database changelog for memory mutations
   and redacted erase markers;
-- PostgreSQL pgaudit logs: immutable operational audit stream shipped to S3
-  Object Lock.
+- PostgreSQL pgaudit logs: operational database audit records retained in the
+  `moa-pg-audit` volume for local development.
 
-The audit bucket is created with Object Lock enabled and default retention set
-to 2190 days. Uploaded objects use `ObjectLockMode=COMPLIANCE` and a
-`RetainUntilDate` 2190 days after upload.
+Application security events are separately signed per tenant and stored in the
+Postgres `security_events` table. MOA does not currently run a separate audit
+export worker; remote archival is an operator concern outside the runtime.
 
-Start Postgres and the shipper locally:
-
-```bash
-docker compose up -d postgres moa-audit-shipper
-```
-
-The shipper scans stable PostgreSQL `*.log` and `*.csv` files, gzip-compresses
-them, and uploads to:
-
-```text
-s3://moa-audit-{env}/tenant=unknown/year=YYYY/month=MM/<log-file>.gz
-```
-
-It records uploaded file versions in its state volume and skips the newest log
-file so the active collector segment is not uploaded before rotation completes.
-
-Create a bucket once per environment:
+Start Postgres locally:
 
 ```bash
-ENV=dev REGION=us-east-1 ops/audit/bootstrap.sh
+docker compose up -d postgres
 ```
 
 Verify pgaudit emitted a relation-level audit line:
@@ -381,16 +365,8 @@ docker compose exec postgres sh -lc \
   'grep -R "AUDIT:.*moa.node_index" /var/log/postgresql || true'
 ```
 
-Verify S3 retention:
-
-```bash
-aws s3api get-object-retention \
-  --bucket moa-audit-dev \
-  --key tenant=unknown/year=YYYY/month=MM/<log-file>.gz
-```
-
-For breach response, preserve the audit bucket, enable legal hold on relevant
-object versions, export matching audit rows, compare pgaudit timestamps with
+For breach response, preserve the database and `moa-pg-audit` volume, export
+matching audit rows, compare pgaudit timestamps with
 `moa.graph_changelog.created_at`, and do not copy raw logs into chat tools or
 tickets.
 
@@ -404,9 +380,14 @@ not link Python, transformers, or torch.
 Run locally:
 
 ```bash
-docker compose up -d moa-pii-service
+docker compose --profile pii up -d moa-pii-service
+export MOA_PII_SERVICE_URL=http://127.0.0.1:10050
 curl -s http://localhost:10050/healthz
 ```
+
+For a Compose-hosted orchestrator, set
+`MOA_PII_SERVICE_URL=http://moa-pii-service:8080` when starting or recreating
+the orchestrator.
 
 Classify text:
 

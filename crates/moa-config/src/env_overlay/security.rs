@@ -203,6 +203,21 @@ mod tests {
     }
 
     #[test]
+    fn empty_pii_service_url_leaves_sidecar_disabled() {
+        // Pins: Compose may pass an empty optional PII URL when its profile is
+        // disabled; startup must preserve the in-process classifier fallback.
+        let overlay = EnvOverlay::from_iter(env_pairs([("MOA_PII_SERVICE_URL", "")]))
+            .expect("an empty optional PII URL should parse as unset");
+        let mut config = MoaConfig::default();
+
+        overlay
+            .apply_to(&mut config)
+            .expect("an unset PII sidecar should preserve the default config");
+
+        assert_eq!(config.memory.pii_service_url, None);
+    }
+
+    #[test]
     fn partial_openfga_overlay_reports_missing_env_name() {
         // Pins: OpenFGA overlay cannot synthesize a partial nested config.
         let overlay = EnvOverlay::from_iter(env_pairs([(

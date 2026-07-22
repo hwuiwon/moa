@@ -189,7 +189,7 @@ Restate state should be small, replay-safe, and useful only for orchestration.
 | Tool result and assistant output | Postgres event log |
 | Graph memory, vectors, changelog | Postgres |
 | Learning log | Postgres |
-| Security events | Postgres and audit shipper |
+| Security events | Postgres |
 | Hand leases and sandbox binding | Postgres `moa.hand_leases`, keyed `(session_id, worker_id, provider)` |
 | Runtime cache/pacing/message refs | Redis when configured; process-local memory only for fallback |
 | Handler journal | Restate |
@@ -463,7 +463,7 @@ approval latency, tool execution, and sandbox fleet health.
 
 Local development uses the same Restate-backed orchestrator as cloud mode.
 Bring the compose stack up only when the task needs Postgres, Restate, OpenFGA,
-edge, PII, audit shipper, or load-test services. Stop it with
+edge, opt-in PII, or load-test services. Stop it with
 `docker compose down` when finished unless the task explicitly requires keeping
 services up.
 

@@ -6,10 +6,10 @@ codegraph:
 dev:
 ifeq ($(MOA_SKIP_FGA),1)
 	@echo ">> MOA_SKIP_FGA=1 set; bringing up stack WITHOUT OpenFGA"
-	docker compose up -d --build postgres restate moa-orchestrator restate-register moa-edge moa-pii-service moa-audit-shipper
+	docker compose up -d --build postgres restate moa-orchestrator restate-register moa-edge
 else
 	@echo ">> bringing up full stack with OpenFGA (default)"
-	docker compose up -d --build postgres restate openfga moa-pii-service moa-audit-shipper
+	docker compose up -d --build postgres restate openfga
 	@$(MAKE) fga-bootstrap
 	@set -a; . ./.env.fga; set +a; docker compose up -d --build moa-orchestrator restate-register moa-edge
 endif
@@ -103,7 +103,7 @@ loadtest-mock:
 	@echo "starting loadtest dependencies with OpenFGA and safe RustFS host ports..."
 	@MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
 	  MOA_RUSTFS_CONSOLE_PORT=$${MOA_RUSTFS_CONSOLE_PORT:-10091} \
-	  docker compose up -d --build postgres restate openfga valkey rustfs rustfs-init moa-pii-service moa-audit-shipper
+	  docker compose up -d --build postgres restate openfga valkey rustfs rustfs-init
 	@docker compose run --rm restate-rules-bootstrap >/dev/null
 	@$(MAKE) fga-bootstrap
 	@echo "restarting orchestrator with scripted providers..."
@@ -137,7 +137,7 @@ loadtest-capacity:
 	@echo "starting capacity dependencies with the production Restate rule..."
 	@MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
 	  MOA_RUSTFS_CONSOLE_PORT=$${MOA_RUSTFS_CONSOLE_PORT:-10091} \
-	  docker compose up -d --build postgres restate openfga valkey rustfs rustfs-init moa-pii-service moa-audit-shipper
+	  docker compose up -d --build postgres restate openfga valkey rustfs rustfs-init
 	@docker compose run --rm restate-rules-bootstrap >/dev/null
 	@$(MAKE) fga-bootstrap
 	@echo "restarting orchestrator with realistic scripted providers..."

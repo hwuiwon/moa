@@ -110,7 +110,7 @@ git diff --check
 ## Local Docker Compose Stack
 
 Bring the MOA compose stack up only when a task needs local Postgres, Restate,
-OpenFGA, edge, PII, audit shipper, or loadtest services. Check state with
+OpenFGA, edge, opt-in PII, or loadtest services. Check state with
 `docker compose ps`. When no longer needed, stop it with `docker compose down`
 to preserve volumes. Use `docker compose down -v` or `make dev-wipe` only for an
 explicit reset.

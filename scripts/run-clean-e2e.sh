@@ -599,7 +599,7 @@ if [[ -z "$(docker compose ps -q 2>/dev/null)" ]]; then
   STARTED_COMPOSE=1
 fi
 
-run docker compose up -d --build postgres valkey openfga moa-pii-service
+run docker compose --profile pii up -d --build postgres valkey openfga moa-pii-service
 run_phase "wait for compose Postgres" wait_for_postgres
 run_phase "wait for compose Valkey" wait_for_valkey
 run "${REPO_ROOT}/scripts/wait-for-fga.sh"

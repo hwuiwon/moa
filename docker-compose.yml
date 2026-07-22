@@ -228,6 +228,7 @@ services:
       MOA_RUNTIME_CACHE_REDIS_URL: redis://valkey:6379/0
       MOA_LOCAL_SANDBOX_DIR: /var/lib/moa/sandbox
       MOA_LOCAL_MEMORY_DIR: /var/lib/moa/memory
+      MOA_PII_SERVICE_URL: ${MOA_PII_SERVICE_URL:-}
       MOA_OBSERVABILITY_LINEAGE_JOURNAL_PATH: /var/lib/moa/lineage-journal
       MOA_LINEAGE_SINK: postgres
       MOA_CLICKHOUSE_URL: ${MOA_CLICKHOUSE_URL:-}
@@ -389,6 +390,7 @@ services:
       dockerfile: services/pii-service/Dockerfile
     image: moa/pii-service:0.1
     container_name: ${COMPOSE_PROJECT_NAME:-moa}-pii-service
+    profiles: ["pii"]
     restart: unless-stopped
     environment:
       MODEL: openai/privacy-filter
@@ -404,28 +406,6 @@ services:
       timeout: 3s
       retries: 10
       start_period: 60s
-
-  moa-audit-shipper:
-    build:
-      context: .
-      dockerfile: services/audit-shipper/Dockerfile
-    image: moa/audit-shipper:0.1
-    container_name: ${COMPOSE_PROJECT_NAME:-moa}-audit-shipper
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      AWS_REGION: us-east-1
-      BUCKET: moa-audit-dev
-      OBJECT_LOCK_DAYS: "2190"
-      LOG_DIR: /var/log/postgresql
-      LOG_GLOB: "*.log,*.csv"
-      STATE_DIR: /var/lib/moa-audit-shipper
-      POLL_INTERVAL_SECONDS: "60"
-    volumes:
-      - moa-pg-audit:/var/log/postgresql:ro
-      - moa-audit-shipper-state:/var/lib/moa-audit-shipper
 
   clickhouse:
     # Optional analytics store for high-volume lineage rows. Start with
@@ -458,7 +438,6 @@ volumes:
   moa-clickhouse-data:
   moa-pg-data:
   moa-pg-audit:
-  moa-audit-shipper-state:
   moa-pii-hf-cache:
   moa-restate-data:
   moa-rustfs-data:

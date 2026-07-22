@@ -57,7 +57,7 @@ flowchart TB
 
     subgraph Data["Data boundary"]
         PG["Postgres / Neon<br/>sessions & events · graph memory + vectors ·<br/>task segments & experiences · skill artifacts · execution runs/tasks ·<br/>learning candidates & log · lineage · analytics"]
-        Audit["moa-ocsf audit<br/>signed events → S3"]
+        Audit["moa-ocsf audit<br/>signed events → Postgres"]
     end
 
     Clients --> Edge
@@ -99,8 +99,7 @@ sequenceDiagram
     participant LLM as Model providers
     participant Tools as ToolRouter / moa-hands / MCP
     participant DB as Postgres / Neon
-    participant Audit as moa-ocsf / audit-shipper
-    participant S3 as Tenant S3 buckets
+    participant Audit as moa-ocsf
 
     Client->>Edge: Request with API key or Auth0/OIDC bearer
     Edge->>Auth: authenticate(credential)
@@ -130,7 +129,6 @@ sequenceDiagram
     end
 
     Audit->>DB: Insert signed security_events rows
-    Audit-->>S3: Ship gzipped OCSF batches asynchronously
 ```
 
 ---
@@ -251,9 +249,10 @@ moa-edge / Restate ingress
 ```
 
 Local development uses `make dev` for Postgres 17 with pgvector and pgaudit,
-OpenFGA, Restate, the PII service, and the audit shipper. Environment variables
-and service config files configure the hosted runtime. This is the fastest way to
-test the enterprise runtime without a managed cloud control plane.
+OpenFGA, and Restate. The PII classifier is an opt-in Compose profile.
+Environment variables and service config files configure the hosted runtime.
+This is the fastest way to test the enterprise runtime without a managed cloud
+control plane.
 
 ### Cloud Runtime
 
@@ -355,7 +354,7 @@ reuse.
 | Privacy | `moa-memory-pii` | PII classification before memory writes |
 | Identity | `moa-auth/providers`, optional `moa-auth/auth0`, `moa-edge` | API keys by default; disabled mode for local/isolated tests; Auth0/OIDC behind the `auth0` feature |
 | Authorization | `moa-auth/authz`, `moa-auth/authz-schema` | OpenFGA checks and transactional tuple outbox |
-| Security events | `moa-ocsf` | OCSF v1.3 events in Postgres, shipped to tenant audit buckets |
+| Security events | `moa-ocsf` | Signed OCSF v1.3 events in Postgres |
 | Lineage | `moa-lineage-*` | Hot lineage, citations, scores, OTel bridge, audit tier |
 | Orchestration | Restate | VO/workflow state and invocation journals only |
 
@@ -372,8 +371,8 @@ Default enterprise posture:
   headers for the orchestrator.
 - OpenFGA is the default authorization engine; handlers call explicit
   `require_authz` helpers.
-- OCSF security events are signed per tenant and written synchronously before
-  shipping to tenant audit buckets.
+- OCSF security events are signed per tenant and written to Postgres by a
+  bounded background sink.
 - Tools are routed through explicit schemas and policies.
 - Risky write/execute operations request approval.
 - MCP credentials are proxied; secrets do not enter LLM-generated code.

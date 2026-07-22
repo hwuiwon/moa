@@ -243,7 +243,7 @@ Lineage audit and security-event audit are separate:
 | Plane | Crate/service | Purpose |
 |---|---|---|
 | Lineage audit | `moa-lineage-audit` | Data lineage, Merkle roots, DSAR verification |
-| Security audit | `moa-ocsf` and `services/audit-shipper` | OCSF event signing and tenant audit export |
+| Security audit | `moa-ocsf` | OCSF event signing and Postgres persistence |
 
 Tool execution spans do not attach raw serialized tool input, raw tool output,
 or raw error output by default. Spans keep correlation-safe metadata instead:

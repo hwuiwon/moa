@@ -356,7 +356,8 @@ pub struct EnvOverlay {
     pub reducto_async_enabled: Option<bool>,
     /// `MOA_REDUCTO_CHUNK_MODE`.
     pub reducto_chunk_mode: Option<String>,
-    /// `MOA_PII_SERVICE_URL`.
+    /// `MOA_PII_SERVICE_URL`; empty means unset.
+    #[serde(deserialize_with = "deserialize_optional_nonempty")]
     pub pii_service_url: Option<String>,
     /// `MOA_TURBOPUFFER_API_KEY`.
     pub turbopuffer_api_key: Option<String>,
@@ -1042,7 +1043,7 @@ const ALLOWLIST_PREFIXES: &[&str] = &[
 /// fields (so a prefix would be unsafe) or that stand alone. Kept exact.
 const ALLOWLIST_EXACT: &[&str] = &[
     "MOA_CONFIG_ENV_STRICT", // this audit's own strictness switch
-    "MOA_AUDIT_BUCKET",      // audit shipper (MOA_AUDIT_ collides with overlay)
+    "MOA_AUDIT_BUCKET",      // audit bucket bootstrap (MOA_AUDIT_ collides with overlay)
     "MOA_AUDIT_OBJECT_LOCK_MODE",
     "MOA_AUDIT_RETENTION_YEARS",
     "MOA_AUTH_HEADER_TRUST",

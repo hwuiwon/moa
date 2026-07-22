@@ -104,13 +104,11 @@ owner = "moa-orchestrator"
 name = "tenant_audit_destinations"
 schema = "public"
 owner = "moa-ocsf"
-readers = ["services/audit-shipper"]
 
 [[table]]
 name = "security_events"
 schema = "public"
 owner = "moa-ocsf"
-readers = ["services/audit-shipper"]
 notes = "OCSF event storage; retrieval idempotency DDL is owned by V000345."
 
 [[table]]

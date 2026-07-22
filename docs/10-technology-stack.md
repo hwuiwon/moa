@@ -72,10 +72,11 @@ table declarations resolve to 111 owned logical families, enforced by
 | Postgres 17.6+ with pgaudit; pgvector when the pgvector backend is enabled | Session store, relational graph memory, event search, sidecar indexes, embeddings, learning tables |
 | OpenFGA v1.8 | Authorization engine. Postgres-backed. Self-hosted by default; Auth0 FGA is a future managed swap-in. |
 | Redis or Valkey | Shared runtime cache for pacing and cross-replica transient references |
-| `moa-pii-service` | Out-of-process `openai/privacy-filter` inference for memory privacy classification |
 | LLM provider | Anthropic, OpenAI, or Google Gemini |
 
 Docker is used by the dev stack and optionally by local hand providers.
+The out-of-process `moa-pii-service` classifier is optional and runs only under
+the Compose `pii` profile when `MOA_PII_SERVICE_URL` is configured.
 
 ### Required For Cloud Runtime
 
@@ -89,7 +90,7 @@ Docker is used by the dev stack and optionally by local hand providers.
 | LLM provider | Model calls and optional embeddings |
 | Hand provider | Runtime-configured local, Daytona, or E2B execution |
 | Kubernetes or equivalent | Hosting Restate and MOA services |
-| Debezium + Kafka-compatible broker | Optional graph changelog CDC for audit shipping, bridge sync, and cache invalidation |
+| Debezium + Kafka-compatible broker | Optional graph changelog CDC for audit export, bridge sync, and cache invalidation |
 
 ### Optional
 

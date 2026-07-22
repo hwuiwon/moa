@@ -2,9 +2,9 @@
 
 MOA emits OCSF v1.3 security events for authentication, authorization,
 API-key lifecycle, agent lifecycle, approval decisions, and SCIM
-provisioning/deactivation. Events are written synchronously to Postgres,
-signed with a per-tenant HMAC key, and shipped to tenant-controlled S3 buckets
-with Object Lock.
+provisioning/deactivation. A bounded background sink signs events with a
+per-tenant HMAC key and writes them to Postgres without blocking request
+handling.
 
 ## Event Volume
 
@@ -34,20 +34,6 @@ curl -X POST http://localhost:10010/Tenants/rotate_signing_key \
 Old key rows stay in `tenant_signing_keys` so historical events remain
 verifiable after rotation.
 
-## Audit Destinations
-
-Configure the per-tenant S3 destination:
-
-```sh
-curl -X POST http://localhost:10010/Tenants/set_audit_destination \
-  -H "Content-Type: application/json" \
-  --data '{"tenant_id":"<tenant_uuid>","bucket":"<customer_bucket>","region":"us-east-1","assume_role":"<role_arn>","retention_days":2190}'
-```
-
-The shipper reads `tenant_audit_destinations`, groups unshipped
-`security_events` by tenant, writes gzipped NDJSON under the configured prefix,
-and requests Object Lock COMPLIANCE retention on each object.
-
 ## Verify An Event
 
 ```sh
@@ -63,8 +49,9 @@ was tampered with or the wrong signing key was used. This is a direct
 `moa-edge` read route with tenant-admin authorization, not a Restate read
 service.
 
-## Shipper Configuration
+## Persistence And Failure Behavior
 
-`services/audit-shipper` keeps the existing PostgreSQL log shipping path and
-adds a `security_events` source when `MOA_DATABASE_URL` is set. Existing pgaudit
-shipping still uses `BUCKET`; OCSF events use the per-tenant destination table.
+The in-process sink batches inserts into `security_events`. A full queue,
+signing failure, or insert failure drops the affected event rather than failing
+the caller and increments `moa_ocsf_audit_events_dropped_total`. Alert on any
+non-zero increase because it means the Postgres audit trail is incomplete.

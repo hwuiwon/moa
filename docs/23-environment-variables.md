@@ -593,7 +593,7 @@ not trip the unknown-variable audit. They do not affect application config.
 | `MOA_MEMORY_EXTRACTION_MODEL` / `_TIMEOUT_MS` / `_MAX_FACTS_PER_CHUNK` | Memory fact-extraction overrides read directly |
 | `MOA_AUTHZ_DECISION_CACHE_TTL_MS` | Authz decision-cache TTL, read directly (see [Hardcoded tuning knobs](#hardcoded-tuning-knobs)) |
 | `MOA_AUTHZ_OPENFGA_STORE_NAME` | OpenFGA store name for bootstrap |
-| `MOA_AUDIT_BUCKET` / `MOA_AUDIT_OBJECT_LOCK_MODE` / `MOA_AUDIT_RETENTION_YEARS` | Audit shipper (object-lock WORM) config |
+| `MOA_AUDIT_BUCKET` / `MOA_AUDIT_OBJECT_LOCK_MODE` / `MOA_AUDIT_RETENTION_YEARS` | Audit Object Lock bucket bootstrap script |
 | `MOA_AUTH_HEADER_TRUST` | Trusted auth-header mode toggle |
 | `MOA_AUTH0_CLIENT_ID` | Auth0 client id (compose/test) |
 | `MOA_LINEAGE_SINK` | Lineage sink selection |
@@ -685,8 +685,8 @@ the stack falls back to the **`mock`** provider — set
 ### Docker Compose
 
 The compose stack passes a curated set of `MOA_*` variables through to the edge,
-orchestrator, PII, audit-shipper, and loadtest services (Postgres/Restate/
-OpenFGA endpoints, ports, and the `MOA_RUSTFS_*` / `MOA_CLEAN_E2E_*` families).
+orchestrator, opt-in PII, and loadtest services (Postgres/Restate/OpenFGA
+endpoints, ports, and the `MOA_RUSTFS_*` / `MOA_CLEAN_E2E_*` families).
 Set them in your shell before `docker compose up`, or in a compose `.env` file;
 compose substitutes `${MOA_...}` into the service `environment:` blocks.
 
