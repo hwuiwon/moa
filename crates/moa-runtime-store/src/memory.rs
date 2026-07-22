@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::error::{MoaError, Result};
-use moa_core::traits::RuntimeCacheStore;
+use moa_core::traits::{BoundedLeaseDecision, RuntimeCacheStore};
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 
@@ -24,6 +24,7 @@ pub struct MemoryRuntimeCacheStore {
 #[derive(Debug)]
 struct State {
     entries: HashMap<String, Entry>,
+    lease_sets: HashMap<String, HashMap<String, Instant>>,
     last_sweep: Instant,
 }
 
@@ -31,6 +32,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             entries: HashMap::new(),
+            lease_sets: HashMap::new(),
             last_sweep: Instant::now(),
         }
     }
@@ -65,6 +67,10 @@ impl MemoryRuntimeCacheStore {
         let now = Instant::now();
         if now.duration_since(state.last_sweep) >= SWEEP_INTERVAL {
             state.entries.retain(|_, entry| entry.expires_at > now);
+            state.lease_sets.retain(|_, leases| {
+                leases.retain(|_, expires_at| *expires_at > now);
+                !leases.is_empty()
+            });
             state.last_sweep = now;
         }
     }
@@ -161,5 +167,57 @@ impl RuntimeCacheStore for MemoryRuntimeCacheStore {
             None => {}
         }
         Ok(())
+    }
+
+    async fn try_acquire_bounded_lease(
+        &self,
+        key: &str,
+        lease_id: &str,
+        limit: usize,
+        ttl: Duration,
+    ) -> Result<BoundedLeaseDecision> {
+        if limit == 0 {
+            return Err(MoaError::ValidationError(
+                "bounded lease limit must be greater than zero".to_string(),
+            ));
+        }
+        let expires_at = Self::expires_at(ttl)?;
+        let now = Instant::now();
+        let mut state = self.state.write().await;
+        Self::sweep_expired(&mut state);
+        let leases = state.lease_sets.entry(key.to_string()).or_default();
+        leases.retain(|_, lease_expires_at| *lease_expires_at > now);
+        if leases.contains_key(lease_id) {
+            leases.insert(lease_id.to_string(), expires_at);
+            return Ok(BoundedLeaseDecision {
+                acquired: true,
+                live: leases.len(),
+            });
+        }
+        if leases.len() >= limit {
+            return Ok(BoundedLeaseDecision {
+                acquired: false,
+                live: leases.len(),
+            });
+        }
+        leases.insert(lease_id.to_string(), expires_at);
+        Ok(BoundedLeaseDecision {
+            acquired: true,
+            live: leases.len(),
+        })
+    }
+
+    async fn release_bounded_lease(&self, key: &str, lease_id: &str) -> Result<usize> {
+        let now = Instant::now();
+        let mut state = self.state.write().await;
+        let Some(leases) = state.lease_sets.get_mut(key) else {
+            return Ok(0);
+        };
+        leases.retain(|id, expires_at| id != lease_id && *expires_at > now);
+        let live = leases.len();
+        if leases.is_empty() {
+            state.lease_sets.remove(key);
+        }
+        Ok(live)
     }
 }

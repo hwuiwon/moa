@@ -6,7 +6,7 @@
 services:
   toxiproxy:
     image: ghcr.io/shopify/toxiproxy:2.11.0
-    container_name: moa-toxiproxy
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-toxiproxy
     command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
     restart: unless-stopped
     volumes:

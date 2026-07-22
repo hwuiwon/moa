@@ -69,20 +69,20 @@ pub struct MergedSummary {
 /// report production — deferred.)
 #[derive(Debug, Clone, PartialEq)]
 struct CampaignFingerprint {
+    run_manifest: LoadTestRunManifest,
     mode: LoadMode,
     endpoint: String,
     profile: SessionProfileKind,
-    duration_ms: f64,
     warmup_ms: f64,
 }
 
 impl CampaignFingerprint {
     fn from_report(report: &LoadTestReport) -> Self {
         Self {
+            run_manifest: report.run_manifest.clone(),
             mode: report.mode,
             endpoint: report.endpoint.clone(),
             profile: report.profile,
-            duration_ms: report.duration_ms,
             warmup_ms: report.warmup_ms,
         }
     }
@@ -106,30 +106,67 @@ impl CampaignFingerprint {
                 self.profile, other.profile
             ));
         }
-        // Exact bit comparison for the config-derived window values, which are
-        // serialized identically across shards of the same campaign (and avoids
-        // the float-equality lint).
-        if self.duration_ms.to_bits() != other.duration_ms.to_bits() {
-            mismatches.push(format!(
-                "duration_ms ({} != {})",
-                self.duration_ms, other.duration_ms
-            ));
-        }
         if self.warmup_ms.to_bits() != other.warmup_ms.to_bits() {
             mismatches.push(format!(
                 "warmup_ms ({} != {})",
                 self.warmup_ms, other.warmup_ms
             ));
         }
+        mismatches.extend(manifest_mismatches(&self.run_manifest, &other.run_manifest));
         mismatches
     }
 }
 
+fn manifest_mismatches(
+    expected: &LoadTestRunManifest,
+    actual: &LoadTestRunManifest,
+) -> Vec<String> {
+    let mut mismatches = Vec::new();
+    macro_rules! compare {
+        ($field:ident) => {
+            if expected.$field != actual.$field {
+                mismatches.push(format!(
+                    "run_manifest.{} ({:?} != {:?})",
+                    stringify!($field),
+                    expected.$field,
+                    actual.$field
+                ));
+            }
+        };
+    }
+
+    compare!(source_revision);
+    compare!(source_state);
+    compare!(lane);
+    compare!(foreground_database_connections);
+    compare!(background_database_connections);
+    compare!(direct_turn_event_append);
+    compare!(restate_rule_profile);
+    compare!(sessions);
+    compare!(tenants);
+    compare!(identities_per_tenant);
+    compare!(shape);
+    compare!(arrival);
+    if expected.rate_end_qps.map(f64::to_bits) != actual.rate_end_qps.map(f64::to_bits) {
+        mismatches.push(format!(
+            "run_manifest.rate_end_qps ({:?} != {:?})",
+            expected.rate_end_qps, actual.rate_end_qps
+        ));
+    }
+    compare!(think_time_ms);
+    compare!(turn_timeout_ms);
+    compare!(schedule_duration_ms);
+    compare!(seed);
+    mismatches
+}
+
 fn add_errors(total: &mut ErrorTaxonomy, part: &ErrorTaxonomy) {
+    total.turn_rejections += part.turn_rejections;
     total.turn_start_failures += part.turn_start_failures;
     total.turn_timeouts += part.turn_timeouts;
     total.turn_failures += part.turn_failures;
     total.turn_cancellations += part.turn_cancellations;
+    total.turn_cleanup_failures += part.turn_cleanup_failures;
     total.arrivals_dropped += part.arrivals_dropped;
     total.event_load_failures += part.event_load_failures;
     total.session_setup_failures += part.session_setup_failures;
@@ -259,7 +296,10 @@ pub fn merge_report_files(paths: &[impl AsRef<Path>]) -> Result<MergedSummary> {
     }
     let measure_window = fingerprint
         .as_ref()
-        .map(|value| ((value.duration_ms - value.warmup_ms) / 1_000.0).max(f64::MIN_POSITIVE))
+        .map(|value| {
+            ((value.run_manifest.schedule_duration_ms as f64 - value.warmup_ms) / 1_000.0)
+                .max(f64::MIN_POSITIVE)
+        })
         .unwrap_or(f64::MIN_POSITIVE);
     merged.achieved_rate_qps = merged.turns_completed as f64 / measure_window;
     merged.admission_rate_qps = merged.execution_admissions as f64 / measure_window;
@@ -610,6 +650,40 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_pool_reports_refuse_to_merge() {
+        // Pins: T3 cannot combine worker histograms collected with different
+        // foreground database budgets under one capacity claim.
+        let recorder =
+            LatencyRecorder::new(Duration::from_secs(10), Duration::ZERO).expect("recorder");
+        let dir = std::env::temp_dir().join(format!("moa-merge-pool-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let pool_20 = template_report(&recorder);
+        let mut pool_5 = template_report(&recorder);
+        pool_5.run_manifest.foreground_database_connections = 5;
+        let paths = [dir.join("pool-20.json"), dir.join("pool-5.json")];
+        std::fs::write(
+            &paths[0],
+            serde_json::to_string(&pool_20).expect("serialize pool 20 report"),
+        )
+        .expect("write pool 20 report");
+        std::fs::write(
+            &paths[1],
+            serde_json::to_string(&pool_5).expect("serialize pool 5 report"),
+        )
+        .expect("write pool 5 report");
+
+        let error = merge_report_files(&paths).expect_err("different pool reports must not merge");
+
+        assert!(
+            error
+                .to_string()
+                .contains("run_manifest.foreground_database_connections"),
+            "error must name the mismatched pool: {error}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn matching_reports_merge_and_sum_totals() {
         // Pins (F29): reports sharing a campaign fingerprint still merge, summing the
         // per-worker counters as before the compatibility check was added.
@@ -629,9 +703,12 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("moa-merge-match-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let report = template_report(&recorder);
         let mut paths = Vec::new();
         for index in 0..2 {
+            let mut report = template_report(&recorder);
+            report.run_manifest.hardware_id = format!("worker-hardware-{index}");
+            report.run_manifest.compose_project = format!("worker-project-{index}");
+            report.run_manifest.state_identity = format!("worker-state-{index}");
             let path = dir.join(format!("worker-{index}.json"));
             std::fs::write(&path, serde_json::to_string(&report).expect("serialize"))
                 .expect("write");
@@ -648,6 +725,28 @@ mod tests {
 
     fn template_report(recorder: &LatencyRecorder) -> LoadTestReport {
         LoadTestReport {
+            run_manifest: LoadTestRunManifest {
+                source_revision: "test-revision".to_string(),
+                source_state: "clean".to_string(),
+                lane: LoadLane::DirectIngress,
+                foreground_database_connections: 20,
+                background_database_connections: 1,
+                direct_turn_event_append: false,
+                compose_project: "worker-project".to_string(),
+                state_identity: "worker-state".to_string(),
+                restate_rule_profile: "scope:*:concurrency=1000".to_string(),
+                hardware_id: "worker-hardware".to_string(),
+                sessions: 4,
+                tenants: 2,
+                identities_per_tenant: 1,
+                shape: LoadShape::Steady,
+                arrival: ArrivalProcess::Constant,
+                rate_end_qps: None,
+                think_time_ms: 0,
+                turn_timeout_ms: 30_000,
+                schedule_duration_ms: 10_000,
+                seed: 42,
+            },
             mode: LoadMode::Mock,
             endpoint: "http://localhost:10010".to_string(),
             profile: SessionProfileKind::Short,
@@ -688,6 +787,7 @@ mod tests {
                     rows: recorder.corrected_len(),
                 }],
             },
+            capacity_signals: CapacitySignals::default(),
             cache_hit_rate: recorder.corrected_summary(),
             total_cost_cents: 0,
             windows: Vec::new(),

@@ -114,6 +114,9 @@ impl SessionAttachmentStorageConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionConfig {
+    /// Uses named TurnExecution actions for event appends instead of SessionStore RPC.
+    /// Kept off until a controlled capacity A/B selects the direct path.
+    pub direct_turn_event_append: bool,
     /// Offload threshold in bytes for large event payload strings.
     pub blob_threshold_bytes: usize,
     /// Backend used for claim-check blob payloads.
@@ -127,6 +130,7 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
+            direct_turn_event_append: false,
             blob_threshold_bytes: 65_536,
             blob_backend: SessionBlobBackend::Postgres,
             blob_dir: None,
@@ -178,6 +182,13 @@ fn is_local_attachment_endpoint(endpoint: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_turn_event_append_is_an_explicit_ab_switch() {
+        // Pins: the replay-sensitive direct path is never enabled implicitly;
+        // capacity campaigns opt into it deliberately for like-for-like A/B.
+        assert!(!SessionConfig::default().direct_turn_event_append);
+    }
 
     #[test]
     fn local_blob_backend_without_path_fails_clearly() {

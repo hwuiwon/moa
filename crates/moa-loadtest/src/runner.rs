@@ -86,6 +86,7 @@ enum CollectorMessage {
     TurnFailed {
         completed: Duration,
         kind: TurnFailureKind,
+        replacement_safe: bool,
     },
     ArrivalDropped {
         at: Duration,
@@ -239,6 +240,7 @@ pub(crate) async fn run_sessions(
     targets: Vec<Arc<dyn SessionTarget>>,
     pool: TenancyPool,
     options: &LoadTestOptions,
+    run_manifest: LoadTestRunManifest,
     started: Instant,
 ) -> Result<LoadTestReport> {
     let schedule = build_arrival_offsets(
@@ -393,7 +395,13 @@ pub(crate) async fn run_sessions(
         .map_err(|error| MoaError::ProviderError(format!("collector task panicked: {error}")))?;
 
     Ok(build_report(
-        options, started, &schedule, warmup, tenant_ids, state,
+        options,
+        run_manifest,
+        started,
+        &schedule,
+        warmup,
+        tenant_ids,
+        state,
     ))
 }
 
@@ -473,6 +481,7 @@ async fn run_one_turn(ctx: Arc<DispatchCtx>, mut slot: SessionSlot, intended: Du
             let _ = ctx.collector_tx.send(CollectorMessage::TurnFailed {
                 completed,
                 kind: failure.kind,
+                replacement_safe: failure.replacement_safe,
             });
             let turn_number = slot.next_turn + 1;
             ctx.finalize_session(
@@ -481,7 +490,9 @@ async fn run_one_turn(ctx: Arc<DispatchCtx>, mut slot: SessionSlot, intended: Du
                 false,
             )
             .await;
-            ctx.replace_session().await;
+            if failure.replacement_safe {
+                ctx.replace_session().await;
+            }
         }
     }
 }
@@ -564,14 +575,22 @@ async fn run_collector(
                     tracing::warn!(%error, "error recording failed");
                 }
             }
-            CollectorMessage::TurnFailed { completed, kind } => {
+            CollectorMessage::TurnFailed {
+                completed,
+                kind,
+                replacement_safe,
+            } => {
                 match kind {
+                    TurnFailureKind::Rejected => state.errors.turn_rejections += 1,
                     TurnFailureKind::StartFailed => state.errors.turn_start_failures += 1,
                     TurnFailureKind::Timeout => state.errors.turn_timeouts += 1,
                     TurnFailureKind::Failed | TurnFailureKind::Transport => {
                         state.errors.turn_failures += 1;
                     }
                     TurnFailureKind::Cancelled => state.errors.turn_cancellations += 1,
+                }
+                if !replacement_safe {
+                    state.errors.turn_cleanup_failures += 1;
                 }
                 if let Err(error) = state.recorder.record_turn_error(completed) {
                     tracing::warn!(%error, "error recording failed");
@@ -592,6 +611,7 @@ impl CollectorState {
 /// Assembles the final report from collector state.
 fn build_report(
     options: &LoadTestOptions,
+    run_manifest: LoadTestRunManifest,
     started: Instant,
     schedule: &[Duration],
     warmup: Duration,
@@ -625,6 +645,7 @@ fn build_report(
     let successful_operations = state.turns_completed + state.execution_admissions;
 
     LoadTestReport {
+        run_manifest,
         mode: options.mode,
         endpoint: options.endpoint.clone(),
         profile: options.profile,
@@ -656,6 +677,7 @@ fn build_report(
         step_latency_ms: Vec::new(),
         event_append_phase_latency_ms: Vec::new(),
         resource_bill: ResourceBillReport::default(),
+        capacity_signals: CapacitySignals::default(),
         cache_hit_rate: summarize_percentiles(&cache_samples),
         total_cost_cents,
         windows: state.recorder.window_reports(),
@@ -759,7 +781,114 @@ pub(crate) fn merge_failure_reason(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
+
+    struct FailingTarget {
+        replacement_safe: bool,
+        replacement_starts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SessionTarget for FailingTarget {
+        async fn start_session(&self, _plan: &SessionPlan) -> Result<SessionId> {
+            self.replacement_starts.fetch_add(1, Ordering::Relaxed);
+            Ok(SessionId::new())
+        }
+
+        async fn run_turn(
+            &self,
+            _session_id: SessionId,
+            _prompt: &str,
+            _timeout: Duration,
+        ) -> std::result::Result<TurnObservation, TurnFailure> {
+            Err(TurnFailure {
+                kind: TurnFailureKind::Timeout,
+                message: "timed out in test".to_string(),
+                replacement_safe: self.replacement_safe,
+            })
+        }
+
+        async fn session_meta(&self, _session_id: SessionId) -> Result<SessionMeta> {
+            Err(MoaError::ProviderError(
+                "test target has no session store".to_string(),
+            ))
+        }
+
+        async fn session_events_since(
+            &self,
+            _session_id: SessionId,
+            _after_seq: u64,
+        ) -> Result<Vec<EventRecord>> {
+            Ok(Vec::new())
+        }
+
+        async fn recent_events(&self, _session_id: SessionId) -> Result<Vec<EventRecord>> {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn replacement_starts_after_failure(replacement_safe: bool) -> (usize, u64) {
+        let target = Arc::new(FailingTarget {
+            replacement_safe,
+            replacement_starts: AtomicUsize::new(0),
+        });
+        let (collector_tx, collector_rx) = mpsc::unbounded_channel();
+        let (idle_tx, _idle_rx) = mpsc::unbounded_channel();
+        let collector = tokio::spawn(run_collector(
+            collector_rx,
+            LatencyRecorder::new(Duration::from_secs(5), Duration::ZERO).expect("latency recorder"),
+        ));
+        let ctx = Arc::new(DispatchCtx {
+            targets: vec![target.clone()],
+            pool: TenancyPool::generate(1, 1).expect("tenancy pool"),
+            collector_tx,
+            idle_tx,
+            generating: AtomicBool::new(true),
+            pool_size: AtomicUsize::new(1),
+            think_time: Duration::ZERO,
+            turn_timeout: Duration::from_secs(1),
+            run_start: tokio::time::Instant::now(),
+            session_ordinal: AtomicUsize::new(0),
+            inspection_files: InspectionFiles {
+                summary_file: "Cargo.toml".to_string(),
+                detail_file: "docs/02-brain-orchestration.md".to_string(),
+            },
+            profile: SessionProfileKind::Short,
+            seed: 42,
+        });
+        let slot = SessionSlot {
+            target_index: 0,
+            session_id: SessionId::new(),
+            plan: SessionPlan {
+                profile: SessionProfileKind::Short,
+                title: "timeout-cleanup-test".to_string(),
+                turns: vec![TurnPlan {
+                    prompt: "test prompt".to_string(),
+                }],
+            },
+            next_turn: 0,
+            last_seq: 0,
+            admitted_run_uids: Vec::new(),
+        };
+
+        run_one_turn(ctx.clone(), slot, Duration::ZERO).await;
+        drop(ctx);
+        let state = collector.await.expect("collector task");
+        (
+            target.replacement_starts.load(Ordering::Relaxed),
+            state.errors.turn_cleanup_failures,
+        )
+    }
+
+    #[tokio::test]
+    async fn unsettled_failure_does_not_start_replacement_session() {
+        // Pins: a timed-out turn whose cooperative cancellation did not settle
+        // shrinks the pool instead of starting overlapping zombie work.
+        assert_eq!(replacement_starts_after_failure(false).await, (0, 1));
+        assert_eq!(replacement_starts_after_failure(true).await, (1, 0));
+    }
 
     #[tokio::test]
     async fn execution_admission_accounting() {

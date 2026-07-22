@@ -215,6 +215,23 @@ impl MoaConfig {
             ));
         }
 
+        if self.session_limits.turn_admission_fleet_limit == 0
+            || self.session_limits.turn_admission_tenant_limit == 0
+        {
+            return Err(MoaError::ConfigError(
+                "session_limits turn admission fleet and tenant limits must be greater than zero"
+                    .to_string(),
+            ));
+        }
+        if self.session_limits.turn_admission_lease_ttl_ms == 0
+            || self.session_limits.turn_admission_retry_after_ms == 0
+        {
+            return Err(MoaError::ConfigError(
+                "session_limits turn admission lease TTL and retry delay must be greater than zero"
+                    .to_string(),
+            ));
+        }
+
         if self.database.uses_builtin_dev_url() {
             // Fails safe (the default targets localhost), so warn rather than reject:
             // a real deployment should configure database.url / MOA_DATABASE_URL.

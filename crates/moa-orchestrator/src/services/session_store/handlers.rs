@@ -1,5 +1,7 @@
 //! Restate handlers for the session-store facade.
 
+use std::time::Instant;
+
 use super::inner::{create_agent_session_for_identity, create_session_for_identity};
 use super::*;
 use crate::ctx::RequestHeaders;
@@ -112,12 +114,14 @@ impl RestateSessionStore for SessionStoreImpl {
         ctx: Context<'_>,
         request: Json<AppendEventRequest>,
     ) -> Result<Json<EventRecord>, HandlerError> {
+        let handler_started = Instant::now();
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "append_event");
         let request = request.into_inner();
         let store = self.store.clone();
 
-        Ok(ctx
+        let action_started = Instant::now();
+        let result = ctx
             .run(|| async move {
                 if matches!(&request.event, Event::Error { .. }) {
                     record_session_error("event_log");
@@ -129,7 +133,16 @@ impl RestateSessionStore for SessionStoreImpl {
                     .map_err(HandlerError::from)
             })
             .name("append_event")
-            .await?)
+            .await;
+        moa_observability::record_session_event_append_phase_duration(
+            moa_observability::SessionEventAppendPhase::HandlerAction,
+            action_started.elapsed(),
+        );
+        moa_observability::record_session_event_append_phase_duration(
+            moa_observability::SessionEventAppendPhase::HandlerTotal,
+            handler_started.elapsed(),
+        );
+        Ok(result?)
     }
 
     #[tracing::instrument(skip(self, ctx, request))]

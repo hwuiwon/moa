@@ -7,6 +7,7 @@ use moa_observability::{SESSION_EVENT_APPEND_PHASE_METRIC, TURN_STEP_DURATION_ME
 
 const METRICS_SCRAPE_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_EVENTS_APPENDED_METRIC: &str = "moa_session_events_appended_total";
+const TURN_ADMISSION_LIVE_METRIC: &str = "moa_turn_admission_live";
 const PROGRESS_UPDATE_EVENT_TYPE: &str = "ProgressUpdate";
 const PROGRESS_NARRATED_EVENT_TYPE: &str = "ProgressNarrated";
 
@@ -15,6 +16,14 @@ pub(crate) struct RuntimeMetricsSnapshot {
     series: BTreeMap<String, HistogramSeries>,
     append_phase_series: BTreeMap<String, HistogramSeries>,
     event_appends: BTreeMap<String, f64>,
+    admission_fleet_live: Option<f64>,
+}
+
+pub(crate) fn admission_fleet_live(snapshot: Option<&RuntimeMetricsSnapshot>) -> Option<u64> {
+    snapshot?
+        .admission_fleet_live
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value as u64)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -281,6 +290,10 @@ fn parse_runtime_metrics_snapshot(body: &str) -> RuntimeMetricsSnapshot {
             && let Some(event_type) = prometheus_label_value(line, "event_type")
         {
             snapshot.event_appends.insert(event_type.to_string(), value);
+        } else if line.starts_with(TURN_ADMISSION_LIVE_METRIC)
+            && prometheus_label_value(line, "scope") == Some("fleet")
+        {
+            snapshot.admission_fleet_live = Some(value);
         }
     }
 
@@ -465,6 +478,20 @@ moa_turn_step_duration_seconds_count{step="llm_call"} 4
         let reports = step_latency_delta_reports(Some(&before), Some(&after));
 
         assert!(reports.is_empty());
+    }
+
+    #[test]
+    fn capacity_snapshot_reads_only_the_fleet_admission_gauge() {
+        // Pins: the composite capacity report consumes the fleet gauge without
+        // mistaking per-scope samples for a fleet-wide queue depth.
+        let snapshot = parse_runtime_metrics_snapshot(
+            r#"
+moa_turn_admission_live{scope="tenant"} 19
+moa_turn_admission_live{scope="fleet"} 73
+"#,
+        );
+
+        assert_eq!(admission_fleet_live(Some(&snapshot)), Some(73));
     }
 
     #[test]

@@ -22,6 +22,16 @@ impl Default for BudgetConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionLimitsConfig {
+    /// Fleet-wide maximum number of concurrently active coordinator turns.
+    pub turn_admission_fleet_limit: u32,
+    /// Per-tenant maximum number of concurrently active coordinator turns.
+    pub turn_admission_tenant_limit: u32,
+    /// TTL for one shared turn-admission lease, in milliseconds.
+    pub turn_admission_lease_ttl_ms: u64,
+    /// Retry delay returned to callers rejected by turn admission, in milliseconds.
+    pub turn_admission_retry_after_ms: u64,
+    /// Maximum messages retained behind one already-active session turn.
+    pub max_pending_messages: u32,
     /// Maximum completed turns per session before pausing. `0` disables the limit.
     pub max_turns: u32,
     /// Maximum model loop iterations for requests classified as simple.
@@ -84,6 +94,11 @@ pub struct SessionLimitsConfig {
 impl Default for SessionLimitsConfig {
     fn default() -> Self {
         Self {
+            turn_admission_fleet_limit: 1_000,
+            turn_admission_tenant_limit: 250,
+            turn_admission_lease_ttl_ms: 600_000,
+            turn_admission_retry_after_ms: 1_000,
+            max_pending_messages: 8,
             max_turns: 50,
             simple_max_turns: 1,
             standard_max_turns: 6,
@@ -353,6 +368,42 @@ impl Default for CompactionConfig {
 mod tests {
     use super::SessionLimitsConfig;
     use crate::{EnvOverlay, MoaConfig};
+
+    #[test]
+    fn turn_admission_defaults_are_fleet_bounded_and_queue_bounded() {
+        // Pins: coordinator turns use a shared finite fleet/tenant budget and
+        // messages behind an active session cannot grow without bound.
+        let limits = SessionLimitsConfig::default();
+        assert_eq!(limits.turn_admission_fleet_limit, 1_000);
+        assert_eq!(limits.turn_admission_tenant_limit, 250);
+        assert_eq!(limits.turn_admission_lease_ttl_ms, 600_000);
+        assert_eq!(limits.turn_admission_retry_after_ms, 1_000);
+        assert_eq!(limits.max_pending_messages, 8);
+    }
+
+    #[test]
+    fn turn_admission_env_overlay_overrides_defaults() {
+        // Pins: Kubernetes can tune every admission and pending-queue control
+        // through the flat MOA_SESSION_LIMITS_* environment surface.
+        let overlay = EnvOverlay {
+            session_limits_turn_admission_fleet_limit: Some(400),
+            session_limits_turn_admission_tenant_limit: Some(80),
+            session_limits_turn_admission_lease_ttl_ms: Some(120_000),
+            session_limits_turn_admission_retry_after_ms: Some(2_500),
+            session_limits_max_pending_messages: Some(3),
+            ..EnvOverlay::default()
+        };
+        let mut config = MoaConfig::default();
+        overlay
+            .apply_to(&mut config)
+            .expect("turn admission overlay should apply");
+        let limits = config.session_limits;
+        assert_eq!(limits.turn_admission_fleet_limit, 400);
+        assert_eq!(limits.turn_admission_tenant_limit, 80);
+        assert_eq!(limits.turn_admission_lease_ttl_ms, 120_000);
+        assert_eq!(limits.turn_admission_retry_after_ms, 2_500);
+        assert_eq!(limits.max_pending_messages, 3);
+    }
 
     #[test]
     fn progress_narration_defaults_are_on_with_cheapest_model() {

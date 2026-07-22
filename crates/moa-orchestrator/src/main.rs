@@ -227,6 +227,7 @@ async fn async_main() -> anyhow::Result<()> {
         runtime_deps.lineage.handle.clone(),
         runtime_deps.embedding_provider.clone(),
         Arc::new(runtime_deps.channel_adapters.clone()),
+        runtime_deps.runtime_cache.clone(),
     );
 
     let readiness = Arc::new(AtomicBool::new(false));

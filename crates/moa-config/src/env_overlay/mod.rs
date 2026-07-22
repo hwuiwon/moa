@@ -415,6 +415,8 @@ pub struct EnvOverlay {
     pub permissions_always_deny: Option<Vec<String>>,
     /// `MOA_SESSION_BLOB_THRESHOLD_BYTES`.
     pub session_blob_threshold_bytes: Option<usize>,
+    /// `MOA_SESSION_DIRECT_TURN_EVENT_APPEND`.
+    pub session_direct_turn_event_append: Option<bool>,
     /// `MOA_SESSION_BLOB_BACKEND`.
     pub session_blob_backend: Option<SessionBlobBackend>,
     /// `MOA_SESSION_BLOB_DIR`.
@@ -518,6 +520,16 @@ pub struct EnvOverlay {
     pub metrics_listen: Option<String>,
     /// `MOA_BUDGETS_DAILY_TENANT_CENTS`.
     pub budgets_daily_tenant_cents: Option<u32>,
+    /// `MOA_SESSION_LIMITS_TURN_ADMISSION_FLEET_LIMIT`.
+    pub session_limits_turn_admission_fleet_limit: Option<u32>,
+    /// `MOA_SESSION_LIMITS_TURN_ADMISSION_TENANT_LIMIT`.
+    pub session_limits_turn_admission_tenant_limit: Option<u32>,
+    /// `MOA_SESSION_LIMITS_TURN_ADMISSION_LEASE_TTL_MS`.
+    pub session_limits_turn_admission_lease_ttl_ms: Option<u64>,
+    /// `MOA_SESSION_LIMITS_TURN_ADMISSION_RETRY_AFTER_MS`.
+    pub session_limits_turn_admission_retry_after_ms: Option<u64>,
+    /// `MOA_SESSION_LIMITS_MAX_PENDING_MESSAGES`.
+    pub session_limits_max_pending_messages: Option<u32>,
     /// `MOA_SESSION_LIMITS_MAX_TURNS`.
     pub session_limits_max_turns: Option<u32>,
     /// `MOA_SESSION_LIMITS_SIMPLE_MAX_TURNS`.
@@ -1403,6 +1415,7 @@ mod tests {
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_DATABASE_MAX_CONNECTIONS", "42"),
             ("MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS", "3"),
+            ("MOA_SESSION_DIRECT_TURN_EVENT_APPEND", "true"),
             ("MOA_AUTH_PROVIDER", "oidc"),
             ("MOA_AUTHZ_ENGINE", "openfga"),
             ("MOA_AUTHZ_OPENFGA_URL", "http://openfga.example"),
@@ -1499,6 +1512,7 @@ mod tests {
         assert_eq!(config.database.url, "postgres://moa:test@db.example/moa");
         assert_eq!(config.database.max_connections, 42);
         assert_eq!(config.database.background_max_connections, 3);
+        assert!(config.session.direct_turn_event_append);
         assert_eq!(config.auth.provider, AuthProviderKind::Oidc);
         assert_eq!(
             config.auth.auth0_webhook_secret.as_deref(),

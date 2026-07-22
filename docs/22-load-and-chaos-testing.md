@@ -50,7 +50,7 @@ Per-turn cost bill (measured, not assumed — T2 produces these numbers):
 | Resource | Cost per turn | Shared limit |
 |---|---|---|
 | Restate invocations | ~5–10 | per-tenant scope concurrency (1000 in compose/prod rules) |
-| Postgres event appends | 3–8 rows + blob offload >64KiB | foreground orchestrator pool (production base 5 conns/replica), single writer |
+| Postgres event appends | 3–8 rows + blob offload >64KiB | foreground orchestrator pool (production base 20 conns/replica), single writer |
 | Postgres reads | snapshot load + authz + retrieval legs | same foreground pool + edge pool (production base 8) |
 | Background Postgres work | outbox, analytics, lineage, memory ingestion | independent orchestrator pool (production base 1 conn/replica) |
 | LLM call | 1+ (with retries/failover) | provider concurrency (default 16 per provider credential; production uses runtime-store-backed global scope) + process-local RatePacer/RateGuard + stream deadlines |
@@ -66,9 +66,11 @@ Production connection admission is explicit. `MOA_DATABASE_MAX_CONNECTIONS`
 controls the foreground orchestrator pool,
 `MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS` isolates continuous maintenance
 work, and `MOA_DATABASE_CONNECT_TIMEOUT_SECONDS` bounds pool acquisition. The
-base deployment uses 5 + 1 connections per orchestrator replica; at the HPA
-maximum of 50 replicas, plus the edge budget, this reserves headroom under the
-documented 400-connection database assumption.
+base deployment uses 20 + 1 connections per orchestrator replica. At the HPA
+maximum of 50 replicas, the orchestrator reserves 1,050 connections and edge
+reserves 24; production must provide a verified database/proxy envelope of at
+least 1,200 so migrations, deploy overlap, and operator access retain 126
+connections of headroom.
 
 Provider production admission sets `MOA_PROVIDERS_CONCURRENCY_SCOPE=global`.
 Streaming requests are bounded independently by
@@ -161,13 +163,32 @@ only source for baseline updates.
 **T2 capacity (nightly).** `make loadtest-capacity` — recreates the
 dependencies, installs the Restate concurrency rule, bootstraps OpenFGA, then
 recreates the orchestrator with `scripts/realistic.json` (real latency/TTFT
-pacing, tool loop) and ramps 5→200 turns/s over 10 minutes across 8 tenants. To test a
-specific database pool profile, run
+pacing, tool loop) and ramps 5→200 turns/s over 10 minutes across 8 tenants.
+The capacity target and Kubernetes base use 20 foreground database connections
+per orchestrator. To test a comparison profile, run
 `MOA_DATABASE_MAX_CONNECTIONS=<n> make loadtest-capacity` and record that
-profile with the result. Read the window series in
-`target/perf-gate/capacity.json`: the knee is where dispatch-delay p95 starts
-climbing monotonically. Record the per-replica sustainable rate, database pool
-profile, and per-turn step latencies in `docs/18-performance.md`.
+profile with the result. The direct lane writes
+`target/perf-gate/capacity-direct.json`; `make loadtest-capacity-edge` writes the
+separate production-path `target/perf-gate/capacity-edge.json`. Each report is
+paired with `-restate-before.json` and `-restate-after.json` snapshots containing
+`sys_rules` and `sys_user_limits`; the report manifest also records the exact
+pre-run rule JSON, source revision/state, database pools, state identity, lane,
+hardware, and resolved load options. Classify the knee from completed throughput,
+corrected latency, dropped arrivals, failures, and queue/utilization metrics;
+dispatch-delay p95 is one signal, not the sole criterion. Record the per-replica
+sustainable rate, database pool profile, and per-turn step latencies in
+`docs/18-performance.md`.
+
+`make loadtest-capacity-direct-append` runs the named-action event-append
+variant and writes `target/perf-gate/capacity-direct-append.json`. The report
+manifest records the append variant, so it cannot be merged with the default
+SessionStore-RPC control accidentally.
+
+`make loadtest-capacity-brackets` runs the pool-5, pool-10, pool-20 ramp
+comparisons plus constant pool-20 50/55/60/65 turns/s brackets in randomized
+order. Every bracket uses a unique Compose project and therefore fresh Restate
+state; the target records the realized order under `target/perf-gate/brackets/`
+and stops each stack without deleting its diagnostic volume.
 
 **Soak.** `make loadtest-soak SOAK_RATE=<70% of knee> SOAK_DURATION=8h`;
 watch the window series for drift (leaks, compaction pressure, event
@@ -181,8 +202,8 @@ worker-N.json` — then merge losslessly: `moa-loadtest --merge worker-*.json`
 count and confirming merged corrected p99 stays in budget with zero
 invariant violations.
 
-**Edge mode.** `make loadtest-edge-keys`, export the printed env, recreate
-the compose stack, then add `--edge-endpoint http://localhost:10000` — turns
+**Edge mode.** `make loadtest-edge-keys`, export the printed env, then run
+`make loadtest-capacity-edge` — turns
 run through the production SSE path with real API keys and contact tokens,
 TTFT is measured from the first `response` frame, and
 `edge_observation_wait_ms` captures response event timestamp-to-client receipt
@@ -194,7 +215,7 @@ export `COMPOSE_FILE="docker-compose.yml:docker-compose.chaos.yml"` for the
 whole run so the driver's orchestrator recreates keep the toxiproxy routes,
 then `docker compose up -d`.
 Deterministic storage failpoints: `cargo nextest run -p moa-session
---features failpoints --test events_append_only_db`. Every experiment ends
+--features failpoints --test session_db`. Every experiment ends
 with the invariant sweep from `moa_test_support::invariants`.
 
 ## Operational rules learned from live runs

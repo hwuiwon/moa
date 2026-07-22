@@ -486,6 +486,12 @@ impl TurnLatencyStep {
 /// Low-cardinality phases inside one session event append operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionEventAppendPhase {
+    /// Time from SessionStore handler entry through the completed handler action.
+    HandlerTotal,
+    /// Time spent inside the SessionStore named `ctx.run` action.
+    HandlerAction,
+    /// Time spent inside a TurnExecution named `ctx.run` direct append action.
+    DirectAction,
     /// Pre-transaction payload encoding and claim-check preparation.
     Prepare,
     /// Wait for a pooled PostgreSQL connection.
@@ -512,7 +518,10 @@ pub enum SessionEventAppendPhase {
 
 impl SessionEventAppendPhase {
     /// All session event append phases in a stable order for cached metric handles.
-    const ALL: [SessionEventAppendPhase; 11] = [
+    const ALL: [SessionEventAppendPhase; 14] = [
+        Self::HandlerTotal,
+        Self::HandlerAction,
+        Self::DirectAction,
         Self::Prepare,
         Self::AcquireConnection,
         Self::BeginTransaction,
@@ -530,6 +539,9 @@ impl SessionEventAppendPhase {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::HandlerTotal => "handler_total",
+            Self::HandlerAction => "handler_action",
+            Self::DirectAction => "direct_action",
             Self::Prepare => "prepare",
             Self::AcquireConnection => "acquire_connection",
             Self::BeginTransaction => "begin_transaction",
@@ -547,17 +559,20 @@ impl SessionEventAppendPhase {
     /// Returns the dense index of this phase into [`SessionEventAppendPhase::ALL`].
     const fn index(self) -> usize {
         match self {
-            Self::Prepare => 0,
-            Self::AcquireConnection => 1,
-            Self::BeginTransaction => 2,
-            Self::LockSession => 3,
-            Self::DedupeLookup => 4,
-            Self::DedupeFetchRecords => 5,
-            Self::BuildInsertPayloads => 6,
-            Self::InsertEvents => 7,
-            Self::InsertDedupeRows => 8,
-            Self::UpdateSessionAggregates => 9,
-            Self::Commit => 10,
+            Self::HandlerTotal => 0,
+            Self::HandlerAction => 1,
+            Self::DirectAction => 2,
+            Self::Prepare => 3,
+            Self::AcquireConnection => 4,
+            Self::BeginTransaction => 5,
+            Self::LockSession => 6,
+            Self::DedupeLookup => 7,
+            Self::DedupeFetchRecords => 8,
+            Self::BuildInsertPayloads => 9,
+            Self::InsertEvents => 10,
+            Self::InsertDedupeRows => 11,
+            Self::UpdateSessionAggregates => 12,
+            Self::Commit => 13,
         }
     }
 }
@@ -953,7 +968,7 @@ pub fn record_session_event_append_phase_duration(
     phase: SessionEventAppendPhase,
     duration: Duration,
 ) {
-    static APPEND_PHASE_HISTOGRAMS: OnceLock<[metrics::Histogram; 11]> = OnceLock::new();
+    static APPEND_PHASE_HISTOGRAMS: OnceLock<[metrics::Histogram; 14]> = OnceLock::new();
     let histograms = APPEND_PHASE_HISTOGRAMS.get_or_init(|| {
         SessionEventAppendPhase::ALL
             .map(|phase| histogram!(SESSION_EVENT_APPEND_PHASE_METRIC, "phase" => phase.as_str()))
@@ -1619,7 +1634,19 @@ fn register_metric_descriptions() {
     );
     describe_histogram!(
         SESSION_EVENT_APPEND_PHASE_METRIC,
-        "Session event append duration in seconds, labeled by bounded transaction phase."
+        "Session event append duration in seconds, labeled by bounded handler/action/transaction phase."
+    );
+    describe_counter!(
+        "moa_turn_admission_decisions_total",
+        "Coordinator-turn admission decisions, labeled by bounded scope and outcome."
+    );
+    describe_gauge!(
+        "moa_turn_admission_live",
+        "Live coordinator-turn admission leases, labeled by bounded scope."
+    );
+    describe_histogram!(
+        "moa_turn_admission_tenant_utilization_ratio",
+        "Per-attempt tenant coordinator-turn admission utilization ratio."
     );
     describe_counter!(
         "moa_session_event_load_events_total",

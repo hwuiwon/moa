@@ -43,6 +43,26 @@ pub(crate) struct EdgeTarget {
     reads: RemoteTarget,
 }
 
+impl EdgeTarget {
+    async fn failure_after_active_turn(
+        &self,
+        session_id: SessionId,
+        kind: TurnFailureKind,
+        message: String,
+    ) -> TurnFailure {
+        let cleanup = self.reads.cancel_active_turn_and_wait(session_id).await;
+        let cleanup_message = match &cleanup {
+            Ok(()) => "cooperative cancellation reached an idle session".to_string(),
+            Err(error) => format!("cooperative cancellation did not settle: {error}"),
+        };
+        TurnFailure {
+            kind,
+            message: format!("{message}; {cleanup_message}"),
+            replacement_safe: cleanup.is_ok(),
+        }
+    }
+}
+
 #[async_trait]
 impl SessionTarget for EdgeTarget {
     async fn start_session(&self, plan: &SessionPlan) -> Result<SessionId> {
@@ -112,13 +132,20 @@ impl SessionTarget for EdgeTarget {
             .map_err(|error| TurnFailure {
                 kind: TurnFailureKind::StartFailed,
                 message: format!("edge message post failed: {error}"),
+                replacement_safe: false,
             })?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            let rejected = is_turn_admission_rejection(status, &body);
             return Err(TurnFailure {
-                kind: TurnFailureKind::StartFailed,
+                kind: if rejected {
+                    TurnFailureKind::Rejected
+                } else {
+                    TurnFailureKind::StartFailed
+                },
                 message: format!("edge message post returned {status}: {body}"),
+                replacement_safe: rejected,
             });
         }
 
@@ -126,34 +153,55 @@ impl SessionTarget for EdgeTarget {
         let mut edge_observation_wait = None;
         let mut stream = response.bytes_stream().eventsource();
         loop {
-            let next = tokio::time::timeout_at(deadline, stream.next())
-                .await
-                .map_err(|_| TurnFailure {
-                    kind: TurnFailureKind::Timeout,
-                    message: format!("no terminal done frame within {timeout:?}"),
-                })?;
-            let Some(frame) = next else {
-                return Err(TurnFailure {
-                    kind: TurnFailureKind::Transport,
-                    message: "SSE stream ended without a done frame".to_string(),
-                });
+            let next = match tokio::time::timeout_at(deadline, stream.next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    return Err(self
+                        .failure_after_active_turn(
+                            session_id,
+                            TurnFailureKind::Timeout,
+                            format!("no terminal done frame within {timeout:?}"),
+                        )
+                        .await);
+                }
             };
-            let frame = frame.map_err(|error| TurnFailure {
-                kind: TurnFailureKind::Transport,
-                message: format!("SSE stream error: {error}"),
-            })?;
+            let Some(frame) = next else {
+                return Err(self
+                    .failure_after_active_turn(
+                        session_id,
+                        TurnFailureKind::Transport,
+                        "SSE stream ended without a done frame".to_string(),
+                    )
+                    .await);
+            };
+            let frame = match frame {
+                Ok(frame) => frame,
+                Err(error) => {
+                    return Err(self
+                        .failure_after_active_turn(
+                            session_id,
+                            TurnFailureKind::Transport,
+                            format!("SSE stream error: {error}"),
+                        )
+                        .await);
+                }
+            };
             match frame.event.as_str() {
                 "response" if ttft.is_none() => {
                     ttft = Some(started.elapsed());
                     edge_observation_wait = response_frame_observation_wait(&frame.data);
                 }
                 "execution_started" => {
-                    let run_uid =
-                        execution_started_run_uid(&frame.data).ok_or_else(|| TurnFailure {
-                            kind: TurnFailureKind::Transport,
-                            message: "execution_started frame did not contain a typed run UID"
-                                .to_string(),
-                        })?;
+                    let Some(run_uid) = execution_started_run_uid(&frame.data) else {
+                        return Err(self
+                            .failure_after_active_turn(
+                                session_id,
+                                TurnFailureKind::Transport,
+                                "execution_started frame did not contain a typed run UID"
+                                    .to_string(),
+                            )
+                            .await);
+                    };
                     return Ok(TurnObservation {
                         kind: TurnObservationKind::ExecutionAdmission { run_uid },
                         ttft: None,
@@ -183,18 +231,23 @@ impl SessionTarget for EdgeTarget {
                         "cancelled" => Err(TurnFailure {
                             kind: TurnFailureKind::Cancelled,
                             message: "turn cancelled".to_string(),
+                            replacement_safe: true,
                         }),
                         other => Err(TurnFailure {
                             kind: TurnFailureKind::Failed,
                             message: format!("turn ended with status {other}"),
+                            replacement_safe: true,
                         }),
                     };
                 }
                 "error" => {
-                    return Err(TurnFailure {
-                        kind: TurnFailureKind::Transport,
-                        message: format!("edge stream error frame: {}", frame.data),
-                    });
+                    return Err(self
+                        .failure_after_active_turn(
+                            session_id,
+                            TurnFailureKind::Transport,
+                            format!("edge stream error frame: {}", frame.data),
+                        )
+                        .await);
                 }
                 _ => {}
             }

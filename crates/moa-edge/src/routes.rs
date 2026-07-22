@@ -917,7 +917,11 @@ async fn handle_session_attachment(
 enum EdgeJsonError {
     Serialize(String),
     Forward(String),
-    Upstream { status: StatusCode, body: String },
+    Upstream {
+        status: StatusCode,
+        body: String,
+        retry_after: Option<String>,
+    },
     Read(String),
     Decode(String),
 }
@@ -936,10 +940,10 @@ impl EdgeJsonError {
         match self {
             Self::Serialize(error) => format!("serialize upstream request failed: {error}"),
             Self::Forward(error) => format!("upstream request failed: {error}"),
-            Self::Upstream { status, body } if body.is_empty() => {
+            Self::Upstream { status, body, .. } if body.is_empty() => {
                 format!("upstream returned {status}")
             }
-            Self::Upstream { status, body } => format!("upstream returned {status}: {body}"),
+            Self::Upstream { status, body, .. } => format!("upstream returned {status}: {body}"),
             Self::Read(error) => format!("upstream response read failed: {error}"),
             Self::Decode(error) => format!("upstream response decode failed: {error}"),
         }
@@ -947,12 +951,38 @@ impl EdgeJsonError {
 
     fn into_response(self) -> axum::response::Response {
         let status = self.status_code();
+        let retry_after = match &self {
+            Self::Upstream {
+                retry_after, body, ..
+            } if status == StatusCode::TOO_MANY_REQUESTS => retry_after
+                .clone()
+                .or_else(|| retry_after_from_terminal_body(body)),
+            _ => None,
+        };
         let body = match self {
             Self::Upstream { body, .. } if !body.is_empty() => body,
             error => error.summary(),
         };
-        (status, body).into_response()
+        let mut response = (status, body).into_response();
+        if let Some(retry_after) = retry_after
+            && let Ok(value) = retry_after.parse()
+        {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+        response
     }
+}
+
+fn retry_after_from_terminal_body(body: &str) -> Option<String> {
+    let marker = "retry_after_ms=";
+    let start = body.find(marker)? + marker.len();
+    let millis = body[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse::<u64>()
+        .ok()?;
+    Some(millis.div_ceil(1_000).max(1).to_string())
 }
 
 /// Flow-control scope for a `Contacts` ingress call.
@@ -990,6 +1020,11 @@ where
         .await
         .map_err(|error| EdgeJsonError::Forward(error.to_string()))?;
     let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
     let body = response
         .bytes()
         .await
@@ -998,6 +1033,7 @@ where
         return Err(EdgeJsonError::Upstream {
             status,
             body: String::from_utf8_lossy(&body).into_owned(),
+            retry_after,
         });
     }
     serde_json::from_slice(&body).map_err(|error| EdgeJsonError::Decode(error.to_string()))
@@ -1772,6 +1808,23 @@ mod tests {
                 "{read_handler} must not consume tenant concurrency"
             );
         }
+    }
+
+    #[test]
+    fn admission_429_terminal_body_produces_retry_after_seconds() {
+        // Pins: Restate terminal errors cannot add arbitrary HTTP headers, so
+        // edge translates the bounded retry delay carried by the admission
+        // error into the public Retry-After response header.
+        assert_eq!(
+            retry_after_from_terminal_body(
+                "turn admission fleet budget is saturated; retry_after_ms=2500"
+            ),
+            Some("3".to_string())
+        );
+        assert_eq!(
+            retry_after_from_terminal_body("unrelated upstream failure"),
+            None
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ services:
       args:
         PGVECTOR_REF: v0.8.2
     image: moa-postgres:pg17-pgvector0.8.2-pgaudit
-    container_name: moa-postgres
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: moa
@@ -62,7 +62,7 @@ services:
 
   valkey:
     image: valkey/valkey:8-alpine
-    container_name: moa-valkey
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-valkey
     restart: unless-stopped
     command: ["valkey-server", "--save", "", "--appendonly", "no"]
     ports:
@@ -130,7 +130,7 @@ services:
 
   rustfs:
     image: rustfs/rustfs:latest
-    container_name: moa-rustfs
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-rustfs
     restart: unless-stopped
     environment:
       RUSTFS_ACCESS_KEY: ${MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID:-moaadmin}
@@ -150,7 +150,7 @@ services:
 
   rustfs-init:
     image: rustfs/rc:latest
-    container_name: moa-rustfs-init
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-rustfs-init
     restart: "no"
     depends_on:
       rustfs:
@@ -171,7 +171,7 @@ services:
 
   restate:
     image: docker.restate.dev/restatedev/restate:1.7.0
-    container_name: moa-restate
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-restate
     restart: unless-stopped
     command: ["--node-name=restate-dev"]
     environment:
@@ -204,7 +204,7 @@ services:
       args:
         MOA_ORCHESTRATOR_FEATURES: provider-overrides
     image: moa/orchestrator:dev
-    container_name: moa-orchestrator
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-orchestrator
     restart: unless-stopped
     depends_on:
       postgres:
@@ -221,6 +221,7 @@ services:
       MOA_DATABASE_MAX_CONNECTIONS: ${MOA_DATABASE_MAX_CONNECTIONS:-20}
       MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS: ${MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS:-2}
       MOA_DATABASE_CONNECT_TIMEOUT_SECONDS: ${MOA_DATABASE_CONNECT_TIMEOUT_SECONDS:-10}
+      MOA_SESSION_DIRECT_TURN_EVENT_APPEND: ${MOA_SESSION_DIRECT_TURN_EVENT_APPEND:-false}
       MOA_RESTATE_ADMIN_URL: http://restate:9070
       MOA_RESTATE_INGRESS_URL: http://restate:8080
       MOA_RUNTIME_CACHE_BACKEND: redis
@@ -283,7 +284,7 @@ services:
       context: .
       dockerfile: crates/moa-edge/Dockerfile
     image: moa/edge:dev
-    container_name: moa-edge
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-edge
     restart: unless-stopped
     depends_on:
       moa-orchestrator:
@@ -325,7 +326,7 @@ services:
 
   restate-register:
     image: curlimages/curl:8.10.1
-    container_name: moa-restate-register
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-restate-register
     restart: "no"
     depends_on:
       restate:
@@ -362,7 +363,7 @@ services:
   # `rules set` is idempotent, so a re-run just overwrites the same default.
   restate-rules-bootstrap:
     image: docker.restate.dev/restatedev/restate-cli:1.7.0
-    container_name: moa-restate-rules-bootstrap
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-restate-rules-bootstrap
     restart: "no"
     depends_on:
       restate:
@@ -387,7 +388,7 @@ services:
       context: .
       dockerfile: services/pii-service/Dockerfile
     image: moa/pii-service:0.1
-    container_name: moa-pii-service
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-pii-service
     restart: unless-stopped
     environment:
       MODEL: openai/privacy-filter
@@ -409,7 +410,7 @@ services:
       context: .
       dockerfile: services/audit-shipper/Dockerfile
     image: moa/audit-shipper:0.1
-    container_name: moa-audit-shipper
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-audit-shipper
     restart: unless-stopped
     depends_on:
       postgres:
@@ -432,7 +433,7 @@ services:
     # MOA_CLICKHOUSE_URL=http://clickhouse:8123 (plus user/password below)
     # in .env so the orchestrator and edge switch turn_lineage to ClickHouse.
     image: clickhouse/clickhouse-server:25.5
-    container_name: moa-clickhouse
+    container_name: ${COMPOSE_PROJECT_NAME:-moa}-clickhouse
     restart: unless-stopped
     profiles: ["clickhouse"]
     environment:

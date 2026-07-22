@@ -48,6 +48,7 @@ impl Session for SessionImpl {
                 execution_template: None,
             },
             &self.session_limits,
+            &self.turn_admission,
         )
         .await?;
         Ok(())
@@ -143,7 +144,13 @@ impl Session for SessionImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "start_turn");
         Ok(Json::from(
-            start_turn_inner(&mut ctx, request.into_inner(), &self.session_limits).await?,
+            start_turn_inner(
+                &mut ctx,
+                request.into_inner(),
+                &self.session_limits,
+                &self.turn_admission,
+            )
+            .await?,
         ))
     }
 
@@ -276,6 +283,15 @@ impl Session for SessionImpl {
             }
             state.persist(&ctx);
             sync_status(&ctx, session_id, &state).await?;
+        }
+        if matches_active && pending_state.active_turn_id.is_none() {
+            let tenant_id = state
+                .ensure_initialized()
+                .map_err(moa_error_to_handler_error)?
+                .tenant_id;
+            self.turn_admission
+                .release(&ctx, session_id, tenant_id)
+                .await?;
         }
         persist_pending_state(&ctx, &pending_state);
         resolve_turn_waiters(&ctx, turn_waiters, &outcome)?;
@@ -447,7 +463,16 @@ impl Session for SessionImpl {
         );
 
         let mut pending_state = load_pending_state(&ctx).await?;
+        self.turn_admission
+            .acquire(
+                &ctx,
+                session_id,
+                meta.tenant_id,
+                "turn_admission_execution_synthesis",
+            )
+            .await?;
         pending_state.active_turn_id = Some(requested.turn_id.clone());
+        arm_turn_admission_heartbeat(&ctx, &mut pending_state, &self.turn_admission);
         let now = durable_utc_now(&ctx).await?;
         state.set_status(SessionStatus::Running, now);
         state.persist(&ctx);
@@ -590,6 +615,7 @@ impl Session for SessionImpl {
                 execution_template: request.execution_template,
             },
             &self.session_limits,
+            &self.turn_admission,
         )
         .await?;
         Ok(Json::from(QueueMessageResponse {
@@ -896,6 +922,13 @@ impl Session for SessionImpl {
             // `require_session_participant` legitimately. With no owning identity we cannot
             // authorize a turn, so we undo the arm and skip dispatch — never a bypass.
             if let Some(identity) = state.owning_identity.clone() {
+                let tenant_id = state
+                    .ensure_initialized()
+                    .map_err(moa_error_to_handler_error)?
+                    .tenant_id;
+                self.turn_admission
+                    .acquire(&ctx, session_id, tenant_id, "turn_admission_child_resume")
+                    .await?;
                 let turn_id = generate_turn_id(&mut ctx);
                 let instruction = build_resume_instruction(&signal, &state.unread_child_signals);
                 // Durable, idempotent control record that seeds the resume turn's prompt
@@ -916,6 +949,7 @@ impl Session for SessionImpl {
                 // an active turn and no second root turn can start.
                 let mut pending_state = load_pending_state(&ctx).await?;
                 pending_state.active_turn_id = Some(turn_id.clone());
+                arm_turn_admission_heartbeat(&ctx, &mut pending_state, &self.turn_admission);
                 state.set_status(SessionStatus::Running, now);
                 state.record_resume_dispatch(turn_id.clone(), now, limits.worker_resume_window_ms);
                 let contact = state.meta.as_ref().and_then(|meta| meta.contact.clone());
@@ -1025,6 +1059,36 @@ impl Session for SessionImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "narration_tick");
         narration::run_narration_tick(&ctx, req.into_inner().generation, &self.session_limits).await
+    }
+
+    #[tracing::instrument(skip(self, ctx, req))]
+    // SAFETY: internal generation-guarded self-call; it only renews the shared
+    // admission lease for this Session while a coordinator turn remains active.
+    async fn turn_admission_heartbeat(
+        &self,
+        ctx: ObjectContext<'_>,
+        req: Json<TurnAdmissionHeartbeatRequest>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Session", "turn_admission_heartbeat");
+        let req = req.into_inner();
+        let pending_state = load_pending_state(&ctx).await?;
+        if pending_state.active_turn_id.is_none()
+            || pending_state.admission_heartbeat_generation != req.generation
+        {
+            return Ok(());
+        }
+        let session_id = parse_session_key(ctx.key())?;
+        let state = SessionVoState::load_from(&ctx).await?;
+        let tenant_id = state
+            .ensure_initialized()
+            .map_err(moa_error_to_handler_error)?
+            .tenant_id;
+        self.turn_admission
+            .acquire(&ctx, session_id, tenant_id, "turn_admission_heartbeat")
+            .await?;
+        schedule_turn_admission_heartbeat(&ctx, req.generation, &self.turn_admission);
+        Ok(())
     }
 
     #[tracing::instrument(skip(self, ctx, req))]
@@ -1531,6 +1595,7 @@ async fn start_turn_inner(
     ctx: &mut ObjectContext<'_>,
     request: StartTurnRequest,
     session_limits: &SessionLimitsConfig,
+    turn_admission: &admission::TurnAdmission,
 ) -> Result<StartTurnResponse, HandlerError> {
     // Continue the caller's trace (edge or Slack ingress) so the turn this
     // schedules dispatches TurnExecution under the same end-to-end trace.
@@ -1567,6 +1632,19 @@ async fn start_turn_inner(
     }
 
     if let Some(active_turn_id) = pending_state.active_turn_id.as_deref() {
+        if pending_message_queue_is_full(
+            pending_state.pending_messages.len(),
+            session_limits.max_pending_messages,
+        ) {
+            return Err(TerminalError::new_with_code(
+                429,
+                format!(
+                    "session pending message queue is full; retry_after_ms={}",
+                    session_limits.turn_admission_retry_after_ms
+                ),
+            )
+            .into());
+        }
         let queued_at = durable_utc_now(ctx).await?;
         let queue_index = pending_state.pending_messages.len();
         append_session_event_deduped(
@@ -1600,8 +1678,12 @@ async fn start_turn_inner(
         });
     }
 
+    turn_admission
+        .acquire(ctx, session_id, tenant_id, "turn_admission_start")
+        .await?;
     let turn_id = generate_turn_id(ctx);
     pending_state.active_turn_id = Some(turn_id.clone());
+    arm_turn_admission_heartbeat(ctx, &mut pending_state, turn_admission);
     let now = durable_utc_now(ctx).await?;
     state.set_status(SessionStatus::Running, now);
     // Capture the session's owning-actor identity from the first verified turn
@@ -1647,6 +1729,10 @@ async fn start_turn_inner(
     })
 }
 
+fn pending_message_queue_is_full(pending: usize, limit: u32) -> bool {
+    pending >= limit as usize
+}
+
 fn admitted_contact_for_turn(
     requested: Option<ContactRef>,
     meta: &SessionMeta,
@@ -1689,8 +1775,18 @@ mod tests {
     use restate_sdk::prelude::TerminalError;
 
     use super::{
-        active_turn_progress_or_none, admitted_contact_for_turn, worker_provide_input_request,
+        active_turn_progress_or_none, admitted_contact_for_turn, pending_message_queue_is_full,
+        worker_provide_input_request,
     };
+
+    #[test]
+    fn pending_message_queue_rejects_exactly_at_the_configured_bound() {
+        // Pins: active sessions accept only the declared number of queued
+        // messages; the next message is rejected instead of growing state.
+        assert!(!pending_message_queue_is_full(7, 8));
+        assert!(pending_message_queue_is_full(8, 8));
+        assert!(pending_message_queue_is_full(9, 8));
+    }
 
     #[test]
     fn session_worker_reply_payload_carries_exact_parent_session_and_string() {

@@ -19,6 +19,26 @@ spec:
         app.kubernetes.io/part-of: moa
     spec:
       terminationGracePeriodSeconds: 600
+      initContainers:
+        # Converge the required per-scope Restate rule before this pod can
+        # accept work. `rules set` is idempotent across replica startups.
+        - name: restate-rules-bootstrap
+          image: docker.restate.dev/restatedev/restate-cli:1.7.0
+          env:
+            - name: RESTATE_ADMIN_URL
+              value: http://restate.moa-restate.svc.cluster.local:9070
+          args:
+            - --connect-timeout
+            - "10000"
+            - --request-timeout
+            - "30000"
+            - rules
+            - set
+            - "*"
+            - --concurrency
+            - "1000"
+            - --description
+            - scope default
       containers:
         - name: orchestrator
           image: ghcr.io/hwuiwon/moa-orchestrator:latest
@@ -63,11 +83,11 @@ spec:
                 secretKeyRef:
                   name: moa-postgres
                   key: url
-            # Fleet budget: each of 50 HPA replicas reserves 5 foreground + 1
-            # background connection = 300. Together with edge's 24, this leaves
-            # at least 76 connections of reserve on a 400-connection runtime tier.
+            # Fleet budget: 50 HPA replicas reserve 20 foreground + 1 background
+            # connection = 1,050. Edge reserves 24, leaving 126 connections for
+            # migrations, deploy overlap, and operators in a 1,200-connection tier.
             - name: MOA_DATABASE_MAX_CONNECTIONS
-              value: "5"
+              value: "20"
             - name: MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS
               value: "1"
             - name: MOA_DATABASE_CONNECT_TIMEOUT_SECONDS
@@ -124,6 +144,9 @@ spec:
               value: http://restate.moa-restate.svc.cluster.local:9070
             - name: MOA_RESTATE_INGRESS_URL
               value: http://restate.moa-restate.svc.cluster.local:8080
+            # Keep the capacity experiment off in production until its A/B wins.
+            - name: MOA_SESSION_DIRECT_TURN_EVENT_APPEND
+              value: "false"
             - name: MOA_RUNTIME_CACHE_BACKEND
               value: redis
             - name: MOA_RUNTIME_CACHE_REDIS_URL

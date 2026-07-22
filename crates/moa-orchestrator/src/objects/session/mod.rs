@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use moa_config::SessionLimitsConfig;
@@ -51,6 +51,7 @@ use crate::worker_dispatch::MAX_WORKER_FAN_OUT;
 use crate::workflows::turn_execution::TurnExecutionClient;
 use moa_observability::restate_observability::{annotate_restate_handler_span, event_persist_span};
 
+mod admission;
 mod execution_runs;
 mod handlers;
 mod liveness;
@@ -76,6 +77,8 @@ struct SessionPendingState {
     last_outcome: Option<ExecutionTurnOutcome>,
     #[serde(default)]
     turn_waiters: Vec<SessionTurnWaiter>,
+    #[serde(default)]
+    admission_heartbeat_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -115,6 +118,13 @@ pub struct NarrationTickRequest {
     /// Scheduling generation observed when this tick was scheduled. A tick whose
     /// generation no longer matches the VO's current generation is stale and is
     /// ignored without rescheduling, because a newer generation now owns scheduling.
+    pub generation: u64,
+}
+
+/// Internal payload for a generation-guarded shared-admission lease heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TurnAdmissionHeartbeatRequest {
+    /// Scheduling generation owned by the currently active turn chain.
     pub generation: u64,
 }
 
@@ -261,6 +271,11 @@ pub trait Session {
     /// Internal generation-guarded tick that drives per-session progress narration.
     async fn narration_tick(req: Json<NarrationTickRequest>) -> Result<(), HandlerError>;
 
+    /// Internal generation-guarded tick that renews the active shared admission lease.
+    async fn turn_admission_heartbeat(
+        req: Json<TurnAdmissionHeartbeatRequest>,
+    ) -> Result<(), HandlerError>;
+
     /// Internal generation-guarded per-child heartbeat-liveness watchdog tick.
     async fn check_child_liveness(req: Json<CheckChildLivenessRequest>)
     -> Result<(), HandlerError>;
@@ -271,6 +286,7 @@ pub struct SessionImpl {
     session_store: Arc<dyn SessionRepository>,
     session_store_backend: Arc<PostgresSessionStore>,
     session_limits: SessionLimitsConfig,
+    turn_admission: admission::TurnAdmission,
 }
 
 impl SessionImpl {
@@ -279,11 +295,14 @@ impl SessionImpl {
     pub fn new(
         session_store: Arc<PostgresSessionStore>,
         session_limits: SessionLimitsConfig,
+        runtime_cache: Arc<dyn moa_core::traits::RuntimeCacheStore>,
     ) -> Self {
+        let turn_admission = admission::TurnAdmission::new(runtime_cache, &session_limits);
         Self {
             session_store: session_store.clone(),
             session_store_backend: session_store,
             session_limits,
+            turn_admission,
         }
     }
 }
@@ -307,6 +326,38 @@ fn dispatch_turn_execution(ctx: &ObjectContext<'_>, request: RunTurnRequest) {
         .workflow_client::<TurnExecutionClient>(turn_id.clone())
         .run(Json::from(request));
     with_identity_headers(request, &identity).send();
+}
+
+fn arm_turn_admission_heartbeat(
+    ctx: &ObjectContext<'_>,
+    pending_state: &mut SessionPendingState,
+    turn_admission: &admission::TurnAdmission,
+) {
+    pending_state.admission_heartbeat_generation = pending_state
+        .admission_heartbeat_generation
+        .saturating_add(1);
+    schedule_turn_admission_heartbeat(
+        ctx,
+        pending_state.admission_heartbeat_generation,
+        turn_admission,
+    );
+}
+
+fn schedule_turn_admission_heartbeat(
+    ctx: &ObjectContext<'_>,
+    generation: u64,
+    turn_admission: &admission::TurnAdmission,
+) {
+    let request = ctx
+        .object_client::<SessionClient>(ctx.key().to_string())
+        .turn_admission_heartbeat(Json::from(TurnAdmissionHeartbeatRequest { generation }))
+        .idempotency_key(format!(
+            "turn-admission-heartbeat:{generation}:{}",
+            ctx.invocation_id()
+        ));
+    crate::restate_identity::replay_safe_request(request).send_after(Duration::from_millis(
+        turn_admission.heartbeat_interval_ms(),
+    ));
 }
 
 /// One planned step for the bounded `Session/progress` child fan-in.

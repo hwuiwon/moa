@@ -29,7 +29,8 @@ use moa_core::{
     error::MoaError, error::Result, events::Event, types::channel::Channel,
     types::contact::SessionActorRef, types::events_stream::EventRecord,
     types::identifiers::ModelId, types::identifiers::SessionId, types::identifiers::TenantId,
-    types::provider::ModelTask, types::session::SessionMeta, types::session::SessionStatus,
+    types::provider::ModelTask, types::session::CancelScope, types::session::SessionMeta,
+    types::session::SessionStatus,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -40,9 +41,9 @@ pub use hist::SerializedHistograms;
 pub use merge::{MergedSummary, merge_report_files, render_merged_summary};
 pub use options::{LoadMode, LoadTestOptions, OutputFormat, SessionProfileKind};
 pub use report::{
-    ErrorTaxonomy, EventAppendPhaseLatencyReport, EventAppendTypeReport, LoadTestReport,
-    PercentileSummary, ResourceBillReport, SessionReport, StepLatencyReport, WindowReport,
-    render_human_report, render_json_report,
+    CapacitySignals, ErrorTaxonomy, EventAppendPhaseLatencyReport, EventAppendTypeReport, LoadLane,
+    LoadTestReport, LoadTestRunManifest, PercentileSummary, ResourceBillReport, SessionReport,
+    StepLatencyReport, WindowReport, render_human_report, render_json_report,
 };
 pub use schedule::{ArrivalProcess, LoadShape};
 

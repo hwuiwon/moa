@@ -142,6 +142,53 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn bounded_leases_enforce_limit_idempotency_release_and_ttl() -> Result<()> {
+        // Pins: shared admission never exceeds its cap, a retry with the same
+        // durable lease id does not consume another slot, terminal release is
+        // idempotent, and crash-leaked slots become available after TTL expiry.
+        let store = MemoryRuntimeCacheStore::default();
+        let ttl = Duration::from_secs(10);
+
+        let first = store
+            .try_acquire_bounded_lease("turns", "session-a", 2, ttl)
+            .await?;
+        assert!(first.acquired);
+        assert_eq!(first.live, 1);
+
+        let replay = store
+            .try_acquire_bounded_lease("turns", "session-a", 2, ttl)
+            .await?;
+        assert_eq!(replay, first);
+        assert!(
+            store
+                .try_acquire_bounded_lease("turns", "session-b", 2, ttl)
+                .await?
+                .acquired
+        );
+        let saturated = store
+            .try_acquire_bounded_lease("turns", "session-c", 2, ttl)
+            .await?;
+        assert!(!saturated.acquired);
+        assert_eq!(saturated.live, 2);
+
+        assert_eq!(store.release_bounded_lease("turns", "session-a").await?, 1);
+        assert!(
+            store
+                .try_acquire_bounded_lease("turns", "session-c", 2, ttl)
+                .await?
+                .acquired
+        );
+        advance(Duration::from_secs(11)).await;
+        let after_expiry = store
+            .try_acquire_bounded_lease("turns", "session-d", 2, ttl)
+            .await?;
+        assert!(after_expiry.acquired);
+        assert_eq!(after_expiry.live, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn memory_compare_and_set_matches_absent_and_exact_values() -> Result<()> {
         // Pins: compare-and-set only mutates when the expected bytes match current cache state.
         let store = MemoryRuntimeCacheStore::default();

@@ -5,13 +5,13 @@
 //! wiring. These helpers are the single definition of that wiring so both
 //! workflows emit bit-identical events, fields, and tracing.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use moa_core::{
-    events::Event, types::completion::ToolCallContent, types::completion::ToolInvocation,
-    types::events_stream::EventRecord, types::identifiers::SessionId,
-    types::identifiers::ToolCallId, types::provider::ModelTier, types::session::SessionMeta,
-    types::tools::ToolOutput,
+    events::Event, traits::SessionStore as _, types::completion::ToolCallContent,
+    types::completion::ToolInvocation, types::events_stream::EventRecord,
+    types::identifiers::SessionId, types::identifiers::ToolCallId, types::provider::ModelTier,
+    types::session::SessionMeta, types::tools::ToolOutput,
 };
 use moa_observability::restate_observability::event_persist_span;
 use moa_observability::{record_session_error, record_turn_event_persist_duration};
@@ -37,20 +37,108 @@ pub(super) async fn append_session_event(
     let persist_span = event_persist_span(1);
     let persist_started = Instant::now();
     moa_core::coordination_counters::record_durable_append();
-    let record = crate::restate_identity::replay_safe_request(
-        ctx.service_client::<RestateSessionStoreClient>()
-            .append_event(Json(AppendEventRequest {
-                session_id,
-                event,
-                dedupe_key: None,
-            })),
-    )
-    .call()
-    .instrument(persist_span)
-    .await?
-    .into_inner();
+    let dedupe = next_turn_event_identity(ctx).await?;
+    let orchestrator = crate::ctx::OrchestratorCtx::current();
+    let record = if orchestrator.config().session.direct_turn_event_append {
+        let action_started = Instant::now();
+        let store = orchestrator.session_store_backend();
+        let event_is_error = matches!(&event, Event::Error { .. });
+        let event_for_action = event.clone();
+        let dedupe_for_action = dedupe.key.clone();
+        let action = ctx
+            .run(move || {
+                let store = store.clone();
+                let event = event_for_action.clone();
+                let dedupe_key = dedupe_for_action.clone();
+                async move {
+                    emit_direct_event(&store, session_id, event, dedupe_key)
+                        .await
+                        .map(Json::from)
+                        .map_err(crate::workflows::errors::moa_error_to_handler_error)
+                }
+            })
+            .name(dedupe.action_name)
+            .retry_policy(turn_event_append_retry_policy(dedupe.jitter_ms))
+            .instrument(persist_span)
+            .await?
+            .into_inner();
+        moa_observability::record_session_event_append_phase_duration(
+            moa_observability::SessionEventAppendPhase::DirectAction,
+            action_started.elapsed(),
+        );
+        if event_is_error {
+            record_session_error("event_log");
+        }
+        action
+    } else {
+        crate::restate_identity::replay_safe_request(
+            ctx.service_client::<RestateSessionStoreClient>()
+                .append_event(Json(AppendEventRequest {
+                    session_id,
+                    event,
+                    dedupe_key: Some(dedupe.key),
+                })),
+        )
+        .call()
+        .instrument(persist_span)
+        .await?
+        .into_inner()
+    };
     record_turn_event_persist_duration(persist_started.elapsed(), 1);
     Ok(record)
+}
+
+async fn emit_direct_event(
+    store: &moa_session::PostgresSessionStore,
+    session_id: SessionId,
+    event: Event,
+    dedupe_key: String,
+) -> moa_core::error::Result<EventRecord> {
+    store
+        .emit_event_record(session_id, event, Some(dedupe_key))
+        .await
+}
+
+struct TurnEventIdentity {
+    key: String,
+    action_name: String,
+    jitter_ms: u64,
+}
+
+const K_EVENT_APPEND_SEQUENCE: &str = "turn_event_append_sequence";
+
+async fn next_turn_event_identity(
+    ctx: &WorkflowContext<'_>,
+) -> Result<TurnEventIdentity, HandlerError> {
+    let sequence = ctx
+        .get::<Json<u64>>(K_EVENT_APPEND_SEQUENCE)
+        .await?
+        .map(Json::into_inner)
+        .unwrap_or_default();
+    ctx.set(
+        K_EVENT_APPEND_SEQUENCE,
+        Json::from(sequence.saturating_add(1)),
+    );
+    Ok(turn_event_identity(ctx.key(), sequence))
+}
+
+fn turn_event_identity(turn_id: &str, sequence: u64) -> TurnEventIdentity {
+    let turn_digest = blake3::hash(turn_id.as_bytes());
+    let short = turn_digest.to_hex()[..12].to_string();
+    let jitter_ms = 50 + (u64::from(turn_digest.as_bytes()[0]) + sequence.wrapping_mul(31)) % 101;
+    TurnEventIdentity {
+        key: format!("turn_event:{turn_id}:{sequence}"),
+        action_name: format!("turn_event_append_{short}_{sequence}"),
+        jitter_ms,
+    }
+}
+
+fn turn_event_append_retry_policy(jitter_ms: u64) -> RunRetryPolicy {
+    RunRetryPolicy::new()
+        .initial_delay(Duration::from_millis(jitter_ms))
+        .exponentiation_factor(2.0)
+        .max_delay(Duration::from_secs(1))
+        .max_attempts(5)
 }
 
 /// Persists a `ToolCall` event for a model-issued tool invocation.
@@ -221,5 +309,93 @@ pub(super) fn turn_outcome_kind_label(kind: &TurnOutcomeKind) -> &'static str {
         TurnOutcomeKind::Accepted { .. } => "accepted",
         TurnOutcomeKind::Cancelled => "cancelled",
         TurnOutcomeKind::Failed => "failed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_event_identity_is_unique_per_append_and_stable_per_sequence() {
+        // Pins: a replay of one logical append reuses its database dedupe key
+        // and action name, while two identical event bodies remain distinct.
+        let first = turn_event_identity("turn-123", 7);
+        let replay = turn_event_identity("turn-123", 7);
+        let next = turn_event_identity("turn-123", 8);
+
+        assert_eq!(first.key, replay.key);
+        assert_eq!(first.action_name, replay.action_name);
+        assert_eq!(first.jitter_ms, replay.jitter_ms);
+        assert_ne!(first.key, next.key);
+        assert_ne!(first.action_name, next.action_name);
+        assert!(first.action_name.len() <= 64);
+        assert!((50..=150).contains(&first.jitter_ms));
+    }
+
+    #[test]
+    fn turn_event_identity_is_namespaced_by_workflow() {
+        // Pins: root and worker workflows may share the same append sequence
+        // without sharing a database idempotency key.
+        let root = turn_event_identity("root-turn", 0);
+        let worker = turn_event_identity("worker-turn", 0);
+
+        assert_ne!(root.key, worker.key);
+        assert_ne!(root.action_name, worker.action_name);
+    }
+
+    #[cfg(feature = "execution-planning-failpoints")]
+    #[tokio::test]
+    async fn direct_append_lost_ack_retry_materializes_one_event_db() {
+        // Pins: the direct action passes its replay-stable identity into the
+        // store, so an error returned after commit cannot duplicate the event.
+        use moa_core::types::contact::SessionActorRef;
+        use moa_core::types::identifiers::{ModelId, TenantId};
+        use moa_session::failpoints;
+        use moa_test_support::postgres::bootstrap_test_db;
+
+        let test_db = bootstrap_test_db().await.expect("bootstrap test database");
+        let session_id = test_db
+            .store()
+            .create_session(SessionMeta {
+                tenant_id: TenantId::new(),
+                created_by: Some(SessionActorRef::Identity {
+                    id: uuid::Uuid::from_u128(42),
+                }),
+                model: ModelId::new("test-model"),
+                ..SessionMeta::default()
+            })
+            .await
+            .expect("create direct-append session");
+        let event = Event::UserMessage {
+            text: "post-commit direct append".to_string(),
+            attachments: Vec::new(),
+        };
+        let identity = turn_event_identity("turn-direct-failpoint", 0);
+        failpoints::arm("event_append_post_commit", 1);
+
+        let first = emit_direct_event(
+            test_db.store(),
+            session_id,
+            event.clone(),
+            identity.key.clone(),
+        )
+        .await;
+        assert!(first.is_err(), "post-commit ack failpoint must surface");
+
+        let retried = emit_direct_event(test_db.store(), session_id, event, identity.key)
+            .await
+            .expect("direct append retry should resolve the committed event");
+        assert_eq!(retried.sequence_num, 0);
+        let events = test_db
+            .store()
+            .get_events(
+                session_id,
+                moa_core::types::events_stream::EventRange::all(),
+            )
+            .await
+            .expect("load direct append events");
+        assert_eq!(events.len(), 1, "direct retry must not duplicate the event");
+        failpoints::reset("event_append_post_commit");
     }
 }

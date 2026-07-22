@@ -6,6 +6,15 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 
+/// Result of one atomic bounded-lease admission attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundedLeaseDecision {
+    /// Whether this lease owns a slot after the operation.
+    pub acquired: bool,
+    /// Number of live leases observed after expired leases were pruned.
+    pub live: usize,
+}
+
 /// Ephemeral byte-value cache used for runtime coordination.
 #[async_trait]
 pub trait RuntimeCacheStore: Send + Sync {
@@ -29,4 +38,31 @@ pub trait RuntimeCacheStore: Send + Sync {
 
     /// Updates the expiration for an existing unexpired cache value.
     async fn expire(&self, key: &str, ttl: Duration) -> Result<()>;
+
+    /// Atomically acquires or renews one idempotent lease in a bounded shared set.
+    ///
+    /// Implementations used for distributed coordination must override this
+    /// operation with a backend-native atomic primitive. The default fails
+    /// closed so a cache implementation cannot silently provide process-local
+    /// or racy admission semantics.
+    async fn try_acquire_bounded_lease(
+        &self,
+        _key: &str,
+        _lease_id: &str,
+        _limit: usize,
+        _ttl: Duration,
+    ) -> Result<BoundedLeaseDecision> {
+        Err(crate::error::MoaError::ConfigError(
+            "runtime cache does not support atomic bounded leases".to_string(),
+        ))
+    }
+
+    /// Atomically releases one idempotent lease from a bounded shared set.
+    ///
+    /// Returns the number of live leases remaining after expiry pruning.
+    async fn release_bounded_lease(&self, _key: &str, _lease_id: &str) -> Result<usize> {
+        Err(crate::error::MoaError::ConfigError(
+            "runtime cache does not support atomic bounded leases".to_string(),
+        ))
+    }
 }

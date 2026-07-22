@@ -34,6 +34,31 @@ fn test_options() -> LoadTestOptions {
     }
 }
 
+fn test_run_manifest() -> LoadTestRunManifest {
+    LoadTestRunManifest {
+        source_revision: "test-revision".to_string(),
+        source_state: "clean".to_string(),
+        lane: LoadLane::DirectIngress,
+        foreground_database_connections: 20,
+        background_database_connections: 1,
+        direct_turn_event_append: false,
+        compose_project: "test-project".to_string(),
+        state_identity: "test-project_moa-restate-data".to_string(),
+        restate_rule_profile: "scope:*:concurrency=1000".to_string(),
+        hardware_id: "test-hardware".to_string(),
+        sessions: 4,
+        tenants: 2,
+        identities_per_tenant: 1,
+        shape: LoadShape::Steady,
+        arrival: ArrivalProcess::Constant,
+        rate_end_qps: None,
+        think_time_ms: 1,
+        turn_timeout_ms: 15_000,
+        schedule_duration_ms: 10_000,
+        seed: 42,
+    }
+}
+
 #[test]
 fn load_options_accept_remote_endpoint() {
     // Pins: loadtest validates a Restate ingress endpoint without any local or daemon target mode.
@@ -108,6 +133,7 @@ fn execution_admission_report_rendering() {
         max: value,
     };
     let report = LoadTestReport {
+        run_manifest: test_run_manifest(),
         mode: LoadMode::Mock,
         endpoint: "http://localhost:10010".to_string(),
         profile: SessionProfileKind::Short,
@@ -124,6 +150,7 @@ fn execution_admission_report_rendering() {
         successful_operations: 10,
         errors: ErrorTaxonomy {
             turn_timeouts: 1,
+            turn_cleanup_failures: 1,
             ..ErrorTaxonomy::default()
         },
         total_tool_calls: 0,
@@ -165,6 +192,7 @@ fn execution_admission_report_rendering() {
                 },
             ],
         },
+        capacity_signals: CapacitySignals::default(),
         cache_hit_rate: summary(0.0),
         total_cost_cents: 0,
         windows: vec![WindowReport {
@@ -185,6 +213,8 @@ fn execution_admission_report_rendering() {
     let rendered = render_human_report(&report);
 
     assert!(rendered.contains("Endpoint: http://localhost:10010"));
+    assert!(rendered.contains("Lane: DirectIngress"));
+    assert!(rendered.contains("DB pools: 20 foreground + 1 background"));
     assert!(rendered.contains("pipeline_compile (n=1): p50 4ms  p95 4ms  p99 4ms"));
     assert!(rendered.contains("lock_session (n=2): p50 7ms  p95 7ms  p99 7ms"));
     assert!(rendered.contains("Edge Observation Wait:"));
@@ -195,6 +225,7 @@ fn execution_admission_report_rendering() {
     ));
     assert!(rendered.contains("Turn Latency (corrected, from intended arrival):"));
     assert!(rendered.contains("timeout 1"));
+    assert!(rendered.contains("cleanup 1"));
     assert!(rendered.contains("Windows (corrected p95 per 10s):"));
     assert!(!rendered.contains("Target:"));
 }
@@ -204,10 +235,12 @@ fn turn_error_rate_counts_failed_turns_over_scheduled_arrivals() {
     // Pins: the turn error rate denominator is scheduled arrivals, so missed
     // (never-dispatched) turns cannot hide a saturated system.
     let errors = ErrorTaxonomy {
+        turn_rejections: 1,
         turn_start_failures: 1,
         turn_timeouts: 2,
         turn_failures: 3,
         turn_cancellations: 4,
+        turn_cleanup_failures: 6,
         arrivals_dropped: 5,
         event_load_failures: 100,
         session_setup_failures: 100,
@@ -215,5 +248,5 @@ fn turn_error_rate_counts_failed_turns_over_scheduled_arrivals() {
         tool_error_events: 100,
     };
 
-    assert_eq!(errors.failed_turns(), 15);
+    assert_eq!(errors.failed_turns(), 16);
 }

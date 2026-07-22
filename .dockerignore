@@ -6,6 +6,7 @@
 .agents
 .codex
 .codegraph
+.env.fga
 target
 sequence
 scripts

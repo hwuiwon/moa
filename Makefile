@@ -1,4 +1,4 @@
-.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-affected test-ci test-db-session test-db-memory test-authz-pentest test-service-e2e test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live chaos-smoke chaos-matrix codegraph
+.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-affected test-ci test-db-session test-db-memory test-authz-pentest test-service-e2e test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live loadtest-capacity loadtest-capacity-edge loadtest-capacity-direct-append loadtest-capacity-brackets chaos-smoke chaos-matrix codegraph
 
 codegraph:
 	@./scripts/codegraph init
@@ -131,8 +131,8 @@ loadtest-mock:
 loadtest-live:
 	cargo run -p moa-loadtest --release --bin moa-loadtest -- --mode live --endpoint http://localhost:10010
 
-# T2 capacity run: realistic scripted workload, ramp to the knee, windowed
-# report written to target/perf-gate/capacity.json.
+# T2 direct-ingress capacity run: realistic scripted workload, ramp to the
+# knee, report plus Restate state snapshots written under target/perf-gate/.
 loadtest-capacity:
 	@echo "starting capacity dependencies with the production Restate rule..."
 	@MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
@@ -144,24 +144,53 @@ loadtest-capacity:
 	@set -a; . ./.env.fga; set +a; \
 	  MOA_RUSTFS_PORT=$${MOA_RUSTFS_PORT:-10090} \
 	  MOA_RUSTFS_CONSOLE_PORT=$${MOA_RUSTFS_CONSOLE_PORT:-10091} \
-	  MOA_DATABASE_MAX_CONNECTIONS=$${MOA_DATABASE_MAX_CONNECTIONS:-5} \
+	  MOA_DATABASE_MAX_CONNECTIONS=$${MOA_DATABASE_MAX_CONNECTIONS:-20} \
 	  MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS=$${MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS:-1} \
 	  MOA_DATABASE_CONNECT_TIMEOUT_SECONDS=$${MOA_DATABASE_CONNECT_TIMEOUT_SECONDS:-3} \
+	  MOA_SESSION_DIRECT_TURN_EVENT_APPEND=$${MOA_SESSION_DIRECT_TURN_EVENT_APPEND:-false} \
 	  MOA_PROVIDERS_OVERRIDE=scripted:/loadtest-scripts/realistic.json \
-	  docker compose up -d --build --force-recreate moa-orchestrator restate-register
+	  docker compose up -d --build --force-recreate moa-orchestrator restate-register moa-edge
 	@$(MAKE) dev-status
 	@mkdir -p target/perf-gate
 	@set -a; . ./.env.fga; set +a; \
-	  report_tmp=target/perf-gate/capacity.json.tmp; \
+	  report_path=$${MOA_LOADTEST_REPORT:-target/perf-gate/capacity-direct.json}; \
+	  report_tmp=$$report_path.tmp; \
+	  state_prefix=$${report_path%.json}; \
+	  rules_before=$$(docker compose run --rm --no-deps restate-rules-bootstrap sql --json 'SELECT * FROM sys_rules'); \
+	  limits_before=$$(docker compose run --rm --no-deps restate-rules-bootstrap sql --json 'SELECT * FROM sys_user_limits'); \
+	  jq -n --argjson rules "$$rules_before" --argjson limits "$$limits_before" \
+	    '{sys_rules: $$rules, sys_user_limits: $$limits}' > $$state_prefix-restate-before.json; \
+	  source_revision=$$(git rev-parse --verify HEAD 2>/dev/null || echo unknown); \
+	  source_state=clean; git diff --quiet --ignore-submodules HEAD -- || source_state=dirty; \
+	  compose_project=$${COMPOSE_PROJECT_NAME:-moa}; \
+	  shape=$${MOA_LOADTEST_SHAPE:-ramp}; \
+	  rate_end_arg=; \
+	  if [ "$$shape" != steady ]; then rate_end_arg="--rate-end $${MOA_LOADTEST_RATE_END:-200}"; fi; \
 	  status=0; \
+	MOA_LOADTEST_SOURCE_REVISION=$$source_revision \
+	MOA_LOADTEST_SOURCE_STATE=$$source_state \
+	MOA_LOADTEST_FOREGROUND_DB_CONNECTIONS=$${MOA_DATABASE_MAX_CONNECTIONS:-20} \
+	MOA_LOADTEST_BACKGROUND_DB_CONNECTIONS=$${MOA_DATABASE_BACKGROUND_MAX_CONNECTIONS:-1} \
+	MOA_LOADTEST_COMPOSE_PROJECT=$$compose_project \
+	MOA_LOADTEST_STATE_IDENTITY=$${compose_project}_moa-restate-data \
+	MOA_LOADTEST_RESTATE_RULE_PROFILE="$$(printf '%s' "$$rules_before" | jq -c .)" \
+	MOA_SESSION_DIRECT_TURN_EVENT_APPEND=$${MOA_SESSION_DIRECT_TURN_EVENT_APPEND:-false} \
 	cargo run -p moa-loadtest --release --bin moa-loadtest -- \
 	  --mode mock --endpoint http://localhost:10010 \
-	  --shape ramp --rate 5 --rate-end 200 --duration 10m \
+	  --shape $$shape --rate $${MOA_LOADTEST_RATE:-5} $$rate_end_arg \
+	  --duration $${MOA_LOADTEST_DURATION:-10m} \
 	  --profile mixed --think-time-ms 2000 --sessions 800 --tenants 8 \
+	  $${MOA_LOADTEST_EDGE_ARGS:-} \
 	  --metrics-endpoint http://localhost:10023/metrics \
 	  --output json > $$report_tmp || status=$$?; \
+	  rules_after=$$(docker compose run --rm --no-deps restate-rules-bootstrap sql --json 'SELECT * FROM sys_rules') || \
+	    { echo "warning: post-run Restate rules snapshot failed" >&2; rules_after='[]'; }; \
+	  limits_after=$$(docker compose run --rm --no-deps restate-rules-bootstrap sql --json 'SELECT * FROM sys_user_limits') || \
+	    { echo "warning: post-run Restate limits snapshot failed" >&2; limits_after='[]'; }; \
+	  jq -n --argjson rules "$$rules_after" --argjson limits "$$limits_after" \
+	    '{sys_rules: $$rules, sys_user_limits: $$limits}' > $$state_prefix-restate-after.json; \
 	  if jq -e . $$report_tmp >/dev/null 2>&1; then \
-	    mv $$report_tmp target/perf-gate/capacity.json; \
+	    mv $$report_tmp $$report_path; \
 	    if [ $$status -ne 0 ]; then \
 	      echo "capacity ramp reached expected overload; preserving valid report"; \
 	    fi; \
@@ -170,7 +199,45 @@ loadtest-capacity:
 	    if [ $$status -eq 0 ]; then status=1; fi; \
 	    exit $$status; \
 	  fi
-	@echo "capacity report: target/perf-gate/capacity.json"
+	@echo "capacity report: $${MOA_LOADTEST_REPORT:-target/perf-gate/capacity-direct.json}"
+
+# Production edge/auth/tenant-scope/SSE lane. It writes a distinct report so
+# direct-ingress machinery results cannot be mistaken for edge certification.
+loadtest-capacity-edge:
+	@MOA_LOADTEST_EDGE_ARGS="--edge-endpoint http://localhost:10000" \
+	  MOA_LOADTEST_REPORT=target/perf-gate/capacity-edge.json \
+	  $(MAKE) loadtest-capacity
+
+# Direct named-action event append variant for a controlled capacity comparison.
+loadtest-capacity-direct-append:
+	@MOA_SESSION_DIRECT_TURN_EVENT_APPEND=true \
+	  MOA_LOADTEST_REPORT=target/perf-gate/capacity-direct-append.json \
+	  $(MAKE) loadtest-capacity
+
+# Fresh-state randomized comparison campaign. Each profile gets a unique
+# Compose project (and therefore a fresh Restate volume), while `down` preserves
+# that volume for post-run inspection. This target is intentionally long-running.
+loadtest-capacity-brackets:
+	@mkdir -p target/perf-gate/brackets
+	@run_id=$$(date -u +%Y%m%d%H%M%S); \
+	  profiles='5:ramp:200 10:ramp:200 20:ramp:200 20:steady:50 20:steady:55 20:steady:60 20:steady:65'; \
+	  order=$$(printf '%s\n' $$profiles | awk 'BEGIN{srand()} {print rand(), $$0}' | sort -n | cut -d' ' -f2-); \
+	  printf '%s\n' "$$order" > target/perf-gate/brackets/$$run_id-order.txt; \
+	  for profile in $$order; do \
+	    pool=$${profile%%:*}; remainder=$${profile#*:}; shape=$${remainder%%:*}; rate=$${remainder##*:}; \
+	    project=moa-capacity-$${run_id}-$${pool}-$${shape}-$${rate}; \
+	    report=target/perf-gate/brackets/$${run_id}-pool$${pool}-$${shape}$${rate}-direct.json; \
+	    COMPOSE_PROJECT_NAME=$$project \
+	      MOA_DATABASE_MAX_CONNECTIONS=$$pool \
+	      MOA_LOADTEST_SHAPE=$$shape \
+	      MOA_LOADTEST_RATE=$$([ "$$shape" = steady ] && printf '%s' "$$rate" || printf '%s' 5) \
+	      MOA_LOADTEST_RATE_END=$$rate \
+	      MOA_LOADTEST_REPORT=$$report \
+	      $(MAKE) loadtest-capacity; \
+	    status=$$?; \
+	    COMPOSE_PROJECT_NAME=$$project docker compose down; \
+	    if [ $$status -ne 0 ]; then exit $$status; fi; \
+	  done
 
 # Long steady soak at ~70% of measured capacity; watch the window series for
 # drift (leaks, compaction pressure, partition growth).

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::error::{MoaError, Result};
-use moa_core::traits::RuntimeCacheStore;
+use moa_core::traits::{BoundedLeaseDecision, RuntimeCacheStore};
 use redis::AsyncCommands;
 
 /// Redis-backed runtime cache used for shared coordination state.
@@ -108,6 +108,78 @@ impl RuntimeCacheStore for RedisRuntimeCacheStore {
             .map_err(map_redis_error)?;
         Ok(())
     }
+
+    async fn try_acquire_bounded_lease(
+        &self,
+        key: &str,
+        lease_id: &str,
+        limit: usize,
+        ttl: Duration,
+    ) -> Result<BoundedLeaseDecision> {
+        if limit == 0 {
+            return Err(MoaError::ValidationError(
+                "bounded lease limit must be greater than zero".to_string(),
+            ));
+        }
+        let ttl_ms = ttl_millis(ttl)?;
+        let limit: i64 = limit.try_into().map_err(|_| {
+            MoaError::ValidationError("bounded lease limit is too large".to_string())
+        })?;
+        let mut connection = self.connection.clone();
+        let script = redis::Script::new(
+            r#"
+            local clock = redis.call("TIME")
+            local now_ms = (clock[1] * 1000) + math.floor(clock[2] / 1000)
+            redis.call("ZREMRANGEBYSCORE", KEYS[1], "-inf", now_ms)
+            local existing = redis.call("ZSCORE", KEYS[1], ARGV[1])
+            local live = redis.call("ZCARD", KEYS[1])
+            if existing == false and live >= tonumber(ARGV[2]) then
+                return {0, live}
+            end
+            redis.call("ZADD", KEYS[1], now_ms + tonumber(ARGV[3]), ARGV[1])
+            redis.call("PEXPIRE", KEYS[1], ARGV[3])
+            return {1, redis.call("ZCARD", KEYS[1])}
+            "#,
+        );
+        let (acquired, live): (i64, i64) = script
+            .key(key)
+            .arg(lease_id)
+            .arg(limit)
+            .arg(ttl_ms)
+            .invoke_async(&mut connection)
+            .await
+            .map_err(map_redis_error)?;
+        Ok(BoundedLeaseDecision {
+            acquired: acquired == 1,
+            live: live.try_into().map_err(|_| {
+                MoaError::StorageError("Redis returned a negative bounded lease count".to_string())
+            })?,
+        })
+    }
+
+    async fn release_bounded_lease(&self, key: &str, lease_id: &str) -> Result<usize> {
+        let mut connection = self.connection.clone();
+        let script = redis::Script::new(
+            r#"
+            local clock = redis.call("TIME")
+            local now_ms = (clock[1] * 1000) + math.floor(clock[2] / 1000)
+            redis.call("ZREMRANGEBYSCORE", KEYS[1], "-inf", now_ms)
+            redis.call("ZREM", KEYS[1], ARGV[1])
+            local live = redis.call("ZCARD", KEYS[1])
+            if live == 0 then redis.call("DEL", KEYS[1]) end
+            return live
+            "#,
+        );
+        let live: i64 = script
+            .key(key)
+            .arg(lease_id)
+            .invoke_async(&mut connection)
+            .await
+            .map_err(map_redis_error)?;
+        live.try_into().map_err(|_| {
+            MoaError::StorageError("Redis returned a negative bounded lease count".to_string())
+        })
+    }
 }
 
 fn ttl_millis(ttl: Duration) -> Result<i64> {
@@ -144,8 +216,8 @@ mod tests {
 
     /// Live Redis CAS/TTL coverage. Requires `MOA_RUN_LIVE_REDIS=1` plus a reachable
     /// Redis at `MOA_RUN_LIVE_REDIS_URL` (default `redis://127.0.0.1:6379`); the local
-    /// compose stack exposes `valkey`. Pins the CAS Lua script and PX-millis TTL
-    /// encoding so Memory-vs-Redis CAS semantics cannot silently diverge.
+    /// compose stack exposes `valkey`. Pins the CAS and bounded-lease Lua scripts
+    /// plus PX-millis TTL encoding so Memory-vs-Redis semantics cannot diverge.
     #[tokio::test]
     #[ignore = "requires a live Redis; set MOA_RUN_LIVE_REDIS=1"]
     async fn redis_runtime_cache_set_get_expire_and_cas_round_trip_docker() {
@@ -239,6 +311,37 @@ mod tests {
             "CAS expecting absent must succeed once the key is gone"
         );
         store.delete(&key).await.expect("cleanup key");
+
+        let lease_key = format!("moa:test:leases:{{turn-admission}}:{}", uuid_like());
+        assert!(
+            store
+                .try_acquire_bounded_lease(&lease_key, "session-a", 1, Duration::from_millis(100),)
+                .await
+                .expect("acquire first lease")
+                .acquired
+        );
+        assert!(
+            !store
+                .try_acquire_bounded_lease(&lease_key, "session-b", 1, Duration::from_millis(100),)
+                .await
+                .expect("reject lease over limit")
+                .acquired
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            store
+                .try_acquire_bounded_lease(&lease_key, "session-b", 1, Duration::from_secs(1),)
+                .await
+                .expect("reclaim expired lease")
+                .acquired
+        );
+        assert_eq!(
+            store
+                .release_bounded_lease(&lease_key, "session-b")
+                .await
+                .expect("release bounded lease"),
+            0
+        );
     }
 
     /// Returns a process-and-time-unique suffix without pulling in a uuid dependency.

@@ -44,7 +44,7 @@ use crate::types::{
 
 pub use auth::*;
 pub use embedding::EmbeddingProvider;
-pub use runtime_cache::RuntimeCacheStore;
+pub use runtime_cache::{BoundedLeaseDecision, RuntimeCacheStore};
 
 /// Durable append-only session store.
 #[async_trait]

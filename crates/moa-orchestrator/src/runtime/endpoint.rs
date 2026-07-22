@@ -151,6 +151,7 @@ pub fn build_endpoint(
     lineage: Arc<dyn LineageHandle>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
+    runtime_cache: Arc<dyn moa_core::traits::RuntimeCacheStore>,
 ) -> Endpoint {
     let mut builder = Endpoint::builder()
         .bind(SessionStoreImpl::new(session_store.clone(), pool.clone(), config.clone()).serve())
@@ -235,7 +236,9 @@ pub fn build_endpoint(
         .bind(PrivacyImpl::new(pool.clone(), config.compliance.clone(), kms.clone()).serve())
         .bind(SkillsImpl::new(pool.clone()).serve())
         .bind(CronJobImpl.serve())
-        .bind(SessionImpl::new(session_store.clone(), session_limits.clone()).serve())
+        .bind(
+            SessionImpl::new(session_store.clone(), session_limits.clone(), runtime_cache).serve(),
+        )
         .bind(
             WorkerImpl::new(
                 session_store.clone(),
