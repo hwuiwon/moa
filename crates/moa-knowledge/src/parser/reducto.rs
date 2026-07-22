@@ -255,7 +255,7 @@ pub(crate) fn map_reducto_result(value: Value) -> ParsedDocument {
                     .unwrap_or_else(|| "paragraph".to_string());
                 let kind = map_kind(&raw_type);
                 if kind == DocumentElementKind::Heading {
-                    heading_path.truncate(0);
+                    heading_path.clear();
                     heading_path.push(normalize_text(&block_text));
                 }
                 let page_number = block

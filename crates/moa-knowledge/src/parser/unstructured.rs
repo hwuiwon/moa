@@ -209,7 +209,7 @@ pub(crate) fn map_unstructured_elements(value: Value) -> ParsedDocument {
         if kind == DocumentElementKind::Heading {
             let heading = normalize_text(&text);
             if !heading.is_empty() {
-                heading_path.truncate(0);
+                heading_path.clear();
                 heading_path.push(heading);
             }
         }
