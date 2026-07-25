@@ -168,7 +168,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "exchange_public_token");
         let request = request.into_inner();
-        let caller = knowledge_caller(&mut ctx, request.tenant_id).await?;
+        let caller = authorize_knowledge_caller(&mut ctx, request.tenant_id).await?;
         let service = self.service.clone();
         let response = ctx
             .run(|| async move {
@@ -201,7 +201,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "sync_connection");
         let request = request.into_inner();
-        let caller = knowledge_caller(&mut ctx, request.tenant_id).await?;
+        let caller = authorize_knowledge_caller(&mut ctx, request.tenant_id).await?;
         let service = self.service.clone();
         let response = ctx
             .run(|| async move {
@@ -275,7 +275,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "list_connections");
         let request = request.into_inner();
-        let caller = knowledge_caller(&mut ctx, request.tenant_id).await?;
+        let caller = authorize_knowledge_caller(&mut ctx, request.tenant_id).await?;
         let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
@@ -321,7 +321,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "update_connection_source_selection");
         let request = request.into_inner();
-        let caller = knowledge_caller(&mut ctx, request.tenant_id).await?;
+        let caller = authorize_knowledge_caller(&mut ctx, request.tenant_id).await?;
         let service = self.service.clone();
         let response = ctx
             .run(|| async move {
@@ -354,7 +354,7 @@ impl Knowledge for KnowledgeImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Knowledge", "disconnect_connection");
         let request = request.into_inner();
-        let caller = knowledge_caller(&mut ctx, request.tenant_id).await?;
+        let caller = authorize_knowledge_caller(&mut ctx, request.tenant_id).await?;
         let service = self.service.clone();
         Ok(ctx
             .run(|| async move {
@@ -1241,7 +1241,7 @@ async fn authorize_tenant(
 /// Authorization happens before any credential work, and the id comes from the
 /// invocation's deterministic RNG rather than `Uuid::now_v7`, so a replayed
 /// handler reuses the same credential audit rows instead of appending new ones.
-async fn knowledge_caller(
+async fn authorize_knowledge_caller(
     ctx: &mut Context<'_>,
     tenant_id: TenantId,
 ) -> Result<KnowledgeCaller, HandlerError> {

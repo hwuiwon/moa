@@ -981,7 +981,7 @@ const SENDERS: &[SenderManifestEntry] = &[
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/turn_events.rs",
-        "append_session_event",
+        "append_with_identity",
         TRACE_HELPER,
         "RestateSessionStoreClient",
         "append_event"

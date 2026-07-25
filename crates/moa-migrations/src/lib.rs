@@ -250,6 +250,41 @@ async fn install_shared_extensions_locked(conn: &mut PgConnection) -> Result<()>
         .execute(&mut *conn)
         .await
         .context("install pgcrypto extension")?;
+    // Roles are cluster-global catalog state, exactly like extensions. The
+    // per-schema migration lists reference `moa_app` (RLS policies and grants)
+    // but deliberately exclude `V000001__session_baseline.sql`, which is what
+    // creates the roles in a full replay. On a pristine cluster (fresh CI
+    // service container) a schema-scoped bootstrap therefore raced whichever
+    // full-template build happened to run first — the same guarded creation
+    // here, under the same advisory lock, removes that ordering dependency.
+    raw_sql(
+        r#"
+        DO $$
+        BEGIN
+            CREATE ROLE moa_app NOLOGIN;
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
+            WHEN unique_violation THEN NULL;
+        END $$;
+        DO $$
+        BEGIN
+            CREATE ROLE moa_promoter NOLOGIN;
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
+            WHEN unique_violation THEN NULL;
+        END $$;
+        DO $$
+        BEGIN
+            CREATE ROLE moa_owner NOLOGIN;
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
+            WHEN unique_violation THEN NULL;
+        END $$;
+        "#,
+    )
+    .execute(&mut *conn)
+    .await
+    .context("ensure shared database roles")?;
     Ok(())
 }
 
