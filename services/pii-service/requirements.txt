@@ -1,4 +1,10 @@
 fastapi==0.115.14
 uvicorn[standard]==0.35.0
-transformers @ git+https://github.com/huggingface/transformers.git@main
+# Pinned release: the original git@main pin predated released support for the
+# default token-classification model and made every image rebuild resolve an
+# untested transformers snapshot (a 2026-07 rebuild pulled a main revision
+# whose `pipeline` import fails against torch 2.7.1, crash-looping the
+# sidecar). 4.57.x predates the model's release support; the 5.x line carries
+# it.
+transformers==5.14.1
 torch==2.7.1

@@ -130,6 +130,107 @@ pub enum ExecutionFailureDisposition {
     Failed,
 }
 
+/// Actor whose turn workflow reached its terminal failure boundary.
+///
+/// A session's durable history interleaves root coordinator turns and the turns
+/// of the workers it owns, so a failure fact is only interpretable together with
+/// the actor it belongs to. The actor also scopes the failure's dedupe identity
+/// (see [`TurnFailureActor::actor_key`]) and decides whether the fact affects
+/// root scheduling at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "actor")]
+pub enum TurnFailureActor {
+    /// The session's own root coordinator turn.
+    Coordinator,
+    /// One child worker turn owned by the session.
+    Worker {
+        /// Child worker whose turn failed.
+        worker_id: WorkerId,
+    },
+}
+
+impl TurnFailureActor {
+    /// Returns the stable key that scopes this actor's failure dedupe identity.
+    ///
+    /// Combined with the turn id, this yields `turn_failed:{actor_key}:{turn_id}`:
+    /// a replayed workflow re-appends nothing, while a root turn and a worker turn
+    /// that happen to share an id remain distinct facts.
+    #[must_use]
+    pub fn actor_key(&self) -> String {
+        match self {
+            Self::Coordinator => "coordinator".to_string(),
+            Self::Worker { worker_id } => format!("worker:{worker_id}"),
+        }
+    }
+}
+
+/// Why an already-accepted queued user message will never run.
+///
+/// A queued message was acknowledged to its sender, so it cannot simply vanish:
+/// every accepted message that is discarded gets one durable rejection fact
+/// carrying this reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedMessageRejection {
+    /// The whole task tree was cancelled before the message could start a turn.
+    TaskTreeCancelled,
+}
+
+impl QueuedMessageRejection {
+    /// Returns the bounded, user-facing reason for this rejection.
+    #[must_use]
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::TaskTreeCancelled => {
+                "This queued message was dropped because the session was cancelled."
+            }
+        }
+    }
+}
+
+/// Coarse, secret-free stage a turn failure is attributed to.
+///
+/// This is deliberately a small closed set derived from the turn's own durable
+/// phase, never from provider, tool, or error text. It tells an operator where a
+/// turn died without persisting anything that could carry credentials, prompt
+/// content, or tool output into the session log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnFailureClass {
+    /// Failed before the turn produced any visible work.
+    Startup,
+    /// Failed while compiling context or planning the turn.
+    ContextCompilation,
+    /// Failed while producing model output.
+    ModelCall,
+    /// Failed while dispatching or awaiting tools.
+    ToolDispatch,
+    /// Failed while persisting turn output.
+    Persistence,
+    /// The durable phase did not identify a narrower stage.
+    Unattributed,
+}
+
+impl TurnFailureClass {
+    /// Returns the fixed, bounded, secret-free summary for this class.
+    ///
+    /// The summary is a function of the class alone, so no caller can widen it
+    /// into a channel for raw error text. It is persisted on the event so that
+    /// history, dashboard, and delivery consumers render one identical sentence
+    /// without carrying their own mapping table.
+    #[must_use]
+    pub fn summary(self) -> &'static str {
+        match self {
+            Self::Startup => "The turn failed before it started work.",
+            Self::ContextCompilation => "The turn failed while preparing its context.",
+            Self::ModelCall => "The turn failed while waiting on the model.",
+            Self::ToolDispatch => "The turn failed while running a tool.",
+            Self::Persistence => "The turn failed while saving its result.",
+            Self::Unattributed => "The turn failed.",
+        }
+    }
+}
+
 /// Append-only session event payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::EnumDiscriminants)]
 #[serde(tag = "type", content = "data")]
@@ -498,6 +599,42 @@ pub enum Event {
         #[serde(default)]
         persist_ms: u64,
     },
+    /// One accepted queued user message was discarded without ever running.
+    ///
+    /// `queue_message`/`start_turn` acknowledge a queued message to its sender, so
+    /// dropping it silently would leave acknowledged work invisible forever. One
+    /// of these is appended per discarded message, in the queue's FIFO order, so
+    /// the durable history shows exactly which messages were dropped and why.
+    QueuedMessageRejected {
+        /// When the discarded message was originally queued.
+        queued_at: DateTime<Utc>,
+        /// Position the message held in the queue when it was discarded.
+        queue_index: u64,
+        /// Typed reason the message will never run.
+        rejection: QueuedMessageRejection,
+    },
+    /// One turn workflow reached its terminal failure boundary.
+    ///
+    /// This is the single canonical failed-turn fact for both root coordinator
+    /// turns and worker turns. It is appended before the owning object is told
+    /// the outcome, so a failure is durably visible even when the callback,
+    /// attention signal, or delivery that follows never lands. Its payload is
+    /// closed and secret-free: a raw error rendering is never persisted here.
+    ///
+    /// It does not replace an `Error` a production path already recorded, and it
+    /// does not replace `WorkerSignalReceived` (control-plane attention) or
+    /// `WorkerStatusChanged`/`WorkerNotificationDelivered` (worker lifecycle
+    /// delivery). Those may coexist with it and are counted separately.
+    TurnFailed {
+        /// Actor whose turn failed.
+        actor: TurnFailureActor,
+        /// Turn workflow key that failed.
+        turn_id: String,
+        /// Coarse, secret-free stage the failure is attributed to.
+        class: TurnFailureClass,
+        /// Fixed, bounded, secret-free operator-facing summary.
+        summary: String,
+    },
     /// A control-plane attention signal from a child was recorded on the coordinator.
     WorkerSignalReceived {
         /// Stable identifier for the recorded signal.
@@ -690,6 +827,16 @@ impl Event {
             | Self::ActionReviewDecided { .. }
             | Self::ExecutionInputRequired(_) => ProcessingEffect::Terminal,
 
+            // A canonical turn failure is scheduling-relevant only for the actor
+            // that owns the session's turn loop. A coordinator failure concludes
+            // that loop. A worker failure is a child fact recorded in the shared
+            // session log; treating it as terminal would let a child's failure
+            // mask genuinely pending root work, so it stays transparent.
+            Self::TurnFailed { actor, .. } => match actor {
+                TurnFailureActor::Coordinator => ProcessingEffect::Terminal,
+                TurnFailureActor::Worker { .. } => ProcessingEffect::Neutral,
+            },
+
             // Neutrals: passive telemetry, liveness, enrichment, and lifecycle
             // breadcrumbs. Several are appended asynchronously off the turn path
             // (ProgressNarrated, WorkerHeartbeatStale, TurnMetrics, CacheReport,
@@ -701,6 +848,9 @@ impl Event {
             | Self::SegmentStarted { .. }
             | Self::SegmentCompleted { .. }
             | Self::QueuedMessage { .. }
+            // A rejected queued message is a bookkeeping fact about work that will
+            // never run, so it neither demands nor concludes a turn.
+            | Self::QueuedMessageRejected { .. }
             | Self::ExecutionRunStarted(_)
             | Self::ExecutionProgress(_)
             | Self::ExecutionCompleted(_)
@@ -854,6 +1004,76 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn turn_failure_dedupe_identity_is_scoped_by_actor_and_turn() {
+        // Pins: the canonical failed-turn fact is identified by actor AND turn. A
+        // sequence-only or turn-only key would collapse a coordinator failure and a
+        // worker failure that share a turn id into one event, hiding one of them, and
+        // would let two different turns of the same worker overwrite each other.
+        let coordinator = TurnFailureActor::Coordinator;
+        let worker = TurnFailureActor::Worker {
+            worker_id: "worker-7".to_string(),
+        };
+        let other_worker = TurnFailureActor::Worker {
+            worker_id: "worker-8".to_string(),
+        };
+
+        assert_eq!(coordinator.actor_key(), "coordinator");
+        assert_eq!(worker.actor_key(), "worker:worker-7");
+        assert_ne!(worker.actor_key(), other_worker.actor_key());
+        assert_ne!(coordinator.actor_key(), worker.actor_key());
+    }
+
+    #[test]
+    fn coordinator_turn_failure_is_terminal_and_worker_failure_is_neutral() {
+        // Pins: a child's failure must not mask root scheduling state in the shared
+        // session log. Classifying a worker failure as Terminal makes the tail scan
+        // stop at it and conclude the root turn loop has nothing pending, stalling a
+        // coordinator that still owes the user a reply.
+        let coordinator = Event::TurnFailed {
+            actor: TurnFailureActor::Coordinator,
+            turn_id: "turn-1".to_string(),
+            class: TurnFailureClass::ModelCall,
+            summary: TurnFailureClass::ModelCall.summary().to_string(),
+        };
+        let worker = Event::TurnFailed {
+            actor: TurnFailureActor::Worker {
+                worker_id: "worker-7".to_string(),
+            },
+            turn_id: "turn-1".to_string(),
+            class: TurnFailureClass::ToolDispatch,
+            summary: TurnFailureClass::ToolDispatch.summary().to_string(),
+        };
+
+        assert_eq!(coordinator.processing_effect(), ProcessingEffect::Terminal);
+        assert_eq!(worker.processing_effect(), ProcessingEffect::Neutral);
+    }
+
+    #[test]
+    fn turn_failure_summaries_carry_no_caller_supplied_text() {
+        // Pins: the failure summary is a function of the coarse class alone, so no
+        // catch-all boundary can widen it into a channel for raw error debug output,
+        // provider payloads, or tool secrets.
+        for class in [
+            TurnFailureClass::Startup,
+            TurnFailureClass::ContextCompilation,
+            TurnFailureClass::ModelCall,
+            TurnFailureClass::ToolDispatch,
+            TurnFailureClass::Persistence,
+            TurnFailureClass::Unattributed,
+        ] {
+            let summary = class.summary();
+            assert!(
+                !summary.is_empty() && summary.len() <= 80,
+                "summary must be present and bounded: {summary}"
+            );
+            assert!(
+                summary.starts_with("The turn failed"),
+                "summary must be a fixed sentence: {summary}"
+            );
+        }
+    }
 
     fn sample_action_envelope(
         review_id: Uuid,

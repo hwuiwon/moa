@@ -4,17 +4,25 @@
 //! (`worker_turn_execution`) persist the same durable events through identical
 //! wiring. These helpers are the single definition of that wiring so both
 //! workflows emit bit-identical events, fields, and tracing.
+//!
+//! Every append needs the session-store backend and the append-strategy flag.
+//! Both arrive as an explicitly injected [`TurnEventAppender`]: the composition
+//! root builds one and hands it to each workflow implementation, which owns it
+//! and passes it down. Nothing here reads global runtime state.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use moa_core::{
-    events::Event, traits::SessionStore as _, types::completion::ToolCallContent,
-    types::completion::ToolInvocation, types::events_stream::EventRecord,
-    types::identifiers::SessionId, types::identifiers::ToolCallId, types::provider::ModelTier,
-    types::session::SessionMeta, types::tools::ToolOutput,
+    events::Event, events::TurnFailureActor, events::TurnFailureClass, traits::SessionStore as _,
+    types::completion::ToolCallContent, types::completion::ToolInvocation,
+    types::events_stream::EventRecord, types::identifiers::SessionId,
+    types::identifiers::ToolCallId, types::provider::ModelTier, types::session::SessionMeta,
+    types::tools::ToolOutput,
 };
 use moa_observability::restate_observability::event_persist_span;
 use moa_observability::{record_session_error, record_turn_event_persist_duration};
+use moa_session::PostgresSessionStore;
 use moa_wire::session_store::{
     AppendEventRequest, RecordSegmentSkillUseRequest, RecordSegmentToolUseRequest,
 };
@@ -25,23 +33,80 @@ use tracing::Instrument;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::workflows::turn_responsiveness::ToolBudgetExhausted;
 
+/// Durable turn-event append dependency owned by a workflow implementation.
+///
+/// Carries the two things an append needs — the concrete session-store backend
+/// and whether appends bypass the `SessionStore` service — so neither is read
+/// from global runtime state at append time. Cloning is cheap: the backend is
+/// shared behind an [`Arc`].
+#[derive(Clone)]
+pub struct TurnEventAppender {
+    session_store: Arc<PostgresSessionStore>,
+    direct_append: bool,
+}
+
+impl TurnEventAppender {
+    /// Builds the appender from the session-store backend and append strategy.
+    ///
+    /// `direct_append` mirrors `session.direct_turn_event_append`: when set,
+    /// appends run as a durable action against `session_store` instead of an
+    /// RPC to the `SessionStore` service.
+    #[must_use]
+    pub fn new(session_store: Arc<PostgresSessionStore>, direct_append: bool) -> Self {
+        Self {
+            session_store,
+            direct_append,
+        }
+    }
+}
+
 /// Appends one durable session event and returns its stored record.
 ///
 /// Wraps the append in the standard persistence span and latency counters so
 /// every turn-event write is measured identically across both workflows.
 pub(super) async fn append_session_event(
+    appender: &TurnEventAppender,
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     event: Event,
 ) -> Result<EventRecord, HandlerError> {
+    let dedupe = next_turn_event_identity(ctx).await?;
+    append_with_identity(appender, ctx, session_id, event, dedupe).await
+}
+
+/// Appends one durable session event under a caller-supplied dedupe key.
+///
+/// The ordinary path derives its dedupe key from a per-workflow append sequence,
+/// which makes two logically distinct facts collide only if they occupy the same
+/// sequence slot. A fact whose identity is defined by its own domain — the
+/// canonical failed-turn event, keyed by actor plus turn — must not depend on how
+/// many appends happened to precede it, so it names its key explicitly. The key
+/// alone determines the durable action identity, so a replayed workflow re-derives
+/// the same append and the event materializes exactly once.
+pub(super) async fn append_session_event_with_dedupe_key(
+    appender: &TurnEventAppender,
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    event: Event,
+    dedupe_key: String,
+) -> Result<EventRecord, HandlerError> {
+    let dedupe = keyed_turn_event_identity(dedupe_key);
+    append_with_identity(appender, ctx, session_id, event, dedupe).await
+}
+
+async fn append_with_identity(
+    appender: &TurnEventAppender,
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    event: Event,
+    dedupe: TurnEventIdentity,
+) -> Result<EventRecord, HandlerError> {
     let persist_span = event_persist_span(1);
     let persist_started = Instant::now();
     moa_core::coordination_counters::record_durable_append();
-    let dedupe = next_turn_event_identity(ctx).await?;
-    let orchestrator = crate::ctx::OrchestratorCtx::current();
-    let record = if orchestrator.config().session.direct_turn_event_append {
+    let record = if appender.direct_append {
         let action_started = Instant::now();
-        let store = orchestrator.session_store_backend();
+        let store = appender.session_store.clone();
         let event_is_error = matches!(&event, Event::Error { .. });
         let event_for_action = event.clone();
         let dedupe_for_action = dedupe.key.clone();
@@ -89,7 +154,7 @@ pub(super) async fn append_session_event(
 }
 
 async fn emit_direct_event(
-    store: &moa_session::PostgresSessionStore,
+    store: &PostgresSessionStore,
     session_id: SessionId,
     event: Event,
     dedupe_key: String,
@@ -122,6 +187,21 @@ async fn next_turn_event_identity(
     Ok(turn_event_identity(ctx.key(), sequence))
 }
 
+/// Builds the durable append identity for a caller-supplied dedupe key.
+///
+/// The action name and retry jitter are derived from the key itself, so the
+/// identity is a pure function of the fact being recorded and stays stable across
+/// replay without consuming the workflow's append sequence.
+fn keyed_turn_event_identity(dedupe_key: String) -> TurnEventIdentity {
+    let digest = blake3::hash(dedupe_key.as_bytes());
+    let short = digest.to_hex()[..12].to_string();
+    TurnEventIdentity {
+        key: dedupe_key,
+        action_name: format!("turn_event_append_keyed_{short}"),
+        jitter_ms: 50 + u64::from(digest.as_bytes()[0]) % 101,
+    }
+}
+
 fn turn_event_identity(turn_id: &str, sequence: u64) -> TurnEventIdentity {
     let turn_digest = blake3::hash(turn_id.as_bytes());
     let short = turn_digest.to_hex()[..12].to_string();
@@ -143,6 +223,7 @@ fn turn_event_append_retry_policy(jitter_ms: u64) -> RunRetryPolicy {
 
 /// Persists a `ToolCall` event for a model-issued tool invocation.
 pub(super) async fn append_tool_call_event(
+    appender: &TurnEventAppender,
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     tool_id: ToolCallId,
@@ -150,6 +231,7 @@ pub(super) async fn append_tool_call_event(
 ) -> Result<(), HandlerError> {
     let invocation = tool_call.invocation.clone();
     append_session_event(
+        appender,
         ctx,
         session_id,
         Event::ToolCall {
@@ -171,6 +253,7 @@ pub(super) async fn append_tool_call_event(
 
 /// Persists a `ToolResult` event for a completed tool invocation.
 pub(super) async fn append_tool_result_event(
+    appender: &TurnEventAppender,
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     tool_id: ToolCallId,
@@ -178,6 +261,7 @@ pub(super) async fn append_tool_result_event(
     output: &ToolOutput,
 ) -> Result<(), HandlerError> {
     append_session_event(
+        appender,
         ctx,
         session_id,
         Event::ToolResult {
@@ -240,12 +324,14 @@ pub(super) async fn record_segment_skill_use_for_tool_call(
 
 /// Emits the recoverable error event that records a tool-budget exhaustion stop.
 pub(super) async fn emit_tool_budget_exceeded(
+    appender: &TurnEventAppender,
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     exhaustion: &ToolBudgetExhausted,
 ) -> Result<(), HandlerError> {
     record_session_error("tool_budget");
     append_session_event(
+        appender,
         ctx,
         session_id,
         Event::Error {
@@ -257,17 +343,97 @@ pub(super) async fn emit_tool_budget_exceeded(
     .map(|_| ())
 }
 
+/// Appends the canonical failed-turn fact and returns its safe summary.
+///
+/// This is the single writer of [`Event::TurnFailed`]. Both turn workflows call
+/// it at their catch-all failure boundary, before telling their owning object the
+/// outcome, so the failure is durably recorded even if the callback, attention
+/// signal, or notification that follows is lost. The returned summary is the same
+/// bounded, secret-free sentence that was persisted, and is what the caller must
+/// put in `TurnOutcome.message`: the underlying error is logged for operators and
+/// never persisted.
+///
+/// The append is keyed `turn_failed:{actor_key}:{turn_id}`, so a workflow replay
+/// re-derives one identical append and the fact materializes exactly once per
+/// actor and turn.
+/// Derives the canonical failed-turn dedupe key for one actor and turn.
+///
+/// The key is a persisted durability contract: the event store deduplicates on
+/// it, so every path that records the same actor's failure for the same turn —
+/// catch-all boundary, body-reported failure, or an independent re-invocation —
+/// must derive the identical string. It is a pure function of the fact alone,
+/// never of append order, clocks, or randomness.
+pub(super) fn turn_failed_dedupe_key(actor: &TurnFailureActor, turn_id: &str) -> String {
+    format!("turn_failed:{}:{turn_id}", actor.actor_key())
+}
+
+pub(super) async fn append_turn_failed(
+    appender: &TurnEventAppender,
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    actor: TurnFailureActor,
+    turn_id: &str,
+    class: TurnFailureClass,
+) -> Result<String, HandlerError> {
+    let summary = class.summary().to_string();
+    record_session_error("turn_failed");
+    append_session_event_with_dedupe_key(
+        appender,
+        ctx,
+        session_id,
+        Event::TurnFailed {
+            actor: actor.clone(),
+            turn_id: turn_id.to_string(),
+            class,
+            summary: summary.clone(),
+        },
+        turn_failed_dedupe_key(&actor, turn_id),
+    )
+    .await?;
+    Ok(summary)
+}
+
+/// Stable, hand-authored terminal rejection codes that may surface verbatim in
+/// a failed `TurnOutcome.message`.
+///
+/// The catch-all boundaries replace arbitrary workflow error text with the
+/// fixed class sentence because those errors can carry provider, tool, and
+/// prompt material. Deliberate policy rejections are different: their text is
+/// authored in this repository as a stable code that callers match on, so
+/// erasing it would collapse a typed contract into an indistinguishable
+/// generic failure. Only codes on this closed list survive sanitization;
+/// everything else keeps the fixed class sentence.
+pub(super) const SAFE_TERMINAL_REJECTION_CODES: &[&str] = &[
+    "durable_execution_requires_user_message_origin",
+    "run_requires_user_message_origin",
+];
+
+/// Returns the stable rejection code carried by a hand-authored terminal
+/// error, or `None` for every other failure.
+///
+/// Matches on the debug rendering because `HandlerError` exposes no `Display`;
+/// the closed allowlist means only exact repository-authored constants can
+/// ever pass through, whatever the rendering carries around them.
+pub(super) fn safe_terminal_rejection_code(error: &impl std::fmt::Debug) -> Option<&'static str> {
+    let rendered = format!("{error:?}");
+    SAFE_TERMINAL_REJECTION_CODES
+        .iter()
+        .copied()
+        .find(|code| rendered.contains(code))
+}
+
 /// Persists a zero-cost auxiliary assistant response and returns its text.
 ///
 /// Used for canned replies (clarifications, budget-stop notices) that never
 /// call the model, so all token and cost fields are zero.
 pub(super) async fn append_zero_cost_assistant_response(
+    appender: &TurnEventAppender,
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     meta: &SessionMeta,
     text: String,
 ) -> Result<String, HandlerError> {
-    append_zero_cost_assistant_response_with_sequence(ctx, session_id, meta, text)
+    append_zero_cost_assistant_response_with_sequence(appender, ctx, session_id, meta, text)
         .await
         .map(|(text, _sequence_num)| text)
 }
@@ -276,12 +442,14 @@ pub(super) async fn append_zero_cost_assistant_response(
 ///
 /// Root turn execution uses the sequence number to bound post-outcome segment assessment.
 pub(super) async fn append_zero_cost_assistant_response_with_sequence(
+    appender: &TurnEventAppender,
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     meta: &SessionMeta,
     text: String,
 ) -> Result<(String, u64), HandlerError> {
     let record = append_session_event(
+        appender,
         ctx,
         session_id,
         Event::BrainResponse {
@@ -315,6 +483,33 @@ pub(super) fn turn_outcome_kind_label(kind: &TurnOutcomeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_failed_dedupe_key_is_a_pure_function_of_actor_and_turn() {
+        // Pins: the canonical failed-turn dedupe key is derived from the actor
+        // and turn alone. The event store deduplicates on this exact string,
+        // so a sequence-, clock-, or randomness-derived key would let a
+        // re-executed append materialize the same failure fact twice, and an
+        // operator counting failures would double-count every failed turn.
+        assert_eq!(
+            turn_failed_dedupe_key(&TurnFailureActor::Coordinator, "turn-1"),
+            "turn_failed:coordinator:turn-1",
+        );
+        assert_eq!(
+            turn_failed_dedupe_key(
+                &TurnFailureActor::Worker {
+                    worker_id: "worker-9".to_string(),
+                },
+                "turn-2",
+            ),
+            "turn_failed:worker:worker-9:turn-2",
+        );
+        // Re-derivation is stable: the same fact always yields the same key.
+        assert_eq!(
+            turn_failed_dedupe_key(&TurnFailureActor::Coordinator, "turn-1"),
+            turn_failed_dedupe_key(&TurnFailureActor::Coordinator, "turn-1"),
+        );
+    }
 
     #[test]
     fn turn_event_identity_is_unique_per_append_and_stable_per_sequence() {

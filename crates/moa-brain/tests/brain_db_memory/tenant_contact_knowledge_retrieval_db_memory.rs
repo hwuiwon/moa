@@ -1054,7 +1054,8 @@ async fn seed_knowledge_chunk_with_text(
     let connection_uid = Uuid::now_v7();
     let object_uid = Uuid::now_v7();
     let version_uid = Uuid::now_v7();
-    let chunk_uid = Uuid::now_v7();
+    // The chunk row IS the graph occurrence, so its uid is the graph node uid.
+    let chunk_uid = graph_node_uid;
     let storage_partition_id = tenant_id.to_string();
     sqlx::query(
         r#"

@@ -3,6 +3,7 @@
 mod connection;
 mod contact_group;
 mod document;
+mod link_claim;
 mod row_mapping;
 mod sync;
 
@@ -25,7 +26,8 @@ use crate::{
         ContactGroupTargetMember, DocumentVersion, IngestionStepStatus, KnowledgeBlock,
         KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionProjection, KnowledgeIngestionStep,
         KnowledgeObject, KnowledgeObjectInspection, KnowledgeObjectProjection,
-        KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus,
+        KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, LinkClaim,
+        LinkClaimReservation, LinkClaimState, LinkClaimTransition, NewLinkClaim, ObjectStatus,
         SyncRunStatus,
     },
     error::{Error, Result},
@@ -113,6 +115,73 @@ pub trait KnowledgeRepository: Send + Sync {
 
     /// Gets a linked connection by identifier.
     async fn get_connection(&self, connection_uid: Uuid) -> Result<Option<KnowledgeConnection>>;
+
+    /// Gets the connection an upsert of this provider account would replace.
+    ///
+    /// Keyed on exactly the columns `upsert_connection` treats as the conflict
+    /// target, so a link can learn which connection identifier it will actually
+    /// own *before* writing a credential bound to one. Without this, a re-link
+    /// mints a fresh identifier, binds the credential to it, and then the upsert
+    /// returns the pre-existing identifier — orphaning the version it just wrote.
+    async fn connection_by_provider_account(
+        &self,
+        provider: &str,
+        connector: &str,
+        provider_account_id: &str,
+    ) -> Result<Option<KnowledgeConnection>>;
+
+    /// Reserves the operation-fenced claim that owns one link.
+    ///
+    /// Inserting the claim is what makes the link idempotent: the same operation
+    /// id and request hash resume the recorded state, while a reused id with
+    /// different inputs is a typed conflict instead of a silent overwrite.
+    async fn reserve_link_claim(&self, claim: NewLinkClaim) -> Result<LinkClaimReservation>;
+
+    /// Advances one link claim by compare-and-swap.
+    ///
+    /// Returns the claim as it now stands when the transition applied, and
+    /// `None` when the claim was not in a permitted source state — which is how
+    /// a replayed or concurrent link discovers it lost the race rather than
+    /// overwriting a newer claim.
+    async fn advance_link_claim(
+        &self,
+        tenant_id: TenantId,
+        operation_id: &str,
+        transition: LinkClaimTransition,
+    ) -> Result<Option<LinkClaim>>;
+
+    /// Reads one link claim.
+    async fn get_link_claim(
+        &self,
+        tenant_id: TenantId,
+        operation_id: &str,
+    ) -> Result<Option<LinkClaim>>;
+
+    /// Puts one connection's credential reference back to an exact prior value.
+    ///
+    /// Used only by link compensation, which restores the version it superseded
+    /// rather than whatever is active at failure time. Returns whether the row
+    /// changed, so a caller can tell a real restore from a connection a newer
+    /// link already moved on.
+    async fn restore_connection_credential(
+        &self,
+        connection_uid: Uuid,
+        credential_ref: &str,
+    ) -> Result<bool>;
+
+    /// Removes at most `limit` link claims for this repository's tenant.
+    ///
+    /// Claims hold credential references and nothing else, so they are swept by
+    /// the same tenant-lifecycle stage that drains the credential owner. Bounded
+    /// and idempotent: the caller loops until it returns 0, which gives
+    /// crash-resume without any additional durable state.
+    async fn purge_tenant_link_claims(&self, limit: u32) -> Result<u64>;
+
+    /// Records that one sync run's provider trigger durably dispatched.
+    ///
+    /// Write-once: a repeated call keeps the original timestamp, so the boundary
+    /// records when dispatch was first observed and replay cannot move it.
+    async fn mark_provider_trigger_completed(&self, sync_run_uid: Uuid) -> Result<()>;
 
     /// Updates provider-native selected source state and clears the sync watermark.
     async fn update_connection_source_selection(
@@ -234,6 +303,10 @@ pub trait KnowledgeRepository: Send + Sync {
     /// they are invalidated rather than left retrievable. Chunks whose `active`
     /// retrieval flag has been set to `false` by [`Self::tombstone_chunks`] are
     /// excluded.
+    ///
+    /// Every returned chunk carries its persisted occurrence identity in
+    /// `chunk_uid`, which is also its graph node uid, so invalidation and
+    /// deletion paths address exactly the occurrences this object owns.
     async fn active_chunks_for_object(&self, object_uid: Uuid) -> Result<Vec<KnowledgeChunk>>;
 
     /// Returns whether final object ingestion completed after a version timestamp.
@@ -363,6 +436,16 @@ impl PostgresKnowledgeRepository {
             scope,
             assume_app_role: true,
         }
+    }
+
+    /// Returns the tenant this repository is scoped to.
+    ///
+    /// Statements that must filter by tenant explicitly — rather than relying on
+    /// the RLS policy alone — read it from here, so the predicate can never
+    /// disagree with the scope the connection was opened under.
+    #[must_use]
+    pub fn scoped_tenant_id(&self) -> TenantId {
+        self.scope.tenant_id()
     }
 
     /// Loads a redacted ingestion timeline for one sync run.
@@ -517,6 +600,53 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
 
     async fn get_connection(&self, connection_uid: Uuid) -> Result<Option<KnowledgeConnection>> {
         connection::get_connection(self, connection_uid).await
+    }
+
+    async fn connection_by_provider_account(
+        &self,
+        provider: &str,
+        connector: &str,
+        provider_account_id: &str,
+    ) -> Result<Option<KnowledgeConnection>> {
+        connection::connection_by_provider_account(self, provider, connector, provider_account_id)
+            .await
+    }
+
+    async fn reserve_link_claim(&self, claim: NewLinkClaim) -> Result<LinkClaimReservation> {
+        link_claim::reserve_link_claim(self, claim).await
+    }
+
+    async fn advance_link_claim(
+        &self,
+        tenant_id: TenantId,
+        operation_id: &str,
+        transition: LinkClaimTransition,
+    ) -> Result<Option<LinkClaim>> {
+        link_claim::advance_link_claim(self, tenant_id, operation_id, transition).await
+    }
+
+    async fn get_link_claim(
+        &self,
+        tenant_id: TenantId,
+        operation_id: &str,
+    ) -> Result<Option<LinkClaim>> {
+        link_claim::get_link_claim(self, tenant_id, operation_id).await
+    }
+
+    async fn restore_connection_credential(
+        &self,
+        connection_uid: Uuid,
+        credential_ref: &str,
+    ) -> Result<bool> {
+        connection::restore_connection_credential(self, connection_uid, credential_ref).await
+    }
+
+    async fn purge_tenant_link_claims(&self, limit: u32) -> Result<u64> {
+        link_claim::purge_tenant_link_claims(self, limit).await
+    }
+
+    async fn mark_provider_trigger_completed(&self, sync_run_uid: Uuid) -> Result<()> {
+        sync::mark_provider_trigger_completed(self, sync_run_uid).await
     }
 
     async fn update_connection_source_selection(

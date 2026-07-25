@@ -411,7 +411,12 @@ async fn run_one_turn(ctx: Arc<DispatchCtx>, mut slot: SessionSlot, intended: Du
     let target = ctx.targets[slot.target_index].clone();
     let prompt = slot.plan.turns[slot.next_turn].prompt.clone();
     match target
-        .run_turn(slot.session_id, &prompt, ctx.turn_timeout)
+        .run_turn(
+            slot.session_id,
+            slot.next_turn as u64,
+            &prompt,
+            ctx.turn_timeout,
+        )
         .await
     {
         Ok(observation) => {
@@ -745,6 +750,9 @@ pub(crate) fn latest_session_note(events: &[EventRecord]) -> Option<String> {
     events.iter().rev().find_map(|record| match &record.event {
         Event::Warning { message } => Some(message.clone()),
         Event::Error { message, .. } => Some(message.clone()),
+        // The canonical failed-turn fact is the only note available when a turn
+        // died at its catch-all boundary without recording an inner error.
+        Event::TurnFailed { summary, .. } => Some(summary.clone()),
         _ => None,
     })
 }
@@ -800,6 +808,7 @@ mod tests {
         async fn run_turn(
             &self,
             _session_id: SessionId,
+            _turn_ordinal: u64,
             _prompt: &str,
             _timeout: Duration,
         ) -> std::result::Result<TurnObservation, TurnFailure> {

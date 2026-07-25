@@ -108,6 +108,7 @@ impl SessionTarget for EdgeTarget {
     async fn run_turn(
         &self,
         session_id: SessionId,
+        turn_ordinal: u64,
         prompt: &str,
         timeout: Duration,
     ) -> std::result::Result<TurnObservation, TurnFailure> {
@@ -123,6 +124,9 @@ impl SessionTarget for EdgeTarget {
             .json(&serde_json::json!({
                 "tenant_id": self.tenant_id,
                 "contact_token": self.contact_token,
+                // Derived from the session and this turn's position, so a retried edge
+                // submission replays instead of admitting a second paid turn.
+                "client_message_id": format!("edge-loadtest-turn:{session_id}:{turn_ordinal}"),
                 "user_message": prompt,
                 "model": self.model,
                 "attachments": [],

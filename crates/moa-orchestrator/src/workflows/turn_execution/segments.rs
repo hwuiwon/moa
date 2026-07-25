@@ -433,6 +433,7 @@ pub(super) async fn run_post_outcome_assessment(
             "post-outcome segment assessment failed"
         );
         if let Err(warning_error) = append_session_event(
+            workflow.event_appender(),
             ctx,
             session_id,
             Event::Warning {

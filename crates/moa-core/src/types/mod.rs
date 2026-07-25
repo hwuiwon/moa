@@ -9,6 +9,7 @@ pub mod channel;
 pub mod completion;
 pub mod contact;
 pub mod context;
+pub mod credentials;
 pub mod events_stream;
 pub mod execution_planning;
 pub mod experience;

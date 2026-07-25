@@ -15,7 +15,7 @@ use moa_knowledge::{
         contact_group_member_contact_points,
         derive_contact_groups_from_object_with_resolved_members,
     },
-    domain::{KnowledgeObject, ObjectStatus},
+    domain::{ContactGroup, KnowledgeObject, ObjectStatus},
     repository::{KnowledgeRepository, PostgresKnowledgeRepository},
 };
 use moa_test_support::postgres;
@@ -553,4 +553,119 @@ async fn active_membership_count_for_contact(
     .fetch_one(pool)
     .await
     .expect("load contact membership count")
+}
+
+/// Builds one derived contact group shaped exactly like ingestion materialization output.
+fn derived_group(tenant_id: TenantId, connection_uid: Uuid, source_group_id: &str) -> ContactGroup {
+    let group_key = format!("merge:{connection_uid}:account:{source_group_id}");
+    ContactGroup {
+        group_uid: Uuid::now_v7(),
+        tenant_id,
+        group_key: group_key.clone(),
+        display_name: "Acme".to_string(),
+        metadata: json!({ "source_provider": "merge" }),
+    }
+}
+
+/// Builds a tenant-scoped repository that owns its pool clone for spawned tasks.
+fn owned_repository(pool: &PgPool, tenant_id: TenantId) -> PostgresKnowledgeRepository {
+    PostgresKnowledgeRepository::scoped_for_app_role(pool.clone(), RlsContext::tenant(tenant_id))
+}
+
+#[tokio::test]
+async fn concurrent_identical_group_upserts_converge_without_duplicate_key_db_knowledge() {
+    // Pins: contact groups are cross-object, so page-concurrent records derive
+    // the byte-identical group (same group_uid AND same
+    // knowledge_contact_groups_name_uniq key) and race their upserts. Every
+    // writer must succeed and the table must converge to one row; without
+    // per-group serialization a second writer that passes the group_uid
+    // arbiter pre-check concurrently raises 23505 on the name index, which
+    // never takes the DO UPDATE path.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated knowledge DB");
+    let pool = db.store().pool();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let group = derived_group(tenant_id, Uuid::now_v7(), "acct-race");
+
+    const WRITERS: usize = 8;
+    const ROUNDS: usize = 5;
+    for _ in 0..ROUNDS {
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(WRITERS));
+        let mut handles = Vec::with_capacity(WRITERS);
+        for _ in 0..WRITERS {
+            let barrier = barrier.clone();
+            let repository = owned_repository(pool, tenant_id);
+            let group = group.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                repository.upsert_contact_group(group).await
+            }));
+        }
+        for handle in handles {
+            handle
+                .await
+                .expect("upsert task should not panic")
+                .expect("concurrent identical group upsert should succeed");
+        }
+    }
+
+    let row_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM moa.knowledge_contact_groups WHERE group_uid = $1",
+    )
+    .bind(group.group_uid)
+    .fetch_one(pool)
+    .await
+    .expect("count group rows");
+    assert_eq!(row_count, 1, "identical upserts must converge to one row");
+}
+
+#[tokio::test]
+async fn identical_group_upsert_waits_for_the_group_advisory_lock_db_knowledge() {
+    // Pins: the repository serializes same-group writers by taking
+    // pg_advisory_xact_lock on the group identity before writing, so a
+    // same-group upsert cannot reach its INSERT while another transaction
+    // holds that group's lock. Removing the production lock lets the upsert
+    // complete while the lock is held, which fails this test.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated knowledge DB");
+    let pool = db.store().pool();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let group = derived_group(tenant_id, Uuid::now_v7(), "acct-lock");
+
+    let mut lock_tx = pool.begin().await.expect("open lock transaction");
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('knowledge_contact_group:' || $1::text, 0))",
+    )
+    .bind(group.group_uid)
+    .execute(&mut *lock_tx)
+    .await
+    .expect("hold the group advisory lock");
+
+    let repository = owned_repository(pool, tenant_id);
+    let contended_group = group.clone();
+    let mut handle =
+        tokio::spawn(async move { repository.upsert_contact_group(contended_group).await });
+
+    let blocked = tokio::time::timeout(std::time::Duration::from_millis(300), &mut handle).await;
+    assert!(
+        blocked.is_err(),
+        "same-group upsert must wait for the held group advisory lock"
+    );
+
+    lock_tx.rollback().await.expect("release the group lock");
+    handle
+        .await
+        .expect("upsert task should not panic")
+        .expect("upsert should complete once the group lock is released");
+
+    let row_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM moa.knowledge_contact_groups WHERE group_uid = $1",
+    )
+    .bind(group.group_uid)
+    .fetch_one(pool)
+    .await
+    .expect("count group rows");
+    assert_eq!(row_count, 1, "released upsert must persist exactly one row");
 }

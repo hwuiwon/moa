@@ -470,12 +470,16 @@ async fn seed_knowledge_document_chunks(
     builder.push_values(
         chunks.iter().enumerate(),
         |mut row, (index, (graph_uid, text))| {
-            row.push_bind(Uuid::now_v7())
+            // One chunk row is one graph occurrence: the seeded graph node uid IS
+            // the chunk uid, which is what storage enforces.
+            row.push_bind(*graph_uid)
                 .push_bind(tenant_id.0)
                 .push_bind(storage_partition_id)
                 .push_bind(version_uid)
                 .push_bind(*graph_uid)
-                .push_bind(format!("chunk-{object_slug}-{index}"))
+                // Content identity follows the text, so two documents carrying the
+                // same paragraph really do carry the same content hash.
+                .push_bind(format!("chunk-hash-{text}"))
                 .push_bind(vec![format!("block-{object_slug}-{index}")])
                 .push_bind(vec!["Diagnostics".to_string(), title.to_string()])
                 .push_bind(text)
@@ -912,6 +916,122 @@ async fn duplicate_crowding_keeps_distinct_supporting_knowledge_chunk() {
     for uid in duplicate_uids.into_iter().chain([distinct_uid]) {
         let _ = graph
             .hard_purge(uid, "redacted:hybrid-duplicate-crowding-test")
+            .await;
+    }
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn identical_text_in_two_documents_hydrates_each_source_occurrence_db_memory() {
+    // Pins: byte-identical text in two documents is two occurrences with their own
+    // graph uids, and ONE retrieval hydrates both against their own document
+    // version, source uri, and source title. Collapsing hydration candidates by
+    // graph uid — the newest-version `DISTINCT ON` this task removed — would serve
+    // one document's text under the other document's citation.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool().clone();
+    let storage_partition_id = test_storage_partition_id();
+    let graph = graph_store(&pool, &storage_partition_id);
+    let shared_text = "occurrence hydration reimbursement requires manager approval";
+    let query = shared_text;
+
+    set_workspace_embedder_state(&pool, &storage_partition_id, "test-model").await;
+
+    let mut occurrences = Vec::new();
+    for (slug, title, source_uri) in [
+        (
+            "occurrence-handbook",
+            "Employee Handbook",
+            "https://example.test/handbook",
+        ),
+        (
+            "occurrence-finance-policy",
+            "Finance Policy",
+            "https://example.test/finance-policy",
+        ),
+    ] {
+        let uid = graph
+            .create_node(node_intent(
+                &storage_partition_id,
+                NodeLabel::Chunk,
+                shared_text,
+                Some(deterministic_vector(query)),
+            ))
+            .await
+            .expect("create occurrence chunk node");
+        seed_knowledge_document_chunks(
+            &pool,
+            &storage_partition_id,
+            slug,
+            title,
+            source_uri,
+            &[(uid, shared_text.to_string())],
+        )
+        .await;
+        occurrences.push((uid, title, source_uri));
+    }
+
+    let vector = PgvectorStore::new_for_app_role(pool.clone(), tenant_scope(&storage_partition_id));
+    let retriever = HybridRetriever::new(pool.clone(), Arc::new(graph.clone()), Arc::new(vector))
+        .with_assume_app_role(true);
+    let hits = retriever
+        .retrieve(RetrievalRequest {
+            cleared_barriers: Default::default(),
+            seeds: Vec::new(),
+            query_text: query.to_string(),
+            query_embedding: deterministic_vector(query),
+            scope: tenant_memory_scope(&storage_partition_id),
+            label_filter: Some(vec![NodeLabel::Chunk]),
+            label_boost: None,
+            max_pii_class: SensitivityClass::Restricted,
+            k_final: 5,
+            use_reranker: false,
+            strategy: None,
+            as_of: None,
+            ranking_reference_time: None,
+            lineage: None,
+            disable_leg_timeouts: true,
+            disable_graph_expansion: true,
+            window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
+        })
+        .await
+        .expect("retrieve both occurrences of the shared paragraph");
+
+    let mut hydrated = Vec::new();
+    for (uid, title, source_uri) in &occurrences {
+        let hit = hits
+            .iter()
+            .find(|hit| hit.uid == *uid)
+            .unwrap_or_else(|| panic!("occurrence {uid} must be retrievable: {hits:#?}"));
+        let chunk = hit
+            .knowledge_chunk
+            .as_ref()
+            .unwrap_or_else(|| panic!("occurrence {uid} must hydrate: {hit:#?}"));
+        assert_eq!(chunk.chunk_uid, *uid, "hydration keeps occurrence identity");
+        assert_eq!(chunk.text, shared_text);
+        assert_eq!(chunk.source_title.as_deref(), Some(*title));
+        assert_eq!(chunk.source_uri.as_deref(), Some(*source_uri));
+        hydrated.push((chunk.object_uid, chunk.document_version_uid));
+    }
+    assert_eq!(hydrated.len(), 2);
+    assert_ne!(
+        hydrated[0].0, hydrated[1].0,
+        "each occurrence must cite its own source object"
+    );
+    assert_ne!(
+        hydrated[0].1, hydrated[1].1,
+        "each occurrence must cite its own document version"
+    );
+
+    for (uid, _, _) in occurrences {
+        let _ = graph
+            .hard_purge(uid, "redacted:hybrid-occurrence-hydration-test")
             .await;
     }
     drop(session_store);

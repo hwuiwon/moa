@@ -648,7 +648,6 @@ mod tests {
         KnowledgeChunk {
             chunk_uid: Uuid::from_u128(4),
             version_uid: Uuid::from_u128(5),
-            graph_node_uid: None,
             chunk_hash: "chunk-a".to_string(),
             block_hashes: vec!["block-a".to_string()],
             heading_path: vec![],

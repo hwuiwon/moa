@@ -61,6 +61,7 @@ use crate::{
         consolidate::{Consolidate, ConsolidateImpl},
         execution_run::{ExecutionRun, ExecutionRunImpl},
         execution_task::{ExecutionTask, ExecutionTaskImpl},
+        turn_events::TurnEventAppender,
         turn_execution::{TurnExecution, implementation::TurnExecutionImpl},
         worker_turn_execution::{WorkerTurnExecution, WorkerTurnExecutionImpl},
     },
@@ -148,6 +149,7 @@ pub fn build_endpoint(
     session_limits: SessionLimitsConfig,
     config: Arc<MoaConfig>,
     contact_token_issuer: Option<Arc<moa_auth_providers::ContactTokenIssuer>>,
+    credential_vault: Arc<dyn moa_core::traits::CredentialVault>,
     lineage: Arc<dyn LineageHandle>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
@@ -209,6 +211,7 @@ pub fn build_endpoint(
             KnowledgeImpl::new(KnowledgeService::from_config(
                 pool.clone(),
                 kms.clone(),
+                credential_vault.clone(),
                 config.as_ref(),
             ))
             .serve(),
@@ -250,7 +253,15 @@ pub fn build_endpoint(
         )
         .bind(TenantsImpl::new(pool.clone(), fga_client.clone()).serve())
         .bind(TenantImpl::new(pool.clone()).serve())
-        .bind(TenantPurgeImpl::new(pool.clone(), fga_client.clone(), config.as_ref()).serve())
+        .bind(
+            TenantPurgeImpl::new(
+                pool.clone(),
+                fga_client.clone(),
+                credential_vault.clone(),
+                config.as_ref(),
+            )
+            .serve(),
+        )
         .bind(
             ExecutionRunImpl::new(
                 pool.clone(),
@@ -276,7 +287,15 @@ pub fn build_endpoint(
             )
             .serve(),
         )
-        .bind(KnowledgeSyncIngestionImpl::new(pool.clone(), kms.clone(), config.clone()).serve())
+        .bind(
+            KnowledgeSyncIngestionImpl::new(
+                pool.clone(),
+                kms.clone(),
+                credential_vault.clone(),
+                config.clone(),
+            )
+            .serve(),
+        )
         .bind(
             ConsolidateImpl::new(
                 pool.clone(),
@@ -302,12 +321,20 @@ pub fn build_endpoint(
                 .serve(),
         );
 
+    // One durable event-append dependency, built here and owned by both turn
+    // workflows, so neither reaches into global runtime state to persist events.
+    let event_appender = TurnEventAppender::new(
+        session_store.clone(),
+        config.session.direct_turn_event_append,
+    );
+
     builder
         .bind(
             WorkerTurnExecutionImpl::new(
                 session_limits,
                 session_store.clone(),
                 channel_adapters.clone(),
+                event_appender.clone(),
             )
             .serve(),
         )
@@ -319,6 +346,7 @@ pub fn build_endpoint(
                 tool_schemas,
                 lineage,
                 channel_adapters,
+                event_appender,
             )
             .serve(),
         )

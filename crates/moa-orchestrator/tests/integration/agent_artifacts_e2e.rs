@@ -37,8 +37,8 @@ use crate::support::restate_runtime::{
     restate_ingress_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
-    get_events_request, init_session_vo_request, storage_partition_id_from_meta, test_session_meta,
-    user_message,
+    get_events_request, init_session_vo_request, start_turn_request,
+    storage_partition_id_from_meta, test_session_meta,
 };
 
 const REFUND_SKILL_PATH: &str = ".moa/skills/refund-triage/SKILL.md";
@@ -168,7 +168,7 @@ async fn support_agent_selects_refund_skill_without_starting_execution_run() -> 
 
         let prompt = "A customer says their ramen order arrived spilled all over the bag. \
             They uploaded a clear photo and want a refund or replacement. Can you handle this?";
-        post_user_message(&client, ingress, &identity, session_id, prompt).await?;
+        start_user_turn(&client, ingress, &identity, session_id, prompt).await?;
 
         let events =
             wait_for_brain_response_text(&client, ingress, &identity, session_id, final_text)
@@ -309,21 +309,21 @@ async fn create_session(
     Ok(session_id)
 }
 
-async fn post_user_message(
+async fn start_user_turn(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     session_id: SessionId,
     prompt: &str,
 ) -> Result<()> {
-    let post_message = client.post(object_url(ingress, "Session", session_id, "post_message"));
-    with_identity(post_message, identity)
-        .json(&user_message(prompt))
+    let start_turn = client.post(object_url(ingress, "Session", session_id, "start_turn"));
+    with_identity(start_turn, identity)
+        .json(&start_turn_request(prompt))
         .send()
         .await
-        .context("call Session/post_message")?
+        .context("call Session/start_turn")?
         .error_for_status()
-        .context("post_message should succeed")?;
+        .context("start_turn should succeed")?;
     Ok(())
 }
 

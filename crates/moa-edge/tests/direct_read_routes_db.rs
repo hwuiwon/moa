@@ -34,6 +34,8 @@ use uuid::Uuid;
 
 #[path = "direct_read_routes_db/mcp_db.rs"]
 mod mcp_db;
+#[path = "direct_read_routes_db/session_messages_db.rs"]
+mod session_messages_db;
 
 #[derive(Clone)]
 struct FixedAuth {

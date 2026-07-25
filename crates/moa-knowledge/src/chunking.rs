@@ -128,9 +128,12 @@ fn build_chunk(version_uid: Uuid, ordinal: u32, blocks: &[ChunkPart]) -> Knowled
         })
     };
     KnowledgeChunk {
+        // Occurrence identity: document version plus ordinal plus content seed.
+        // Two documents with identical text, and two versions of one document,
+        // therefore produce different chunk uids — which is also each chunk's
+        // graph node uid.
         chunk_uid: stable_uid(&format!("{}:{}:{}", version_uid, ordinal, chunk_seed)),
         version_uid,
-        graph_node_uid: None,
         chunk_hash: content_hash(&chunk_seed),
         block_hashes,
         token_count: estimate_tokens(&text),

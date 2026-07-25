@@ -1,0 +1,11 @@
+# The cloud sandbox credential lives only in the production overlay: base and
+# local render the local security profile and must not reference a cloud
+# sandbox Secret at all. The cloud profile refuses to serve without it.
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_CLOUD_HANDS_E2B_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: moa-hand-provider-keys
+        key: e2b

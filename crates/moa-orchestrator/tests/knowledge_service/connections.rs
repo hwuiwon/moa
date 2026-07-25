@@ -3,6 +3,67 @@
 use super::*;
 
 #[tokio::test]
+async fn link_and_sync_attribute_credential_work_to_the_authorized_caller() {
+    // Pins: credential create and the resolve that authorizes the initial
+    // provider trigger are attributed to the caller identity that passed tenant
+    // authorization, not to a durable service actor. A service actor is a
+    // read-only allowlist entry for reconstructed workflows; using one here
+    // would let a caller-facing route write credential state anonymously.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let identity = Identity {
+        identity_type: IdentityType::Operator,
+        id: Uuid::now_v7(),
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: Some(Uuid::now_v7()),
+    };
+    let caller = KnowledgeCaller::authorized(&identity, Uuid::now_v7().to_string());
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
+    let service = KnowledgeService::new(
+        repository.clone(),
+        repository.clone(),
+        Arc::new(
+            StaticKnowledgeProviders::new()
+                .with_provider(PROVIDER, Arc::new(FakeLinkedIntegrationProvider::default())),
+        ),
+        credentials.clone(),
+        fake_ingestion_runner(),
+        80,
+    );
+
+    service
+        .exchange_public_token(
+            KnowledgeExchangeTokenRequest {
+                tenant_id,
+                provider: PROVIDER.to_string(),
+                connector: CONNECTOR.to_string(),
+                exchange_token: "public-token".to_string(),
+                source_selection: json!({}),
+                information_barrier: None,
+            },
+            &caller,
+        )
+        .await
+        .expect("token exchange should link the connection");
+
+    let expected = CredentialPrincipal::Caller {
+        identity_id: identity.id,
+        delegated_by: identity.acting_on_behalf_of,
+    };
+    assert_eq!(
+        credentials.principals_for_step("credential-create"),
+        vec![expected],
+        "the linked credential must be created on the authorized caller's authority"
+    );
+    assert_eq!(
+        credentials.principals_for_step("credential-resolve"),
+        vec![expected],
+        "the initial provider trigger must resolve on the authorized caller's authority"
+    );
+}
+
+#[tokio::test]
 async fn list_integrations_merges_providers_sorted_and_honors_provider_filter() {
     // Pins: connect UIs get every enabled provider's integrations, provider-tagged
     // and deterministically sorted, and an explicit provider filter narrows the list.
@@ -119,6 +180,7 @@ async fn list_integrations_merges_providers_sorted_and_honors_provider_filter() 
 async fn exchange_stores_only_credential_reference_on_connection() {
     // Pins: public-token exchange persists credential material through the credential store only.
     let tenant_id = TenantId::from(Uuid::now_v7());
+    let caller = test_caller(tenant_id);
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     let provider = Arc::new(FakeLinkedIntegrationProvider::default());
     let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
@@ -134,17 +196,21 @@ async fn exchange_stores_only_credential_reference_on_connection() {
         InformationBarrierId::parse("finance-restricted").expect("valid barrier");
 
     let response = service
-        .exchange_public_token(KnowledgeExchangeTokenRequest {
-            tenant_id,
-            provider: PROVIDER.to_string(),
-            exchange_token: "public-token".to_string(),
-            source_selection: json!({
-                "metadata": {
-                    "selected_folder_ids": ["folder-1"]
-                }
-            }),
-            information_barrier: Some(information_barrier.clone()),
-        })
+        .exchange_public_token(
+            KnowledgeExchangeTokenRequest {
+                tenant_id,
+                provider: PROVIDER.to_string(),
+                connector: CONNECTOR.to_string(),
+                exchange_token: "public-token".to_string(),
+                source_selection: json!({
+                    "metadata": {
+                        "selected_folder_ids": ["folder-1"]
+                    }
+                }),
+                information_barrier: Some(information_barrier.clone()),
+            },
+            &caller,
+        )
         .await
         .expect("token exchange should persist a connection");
     let connection = repository
@@ -153,7 +219,10 @@ async fn exchange_stores_only_credential_reference_on_connection() {
 
     assert_eq!(provider.exchange_count(), 1);
     assert_eq!(provider.apply_source_selection_count(), 1);
-    assert_eq!(provider.trigger_sync_count(), 1);
+    // The initial link uses the replay-safe start, never the one-off re-sync
+    // trigger, because the owning claim may replay it after a crash.
+    assert_eq!(provider.start_initial_sync_count(), 1);
+    assert_eq!(provider.trigger_sync_count(), 0);
     assert_eq!(response.sync_status.as_deref(), Some("provider_syncing"));
     assert_eq!(repository.sync_run_count(), 1);
     assert_eq!(
@@ -162,11 +231,16 @@ async fn exchange_stores_only_credential_reference_on_connection() {
     );
     assert_eq!(credentials.stored_account_count(), 1);
     assert_eq!(
-        connection.credential_ref,
-        credentials.vault_ref_for(tenant_id)
+        Some(connection.credential_ref.clone()),
+        credentials.reference_for_connection(connection.connection_uid),
+        "the connection must carry the exact reference issued for it"
     );
     assert_ne!(connection.credential_ref, SECRET_TOKEN);
     assert!(!connection.credential_ref.contains(SECRET_TOKEN));
+    // The persisted reference is an opaque identifier, not a parseable address a
+    // caller could edit to reach another tenant's credential.
+    assert!(Uuid::parse_str(&connection.credential_ref).is_ok());
+    assert!(!connection.credential_ref.contains("://"));
     assert_eq!(
         connection.source_selection,
         json!({ "metadata": { "selected_folder_ids": ["folder-1"] } })
@@ -199,6 +273,7 @@ async fn mid_sync_connection_barrier_change_keeps_persisted_run_snapshot_db_memo
         .expect("bootstrap isolated connection snapshot DB");
     let pool = db.store().pool().clone();
     let tenant_id = TenantId::from(Uuid::now_v7());
+    let caller = test_caller(tenant_id);
     let original_barrier =
         InformationBarrierId::parse("finance-restricted").expect("valid original barrier");
     let replacement_barrier =
@@ -213,13 +288,17 @@ async fn mid_sync_connection_barrier_change_keeps_persisted_run_snapshot_db_memo
     );
 
     let exchange = service
-        .exchange_public_token(KnowledgeExchangeTokenRequest {
-            tenant_id,
-            provider: PROVIDER.to_string(),
-            exchange_token: "public-token".to_string(),
-            source_selection: json!({}),
-            information_barrier: Some(original_barrier.clone()),
-        })
+        .exchange_public_token(
+            KnowledgeExchangeTokenRequest {
+                tenant_id,
+                provider: PROVIDER.to_string(),
+                connector: CONNECTOR.to_string(),
+                exchange_token: "public-token".to_string(),
+                source_selection: json!({}),
+                information_barrier: Some(original_barrier.clone()),
+            },
+            &caller,
+        )
         .await
         .expect("token exchange should persist a connection and sync run");
     let sync_run_uid = exchange
@@ -268,6 +347,7 @@ async fn mid_sync_connection_barrier_change_keeps_persisted_run_snapshot_db_memo
 async fn disconnect_connection_deletes_vault_ref_and_disables_connection() {
     // Pins: disconnecting a linked knowledge connection revokes MOA-managed credential material.
     let tenant_id = TenantId::from(Uuid::now_v7());
+    let caller = test_caller(tenant_id);
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     let provider = Arc::new(FakeLinkedIntegrationProvider::default());
     let credentials = Arc::new(FakeKnowledgeCredentialStore::default());
@@ -280,21 +360,28 @@ async fn disconnect_connection_deletes_vault_ref_and_disables_connection() {
         80,
     );
     let exchange = service
-        .exchange_public_token(KnowledgeExchangeTokenRequest {
-            tenant_id,
-            provider: PROVIDER.to_string(),
-            exchange_token: "public-token".to_string(),
-            source_selection: json!({}),
-            information_barrier: None,
-        })
+        .exchange_public_token(
+            KnowledgeExchangeTokenRequest {
+                tenant_id,
+                provider: PROVIDER.to_string(),
+                connector: CONNECTOR.to_string(),
+                exchange_token: "public-token".to_string(),
+                source_selection: json!({}),
+                information_barrier: None,
+            },
+            &caller,
+        )
         .await
         .expect("token exchange should persist a linked connection");
 
     let listed_before = service
-        .list_connections(KnowledgeConnectionListRequest {
-            tenant_id,
-            provider: Some(PROVIDER.to_string()),
-        })
+        .list_connections(
+            KnowledgeConnectionListRequest {
+                tenant_id,
+                provider: Some(PROVIDER.to_string()),
+            },
+            &caller,
+        )
         .await
         .expect("listed connection should resolve credential metadata before disconnect");
     assert_eq!(listed_before.connections.len(), 1);
@@ -304,10 +391,13 @@ async fn disconnect_connection_deletes_vault_ref_and_disables_connection() {
     );
 
     let response = service
-        .disconnect_connection(KnowledgeDisconnectConnectionRequest {
-            tenant_id,
-            connection_uid: exchange.connection_uid,
-        })
+        .disconnect_connection(
+            KnowledgeDisconnectConnectionRequest {
+                tenant_id,
+                connection_uid: exchange.connection_uid,
+            },
+            &caller,
+        )
         .await
         .expect("disconnect should disable the connection and revoke credential material");
     let connection = repository
@@ -322,10 +412,13 @@ async fn disconnect_connection_deletes_vault_ref_and_disables_connection() {
     assert_eq!(repository.op_count("disable_connection"), 1);
 
     let listed_after = service
-        .list_connections(KnowledgeConnectionListRequest {
-            tenant_id,
-            provider: Some(PROVIDER.to_string()),
-        })
+        .list_connections(
+            KnowledgeConnectionListRequest {
+                tenant_id,
+                provider: Some(PROVIDER.to_string()),
+            },
+            &caller,
+        )
         .await
         .expect("listed connection should expose missing managed credential after disconnect");
     assert_eq!(listed_after.connections.len(), 1);
@@ -339,6 +432,7 @@ async fn disconnect_connection_deletes_vault_ref_and_disables_connection() {
 async fn disconnect_connection_leaves_external_credential_ref_and_disables_connection() {
     // Pins: disconnecting a connection with provider-owned credential refs does not invent vault deletes.
     let tenant_id = TenantId::from(Uuid::now_v7());
+    let caller = test_caller(tenant_id);
     let mut connection = fixture_connection(tenant_id);
     connection.credential_ref = "provider-owned-credential-ref".to_string();
     let connection_uid = connection.connection_uid;
@@ -353,10 +447,13 @@ async fn disconnect_connection_leaves_external_credential_ref_and_disables_conne
     );
 
     let response = service
-        .disconnect_connection(KnowledgeDisconnectConnectionRequest {
-            tenant_id,
-            connection_uid,
-        })
+        .disconnect_connection(
+            KnowledgeDisconnectConnectionRequest {
+                tenant_id,
+                connection_uid,
+            },
+            &caller,
+        )
         .await
         .expect("disconnect should still disable an external-ref connection");
     let connection = repository
@@ -374,6 +471,7 @@ async fn disconnect_connection_leaves_external_credential_ref_and_disables_conne
 async fn update_source_selection_persists_applies_and_optionally_syncs() {
     // Pins: tenant admins can update provider-native selected sources and trigger ingestion follow-up.
     let tenant_id = TenantId::from(Uuid::now_v7());
+    let caller = test_caller(tenant_id);
     let mut connection = fixture_connection(tenant_id);
     connection.last_synced_at = Some(Utc::now());
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
@@ -390,12 +488,15 @@ async fn update_source_selection_persists_applies_and_optionally_syncs() {
     });
 
     let response = service
-        .update_connection_source_selection(KnowledgeUpdateConnectionSourceSelectionRequest {
-            tenant_id,
-            connection_uid: connection.connection_uid,
-            source_selection: source_selection.clone(),
-            sync: true,
-        })
+        .update_connection_source_selection(
+            KnowledgeUpdateConnectionSourceSelectionRequest {
+                tenant_id,
+                connection_uid: connection.connection_uid,
+                source_selection: source_selection.clone(),
+                sync: true,
+            },
+            &caller,
+        )
         .await
         .expect("source selection update should persist and trigger sync");
     let stored = repository

@@ -1,10 +1,12 @@
 //! Twilio SMS notification connector.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use moa_config::MessagingConfig;
-use moa_core::{error::MoaError, error::Result, traits::CredentialVault, types::model::Credential};
+use moa_core::{
+    error::MoaError, error::Result, types::credentials::DeploymentSecret,
+    types::credentials::DeploymentSecrets,
+};
 use reqwest::{StatusCode, header::HeaderMap};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -20,30 +22,17 @@ const TWILIO_MESSAGES_PATH_PREFIX: &str = "/2010-04-01/Accounts/";
 const DEFAULT_RATE_LIMIT_RETRIES: usize = 3;
 const DEFAULT_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(1);
 
-/// Credential service key for the Twilio account SID.
-pub const TWILIO_ACCOUNT_SID_SERVICE: &str = "platform.twilio.account_sid";
-/// Credential service key for the Twilio account auth token.
-pub const TWILIO_AUTH_TOKEN_SERVICE: &str = "platform.twilio.auth_token";
-/// Credential service key for the Twilio API key SID.
-pub const TWILIO_API_KEY_SID_SERVICE: &str = "platform.twilio.api_key_sid";
-/// Credential service key for the Twilio API key secret.
-pub const TWILIO_API_KEY_SECRET_SERVICE: &str = "platform.twilio.api_key_secret";
-/// Credential service key for the default Twilio sender phone number.
-pub const TWILIO_FROM_NUMBER_SERVICE: &str = "platform.twilio.from_number";
-/// Credential service key for the default Twilio Messaging Service SID.
-pub const TWILIO_MESSAGING_SERVICE_SID_SERVICE: &str = "platform.twilio.messaging_service_sid";
-
-/// Local environment variable for the Twilio account SID.
+/// Deployment environment variable for the Twilio account SID.
 pub const TWILIO_ACCOUNT_SID_ENV: &str = "TWILIO_ACCOUNT_SID";
-/// Local environment variable for the Twilio account auth token.
+/// Deployment environment variable for the Twilio account auth token.
 pub const TWILIO_AUTH_TOKEN_ENV: &str = "TWILIO_AUTH_TOKEN";
-/// Local environment variable for the Twilio API key SID.
+/// Deployment environment variable for the Twilio API key SID.
 pub const TWILIO_API_KEY_SID_ENV: &str = "TWILIO_API_KEY_SID";
-/// Local environment variable for the Twilio API key secret.
+/// Deployment environment variable for the Twilio API key secret.
 pub const TWILIO_API_KEY_SECRET_ENV: &str = "TWILIO_API_KEY_SECRET";
-/// Local environment variable for the default Twilio sender phone number.
+/// Deployment environment variable for the default Twilio sender phone number.
 pub const TWILIO_FROM_NUMBER_ENV: &str = "TWILIO_FROM_NUMBER";
-/// Local environment variable for the default Twilio Messaging Service SID.
+/// Deployment environment variable for the default Twilio Messaging Service SID.
 pub const TWILIO_MESSAGING_SERVICE_SID_ENV: &str = "TWILIO_MESSAGING_SERVICE_SID";
 
 /// Outbound SMS message accepted by the Twilio connector.
@@ -197,18 +186,30 @@ impl TwilioSmsClient {
         Self::new(account_sid.clone(), account_sid, auth_token)
     }
 
-    /// Creates a Twilio client from a configured credential vault.
-    pub async fn from_vault(
-        vault: Arc<dyn CredentialVault>,
-        scope: &str,
+    /// Creates a Twilio client from the deployment's operator secrets.
+    ///
+    /// Twilio is a deployment-owned transport, not a tenant connection, so every
+    /// value comes from [`DeploymentSecrets`] and never from the tenant
+    /// credential vault. Returns `None` when no account SID is configured, which
+    /// is how SMS delivery stays optional; a half-configured API key pair is a
+    /// typed configuration error rather than a silent downgrade to the account
+    /// auth token, because that downgrade would use broader credentials than the
+    /// operator asked for.
+    pub fn from_deployment_secrets(
+        secrets: &DeploymentSecrets,
         config: &MessagingConfig,
-    ) -> Result<Self> {
-        let account_sid = required_vault_string(&vault, TWILIO_ACCOUNT_SID_SERVICE, scope).await?;
-        let api_key_sid = optional_vault_string(&vault, TWILIO_API_KEY_SID_SERVICE, scope).await?;
-        let api_key_secret =
-            optional_vault_string(&vault, TWILIO_API_KEY_SECRET_SERVICE, scope).await?;
+    ) -> Result<Option<Self>> {
+        let Some(account_sid) = secrets.resolve_optional(DeploymentSecret::TwilioAccountSid) else {
+            return Ok(None);
+        };
+        let api_key_sid = secrets.resolve_optional(DeploymentSecret::TwilioApiKeySid);
+        let api_key_secret = secrets.resolve_optional(DeploymentSecret::TwilioApiKeySecret);
         let mut client = match (api_key_sid, api_key_secret) {
-            (Some(sid), Some(secret)) => Self::new(account_sid, sid, secret),
+            (Some(sid), Some(secret)) => Self::new(
+                account_sid.expose_for_outbound_request(),
+                sid.expose_for_outbound_request(),
+                secret.expose_for_outbound_request(),
+            ),
             (Some(_), None) => {
                 return Err(MoaError::ConfigError(
                     "twilio api key sid requires twilio api key secret".to_string(),
@@ -220,23 +221,33 @@ impl TwilioSmsClient {
                 ));
             }
             (None, None) => {
-                let auth_token =
-                    required_vault_string(&vault, TWILIO_AUTH_TOKEN_SERVICE, scope).await?;
-                Self::from_account_auth_token(account_sid, auth_token)
+                let auth_token = secrets
+                    .resolve_optional(DeploymentSecret::TwilioAuthToken)
+                    .ok_or_else(|| {
+                        MoaError::ConfigError(
+                            "twilio account sid requires an auth token or an api key pair"
+                                .to_string(),
+                        )
+                    })?;
+                Self::from_account_auth_token(
+                    account_sid.expose_for_outbound_request(),
+                    auth_token.expose_for_outbound_request(),
+                )
             }
         }
         .with_base_url(config.twilio_base_url.clone());
 
-        if let Some(from) = optional_vault_string(&vault, TWILIO_FROM_NUMBER_SERVICE, scope).await?
-        {
-            client = client.with_default_from(from);
+        if let Some(from) = secrets.resolve_optional(DeploymentSecret::TwilioFromNumber) {
+            client = client.with_default_from(from.expose_for_outbound_request());
         }
         if let Some(messaging_service_sid) =
-            optional_vault_string(&vault, TWILIO_MESSAGING_SERVICE_SID_SERVICE, scope).await?
+            secrets.resolve_optional(DeploymentSecret::TwilioMessagingServiceSid)
         {
-            client = client.with_default_messaging_service_sid(messaging_service_sid);
+            client = client.with_default_messaging_service_sid(
+                messaging_service_sid.expose_for_outbound_request(),
+            );
         }
-        Ok(client)
+        Ok(Some(client))
     }
 
     /// Overrides the HTTP client, primarily for tests.
@@ -670,37 +681,6 @@ impl From<TwilioSmsResponse> for TwilioSmsSendResult {
             error_message: value.error_message,
             uri: value.uri,
         }
-    }
-}
-
-async fn required_vault_string(
-    vault: &Arc<dyn CredentialVault>,
-    service: &str,
-    scope: &str,
-) -> Result<String> {
-    let credential = vault.get(service, scope).await?;
-    twilio_string_from_credential(service, credential)
-}
-
-async fn optional_vault_string(
-    vault: &Arc<dyn CredentialVault>,
-    service: &str,
-    scope: &str,
-) -> Result<Option<String>> {
-    match vault.get(service, scope).await {
-        Ok(credential) => twilio_string_from_credential(service, credential).map(Some),
-        Err(MoaError::MissingEnvironmentVariable(_)) => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-fn twilio_string_from_credential(service: &str, credential: Credential) -> Result<String> {
-    match credential {
-        Credential::Bearer(value) => Ok(value),
-        Credential::ApiKey { value, .. } => Ok(value),
-        Credential::OAuth { .. } => Err(MoaError::ConfigError(format!(
-            "{service} credential must be bearer or api_key"
-        ))),
     }
 }
 

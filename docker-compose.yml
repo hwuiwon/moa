@@ -247,9 +247,9 @@ services:
       MOA_SESSION_ATTACHMENT_ALLOW_HTTP: "true"
       MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE: "false"
       MOA_PROVIDERS_OVERRIDE: ${MOA_PROVIDERS_OVERRIDE:-}
-      # Development-only: the local hand provider is fail-closed by default
-      # and must be opted into explicitly outside production.
-      MOA_CLOUD_HANDS_ALLOW_LOCAL: "true"
+      # Development-only: the local security profile permits host-local hands.
+      # Production deployments select the fail-closed cloud profile instead.
+      MOA_SECURITY_PROFILE: local
       # Match multi-replica deployments: Postgres owns shared KMS state and a
       # fixed development-only key file survives container restarts.
       MOA_KMS_PROVIDER: postgres

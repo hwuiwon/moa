@@ -37,7 +37,9 @@ async fn query_trace_renders_populated_retrieval_lineage_db_memory() {
     let turn_id = TurnId(trace_uid);
     let session_id = SessionId::new();
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
-    let graph_node_uid = Uuid::now_v7();
+    // A tenant-knowledge chunk hit's graph node uid IS its chunk occurrence uid;
+    // the graph path that reached it starts at the document node.
+    let document_node_uid = Uuid::now_v7();
     let chunk_uid = Uuid::now_v7();
     let event = LineageEvent::Retrieval(RetrievalLineage {
         turn_id,
@@ -56,7 +58,7 @@ async fn query_trace_renders_populated_retrieval_lineage_db_memory() {
             embed_dim: 4,
         }],
         graph_paths: vec![GraphPath {
-            start: graph_node_uid,
+            start: document_node_uid,
             end: chunk_uid,
             edges: vec![Uuid::now_v7()],
             labels: vec!["HAS_CHUNK".to_string()],
@@ -80,7 +82,7 @@ async fn query_trace_renders_populated_retrieval_lineage_db_memory() {
         top_k: vec![chunk_uid],
         searched_scopes: vec!["tenant_knowledge".to_string(), "user_memory".to_string()],
         selected_hits: vec![RetrievalSelectedHit {
-            graph_node_uid,
+            graph_node_uid: chunk_uid,
             chunk_uid: Some(chunk_uid),
             fact_uid: None,
             source_tier: "tenant_knowledge".to_string(),

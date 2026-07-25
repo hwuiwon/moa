@@ -7,7 +7,6 @@ pub(super) fn optional_section_seed(path: &[&str]) -> Option<Value> {
         ["cloud", "hands"] => Some(json!({
             "default_provider": null,
             "fallback_providers": [],
-            "allow_local_provider": false,
             "daytona_api_key": null,
             "daytona_api_url": null,
             "daytona_default_image": null,
@@ -74,7 +73,6 @@ pub(super) fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
         "unstructured_api_url" => &["knowledge", "unstructured", "api_base_url"],
         "reducto_api_url" => &["knowledge", "reducto", "api_base_url"],
         "turbopuffer_baa" => &["memory", "vector", "turbopuffer", "baa_enabled"],
-        "cloud_hands_allow_local" => &["cloud", "hands", "allow_local_provider"],
         "providers_concurrency_scope" => &["providers", "concurrency", "scope"],
         "providers_concurrency_default_max_in_flight" => {
             &["providers", "concurrency", "default_max_in_flight"]
@@ -411,7 +409,6 @@ mod tests {
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_CLOUD_HANDS_DEFAULT_PROVIDER", "daytona"),
             ("MOA_CLOUD_HANDS_FALLBACK_PROVIDERS", "e2b"),
-            ("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true"),
         ]))
         .expect("overlay should deserialize");
         let mut config = MoaConfig::default();
@@ -421,6 +418,5 @@ mod tests {
         let hands = config.cloud.hands.expect("cloud hands config");
         assert_eq!(hands.default_provider.as_deref(), Some("daytona"));
         assert_eq!(hands.fallback_providers, vec!["e2b".to_string()]);
-        assert!(hands.allow_local_provider);
     }
 }

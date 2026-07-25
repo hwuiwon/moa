@@ -47,7 +47,8 @@ extraction seams inside the monolith, not a direction to create internal
 network services.
 
 Restate state is used for hot orchestration state: queued messages, status,
-child refs, active segment, cancellation flags, awakeables, and child budgets.
+child refs, active segment, pending cancellation scope, awakeables, and child
+budgets.
 Product-visible history is written to Postgres. Kubernetes traffic is
 non-sticky, so correctness state shared across incoming requests must live in
 Postgres, Restate, or an explicitly configured Redis runtime cache; process
@@ -67,15 +68,40 @@ graph execution. The open-ended agent loop remains in `Session` and
 client sends message
   -> SessionStore creates/loads session metadata
   -> Session::set_meta initializes VO state when needed
-  -> Session::post_message / Session::start_turn records an active turn id
+  -> Session::start_turn / Session::queue_message consults the admission fence,
+     then records an active turn id
   -> Session sends TurnExecution::run keyed by turn_id
   -> TurnExecution appends the message, runs the brain loop, and records events
   -> TurnExecution calls back to Session::record_turn_outcome
-  -> Session drains the next queued message, if any
+  -> Session dispatches the next queued message in FIFO order, if any
 ```
 
-`Session::post_message` and the explicit `Session::start_turn` path are
-serialized by Restate's single-writer-per-key semantics, but they stay fast:
+`Session::record_turn_outcome` owns queue disposition. The handler-owned
+`SessionPendingState` is the only pending-message projection; the queue lives in
+`pending_messages` and is dispatched one message at a time, oldest first.
+Completed, accepted, **failed**, and coordinator-only-cancelled outcomes all
+dispatch the next queued message: stopping on failure would strand acknowledged
+messages behind a turn that never comes back.
+
+A callback for a turn that is no longer active is a complete no-op. It cannot
+rewrite `last_outcome` or the session summary, and it cannot touch a newer active
+turn; only waiters keyed to that turn resolve. This runs before any validation,
+so a duplicate delivery never becomes a retryable error.
+
+Cancellation scope decides the rest. `CoordinatorOnly` stops one turn and the
+queue continues. `TaskTree` appends one `QueuedMessageRejected` fact per
+already-accepted queued message in FIFO order, drains the queue immediately, and
+fences admission: `start_turn`/`queue_message` return a typed 409
+until the cancelled turn reports its outcome, so a message that raced the
+cancellation cannot start a turn inside a tree being torn down. The scope is
+recorded against the turn it cancels and released only by that turn's matching
+outcome, and no queued work is dispatched after a task-tree cancelled callback.
+The former write-only `SessionVoState.cancel_flag` is gone; it was never read and
+was not a fence.
+
+`Session::start_turn` and `Session::queue_message` are the only message-submitting
+handlers; they are serialized by Restate's single-writer-per-key semantics but
+stay fast:
 the VO mutates K/V state and sends a durable workflow invocation. The
 long-running LLM/tool loop lives in `TurnExecution`, so concurrent `snapshot`,
 `queue_message`, and `request_cancel` calls do not wait behind a running turn.

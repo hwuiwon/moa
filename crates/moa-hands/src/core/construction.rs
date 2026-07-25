@@ -10,10 +10,11 @@ use moa_config::ToolBudgetConfig;
 use moa_config::ToolOutputConfig;
 use moa_core::{
     error::MoaError, error::Result, traits::HandProvider, traits::LineageHandle,
-    traits::NullLineageHandle, traits::SessionStore, types::hands::SandboxTier,
+    traits::NullLineageHandle, traits::SessionStore, types::action_policy::ActionPolicyEffect,
+    types::hands::SandboxTier,
 };
 use moa_security::{
-    ActionPolicies, ActionPolicyRuleStore, EnvironmentCredentialVault, MCPCredentialProxy,
+    ActionPolicies, ActionPolicyRuleStore, MCPCredentialProxy, McpDeploymentCredentials,
     McpEgressGuard,
 };
 
@@ -75,9 +76,15 @@ impl ToolRouter {
     }
 
     /// Creates a tool router from the loaded MOA config.
+    ///
+    /// The rule-store owner is supplied at construction because the `cloud`
+    /// security profile cannot serve without one: a deny-by-default deployment
+    /// with no persisted-rule owner could never authorize any action. Under the
+    /// `local` profile `rule_store` may be `None` and local hands are used.
     pub async fn from_config(
         config: &MoaConfig,
         mcp_egress_guard: Option<Arc<McpEgressGuard>>,
+        rule_store: Option<Arc<dyn ActionPolicyRuleStore>>,
     ) -> Result<Self> {
         if !config.mcp_servers.is_empty() && mcp_egress_guard.is_none() {
             return Err(MoaError::ConfigError(
@@ -86,11 +93,7 @@ impl ToolRouter {
         }
 
         let hand_routes = configured_hand_routes(config)?;
-        if routes_include_local_provider(&hand_routes) && !local_provider_allowed(config) {
-            return Err(MoaError::ConfigError(
-                "local hand provider is disabled by default; set cloud.hands.allow_local_provider=true or MOA_CLOUD_HANDS_ALLOW_LOCAL=true for development-only local hands".to_string(),
-            ));
-        }
+        validate_security_profile(config, &hand_routes, rule_store.as_ref())?;
 
         let mut providers = HashMap::new();
         let mut sandbox_root = None;
@@ -147,6 +150,7 @@ impl ToolRouter {
             sandbox_root,
             local_provider,
             mcp_egress_guard,
+            rule_store,
             ..Self::new(registry, providers)
         }
         .with_tool_output_config(config.tool_output.clone())
@@ -219,7 +223,11 @@ impl ToolRouter {
         self
     }
 
-    /// Attaches an MCP credential proxy to the router.
+    /// Attaches the shared MCP credential proxy to the router.
+    ///
+    /// The proxy is constructed once by runtime composition around the single
+    /// durable credential owner, so every router in a process resolves through
+    /// the same vault rather than a per-router copy.
     #[must_use]
     pub fn with_mcp_proxy(mut self, mcp_proxy: Arc<MCPCredentialProxy>) -> Self {
         self.mcp_proxy = Some(mcp_proxy);
@@ -302,16 +310,18 @@ impl ToolRouter {
 
     async fn load_mcp_servers(&mut self, config: &MoaConfig) -> Result<()> {
         let mut registry = std::mem::take(&mut self.registry);
+        // Every configured MCP server is deployment-owned: its credential is an
+        // operator-authored deployment variable, read once here. This builds no
+        // credential owner — a tenant credential is only ever reachable through
+        // the single durable vault that runtime composition injects as a proxy.
         if config
             .mcp_servers
             .iter()
             .any(|server| server.credentials.is_some())
             && self.mcp_proxy.is_none()
         {
-            let vault = Arc::new(EnvironmentCredentialVault::from_mcp_servers(
-                &config.mcp_servers,
-            )?);
-            self.mcp_proxy = Some(Arc::new(MCPCredentialProxy::new(vault)));
+            let deployment = McpDeploymentCredentials::from_mcp_servers(&config.mcp_servers)?;
+            self.mcp_proxy = Some(Arc::new(MCPCredentialProxy::deployment_only(deployment)));
         }
 
         for server in &config.mcp_servers {
@@ -344,12 +354,95 @@ fn routes_include_local_provider(routes: &[HandRoute]) -> bool {
     })
 }
 
-fn local_provider_allowed(config: &MoaConfig) -> bool {
-    config
-        .cloud
-        .hands
-        .as_ref()
-        .is_some_and(|hands| hands.allow_local_provider)
+/// Validates the configured security profile against the resolved hand routes
+/// and the supplied rule-store owner before any router is returned.
+///
+/// The `cloud` profile fails closed on every one of its four requirements: a
+/// deny-by-default permission posture, a real persisted-rule owner, a non-local
+/// sandbox backend, and present credentials for every selected backend. The
+/// `local` profile is the only posture under which local host hands may run.
+///
+/// Emitted diagnostics name the profile and the owner kinds only; configured
+/// patterns, credentials, and invocation inputs are never logged here.
+fn validate_security_profile(
+    config: &MoaConfig,
+    routes: &[HandRoute],
+    rule_store: Option<&Arc<dyn ActionPolicyRuleStore>>,
+) -> Result<()> {
+    if !config.security_profile.is_cloud() {
+        if routes_include_local_provider(routes) {
+            tracing::info!(
+                security_profile = config.security_profile.as_str(),
+                rule_store_owner = if rule_store.is_some() {
+                    "persistent"
+                } else {
+                    "none"
+                },
+                sandbox_backend = DEFAULT_PROVIDER_NAME,
+                "tool router constructed with local host hands"
+            );
+        }
+        return Ok(());
+    }
+
+    if config.permissions.default_effect != ActionPolicyEffect::Deny {
+        return Err(MoaError::ConfigError(format!(
+            "security_profile=cloud requires permissions.default_effect=deny, found {}",
+            config.permissions.default_effect.as_str()
+        )));
+    }
+    if rule_store.is_none() {
+        return Err(MoaError::ConfigError(
+            "security_profile=cloud requires a persistent action-policy rule store owner"
+                .to_string(),
+        ));
+    }
+    if routes.is_empty() {
+        return Err(MoaError::ConfigError(
+            "security_profile=cloud requires a configured cloud sandbox backend, found none"
+                .to_string(),
+        ));
+    }
+    if routes_include_local_provider(routes) {
+        return Err(MoaError::ConfigError(
+            "security_profile=cloud rejects the local hand provider; configure \
+             cloud.hands.default_provider as daytona or e2b"
+                .to_string(),
+        ));
+    }
+    let hands = config.cloud.hands.as_ref().ok_or_else(|| {
+        MoaError::ConfigError(
+            "security_profile=cloud requires a cloud.hands configuration section".to_string(),
+        )
+    })?;
+    for route in routes {
+        if !cloud_provider_credential_present(hands, &route.provider) {
+            return Err(MoaError::ConfigError(format!(
+                "security_profile=cloud requires credentials for the selected {} sandbox backend",
+                route.provider
+            )));
+        }
+    }
+
+    tracing::info!(
+        security_profile = config.security_profile.as_str(),
+        rule_store_owner = "persistent",
+        sandbox_backend = routes
+            .first()
+            .map_or(DEFAULT_PROVIDER_NAME, |route| route.provider.as_str()),
+        "tool router constructed with fail-closed cloud posture"
+    );
+    Ok(())
+}
+
+/// Returns whether the credential the named cloud backend needs is present.
+fn cloud_provider_credential_present(hands: &CloudHandsConfig, provider: &str) -> bool {
+    let credential = match provider {
+        "daytona" => hands.daytona_api_key.as_deref(),
+        "e2b" => hands.e2b_api_key.as_deref(),
+        _ => None,
+    };
+    credential.is_some_and(|value| !value.trim().is_empty())
 }
 
 fn configured_hand_routes(config: &MoaConfig) -> Result<Vec<HandRoute>> {

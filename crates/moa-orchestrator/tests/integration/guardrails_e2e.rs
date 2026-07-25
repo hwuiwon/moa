@@ -15,6 +15,7 @@ use moa_core::{
     types::identifiers::TenantId, types::provider::ModelTier, types::session::SessionMeta,
     types::session::SessionStatus,
 };
+use moa_test_support::fixtures::fresh_client_message_id;
 use moa_test_support::{OrchestratorTestFixture, TestApiClient};
 use moa_wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use serde_json::json;
@@ -269,6 +270,9 @@ async fn run_turn(
         .session(session_id.to_string())
         .start_turn(
             StartTurnRequest {
+                client_message_id: fresh_client_message_id(),
+                reply_to: None,
+                stream_cursor: None,
                 user_message: message.to_string(),
                 attachments: Vec::new(),
                 model: None,

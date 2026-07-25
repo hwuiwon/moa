@@ -156,7 +156,9 @@ User-visible uploads are separate from claim-check blobs. Contact message
 uploads store metadata and object keys in `session_attachments`, while bytes
 are stored through `object_store` in RustFS locally or AWS S3/GCS in cloud.
 `UserMessage.attachments` stores `Attachment` metadata with durable attachment
-ids. Replaying a session does not require local pod state; any edge or worker
+ids. Those ids are derived, not random: the primary key is a UUIDv5 over the
+attachment's slot (tenant, session, client message id, ordinal), which is what makes a
+retried upload land on the existing row instead of creating a duplicate attachment. Replaying a session does not require local pod state; any edge or worker
 pod can resolve the attachment metadata from the event and the bytes from the
 configured object store.
 
@@ -175,18 +177,53 @@ updates the session to the verified contact and records the prior contact in
 |---|---|
 | Session lifecycle | `SessionCreated`, `SessionStatusChanged` |
 | Task segmentation | `SegmentStarted`, `SegmentCompleted` |
-| User input | `UserMessage`, `QueuedMessage` |
+| User input | `UserMessage`, `QueuedMessage`, `QueuedMessageRejected` |
 | Brain output | `BrainThinking`, `BrainResponse`, `CacheReport` |
 | Tools | `ToolCall`, `ToolResult`, `ToolError` |
 | Action review | `ActionReviewRequested`, `ActionReviewDecided` |
 | Memory | `MemoryRead`, `MemoryWrite`, `MemoryIngest` |
 | Worker coordination | `WorkerSpawned`, `WorkerMessageSent`, `WorkerStatusChanged`, `WorkerNotificationDelivered`, `WorkerSignalReceived`, `WorkerParentResumeRequested`, `WorkerHeartbeatStale`, `ProgressNarrated` |
 | Execution runs | `ExecutionRunStarted`, `ExecutionProgress`, `ExecutionInputRequired`, `ExecutionCompleted`, `ExecutionFailed`, `ExecutionCancelled`, `ExecutionSynthesisRequested` |
+| Turn disposition | `TurnFailed` |
 | Compaction | `Checkpoint` |
 | Diagnostics | `Error`, `Warning` |
 
 The serialized enum is `Event` (not `SessionEvent`); each variant uses
 `#[serde(tag = "type", content = "data")]` with snake_case field names.
+
+### Terminal turn failure
+
+`TurnFailed` is the one canonical failed-turn fact, for both root coordinator
+turns and worker turns. Its payload is closed and secret-free: an actor
+(`Coordinator` or `Worker { worker_id }`), the `turn_id`, a coarse
+`TurnFailureClass` derived from the turn's own durable `TurnPhase`, and a fixed
+bounded `summary` that is a function of the class alone. A raw error rendering is
+never persisted here or in `TurnOutcome.message`; the error is logged for
+operators instead.
+
+Both turn workflows append it at their catch-all failure boundary, before the
+owner callback and before any failed attention signal, so a failure stays
+durably visible when the callback, signal, or notification that follows is lost.
+The append is keyed `turn_failed:{actor_key}:{turn_id}` through the
+`TurnEventAppender` custom-key path rather than the per-workflow append
+sequence, so a workflow replay re-derives one identical append and the fact
+materializes exactly once per actor and turn.
+
+It does not replace an `Error` a production path already recorded, and it does
+not replace `WorkerSignalReceived` (control-plane attention) or
+`WorkerStatusChanged` / `WorkerNotificationDelivered` (worker-lifecycle
+delivery). Those coexist with it and are counted separately.
+
+`ProcessingEffect` classification is actor-dependent: a coordinator `TurnFailed`
+is `Terminal` because it concludes the session's turn loop, and a worker
+`TurnFailed` is `Neutral` so a child's failure cannot mask genuinely pending
+root work in the shared session log.
+
+`QueuedMessageRejected` records one already-accepted queued message that will
+never run, carrying its original `queued_at`, its FIFO `queue_index`, and a
+typed `QueuedMessageRejection`. Whole-task-tree cancellation appends exactly one
+per discarded message, in queue order, so acknowledged work is never silently
+dropped.
 
 Execution planning evidence is not a session event. Route decisions, planner
 calls, and compiler outcomes are written directly to the normalized

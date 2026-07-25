@@ -238,13 +238,15 @@ pub struct KnowledgeBlock {
 /// Retrieval-sized group of consecutive knowledge blocks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeChunk {
-    /// Chunk identifier.
+    /// Chunk occurrence identifier, and the graph node UID for this occurrence.
+    ///
+    /// One chunk row is one graph occurrence: `knowledge_chunks.graph_node_uid`
+    /// is stored equal to this value and the database enforces the equality, so
+    /// equal text in two documents (or in two versions of one document) never
+    /// collapses onto one graph node, embedding, citation, or deletion target.
     pub chunk_uid: Uuid,
     /// Owning document version.
     pub version_uid: Uuid,
-    /// Graph node UID written for this chunk, when available.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub graph_node_uid: Option<Uuid>,
     /// Deterministic chunk content hash.
     pub chunk_hash: String,
     /// Ordered source block hashes.
@@ -274,9 +276,11 @@ pub struct KnowledgeObjectProjection {
     /// Current parser status for the object.
     pub parser_status: String,
     /// Current chunk count.
+    ///
+    /// Every chunk is its own graph occurrence, so this is also the object's
+    /// current graph chunk-node count; there is no separate counter that could
+    /// disagree.
     pub chunk_count: u64,
-    /// Current graph node count.
-    pub graph_node_count: u64,
 }
 
 /// Object inspection projection assembled from object, version, chunks, and steps.

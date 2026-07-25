@@ -31,7 +31,7 @@ the default retrieval path uses tenant knowledge only.
 | Privacy classification and redaction | `moa-memory-pii` |
 | Retrieval fusion and admission | `moa-retrieval` |
 | Context assembly | `moa-brain` |
-| Credential references and secret retrieval | `moa-security` through the `CredentialVault` trait |
+| Credential references and secret retrieval | `moa-auth-providers` through the `CredentialVault` trait, injected once by the orchestrator |
 | Query-time citations, lineage, and audit sinks | `moa-lineage-*` |
 
 `moa-memory-*` never imports Nango, Merge, LlamaParse, Unstructured, or Reducto.
@@ -51,6 +51,34 @@ provider-backed flow is:
 6. `moa-knowledge` exchanges that token for provider account identity.
 7. Provider credentials, API keys, and account tokens are stored through the
    credential vault. Knowledge rows store only credential references.
+
+The whole link is one operation-fenced claim in `moa.knowledge_link_claims`,
+keyed by `(tenant, operation_id)` and advanced by compare-and-swap through
+`reserved -> credential_written -> finalized`, with
+`compensating -> compensated` as the terminal failure path. The claim resolves
+the owning `connection_uid` *before* any credential is written — a re-link keeps
+the connection the upsert conflict target resolves to — and records the exact
+previous-active and candidate references so compensation revokes only what this
+operation wrote and restores only what it superseded.
+
+A queued sync run is not evidence that the provider was called.
+`moa.knowledge_sync_runs.provider_trigger_completed_at` is a separate write-once
+boundary set after a successful dispatch and never rewritten by status updates.
+A link may finalize only on a run it owns whose boundary is durable; a crash
+between claiming the run and dispatching replays the exact idempotent trigger.
+That is why the initial link uses a different provider call than an operator
+re-sync: Nango's naturally idempotent `/sync/start` rather than the one-off
+`/sync/trigger`, and for Merge a read-only, category-correct sync-status
+reconciliation rather than the plan-gated, credit-consuming force-resync. Merge
+readiness follows its documented rule — `status = DONE` or
+`is_initial_sync = false`, skipping disabled models — and fails closed on failed,
+paused, or unrecognized states. The Merge product category the operator selected
+is carried through the exchange, validated against the linked integration's
+declared `categories`, and used in every category-scoped versioned endpoint.
+
+Tenant purge owns credential lifecycle: the `credentials_purged` stage drains
+every stored version, its permitted audit projection, and the tenant's link
+claims through bounded batches, looping until the owner reports nothing left.
 
 Provider credentials and account tokens must never be stored in request
 metadata, tracing fields, graph node properties, graph edge properties,
@@ -107,12 +135,22 @@ All parsers emit the same structure:
   bounding-box, and OCR-confidence metadata when available.
 - `KnowledgeBlock`: normalized atomic unit with
   `block_hash = blake3(normalized_text)`.
-- `KnowledgeChunk`: retrieval-sized consecutive block group with
-  `chunk_hash = blake3(ordered block_hashes)`.
+- `KnowledgeChunk`: retrieval-sized consecutive block group with content hash
+  `chunk_hash = blake3(ordered block_hashes)` and occurrence identity
+  `chunk_uid = blake3(document version, ordinal, ordered block_hashes)`.
 
-Block and chunk hashes are content identities, not database identities. They
-let `moa-knowledge` diff parser output, reuse embeddings, tombstone deleted
-chunks, and produce stable citations across re-syncs.
+Block and chunk hashes are content identities, not database identities and never
+graph identities. They let `moa-knowledge` diff parser output, decide when an
+embedding computation can be reused, and tombstone deleted chunks.
+
+Occurrence identity is separate and mandatory. `chunk_uid` is the chunk's graph
+node uid: `moa.knowledge_chunks.graph_node_uid` is NOT NULL and constrained equal
+to `chunk_uid`, under a unique index. Two documents containing the same paragraph,
+and two versions of one document, therefore own separate graph nodes, embeddings,
+provenance edges, citations, and deletion targets. A document version may hold
+several occurrences of identical text. Invalidation and deletion address persisted
+occurrence uids for every active version of an object — never the latest version
+alone, and never a uid recomputed from tenant plus content hash.
 
 Signed parser completion webhooks are ingestion signals only after they bind to
 tenant, connection, object, and an active sync run. A valid LlamaParse or
@@ -143,6 +181,15 @@ Required edge relationships are:
 - `MENTIONS`: `Chunk -> Entity`
 - `DERIVED_FROM`: contact groups or derived facts back to evidence objects.
 
+`Chunk` nodes are per-occurrence: one node per `moa.knowledge_chunks` row, keyed
+by that row's `chunk_uid`, carrying its `version_uid` in node properties.
+`HAS_CHUNK`, `EVIDENCES`, and `MENTIONS` edges are therefore occurrence-specific,
+while `Fact` and `Entity` nodes stay shared across the occurrences that evidence
+them. Each occurrence also owns its own embedding row and vector association;
+embedding computation may be reused between occurrences only when the complete
+contextual input (document title, heading path, chunk text) and the embedding
+model and version all match.
+
 Full chunk text lives in `moa.knowledge_chunks`; graph properties stay compact
 and citation-friendly. Graph properties must not contain provider tokens,
 account tokens, raw credential material, or unbounded raw source payloads.
@@ -166,7 +213,9 @@ assembly. When graph memory is enabled:
 ```
 
 Tenant knowledge includes source URI/title, document version, chunk identity,
-and citation metadata. Contact memory includes minimal provenance and
+and citation metadata. Hydration resolves one graph uid to exactly one
+document-version occurrence, so a citation names the document the retrieved text
+actually came from. Contact memory includes minimal provenance and
 privacy-filtered summaries. There is no separate public answer endpoint for
 tenant knowledge; normal agent/session answer generation consumes the assembled
 context.

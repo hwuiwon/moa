@@ -4,10 +4,14 @@ use chrono::{DateTime, Utc};
 use moa_core::traits::Identity;
 use moa_core::{
     types::channel::Attachment,
+    types::contact::ClientMessageId,
     types::contact::ContactRef,
+    types::contact::MessageReplyTarget,
+    types::events_stream::SequenceNum,
     types::events_stream::{EventRange, EventRecord},
     types::execution_planning::{ExecutionRouteSummary, ExecutionTemplateInvocation},
     types::identifiers::AgentSignalId,
+    types::identifiers::SessionId,
 };
 use moa_core::{
     types::tools::TrustedSandboxFileManifestRef, types::worker::state::WorkerProgressSummary,
@@ -86,6 +90,12 @@ pub struct RunWorkerTurnRequest {
     pub turn_id: String,
     /// Exact identity inherited from the root turn that created this worker.
     pub identity: Identity,
+    /// Trusted owning session, taken from the dispatching worker's durable state.
+    ///
+    /// Required, so a worker turn that fails before it prepares its first
+    /// iteration can still append its parent-session facts. The workflow never
+    /// infers this value; a request without it is a typed decode error.
+    pub parent_session: SessionId,
     /// Optional turn-iteration cap for this child turn workflow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
@@ -116,6 +126,28 @@ pub enum TurnPhase {
     Cancelled,
     /// Workflow failed.
     Failed,
+}
+
+impl From<TurnPhase> for moa_core::events::TurnFailureClass {
+    /// Attributes a failure to the stage the turn's durable phase was in.
+    ///
+    /// The phase is the only failure input that is guaranteed free of provider,
+    /// tool, and error text, so it is what the canonical failed-turn fact is
+    /// derived from. A phase that is already terminal cannot narrow the stage and
+    /// maps to [`moa_core::events::TurnFailureClass::Unattributed`].
+    fn from(phase: TurnPhase) -> Self {
+        match phase {
+            TurnPhase::Pending => Self::Startup,
+            TurnPhase::Compiling => Self::ContextCompilation,
+            TurnPhase::Streaming => Self::ModelCall,
+            TurnPhase::Tooling => Self::ToolDispatch,
+            TurnPhase::Persisting => Self::Persistence,
+            TurnPhase::Completed
+            | TurnPhase::Accepted
+            | TurnPhase::Cancelled
+            | TurnPhase::Failed => Self::Unattributed,
+        }
+    }
 }
 
 /// Terminal outcome returned by one turn workflow.
@@ -179,6 +211,21 @@ pub struct TurnProgress {
 /// Request for starting a turn through the durable `TurnExecution` workflow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartTurnRequest {
+    /// Caller-owned retry identity for this message. Required.
+    ///
+    /// The Session admission fence is keyed on it, so a retried submission returns
+    /// the original response instead of admitting a second paid turn.
+    pub client_message_id: ClientMessageId,
+    /// Exact pending user-input target this message replies to, when the caller
+    /// addresses one explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<MessageReplyTarget>,
+    /// Event cursor the caller observed before submitting.
+    ///
+    /// Transport state retained by the admission so a retry resumes the same stream
+    /// position; deliberately excluded from [`StartTurnRequest::canonical_request_hash`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_cursor: Option<SequenceNum>,
     /// User message text that initiates the turn.
     pub user_message: String,
     /// Attachments included with the user message.
@@ -198,6 +245,146 @@ pub struct StartTurnRequest {
     pub execution_template: Option<ExecutionTemplateInvocation>,
 }
 
+impl StartTurnRequest {
+    /// Returns the canonical semantic fingerprint of this admission request.
+    ///
+    /// Covers every field that decides what the session will actually do — text,
+    /// ordered attachment metadata and content digests, model override, the contact
+    /// the Session resolved, turn cap, pinned execution template, and the explicit
+    /// reply target. Credentials and transport state (`contact_token`,
+    /// `stream_cursor`, the client message id itself) are excluded, so a retry that
+    /// presents a refreshed token or a different stream cursor still matches, while
+    /// reusing one id for genuinely different work is a detectable conflict.
+    ///
+    /// `contact` is the contact the Session admitted for the turn, not the raw
+    /// per-request override, so the hash reflects the resolved decision.
+    #[must_use]
+    pub fn canonical_request_hash(&self, contact: Option<&ContactRef>) -> AdmissionRequestHash {
+        let mut hasher = blake3::Hasher::new();
+        absorb_field(
+            &mut hasher,
+            "domain",
+            ADMISSION_REQUEST_HASH_DOMAIN.as_bytes(),
+        );
+        absorb_field(&mut hasher, "text", self.user_message.as_bytes());
+        absorb_field(
+            &mut hasher,
+            "attachment_count",
+            &(self.attachments.len() as u64).to_be_bytes(),
+        );
+        for attachment in &self.attachments {
+            absorb_field(&mut hasher, "attachment_name", attachment.name.as_bytes());
+            absorb_optional_field(
+                &mut hasher,
+                "attachment_mime_type",
+                attachment.mime_type.as_deref().map(str::as_bytes),
+            );
+            absorb_optional_field(
+                &mut hasher,
+                "attachment_sha256",
+                attachment.sha256.as_deref().map(str::as_bytes),
+            );
+            absorb_optional_field(
+                &mut hasher,
+                "attachment_size_bytes",
+                attachment.size_bytes.map(u64::to_be_bytes).as_ref(),
+            );
+        }
+        absorb_optional_field(
+            &mut hasher,
+            "model",
+            self.model.as_deref().map(str::as_bytes),
+        );
+        absorb_optional_field(
+            &mut hasher,
+            "contact_tenant_id",
+            contact
+                .map(|contact| contact.tenant_id.0.into_bytes())
+                .as_ref(),
+        );
+        absorb_optional_field(
+            &mut hasher,
+            "contact_id",
+            contact
+                .map(|contact| contact.contact_id.0.into_bytes())
+                .as_ref(),
+        );
+        absorb_optional_field(
+            &mut hasher,
+            "max_turns",
+            self.max_turns.map(u32::to_be_bytes).as_ref(),
+        );
+        absorb_json_field(&mut hasher, "execution_template", &self.execution_template);
+        absorb_json_field(&mut hasher, "reply_to", &self.reply_to);
+        AdmissionRequestHash(*hasher.finalize().as_bytes())
+    }
+}
+
+/// Domain tag pinning the canonical admission-hash field set and framing.
+///
+/// Bumping the version deliberately invalidates every stored admission hash: an
+/// in-flight retry then reads as a hash conflict rather than silently matching a
+/// fingerprint computed over a different field set.
+pub const ADMISSION_REQUEST_HASH_DOMAIN: &str = "moa.session.admission.request.v1";
+
+/// Canonical fingerprint of one admission request's semantic fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionRequestHash([u8; 32]);
+
+impl AdmissionRequestHash {
+    /// Returns the lowercase hex rendering for logs and conflict messages.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        self.0
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                use std::fmt::Write;
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            })
+    }
+}
+
+/// Absorbs one length-prefixed named field so no two field layouts can collide.
+fn absorb_field(hasher: &mut blake3::Hasher, field: &str, bytes: &[u8]) {
+    hasher.update(&(field.len() as u64).to_be_bytes());
+    hasher.update(field.as_bytes());
+    hasher.update(&(bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+}
+
+/// Absorbs one optional field, distinguishing absent from empty.
+fn absorb_optional_field(
+    hasher: &mut blake3::Hasher,
+    field: &str,
+    bytes: Option<impl AsRef<[u8]>>,
+) {
+    match bytes {
+        Some(bytes) => {
+            absorb_field(hasher, field, &[1]);
+            absorb_field(hasher, field, bytes.as_ref());
+        }
+        None => absorb_field(hasher, field, &[0]),
+    }
+}
+
+/// Absorbs one typed optional payload through its JSON encoding.
+///
+/// The payloads are `serde` structs and enums with a fixed declaration order, so
+/// their JSON encoding is stable for a given value; a payload that fails to encode
+/// absorbs a distinct marker rather than silently hashing as absent.
+fn absorb_json_field<T: Serialize>(hasher: &mut blake3::Hasher, field: &str, value: &Option<T>) {
+    match value {
+        Some(value) => match serde_json::to_vec(value) {
+            Ok(encoded) => absorb_optional_field(hasher, field, Some(encoded)),
+            Err(_) => {
+                absorb_field(hasher, field, &[2]);
+            }
+        },
+        None => absorb_optional_field(hasher, field, Option::<&[u8]>::None),
+    }
+}
+
 /// Response returned by `Session/start_turn`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartTurnResponse {
@@ -205,11 +392,26 @@ pub struct StartTurnResponse {
     pub turn_id: Option<String>,
     /// Whether the request was queued behind an already-active turn.
     pub queued: bool,
+    /// Pre-admission event cursor retained for this client message id.
+    ///
+    /// Echoes the cursor the first submission carried; a retry of the same id
+    /// receives that stored value instead of the newer stream head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_cursor: Option<SequenceNum>,
 }
 
 /// Request for queueing a message behind the active `TurnExecution` workflow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueMessageRequest {
+    /// Caller-owned retry identity for this message. Required.
+    pub client_message_id: ClientMessageId,
+    /// Exact pending user-input target this message replies to, when the caller
+    /// addresses one explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<MessageReplyTarget>,
+    /// Event cursor the caller observed before submitting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_cursor: Option<SequenceNum>,
     /// User message text to enqueue or start immediately.
     pub user_message: String,
     /// Attachments included with the user message.
@@ -229,6 +431,27 @@ pub struct QueueMessageRequest {
     pub execution_template: Option<ExecutionTemplateInvocation>,
 }
 
+impl From<QueueMessageRequest> for StartTurnRequest {
+    /// Converts one queue request into the single admission contract.
+    ///
+    /// `Session/queue_message` and `Session/start_turn` differ only in the shape of
+    /// their responses; admission itself is one code path, so the queue request
+    /// carries exactly the start-turn fields.
+    fn from(request: QueueMessageRequest) -> Self {
+        Self {
+            client_message_id: request.client_message_id,
+            reply_to: request.reply_to,
+            stream_cursor: request.stream_cursor,
+            user_message: request.user_message,
+            attachments: request.attachments,
+            model: request.model,
+            contact: request.contact,
+            max_turns: request.max_turns,
+            execution_template: request.execution_template,
+        }
+    }
+}
+
 /// Response returned by `Session/queue_message`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueMessageResponse {
@@ -236,6 +459,20 @@ pub struct QueueMessageResponse {
     pub queued: bool,
     /// Turn ID when the message started a workflow immediately.
     pub started_turn_id: Option<String>,
+    /// Pre-admission event cursor retained for this client message id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_cursor: Option<SequenceNum>,
+}
+
+impl From<StartTurnResponse> for QueueMessageResponse {
+    /// Projects one admission result into the queue-shaped response.
+    fn from(response: StartTurnResponse) -> Self {
+        Self {
+            queued: response.queued,
+            started_turn_id: response.turn_id,
+            stream_cursor: response.stream_cursor,
+        }
+    }
 }
 
 /// Response returned by `Session/request_cancel`.
@@ -250,6 +487,12 @@ pub struct CancelResponse {
 /// Message queued behind an active turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingMessage {
+    /// Caller-owned retry identity that admitted this queued message.
+    ///
+    /// Kept with the queue entry so the admission fence can move this message's
+    /// recorded admission from queued to running when the queue dispatches it,
+    /// without ever changing the response the caller already received.
+    pub client_message_id: ClientMessageId,
     /// Durable time the message was accepted by the Session VO.
     pub queued_at: DateTime<Utc>,
     /// Trusted identity admitted by the Session VO for this queued turn.
@@ -306,6 +549,54 @@ pub enum PendingUserReplyTarget<ExecutionBudgetLimit> {
         /// Exact worker input request identifier.
         input_request_id: String,
     },
+}
+
+impl<ExecutionBudgetLimit> PendingUserReplyTarget<ExecutionBudgetLimit> {
+    /// Returns whether this pending target is the one a caller explicitly addressed.
+    ///
+    /// Matching is exact on every coordinate the caller supplied, including the
+    /// execution-task generation fence: a reply that names a superseded generation
+    /// addresses work that has already moved on and must conflict rather than be
+    /// delivered. The approved budget and plan hash are deliberately not part of the
+    /// comparison because a caller never restates them.
+    #[must_use]
+    pub fn matches_reply_target(&self, requested: &MessageReplyTarget) -> bool {
+        match (self, requested) {
+            (
+                Self::ExecutionConfirmation { run_uid, .. },
+                MessageReplyTarget::ExecutionConfirmation {
+                    run_uid: requested_run_uid,
+                },
+            ) => run_uid == requested_run_uid,
+            (
+                Self::ExecutionInput {
+                    run_uid,
+                    task_id,
+                    generation,
+                },
+                MessageReplyTarget::ExecutionInput {
+                    run_uid: requested_run_uid,
+                    task_id: requested_task_id,
+                    generation: requested_generation,
+                },
+            ) => {
+                run_uid == requested_run_uid
+                    && task_id == requested_task_id
+                    && generation == requested_generation
+            }
+            (
+                Self::WorkerInput {
+                    worker_id,
+                    input_request_id,
+                },
+                MessageReplyTarget::WorkerInput {
+                    worker_id: requested_worker_id,
+                    input_request_id: requested_input_request_id,
+                },
+            ) => worker_id == requested_worker_id && input_request_id == requested_input_request_id,
+            _ => false,
+        }
+    }
 }
 
 /// Read-only projection of the additive `TurnExecution` session state.
@@ -523,6 +814,205 @@ mod tests {
         assert_eq!(decoded, progress);
         assert_eq!(decoded.snapshot.active_execution_run_uids, vec![run_uid]);
         assert!(decoded.active_execution_progress.is_empty());
+    }
+
+    fn hash_request() -> StartTurnRequest {
+        StartTurnRequest {
+            client_message_id: moa_core::types::contact::ClientMessageId::new("client-message-1")
+                .expect("fixture client message id is valid"),
+            reply_to: None,
+            stream_cursor: None,
+            user_message: "audit the invoice".to_string(),
+            attachments: Vec::new(),
+            model: None,
+            contact: None,
+            max_turns: None,
+            execution_template: None,
+        }
+    }
+
+    fn hash_contact(contact_id: u128) -> ContactRef {
+        ContactRef {
+            contact_id: moa_core::types::contact::ContactId(uuid::Uuid::from_u128(contact_id)),
+            tenant_id: moa_core::types::identifiers::TenantId(uuid::Uuid::from_u128(1)),
+            state: moa_core::types::contact::ContactVerificationState::Verified,
+            canonical_contact_id: None,
+            linked_contact_ids: Vec::new(),
+            scopes: Vec::new(),
+            permissions: serde_json::Value::Null,
+            agent_ids: Vec::new(),
+            session_ids: Vec::new(),
+            verified_contact_point_ids: Vec::new(),
+        }
+    }
+
+    fn stored_attachment(name: &str, digest: &str, size_bytes: u64) -> Attachment {
+        Attachment {
+            id: None,
+            name: name.to_string(),
+            mime_type: Some("image/png".to_string()),
+            sha256: Some(digest.to_string()),
+            url: None,
+            path: None,
+            size_bytes: Some(size_bytes),
+        }
+    }
+
+    #[test]
+    fn admission_hash_covers_every_semantic_field_and_ignores_transport_state() {
+        // Pins: the admission fence compares a fingerprint of what the session will actually
+        // do. Any semantic change under a reused client message id must be detectable as a
+        // conflict, while a refreshed transport cursor must still replay as the same request.
+        let baseline = hash_request();
+        let baseline_hash = baseline.canonical_request_hash(None);
+        assert_eq!(baseline_hash, hash_request().canonical_request_hash(None));
+
+        let mut transport_only = hash_request();
+        transport_only.stream_cursor = Some(4_112);
+        transport_only.client_message_id =
+            moa_core::types::contact::ClientMessageId::new("client-message-2")
+                .expect("second fixture id is valid");
+        assert_eq!(
+            transport_only.canonical_request_hash(None),
+            baseline_hash,
+            "stream cursor and the id itself are not semantic admission inputs"
+        );
+
+        let mut changed_text = hash_request();
+        changed_text.user_message = "audit the receipt".to_string();
+        let mut changed_model = hash_request();
+        changed_model.model = Some("model-b".to_string());
+        let mut changed_max_turns = hash_request();
+        changed_max_turns.max_turns = Some(3);
+        let mut changed_reply_to = hash_request();
+        changed_reply_to.reply_to = Some(MessageReplyTarget::ExecutionInput {
+            run_uid: uuid::Uuid::from_u128(9),
+            task_id: uuid::Uuid::from_u128(10),
+            generation: 2,
+        });
+        let mut changed_template = hash_request();
+        changed_template.execution_template = Some(ExecutionTemplateInvocation {
+            template: moa_core::types::execution_planning::PinnedExecutionTemplateRef {
+                skill_ref: "skill://invoice-audit".to_string(),
+                revision_uid: uuid::Uuid::from_u128(31),
+            },
+            input: serde_json::json!({ "invoice": 1 }),
+        });
+        let mut one_attachment = hash_request();
+        one_attachment.attachments = vec![stored_attachment("a.png", &"a".repeat(64), 10)];
+        let mut changed_digest = hash_request();
+        changed_digest.attachments = vec![stored_attachment("a.png", &"b".repeat(64), 10)];
+        let mut changed_attachment_size = hash_request();
+        changed_attachment_size.attachments = vec![stored_attachment("a.png", &"a".repeat(64), 11)];
+        let mut reordered_attachments = hash_request();
+        reordered_attachments.attachments = vec![
+            stored_attachment("b.png", &"b".repeat(64), 10),
+            stored_attachment("a.png", &"a".repeat(64), 10),
+        ];
+        let mut ordered_attachments = hash_request();
+        ordered_attachments.attachments = vec![
+            stored_attachment("a.png", &"a".repeat(64), 10),
+            stored_attachment("b.png", &"b".repeat(64), 10),
+        ];
+
+        let contact_a = hash_contact(7);
+        let contact_b = hash_contact(8);
+        let mut distinct = vec![
+            baseline_hash,
+            changed_text.canonical_request_hash(None),
+            changed_model.canonical_request_hash(None),
+            changed_max_turns.canonical_request_hash(None),
+            changed_reply_to.canonical_request_hash(None),
+            changed_template.canonical_request_hash(None),
+            one_attachment.canonical_request_hash(None),
+            changed_digest.canonical_request_hash(None),
+            changed_attachment_size.canonical_request_hash(None),
+            reordered_attachments.canonical_request_hash(None),
+            ordered_attachments.canonical_request_hash(None),
+            baseline.canonical_request_hash(Some(&contact_a)),
+            baseline.canonical_request_hash(Some(&contact_b)),
+        ];
+        let total = distinct.len();
+        distinct.sort_by_key(|hash| hash.to_hex());
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            total,
+            "every semantic admission field must change the canonical hash"
+        );
+    }
+
+    #[test]
+    fn explicit_reply_target_matches_only_its_exact_pending_target() {
+        // Pins: an explicitly addressed reply is delivered only to the target the caller named.
+        // A superseded execution generation, a different run/task/worker, or a different target
+        // kind must not match, because delivering there would answer the wrong request.
+        let run_uid = uuid::Uuid::from_u128(41);
+        let task_id = uuid::Uuid::from_u128(42);
+        let pending: PendingUserReplyTarget<u64> = PendingUserReplyTarget::ExecutionInput {
+            run_uid,
+            task_id,
+            generation: 5,
+        };
+
+        assert!(
+            pending.matches_reply_target(&MessageReplyTarget::ExecutionInput {
+                run_uid,
+                task_id,
+                generation: 5,
+            })
+        );
+        for stale in [
+            MessageReplyTarget::ExecutionInput {
+                run_uid,
+                task_id,
+                generation: 4,
+            },
+            MessageReplyTarget::ExecutionInput {
+                run_uid,
+                task_id: uuid::Uuid::from_u128(43),
+                generation: 5,
+            },
+            MessageReplyTarget::ExecutionConfirmation { run_uid },
+            MessageReplyTarget::WorkerInput {
+                worker_id: "worker-1".to_string(),
+                input_request_id: "request-1".to_string(),
+            },
+        ] {
+            assert!(
+                !pending.matches_reply_target(&stale),
+                "stale or nonmatching target must not match: {stale:?}"
+            );
+        }
+
+        let confirmation: PendingUserReplyTarget<u64> =
+            PendingUserReplyTarget::ExecutionConfirmation {
+                run_uid,
+                expected_plan_hash: [3; 32],
+                approved_budget: 12,
+            };
+        assert!(
+            confirmation
+                .matches_reply_target(&MessageReplyTarget::ExecutionConfirmation { run_uid }),
+            "a confirmation matches on run id alone; the caller never restates plan or budget"
+        );
+
+        let worker: PendingUserReplyTarget<u64> = PendingUserReplyTarget::WorkerInput {
+            worker_id: "worker-1".to_string(),
+            input_request_id: "request-1".to_string(),
+        };
+        assert!(
+            worker.matches_reply_target(&MessageReplyTarget::WorkerInput {
+                worker_id: "worker-1".to_string(),
+                input_request_id: "request-1".to_string(),
+            })
+        );
+        assert!(
+            !worker.matches_reply_target(&MessageReplyTarget::WorkerInput {
+                worker_id: "worker-1".to_string(),
+                input_request_id: "request-2".to_string(),
+            })
+        );
     }
 
     #[test]

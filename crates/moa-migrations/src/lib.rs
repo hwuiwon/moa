@@ -32,6 +32,10 @@ const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         name: "V000341__oauth_authorization_server.sql",
         sql: include_str!("../migrations/postgres/V000341__oauth_authorization_server.sql"),
     },
+    SchemaMigration {
+        name: "V000346__tenant_credential_vault.sql",
+        sql: include_str!("../migrations/postgres/V000346__tenant_credential_vault.sql"),
+    },
 ];
 
 const ORCHESTRATOR_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {

@@ -37,6 +37,7 @@ async fn knowledge_service_accepts_injected_ingestion_runner_without_global_conf
         error_code: None,
         started_at: Utc::now(),
         finished_at: None,
+        provider_trigger_completed_at: None,
     };
     let page = RecordPage {
         records: vec![ProviderRecord {
@@ -86,7 +87,6 @@ async fn list_and_inspect_redact_tokens_and_bound_previews() {
     let chunk = KnowledgeChunk {
         chunk_uid: Uuid::now_v7(),
         version_uid: version.version_uid,
-        graph_node_uid: Some(Uuid::now_v7()),
         chunk_hash: "chunk-hash".to_string(),
         block_hashes: vec!["block-hash".to_string()],
         text: chunk_text.clone(),

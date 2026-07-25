@@ -221,6 +221,10 @@ where
                 return Ok(false);
             }
         }
+        // The durable materialization fence stays authoritative: a chunk row now
+        // always carries its graph occurrence identity (the database enforces
+        // `graph_node_uid = chunk_uid`), so identity presence proves nothing about
+        // completion. Only the recorded terminal ingestion step does.
         if !self
             .repository
             .object_ingestion_completed_since(existing.object_uid, version.created_at)
@@ -232,7 +236,7 @@ where
             .repository
             .chunks_for_version(version.version_uid)
             .await?;
-        Ok(!chunks.is_empty() && chunks.iter().all(|chunk| chunk.graph_node_uid.is_some()))
+        Ok(!chunks.is_empty())
     }
 
     /// Resolves the parse input for one record, downloading provider content

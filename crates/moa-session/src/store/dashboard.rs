@@ -407,6 +407,11 @@ fn redacted_event_summary(event: &Event) -> String {
         Event::QueuedMessage { attachments, .. } => {
             format!("queued user message with {} attachments", attachments.len())
         }
+        Event::QueuedMessageRejected {
+            queue_index,
+            rejection,
+            ..
+        } => format!("queued message {queue_index} rejected: {rejection:?}"),
         Event::ExecutionRunStarted(started) => {
             format!("execution run {} started", started.run_uid)
         }
@@ -496,6 +501,17 @@ fn redacted_event_summary(event: &Event) -> String {
             durable_appends,
             ..
         } => format!("turn metrics for {turn_id} with {durable_appends} durable appends"),
+        // The class is already the coarse, secret-free attribution, so the
+        // dashboard renders it directly instead of re-deriving a summary.
+        Event::TurnFailed {
+            actor,
+            turn_id,
+            class,
+            ..
+        } => format!(
+            "{} turn {turn_id} failed during {class:?}",
+            actor.actor_key()
+        ),
         Event::WorkerSignalReceived {
             signal_id,
             worker_id,

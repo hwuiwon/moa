@@ -49,7 +49,6 @@ impl KnowledgeService {
                     "parser": projection.parser,
                     "parser_status": projection.parser_status,
                     "chunk_count": projection.chunk_count,
-                    "graph_node_count": projection.graph_node_count,
                     "metadata": redact_provider_metadata(object.metadata),
                 })
             })
@@ -86,15 +85,10 @@ impl KnowledgeService {
                 heading_path: chunk.heading_path.clone(),
                 token_count: chunk.token_count,
                 preview: bounded_preview(&chunk.text, chunk_preview_limit),
-                graph_node_uid: chunk.graph_node_uid,
                 metadata: redact_provider_metadata(chunk.metadata.clone()),
             })
             .collect::<Vec<_>>();
         let heading_paths = unique_heading_paths(&chunks);
-        let graph_node_uids = chunks
-            .iter()
-            .filter_map(|chunk| chunk.graph_node_uid)
-            .collect::<Vec<_>>();
         let object_preview = if inspection.chunks.is_empty() {
             inspection.object.title.clone()
         } else {
@@ -113,7 +107,6 @@ impl KnowledgeService {
                 .iter()
                 .map(|chunk| json!({
                     "chunk_uid": chunk.chunk_uid,
-                    "graph_node_uid": chunk.graph_node_uid,
                     "heading_path": chunk.heading_path,
                     "metadata": chunk.metadata,
                 }))
@@ -141,7 +134,6 @@ impl KnowledgeService {
                 .unwrap_or(Value::Null),
             heading_paths,
             chunks,
-            graph_node_uids,
             citation_metadata,
             metadata: redact_provider_metadata(inspection.object.metadata),
             steps: inspection.steps.into_iter().map(step_view).collect(),

@@ -14,17 +14,17 @@ use moa_config::SessionLimitsConfig;
 use moa_core::traits::ChannelAdapter;
 use moa_core::{
     coordination_counters::CoordinationCounters,
-    coordination_counters::scope_coordination_counters, events::Event, types::channel::Channel,
-    types::completion::CompletionContent, types::completion::CompletionRequest,
-    types::completion::CompletionResponse, types::completion::StopReason,
-    types::completion::TokenUsage, types::completion::ToolCallContent,
-    types::completion::ToolInvocation, types::identifiers::AgentSignalId,
-    types::identifiers::SessionId, types::identifiers::ToolCallId, types::provider::ModelTier,
-    types::session::SessionMeta, types::session::TurnOutcome as CoreTurnOutcome,
-    types::tools::ToolOutput, types::tools::TrustedSandboxFileManifestRef,
-    types::worker::commands::ChildReportKind, types::worker::commands::ReportToParentInput,
-    types::worker::commands::RequestInputInput, types::worker::commands::WorkerToolRecord,
-    types::worker::commands::WorkerTurnOutcomeRecord,
+    coordination_counters::scope_coordination_counters, events::Event, events::TurnFailureActor,
+    events::TurnFailureClass, types::channel::Channel, types::completion::CompletionContent,
+    types::completion::CompletionRequest, types::completion::CompletionResponse,
+    types::completion::StopReason, types::completion::TokenUsage,
+    types::completion::ToolCallContent, types::completion::ToolInvocation,
+    types::identifiers::AgentSignalId, types::identifiers::SessionId,
+    types::identifiers::ToolCallId, types::provider::ModelTier, types::session::SessionMeta,
+    types::session::TurnOutcome as CoreTurnOutcome, types::tools::ToolOutput,
+    types::tools::TrustedSandboxFileManifestRef, types::worker::commands::ChildReportKind,
+    types::worker::commands::ReportToParentInput, types::worker::commands::RequestInputInput,
+    types::worker::commands::WorkerToolRecord, types::worker::commands::WorkerTurnOutcomeRecord,
     types::worker::commands::WorkerTurnPreparation,
     types::worker::commands::WorkerTurnResponseRecord, types::worker::state::ChildSignalKind,
     types::worker::state::InputAudience, types::worker::state::ParentResumePolicy,
@@ -60,8 +60,8 @@ use crate::turn_driver::{
 };
 use crate::workflows::durable_utc_now;
 use crate::workflows::turn_events::{
-    append_session_event, append_tool_call_event, append_tool_result_event,
-    append_zero_cost_assistant_response, emit_tool_budget_exceeded,
+    TurnEventAppender, append_session_event, append_tool_call_event, append_tool_result_event,
+    append_turn_failed, append_zero_cost_assistant_response, emit_tool_budget_exceeded,
     record_segment_skill_use_for_tool_call, record_segment_tool_use, turn_outcome_kind_label,
 };
 use crate::workflows::turn_progress::{self, SUMMARY_CALLING_MODEL};
@@ -108,21 +108,29 @@ pub struct WorkerTurnExecutionImpl {
     session_limits: SessionLimitsConfig,
     session_store: Arc<PostgresSessionStore>,
     channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
+    event_appender: TurnEventAppender,
 }
 
 impl WorkerTurnExecutionImpl {
-    /// Creates a worker-turn workflow with its limits and progress-delivery dependencies.
+    /// Creates a worker-turn workflow with its limits, event-append, and progress-delivery dependencies.
     #[must_use]
     pub fn new(
         session_limits: SessionLimitsConfig,
         session_store: Arc<PostgresSessionStore>,
         channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
+        event_appender: TurnEventAppender,
     ) -> Self {
         Self {
             session_limits,
             session_store,
             channel_adapters,
+            event_appender,
         }
+    }
+
+    /// Returns the durable event-append dependency this workflow owns.
+    fn event_appender(&self) -> &TurnEventAppender {
+        &self.event_appender
     }
 }
 
@@ -138,20 +146,56 @@ impl WorkerTurnExecution for WorkerTurnExecutionImpl {
         let request = request.into_inner();
         driver_progress::set_phase(&ctx, TurnPhase::Compiling);
 
-        // `parent_session` is learned during the loop (best-effort for the FAILED-signal
-        // emit below). It stays `None` if the workflow errors before the first turn is
-        // prepared; the terminal idle-wake still covers waking an idle parent.
-        let mut parent_session: Option<SessionId> = None;
-        let mut outcome =
-            match run_worker_inside_workflow(self, &ctx, &request, &mut parent_session).await {
-                Ok(outcome) => outcome,
-                Err(error) => TurnOutcome {
+        // The dispatching worker object supplies its owning session on the request,
+        // so a failure before the first prepared iteration can still append the
+        // parent-session facts below.
+        let parent_session = request.parent_session;
+        let mut outcome = match run_worker_inside_workflow(self, &ctx, &request).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // The error is logged for operators and never persisted: it can
+                // carry provider, tool, and prompt material.
+                tracing::error!(
+                    worker_id = %request.worker_id,
+                    parent_session = %parent_session,
+                    turn_id = %request.turn_id,
+                    error = ?error,
+                    "worker turn workflow failed at its catch-all boundary"
+                );
+                TurnOutcome {
                     turn_id: request.turn_id.clone(),
                     kind: TurnOutcomeKind::Failed,
-                    message: format!("{error:?}"),
-                },
-            };
+                    message: String::new(),
+                }
+            }
+        };
         outcome = enforce_worker_user_message_origin(&request.turn_id, outcome);
+        // One canonical fact for every failed worker turn, whatever produced it:
+        // the catch-all boundary, a reported failure, or the origin invariant. It
+        // is appended before the attention signal and the owner callback, so the
+        // failure survives losing either, and its dedupe key collapses a replay
+        // into the same single event. The outcome keeps an authored stable
+        // rejection code when one is present; every other failure carries only
+        // the fixed class sentence the append returns.
+        if matches!(outcome.kind, TurnOutcomeKind::Failed) {
+            // Attribute from the phase the turn died in, read before the terminal
+            // phase below overwrites it.
+            let class = TurnFailureClass::from(driver_progress::current_phase(&ctx).await?);
+            let summary = append_turn_failed(
+                self.event_appender(),
+                &ctx,
+                parent_session,
+                TurnFailureActor::Worker {
+                    worker_id: request.worker_id.clone(),
+                },
+                &request.turn_id,
+                class,
+            )
+            .await?;
+            if super::turn_events::safe_terminal_rejection_code(&outcome.message).is_none() {
+                outcome.message = summary;
+            }
+        }
         record_turn_workflow_outcome(
             "worker",
             turn_outcome_kind_label(&outcome.kind),
@@ -169,6 +213,7 @@ impl WorkerTurnExecution for WorkerTurnExecutionImpl {
         // coordinator (the only child-originated emit in this increment).
         emit_failed_child_signal_if_needed(&ctx, &request.worker_id, parent_session, &outcome)
             .await?;
+
         notify_worker_of_outcome(&ctx, &request.worker_id, &outcome);
         Ok(Json::from(outcome))
     }
@@ -210,7 +255,6 @@ async fn run_worker_inside_workflow(
     workflow: &WorkerTurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
     request: &RunWorkerTurnRequest,
-    parent_session_out: &mut Option<SessionId>,
 ) -> Result<TurnOutcome, HandlerError> {
     let session_limits = &workflow.session_limits;
     let loop_plan = driver_model_loop::worker_loop_plan(
@@ -269,9 +313,6 @@ async fn run_worker_inside_workflow(
             } => {
                 last_request_meta = Some((*session_meta).clone());
                 last_parent_session = Some(parent_session);
-                // Surface the owning coordinator session to the caller for the
-                // FAILED-signal emit, even if a later turn errors.
-                *parent_session_out = Some(parent_session);
                 (*request, active_canary, *session_meta, parent_session)
             }
         };
@@ -337,8 +378,15 @@ async fn run_worker_inside_workflow(
     }
 
     if let (Some(meta), Some(parent_session)) = (last_request_meta.as_ref(), last_parent_session) {
-        let message =
-            record_worker_turn_cap_stop(ctx, request, meta, parent_session, max_turns).await?;
+        let message = record_worker_turn_cap_stop(
+            workflow.event_appender(),
+            ctx,
+            request,
+            meta,
+            parent_session,
+            max_turns,
+        )
+        .await?;
         return Ok(TurnOutcome {
             turn_id: request.turn_id.clone(),
             kind: TurnOutcomeKind::Completed,
@@ -452,6 +500,7 @@ async fn run_worker_iteration(
             ToolBudgetDecision::Stop(exhaustion) => {
                 driver_progress::set_tool_calls(ctx, input.tool_budget.attempted_tool_calls());
                 let message = record_worker_budget_stop(
+                    workflow.event_appender(),
                     ctx,
                     input.request,
                     &input.meta,
@@ -701,7 +750,14 @@ async fn handle_delegation_tool(
         tool_call,
     } = request;
     let invocation = tool_call.invocation.clone();
-    append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
+    append_tool_call_event(
+        workflow.event_appender(),
+        ctx,
+        session_id,
+        tool_id,
+        tool_call,
+    )
+    .await?;
     // Workers are never granted delegation tools, so any delegation-named call reaching here is a
     // model hallucination. Return a graceful, recoverable tool error WITHOUT parsing the
     // (possibly malformed) invocation — parsing and erroring on it would fail the whole worker
@@ -729,7 +785,15 @@ async fn handle_delegation_tool(
     .await?;
     record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
 
-    append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
+    append_tool_result_event(
+        workflow.event_appender(),
+        ctx,
+        session_id,
+        tool_id,
+        &invocation,
+        &output,
+    )
+    .await?;
     record_denied_tool(ctx, turn_id, worker_id, tool_id, &invocation, &output).await?;
     turn_evidence.record_tool_result(&invocation, &output);
     if !output.is_error {
@@ -771,7 +835,14 @@ async fn handle_child_report_tool(
         report_tool,
     } = request;
     let invocation = tool_call.invocation.clone();
-    append_tool_call_event(ctx, parent_session, tool_id, tool_call).await?;
+    append_tool_call_event(
+        workflow.event_appender(),
+        ctx,
+        parent_session,
+        tool_id,
+        tool_call,
+    )
+    .await?;
     record_worker_heartbeat(ctx, worker_id).await?;
     let output = match report_tool {
         ChildReportTool::Report(input) => {
@@ -781,7 +852,15 @@ async fn handle_child_report_tool(
             request_input_from_parent(workflow, ctx, worker_id, parent_session, &input).await?
         }
     };
-    append_tool_result_event(ctx, parent_session, tool_id, &invocation, &output).await?;
+    append_tool_result_event(
+        workflow.event_appender(),
+        ctx,
+        parent_session,
+        tool_id,
+        &invocation,
+        &output,
+    )
+    .await?;
     record_tool_result(ctx, turn_id, worker_id, tool_id, &invocation, &output).await?;
     turn_evidence.record_tool_result(&invocation, &output);
     Ok(())
@@ -990,15 +1069,17 @@ fn build_needs_input_signal(
 }
 
 async fn record_worker_budget_stop(
+    appender: &TurnEventAppender,
     ctx: &WorkflowContext<'_>,
     request: &RunWorkerTurnRequest,
     meta: &SessionMeta,
     parent_session: SessionId,
     exhaustion: &ToolBudgetExhausted,
 ) -> Result<String, HandlerError> {
-    emit_tool_budget_exceeded(ctx, parent_session, exhaustion).await?;
+    emit_tool_budget_exceeded(appender, ctx, parent_session, exhaustion).await?;
     let message = exhaustion.assistant_message();
-    append_zero_cost_assistant_response(ctx, parent_session, meta, message.clone()).await?;
+    append_zero_cost_assistant_response(appender, ctx, parent_session, meta, message.clone())
+        .await?;
     let response = CompletionResponse {
         text: message.clone(),
         content: vec![CompletionContent::Text(message.clone())],
@@ -1032,6 +1113,7 @@ async fn record_worker_budget_stop(
 }
 
 async fn record_worker_turn_cap_stop(
+    appender: &TurnEventAppender,
     ctx: &WorkflowContext<'_>,
     request: &RunWorkerTurnRequest,
     meta: &SessionMeta,
@@ -1040,6 +1122,7 @@ async fn record_worker_turn_cap_stop(
 ) -> Result<String, HandlerError> {
     record_session_error("turn_cap");
     append_session_event(
+        appender,
         ctx,
         parent_session,
         Event::Error {
@@ -1051,7 +1134,8 @@ async fn record_worker_turn_cap_stop(
     let message = format!(
         "MOA stopped because this worker reached the model-loop turn cap ({max_turns}). Narrow the scope or ask MOA to continue."
     );
-    append_zero_cost_assistant_response(ctx, parent_session, meta, message.clone()).await?;
+    append_zero_cost_assistant_response(appender, ctx, parent_session, meta, message.clone())
+        .await?;
     let response = CompletionResponse {
         text: message.clone(),
         content: vec![CompletionContent::Text(message.clone())],
@@ -1155,19 +1239,12 @@ fn notify_worker_of_outcome(ctx: &WorkflowContext<'_>, worker_id: &str, outcome:
 async fn emit_failed_child_signal_if_needed(
     ctx: &WorkflowContext<'_>,
     worker_id: &str,
-    parent_session: Option<SessionId>,
+    parent_session: SessionId,
     outcome: &TurnOutcome,
 ) -> Result<(), HandlerError> {
     if !matches!(outcome.kind, TurnOutcomeKind::Failed) {
         return Ok(());
     }
-    let Some(parent_session) = parent_session else {
-        tracing::warn!(
-            worker_id = %worker_id,
-            "child turn failed before a parent session was known; skipping Failed control-plane signal (terminal idle-wake still applies)"
-        );
-        return Ok(());
-    };
 
     let signal_id = ctx
         .run(|| async { Ok::<_, HandlerError>(Json::from(AgentSignalId::new())) })

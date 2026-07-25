@@ -425,11 +425,16 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_MESSAGING_SLACK_TOKEN` | `messaging.slack_token` | _empty_ | Slack bot token loaded from runtime configuration |
 | `MOA_MESSAGING_TWILIO_BASE_URL` | `messaging.twilio_base_url` | https://api.twilio.com | Base URL for Twilio's REST API |
 
+### `security_profile`
+
+| Variable | Config path | Default | Description |
+|---|---|---|---|
+| `MOA_SECURITY_PROFILE` | `security_profile` | local | Deployment security posture: `local` permits host-local hands with permissive permission defaults; `cloud` fails closed and requires `permissions.default_effect=deny`, a persisted action-policy rule owner, and a credentialed non-local sandbox backend |
+
 ### `cloud`
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
-| `MOA_CLOUD_HANDS_ALLOW_LOCAL` | `cloud.hands.allow_local_provider` | false | Development-only opt-in that permits routing hand tools to the local host provider |
 | `MOA_CLOUD_HANDS_DAYTONA_API_KEY` | `cloud.hands.daytona_api_key` | _none_ | Daytona API key loaded from runtime configuration **(secret)** |
 | `MOA_CLOUD_HANDS_DAYTONA_API_URL` | `cloud.hands.daytona_api_url` | _none_ | Optional Daytona API base URL override |
 | `MOA_CLOUD_HANDS_DAYTONA_DEFAULT_IMAGE` | `cloud.hands.daytona_default_image` | _none_ | Optional default image for Daytona sandboxes |

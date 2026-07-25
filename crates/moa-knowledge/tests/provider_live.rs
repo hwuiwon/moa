@@ -3,6 +3,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use chrono::Utc;
+use moa_core::types::credentials::RedactedSecret;
 use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
     domain::{
@@ -128,6 +129,7 @@ async fn nango_live_google_drive_lists_records_with_content() {
 
     let page = provider
         .list_changed_records(ListChangedRecordsRequest {
+            credential: test_credential(),
             connection,
             cursor: None,
             modified_after: None,
@@ -270,6 +272,7 @@ async fn nango_live_google_drive_fetches_record_content() {
     let connection = live_connection(&connector, &connection_id, &model);
     let page = provider
         .list_changed_records(ListChangedRecordsRequest {
+            credential: test_credential(),
             connection: connection.clone(),
             cursor: None,
             modified_after: None,
@@ -307,6 +310,7 @@ async fn nango_live_google_drive_fetches_record_content() {
             .to_string();
         match provider
             .fetch_record_content(FetchRecordContentRequest {
+                credential: test_credential(),
                 connection: connection.clone(),
                 record: record.clone(),
             })
@@ -549,4 +553,12 @@ fn repo_root() -> PathBuf {
         .and_then(|path| path.parent())
         .expect("crate should live under crates/moa-knowledge")
         .to_path_buf()
+}
+
+/// Builds the resolved credential a provider request carries.
+///
+/// Provider requests take a non-serializable redacted secret, so tests build one
+/// explicitly instead of smuggling material through the connection.
+fn test_credential() -> RedactedSecret {
+    RedactedSecret::new("test-provider-credential".to_string())
 }

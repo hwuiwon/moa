@@ -28,32 +28,6 @@ impl Session for SessionImpl {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self, ctx, msg))]
-    async fn post_message(
-        &self,
-        mut ctx: ObjectContext<'_>,
-        msg: Json<UserMessage>,
-    ) -> Result<(), HandlerError> {
-        crate::ctx::adopt_incoming_trace_parent(&ctx);
-        annotate_restate_handler_span("Session", "post_message");
-        let msg = msg.into_inner();
-        start_turn_inner(
-            &mut ctx,
-            StartTurnRequest {
-                user_message: msg.text,
-                attachments: msg.attachments,
-                model: None,
-                contact: None,
-                max_turns: None,
-                execution_template: None,
-            },
-            &self.session_limits,
-            &self.turn_admission,
-        )
-        .await?;
-        Ok(())
-    }
-
     #[tracing::instrument(skip(self, ctx, scope))]
     async fn cancel(
         &self,
@@ -65,12 +39,11 @@ impl Session for SessionImpl {
         let session_id = parse_session_key(ctx.key())?;
         let identity = require_session_participant(&ctx, session_id).await?;
         let scope = scope.into_inner();
-        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        let state = Tracked::<SessionVoState>::load(&ctx).await?;
         let meta = state
             .ensure_initialized()
             .map_err(moa_error_to_handler_error)?
             .clone();
-        state.set_cancel_flag(scope);
         let children = state.children.clone();
         let active_execution_run_uids = state
             .active_execution_runs
@@ -78,8 +51,45 @@ impl Session for SessionImpl {
             .map(|run| run.run_uid)
             .collect::<Vec<_>>();
         state.persist(&ctx);
+
+        let mut pending_state = load_pending_state(&ctx).await?;
+        let active_turn_id = pending_state.active_turn_id.clone();
+        // Remember the scope against the turn it cancels. `record_turn_outcome`
+        // needs it to decide the queue's disposition, and it is what releases the
+        // admission fence below. Without an active turn there is no callback to
+        // wait for, so there is nothing to fence and nothing to remember.
+        if let Some(turn_id) = active_turn_id.clone() {
+            pending_state.pending_cancellation = Some(PendingCancellation { turn_id, scope });
+        }
+        // A whole-task-tree cancellation discards every already-accepted queued
+        // message. Each was acknowledged to its sender, so each gets one durable
+        // rejection fact, in queue order, before the queue is drained here rather
+        // than at some later callback.
+        if scope.cancels_task_tree() {
+            let mut admissions = load_message_admissions(&ctx).await?;
+            let now = durable_utc_now(&ctx).await?;
+            let rejected = reject_queued_messages(
+                &ctx,
+                session_id,
+                &mut pending_state,
+                &mut admissions,
+                active_turn_id.as_deref(),
+                now,
+            )
+            .await?;
+            if rejected > 0 {
+                persist_message_admissions(&ctx, &admissions, 0);
+                tracing::info!(
+                    key = %ctx.key(),
+                    rejected,
+                    "rejected and drained queued messages for a cancelled task tree"
+                );
+            }
+        }
+        persist_pending_state(&ctx, &pending_state);
+
         // Both scopes cancel the active coordinator turn.
-        if let Some(turn_id) = load_pending_state(&ctx).await?.active_turn_id {
+        if let Some(turn_id) = active_turn_id {
             crate::restate_identity::replay_safe_request(
                 ctx.workflow_client::<TurnExecutionClient>(turn_id)
                     .request_cancel(Json::from("session cancel requested".to_string())),
@@ -164,9 +174,41 @@ impl Session for SessionImpl {
         annotate_restate_handler_span("Session", "record_turn_outcome");
         let outcome = outcome.into_inner();
         let mut pending_state = load_pending_state(&ctx).await?;
-        let matches_active =
-            pending_state.active_turn_id.as_deref() == Some(outcome.turn_id.as_str());
         let session_id = parse_session_key(ctx.key())?;
+
+        // The admission that started this turn is resolved by the turn's terminal
+        // disposition, whether or not the turn is still the active one. Its guarantee
+        // window opens here, not when admission returned, so a caller retrying while
+        // the turn was still running always saw the original response.
+        let mut admissions = load_message_admissions(&ctx).await?;
+        let terminal_at = durable_utc_now(&ctx).await?;
+        let (resolved_admission, evicted) =
+            admissions.mark_terminal_for_turn(&outcome.turn_id, terminal_at);
+        if resolved_admission {
+            persist_message_admissions(&ctx, &admissions, evicted);
+        }
+
+        // A stale or replayed callback for a turn that is no longer active is a
+        // complete no-op: it must not overwrite the terminal outcome or summary a
+        // newer turn already published, and it must not touch a newer active turn.
+        // Only its own waiters resolve, because those are keyed by the turn it
+        // actually belongs to. This runs before any validation so a duplicate
+        // delivery can never be turned into a retryable error.
+        if pending_state.active_turn_id.as_deref() != Some(outcome.turn_id.as_str()) {
+            let turn_waiters = take_turn_waiters(&mut pending_state, &outcome.turn_id);
+            if !turn_waiters.is_empty() {
+                resolve_turn_waiters(&ctx, turn_waiters, &outcome)?;
+                persist_pending_state(&ctx, &pending_state);
+            }
+            tracing::debug!(
+                key = %ctx.key(),
+                turn_id = %outcome.turn_id,
+                active_turn_id = ?pending_state.active_turn_id,
+                "ignored turn outcome for a turn that is no longer active"
+            );
+            return Ok(());
+        }
+
         let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         if let ExecutionTurnOutcomeKind::Accepted { execution_run_uid } = outcome.kind
             && !state
@@ -181,9 +223,23 @@ impl Session for SessionImpl {
             .into());
         }
 
-        if matches_active {
-            pending_state.active_turn_id = None;
+        let dispatch_next = pending_state.dispatches_next_after(&outcome);
+        // The cancellation fence is released only now, by the outcome it was waiting
+        // for, so nothing can be admitted while the cancelled turn is still winding
+        // down.
+        let cleared_cancellation = pending_state
+            .pending_cancellation
+            .take_if(|cancellation| cancellation.turn_id == outcome.turn_id)
+            .is_some();
+        if cleared_cancellation {
+            tracing::debug!(
+                key = %ctx.key(),
+                turn_id = %outcome.turn_id,
+                "cleared cancellation fence on its matching turn outcome"
+            );
         }
+
+        pending_state.active_turn_id = None;
         pending_state.last_outcome = Some(outcome.clone());
         let turn_waiters = take_turn_waiters(&mut pending_state, &outcome.turn_id);
         state.last_turn_summary = Some(outcome.message.clone());
@@ -191,25 +247,24 @@ impl Session for SessionImpl {
         // When the completing turn was the guarded coordinator resume turn, clear the
         // pending-resume marker and drain exactly its dispatch-time unread snapshot
         // (signals that arrived mid-turn stay queued for the next resume). Only the
-        // active turn can match, and every `matches_active` branch below persists `state`.
-        if matches_active && state.clear_resume_on_outcome(&outcome.turn_id) {
+        // active turn reaches here, and every branch below persists `state`.
+        if state.clear_resume_on_outcome(&outcome.turn_id) {
             tracing::debug!(
                 key = %ctx.key(),
                 turn_id = %outcome.turn_id,
                 "cleared pending parent resume and drained dispatch-time signal snapshot"
             );
         }
-        if matches_active
-            && matches!(
-                outcome.kind,
-                ExecutionTurnOutcomeKind::Completed | ExecutionTurnOutcomeKind::Accepted { .. }
-            )
-            && let Some(next) = pending_state.pending_messages.pop_front()
-        {
+        if dispatch_next && let Some(next) = pending_state.pending_messages.pop_front() {
             let next_turn_id = generate_turn_id(&mut ctx);
             pending_state.active_turn_id = Some(next_turn_id.clone());
             let now = durable_utc_now(&ctx).await?;
             state.set_status(SessionStatus::Running, now);
+            // The dequeued message's admission now owns a running turn. Its recorded
+            // response still says `queued`, which is exactly what its caller was told.
+            if admissions.mark_running(&next.client_message_id, &next_turn_id) {
+                persist_message_admissions(&ctx, &admissions, 0);
+            }
             let drained = state.drain_unread_child_signals();
             state.persist(&ctx);
             persist_pending_state(&ctx, &pending_state);
@@ -242,7 +297,7 @@ impl Session for SessionImpl {
             return Ok(());
         }
 
-        if matches_active {
+        {
             let now = durable_utc_now(&ctx).await?;
             let resumed = if matches!(outcome.kind, ExecutionTurnOutcomeKind::Completed) {
                 dispatch_queued_parent_resume_if_idle(
@@ -284,7 +339,7 @@ impl Session for SessionImpl {
             state.persist(&ctx);
             sync_status(&ctx, session_id, &state).await?;
         }
-        if matches_active && pending_state.active_turn_id.is_none() {
+        if pending_state.active_turn_id.is_none() {
             let tenant_id = state
                 .ensure_initialized()
                 .map_err(moa_error_to_handler_error)?
@@ -603,25 +658,14 @@ impl Session for SessionImpl {
     ) -> Result<Json<QueueMessageResponse>, HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Session", "queue_message");
-        let request = request.into_inner();
         let response = start_turn_inner(
             &mut ctx,
-            StartTurnRequest {
-                user_message: request.user_message,
-                attachments: request.attachments,
-                model: request.model,
-                contact: request.contact,
-                max_turns: request.max_turns,
-                execution_template: request.execution_template,
-            },
+            StartTurnRequest::from(request.into_inner()),
             &self.session_limits,
             &self.turn_admission,
         )
         .await?;
-        Ok(Json::from(QueueMessageResponse {
-            queued: response.queued,
-            started_turn_id: response.turn_id,
-        }))
+        Ok(Json::from(QueueMessageResponse::from(response)))
     }
 
     #[tracing::instrument(skip(self, ctx))]
@@ -1215,19 +1259,26 @@ async fn collect_child_progress(
     child_progress_in_plan_order(summaries)
 }
 
+/// Delivers one user reply to the exact target the reply matrix resolved.
+///
+/// The target is decided by [`resolve_message_routing`] before any mutation, so this
+/// function never chooses a target itself and can never deliver to a second one.
 async fn forward_user_input_reply(
     ctx: &ObjectContext<'_>,
     state: &mut SessionVoState,
     session_id: SessionId,
-    tenant_id: moa_core::types::identifiers::TenantId,
-    contact_id: Option<moa_core::types::contact::ContactId>,
     identity: &moa_core::traits::Identity,
+    target: &PendingUserReplyTarget,
     text: &str,
-) -> Result<bool, HandlerError> {
-    let Some(target) = state.exact_pending_user_reply_target() else {
-        return Ok(false);
-    };
-    let acknowledgement = match &target {
+) -> Result<(), HandlerError> {
+    // The run this reply addresses is scoped by the session's own tenant and contact, so
+    // they are read from admitted session metadata rather than re-passed by the caller.
+    let meta = state
+        .ensure_initialized()
+        .map_err(moa_error_to_handler_error)?;
+    let tenant_id = meta.tenant_id;
+    let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
+    let acknowledgement = match target {
         PendingUserReplyTarget::ExecutionConfirmation {
             run_uid,
             expected_plan_hash,
@@ -1313,8 +1364,8 @@ async fn forward_user_input_reply(
             acknowledgement
         }
     };
-    state.apply_pending_user_reply_ack(&target, acknowledgement);
-    Ok(true)
+    state.apply_pending_user_reply_ack(target, acknowledgement);
+    Ok(())
 }
 
 fn worker_provide_input_request(
@@ -1404,6 +1455,47 @@ async fn hydrate_child_terminal_output(
         .into_inner();
     terminal.result.output = body;
     Ok(())
+}
+
+/// Rejects and drains every already-accepted queued message, in FIFO order.
+///
+/// Returns how many messages were discarded. Each rejection is appended under a
+/// key derived from the cancelled turn (or this invocation when the session was
+/// idle) plus the message's queue position, so a retried `cancel` re-derives the
+/// same keys and records each rejection exactly once.
+///
+/// Rejection is a terminal disposition for the admission that queued the message: its
+/// recorded response still replays for a retry inside the guarantee window, but the entry
+/// can now age out. Leaving it unresolved would pin one admission per rejected message
+/// for the life of the session.
+async fn reject_queued_messages(
+    ctx: &ObjectContext<'_>,
+    session_id: SessionId,
+    pending_state: &mut SessionPendingState,
+    admissions: &mut SessionMessageAdmissions,
+    cancelled_turn_id: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<usize, HandlerError> {
+    let fence_key = cancelled_turn_id
+        .map(str::to_string)
+        .unwrap_or_else(|| ctx.invocation_id().to_string());
+    let rejected = std::mem::take(&mut pending_state.pending_messages);
+    let count = rejected.len();
+    for (queue_index, message) in rejected.into_iter().enumerate() {
+        append_session_event_deduped(
+            ctx,
+            session_id,
+            Event::QueuedMessageRejected {
+                queued_at: message.queued_at,
+                queue_index: queue_index as u64,
+                rejection: QueuedMessageRejection::TaskTreeCancelled,
+            },
+            format!("queued_message_rejected:{fence_key}:{queue_index}"),
+        )
+        .await?;
+        admissions.mark_terminal_for_message(&message.client_message_id, now);
+    }
+    Ok(count)
 }
 
 async fn dispatch_queued_parent_resume_if_idle(
@@ -1606,29 +1698,125 @@ async fn start_turn_inner(
     let meta = state
         .ensure_initialized()
         .map_err(moa_error_to_handler_error)?;
-    let contact = admitted_contact_for_turn(request.contact, meta)?;
+    let contact = admitted_contact_for_turn(request.contact.clone(), meta)?;
     let tenant_id = meta.tenant_id;
-    let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
-    let mut pending_state = load_pending_state(ctx).await?;
 
-    if request.attachments.is_empty()
-        && forward_user_input_reply(
-            ctx,
-            &mut state,
-            session_id,
-            tenant_id,
-            contact_id,
-            &identity,
-            &request.user_message,
+    // The fence is consulted before every Session side effect, including the reply
+    // delivery, the queue mutation, the shared admission lease, and the turn dispatch
+    // below. A retry that reaches here after its original response was lost must
+    // receive that response back, never a second admission.
+    let client_message_id = request.client_message_id.clone();
+    let request_hash = request.canonical_request_hash(contact.as_ref());
+    let mut admissions = load_message_admissions(ctx).await?;
+    match admissions.lookup(&client_message_id, request_hash) {
+        AdmissionLookup::Replay(response) => {
+            record_admission_decision("replayed");
+            tracing::info!(
+                key = %ctx.key(),
+                client_message_id = %client_message_id,
+                "replayed an already-admitted session message without a second side effect"
+            );
+            return Ok(response);
+        }
+        AdmissionLookup::Conflict { admitted } => {
+            record_admission_decision("conflict");
+            return Err(TerminalError::new_with_code(
+                409,
+                format!(
+                    "client message id {client_message_id} was already admitted for a different \
+                     request (admitted request hash {})",
+                    admitted.to_hex()
+                ),
+            )
+            .into());
+        }
+        AdmissionLookup::Fresh => {}
+    }
+
+    let mut pending_state = load_pending_state(ctx).await?;
+    // A cancelled task tree is being torn down. Admitting work into it — even work
+    // that raced the cancellation — would start a turn whose children and execution
+    // runs are already being cancelled, so the caller gets a typed refusal until the
+    // cancelled turn reports its outcome.
+    if pending_state.task_tree_cancellation_fenced() {
+        record_admission_decision("rejected_task_tree_cancelling");
+        return Err(TerminalError::new_with_code(
+            409,
+            "session task-tree cancellation is in progress and cannot admit new turns",
         )
-        .await?
-    {
-        state.persist_into(ctx);
-        sync_status(ctx, session_id, &state).await?;
-        return Ok(StartTurnResponse {
-            turn_id: None,
-            queued: false,
-        });
+        .into());
+    }
+
+    // The routing decision is made before any mutation, so every refusal below leaves
+    // no queue entry, no reply delivery, no turn, and no recorded admission.
+    let routing = resolve_message_routing(
+        &state.pending_user_reply_targets,
+        request.reply_to.as_ref(),
+        !request.attachments.is_empty(),
+    );
+    let now = durable_utc_now(ctx).await?;
+    match routing {
+        MessageRouting::AmbiguousImplicitReply { targets } => {
+            record_admission_decision("rejected_ambiguous_reply");
+            return Err(TerminalError::new_with_code(
+                409,
+                format!(
+                    "session is waiting on {targets} user replies; resend with reply_to naming \
+                     exactly one of them"
+                ),
+            )
+            .into());
+        }
+        MessageRouting::StaleReplyTarget => {
+            record_admission_decision("rejected_stale_reply_target");
+            return Err(TerminalError::new_with_code(
+                409,
+                "reply target does not match any request this session is waiting on",
+            )
+            .into());
+        }
+        MessageRouting::ReplyWithAttachments => {
+            record_admission_decision("rejected_reply_with_attachments");
+            return Err(TerminalError::new_with_code(
+                400,
+                "a reply to a pending request cannot carry attachments",
+            )
+            .into());
+        }
+        MessageRouting::Reply(target) => {
+            forward_user_input_reply(
+                ctx,
+                &mut state,
+                session_id,
+                &identity,
+                &target,
+                &request.user_message,
+            )
+            .await?;
+            let response = StartTurnResponse {
+                turn_id: None,
+                queued: false,
+                stream_cursor: request.stream_cursor,
+            };
+            // A delivered reply has no later callback: the target either applied it or
+            // definitively did not, so this admission is terminal at admission time.
+            let evicted = admissions.record(
+                client_message_id,
+                request_hash,
+                response.clone(),
+                MessageAdmissionState::Terminal {
+                    at: now,
+                    ordinal: 0,
+                },
+                now,
+            );
+            state.persist_into(ctx);
+            persist_message_admissions(ctx, &admissions, evicted);
+            sync_status(ctx, session_id, &state).await?;
+            record_admission_decision("admitted_reply");
+            return Ok(response);
+        }
+        MessageRouting::OrdinaryTurn => {}
     }
 
     if let Some(active_turn_id) = pending_state.active_turn_id.as_deref() {
@@ -1636,6 +1824,7 @@ async fn start_turn_inner(
             pending_state.pending_messages.len(),
             session_limits.max_pending_messages,
         ) {
+            record_admission_decision("rejected_queue_full");
             return Err(TerminalError::new_with_code(
                 429,
                 format!(
@@ -1645,7 +1834,6 @@ async fn start_turn_inner(
             )
             .into());
         }
-        let queued_at = durable_utc_now(ctx).await?;
         let queue_index = pending_state.pending_messages.len();
         append_session_event_deduped(
             ctx,
@@ -1653,16 +1841,14 @@ async fn start_turn_inner(
             Event::QueuedMessage {
                 text: request.user_message.clone(),
                 attachments: request.attachments.clone(),
-                queued_at,
+                queued_at: now,
             },
-            format!(
-                "queued_message:{active_turn_id}:{queue_index}:{}",
-                queued_at.timestamp_micros()
-            ),
+            format!("queued_message:{active_turn_id}:{queue_index}:{client_message_id}"),
         )
         .await?;
         pending_state.pending_messages.push_back(PendingMessage {
-            queued_at,
+            client_message_id: client_message_id.clone(),
+            queued_at: now,
             identity,
             contact,
             user_message: request.user_message,
@@ -1671,11 +1857,22 @@ async fn start_turn_inner(
             max_turns: request.max_turns,
             execution_template: request.execution_template,
         });
-        persist_pending_state(ctx, &pending_state);
-        return Ok(StartTurnResponse {
+        let response = StartTurnResponse {
             turn_id: None,
             queued: true,
-        });
+            stream_cursor: request.stream_cursor,
+        };
+        let evicted = admissions.record(
+            client_message_id,
+            request_hash,
+            response.clone(),
+            MessageAdmissionState::Queued,
+            now,
+        );
+        persist_pending_state(ctx, &pending_state);
+        persist_message_admissions(ctx, &admissions, evicted);
+        record_admission_decision("admitted_queued");
+        return Ok(response);
     }
 
     turn_admission
@@ -1684,7 +1881,6 @@ async fn start_turn_inner(
     let turn_id = generate_turn_id(ctx);
     pending_state.active_turn_id = Some(turn_id.clone());
     arm_turn_admission_heartbeat(ctx, &mut pending_state, turn_admission);
-    let now = durable_utc_now(ctx).await?;
     state.set_status(SessionStatus::Running, now);
     // Capture the session's owning-actor identity from the first verified turn
     // participant so the self-originated narration read can be authorized later.
@@ -1695,8 +1891,23 @@ async fn start_turn_inner(
     // outstanding (single-outstanding guard prevents overlapping schedules).
     narration::ensure_narration_tick_scheduled(ctx, &mut state, session_limits).await?;
     let drained = state.drain_unread_child_signals();
+    let response = StartTurnResponse {
+        turn_id: Some(turn_id.clone()),
+        queued: false,
+        stream_cursor: request.stream_cursor,
+    };
+    let evicted = admissions.record(
+        client_message_id,
+        request_hash,
+        response.clone(),
+        MessageAdmissionState::Running {
+            turn_id: turn_id.clone(),
+        },
+        now,
+    );
     state.persist_into(ctx);
     persist_pending_state(ctx, &pending_state);
+    persist_message_admissions(ctx, &admissions, evicted);
     sync_status(ctx, session_id, &state).await?;
     dispatch_turn_execution(
         ctx,
@@ -1722,11 +1933,9 @@ async fn start_turn_inner(
             "drained queued child signals into coordinator turn"
         );
     }
+    record_admission_decision("admitted_turn");
 
-    Ok(StartTurnResponse {
-        turn_id: Some(turn_id),
-        queued: false,
-    })
+    Ok(response)
 }
 
 fn pending_message_queue_is_full(pending: usize, limit: u32) -> bool {

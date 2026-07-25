@@ -89,6 +89,7 @@ test-threads = 1
 default-filter = '''
 binary(/^orchestrator_fixture_service_e2e$/)
   | binary(/^(action_policy_service_e2e|guardrails_service_e2e|ingestion_service_e2e|memory_service_e2e|turn_responsiveness_service_e2e)$/)
+  | binary(/^turn_terminal_failure_service_e2e$/)
 '''
 
 [profile.loadtest-service-e2e]

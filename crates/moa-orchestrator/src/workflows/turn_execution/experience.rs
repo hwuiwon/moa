@@ -79,6 +79,7 @@ pub(super) async fn emit_experience_for_assessment(
             "experience learning emission failed"
         );
         append_session_event(
+            workflow.event_appender(),
             ctx,
             meta.id,
             Event::Warning {

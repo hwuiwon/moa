@@ -24,6 +24,7 @@ use moa_eval::execution::{
 use moa_execution::repository::{ExecutionRepository, ExecutionScope};
 use moa_execution::wire::{ExecutionRunRequest, ExecutionStatusResponse};
 use moa_test_support::OrchestratorTestFixture;
+use moa_test_support::fixtures::fresh_client_message_id;
 use moa_wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use sha2::{Digest, Sha256};
 
@@ -163,6 +164,9 @@ async fn run_live_case(
         .session(session_id.to_string())
         .start_turn(
             StartTurnRequest {
+                client_message_id: fresh_client_message_id(),
+                reply_to: None,
+                stream_cursor: None,
                 user_message: case.objective.clone(),
                 attachments: Vec::new(),
                 model: Some(model.as_str().to_string()),

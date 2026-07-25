@@ -68,6 +68,16 @@ client or edge
 
 The `Session` VO serializes message admission, queue state, cancellation
 requests, and outcome recording. It starts `TurnExecution` and returns quickly.
+`start_turn` and `queue_message` are the only message-submitting handlers; both pass
+through one admission fence held in the VO's `message_admissions` state key, which records
+each admitted `client_message_id` with the canonical hash of its request and the exact
+response the caller received. The fence is consulted before every side effect — reply
+delivery, queue mutation, shared admission lease, turn dispatch — so a retried submission
+replays its original response, and one id reused for a different request is refused. A
+queued admission keeps replaying its `queued` response even after the queue starts its
+turn, because that is what its caller was told; the admission becomes terminal only when
+its turn or reply reaches a terminal disposition, and is then retained for the earlier of
+24 hours or 256 newer terminal admissions.
 The workflow owns the long LLM/tool loop so read-only status, queueing, and
 cancellation do not wait behind a long turn.
 
@@ -242,6 +252,17 @@ bulk DAG primitive. Worker fan-out controls do not cap execution-run maps.
 - Terminal completion keeps its existing path
   (`WorkerStatusChanged`/`WorkerNotificationDelivered` + cached result +
   result-waiter awakeable) and additionally records a control-plane idle-wake.
+- `RunWorkerTurnRequest` carries a required `parent_session`, populated from
+  `WorkerVoState` at dispatch. It is the only source of the owning session for a
+  worker turn: the workflow never infers a missing parent, and a request without
+  one is a typed decode error. Because it arrives on the request rather than being
+  learned from the first prepared iteration, a worker turn that fails before that
+  iteration can still append its parent-session facts.
+- A failed worker turn appends the canonical `TurnFailed` fact (actor
+  `Worker { worker_id }`) to the parent session before its `Failed` attention
+  signal and before the owner callback, so the failure survives losing either.
+  The attention signal and the worker-lifecycle events coexist with it and are
+  neither substitutes for it nor duplicates of it.
 - Only this plane writes parent VO state per event, and it fires rarely.
 
 Postgres owns the replayable signal/session event history. Restate awakeables

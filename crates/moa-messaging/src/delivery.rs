@@ -1,31 +1,27 @@
 //! Channel-neutral delivery helpers for account and contact-facing messages.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_config::MessagingConfig;
 use moa_core::{
-    error::MoaError, error::Result, traits::CredentialVault, traits::StoredCredentialMetadata,
-    types::channel::Channel, types::contact::ContactId, types::model::Credential,
+    error::MoaError, error::Result, types::channel::Channel, types::contact::ContactId,
 };
 use moa_observability::current_turn_root_span;
 use tracing::Instrument;
 use uuid::Uuid;
 
+#[cfg(any(feature = "postmark", feature = "twilio"))]
+use moa_core::types::credentials::DeploymentSecret;
+use moa_core::types::credentials::DeploymentSecrets;
+
 #[cfg(feature = "postmark")]
-use crate::postmark::{
-    POSTMARK_SERVER_API_TOKEN_ENV, POSTMARK_SERVER_TOKEN_SERVICE, PostmarkEmailClient,
-    PostmarkEmailMessage,
-};
+use crate::postmark::{POSTMARK_SERVER_API_TOKEN_ENV, PostmarkEmailClient, PostmarkEmailMessage};
 #[cfg(feature = "twilio")]
 use crate::twilio::{
-    TWILIO_ACCOUNT_SID_ENV, TWILIO_ACCOUNT_SID_SERVICE, TWILIO_API_KEY_SECRET_ENV,
-    TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SID_ENV, TWILIO_API_KEY_SID_SERVICE,
-    TWILIO_AUTH_TOKEN_ENV, TWILIO_AUTH_TOKEN_SERVICE, TWILIO_FROM_NUMBER_ENV,
-    TWILIO_FROM_NUMBER_SERVICE, TWILIO_MESSAGING_SERVICE_SID_ENV,
-    TWILIO_MESSAGING_SERVICE_SID_SERVICE, TwilioSmsClient, TwilioSmsMessage,
+    TWILIO_ACCOUNT_SID_ENV, TWILIO_API_KEY_SECRET_ENV, TWILIO_API_KEY_SID_ENV,
+    TWILIO_AUTH_TOKEN_ENV, TWILIO_FROM_NUMBER_ENV, TWILIO_MESSAGING_SERVICE_SID_ENV,
+    TwilioSmsClient, TwilioSmsMessage,
 };
 
 /// Delivery use case used for routing, metadata, and provider tags.
@@ -226,10 +222,14 @@ impl ProviderDeliverySink {
         }
     }
 
-    /// Builds a provider-backed delivery sink from a credential vault.
-    pub async fn from_vault(
-        vault: Arc<dyn CredentialVault>,
-        scope: &str,
+    /// Builds a provider-backed delivery sink from the deployment's secrets.
+    ///
+    /// Email and SMS transports belong to the deployment, so this takes the
+    /// typed deployment-secret source directly. There is deliberately no tenant
+    /// argument: a tenant can never influence which transport credential an
+    /// operator message is sent with.
+    pub fn from_deployment_secrets(
+        secrets: &DeploymentSecrets,
         config: &MessagingConfig,
     ) -> Result<Self> {
         #[cfg(any(feature = "postmark", feature = "twilio"))]
@@ -240,25 +240,24 @@ impl ProviderDeliverySink {
         }
         #[cfg(not(any(feature = "postmark", feature = "twilio")))]
         let sink = {
-            let _ = (vault, scope);
+            let _ = secrets;
             let _ = &config.email_reply_to;
             Self::empty(config.email_from.clone())
         };
         #[cfg(feature = "postmark")]
         {
-            sink.email = optional_postmark_client(vault.clone(), scope, config).await?;
+            sink.email = PostmarkEmailClient::from_deployment_secrets(secrets, config);
         }
         #[cfg(feature = "twilio")]
         {
-            sink.sms = optional_twilio_client(vault, scope, config).await?;
+            sink.sms = TwilioSmsClient::from_deployment_secrets(secrets, config)?;
         }
         Ok(sink)
     }
 
     /// Builds a provider-backed delivery sink from process environment variables.
-    pub async fn from_env(scope: &str, config: &MessagingConfig) -> Result<Self> {
-        let vault: Arc<dyn CredentialVault> = Arc::new(EnvironmentDeliveryCredentialVault);
-        Self::from_vault(vault, scope, config).await
+    pub fn from_env(config: &MessagingConfig) -> Result<Self> {
+        Self::from_deployment_secrets(&delivery_deployment_secrets_from_env(), config)
     }
 
     /// Sets the optional reply-to address for email delivery.
@@ -382,92 +381,57 @@ impl ProviderDeliverySink {
     }
 }
 
-/// Environment-backed credential vault for messaging providers.
-#[derive(Debug, Default)]
-pub struct EnvironmentDeliveryCredentialVault;
-
-#[async_trait]
-impl CredentialVault for EnvironmentDeliveryCredentialVault {
-    async fn get(&self, service: &str, _scope: &str) -> Result<Credential> {
-        #[cfg(any(feature = "postmark", feature = "twilio"))]
-        {
-            let value = match service {
-                #[cfg(feature = "postmark")]
-                POSTMARK_SERVER_TOKEN_SERVICE => required_env(POSTMARK_SERVER_API_TOKEN_ENV)?,
-                #[cfg(feature = "twilio")]
-                TWILIO_ACCOUNT_SID_SERVICE => required_env(TWILIO_ACCOUNT_SID_ENV)?,
-                #[cfg(feature = "twilio")]
-                TWILIO_AUTH_TOKEN_SERVICE => required_env(TWILIO_AUTH_TOKEN_ENV)?,
-                #[cfg(feature = "twilio")]
-                TWILIO_API_KEY_SID_SERVICE => required_env(TWILIO_API_KEY_SID_ENV)?,
-                #[cfg(feature = "twilio")]
-                TWILIO_API_KEY_SECRET_SERVICE => required_env(TWILIO_API_KEY_SECRET_ENV)?,
-                #[cfg(feature = "twilio")]
-                TWILIO_FROM_NUMBER_SERVICE => required_env(TWILIO_FROM_NUMBER_ENV)?,
-                #[cfg(feature = "twilio")]
-                TWILIO_MESSAGING_SERVICE_SID_SERVICE => {
-                    required_env(TWILIO_MESSAGING_SERVICE_SID_ENV)?
-                }
-                _ => {
-                    return Err(MoaError::MissingEnvironmentVariable(service.to_string()));
-                }
-            };
-            Ok(Credential::Bearer(value))
-        }
-        #[cfg(not(any(feature = "postmark", feature = "twilio")))]
-        {
-            Err(MoaError::MissingEnvironmentVariable(service.to_string()))
-        }
+/// Reads the deployment's messaging transport secrets from process environment.
+///
+/// This is the one place that knows the deployment variable names for outbound
+/// email and SMS. Runtime composition calls it once and shares the result, so
+/// nothing downstream reads these variables again or invents its own naming.
+#[must_use]
+pub fn delivery_deployment_secrets_from_env() -> DeploymentSecrets {
+    #[cfg_attr(
+        not(any(feature = "postmark", feature = "twilio")),
+        expect(
+            unused_mut,
+            reason = "no transport feature is enabled, so nothing is registered"
+        )
+    )]
+    let mut secrets = DeploymentSecrets::new();
+    #[cfg(feature = "postmark")]
+    {
+        secrets = secrets.with(
+            DeploymentSecret::PostmarkServerToken,
+            optional_env(POSTMARK_SERVER_API_TOKEN_ENV),
+        );
     }
-
-    async fn set(&self, _service: &str, _scope: &str, _cred: Credential) -> Result<()> {
-        Err(MoaError::StorageError(
-            "environment delivery credential vault is read-only".to_string(),
-        ))
+    #[cfg(feature = "twilio")]
+    {
+        secrets = secrets
+            .with(
+                DeploymentSecret::TwilioAccountSid,
+                optional_env(TWILIO_ACCOUNT_SID_ENV),
+            )
+            .with(
+                DeploymentSecret::TwilioAuthToken,
+                optional_env(TWILIO_AUTH_TOKEN_ENV),
+            )
+            .with(
+                DeploymentSecret::TwilioApiKeySid,
+                optional_env(TWILIO_API_KEY_SID_ENV),
+            )
+            .with(
+                DeploymentSecret::TwilioApiKeySecret,
+                optional_env(TWILIO_API_KEY_SECRET_ENV),
+            )
+            .with(
+                DeploymentSecret::TwilioFromNumber,
+                optional_env(TWILIO_FROM_NUMBER_ENV),
+            )
+            .with(
+                DeploymentSecret::TwilioMessagingServiceSid,
+                optional_env(TWILIO_MESSAGING_SERVICE_SID_ENV),
+            );
     }
-
-    async fn delete(&self, _service: &str, _scope: &str) -> Result<bool> {
-        Err(MoaError::StorageError(
-            "environment delivery credential vault is read-only".to_string(),
-        ))
-    }
-
-    async fn list(&self, _service_prefix: &str) -> Result<Vec<StoredCredentialMetadata>> {
-        Err(MoaError::StorageError(
-            "environment delivery credential vault does not support listing".to_string(),
-        ))
-    }
-}
-
-#[cfg(feature = "postmark")]
-async fn optional_postmark_client(
-    vault: Arc<dyn CredentialVault>,
-    scope: &str,
-    config: &MessagingConfig,
-) -> Result<Option<PostmarkEmailClient>> {
-    match PostmarkEmailClient::from_vault(vault, scope, config).await {
-        Ok(client) => Ok(Some(client)),
-        Err(MoaError::MissingEnvironmentVariable(_)) => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(feature = "twilio")]
-async fn optional_twilio_client(
-    vault: Arc<dyn CredentialVault>,
-    scope: &str,
-    config: &MessagingConfig,
-) -> Result<Option<TwilioSmsClient>> {
-    match TwilioSmsClient::from_vault(vault, scope, config).await {
-        Ok(client) => Ok(Some(client)),
-        Err(MoaError::MissingEnvironmentVariable(_)) => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(any(feature = "postmark", feature = "twilio"))]
-fn required_env(name: &str) -> Result<String> {
-    optional_env(name).ok_or_else(|| MoaError::MissingEnvironmentVariable(name.to_string()))
+    secrets
 }
 
 #[cfg(any(feature = "postmark", feature = "twilio"))]

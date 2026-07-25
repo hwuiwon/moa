@@ -50,9 +50,11 @@ curl -sf -X POST http://127.0.0.1:8080/restate/call/SessionStore/init_session_vo
   -d "{\"session_id\":\"${SESSION_ID}\",\"meta\":${SESSION_META}}" >/dev/null
 
 echo "Posting prompt to generate traces, metrics, and logs..."
-curl -sf -X POST "http://127.0.0.1:8080/restate/call/Session/${SESSION_ID}/post_message" \
+# The client message id is this script's retry identity: rerunning the smoke test with the
+# same session and id replays the original admission instead of buying a second turn.
+curl -sf -X POST "http://127.0.0.1:8080/restate/call/Session/${SESSION_ID}/start_turn" \
   -H "Content-Type: application/json" \
-  -d "{\"text\":\"${PROMPT}\",\"attachments\":[]}" >/dev/null
+  -d "{\"client_message_id\":\"observability-smoke:${SESSION_ID}:0\",\"user_message\":\"${PROMPT}\",\"attachments\":[]}" >/dev/null
 
 echo "Waiting 45 seconds for telemetry export..."
 sleep 45

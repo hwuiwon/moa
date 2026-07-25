@@ -86,20 +86,18 @@ where
         // object stays non-terminal, so the next prune pass or deletion retry still
         // selects it and finishes the cleanup — instead of a `deleted` row stranding
         // active graph chunks that no later pass revisits.
-        let latest = self
+        // Whole-object deletion covers every active occurrence of every version,
+        // not just the latest version's chunks: a superseded version whose
+        // invalidation never completed would otherwise keep serving retrievable
+        // content for a deleted source object. The graph uid is each chunk's
+        // persisted occurrence identity.
+        let chunks = self
             .repository
-            .latest_document_version(object.object_uid)
+            .active_chunks_for_object(object.object_uid)
             .await?;
-        let chunks = if let Some(version) = latest {
-            self.repository
-                .chunks_for_version(version.version_uid)
-                .await?
-        } else {
-            Vec::new()
-        };
         let graph_uids = chunks
             .iter()
-            .map(|chunk| stable_uid(&format!("chunk:{}:{}", object.tenant_id, chunk.chunk_hash)))
+            .map(|chunk| chunk.chunk_uid)
             .collect::<Vec<_>>();
         let invalidation_span = tracing::info_span!(
             "knowledge_graph_write",

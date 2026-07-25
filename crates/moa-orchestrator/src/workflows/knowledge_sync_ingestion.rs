@@ -4,8 +4,10 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use moa_config::MoaConfig;
+use moa_core::traits::CredentialVault;
+use moa_core::types::credentials::{CredentialServiceActor, RedactedSecret};
+use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
-use moa_core::{traits::CredentialVault, types::identifiers::TenantId};
 use moa_crypto::KeyManagementProvider;
 use moa_knowledge::{
     domain::{
@@ -13,7 +15,7 @@ use moa_knowledge::{
     },
     ingestion::PageIngestionReport,
     observability::classify_failure,
-    providers::{LinkedProviderContentFetcher, RecordContentFetcher},
+    providers::{ConnectionCredentialResolver, LinkedProviderContentFetcher, RecordContentFetcher},
     repository::{
         KnowledgeDiscoveryStore as _, KnowledgeRepository as _, PostgresKnowledgeDiscoveryStore,
         PostgresKnowledgeRepository,
@@ -25,9 +27,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::services::knowledge::{
-    ConfigKnowledgeProviders, KnowledgeCredentialStore as _, KnowledgeIngestionRunner as _,
-    KnowledgeProviderResolver as _, KnowledgeServiceError, ProductionKnowledgeIngestionRunner,
-    VaultKnowledgeCredentialStore,
+    ConfigKnowledgeProviders, KnowledgeCaller, KnowledgeCredentialStore,
+    KnowledgeIngestionRunner as _, KnowledgeProviderResolver as _, KnowledgeServiceError,
+    ProductionKnowledgeIngestionRunner, VaultKnowledgeCredentialStore,
 };
 use crate::workflows::errors::handler_error_message;
 
@@ -116,14 +118,29 @@ pub trait KnowledgeSyncIngestion {
 pub struct KnowledgeSyncIngestionImpl {
     pool: PgPool,
     kms: Arc<dyn KeyManagementProvider>,
+    credentials: Arc<dyn KnowledgeCredentialStore>,
     config: Arc<MoaConfig>,
 }
 
 impl KnowledgeSyncIngestionImpl {
     /// Creates a knowledge-sync workflow with its storage and provider configuration.
+    ///
+    /// `credential_vault` is the process's single durable credential owner, so a
+    /// workflow reconstructed on another replica resolves the same stored
+    /// versions instead of building an empty process-local vault.
     #[must_use]
-    pub fn new(pool: PgPool, kms: Arc<dyn KeyManagementProvider>, config: Arc<MoaConfig>) -> Self {
-        Self { pool, kms, config }
+    pub fn new(
+        pool: PgPool,
+        kms: Arc<dyn KeyManagementProvider>,
+        credential_vault: Arc<dyn CredentialVault>,
+        config: Arc<MoaConfig>,
+    ) -> Self {
+        Self {
+            pool,
+            kms,
+            credentials: Arc::new(VaultKnowledgeCredentialStore::new(credential_vault)),
+            config,
+        }
     }
 }
 
@@ -142,6 +159,7 @@ impl KnowledgeSyncIngestion for KnowledgeSyncIngestionImpl {
             ctx: &ctx,
             pool: self.pool.clone(),
             kms: self.kms.clone(),
+            credentials: self.credentials.clone(),
             config: self.config.clone(),
         };
         let report = run_knowledge_sync_ingestion_workflow(&mut steps, request).await?;
@@ -292,6 +310,7 @@ struct RestateKnowledgeSyncIngestionSteps<'ctx, 'workflow> {
     ctx: &'ctx WorkflowContext<'workflow>,
     pool: PgPool,
     kms: Arc<dyn KeyManagementProvider>,
+    credentials: Arc<dyn KnowledgeCredentialStore>,
     config: Arc<MoaConfig>,
 }
 
@@ -390,16 +409,28 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
         let tenant_id = prepared.run.tenant_id;
         let provider_label = prepared.provider.clone();
         let connection = prepared.connection.clone();
+        let credentials = self.credentials.clone();
+        let caller = KnowledgeCaller::service(
+            CredentialServiceActor::KnowledgeSyncListing,
+            sync_listing_operation_id(prepared.run.sync_run_uid, page_index),
+        );
         self.ctx
             .run(|| async move {
                 let modified_after = connection.last_synced_at;
-                let connection = resolve_connection_credentials(tenant_id, connection).await?;
+                // Resolved through the shared durable owner immediately before
+                // the outbound call; the plaintext never enters the connection
+                // row, the journal, or the returned page.
+                let credential = credentials
+                    .resolve_linked_account(tenant_id, &connection, &caller)
+                    .await
+                    .map_err(knowledge_service_handler_error)?;
                 let provider = ConfigKnowledgeProviders::new(config.knowledge.clone())
                     .provider(&provider_label)
                     .map_err(knowledge_service_handler_error)?;
                 let page = provider
                     .list_changed_records(ListChangedRecordsRequest {
                         connection,
+                        credential,
                         cursor,
                         modified_after,
                         limit: Some(limit),
@@ -432,10 +463,22 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
         let run = prepared.run.clone();
         let provider_label = prepared.provider.clone();
         let connection = prepared.connection.clone();
+        let credentials = self.credentials.clone();
+        let content_caller = KnowledgeCaller::service(
+            CredentialServiceActor::KnowledgeContentFetch,
+            content_fetch_operation_id(prepared.run.sync_run_uid, page_index),
+        );
         self.ctx
             .run(|| async move {
-                let content_fetcher =
-                    build_record_content_fetcher(&config, &provider_label, connection);
+                let content_fetcher = build_record_content_fetcher(
+                    &config,
+                    &provider_label,
+                    connection,
+                    Arc::new(StoreConnectionCredentialResolver::new(
+                        credentials,
+                        content_caller,
+                    )),
+                );
                 let runner =
                     ProductionKnowledgeIngestionRunner::new(pool, kms, config.as_ref().clone())
                         .with_content_fetcher(content_fetcher);
@@ -613,17 +656,18 @@ impl From<PageIngestionReport> for KnowledgeSyncPageApplication {
 /// A build failure degrades gracefully to metadata-only ingestion (records that
 /// need content fall back to their title) rather than failing the page: the
 /// provider was already constructed successfully during the listing step, so a
-/// failure here is not expected but must not abort applying the page. The Nango
-/// proxy content path only needs the connection's provider account and
-/// connector, so no vault credential resolution is required.
+/// failure here is not expected but must not abort applying the page.
 fn build_record_content_fetcher(
     config: &std::sync::Arc<moa_config::MoaConfig>,
     provider_label: &str,
     connection: KnowledgeConnection,
+    credentials: Arc<dyn ConnectionCredentialResolver>,
 ) -> Option<Arc<dyn RecordContentFetcher>> {
     match ConfigKnowledgeProviders::new(config.knowledge.clone()).provider(provider_label) {
         Ok(provider) => Some(Arc::new(LinkedProviderContentFetcher::new(
-            provider, connection,
+            provider,
+            connection,
+            credentials,
         ))),
         Err(error) => {
             tracing::warn!(
@@ -636,20 +680,55 @@ fn build_record_content_fetcher(
     }
 }
 
-async fn resolve_connection_credentials(
-    tenant_id: TenantId,
-    mut connection: KnowledgeConnection,
-) -> Result<KnowledgeConnection, HandlerError> {
-    let vault: Arc<dyn CredentialVault> = Arc::new(
-        moa_security::EnvironmentCredentialVault::from_mcp_servers(&[])
-            .map_err(core_handler_error)?,
-    );
-    let credential_store = VaultKnowledgeCredentialStore::new(vault);
-    connection.credential_ref = credential_store
-        .resolve_linked_account(tenant_id, &connection)
-        .await
-        .map_err(knowledge_service_handler_error)?;
-    Ok(connection)
+/// Resolves connection credentials for content fetches through the shared owner.
+///
+/// Exists so `moa-knowledge` keeps no dependency on credential storage: the
+/// orchestrator owns the vault and hands the ingestion pipeline this narrow,
+/// already-authorized resolver bound to one service actor and one operation.
+struct StoreConnectionCredentialResolver {
+    credentials: Arc<dyn KnowledgeCredentialStore>,
+    caller: KnowledgeCaller,
+}
+
+impl StoreConnectionCredentialResolver {
+    /// Binds a credential store and caller context to one ingestion page.
+    fn new(credentials: Arc<dyn KnowledgeCredentialStore>, caller: KnowledgeCaller) -> Self {
+        Self {
+            credentials,
+            caller,
+        }
+    }
+}
+
+#[async_trait]
+impl ConnectionCredentialResolver for StoreConnectionCredentialResolver {
+    async fn resolve(
+        &self,
+        connection: &KnowledgeConnection,
+    ) -> moa_knowledge::Result<RedactedSecret> {
+        self.credentials
+            .resolve_linked_account(connection.tenant_id, connection, &self.caller)
+            .await
+            .map_err(|error| {
+                // Only the typed, secret-free service error text crosses this
+                // boundary; provider bodies and material never do.
+                moa_knowledge::Error::Repository(error.to_string())
+            })
+    }
+}
+
+/// Returns the replay-stable operation id for one provider listing page.
+fn sync_listing_operation_id(sync_run_uid: Uuid, page_index: u32) -> String {
+    format!("knowledge-sync:{sync_run_uid}:listing:{page_index}")
+}
+
+/// Returns the replay-stable operation id for one page's content fetches.
+///
+/// Content is fetched per record but authorized once per page: the selector and
+/// service actor are identical for every record in the page, so one audited
+/// resolve operation describes the page rather than one row per record.
+fn content_fetch_operation_id(sync_run_uid: Uuid, page_index: u32) -> String {
+    format!("knowledge-sync:{sync_run_uid}:content:{page_index}")
 }
 
 fn cap_provider_page(
@@ -700,9 +779,5 @@ fn knowledge_ingestion_error(error: moa_knowledge::Error) -> HandlerError {
 }
 
 fn knowledge_service_handler_error(error: KnowledgeServiceError) -> HandlerError {
-    TerminalError::new(error.to_string()).into()
-}
-
-fn core_handler_error(error: moa_core::error::MoaError) -> HandlerError {
     TerminalError::new(error.to_string()).into()
 }

@@ -135,6 +135,19 @@ pub(crate) async fn request_cancel(
     Ok(())
 }
 
+/// Returns the turn's current durable phase.
+///
+/// The failure boundary uses this to attribute a failed turn to a coarse,
+/// secret-free stage, so the canonical failed-turn fact never has to inspect the
+/// error value itself.
+pub(crate) async fn current_phase(ctx: &WorkflowContext<'_>) -> Result<TurnPhase, HandlerError> {
+    Ok(ctx
+        .get::<Json<TurnPhase>>(TurnStateKey::PHASE)
+        .await?
+        .map(Json::into_inner)
+        .unwrap_or_default())
+}
+
 /// Returns a meaningful cancellation reason if one has been requested.
 pub(crate) async fn cancel_requested(
     ctx: &WorkflowContext<'_>,

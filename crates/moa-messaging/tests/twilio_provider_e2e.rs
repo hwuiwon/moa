@@ -5,19 +5,15 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use chrono::Utc;
 use moa_config::MessagingConfig;
-use moa_core::{error::MoaError, traits::CredentialVault, types::model::Credential};
+use moa_core::types::credentials::{DeploymentSecret, DeploymentSecrets};
 use moa_messaging::{
-    TWILIO_ACCOUNT_SID_ENV, TWILIO_ACCOUNT_SID_SERVICE, TWILIO_API_KEY_SECRET_ENV,
-    TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SID_ENV, TWILIO_API_KEY_SID_SERVICE,
-    TWILIO_AUTH_TOKEN_ENV, TWILIO_AUTH_TOKEN_SERVICE, TWILIO_FROM_NUMBER_ENV,
-    TWILIO_FROM_NUMBER_SERVICE, TWILIO_MESSAGING_SERVICE_SID_ENV,
-    TWILIO_MESSAGING_SERVICE_SID_SERVICE, TwilioSmsClient, TwilioSmsMessage, TwilioSmsSendResult,
+    TWILIO_ACCOUNT_SID_ENV, TWILIO_API_KEY_SECRET_ENV, TWILIO_API_KEY_SID_ENV,
+    TWILIO_AUTH_TOKEN_ENV, TWILIO_FROM_NUMBER_ENV, TWILIO_MESSAGING_SERVICE_SID_ENV,
+    TwilioSmsClient, TwilioSmsMessage, TwilioSmsSendResult,
 };
 use tokio::time::sleep;
 
@@ -25,7 +21,6 @@ const LIVE_FLAG_ENV: &str = "MOA_RUN_LIVE_TWILIO_TESTS";
 const TWILIO_API_KEY_ENV: &str = "TWILIO_API_KEY";
 const TWILIO_API_SECRET_ENV: &str = "TWILIO_API_SECRET";
 const TWILIO_TEST_TO_ENV: &str = "TWILIO_TEST_TO";
-const TEST_SCOPE: &str = "twilio-provider-e2e";
 const STATUS_POLL_ATTEMPTS: usize = 15;
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -36,15 +31,15 @@ async fn twilio_provider_e2e_sends_sms_to_configured_test_number() {
         return;
     };
     let test_to = env.test_to.clone();
-    let vault = Arc::new(env.into_vault());
+    let secrets = env.into_deployment_secrets();
     let config = MessagingConfig {
         twilio_base_url: optional_local_env("MOA_MESSAGING_TWILIO_BASE_URL")
             .unwrap_or_else(|| MessagingConfig::default().twilio_base_url),
         ..MessagingConfig::default()
     };
-    let client = TwilioSmsClient::from_vault(vault, TEST_SCOPE, &config)
-        .await
-        .expect("Twilio e2e client should load local credentials through CredentialVault");
+    let client = TwilioSmsClient::from_deployment_secrets(&secrets, &config)
+        .expect("Twilio e2e client should load local credentials as deployment secrets")
+        .expect("the live lane configures an account sid");
     let message = TwilioSmsMessage::new(
         test_to.clone(),
         format!("MOA Twilio SMS e2e {}", Utc::now().to_rfc3339()),
@@ -142,76 +137,17 @@ impl LocalTwilioEnv {
         })
     }
 
-    fn into_vault(self) -> LocalTwilioVault {
-        let mut vault =
-            LocalTwilioVault::default().with(TWILIO_ACCOUNT_SID_SERVICE, self.account_sid);
-        if let Some(auth_token) = self.auth_token {
-            vault = vault.with(TWILIO_AUTH_TOKEN_SERVICE, auth_token);
-        }
-        if let Some(api_key_sid) = self.api_key_sid {
-            vault = vault.with(TWILIO_API_KEY_SID_SERVICE, api_key_sid);
-        }
-        if let Some(api_key_secret) = self.api_key_secret {
-            vault = vault.with(TWILIO_API_KEY_SECRET_SERVICE, api_key_secret);
-        }
-        if let Some(from_number) = self.from_number {
-            vault = vault.with(TWILIO_FROM_NUMBER_SERVICE, from_number);
-        }
-        if let Some(messaging_service_sid) = self.messaging_service_sid {
-            vault = vault.with(TWILIO_MESSAGING_SERVICE_SID_SERVICE, messaging_service_sid);
-        }
-        vault
-    }
-}
-
-#[derive(Debug, Default)]
-struct LocalTwilioVault {
-    credentials: HashMap<(String, String), Credential>,
-}
-
-impl LocalTwilioVault {
-    fn with(mut self, service: &str, value: String) -> Self {
-        self.credentials.insert(
-            (service.to_string(), TEST_SCOPE.to_string()),
-            Credential::Bearer(value),
-        );
-        self
-    }
-}
-
-#[async_trait]
-impl CredentialVault for LocalTwilioVault {
-    async fn get(&self, service: &str, scope: &str) -> moa_core::error::Result<Credential> {
-        self.credentials
-            .get(&(service.to_string(), scope.to_string()))
-            .cloned()
-            .ok_or_else(|| MoaError::MissingEnvironmentVariable(service.to_string()))
-    }
-
-    async fn set(
-        &self,
-        _service: &str,
-        _scope: &str,
-        _cred: Credential,
-    ) -> moa_core::error::Result<()> {
-        Err(MoaError::StorageError(
-            "Twilio e2e vault is read-only".to_string(),
-        ))
-    }
-
-    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::error::Result<bool> {
-        Err(MoaError::StorageError(
-            "Twilio e2e vault is read-only".to_string(),
-        ))
-    }
-
-    async fn list(
-        &self,
-        _service_prefix: &str,
-    ) -> moa_core::error::Result<Vec<moa_core::traits::StoredCredentialMetadata>> {
-        Err(MoaError::StorageError(
-            "Twilio e2e vault does not support listing".to_string(),
-        ))
+    fn into_deployment_secrets(self) -> DeploymentSecrets {
+        DeploymentSecrets::new()
+            .with(DeploymentSecret::TwilioAccountSid, Some(self.account_sid))
+            .with(DeploymentSecret::TwilioAuthToken, self.auth_token)
+            .with(DeploymentSecret::TwilioApiKeySid, self.api_key_sid)
+            .with(DeploymentSecret::TwilioApiKeySecret, self.api_key_secret)
+            .with(DeploymentSecret::TwilioFromNumber, self.from_number)
+            .with(
+                DeploymentSecret::TwilioMessagingServiceSid,
+                self.messaging_service_sid,
+            )
     }
 }
 

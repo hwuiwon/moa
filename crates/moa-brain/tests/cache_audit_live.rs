@@ -13,7 +13,7 @@ use moa_brain::{
     BrainTurnRequest, GraphMemoryPipelineOptions,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
-use moa_config::MoaConfig;
+use moa_config::{MoaConfig, SecurityProfile};
 use moa_core::{
     error::Result, events::Event, traits::LLMProvider, traits::SessionStore,
     types::completion::CompletionRequest, types::completion::CompletionResponse,
@@ -426,9 +426,8 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);
     let tool_router = Arc::new(
-        ToolRouter::from_config(&sonnet_config, None)
+        ToolRouter::from_config(&sonnet_config, None, Some(store.clone()))
             .await?
-            .with_rule_store(store.clone())
             .with_session_store(store.clone()),
     );
     tool_router
@@ -912,12 +911,8 @@ fn live_cache_config(provider: &str, model: &str, repo_root: &Path) -> MoaConfig
         Some("Cache audit static padding. Keep this prefix identical across turns.\n".repeat(220));
     config.local.sandbox_dir = repo_root.display().to_string();
     // This audit drives real read-only tool turns against the repo checkout,
-    // which requires the development-only local hand provider.
-    config
-        .cloud
-        .hands
-        .get_or_insert_with(Default::default)
-        .allow_local_provider = true;
+    // which requires the local security profile's host hand provider.
+    config.security_profile = SecurityProfile::Local;
     config
 }
 

@@ -4,12 +4,13 @@ use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
+use moa_core::types::credentials::RedactedSecret;
 use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
     Error,
     domain::{
         ConnectionStatus, CreateLinkTokenRequest, ExchangePublicTokenRequest, KnowledgeConnection,
-        ListChangedRecordsRequest, ProviderIntegration,
+        ListChangedRecordsRequest, ProviderIntegration, StartInitialSyncRequest,
     },
     providers::{LinkedIntegrationProvider, merge::MergeProvider},
 };
@@ -32,9 +33,14 @@ fn connection() -> KnowledgeConnection {
         connection_uid: Uuid::from_u128(201),
         tenant_id: tenant_id(),
         provider: "merge".to_string(),
-        connector: "crm".to_string(),
+        // The connection carries the exact Merge product category the link
+        // selected; every category-scoped URL is built from it.
+        connector: "knowledgebase".to_string(),
         provider_account_id: "linked-account-123".to_string(),
-        credential_ref: "account-token-123".to_string(),
+        // Opaque durable reference only: the account token now reaches the
+        // provider through the resolved credential, never through the
+        // connection, so a plaintext token here would fail the header matcher.
+        credential_ref: Uuid::from_u128(202).to_string(),
         status: ConnectionStatus::Active,
         metadata: json!({ "safe": true }),
         source_selection: json!({}),
@@ -138,7 +144,8 @@ async fn link_token_creation_posts_merge_link_shape() {
 
 #[tokio::test]
 async fn public_token_exchange_gets_account_token_path_and_maps_metadata() {
-    // Pins: Merge public-token exchange uses the official bodyless account-token GET path.
+    // Pins: Merge public-token exchange uses the official bodyless account-token
+    // GET path and keeps the exact category the link operation selected.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/integrations/account-token/public%2Ftoken%3Fabc"))
@@ -149,6 +156,7 @@ async fn public_token_exchange_gets_account_token_path_and_maps_metadata() {
             "id": "linked-account-123",
             "integration": {
                 "name": "Salesforce",
+                "categories": ["knowledgebase", "crm"],
                 "access_token": "must-redact"
             }
         })))
@@ -161,6 +169,7 @@ async fn public_token_exchange_gets_account_token_path_and_maps_metadata() {
     let account = provider
         .exchange_public_token(ExchangePublicTokenRequest {
             tenant_id: tenant_id(),
+            connector: "knowledgebase".to_string(),
             public_token: "public/token?abc".to_string(),
             source_selection: json!({}),
         })
@@ -168,6 +177,10 @@ async fn public_token_exchange_gets_account_token_path_and_maps_metadata() {
         .expect("exchange Merge public token through local fixture");
 
     assert_eq!(account.provider, "merge");
+    assert_eq!(
+        account.connector, "knowledgebase",
+        "the linked connection must keep the category the operator selected"
+    );
     assert_eq!(account.provider_account_id, "linked-account-123");
     assert_eq!(account.credential_ref, "merge-account-token");
     assert_eq!(
@@ -176,6 +189,138 @@ async fn public_token_exchange_gets_account_token_path_and_maps_metadata() {
     );
     assert_eq!(account.metadata["name"], "Salesforce");
     assert!(account.metadata.get("access_token").is_none());
+}
+
+#[tokio::test]
+async fn public_token_exchange_rejects_a_category_the_integration_does_not_support() {
+    // Pins: a link cannot complete against a category the linked integration
+    // does not declare, so later category-scoped requests can never be issued
+    // against an API surface the integration will not serve.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/integrations/account-token/public-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "account_token": "account-token-123",
+            "id": "linked-account-123",
+            "integration": { "name": "Salesforce", "categories": ["crm"] }
+        })))
+        .mount(&server)
+        .await;
+
+    let provider =
+        MergeProvider::with_client(reqwest::Client::new(), server.uri(), "merge-test-key");
+    let error = provider
+        .exchange_public_token(ExchangePublicTokenRequest {
+            tenant_id: tenant_id(),
+            connector: "knowledgebase".to_string(),
+            public_token: "public-token".to_string(),
+            source_selection: json!({}),
+        })
+        .await
+        .expect_err("a category the integration does not support must fail the link");
+
+    assert!(
+        error.to_string().contains("knowledgebase"),
+        "error should name the rejected category: {error}"
+    );
+}
+
+#[tokio::test]
+async fn initial_link_sync_reads_category_status_and_never_force_resyncs() {
+    // Pins: the replay-safe initial link performs a read-only, category-correct
+    // sync-status reconciliation. Merge starts the initial sync itself, and its
+    // force-resync endpoint is plan-gated and credit-consuming, so a link that
+    // can replay must never call it.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/knowledgebase/v1/sync-status"))
+        .and(bearer_token("merge-test-key"))
+        .and(header("X-Account-Token", "account-token-123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "model_name": "Article", "status": "DONE", "is_initial_sync": false },
+                { "model_name": "Attachment", "status": "DISABLED", "is_initial_sync": true }
+            ]
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    // Any resync call at all fails the test: the mock is mounted with a zero
+    // expectation rather than asserted after the fact.
+    Mock::given(method("POST"))
+        .and(path("/api/knowledgebase/v1/sync-status/resync"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let provider =
+        MergeProvider::with_client(reqwest::Client::new(), server.uri(), "merge-test-key");
+    for _ in 0..2 {
+        let started = provider
+            .start_initial_sync(StartInitialSyncRequest {
+                connection: merge_connection("knowledgebase"),
+                credential: RedactedSecret::new("account-token-123".to_string()),
+            })
+            .await
+            .expect("initial link sync should reconcile provider status");
+        assert!(
+            started.completed,
+            "a DONE model with every other model disabled proves the initial sync finished"
+        );
+    }
+}
+
+#[tokio::test]
+async fn initial_link_sync_fails_closed_on_paused_and_unknown_provider_states() {
+    // Pins: an ambiguous or stalled provider state can never read as progress.
+    // Treating either as "still syncing" would let a link finalize against a
+    // connection that will never produce records.
+    for (status, description) in [
+        ("PAUSED", "a paused model"),
+        ("FAILED", "a failed model"),
+        ("SOMETHING_NEW", "an undocumented status"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/knowledgebase/v1/sync-status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    { "model_name": "Article", "status": status, "is_initial_sync": true }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let provider =
+            MergeProvider::with_client(reqwest::Client::new(), server.uri(), "merge-test-key");
+
+        provider
+            .start_initial_sync(StartInitialSyncRequest {
+                connection: merge_connection("knowledgebase"),
+                credential: RedactedSecret::new("account-token-123".to_string()),
+            })
+            .await
+            .expect_err(&format!("{description} must fail the initial link closed"));
+    }
+}
+
+/// Builds a linked Merge connection bound to one product category.
+fn merge_connection(category: &str) -> KnowledgeConnection {
+    KnowledgeConnection {
+        connection_uid: Uuid::from_u128(0x2358_0001),
+        tenant_id: tenant_id(),
+        provider: "merge".to_string(),
+        connector: category.to_string(),
+        provider_account_id: "linked-account-123".to_string(),
+        credential_ref: Uuid::from_u128(0x2358_0002).to_string(),
+        status: ConnectionStatus::Active,
+        metadata: json!({}),
+        source_selection: json!({}),
+        information_barrier: None,
+        created_at: ts("2026-06-26T12:00:00Z"),
+        updated_at: ts("2026-06-26T12:00:00Z"),
+        last_synced_at: None,
+    }
 }
 
 #[tokio::test]
@@ -221,6 +366,7 @@ async fn changed_records_request_includes_modified_after_and_maps_results() {
         MergeProvider::with_client(reqwest::Client::new(), server.uri(), "merge-test-key");
     let page = provider
         .list_changed_records(ListChangedRecordsRequest {
+            credential: test_credential(),
             connection: connection(),
             cursor: Some("cursor-1".to_string()),
             modified_after: Some(modified_after),
@@ -295,4 +441,12 @@ async fn linked_account_synced_webhook_verifies_signature_and_rejects_bad_signat
         Error::Provider { provider, message }
             if provider == "merge" && message.contains("signature verification failed")
     ));
+}
+
+/// Builds the resolved credential a provider request carries.
+///
+/// Provider requests take a non-serializable redacted secret, so tests build one
+/// explicitly instead of smuggling material through the connection.
+fn test_credential() -> RedactedSecret {
+    RedactedSecret::new("account-token-123".to_string())
 }

@@ -69,6 +69,7 @@ fn sync_run(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeSyncRun {
         error_code: None,
         started_at: Utc::now(),
         finished_at: None,
+        provider_trigger_completed_at: None,
     }
 }
 

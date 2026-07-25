@@ -143,14 +143,18 @@ pub fn classify_failure(stage: &str, error: &Error) -> FailureClassification {
             error_code: codes.config_terminal,
             retryable: false,
         },
-        Error::Repository(_) if prefix == "graph" => FailureClassification {
-            error_code: "graph_write_failed_retryable",
-            retryable: true,
-        },
-        Error::Repository(_) if prefix == "embedder" => FailureClassification {
-            error_code: "embedder_failed_retryable",
-            retryable: true,
-        },
+        Error::Repository(_) | Error::Database { .. } if prefix == "graph" => {
+            FailureClassification {
+                error_code: "graph_write_failed_retryable",
+                retryable: true,
+            }
+        }
+        Error::Repository(_) | Error::Database { .. } if prefix == "embedder" => {
+            FailureClassification {
+                error_code: "embedder_failed_retryable",
+                retryable: true,
+            }
+        }
         // A provider-contract violation (wrong vector count) will not self-heal on
         // a plain retry, so it is terminal rather than retryable.
         Error::EmbeddingCardinalityMismatch { .. } => FailureClassification {
@@ -164,7 +168,7 @@ pub fn classify_failure(stage: &str, error: &Error) -> FailureClassification {
             error_code: "semantic_model_extraction_failed",
             retryable: false,
         },
-        Error::Repository(_) => FailureClassification {
+        Error::Repository(_) | Error::Database { .. } => FailureClassification {
             error_code: "repository_failed_retryable",
             retryable: true,
         },

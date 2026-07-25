@@ -49,6 +49,29 @@ pub enum Error {
     /// A repository operation failed.
     #[error("knowledge repository failed: {0}")]
     Repository(String),
+    /// A database driver error with its diagnostic fields preserved.
+    ///
+    /// Concurrency failures are only diagnosable from these fields: a
+    /// duplicate key surfaces as SQLSTATE `23505` plus the violated
+    /// constraint and key tuple, while a deadlock surfaces as `40P01`.
+    /// Collapsing them into one opaque string (the old `Repository` mapping)
+    /// made full-suite-only races unattributable.
+    #[error(
+        "knowledge database operation failed: {message}{}",
+        database_error_suffix(code, constraint, table, detail)
+    )]
+    Database {
+        /// Five-character SQLSTATE reported by the database, when available.
+        code: Option<String>,
+        /// Violated constraint name, when the driver reports one.
+        constraint: Option<String>,
+        /// Affected table, when the driver reports one.
+        table: Option<String>,
+        /// Primary driver message.
+        message: String,
+        /// `DETAIL` line (for example the duplicate key tuple), when present.
+        detail: Option<String>,
+    },
     /// A model-backed semantic graph extraction call, timeout, or parse failed.
     ///
     /// The ingestion pipeline treats this as a per-chunk signal to fall back to
@@ -65,6 +88,29 @@ pub enum Error {
         /// Number of vectors the provider returned.
         actual: usize,
     },
+}
+
+/// Formats the optional database diagnostics as a bracketed display suffix.
+fn database_error_suffix(
+    code: &Option<String>,
+    constraint: &Option<String>,
+    table: &Option<String>,
+    detail: &Option<String>,
+) -> String {
+    let fields = [
+        ("sqlstate", code),
+        ("constraint", constraint),
+        ("table", table),
+        ("detail", detail),
+    ]
+    .into_iter()
+    .filter_map(|(label, value)| value.as_deref().map(|value| format!("{label}={value}")))
+    .collect::<Vec<_>>();
+    if fields.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", fields.join(", "))
+    }
 }
 
 impl Error {

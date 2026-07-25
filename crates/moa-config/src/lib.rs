@@ -84,7 +84,7 @@ pub use sandbox::{
     CloudConfig, CloudHandsConfig, LocalConfig, McpCredentialConfig, McpServerConfig,
     McpTransportConfig,
 };
-pub use security::PermissionsConfig;
+pub use security::{PermissionsConfig, SecurityProfile};
 pub use session::{
     SessionAttachmentBackend, SessionAttachmentStorageConfig, SessionBlobBackend, SessionConfig,
 };
@@ -99,6 +99,9 @@ use moa_core::error::{MoaError, Result};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MoaConfig {
+    /// Deployment security posture that decides whether local hands and
+    /// permissive permission defaults are permitted at all.
+    pub security_profile: SecurityProfile,
     /// General runtime settings.
     pub general: GeneralConfig,
     /// Tiered model-routing settings.

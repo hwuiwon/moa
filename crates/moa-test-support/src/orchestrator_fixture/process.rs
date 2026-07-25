@@ -205,7 +205,7 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         .env("MOA_RESTATE_INGRESS_URL", config.ingress_url)
         .env("MOA_RUNTIME_CACHE_BACKEND", "redis")
         .env("MOA_RUNTIME_CACHE_REDIS_URL", config.redis_url)
-        .env("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true")
+        .env("MOA_SECURITY_PROFILE", "local")
         // The spawned orchestrator boots with the in-process ephemeral KMS; opt
         // into it explicitly so the composition-root fail-closed durability guard
         // does not reject startup (production uses a persistent postgres KMS).

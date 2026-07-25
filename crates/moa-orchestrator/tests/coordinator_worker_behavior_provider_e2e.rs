@@ -64,6 +64,7 @@ use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, storage_partition_id_from_meta, test_session_meta,
 };
 use moa_test_support::execution_audits::load_execution_planning_audits;
+use moa_test_support::fixtures::fresh_client_message_id;
 use moa_test_support::postgres::test_database_url;
 use moa_test_support::process::TestChildGuard;
 
@@ -244,6 +245,9 @@ async fn start_turn(
     let request = client.post(session_url(ingress, session.session_id, "start_turn"));
     let response = with_identity(request, &session.identity)
         .json(&StartTurnRequest {
+            client_message_id: fresh_client_message_id(),
+            reply_to: None,
+            stream_cursor: None,
             user_message: case.prompt.to_string(),
             attachments: Vec::new(),
             model: None,
@@ -1016,6 +1020,9 @@ impl SupplementaryLiveHarness {
         ));
         let response = with_identity(request, &self.session.identity)
             .json(&StartTurnRequest {
+                client_message_id: fresh_client_message_id(),
+                reply_to: None,
+                stream_cursor: None,
                 user_message: prompt.to_string(),
                 attachments: Vec::new(),
                 model: None,

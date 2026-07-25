@@ -150,6 +150,69 @@ async fn bootstrap_test_db_creates_isolated_database_and_drops_on_drop() {
     );
 }
 
+#[tokio::test]
+#[ignore = "requires MOA_DATABASE_URL and a reachable Postgres instance"]
+async fn test_db_drop_completes_when_a_checked_out_connection_never_returns() {
+    // Pins: `TestDb::drop` blocks the test runtime's thread while it joins its
+    // cleanup thread, so a background task still holding a checked-out pooled
+    // connection can never be polled again to return it. A graceful
+    // `pool.close()` in that cleanup therefore waited forever — a three-party
+    // deadlock (main thread joins cleanup, cleanup awaits close, close awaits
+    // a connection owned by a task only the blocked main thread could poll)
+    // that hung the owning test until the harness killed it. The bounded close
+    // plus `DROP DATABASE ... WITH (FORCE)` must complete cleanup anyway.
+    let db = bootstrap_test_db().await.expect("bootstrap test db");
+    // Model the frozen holder faithfully: a live task that has checked out a
+    // connection and parks forever. Once `drop(db)` blocks this runtime's
+    // thread, the task can never be polled again, so the connection is never
+    // released — `mem::forget` is not equivalent because sqlx's `close()`
+    // waits only on live holders, not leaked permits.
+    let pool = db.store().pool().clone();
+    let _holder = tokio::spawn(async move {
+        let _conn = pool.acquire().await.expect("check out a pooled connection");
+        std::future::pending::<()>().await;
+    });
+    // Let the holder actually acquire before the drop freezes the runtime.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let started = std::time::Instant::now();
+    drop(db);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "TestDb cleanup must complete despite an unreturned connection; took {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MOA_DATABASE_URL and a reachable Postgres instance"]
+async fn test_db_drop_returns_within_its_bound_when_cleanup_cannot_connect() {
+    // Pins: the whole drop-time cleanup future is bounded. The destructor
+    // blocks the test runtime's thread while joining its cleanup thread, so an
+    // unbounded await in cleanup (observed in the wild parked in the io driver
+    // before Postgres ever saw a connection) hangs the owning test until the
+    // harness kills it at 240s. With the bound, a cleanup that cannot connect
+    // gives up, warns, and leaves the clone to the provisioning orphan sweep.
+    let mut db = bootstrap_test_db().await.expect("bootstrap test db");
+    // Blackholed RFC1918 address: connect attempts hang rather than refuse,
+    // modeling the observed stall. The real clone this bootstrap created is
+    // deliberately orphaned and reaped by the >1h sweep.
+    db.override_cleanup_url_for_tests(
+        "postgres://moa_owner:dev@10.255.255.1:10040/moa_test_cleanup_blackhole".to_string(),
+    );
+
+    let started = std::time::Instant::now();
+    drop(db);
+    let elapsed = started.elapsed();
+    // The macOS SYN-retry timeout alone returns in ~35s, so the assertion sits
+    // between the cleanup bound (15s) and that OS floor: only the explicit
+    // bound can satisfy it.
+    assert!(
+        elapsed < std::time::Duration::from_secs(25),
+        "bounded cleanup must return even when its maintenance connect hangs; took {elapsed:?}"
+    );
+}
+
 fn fixture_path(relative: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
 }

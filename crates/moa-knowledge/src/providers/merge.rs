@@ -10,9 +10,9 @@ use sha2::Sha256;
 
 use crate::{
     domain::{
-        CreateLinkTokenRequest, ExchangePublicTokenRequest, LinkToken, LinkedAccount,
-        ListChangedRecordsRequest, ProviderIntegration, ProviderRecord, RecordPage,
-        TriggerSyncRequest, TriggeredSync, WebhookEvent,
+        CreateLinkTokenRequest, ExchangePublicTokenRequest, InitialSyncStarted, LinkToken,
+        LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord, RecordPage,
+        StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
@@ -167,6 +167,7 @@ impl LinkedIntegrationProvider for MergeProvider {
             id: Option<String>,
             integration: Option<Value>,
         }
+        let category = validated_category(&req.connector)?;
         let mut url = http::parse_url(&self.url("/api/integrations/account-token"), |m| {
             Error::provider("merge", m)
         })?;
@@ -182,23 +183,33 @@ impl LinkedIntegrationProvider for MergeProvider {
         let account_token = response
             .account_token
             .ok_or_else(|| Error::provider("merge", "exchange response missing account_token"))?;
+        let integration = response.integration.unwrap_or(Value::Null);
+        // The linked integration reports which categories it actually supports.
+        // Rejecting a mismatch here keeps every later request for this
+        // connection on the category the operator linked, instead of silently
+        // querying a category the integration cannot serve.
+        ensure_integration_supports_category(&integration, category)?;
         let provider_account_id = response.id.unwrap_or_else(|| stable_id(&account_token));
         Ok(LinkedAccount {
             provider: "merge".to_string(),
-            connector: "merge".to_string(),
+            connector: category.to_string(),
             provider_account_id,
             credential_ref: "merge-account-token".to_string(),
             credential_material: Some(account_token),
-            metadata: redact_provider_metadata(response.integration.unwrap_or(Value::Null)),
+            metadata: redact_provider_metadata(integration),
         })
     }
 
     async fn trigger_sync(&self, req: TriggerSyncRequest) -> Result<TriggeredSync> {
+        let category = validated_category(&req.connection.connector)?;
         let response = self
             .client
-            .post(self.url("/api/sync-status/resync"))
+            .post(self.url(&format!("/api/{category}/v1/sync-status/resync")))
             .bearer_auth(&self.api_key)
-            .header("X-Account-Token", req.connection.credential_ref)
+            .header(
+                "X-Account-Token",
+                req.credential.expose_for_outbound_request(),
+            )
             .json(&json!({ "model_name": req.model }))
             .send()
             .await
@@ -212,8 +223,39 @@ impl LinkedIntegrationProvider for MergeProvider {
         })
     }
 
+    async fn start_initial_sync(&self, req: StartInitialSyncRequest) -> Result<InitialSyncStarted> {
+        // Merge starts a linked account's initial sync automatically, so there
+        // is nothing to start. Deliberately read-only: the force-resync endpoint
+        // is plan-gated and consumes credits per call, which a replayed link
+        // would charge repeatedly for no benefit.
+        let category = validated_category(&req.connection.connector)?;
+        let response = self
+            .client
+            .get(self.url(&format!("/api/{category}/v1/sync-status")))
+            .bearer_auth(&self.api_key)
+            .header(
+                "X-Account-Token",
+                req.credential.expose_for_outbound_request(),
+            )
+            .send()
+            .await
+            .map_err(|error| {
+                Error::provider("merge", format!("sync status read failed: {error}"))
+            })?;
+        let value: Value = http::json_response(response).await?;
+        let completed = initial_sync_completed(&value)?;
+        Ok(InitialSyncStarted {
+            provider: "merge".to_string(),
+            provider_sync_id: None,
+            completed,
+            metadata: redact_provider_metadata(value),
+        })
+    }
+
     async fn list_changed_records(&self, req: ListChangedRecordsRequest) -> Result<RecordPage> {
-        let mut url = http::parse_url(&self.url("/api/knowledgebase/v1/articles"), |m| {
+        let category = validated_category(&req.connection.connector)?;
+        let resource = category_record_resource(category);
+        let mut url = http::parse_url(&self.url(&format!("/api/{category}/v1/{resource}")), |m| {
             Error::provider("merge", m)
         })?;
         if let Some(cursor) = &req.cursor {
@@ -231,7 +273,10 @@ impl LinkedIntegrationProvider for MergeProvider {
             .client
             .get(url)
             .bearer_auth(&self.api_key)
-            .header("X-Account-Token", req.connection.credential_ref)
+            .header(
+                "X-Account-Token",
+                req.credential.expose_for_outbound_request(),
+            )
             .send()
             .await
             .map_err(|error| Error::provider("merge", format!("record listing failed: {error}")))?;
@@ -261,6 +306,118 @@ impl LinkedIntegrationProvider for MergeProvider {
             metadata: redact_provider_metadata(value),
         })
     }
+}
+
+/// Returns the requested Merge category, rejecting anything outside the closed set.
+///
+/// The category is part of every category-scoped URL this adapter builds, so it
+/// must never come from an unvalidated string.
+fn validated_category(connector: &str) -> Result<&'static str> {
+    MERGE_KNOWLEDGE_CATEGORIES
+        .iter()
+        .find(|(id, _)| *id == connector)
+        .map(|(id, _)| *id)
+        .ok_or_else(|| {
+            Error::provider(
+                "merge",
+                format!("`{connector}` is not a supported Merge knowledge category"),
+            )
+        })
+}
+
+/// Returns the category's record collection under the versioned category API.
+fn category_record_resource(category: &str) -> &'static str {
+    match category {
+        "filestorage" => "files",
+        // `knowledgebase` is the only other supported category, and
+        // `validated_category` already rejected everything else.
+        _ => "articles",
+    }
+}
+
+/// Fails unless the linked integration declares support for `category`.
+///
+/// An integration that omits `categories` entirely is treated as unverifiable
+/// rather than compatible: accepting it would let a link proceed against an API
+/// surface the integration may not serve.
+fn ensure_integration_supports_category(integration: &Value, category: &str) -> Result<()> {
+    let categories = integration
+        .get("categories")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            Error::provider(
+                "merge",
+                "exchange response integration did not declare categories",
+            )
+        })?;
+    if categories
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|declared| declared == category)
+    {
+        return Ok(());
+    }
+    Err(Error::provider(
+        "merge",
+        format!("linked Merge integration does not support the `{category}` category"),
+    ))
+}
+
+/// Decides whether a Merge sync-status payload proves the initial sync finished.
+///
+/// Merge's documented readiness rule is that a model is caught up when its
+/// `status` is `DONE` or it is no longer performing its initial sync
+/// (`is_initial_sync = false`). Disabled models are skipped because they will
+/// never report progress, while failed and paused models — and any status
+/// outside the documented set — fail closed rather than being read as progress.
+fn initial_sync_completed(value: &Value) -> Result<bool> {
+    let results = value
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::provider("merge", "sync status response had no results array"))?;
+    let mut evaluated = 0_usize;
+    let mut completed = true;
+    for entry in results {
+        let status = entry
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::provider("merge", "sync status entry had no status"))?
+            .to_ascii_uppercase();
+        match status.as_str() {
+            "DISABLED" => continue,
+            "FAILED" | "PAUSED" => {
+                return Err(Error::provider(
+                    "merge",
+                    format!("linked account sync status is {status}"),
+                ));
+            }
+            "DONE" | "SYNCING" | "PARTIALLY_SYNCED" => {}
+            other => {
+                return Err(Error::provider(
+                    "merge",
+                    format!("unrecognized sync status `{other}`"),
+                ));
+            }
+        }
+        evaluated += 1;
+        let is_initial_sync = entry
+            .get("is_initial_sync")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if status != "DONE" && is_initial_sync {
+            completed = false;
+        }
+    }
+    // Every model disabled means nothing will ever sync; treating that as
+    // "completed" would let a link finalize against a connection that can never
+    // produce records.
+    if evaluated == 0 {
+        return Err(Error::provider(
+            "merge",
+            "linked account has no enabled models to sync",
+        ));
+    }
+    Ok(completed)
 }
 
 fn value_to_provider_record(value: &Value) -> ProviderRecord {

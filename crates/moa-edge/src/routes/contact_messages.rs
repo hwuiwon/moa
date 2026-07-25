@@ -6,11 +6,14 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use moa_core::{
     error::MoaError, traits::SessionAttachmentStore, traits::SessionStore,
-    types::channel::Attachment, types::contact::ContactSessionMessageRequest,
+    types::channel::Attachment, types::contact::ClientMessageId,
+    types::contact::ContactSessionMessageRequest,
     types::contact::MAX_CONTACT_SESSION_ATTACHMENT_BYTES,
     types::contact::MAX_CONTACT_SESSION_ATTACHMENT_NAME_BYTES,
     types::contact::MAX_CONTACT_SESSION_ATTACHMENT_TOTAL_BYTES,
     types::contact::MAX_CONTACT_SESSION_ATTACHMENTS_PER_MESSAGE,
+    types::contact::MessageReplyTarget, types::contact::SessionAttachmentSlot,
+    types::contact::SessionAttachmentUpload, types::contact::StoredSessionAttachment,
     types::contact::normalize_contact_session_photo_mime,
     types::contact::validate_contact_session_message_text, types::identifiers::SessionId,
     types::identifiers::TenantId,
@@ -24,10 +27,10 @@ const MAX_SESSION_PHOTO_PIXELS: u64 = 25_000_000;
 
 pub(super) struct SessionMessageInput {
     pub(super) message: ContactSessionMessageRequest,
-    pub(super) uploads: Vec<SessionAttachmentUpload>,
+    pub(super) uploads: Vec<AdmittedPhotoUpload>,
 }
 
-pub(super) struct SessionAttachmentUpload {
+pub(super) struct AdmittedPhotoUpload {
     name: String,
     mime_type: String,
     content: Vec<u8>,
@@ -98,8 +101,8 @@ pub(super) async fn session_message_input(
 pub(super) async fn persist_session_attachments(
     state: &AppState,
     message: &ContactSessionMessageRequest,
-    uploads: Vec<SessionAttachmentUpload>,
-) -> Result<Vec<Attachment>, MoaError> {
+    uploads: Vec<AdmittedPhotoUpload>,
+) -> Result<Vec<StoredSessionAttachment>, MoaError> {
     let session = state.session_store.get_session(message.session_id).await?;
     if session.tenant_id != message.tenant_id {
         return Err(MoaError::StorageError(format!(
@@ -108,47 +111,60 @@ pub(super) async fn persist_session_attachments(
         )));
     }
     let contact_id = session.contact.as_ref().map(|contact| contact.contact_id);
-    let mut attachments = Vec::with_capacity(uploads.len());
-    for upload in uploads {
-        let attachment = match state
-            .session_store
-            .put(
-                message.tenant_id,
-                message.session_id,
-                contact_id,
-                upload.name,
-                upload.mime_type,
-                upload.content,
-            )
-            .await
-        {
-            Ok(attachment) => attachment,
+    let mut stored = Vec::with_capacity(uploads.len());
+    for (ordinal, upload) in uploads.into_iter().enumerate() {
+        // The slot is a pure function of the message identity and the upload's position,
+        // so a retried submission of the same message replays these exact attachments
+        // instead of storing a second copy of every photo.
+        let slot = SessionAttachmentSlot {
+            tenant_id: message.tenant_id,
+            session_id: message.session_id,
+            client_message_id: message.client_message_id.clone(),
+            ordinal: u16::try_from(ordinal).map_err(|_| {
+                MoaError::ValidationError("too many message attachments".to_string())
+            })?,
+        };
+        let upload = SessionAttachmentUpload {
+            contact_id,
+            name: upload.name,
+            mime_type: upload.mime_type,
+            content: upload.content,
+        };
+        match state.session_store.put(&slot, upload).await {
+            Ok(attachment) => stored.push(attachment),
             Err(error) => {
-                cleanup_session_attachments(
-                    state,
-                    message.tenant_id,
-                    message.session_id,
-                    &attachments,
-                )
-                .await;
+                cleanup_session_attachments(state, message.tenant_id, message.session_id, &stored)
+                    .await;
                 return Err(error);
             }
-        };
-        attachments.push(attachment);
+        }
     }
-    Ok(attachments)
+    Ok(stored)
 }
 
+/// Removes attachments this request created after the message was rejected.
+///
+/// A replayed attachment belongs to the original submission that is still live, so
+/// deleting it here would destroy a durable attachment the session already published
+/// and leave its message pointing at nothing.
 pub(super) async fn cleanup_session_attachments(
     state: &AppState,
     tenant_id: TenantId,
     session_id: SessionId,
-    attachments: &[Attachment],
+    attachments: &[StoredSessionAttachment],
 ) {
-    for attachment in attachments {
-        let Some(attachment_id) = attachment.id else {
+    for stored in attachments {
+        let Some(attachment_id) = stored.attachment.id else {
             continue;
         };
+        if !stored.was_created() {
+            tracing::debug!(
+                %session_id,
+                %attachment_id,
+                "kept a replayed session attachment owned by the original message"
+            );
+            continue;
+        }
         if let Err(error) = state
             .session_store
             .delete(tenant_id, session_id, attachment_id)
@@ -174,6 +190,9 @@ fn contact_session_message_request(
         return Err("session message body must be object");
     };
     object.insert("session_id".to_string(), serde_json::json!(session_id));
+    // Checked before the whole-body decode so a client that omits or malforms its retry
+    // identity is told exactly that, instead of receiving one opaque body error.
+    validate_client_message_id_field(object.get("client_message_id"))?;
     let message: ContactSessionMessageRequest =
         serde_json::from_value(value).map_err(|_| "bad session message body")?;
     if !message.attachments.is_empty() {
@@ -181,6 +200,17 @@ fn contact_session_message_request(
     }
     message.validate_admitted_payload()?;
     Ok(message)
+}
+
+/// Validates the caller-supplied retry identity before the body decode.
+fn validate_client_message_id_field(value: Option<&serde_json::Value>) -> Result<(), &'static str> {
+    match value {
+        None | Some(serde_json::Value::Null) => Err("client_message_id is required"),
+        Some(serde_json::Value::String(value)) => ClientMessageId::new(value.clone())
+            .map(|_| ())
+            .map_err(|_| "client_message_id is invalid"),
+        Some(_) => Err("client_message_id is invalid"),
+    }
 }
 
 async fn multipart_session_message_request(
@@ -193,6 +223,8 @@ async fn multipart_session_message_request(
         .map_err(|_| SessionMessageRequestError::bad_request("bad multipart session message"))?;
     let mut tenant_id = None;
     let mut contact_token = None;
+    let mut client_message_id = None;
+    let mut reply_to = None;
     let mut user_message = String::new();
     let mut model = None;
     let mut max_turns = None;
@@ -236,7 +268,7 @@ async fn multipart_session_message_request(
             }
             let mime_type = canonical_photo_mime(declared_mime.as_deref(), &bytes)?;
             let name = validated_upload_name(file_name.as_deref())?;
-            uploads.push(SessionAttachmentUpload {
+            uploads.push(AdmittedPhotoUpload {
                 name,
                 mime_type: mime_type.to_string(),
                 content: bytes.to_vec(),
@@ -254,6 +286,20 @@ async fn multipart_session_message_request(
                 tenant_id = Some(TenantId::from(parsed));
             }
             "contact_token" => contact_token = Some(value),
+            "client_message_id" => {
+                client_message_id = Some(ClientMessageId::new(value).map_err(|_| {
+                    SessionMessageRequestError::bad_request("client_message_id is invalid")
+                })?);
+            }
+            // Multipart carries no types, so an explicit reply target arrives as the same
+            // JSON object the JSON body would use.
+            "reply_to" if !value.trim().is_empty() => {
+                reply_to = Some(
+                    serde_json::from_str::<MessageReplyTarget>(&value).map_err(|_| {
+                        SessionMessageRequestError::bad_request("reply_to is invalid")
+                    })?,
+                );
+            }
             "user_message" | "text" | "message" => {
                 validate_contact_session_message_text(&value)
                     .map_err(SessionMessageRequestError::bad_request)?;
@@ -286,6 +332,13 @@ async fn multipart_session_message_request(
             contact_token: contact_token.ok_or_else(|| {
                 SessionMessageRequestError::bad_request("contact_token is required")
             })?,
+            client_message_id: client_message_id.ok_or_else(|| {
+                SessionMessageRequestError::bad_request("client_message_id is required")
+            })?,
+            reply_to,
+            // Overwritten by the route with the cursor the edge itself observed before
+            // admission; a caller cannot choose where its own stream resumes from.
+            stream_cursor: None,
             user_message,
             attachments: Vec::new(),
             model,
@@ -563,6 +616,7 @@ mod tests {
                 "tenant_id":"22222222-2222-2222-2222-222222222222",
                 "session_id":"33333333-3333-3333-3333-333333333333",
                 "contact_token":"token",
+                "client_message_id":"client-message-1",
                 "user_message":"hello"
             }"#,
         );
@@ -579,7 +633,46 @@ mod tests {
             )
         );
         assert_eq!(request.contact_token, "token");
+        assert_eq!(request.client_message_id.as_str(), "client-message-1");
         assert_eq!(request.user_message, "hello");
+    }
+
+    #[test]
+    fn session_message_request_requires_a_valid_client_message_id() {
+        // Pins: the JSON boundary names the missing or malformed retry identity exactly, instead
+        // of collapsing it into one opaque body error a client cannot act on.
+        let path_session_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+            .expect("path session id should parse");
+        let body = |client_message_id: serde_json::Value| {
+            Bytes::from(
+                serde_json::json!({
+                    "tenant_id": "22222222-2222-2222-2222-222222222222",
+                    "contact_token": "token",
+                    "client_message_id": client_message_id,
+                    "user_message": "hello",
+                })
+                .to_string(),
+            )
+        };
+
+        assert_eq!(
+            contact_session_message_request(path_session_id, &body(serde_json::Value::Null))
+                .expect_err("null id should be rejected"),
+            "client_message_id is required"
+        );
+        for invalid in [
+            serde_json::json!(""),
+            serde_json::json!("x".repeat(257)),
+            serde_json::json!("bad\nid"),
+            serde_json::json!(7),
+        ] {
+            assert_eq!(
+                contact_session_message_request(path_session_id, &body(invalid.clone()))
+                    .expect_err("invalid id should be rejected"),
+                "client_message_id is invalid",
+                "unexpected acceptance of {invalid}"
+            );
+        }
     }
 
     #[test]
@@ -591,6 +684,7 @@ mod tests {
             br#"{
                 "tenant_id":"22222222-2222-2222-2222-222222222222",
                 "contact_token":"token",
+                "client_message_id":"client-message-1",
                 "attachments":[{
                     "name":"receipt.png",
                     "mime_type":"image/png",
@@ -618,7 +712,8 @@ mod tests {
         let body = Bytes::from_static(
             br#"{
                 "tenant_id":"22222222-2222-2222-2222-222222222222",
-                "contact_token":"token"
+                "contact_token":"token",
+                "client_message_id":"client-message-1"
             }"#,
         );
 
@@ -640,6 +735,7 @@ mod tests {
             serde_json::json!({
                 "tenant_id": "22222222-2222-2222-2222-222222222222",
                 "contact_token": "token",
+                "client_message_id": "client-message-1",
                 "user_message": "x".repeat(moa_core::types::contact::MAX_CONTACT_SESSION_MESSAGE_TEXT_BYTES + 1),
             })
             .to_string(),

@@ -53,8 +53,6 @@ pub struct CloudHandsConfig {
     pub default_provider: Option<String>,
     /// Ordered fallback cloud providers attempted when the selected cloud hand is unavailable.
     pub fallback_providers: Vec<String>,
-    /// Development-only opt-in that permits routing hand tools to the local host provider.
-    pub allow_local_provider: bool,
     /// Daytona API key loaded from runtime configuration.
     pub daytona_api_key: Option<String>,
     /// Optional Daytona API base URL override.

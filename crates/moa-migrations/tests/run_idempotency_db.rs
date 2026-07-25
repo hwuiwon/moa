@@ -1757,3 +1757,984 @@ async fn foreign_key_targets(
     }
     Ok(targets)
 }
+
+/// Collects the credential-vault schema facts a fresh database must expose.
+///
+/// Returns `(versions_forced_rls, operations_forced_rls, policy_names,
+/// active_index_is_partial_unique, moa_app_update_on_audit)`.
+async fn tenant_credential_vault_schema_facts(
+    pool: &PgPool,
+) -> Result<(bool, bool, Vec<String>, bool, bool), Box<dyn std::error::Error + Send + Sync>> {
+    let versions_forced: bool = sqlx::query_scalar(
+        "SELECT relforcerowsecurity FROM pg_class WHERE relname = 'tenant_credential_versions'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let operations_forced: bool = sqlx::query_scalar(
+        "SELECT relforcerowsecurity FROM pg_class WHERE relname = 'tenant_credential_operations'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let policies: Vec<String> = sqlx::query_scalar(
+        "SELECT policyname::TEXT FROM pg_policies
+         WHERE tablename IN ('tenant_credential_versions', 'tenant_credential_operations')
+         ORDER BY policyname",
+    )
+    .fetch_all(pool)
+    .await?;
+    let active_partial_unique: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) = 1 FROM pg_indexes
+         WHERE indexname = 'tenant_credential_versions_one_active'
+           AND indexdef LIKE '%UNIQUE%'
+           AND indexdef LIKE '%WHERE active%'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let audit_update_granted: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM information_schema.role_table_grants
+         WHERE table_name = 'tenant_credential_operations'
+           AND grantee = 'moa_app'
+           AND privilege_type = 'UPDATE'",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok((
+        versions_forced,
+        operations_forced,
+        policies,
+        active_partial_unique,
+        audit_update_granted,
+    ))
+}
+
+async fn knowledge_link_claim_schema_facts(
+    pool: &PgPool,
+) -> Result<(bool, Vec<String>, bool, bool), Box<dyn std::error::Error + Send + Sync>> {
+    let claims_forced: bool = sqlx::query_scalar(
+        "SELECT relforcerowsecurity FROM pg_class WHERE relname = 'knowledge_link_claims'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let policies: Vec<String> = sqlx::query_scalar(
+        "SELECT policyname::TEXT FROM pg_policies
+         WHERE tablename = 'knowledge_link_claims'
+         ORDER BY policyname",
+    )
+    .fetch_all(pool)
+    .await?;
+    // A finalized claim must name the run whose trigger proved durable.
+    let finalized_requires_run: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) = 1 FROM pg_constraint
+         WHERE conname = 'knowledge_link_claims_finalized_has_sync_run'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let trigger_boundary_column: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) = 1 FROM information_schema.columns
+         WHERE table_schema = 'moa'
+           AND table_name = 'knowledge_sync_runs'
+           AND column_name = 'provider_trigger_completed_at'",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok((
+        claims_forced,
+        policies,
+        finalized_requires_run,
+        trigger_boundary_column,
+    ))
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn knowledge_link_claims_v000358_fresh_and_idempotent_db() {
+    // Pins: V000358 bootstraps the link claim table on a pristine database and
+    // re-applies as a no-op, and installs the two properties the durable link
+    // depends on — strict forced-RLS tenant isolation with no control-plane
+    // branch, and a database-owned rule that a finalized claim always names the
+    // sync run whose provider trigger was proven durable.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create throwaway migration database");
+
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        let (first, second) = clean_apply_then_reapply(&target_url).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let facts = knowledge_link_claim_schema_facts(&pool).await?;
+        pool.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((first, second, facts))
+    }
+    .await;
+
+    // Always force-drop the throwaway database, even if an assertion below fails.
+    let _ = admin
+        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
+        .await;
+    admin.close().await;
+
+    let (first, second, facts) =
+        outcome.expect("link claim migration should apply on a fresh database");
+    let (claims_forced, policies, finalized_requires_run, trigger_boundary_column) = facts;
+
+    assert!(
+        first
+            .iter()
+            .any(|applied| applied.contains("knowledge_link_claims")),
+        "a pristine database must apply V000358, got {first:?}"
+    );
+    assert!(
+        second.is_empty(),
+        "re-applying must report no newly applied migrations, got {second:?}"
+    );
+    assert!(
+        claims_forced,
+        "knowledge_link_claims must FORCE row level security"
+    );
+    assert_eq!(
+        policies,
+        vec!["tenant_isolation".to_string()],
+        "the claim table must expose exactly one strict tenant-isolation policy"
+    );
+    assert!(
+        finalized_requires_run,
+        "a finalized claim must be unable to exist without its durable sync run"
+    );
+    assert!(
+        trigger_boundary_column,
+        "sync runs must carry the durable provider-trigger boundary"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn tenant_credential_vault_v000346_fresh_and_idempotent_db() {
+    // Pins: V000346 bootstraps the durable credential owner on a pristine
+    // database and re-applies as a no-op, and the schema it installs carries the
+    // security properties the vault depends on — forced RLS on both tables, one
+    // active version per series, and an audit table an ordinary role cannot
+    // rewrite (no UPDATE grant, no UPDATE policy).
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create throwaway migration database");
+
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        let (first, second) = clean_apply_then_reapply(&target_url).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let facts = tenant_credential_vault_schema_facts(&pool).await?;
+        pool.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((first, second, facts))
+    }
+    .await;
+
+    // Always force-drop the throwaway database, even if an assertion below fails.
+    let _ = admin
+        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
+        .await;
+    admin.close().await;
+
+    let (first, second, facts) =
+        outcome.expect("credential-vault migration should apply on a fresh database");
+    let (versions_forced, operations_forced, policies, active_partial_unique, audit_update_granted) =
+        facts;
+
+    assert!(
+        first
+            .iter()
+            .any(|applied| applied.contains("tenant_credential_vault")),
+        "a pristine database must apply V000346, got {first:?}"
+    );
+    assert!(
+        second.is_empty(),
+        "re-applying must report no newly applied migrations, got {second:?}"
+    );
+    assert!(
+        versions_forced,
+        "tenant_credential_versions must FORCE row level security"
+    );
+    assert!(
+        operations_forced,
+        "tenant_credential_operations must FORCE row level security"
+    );
+    assert_eq!(
+        policies,
+        vec![
+            "audit_purge_delete".to_string(),
+            "audit_tenant_append".to_string(),
+            "audit_tenant_read".to_string(),
+            "tenant_isolation".to_string(),
+        ],
+        "the audit table must expose exactly read/append/purge-delete policies and no UPDATE policy"
+    );
+    assert!(
+        active_partial_unique,
+        "one active credential version per series must be database-owned"
+    );
+    assert!(
+        !audit_update_granted,
+        "the append-only audit must not grant UPDATE to the application role"
+    );
+}
+
+/// Legacy content-hash graph state seeded at V000346 so the V000347 backfill has
+/// real work to do.
+///
+/// The shape is the defect this migration exists to remove: two different
+/// documents whose identical paragraph collapsed onto ONE shared chunk node, plus
+/// a tombstoned occurrence of the same text under a superseded version, plus a
+/// chunk that never reached the graph at all.
+#[derive(Debug, Clone, Copy)]
+struct LegacyChunkGraph {
+    tenant_id: uuid::Uuid,
+    shared_chunk_node: uuid::Uuid,
+    document_node: uuid::Uuid,
+    entity_node: uuid::Uuid,
+    fact_node: uuid::Uuid,
+    alpha_version: uuid::Uuid,
+    alpha_chunk: uuid::Uuid,
+    alpha_unlinked_chunk: uuid::Uuid,
+    alpha_superseded_chunk: uuid::Uuid,
+    beta_chunk: uuid::Uuid,
+}
+
+impl LegacyChunkGraph {
+    fn new() -> Self {
+        Self {
+            tenant_id: uuid::Uuid::now_v7(),
+            shared_chunk_node: uuid::Uuid::now_v7(),
+            document_node: uuid::Uuid::now_v7(),
+            entity_node: uuid::Uuid::now_v7(),
+            fact_node: uuid::Uuid::now_v7(),
+            alpha_version: uuid::Uuid::now_v7(),
+            alpha_chunk: uuid::Uuid::now_v7(),
+            alpha_unlinked_chunk: uuid::Uuid::now_v7(),
+            alpha_superseded_chunk: uuid::Uuid::now_v7(),
+            beta_chunk: uuid::Uuid::now_v7(),
+        }
+    }
+
+    /// Returns every seeded chunk uid in a stable order.
+    fn chunk_uids(&self) -> Vec<uuid::Uuid> {
+        vec![
+            self.alpha_chunk,
+            self.alpha_unlinked_chunk,
+            self.alpha_superseded_chunk,
+            self.beta_chunk,
+        ]
+    }
+}
+
+/// Applies `SET LOCAL ROLE moa_app` plus the tenant RLS session variables that
+/// `ScopedConn` installs at runtime, so seeds and reads go through the same
+/// forced-RLS path production uses.
+async fn begin_as_app(
+    pool: &PgPool,
+    tenant_id: Option<uuid::Uuid>,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut tx = pool.begin().await?;
+    let tenant_text = tenant_id
+        .map(|tenant| tenant.to_string())
+        .unwrap_or_default();
+    sqlx::query(
+        "SELECT pg_catalog.set_config('moa.tenant_id', $1, true), \
+                pg_catalog.set_config('moa.storage_partition_id', $1, true), \
+                pg_catalog.set_config('moa.contact_id', '', true), \
+                pg_catalog.set_config('moa.control_plane', 'false', true)",
+    )
+    .bind(&tenant_text)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(&mut *tx)
+        .await?;
+    Ok(tx)
+}
+
+/// Seeds the pre-V000347 shared-chunk-node world through forced RLS.
+async fn seed_legacy_shared_chunk_graph(
+    pool: &PgPool,
+) -> Result<LegacyChunkGraph, Box<dyn std::error::Error + Send + Sync>> {
+    let seed = LegacyChunkGraph::new();
+    let tenant_text = seed.tenant_id.to_string();
+    let connection_uid = uuid::Uuid::now_v7();
+    let alpha_object = uuid::Uuid::now_v7();
+    let beta_object = uuid::Uuid::now_v7();
+    let alpha_superseded_version = uuid::Uuid::now_v7();
+    let beta_version = uuid::Uuid::now_v7();
+    let mut tx = begin_as_app(pool, Some(seed.tenant_id)).await?;
+
+    // An external vector backend, so the outbox backfill has an addressee.
+    sqlx::query(
+        "INSERT INTO moa.storage_partition_state (storage_partition_id, vector_backend) \
+         VALUES ($1, 'turbopuffer')",
+    )
+    .bind(&tenant_text)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO moa.knowledge_connections ( \
+             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key, \
+             provider_connection_id, connector, credential_ref, status, metadata) \
+         VALUES ($1, $2, $3, 'merge', 'occurrence-config', 'occurrence-account', 'drive', \
+                 'occurrence-credential', 'active', '{}'::JSONB)",
+    )
+    .bind(connection_uid)
+    .bind(seed.tenant_id)
+    .bind(&tenant_text)
+    .execute(&mut *tx)
+    .await?;
+
+    for (object_uid, external_id) in [(alpha_object, "doc-alpha"), (beta_object, "doc-beta")] {
+        sqlx::query(
+            "INSERT INTO moa.knowledge_objects ( \
+                 object_uid, tenant_id, storage_partition_id, connection_id, object_type, \
+                 external_object_id, title, change_token, source_uri, status, metadata) \
+             VALUES ($1, $2, $3, $4, 'document', $5, $5, 'etag-1', \
+                     'https://example.test/' || $5, 'active', '{}'::JSONB)",
+        )
+        .bind(object_uid)
+        .bind(seed.tenant_id)
+        .bind(&tenant_text)
+        .bind(connection_uid)
+        .bind(external_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for (version_uid, object_uid, content_hash, age_seconds) in [
+        (
+            alpha_superseded_version,
+            alpha_object,
+            "hash-alpha-v0",
+            120_i32,
+        ),
+        (seed.alpha_version, alpha_object, "hash-alpha-v1", 60),
+        (beta_version, beta_object, "hash-beta-v1", 60),
+    ] {
+        sqlx::query(
+            "INSERT INTO moa.knowledge_document_versions ( \
+                 document_version_uid, tenant_id, storage_partition_id, object_id, \
+                 parser_provider, content_hash, metadata, created_at) \
+             VALUES ($1, $2, $3, $4, 'native', $5, '{}'::JSONB, \
+                     now() - make_interval(secs => $6))",
+        )
+        .bind(version_uid)
+        .bind(seed.tenant_id)
+        .bind(&tenant_text)
+        .bind(object_uid)
+        .bind(content_hash)
+        .bind(f64::from(age_seconds))
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // Two documents' identical paragraph share one content-hash node; the
+    // superseded occurrence is tombstoned; one chunk never reached the graph.
+    for (chunk_uid, version_uid, graph_node_uid, chunk_hash, metadata) in [
+        (
+            seed.alpha_chunk,
+            seed.alpha_version,
+            Some(seed.shared_chunk_node),
+            "shared-content-hash",
+            "{}",
+        ),
+        (
+            seed.alpha_unlinked_chunk,
+            seed.alpha_version,
+            None,
+            "unlinked-content-hash",
+            r#"{"active": true}"#,
+        ),
+        (
+            seed.alpha_superseded_chunk,
+            alpha_superseded_version,
+            Some(seed.shared_chunk_node),
+            "shared-content-hash",
+            r#"{"active": false}"#,
+        ),
+        (
+            seed.beta_chunk,
+            beta_version,
+            Some(seed.shared_chunk_node),
+            "shared-content-hash",
+            r#"{"active": true}"#,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO moa.knowledge_chunks ( \
+                 chunk_uid, tenant_id, storage_partition_id, document_version_id, \
+                 graph_node_uid, chunk_hash, block_hashes, heading_path, text, ordinal, \
+                 token_count, metadata) \
+             VALUES ($1, $2, $3, $4, $5, $6, ARRAY['block-1']::TEXT[], \
+                     ARRAY['Policies']::TEXT[], 'Reimbursement requires manager approval.', \
+                     0, 6, $7::JSONB)",
+        )
+        .bind(chunk_uid)
+        .bind(seed.tenant_id)
+        .bind(&tenant_text)
+        .bind(version_uid)
+        .bind(graph_node_uid)
+        .bind(chunk_hash)
+        .bind(metadata)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for (uid, label, name) in [
+        (seed.shared_chunk_node, "Chunk", "shared-content-hash"),
+        (seed.document_node, "Document", "Alpha policy"),
+        (seed.entity_node, "Entity", "Manager approval"),
+        (
+            seed.fact_node,
+            "Fact",
+            "Reimbursement requires manager approval",
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO moa.node_index ( \
+                 uid, label, storage_partition_id, tenant_id, name, pii_class, confidence, \
+                 properties_summary, data_subject_id) \
+             VALUES ($1, $2, $3, $4, $5, 'none', 0.95, \
+                     jsonb_build_object('chunk_hash', 'shared-content-hash'), $4)",
+        )
+        .bind(uid)
+        .bind(label)
+        .bind(&tenant_text)
+        .bind(seed.tenant_id)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    for (start_uid, end_uid, label) in [
+        (seed.document_node, seed.shared_chunk_node, "CONTAINS"),
+        (seed.shared_chunk_node, seed.entity_node, "MENTIONED_IN"),
+        (seed.shared_chunk_node, seed.fact_node, "DERIVED_FROM"),
+    ] {
+        sqlx::query(
+            "INSERT INTO moa.edge_index ( \
+                 uid, label, start_uid, end_uid, storage_partition_id, tenant_id, properties) \
+             VALUES ($1, $2, $3, $4, $5, $6, '{}'::JSONB)",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(label)
+        .bind(start_uid)
+        .bind(end_uid)
+        .bind(&tenant_text)
+        .bind(seed.tenant_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    sqlx::query(
+        "INSERT INTO moa.embeddings ( \
+             uid, storage_partition_id, tenant_id, label, pii_class, embedding, \
+             embedding_model, embedding_model_version) \
+         VALUES ($1, $2, $3, 'Chunk', 'none', \
+                 ('[' || array_to_string(array_fill(0.0125::REAL, ARRAY[1024]), ',') || ']')::public.halfvec(1024), \
+                 'embed-v4.0', 7)",
+    )
+    .bind(seed.shared_chunk_node)
+    .bind(&tenant_text)
+    .bind(seed.tenant_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(seed)
+}
+
+/// Collects the occurrence facts the V000347 backfill must produce.
+#[allow(clippy::type_complexity)]
+async fn occurrence_backfill_facts(
+    pool: &PgPool,
+    seed: &LegacyChunkGraph,
+) -> Result<
+    (
+        Vec<(uuid::Uuid, uuid::Uuid, bool)>,
+        i64,
+        Vec<(uuid::Uuid, String)>,
+        Vec<(uuid::Uuid, String, i32)>,
+        Vec<(uuid::Uuid, String)>,
+        i64,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let mut tx = begin_as_app(pool, Some(seed.tenant_id)).await?;
+    // (chunk uid, persisted graph identity, occurrence is active in the graph)
+    let occurrences = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, bool)>(
+        "SELECT chunk.chunk_uid, chunk.graph_node_uid, occurrence.valid_to IS NULL \
+           FROM moa.knowledge_chunks AS chunk \
+           JOIN moa.node_index AS occurrence ON occurrence.uid = chunk.chunk_uid \
+          WHERE occurrence.label = 'Chunk' \
+            AND occurrence.storage_partition_id = chunk.storage_partition_id \
+            AND occurrence.tenant_id = chunk.tenant_id \
+          ORDER BY chunk.chunk_uid",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let surviving_shared_nodes =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM moa.node_index WHERE uid = $1")
+            .bind(seed.shared_chunk_node)
+            .fetch_one(&mut *tx)
+            .await?;
+    // Every edge now incident to an occurrence, as (occurrence uid, label).
+    let occurrence_edges = sqlx::query_as::<_, (uuid::Uuid, String)>(
+        "SELECT chunk.chunk_uid, edge.label \
+           FROM moa.knowledge_chunks AS chunk \
+           JOIN moa.edge_index AS edge \
+             ON edge.start_uid = chunk.chunk_uid OR edge.end_uid = chunk.chunk_uid \
+          ORDER BY chunk.chunk_uid, edge.label",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let occurrence_embeddings = sqlx::query_as::<_, (uuid::Uuid, String, i32)>(
+        "SELECT uid, embedding_model, embedding_model_version FROM moa.embeddings ORDER BY uid",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let queued_vector_sync = sqlx::query_as::<_, (uuid::Uuid, String)>(
+        "SELECT uid, op FROM moa.vector_sync_outbox WHERE processed_at IS NULL ORDER BY op, uid",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let shared_entities = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.node_index WHERE label IN ('Entity', 'Fact', 'Document')",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok((
+        occurrences,
+        surviving_shared_nodes,
+        occurrence_edges,
+        occurrence_embeddings,
+        queued_vector_sync,
+        shared_entities,
+    ))
+}
+
+/// Collects the schema facts the occurrence invariant depends on.
+///
+/// Returns `(graph_node_uid_not_null, equality_constraint, occurrence_unique_index,
+/// content_hash_unique_index_removed, chunks_force_rls)`.
+async fn knowledge_occurrence_schema_facts(
+    pool: &PgPool,
+) -> Result<(bool, bool, bool, bool, bool), Box<dyn std::error::Error + Send + Sync>> {
+    let not_null: bool = sqlx::query_scalar(
+        "SELECT attnotnull FROM pg_attribute \
+          WHERE attrelid = 'moa.knowledge_chunks'::REGCLASS AND attname = 'graph_node_uid'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let equality_constraint: bool = sqlx::query_scalar(
+        "SELECT count(*) = 1 FROM pg_constraint \
+          WHERE conname = 'knowledge_chunks_graph_node_is_occurrence' \
+            AND pg_get_constraintdef(oid) LIKE '%graph_node_uid = chunk_uid%'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let occurrence_unique: bool = sqlx::query_scalar(
+        "SELECT count(*) = 1 FROM pg_indexes \
+          WHERE indexname = 'knowledge_chunks_graph_node_occurrence_uniq' \
+            AND indexdef LIKE '%UNIQUE%'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let content_hash_unique_removed: bool = sqlx::query_scalar(
+        "SELECT count(*) = 0 FROM pg_indexes WHERE indexname = 'knowledge_chunks_hash_uniq'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let force_rls: bool = sqlx::query_scalar(
+        "SELECT relforcerowsecurity FROM pg_class WHERE oid = 'moa.knowledge_chunks'::REGCLASS",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok((
+        not_null,
+        equality_constraint,
+        occurrence_unique,
+        content_hash_unique_removed,
+        force_rls,
+    ))
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn knowledge_graph_occurrences_v000347_fresh_and_idempotent_db() {
+    // Pins: V000347 installs the occurrence invariant on a pristine database and
+    // re-applies as a no-op. The invariant is database-owned — `graph_node_uid` is
+    // NOT NULL and constrained equal to `chunk_uid`, one graph uid can belong to
+    // exactly one chunk row, and content-hash uniqueness no longer constrains how
+    // many occurrences a document version may hold.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create throwaway migration database");
+
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        let (first, second) = clean_apply_then_reapply(&target_url).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let facts = knowledge_occurrence_schema_facts(&pool).await?;
+        let policies: Vec<String> = sqlx::query_scalar(
+            "SELECT policyname::TEXT FROM pg_policies \
+              WHERE schemaname = 'moa' AND tablename = 'knowledge_chunks' ORDER BY policyname",
+        )
+        .fetch_all(&pool)
+        .await?;
+        pool.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((first, second, facts, policies))
+    }
+    .await;
+
+    // Always force-drop the throwaway database, even if an assertion below fails.
+    let _ = admin
+        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
+        .await;
+    admin.close().await;
+
+    let (first, second, facts, policies) =
+        outcome.expect("occurrence migration should apply on a fresh database");
+    let (not_null, equality_constraint, occurrence_unique, content_hash_unique_removed, force_rls) =
+        facts;
+
+    assert!(
+        first
+            .iter()
+            .any(|applied| applied.contains("knowledge_graph_occurrences")),
+        "a pristine database must apply V000347, got {first:?}"
+    );
+    assert!(
+        second.is_empty(),
+        "re-applying must report no newly applied migrations, got {second:?}"
+    );
+    assert!(not_null, "graph_node_uid must be NOT NULL");
+    assert!(
+        equality_constraint,
+        "the database must own `graph_node_uid = chunk_uid`"
+    );
+    assert!(
+        occurrence_unique,
+        "one graph uid must belong to exactly one chunk row"
+    );
+    assert!(
+        content_hash_unique_removed,
+        "content-hash uniqueness must no longer limit occurrences per document version"
+    );
+    assert!(
+        force_rls,
+        "knowledge_chunks must keep forced row level security"
+    );
+    assert_eq!(
+        policies,
+        vec!["tenant_isolation".to_string()],
+        "tenant isolation must survive the occurrence migration"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn knowledge_graph_occurrence_backfill_v346_to_v347_db() {
+    // Pins: upgrading a V000346 database that already collapsed two documents onto
+    // one content-hash chunk node splits it into one occurrence per chunk row —
+    // including the tombstoned occurrence and the chunk that never reached the
+    // graph — clones the occurrence-specific edges and the current embedding,
+    // queues the external-vector upserts plus the retirement deletion, retires the
+    // shared node last, and leaves forced tenant RLS effective for `moa_app`.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create throwaway migration database");
+
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        {
+            let bootstrap = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&target_url)
+                .await?;
+            bootstrap
+                .execute(
+                    "CREATE EXTENSION IF NOT EXISTS vector; \
+                     CREATE EXTENSION IF NOT EXISTS pgaudit;",
+                )
+                .await?;
+            bootstrap.close().await;
+        }
+        apply_through_version(&target_url, 346).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&target_url)
+            .await?;
+        let seed = seed_legacy_shared_chunk_graph(&pool).await?;
+        let applied = apply_through_version(&target_url, 347).await?;
+        let facts = occurrence_backfill_facts(&pool, &seed).await?;
+        let schema = knowledge_occurrence_schema_facts(&pool).await?;
+
+        // Correct, wrong, and missing tenant visibility of the backfilled rows.
+        let mut correct_tenant = begin_as_app(&pool, Some(seed.tenant_id)).await?;
+        let visible_for_tenant = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM moa.knowledge_chunks WHERE chunk_uid = ANY($1)",
+        )
+        .bind(seed.chunk_uids())
+        .fetch_one(&mut *correct_tenant)
+        .await?;
+        // The occurrence invariant is enforced against the application role, not
+        // just the migration role.
+        let rejected_identity = sqlx::query(
+            "INSERT INTO moa.knowledge_chunks ( \
+                 chunk_uid, tenant_id, storage_partition_id, document_version_id, \
+                 graph_node_uid, chunk_hash, text, ordinal, token_count, metadata) \
+             SELECT gen_random_uuid(), chunk.tenant_id, chunk.storage_partition_id, \
+                    chunk.document_version_id, gen_random_uuid(), 'forged', 'forged', \
+                    99, 1, '{}'::JSONB \
+               FROM moa.knowledge_chunks AS chunk WHERE chunk.chunk_uid = $1",
+        )
+        .bind(seed.alpha_chunk)
+        .execute(&mut *correct_tenant)
+        .await
+        .expect_err("a chunk row may not claim another graph identity")
+        .as_database_error()
+        .and_then(|error| error.code().map(|code| code.to_string()))
+        .unwrap_or_default();
+        correct_tenant.rollback().await?;
+
+        // Content identity no longer constrains occurrences: a document version may
+        // hold two occurrences of the same text.
+        let mut repeated = begin_as_app(&pool, Some(seed.tenant_id)).await?;
+        let repeated_occurrence = sqlx::query(
+            "INSERT INTO moa.knowledge_chunks ( \
+                 chunk_uid, tenant_id, storage_partition_id, document_version_id, \
+                 graph_node_uid, chunk_hash, text, ordinal, token_count, metadata) \
+             SELECT repeated.uid, chunk.tenant_id, chunk.storage_partition_id, \
+                    chunk.document_version_id, repeated.uid, chunk.chunk_hash, chunk.text, \
+                    42, chunk.token_count, '{}'::JSONB \
+               FROM moa.knowledge_chunks AS chunk \
+               CROSS JOIN (SELECT gen_random_uuid() AS uid) AS repeated \
+              WHERE chunk.chunk_uid = $1",
+        )
+        .bind(seed.alpha_chunk)
+        .execute(&mut *repeated)
+        .await
+        .map(|done| done.rows_affected());
+        repeated.rollback().await?;
+
+        let mut wrong_tenant = begin_as_app(&pool, Some(uuid::Uuid::now_v7())).await?;
+        let visible_for_wrong_tenant = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM moa.knowledge_chunks WHERE chunk_uid = ANY($1)",
+        )
+        .bind(seed.chunk_uids())
+        .fetch_one(&mut *wrong_tenant)
+        .await?;
+        wrong_tenant.rollback().await?;
+
+        let mut no_tenant = begin_as_app(&pool, None).await?;
+        let visible_without_tenant = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM moa.knowledge_chunks WHERE chunk_uid = ANY($1)",
+        )
+        .bind(seed.chunk_uids())
+        .fetch_one(&mut *no_tenant)
+        .await?;
+        no_tenant.rollback().await?;
+
+        // The remaining migrations still apply on top of the backfilled state.
+        let remainder = moa_migrations::run_reporting_applied(&target_url).await?;
+        pool.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            seed,
+            applied,
+            facts,
+            schema,
+            visible_for_tenant,
+            rejected_identity,
+            repeated_occurrence,
+            visible_for_wrong_tenant,
+            visible_without_tenant,
+            remainder,
+        ))
+    }
+    .await;
+
+    // Always force-drop the throwaway database, even if an assertion below fails.
+    let _ = admin
+        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
+        .await;
+    admin.close().await;
+
+    let (
+        seed,
+        applied,
+        facts,
+        schema,
+        visible_for_tenant,
+        rejected_identity,
+        repeated_occurrence,
+        visible_for_wrong_tenant,
+        visible_without_tenant,
+        remainder,
+    ) = outcome.expect("V000346 to V000347 upgrade should complete");
+    let (
+        occurrences,
+        surviving_shared_nodes,
+        occurrence_edges,
+        occurrence_embeddings,
+        queued_vector_sync,
+        shared_entities,
+    ) = facts;
+
+    assert!(
+        applied
+            .iter()
+            .any(|migration| migration.contains("knowledge_graph_occurrences")),
+        "the upgrade must apply V000347, got {applied:?}"
+    );
+
+    // One occurrence node per chunk row, identity equal to the chunk uid, and the
+    // tombstoned chunk's occurrence invalidated even though the shared node was
+    // alive for two other documents.
+    let mut expected_occurrences = vec![
+        (seed.alpha_chunk, seed.alpha_chunk, true),
+        (seed.alpha_unlinked_chunk, seed.alpha_unlinked_chunk, true),
+        (
+            seed.alpha_superseded_chunk,
+            seed.alpha_superseded_chunk,
+            false,
+        ),
+        (seed.beta_chunk, seed.beta_chunk, true),
+    ];
+    expected_occurrences.sort();
+    assert_eq!(
+        occurrences, expected_occurrences,
+        "every chunk row must own an occurrence node with its own identity and state"
+    );
+    assert_eq!(
+        surviving_shared_nodes, 0,
+        "the content-hash chunk node must be retired"
+    );
+    assert_eq!(
+        shared_entities, 3,
+        "document, entity, and fact nodes stay shared"
+    );
+
+    // Occurrence-specific edges are cloned per occurrence; the chunk that never
+    // reached the graph gains none, because there was nothing to clone.
+    let mut expected_edges = Vec::new();
+    for chunk_uid in [
+        seed.alpha_chunk,
+        seed.alpha_superseded_chunk,
+        seed.beta_chunk,
+    ] {
+        expected_edges.push((chunk_uid, "CONTAINS".to_string()));
+        expected_edges.push((chunk_uid, "DERIVED_FROM".to_string()));
+        expected_edges.push((chunk_uid, "MENTIONED_IN".to_string()));
+    }
+    expected_edges.sort();
+    assert_eq!(
+        occurrence_edges, expected_edges,
+        "containment, provenance, and evidence edges must be rewired per occurrence"
+    );
+
+    // The current embedding is cloned beneath every ACTIVE occurrence, model and
+    // version preserved. The tombstoned occurrence gets none (runtime
+    // invalidation deletes vectors), and neither does the never-embedded chunk.
+    let mut expected_embeddings = vec![
+        (seed.alpha_chunk, "embed-v4.0".to_string(), 7),
+        (seed.beta_chunk, "embed-v4.0".to_string(), 7),
+    ];
+    expected_embeddings.sort();
+    assert_eq!(
+        occurrence_embeddings, expected_embeddings,
+        "each active occurrence owns its own embedding row"
+    );
+
+    let mut expected_sync = vec![
+        (seed.shared_chunk_node, "delete".to_string()),
+        (seed.alpha_chunk, "upsert".to_string()),
+        (seed.beta_chunk, "upsert".to_string()),
+    ];
+    expected_sync.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
+    assert_eq!(
+        queued_vector_sync, expected_sync,
+        "external vector sync must gain the new occurrence upserts and the retirement delete"
+    );
+
+    let (not_null, equality_constraint, occurrence_unique, content_hash_unique_removed, force_rls) =
+        schema;
+    assert!(not_null && equality_constraint && occurrence_unique);
+    assert!(content_hash_unique_removed);
+    assert!(force_rls);
+
+    assert_eq!(
+        visible_for_tenant, 4,
+        "the owning tenant still reads its own occurrences"
+    );
+    assert_eq!(
+        rejected_identity, "23514",
+        "the application role cannot write a chunk whose graph identity is not its own uid"
+    );
+    assert_eq!(
+        repeated_occurrence.expect("a repeated paragraph is a legal second occurrence"),
+        1
+    );
+    assert_eq!(
+        visible_for_wrong_tenant, 0,
+        "another tenant must not see backfilled occurrences"
+    );
+    assert_eq!(
+        visible_without_tenant, 0,
+        "a missing tenant scope must fail closed after the backfill"
+    );
+    assert!(
+        !remainder
+            .iter()
+            .any(|migration| migration.contains("knowledge_graph_occurrences")),
+        "V000347 must not re-apply once recorded, got {remainder:?}"
+    );
+}

@@ -449,6 +449,7 @@ async fn create_counter_seed_run(
             error_code: Some("seed_error_code".to_string()),
             started_at: Utc::now(),
             finished_at: Some(Utc::now()),
+            provider_trigger_completed_at: None,
         })
         .await
         .expect("create counter seed run");
@@ -505,6 +506,7 @@ async fn run_failure_case(case: FailureCase) -> Uuid {
             error_code: None,
             started_at: Utc::now(),
             finished_at: None,
+            provider_trigger_completed_at: None,
         })
         .await
         .expect("create failure run");

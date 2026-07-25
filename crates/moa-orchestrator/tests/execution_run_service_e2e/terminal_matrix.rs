@@ -428,13 +428,19 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
         1,
         "Durable upgrade must not reclassify the root objective"
     );
+    // The execution planner embeds the candidate schema in-prompt as
+    // `<response_schema>…</response_schema>` and sends no provider-native
+    // strict response format (planner candidates carry free-form JSON that
+    // strict schemas cannot represent), so the planner request is identified
+    // by that marker rather than a `response_format` name.
     let planner = requests
         .iter()
         .find(|request| {
-            request
-                .response_format
-                .as_ref()
-                .is_some_and(|format| format.name == "generated_execution_candidate")
+            request.response_format.is_none()
+                && request
+                    .messages
+                    .iter()
+                    .any(|message| message.content.contains("<response_schema>"))
         })
         .context("Durable upgrade omitted its sole generated planner request")?;
     let planner_context = planner

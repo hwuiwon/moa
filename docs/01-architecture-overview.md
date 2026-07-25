@@ -322,7 +322,7 @@ it is realized as Restate services and virtual objects in `moa-orchestrator`
 | `ContextProcessor` | One stage in context compilation | identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, runtime context |
 | `LinkedIntegrationProvider` | Tenant knowledge linked-account flow, provider sync trigger, changed-record listing, and webhook verification | Nango and Merge adapters in `moa-knowledge` |
 | `DocumentParser` | Structure-aware parsing into normalized document elements for tenant knowledge ingestion | Native parser backed by `liteparse` for local file parsing, plus LlamaParse, Unstructured, and Reducto adapters in `moa-knowledge` |
-| `CredentialVault` | Secret storage and retrieval | environment-backed MCP vault |
+| `CredentialVault` | Durable, versioned tenant credential storage and audited resolution | `PostgresCredentialVault` in `moa-auth-providers`, constructed once per process |
 | `LineageHandle` | Transport-neutral lineage capture | null handle, async sink, OTel bridge |
 
 Runtime entrypoints share these seams through the Restate-backed orchestrator.
@@ -369,10 +369,22 @@ separate from the outbound agent-tool MCP clients and credential proxy in
 The binary composition root constructs `RuntimeDeps` and passes concrete
 dependencies through implementation constructors before `build_endpoint`
 binds the Restate services, virtual objects, and workflows. The architecture
-scanner enforces zero raw `OrchestratorCtx::current_*` dependency reads under
-`objects/`, `services/`, and `workflows/`. This is a scoped runtime-boundary
-invariant, not a claim that every `OrchestratorCtx` use has been removed from
-the entire repository.
+scanner constrains raw `OrchestratorCtx` dependency reads under `objects/`,
+`services/`, and `workflows/`. This is a scoped runtime-boundary invariant, not
+a claim that every `OrchestratorCtx` use has been removed from the entire
+repository.
+
+Raw `OrchestratorCtx::current()` reads under those roots are zero and no
+allowance may reintroduce one. Eight counted `current_*` reads remain as
+temporary exceptions: four in `objects/session/execution_runs.rs` (three
+`current_graph_pool()` for keyed Session admission's control-plane replay
+transactions, one `current_config()` for Session-owned template planning), two
+`current_config()` in `workflows/experiment_run/target_execution.rs`, and two
+`current_config()` in `workflows/experiment_trial_run/target_execution.rs`.
+Each is counted per accessor, so a ninth read fails the checker even in an
+already-allowed file. Task 6.6 injects those dependencies through their
+implementation constructors and empties the list. `docs/15-architecture-policy.md`
+holds the authoritative table.
 
 `Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `Worker` owns conversational delegated state with depth and budget limits, while `WorkerTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
 
@@ -466,7 +478,7 @@ policy.
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity |
 | Hand leases | Postgres | `moa.hand_leases` stores session/provider sandbox bindings, serialized handles, generation fencing, status, and expiry for cross-pod reuse and cleanup |
 | Claim-check blobs | Postgres by default | large event payloads use `session_blobs`; local filesystem blobs require explicit configuration and a persistent mounted path in cloud |
-| Session attachments | Postgres + object storage | `session_attachments` stores metadata and object keys; bytes live in RustFS locally or AWS S3/GCS in cloud; session events carry `Attachment` refs with durable ids |
+| Session attachments | Postgres + object storage | `session_attachments` stores metadata and object keys; bytes live in RustFS locally or AWS S3/GCS in cloud; session events carry `Attachment` refs with durable ids. `SessionAttachmentStore::put` takes a deterministic slot (tenant, session, client message id, ordinal) whose UUIDv5 is the row's primary key, claims that row before writing the object create-only, and reports whether the write created storage or replayed an identical one |
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
 | Runtime cache | Redis or memory | optional TTL cache/coordination for pacing and transient references; memory is per-process and non-authoritative |
 | Optional checkpoints | Neon | branch manager for database checkpoints |

@@ -6,7 +6,7 @@
 //! builders. Keeping a single copy here keeps behavior identical across lanes.
 
 use moa_core::{
-    types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ClientMessageId, types::contact::ContactId, types::contact::ContactRef,
     types::contact::ContactVerificationState, types::contact::SessionActorRef,
     types::identifiers::ModelId, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId, types::session::SessionMeta,
@@ -20,6 +20,17 @@ use uuid::Uuid;
 #[must_use]
 pub fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+/// Mints a fresh caller retry identity for one submitted test message.
+///
+/// A test that drives several messages through one session needs a distinct identity per
+/// message, exactly like a real client: reusing one would be answered by the Session
+/// admission fence with the first message's response instead of starting new work. Tests
+/// that deliberately exercise a retry pass the same id twice themselves.
+#[must_use]
+pub fn fresh_client_message_id() -> ClientMessageId {
+    ClientMessageId::new(Uuid::now_v7().to_string()).expect("a uuid is a valid client message id")
 }
 
 /// Maps a storage partition identifier to the tenant ID used by test fixtures.

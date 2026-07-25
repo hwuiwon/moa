@@ -3,11 +3,35 @@
 use super::row_mapping::*;
 use super::*;
 
+/// Serializes same-group writers behind a transaction-scoped advisory lock.
+///
+/// Contact groups are cross-object by construction: concurrent page records
+/// legitimately derive the byte-identical group and race their writes. The
+/// group table carries a second unique index
+/// (`knowledge_contact_groups_name_uniq`) beside the `group_uid` arbiter, and
+/// PostgreSQL only routes arbiter-index conflicts into `DO UPDATE` — a
+/// concurrent identical insert first detected on the name index raises a plain
+/// `23505`. The same concurrency also drives unordered same-group membership
+/// updates toward `40P01`. Taking one per-group lock before either write makes
+/// the second writer wait for the first commit, after which its arbiter check
+/// sees the committed row and takes the update path.
+async fn lock_contact_group(conn: &mut moa_db::ScopedConn<'_>, group_uid: Uuid) -> Result<()> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('knowledge_contact_group:' || $1::text, 0))",
+    )
+    .bind(group_uid)
+    .execute(conn.as_mut())
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
 pub(super) async fn upsert_contact_group(
     repository: &PostgresKnowledgeRepository,
     group: ContactGroup,
 ) -> Result<()> {
     let mut conn = repository.begin().await?;
+    lock_contact_group(&mut conn, group.group_uid).await?;
     sqlx::query(
         r#"
         INSERT INTO moa.knowledge_contact_groups (
@@ -56,6 +80,7 @@ pub(super) async fn replace_contact_group_memberships(
     memberships: Vec<ContactGroupMembership>,
 ) -> Result<()> {
     let mut conn = repository.begin().await?;
+    lock_contact_group(&mut conn, group_uid).await?;
     let mut memberships_by_contact = BTreeMap::new();
     for mut membership in memberships {
         membership.evidence.sort_unstable();

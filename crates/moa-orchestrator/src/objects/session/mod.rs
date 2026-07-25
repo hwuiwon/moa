@@ -10,11 +10,11 @@ use moa_core::traits::SessionRepository;
 use moa_core::{
     error::MoaError, error::Result as MoaResult, events::Event, events::ExecutionInputRequired,
     events::ExecutionProgress, events::ExecutionRunEvidenceRef,
-    events::ExecutionSynthesisRequested, types::contact::ContactRef,
-    types::events_stream::ClaimCheck, types::events_stream::EventRange,
+    events::ExecutionSynthesisRequested, events::QueuedMessageRejection,
+    types::contact::ContactRef, types::events_stream::ClaimCheck, types::events_stream::EventRange,
     types::events_stream::EventRecord, types::execution_planning::ExecutionRunStarted,
     types::identifiers::SessionId, types::segments::ActiveSegment, types::session::CancelScope,
-    types::session::SessionMeta, types::session::SessionStatus, types::session::UserMessage,
+    types::session::SessionMeta, types::session::SessionStatus,
     types::worker::commands::ConsumeWorkerChildResultInput,
     types::worker::commands::ConsumeWorkerChildResultOutput,
     types::worker::commands::MarkWorkerChildTerminalInput,
@@ -55,11 +55,16 @@ mod admission;
 mod execution_runs;
 mod handlers;
 mod liveness;
+mod message_admission;
 mod narration;
 mod persistence;
 mod state;
 
 use crate::workflows::errors::moa_error_to_handler_error;
+use message_admission::{
+    AdmissionLookup, K_MESSAGE_ADMISSIONS, MessageAdmissionState, MessageRouting,
+    SessionMessageAdmissions, record_admission_decision, resolve_message_routing,
+};
 use persistence::{parse_session_key, sync_status};
 pub use state::{
     ActiveExecutionRunState, ExecutionProgressSignature, ExecutionSynthesisDedupe,
@@ -79,6 +84,64 @@ struct SessionPendingState {
     turn_waiters: Vec<SessionTurnWaiter>,
     #[serde(default)]
     admission_heartbeat_generation: u64,
+    /// Cancellation requested for a turn that has not yet reported its outcome.
+    ///
+    /// The scope decides queue disposition when the matching `Cancelled` callback
+    /// arrives, so it must be remembered between the request and the callback.
+    #[serde(default)]
+    pending_cancellation: Option<PendingCancellation>,
+}
+
+/// Cancellation requested for one turn, awaiting that turn's outcome callback.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PendingCancellation {
+    /// Turn whose outcome clears this cancellation.
+    turn_id: String,
+    /// Requested scope, which decides what happens to queued work.
+    scope: CancelScope,
+}
+
+impl SessionPendingState {
+    /// Returns whether a new turn may be admitted right now.
+    ///
+    /// A whole-task-tree cancellation fences admission for the window between the
+    /// request and the cancelled turn's callback. Without the fence a message that
+    /// raced the cancellation would start a turn inside a tree that is being torn
+    /// down. `CoordinatorOnly` deliberately does not fence: it cancels one turn and
+    /// the next queued message is expected to run.
+    fn task_tree_cancellation_fenced(&self) -> bool {
+        self.pending_cancellation
+            .as_ref()
+            .is_some_and(|cancellation| cancellation.scope.cancels_task_tree())
+    }
+
+    /// Returns whether this terminal outcome should dispatch the next queued message.
+    ///
+    /// The queue continues for every outcome that leaves the session able to work:
+    /// completed, accepted, failed, and a cancellation that only stopped this
+    /// coordinator turn. Stopping on failure would strand acknowledged messages
+    /// behind a turn that is never coming back.
+    ///
+    /// A cancellation continues the queue only when this exact turn was cancelled
+    /// with coordinator-only scope. A task-tree cancellation already drained the
+    /// queue, and a `Cancelled` outcome with no recorded request — an externally
+    /// cancelled invocation — dispatches nothing, because nothing asked for the
+    /// queue to continue.
+    fn dispatches_next_after(&self, outcome: &ExecutionTurnOutcome) -> bool {
+        match outcome.kind {
+            ExecutionTurnOutcomeKind::Completed
+            | ExecutionTurnOutcomeKind::Accepted { .. }
+            | ExecutionTurnOutcomeKind::Failed => true,
+            ExecutionTurnOutcomeKind::Cancelled => {
+                self.pending_cancellation
+                    .as_ref()
+                    .is_some_and(|cancellation| {
+                        cancellation.turn_id == outcome.turn_id
+                            && !cancellation.scope.cancels_task_tree()
+                    })
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -168,9 +231,6 @@ pub struct ExecutionSynthesisDispatch {
 pub trait Session {
     /// Initializes VO state after `SessionStore/create_session` persists metadata in Postgres.
     async fn set_meta(meta: Json<SessionMeta>) -> Result<(), HandlerError>;
-
-    /// Appends a user message and drives turns until the session becomes idle or blocked.
-    async fn post_message(msg: Json<UserMessage>) -> Result<(), HandlerError>;
 
     /// Requests cancellation at the given scope: only the coordinator turn, or the whole task tree.
     async fn cancel(scope: Json<CancelScope>) -> Result<(), HandlerError>;
@@ -313,6 +373,26 @@ async fn load_pending_state<R: VoReader>(reader: &R) -> Result<SessionPendingSta
 
 fn persist_pending_state(ctx: &ObjectContext<'_>, state: &SessionPendingState) {
     ctx.set(K_PENDING_STATE, Json::from(state.clone()));
+}
+
+/// Loads the session's admission projection, the fence every message passes through.
+async fn load_message_admissions<R: VoReader>(
+    reader: &R,
+) -> Result<SessionMessageAdmissions, HandlerError> {
+    Ok(reader
+        .get_json(K_MESSAGE_ADMISSIONS)
+        .await?
+        .unwrap_or_default())
+}
+
+/// Persists the admission projection and publishes its bounded-cache observability.
+fn persist_message_admissions(
+    ctx: &ObjectContext<'_>,
+    admissions: &SessionMessageAdmissions,
+    evicted: usize,
+) {
+    ctx.set(K_MESSAGE_ADMISSIONS, Json::from(admissions.clone()));
+    message_admission::record_admission_evictions(evicted, admissions.len());
 }
 
 fn generate_turn_id(ctx: &mut ObjectContext<'_>) -> String {
@@ -473,4 +553,88 @@ pub fn child_progress_in_plan_order(
     summaries: Vec<Option<WorkerProgressSummary>>,
 ) -> Vec<WorkerProgressSummary> {
     summaries.into_iter().flatten().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outcome(turn_id: &str, kind: ExecutionTurnOutcomeKind) -> ExecutionTurnOutcome {
+        ExecutionTurnOutcome {
+            turn_id: turn_id.to_string(),
+            kind,
+            message: "outcome".to_string(),
+        }
+    }
+
+    fn cancelled_state(turn_id: &str, scope: CancelScope) -> SessionPendingState {
+        SessionPendingState {
+            active_turn_id: Some(turn_id.to_string()),
+            pending_cancellation: Some(PendingCancellation {
+                turn_id: turn_id.to_string(),
+                scope,
+            }),
+            ..SessionPendingState::default()
+        }
+    }
+
+    #[test]
+    fn failed_turn_still_dispatches_the_next_queued_message() {
+        // Pins: acknowledged work stays reachable after a turn dies. Restricting the
+        // queue pop to Completed/Accepted strands every message queued behind a
+        // failed turn forever, because nothing else ever pops the queue.
+        let state = SessionPendingState::default();
+
+        assert!(state.dispatches_next_after(&outcome("turn-1", ExecutionTurnOutcomeKind::Failed)));
+        assert!(
+            state.dispatches_next_after(&outcome("turn-1", ExecutionTurnOutcomeKind::Completed))
+        );
+        assert!(state.dispatches_next_after(&outcome(
+            "turn-1",
+            ExecutionTurnOutcomeKind::Accepted {
+                execution_run_uid: uuid::Uuid::from_u128(7),
+            }
+        )));
+    }
+
+    #[test]
+    fn only_coordinator_only_cancellation_continues_the_queue() {
+        // Pins: cancellation scope decides queue disposition. A coordinator-only
+        // cancel stops one turn and the queue continues; a task-tree cancel tore the
+        // tree down and already drained the queue, so it must dispatch nothing.
+        let coordinator_only = cancelled_state("turn-1", CancelScope::CoordinatorOnly);
+        let task_tree = cancelled_state("turn-1", CancelScope::TaskTree);
+        let cancelled = outcome("turn-1", ExecutionTurnOutcomeKind::Cancelled);
+
+        assert!(coordinator_only.dispatches_next_after(&cancelled));
+        assert!(!task_tree.dispatches_next_after(&cancelled));
+    }
+
+    #[test]
+    fn cancellation_without_a_matching_request_dispatches_nothing() {
+        // Pins: an externally cancelled invocation, or a cancellation recorded for a
+        // different turn, is not evidence that the queue should continue. Treating an
+        // unexplained Cancelled outcome as continuable would start queued work inside
+        // a tree that may already be torn down.
+        let cancelled = outcome("turn-1", ExecutionTurnOutcomeKind::Cancelled);
+        let unrequested = SessionPendingState::default();
+        let other_turn = cancelled_state("turn-2", CancelScope::CoordinatorOnly);
+
+        assert!(!unrequested.dispatches_next_after(&cancelled));
+        assert!(!other_turn.dispatches_next_after(&cancelled));
+    }
+
+    #[test]
+    fn only_task_tree_cancellation_fences_admission() {
+        // Pins: the admission fence is scoped to a task-tree teardown. Fencing on a
+        // coordinator-only cancel would refuse the very next queued message, and not
+        // fencing on a task-tree cancel would admit a turn into a tree whose children
+        // and execution runs are already being cancelled.
+        assert!(cancelled_state("turn-1", CancelScope::TaskTree).task_tree_cancellation_fenced());
+        assert!(
+            !cancelled_state("turn-1", CancelScope::CoordinatorOnly)
+                .task_tree_cancellation_fenced()
+        );
+        assert!(!SessionPendingState::default().task_tree_cancellation_fenced());
+    }
 }

@@ -69,6 +69,7 @@ fn sync_run(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeSyncRun {
         error_code: None,
         started_at: Utc::now(),
         finished_at: None,
+        provider_trigger_completed_at: None,
     }
 }
 
@@ -444,7 +445,6 @@ fn block(
 fn chunk(
     version_uid: Uuid,
     ordinal: u32,
-    graph_node_uid: Option<Uuid>,
     chunk_hash: &str,
     block_hashes: Vec<String>,
     text: &str,
@@ -454,7 +454,6 @@ fn chunk(
     KnowledgeChunk {
         chunk_uid: Uuid::now_v7(),
         version_uid,
-        graph_node_uid,
         chunk_hash: chunk_hash.to_string(),
         block_hashes,
         text: text.to_string(),
@@ -505,9 +504,10 @@ async fn stored_blocks(pool: &sqlx::PgPool, version_uid: Uuid) -> Vec<StoredBloc
 #[tokio::test]
 async fn replace_blocks_and_chunks_batch_round_trip_persists_all_rows_db_knowledge() {
     // Pins: the multi-row UNNEST batch insert persists every block and chunk row
-    // with the same content the former per-row loop wrote, keeps the folded
-    // graph_node_uid (including NULLs), preserves empty and populated TEXT[]
-    // arrays and JSON metadata, and still fully replaces prior rows.
+    // with the same content the former per-row loop wrote, stores each chunk's
+    // graph occurrence identity as its own `chunk_uid`, preserves empty and
+    // populated TEXT[] arrays and JSON metadata, and still fully replaces prior
+    // rows.
     let db = postgres::bootstrap_test_db()
         .await
         .expect("bootstrap isolated knowledge DB");
@@ -576,7 +576,6 @@ async fn replace_blocks_and_chunks_batch_round_trip_persists_all_rows_db_knowled
         chunk(
             version.version_uid,
             0,
-            Some(Uuid::now_v7()),
             "ch-0",
             vec!["bh-0".to_string()],
             "First chunk.",
@@ -586,7 +585,6 @@ async fn replace_blocks_and_chunks_batch_round_trip_persists_all_rows_db_knowled
         chunk(
             version.version_uid,
             1,
-            Some(Uuid::now_v7()),
             "ch-1",
             vec!["bh-1a".to_string(), "bh-1b".to_string()],
             "Second chunk.",
@@ -596,7 +594,6 @@ async fn replace_blocks_and_chunks_batch_round_trip_persists_all_rows_db_knowled
         chunk(
             version.version_uid,
             2,
-            None,
             "ch-2",
             Vec::new(),
             "Third chunk.",
@@ -615,7 +612,6 @@ async fn replace_blocks_and_chunks_batch_round_trip_persists_all_rows_db_knowled
     assert_eq!(stored_chunks.len(), 3);
     for (row, expected) in stored_chunks.iter().zip(chunks.iter()) {
         assert_eq!(row.chunk_uid, expected.chunk_uid);
-        assert_eq!(row.graph_node_uid, expected.graph_node_uid);
         assert_eq!(row.chunk_hash, expected.chunk_hash);
         assert_eq!(row.block_hashes, expected.block_hashes);
         assert_eq!(row.heading_path, expected.heading_path);
@@ -625,13 +621,30 @@ async fn replace_blocks_and_chunks_batch_round_trip_persists_all_rows_db_knowled
         assert_eq!(row.metadata, expected.metadata);
     }
 
+    // Storage owns the occurrence invariant: the persisted graph identity of every
+    // chunk row is that row's own `chunk_uid`.
+    let persisted_identities = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT chunk_uid, graph_node_uid FROM moa.knowledge_chunks \
+         WHERE document_version_id = $1 ORDER BY ordinal ASC",
+    )
+    .bind(version.version_uid)
+    .fetch_all(&pool)
+    .await
+    .expect("load persisted chunk identities");
+    assert_eq!(
+        persisted_identities,
+        chunks
+            .iter()
+            .map(|chunk| (chunk.chunk_uid, chunk.chunk_uid))
+            .collect::<Vec<_>>()
+    );
+
     // Replacing with a smaller set fully clears the prior rows.
     repo.replace_chunks(
         version.version_uid,
         vec![chunk(
             version.version_uid,
             0,
-            Some(Uuid::now_v7()),
             "ch-only",
             vec!["bh".to_string()],
             "Only chunk.",

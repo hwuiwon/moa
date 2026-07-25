@@ -10,6 +10,7 @@ use moa_core::{
     types::contact::SessionActorRef, types::identifiers::ModelId, types::identifiers::SessionId,
     types::identifiers::TenantId, types::session::SessionMeta,
 };
+use moa_test_support::fixtures::fresh_client_message_id;
 use serde::Deserialize;
 
 use crate::support::restate_runtime::{grant_tenant_operator, test_user_identity, with_identity};
@@ -146,7 +147,10 @@ async fn start_turn(
 ) -> Result<StartTurnResponse> {
     let request = client.post(session_url(&session.id, "start_turn"));
     with_identity(request, &session.identity)
-        .json(&serde_json::json!({ "user_message": message }))
+        .json(&serde_json::json!({
+            "client_message_id": fresh_client_message_id(),
+            "user_message": message,
+        }))
         .send()
         .await
         .context("send Session start_turn")?
@@ -164,7 +168,10 @@ async fn queue_message(
 ) -> Result<QueueMessageResponse> {
     let request = client.post(session_url(&session.id, "queue_message"));
     with_identity(request, &session.identity)
-        .json(&serde_json::json!({ "user_message": message }))
+        .json(&serde_json::json!({
+            "client_message_id": fresh_client_message_id(),
+            "user_message": message,
+        }))
         .send()
         .await
         .context("send Session queue_message")?
@@ -173,6 +180,42 @@ async fn queue_message(
         .json::<QueueMessageResponse>()
         .await
         .context("deserialize Session queue_message response")
+}
+
+/// Submits one `start_turn` under a caller-chosen retry identity, without asserting success.
+///
+/// Retry and conflict coverage needs both the raw status and the ability to reuse one
+/// client message id across attempts, which the success-only helpers deliberately hide.
+async fn post_start_turn(
+    client: &reqwest::Client,
+    session: &InitializedSession,
+    client_message_id: &str,
+    message: &str,
+) -> Result<reqwest::Response> {
+    let request = client.post(session_url(&session.id, "start_turn"));
+    with_identity(request, &session.identity)
+        .json(&serde_json::json!({
+            "client_message_id": client_message_id,
+            "user_message": message,
+        }))
+        .send()
+        .await
+        .context("send Session start_turn")
+}
+
+/// Counts durable user-message events carrying `text`.
+///
+/// Persisted events are externally tagged as `{"type": ..., "data": ...}` with a
+/// snake_case `event_type` discriminator, which is the shape a client actually reads.
+fn user_message_count(progress: &SessionProgress, text: &str) -> usize {
+    progress
+        .events
+        .iter()
+        .filter(|event| {
+            event.pointer("/event/type") == Some(&serde_json::json!("UserMessage"))
+                && event.pointer("/event/data/text") == Some(&serde_json::json!(text))
+        })
+        .count()
 }
 
 async fn request_cancel(
@@ -344,6 +387,100 @@ async fn start_turn_returns_turn_id_immediately() -> Result<()> {
     assert_eq!(current.active_turn_id.as_deref(), Some(turn_id.as_str()));
     assert_eq!(current.pending_message_count, 0);
     assert!(current.last_outcome.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
+async fn retried_start_turn_replays_one_admission_instead_of_buying_a_second_turn() -> Result<()> {
+    // Pins: the reason this task exists. A client that never saw its first response resends the
+    // same message identity; the session must answer with the original turn and leave exactly
+    // one user message in durable history, not run and bill a second turn.
+    let client = reqwest::Client::new();
+    let session = create_initialized_session(&client, "retry-fence").await?;
+    let client_message_id = format!("retry-fence:{}", session.id);
+    let text = "summarize the attached policy";
+
+    let first = post_start_turn(&client, &session, &client_message_id, text).await?;
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    let first: StartTurnResponse = first
+        .json()
+        .await
+        .context("deserialize first start_turn response")?;
+    let turn_id = first
+        .turn_id
+        .clone()
+        .expect("first submission should start a turn");
+    assert!(!first.queued);
+
+    let retry = post_start_turn(&client, &session, &client_message_id, text).await?;
+    assert_eq!(retry.status(), reqwest::StatusCode::OK);
+    let retry: StartTurnResponse = retry
+        .json()
+        .await
+        .context("deserialize retried start_turn response")?;
+
+    assert_eq!(
+        retry.turn_id.as_deref(),
+        Some(turn_id.as_str()),
+        "a retry must return the original turn id"
+    );
+    assert_eq!(retry.queued, first.queued);
+
+    let progress =
+        await_session_progress_matching(&client, &session, Duration::from_secs(30), |current| {
+            user_message_count(current, text) > 0
+        })
+        .await?;
+    assert_eq!(
+        user_message_count(&progress, text),
+        1,
+        "a retried admission must not append a second user message: {progress:?}"
+    );
+    assert!(
+        progress.snapshot.active_turn_id.as_deref() == Some(turn_id.as_str())
+            || progress
+                .snapshot
+                .last_outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.turn_id == turn_id),
+        "only the original turn may exist for this message: {progress:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
+async fn reusing_a_client_message_id_for_different_text_conflicts_without_mutation() -> Result<()> {
+    // Pins: one caller identity means one request. Reusing it for different work is a typed
+    // conflict decided before any Session mutation, so the second text never reaches history.
+    let client = reqwest::Client::new();
+    let session = create_initialized_session(&client, "hash-conflict").await?;
+    let client_message_id = format!("hash-conflict:{}", session.id);
+    let admitted_text = "check the invoice total";
+    let changed_text = "wire the invoice total";
+
+    let admitted = post_start_turn(&client, &session, &client_message_id, admitted_text).await?;
+    assert_eq!(admitted.status(), reqwest::StatusCode::OK);
+
+    let conflicted = post_start_turn(&client, &session, &client_message_id, changed_text).await?;
+    assert_eq!(
+        conflicted.status(),
+        reqwest::StatusCode::CONFLICT,
+        "a changed request under an admitted id must be refused"
+    );
+
+    let progress =
+        await_session_progress_matching(&client, &session, Duration::from_secs(30), |current| {
+            user_message_count(current, admitted_text) > 0
+        })
+        .await?;
+    assert_eq!(
+        user_message_count(&progress, changed_text),
+        0,
+        "a conflicted submission must not append its text: {progress:?}"
+    );
+    assert_eq!(progress.snapshot.pending_message_count, 0);
     Ok(())
 }
 

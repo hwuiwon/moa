@@ -56,6 +56,12 @@ pub struct RuntimeDeps {
     pub contact_token_issuer: Option<Arc<moa_auth_providers::ContactTokenIssuer>>,
     /// Configured third-party token vault backed by the shared runtime KMS.
     pub token_vault_provider: Arc<dyn moa_core::traits::TokenVaultProvider>,
+    /// The process's single durable tenant credential owner.
+    ///
+    /// Constructed once and shared by every service and workflow that resolves
+    /// connector material, so a credential written on one replica resolves on
+    /// every other and a reconstructed workflow reads the same durable state.
+    pub credential_vault: Arc<dyn moa_core::traits::CredentialVault>,
     /// Explicit key-management handle shared by runtime owners and readiness.
     pub kms: KmsRuntime,
     /// Runtime cache used for ephemeral coordination state.
@@ -118,6 +124,16 @@ impl RuntimeDeps {
             kms.provider(),
         )
         .context("build token-vault provider")?;
+        // One owner for the whole process. Deployment-owned transport secrets
+        // are attached here rather than read again downstream, so a tenant
+        // connection can never fall back to an operator credential.
+        let credential_vault: Arc<dyn moa_core::traits::CredentialVault> = Arc::new(
+            moa_auth_providers::PostgresCredentialVault::new(
+                Arc::new(pool.clone()),
+                kms.provider(),
+            )
+            .with_deployment_secrets(moa_messaging::delivery_deployment_secrets_from_env()),
+        );
         let runtime_cache = build_runtime_cache_store(config.as_ref()).await?;
         // Give provider concurrency limiters the shared coordination store before
         // any provider is built, so `global` scope can coordinate across replicas.
@@ -132,19 +148,22 @@ impl RuntimeDeps {
         )?);
         let embedding_provider = build_embedding_provider_from_config(config.as_ref())?;
         let mcp_egress_guard = build_mcp_egress_guard(config.as_ref(), egress_classifier.as_ref())?;
-        let tool_router = ToolRouter::from_config(config.as_ref(), mcp_egress_guard)
-            .await?
-            .with_hand_lease_store(Arc::new(PostgresHandLeaseStore::new(pool.clone())))
-            .with_rule_store(session_store.clone())
-            .with_session_store(session_store.clone())
-            .with_memory_retrieval_executor(Arc::new(
-                crate::services::memory::OrchestratorMemoryRetrievalExecutor::new(
-                    pool.clone(),
-                    kms.provider(),
-                    config.clone(),
-                ),
-            ))
-            .with_memory_tool_executor(Arc::new(moa_memory_ingest::FastMemoryToolExecutor));
+        let tool_router = ToolRouter::from_config(
+            config.as_ref(),
+            mcp_egress_guard,
+            Some(session_store.clone()),
+        )
+        .await?
+        .with_hand_lease_store(Arc::new(PostgresHandLeaseStore::new(pool.clone())))
+        .with_session_store(session_store.clone())
+        .with_memory_retrieval_executor(Arc::new(
+            crate::services::memory::OrchestratorMemoryRetrievalExecutor::new(
+                pool.clone(),
+                kms.provider(),
+                config.clone(),
+            ),
+        ))
+        .with_memory_tool_executor(Arc::new(moa_memory_ingest::FastMemoryToolExecutor));
         let tool_router = Arc::new(tool_router);
         validate_lineage_journal_startup(config.as_ref())?;
         let lineage = build_lineage_sink(config.as_ref(), background_pool.clone()).await?;
@@ -183,6 +202,7 @@ impl RuntimeDeps {
             fga_client,
             contact_token_issuer,
             token_vault_provider,
+            credential_vault,
             kms,
             runtime_cache,
             providers,

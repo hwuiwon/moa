@@ -105,6 +105,7 @@ async fn provider_cdc_webhook_advances_provider_syncing_run_and_dispatches() {
             error_code: None,
             started_at: Utc::now(),
             finished_at: None,
+            provider_trigger_completed_at: None,
         })
         .await
         .expect("seed provider-syncing run");
@@ -483,6 +484,7 @@ async fn knowledge_auto_sync_parser_webhook_rejects_bad_signature_and_stores_red
             error_code: None,
             started_at: Utc::now(),
             finished_at: None,
+            provider_trigger_completed_at: None,
         })
         .await
         .expect("seed parse-pending run");
@@ -618,6 +620,7 @@ async fn knowledge_auto_sync_parser_webhook_rejects_bad_custom_header_and_accept
             error_code: None,
             started_at: Utc::now(),
             finished_at: None,
+            provider_trigger_completed_at: None,
         })
         .await
         .expect("seed parse-pending run");
@@ -726,6 +729,7 @@ async fn parser_completion_webhook_rejects_unbound_object_before_recording() {
             error_code: None,
             started_at: Utc::now(),
             finished_at: None,
+            provider_trigger_completed_at: None,
         })
         .await
         .expect("seed parse-pending run");

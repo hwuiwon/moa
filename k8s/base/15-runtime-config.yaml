@@ -4,6 +4,12 @@ metadata:
   name: moa-runtime-config
   namespace: moa-system
 data:
+  # Base/local renders the development posture explicitly: host-local hands with
+  # a permissive permission default. The production overlay patches both to the
+  # fail-closed cloud contract; neither value is ever inferred.
+  MOA_SECURITY_PROFILE: local
+  MOA_PERMISSIONS_DEFAULT_EFFECT: allow
+  MOA_CLOUD_HANDS_DEFAULT_PROVIDER: local
   # Every KMS-capable replica shares Postgres state and the same immutable
   # generation-named keyring. Root-key material remains in a Secret volume.
   MOA_KMS_PROVIDER: postgres

@@ -6,6 +6,7 @@ use super::*;
 async fn knowledge_auto_sync_manual_sync_triggers_provider_and_does_not_ingest_inline() {
     // Pins: manual sync returns after provider trigger and only touches sync-run state.
     let tenant_id = TenantId::from(Uuid::now_v7());
+    let caller = test_caller(tenant_id);
     let connection = fixture_connection(tenant_id);
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     repository
@@ -15,12 +16,15 @@ async fn knowledge_auto_sync_manual_sync_triggers_provider_and_does_not_ingest_i
     let service = fixture_service(repository.clone(), provider.clone(), 80);
 
     let response = service
-        .sync_connection(KnowledgeSyncRequest {
-            tenant_id,
-            connection_uid: connection.connection_uid,
-            parser: Some("native".to_string()),
-            max_records: Some(25),
-        })
+        .sync_connection(
+            KnowledgeSyncRequest {
+                tenant_id,
+                connection_uid: connection.connection_uid,
+                parser: Some("native".to_string()),
+                max_records: Some(25),
+            },
+            &caller,
+        )
         .await
         .expect("manual sync should trigger provider sync");
 
@@ -44,6 +48,7 @@ async fn knowledge_auto_sync_manual_sync_immediate_provider_completion_marks_run
  {
     // Pins: immediate provider completion marks the run provider-synced and records the same ingestion enqueue marker used by webhooks.
     let tenant_id = TenantId::from(Uuid::now_v7());
+    let caller = test_caller(tenant_id);
     let connection = fixture_connection(tenant_id);
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     repository
@@ -55,12 +60,15 @@ async fn knowledge_auto_sync_manual_sync_immediate_provider_completion_marks_run
     let service = fixture_service(repository.clone(), provider.clone(), 80);
 
     let response = service
-        .sync_connection(KnowledgeSyncRequest {
-            tenant_id,
-            connection_uid: connection.connection_uid,
-            parser: Some("native".to_string()),
-            max_records: Some(25),
-        })
+        .sync_connection(
+            KnowledgeSyncRequest {
+                tenant_id,
+                connection_uid: connection.connection_uid,
+                parser: Some("native".to_string()),
+                max_records: Some(25),
+            },
+            &caller,
+        )
         .await
         .expect("manual sync should accept an immediate provider completion");
 
@@ -85,6 +93,7 @@ async fn mock_connector_end_to_end_db_memory() {
     let kms: Arc<dyn moa_crypto::KeyManagementProvider> =
         Arc::new(moa_crypto::LocalKmsProvider::new());
     let tenant_id = TenantId::from(Uuid::now_v7());
+    let caller = test_caller(tenant_id);
     let contact_id = ContactId::new();
     let information_barrier =
         InformationBarrierId::parse("knowledge-restricted").expect("valid barrier");
@@ -110,23 +119,34 @@ async fn mock_connector_end_to_end_db_memory() {
     );
 
     let merge_connection = service
-        .exchange_public_token(KnowledgeExchangeTokenRequest {
-            tenant_id,
-            provider: "merge".to_string(),
-            exchange_token: "merge-public-token".to_string(),
-            source_selection: json!({}),
-            information_barrier: Some(information_barrier.clone()),
-        })
+        .exchange_public_token(
+            KnowledgeExchangeTokenRequest {
+                tenant_id,
+                provider: "merge".to_string(),
+                connector: CONNECTOR.to_string(),
+                exchange_token: "merge-public-token".to_string(),
+                source_selection: json!({}),
+                information_barrier: Some(information_barrier.clone()),
+            },
+            &caller,
+        )
         .await
         .expect("merge link should store one fake connection");
+    // A distinct link is a distinct operation: each Restate invocation mints its
+    // own replay-stable id, so reusing one here would be a fenced conflict.
+    let nango_caller = test_caller(tenant_id);
     let nango_connection = service
-        .exchange_public_token(KnowledgeExchangeTokenRequest {
-            tenant_id,
-            provider: "nango".to_string(),
-            exchange_token: "nango-public-token".to_string(),
-            source_selection: json!({}),
-            information_barrier: Some(information_barrier.clone()),
-        })
+        .exchange_public_token(
+            KnowledgeExchangeTokenRequest {
+                tenant_id,
+                provider: "nango".to_string(),
+                connector: CONNECTOR.to_string(),
+                exchange_token: "nango-public-token".to_string(),
+                source_selection: json!({}),
+                information_barrier: Some(information_barrier.clone()),
+            },
+            &nango_caller,
+        )
         .await
         .expect("nango link should store one fake connection");
     assert_ne!(
@@ -135,27 +155,38 @@ async fn mock_connector_end_to_end_db_memory() {
     );
 
     let merge_sync = service
-        .sync_connection(KnowledgeSyncRequest {
-            tenant_id,
-            connection_uid: merge_connection.connection_uid,
-            parser: Some("task14".to_string()),
-            max_records: Some(10),
-        })
+        .sync_connection(
+            KnowledgeSyncRequest {
+                tenant_id,
+                connection_uid: merge_connection.connection_uid,
+                parser: Some("task14".to_string()),
+                max_records: Some(10),
+            },
+            &caller,
+        )
         .await
         .expect("merge manual sync should trigger provider sync");
     let nango_sync = service
-        .sync_connection(KnowledgeSyncRequest {
-            tenant_id,
-            connection_uid: nango_connection.connection_uid,
-            parser: Some("task14".to_string()),
-            max_records: Some(10),
-        })
+        .sync_connection(
+            KnowledgeSyncRequest {
+                tenant_id,
+                connection_uid: nango_connection.connection_uid,
+                parser: Some("task14".to_string()),
+                max_records: Some(10),
+            },
+            &caller,
+        )
         .await
         .expect("nango manual sync should trigger provider sync");
     assert_eq!(merge_sync.status, "provider_syncing");
     assert_eq!(nango_sync.status, "provider_syncing");
-    assert_eq!(merge_provider.trigger_sync_count(), 1);
-    assert_eq!(nango_provider.trigger_sync_count(), 1);
+    // Each link already started its own initial sync, and a manual sync while
+    // that run still holds the connection's active slot returns it rather than
+    // dispatching a second provider call.
+    assert_eq!(merge_provider.start_initial_sync_count(), 1);
+    assert_eq!(nango_provider.start_initial_sync_count(), 1);
+    assert_eq!(merge_provider.trigger_sync_count(), 0);
+    assert_eq!(nango_provider.trigger_sync_count(), 0);
 
     let scope = RlsContext::tenant(tenant_id);
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
@@ -209,6 +240,7 @@ async fn mock_connector_end_to_end_db_memory() {
     let merge_page = merge_provider
         .list_changed_records(ListChangedRecordsRequest {
             connection: merge_connection_row,
+            credential: RedactedSecret::new("merge-provider-credential".to_string()),
             cursor: None,
             modified_after: None,
             limit: Some(10),
@@ -219,6 +251,7 @@ async fn mock_connector_end_to_end_db_memory() {
     let nango_page = nango_provider
         .list_changed_records(ListChangedRecordsRequest {
             connection: nango_connection_row,
+            credential: RedactedSecret::new("nango-provider-credential".to_string()),
             cursor: None,
             modified_after: None,
             limit: Some(10),
@@ -403,7 +436,6 @@ async fn mock_connector_end_to_end_db_memory() {
         .map(|object| {
             assert_eq!(object["parser_status"], json!("parsed"));
             assert_eq!(object["chunk_count"], json!(1));
-            assert_eq!(object["graph_node_count"], json!(1));
             object["source_id"]
                 .as_str()
                 .expect("object summary should include source_id")
@@ -478,9 +510,8 @@ async fn mock_connector_end_to_end_db_memory() {
         .chunks
         .first()
         .expect("llamaparse object should expose one chunk");
-    let trace_graph_uid = trace_chunk
-        .graph_node_uid
-        .expect("llamaparse chunk should have a graph node");
+    // A chunk's occurrence identity IS its graph node uid.
+    let trace_graph_uid = trace_chunk.chunk_uid;
     let contact_fact_uid = Uuid::now_v7();
     let retrieval_event = LineageEvent::Retrieval(RetrievalLineage {
         turn_id: TurnId(trace_uid),
@@ -744,7 +775,7 @@ async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_inges
             provider: "nango".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "nango-task14-account".to_string(),
-            credential_ref: "vault://knowledge/nango-task14".to_string(),
+            credential_ref: "c42bc21d-9469-aa8a-2667-39711cae3cb1".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({ "safe": "connection" }),
             source_selection: json!({}),
@@ -884,7 +915,7 @@ async fn knowledge_auto_sync_record_listing_failure_marks_sync_retryable_db_memo
             provider: "nango".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "nango-task14-account".to_string(),
-            credential_ref: "vault://knowledge/nango-task14".to_string(),
+            credential_ref: "c42bc21d-9469-aa8a-2667-39711cae3cb1".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({ "safe": "connection" }),
             source_selection: json!({}),
@@ -976,6 +1007,7 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
             error_code: None,
             started_at: Utc::now(),
             finished_at: None,
+            provider_trigger_completed_at: None,
         },
         connection: KnowledgeConnection {
             connection_uid,

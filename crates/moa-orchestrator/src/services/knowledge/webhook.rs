@@ -145,6 +145,9 @@ impl KnowledgeService {
                     error_code: None,
                     started_at: Utc::now(),
                     finished_at: None,
+                    // The provider told us it already synced, so there is no
+                    // MOA-side dispatch this run is waiting on.
+                    provider_trigger_completed_at: Some(Utc::now()),
                 };
                 match repository.claim_sync_run(run).await? {
                     SyncRunClaim::Claimed(run) => {

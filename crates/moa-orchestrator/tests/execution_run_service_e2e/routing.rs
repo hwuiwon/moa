@@ -641,13 +641,13 @@ async fn no_skill_research_compiles_executes_streams_and_synthesizes_service_e2e
         ]
     );
     assert!(requests[0].tools.is_empty());
-    assert_eq!(
-        requests[1]
-            .response_format
-            .as_ref()
-            .map(|format| format.name.as_str()),
-        Some("generated_execution_candidate")
-    );
+    // The execution planner embeds the candidate schema in-prompt as
+    // `<response_schema>…</response_schema>` and sends no provider-native
+    // strict response format (planner candidates carry free-form JSON that
+    // strict schemas cannot represent). The role vector above already pinned
+    // the in-prompt marker; this pins the absent provider-native half of the
+    // same contract.
+    assert_eq!(requests[1].response_format, None);
     Ok(())
 }
 

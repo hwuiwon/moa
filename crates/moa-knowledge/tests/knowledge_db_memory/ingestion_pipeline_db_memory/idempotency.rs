@@ -45,7 +45,7 @@ async fn ingestion_reconciles_stale_predecessor_when_retrying_incomplete_same_ha
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_1".to_string(),
-            credential_ref: "vault://knowledge/test".to_string(),
+            credential_ref: "44a8995d-d50b-6657-a037-a7839304535b".to_string(),
             status: ConnectionStatus::Active,
             metadata: credentialish_metadata(),
             source_selection: json!({}),
@@ -174,7 +174,7 @@ async fn ingestion_pipeline_replaying_same_page_keeps_counters_and_identities_on
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_replay".to_string(),
-            credential_ref: "vault://knowledge/replay".to_string(),
+            credential_ref: "c1fc5631-3673-8c1e-f677-a5e7d1199bdf".to_string(),
             status: ConnectionStatus::Active,
             metadata: credentialish_metadata(),
             source_selection: json!({}),
@@ -306,7 +306,7 @@ async fn ingestion_pipeline_replay_after_change_token_only_progress_finishes_ing
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_partial_replay".to_string(),
-            credential_ref: "vault://knowledge/partial-replay".to_string(),
+            credential_ref: "023f98cb-7db0-6487-ee51-57f1cd82e323".to_string(),
             status: ConnectionStatus::Active,
             metadata: credentialish_metadata(),
             source_selection: json!({}),
@@ -410,7 +410,7 @@ async fn ingestion_pipeline_replay_after_change_token_only_progress_finishes_ing
     assert!(counters.graph_edges_upserted > 0);
     assert_eq!(version_count(&pool, object_uid).await, 1);
     assert_eq!(chunk_count(&pool, object_uid).await, 2);
-    assert_eq!(chunks_with_graph_uid(&pool, object_uid).await, 2);
+    assert_eq!(chunks_with_occurrence_identity(&pool, object_uid).await, 2);
     assert_eq!(embedder.embedded_count(), 2);
 }
 
@@ -454,7 +454,7 @@ async fn ingestion_pipeline_reclaims_stale_started_claim_after_crash_db_knowledg
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_stale_claim_replay".to_string(),
-            credential_ref: "vault://knowledge/stale-claim-replay".to_string(),
+            credential_ref: "d97027dc-3116-c301-41f9-b6ffcc6c352a".to_string(),
             status: ConnectionStatus::Active,
             metadata: credentialish_metadata(),
             source_selection: json!({}),
@@ -527,7 +527,7 @@ async fn ingestion_pipeline_reclaims_stale_started_claim_after_crash_db_knowledg
     assert_eq!(replay.embeddings_created, 2);
     assert_eq!(version_count(&pool, object_uid).await, 1);
     assert_eq!(chunk_count(&pool, object_uid).await, 2);
-    assert_eq!(chunks_with_graph_uid(&pool, object_uid).await, 2);
+    assert_eq!(chunks_with_occurrence_identity(&pool, object_uid).await, 2);
     assert_eq!(embedder.embedded_count(), 2);
     assert_eq!(graph.vector_count(), 2);
     assert_eq!(
@@ -538,7 +538,10 @@ async fn ingestion_pipeline_reclaims_stale_started_claim_after_crash_db_knowledg
 
 #[tokio::test]
 async fn ingestion_pipeline_replay_after_graph_uid_midpoint_finishes_ingestion() {
-    // Pins: graph_node_uid on chunks is not enough replay proof before final records_ingested step.
+    // Pins: persisted chunk rows carrying graph occurrence identity are not
+    // replay proof. Only the durable materialization fence (the final
+    // records_ingested step) is, so a claimed version whose chunks exist but whose
+    // ingestion never completed is re-ingested.
     let db = postgres::bootstrap_test_db()
         .await
         .expect("bootstrap isolated Postgres");
@@ -576,7 +579,7 @@ async fn ingestion_pipeline_replay_after_graph_uid_midpoint_finishes_ingestion()
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_graph_uid_replay".to_string(),
-            credential_ref: "vault://knowledge/graph-uid-replay".to_string(),
+            credential_ref: "51430e7e-62a8-31a9-2dee-16a91c601760".to_string(),
             status: ConnectionStatus::Active,
             metadata: credentialish_metadata(),
             source_selection: json!({}),
@@ -666,7 +669,7 @@ async fn ingestion_pipeline_replay_after_graph_uid_midpoint_finishes_ingestion()
     assert_eq!(counters.chunks_embedded, 2);
     assert!(counters.graph_nodes_upserted > 0);
     assert!(counters.graph_edges_upserted > 0);
-    assert_eq!(chunks_with_graph_uid(&pool, object_uid).await, 2);
+    assert_eq!(chunks_with_occurrence_identity(&pool, object_uid).await, 2);
     assert_eq!(embedder.embedded_count(), 2);
 }
 

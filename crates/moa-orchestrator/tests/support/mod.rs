@@ -30,8 +30,8 @@ pub mod restate_runtime {
 /// Facade aggregating SessionStore request and metadata fixtures.
 pub mod session_store_service {
     pub use super::session_fixtures::{
-        append_event_request, get_events_request, init_session_vo_request,
-        storage_partition_id_from_meta, test_session_meta, user_message, user_message_event,
+        append_event_request, get_events_request, init_session_vo_request, start_turn_request,
+        storage_partition_id_from_meta, test_session_meta, user_message_event,
     };
 }
 

@@ -11,7 +11,7 @@ pub use injection::{
     screen_tool_input_for_canary, wrap_untrusted_tool_output,
 };
 pub use mcp_egress::{McpEgressError, McpEgressGuard, McpEgressPolicy};
-pub use mcp_proxy::{EnvironmentCredentialVault, MCPCredentialProxy};
+pub use mcp_proxy::{MCPCredentialProxy, McpDeploymentCredentials};
 pub use policies::{
     ActionPolicies, ActionPolicyCheck, ActionPolicyContext, ActionPolicyRuleStore, glob_match,
     parse_and_match_command, stricter_effect, validate_action_policy_rule,

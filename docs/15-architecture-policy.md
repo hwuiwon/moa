@@ -129,10 +129,27 @@ without changing turn workflows, handler contracts, or domain tests.
 
 The architecture checker enforces dependency kinds as well as source layout:
 forbidden production directions cannot be hidden as ordinary build edges, and
-explicit dev-only exceptions remain counted. It also enforces zero raw
-`OrchestratorCtx::current_*` dependency reads in orchestrator objects, services,
-and workflows. That scoped rule does not assert repository-wide elimination of
-the context type.
+explicit dev-only exceptions remain counted. It also constrains raw
+`OrchestratorCtx` dependency reads in orchestrator objects, services, and
+workflows. That scoped rule does not assert repository-wide elimination of the
+context type.
+
+Zero raw `OrchestratorCtx::current()` reads remain under those roots, and no
+allowance may reintroduce one: a bare `current()` hands a caller the whole
+dependency graph, which is exactly the coupling the rule exists to prevent.
+Eight counted `current_*` reads remain as temporary, per-accessor exceptions:
+
+| File | Accessor | Count | Why it is still there |
+|---|---|---:|---|
+| `objects/session/execution_runs.rs` | `current_graph_pool()` | 3 | Keyed Session admission runs three control-plane replay transactions; removing them needs constructor-injected admission persistence in `SessionImpl` |
+| `objects/session/execution_runs.rs` | `current_config()` | 1 | Session-owned template planning reads model and execution configuration; same injection prerequisite |
+| `workflows/experiment_run/target_execution.rs` | `current_config()` | 2 | Experiment-run targets select the internal model and compile against execution limits; needs constructor injection into `ExperimentRunImpl` |
+| `workflows/experiment_trial_run/target_execution.rs` | `current_config()` | 2 | Same selection and compilation for trial targets; needs constructor injection into `ExperimentTrialRunImpl` |
+
+Each entry is counted, not wildcarded: adding a ninth read fails the checker
+even in an already-allowed file. Task 6.6 removes all eight by injecting the
+dependencies through their implementation constructors, after which the
+allowance list is empty.
 
 Postgres DDL has one declared owner per logical top-level table family in the
 `moa-migrations` manifest. New or removed tables must update that manifest in
@@ -214,3 +231,58 @@ Consequences:
 Revisit when a customer forbids API keys, OpenFGA becomes a scale bottleneck,
 identity propagation must be cryptographically signed between services, or a
 third audit event format becomes required.
+
+### ADR 0003 - Accepted Category-Owner Splits And Growth Ratchets
+
+Status: Accepted.
+Date: 2026-07-24.
+
+The architecture checker had drifted into a dead gate: a stale configured path
+aborted the run before any coupling rule executed, so nothing was actually
+enforced. Restoring it forced a choice for every budget that reality had already
+exceeded — raise it, or claim a number the tree does not meet. Silently raising
+budgets is how the gate died the first time, so the current shape is recorded
+here explicitly instead.
+
+Decisions:
+
+1. The workspace is **51 packages** and **48 default members**. The category
+   splits that produced this count are accepted, not debt: `moa-config`,
+   `moa-wire`, `moa-retrieval`, and `moa-analytics-export` own configuration,
+   wire DTOs, retrieval, and analytics export respectively, and the memory and
+   auth namespaces are folders of separately-owned crates rather than parent
+   crates. `moa-orchestrator` stays **one** crate — an earlier verified split
+   into domain crates was reverted deliberately.
+2. `moa-core` has **43 direct** and **46 transitive** workspace reverse
+   dependencies. That fan-in is the cost of owning IDs, RLS context, events,
+   errors, and trait surfaces in one place. It is accepted at this number; it is
+   not a licence to add more.
+3. `crates/moa-core/src/types/worker/state.rs` is **344 lines** because
+   `WorkerInitialTask` now carries the inherited authenticated identity, which
+   must travel with the task rather than be re-derived by the child.
+4. Production LOC caps are enforced against **production** files. Large inline
+   test modules move into child `tests.rs` modules beside their owner instead of
+   inflating the owner's cap. The four caps held through that extraction: env
+   overlay 1,664; edge routes 1,749; turn execution 1,535; worker commands 352.
+5. Repository code owns SQL. Handlers, services, and workflows own transport,
+   authorization, and orchestration. Extracting a repository is the remedy for a
+   `DirectSql` finding; adding an allowance is not.
+
+Consequences:
+
+- The gate runs to completion and every rule reports, so later refactors are
+  actually protected.
+- The recorded numbers are ratchets, not targets: the checker fails when any is
+  exceeded, and raising one requires a new decision record in this file stating
+  what category boundary changed and why. "The number grew" is not a reason.
+- The budgets are now honest, which means they will fail more often. That is the
+  intended behavior.
+- Configuration is self-validating: every configured scan root, allowance, LOC
+  and symbol budget, sensitive consumer, and trace-manifest path is checked to
+  exist before any rule runs, and a stale path fails with its owner and exact
+  path instead of aborting the gate.
+
+Revisit when a new crate is genuinely required by a category boundary, when
+`moa-core` fan-in changes because a type moved to its domain owner, or when a
+production file exceeds its cap for a reason other than accumulated inline
+tests.

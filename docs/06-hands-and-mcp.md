@@ -223,7 +223,8 @@ Credential handling is host-side:
 
 1. The brain emits a normal tool call.
 2. The MCP credential proxy resolves session-scoped access.
-3. The proxy fetches real credentials from the configured vault.
+3. The proxy resolves the credential from its typed source: a deployment-owned
+   operator secret, or the durable tenant credential owner.
 4. The remote MCP request is enriched.
 5. The result is returned with credentials stripped.
 

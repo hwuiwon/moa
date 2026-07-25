@@ -140,7 +140,7 @@ cargo build -p moa-orchestrator --bin moa-orchestrator-bin \
   --features provider-overrides,integration,execution-planning-failpoints \
   --locked
 MOA_ORCHESTRATOR_BIN="$PWD/target/debug/moa-orchestrator-bin" \
-MOA_CLOUD_HANDS_ALLOW_LOCAL=true \
+MOA_SECURITY_PROFILE=local \
 cargo nextest run -p moa-orchestrator --locked \
   --features provider-overrides,integration,execution-planning-failpoints \
   --profile execution-eval-pr \

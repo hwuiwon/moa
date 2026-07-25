@@ -10,9 +10,11 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use secrecy::SecretString;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::analytics::{
     CacheDailyMetric, SessionAnalyticsSummary, SessionTurnMetric, TenantAnalyticsSummary,
@@ -27,15 +29,18 @@ use crate::types::{
     channel::SessionChannelBinding, channel::SessionChannelBindingId,
     channel::SessionChannelBindingResolution, completion::CompletionRequest,
     completion::CompletionStream, contact::ContactId, contact::ContactPointId,
-    context::ProcessorOutput, context::WorkingContext, events_stream::ClaimCheck,
-    events_stream::EventFilter, events_stream::EventRange, events_stream::EventRecord,
-    events_stream::SequenceNum, experience::ExperienceAttribution, experience::ExperienceRecord,
-    experience::LearningCandidate, experience::LearningCandidateStatus,
-    experience::LearningCandidateStatusUpdate, experience::TaskStrategySuccessRate,
-    hands::HandHandle, hands::HandSpec, hands::HandStatus, hands::SandboxFile,
-    identifiers::SegmentId, identifiers::SessionAttachmentId, identifiers::SessionId,
-    identifiers::StoragePartitionId, identifiers::TenantId, identifiers::ToolCallId,
-    learning::LearningEntry, model::Credential as StoredCredential, model::ModelCapabilities,
+    contact::SessionAttachmentSlot, contact::SessionAttachmentUpload,
+    contact::StoredSessionAttachment, context::ProcessorOutput, context::WorkingContext,
+    credentials::CredentialContext, credentials::CredentialError, credentials::CredentialIdentity,
+    credentials::CredentialRef, credentials::CredentialSource, credentials::CredentialVersion,
+    credentials::RedactedSecret, events_stream::ClaimCheck, events_stream::EventFilter,
+    events_stream::EventRange, events_stream::EventRecord, events_stream::SequenceNum,
+    experience::ExperienceAttribution, experience::ExperienceRecord, experience::LearningCandidate,
+    experience::LearningCandidateStatus, experience::LearningCandidateStatusUpdate,
+    experience::TaskStrategySuccessRate, hands::HandHandle, hands::HandSpec, hands::HandStatus,
+    hands::SandboxFile, identifiers::SegmentId, identifiers::SessionAttachmentId,
+    identifiers::SessionId, identifiers::StoragePartitionId, identifiers::TenantId,
+    identifiers::ToolCallId, learning::LearningEntry, model::ModelCapabilities,
     segment_assessment::SegmentAssessment, segment_assessment::SegmentBaseline,
     segment_assessment::SkillResolutionRate, segments::SegmentCompletion, segments::TaskSegment,
     session::Checkpoint, session::CheckpointHandle, session::SessionFilter, session::SessionMeta,
@@ -519,16 +524,21 @@ pub trait BlobStore: Send + Sync {
 /// Durable store for user-visible attachments carried by session messages.
 #[async_trait]
 pub trait SessionAttachmentStore: Send + Sync {
-    /// Stores one attachment and returns its durable metadata.
+    /// Stores one attachment into its deterministic slot, or replays an existing one.
+    ///
+    /// The slot identity is derived from tenant, session, client message id, and
+    /// attachment ordinal, so a retried submission of the same message addresses the
+    /// same row and object instead of creating a second attachment. An occupied slot
+    /// holding byte-identical content and identical metadata returns
+    /// [`crate::types::contact::SessionAttachmentDisposition::Replayed`] and writes
+    /// nothing; an occupied slot whose digest or metadata differs returns
+    /// [`MoaError::SessionAttachmentSlotConflict`] without overwriting the stored
+    /// object.
     async fn put(
         &self,
-        tenant_id: TenantId,
-        session_id: SessionId,
-        contact_id: Option<ContactId>,
-        name: String,
-        mime_type: String,
-        content: Vec<u8>,
-    ) -> Result<Attachment>;
+        slot: &SessionAttachmentSlot,
+        upload: SessionAttachmentUpload,
+    ) -> Result<StoredSessionAttachment>;
 
     /// Fetches stored attachment content and metadata.
     async fn get(
@@ -861,29 +871,97 @@ pub trait ContextProcessor: Send + Sync {
     }
 }
 
-/// Metadata for a stored credential without secret material.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredCredentialMetadata {
-    /// Credential service namespace.
-    pub service: String,
-    /// Credential scope inside the service namespace.
-    pub scope: String,
-    /// Stable credential material kind, such as `bearer`, `oauth`, or `api_key`.
-    pub kind: String,
-}
-
-/// Secure credential storage abstraction.
+/// Durable, tenant-scoped credential storage.
+///
+/// Every operation is addressed by typed identity — never a `(service, scope)`
+/// string — and carries a [`CredentialContext`] with the acting principal, the
+/// requested operation, and a replay-stable operation identity. Implementations
+/// own their storage handle and must not borrow a caller's request transaction,
+/// so a credential written by one replica resolves on another.
+///
+/// There is deliberately no enumeration operation: a caller-selected tenant
+/// credential listing cannot be authorized meaningfully.
 #[async_trait]
 pub trait CredentialVault: Send + Sync {
-    /// Retrieves credentials for a service and scope.
-    async fn get(&self, service: &str, scope: &str) -> Result<StoredCredential>;
+    /// Stores the first version of a new credential series.
+    ///
+    /// The acting caller identity is recorded as the credential's owner for
+    /// authorization purposes only; it is not a privacy-subject relationship.
+    async fn create(
+        &self,
+        identity: CredentialIdentity,
+        material: SecretString,
+        ctx: &CredentialContext,
+    ) -> std::result::Result<CredentialVersion, CredentialError>;
 
-    /// Stores credentials for a service and scope.
-    async fn set(&self, service: &str, scope: &str, cred: StoredCredential) -> Result<()>;
+    /// Resolves the plaintext behind `source` for one authorized outbound request.
+    ///
+    /// The operation's audit row is committed before plaintext is returned, so a
+    /// resolution can never be observed by the caller without a durable record.
+    async fn resolve(
+        &self,
+        source: &CredentialSource,
+        ctx: &CredentialContext,
+    ) -> std::result::Result<RedactedSecret, CredentialError>;
 
-    /// Deletes credentials for a service and scope, returning whether a value existed.
-    async fn delete(&self, service: &str, scope: &str) -> Result<bool>;
+    /// Describes one exact stored version without opening its material.
+    ///
+    /// This is a status read for a reference the caller already holds, not an
+    /// enumeration: the exact reference must be supplied, the tenant in `ctx`
+    /// must own it, and nothing is decrypted. It exists so an operator surface
+    /// can report that a connection's credential is present, revoked, or gone
+    /// without a tenant-wide listing and without a plaintext resolution.
+    async fn describe(
+        &self,
+        reference: CredentialRef,
+        ctx: &CredentialContext,
+    ) -> std::result::Result<CredentialVersion, CredentialError>;
 
-    /// Lists stored credential metadata for services with the supplied prefix.
-    async fn list(&self, service_prefix: &str) -> Result<Vec<StoredCredentialMetadata>>;
+    /// Stores a new active version, superseding `current` under compare-and-swap.
+    ///
+    /// Fails with [`CredentialError::VersionConflict`] when `current` is no
+    /// longer the active version, so a concurrent rotation cannot be lost.
+    async fn rotate(
+        &self,
+        current: CredentialRef,
+        material: SecretString,
+        ctx: &CredentialContext,
+    ) -> std::result::Result<CredentialVersion, CredentialError>;
+
+    /// Marks one version unusable while preserving its audit history.
+    async fn revoke(
+        &self,
+        reference: CredentialRef,
+        ctx: &CredentialContext,
+    ) -> std::result::Result<(), CredentialError>;
+
+    /// Removes every credential version for one tenant connection.
+    ///
+    /// Returns the number of versions removed. Idempotent: a repeated call for
+    /// an already-purged connection removes nothing and succeeds.
+    async fn delete_connection(
+        &self,
+        connection_uid: Uuid,
+        ctx: &CredentialContext,
+    ) -> std::result::Result<u64, CredentialError>;
+
+    /// Removes at most `limit` credential rows for the context's tenant.
+    ///
+    /// This is the bounded tenant-lifecycle sweep used by tenant purge. The
+    /// caller loops until it returns 0, which gives bounded transactions,
+    /// natural idempotency, and crash-resume for free — a workflow that dies
+    /// mid-purge simply resumes where the durable state left off.
+    ///
+    /// The vault owns purge completeness because credentials can outlive the
+    /// connections that created them (failed link compensation, orphans,
+    /// partial purges), so no other table is authoritative about what exists.
+    ///
+    /// It is not an enumeration surface: it returns only a count, never the set
+    /// of connections or credentials, so it cannot be used to discover what a
+    /// tenant holds. Requires a purge-scoped context.
+    async fn purge_tenant(
+        &self,
+        limit: u32,
+        ctx: &CredentialContext,
+    ) -> std::result::Result<u64, CredentialError>;
 }

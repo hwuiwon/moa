@@ -8,6 +8,7 @@ use moa_core::events::Event;
 use moa_core::types::events_stream::EventRange;
 use moa_core::types::session::SessionStatus;
 use moa_test_support::OrchestratorTestFixture;
+use moa_test_support::fixtures::fresh_client_message_id;
 use moa_wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use serde_json::json;
 
@@ -23,6 +24,9 @@ async fn fixture_round_trips_session_turn_through_restate() -> anyhow::Result<()
         .session(session_id.to_string())
         .start_turn(
             StartTurnRequest {
+                client_message_id: fresh_client_message_id(),
+                reply_to: None,
+                stream_cursor: None,
                 user_message: "ping".to_string(),
                 attachments: Vec::new(),
                 model: Some("scripted-loadtest".to_string()),
@@ -83,6 +87,9 @@ async fn fixture_round_trips_accepted_execution_run_through_restate() -> anyhow:
         .session(session_id.to_string())
         .start_turn(
             StartTurnRequest {
+                client_message_id: fresh_client_message_id(),
+                reply_to: None,
+                stream_cursor: None,
                 user_message: objective.to_string(),
                 attachments: Vec::new(),
                 model: None,

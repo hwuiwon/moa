@@ -447,6 +447,13 @@ schema = "moa"
 owner = "moa-knowledge"
 
 [[table]]
+name = "knowledge_link_claims"
+schema = "moa"
+owner = "moa-knowledge"
+readers = ["moa-orchestrator"]
+notes = "Operation-fenced link reserve/claim/finalize state; holds credential references only."
+
+[[table]]
 name = "knowledge_object_ingestion_claims"
 schema = "moa"
 owner = "moa-knowledge"
@@ -590,6 +597,20 @@ owner = "moa-session"
 name = "tenant_signing_keys"
 schema = "public"
 owner = "moa-ocsf"
+
+[[table]]
+name = "tenant_credential_operations"
+schema = "public"
+owner = "moa-auth/providers"
+readers = ["moa-orchestrator"]
+notes = "Append-only, secret-free audit of tenant credential operations."
+
+[[table]]
+name = "tenant_credential_versions"
+schema = "public"
+owner = "moa-auth/providers"
+readers = ["moa-orchestrator"]
+notes = "Envelope-encrypted versioned tenant connection credentials."
 
 [[table]]
 name = "tenant_purge_operations"

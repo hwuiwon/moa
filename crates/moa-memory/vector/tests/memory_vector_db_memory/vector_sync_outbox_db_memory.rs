@@ -128,7 +128,8 @@ async fn insert_knowledge_chunk(
     let connection_uid = Uuid::now_v7();
     let object_uid = Uuid::now_v7();
     let version_uid = Uuid::now_v7();
-    let chunk_uid = Uuid::now_v7();
+    // The chunk row IS the graph occurrence, so its uid is the graph node uid.
+    let chunk_uid = graph_node_uid;
     let mut conn = scoped_conn(pool, storage_partition_id).await;
     sqlx::query(
         r#"
