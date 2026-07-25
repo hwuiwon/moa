@@ -2051,7 +2051,7 @@ async fn reservation_near_bigint_limit_returns_budget_exceeded_db() -> TestResul
         max_tasks: Some(maximum),
         max_tool_calls: Some(maximum),
         max_retrieved_bytes: Some(maximum),
-        deadline_at: Some(Utc::now() + Duration::hours(1)),
+        deadline_at: Some(pg_deadline(Duration::hours(1))),
     };
     let cases = [
         (
@@ -2409,7 +2409,7 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
                     max_tasks: Some(1),
                     max_tool_calls: Some(1),
                     max_retrieved_bytes: Some(1),
-                    deadline_at: Some(Utc::now() + Duration::hours(1)),
+                    deadline_at: Some(pg_deadline(Duration::hours(1))),
                 },
             ),
         )
@@ -4651,14 +4651,21 @@ fn canonical_plan(seed: u8) -> CanonicalExecutionPlan {
     }
 }
 
+/// A deadline offset from now, truncated to what Postgres can round-trip.
+///
+/// TIMESTAMPTZ carries microseconds, so a nanosecond-precision deadline only
+/// equals its repository round-trip when the wall clock happens to land on a
+/// whole microsecond — true on microsecond-granular macOS clocks and false
+/// almost always on nanosecond-granular Linux CI clocks. Every budget a test
+/// may read back must build its deadline through this helper.
+fn pg_deadline(offset: Duration) -> chrono::DateTime<Utc> {
+    let deadline = Utc::now() + offset;
+    chrono::DateTime::<Utc>::from_timestamp_micros(deadline.timestamp_micros())
+        .expect("test deadline offsets are representable at microsecond precision")
+}
+
 fn budget(max_tasks: u64) -> ExecutionBudgetLimit {
-    // Postgres TIMESTAMPTZ carries microseconds, so a nanosecond-precision
-    // deadline only equals its repository round-trip when the wall clock
-    // happens to land on a whole microsecond. Truncate up front so equality
-    // assertions against read-back budgets are exact instead of clock-lucky.
-    let deadline = Utc::now() + Duration::hours(1);
-    let deadline = chrono::DateTime::<Utc>::from_timestamp_micros(deadline.timestamp_micros())
-        .expect("hour-offset deadline is representable at microsecond precision");
+    let deadline = pg_deadline(Duration::hours(1));
     ExecutionBudgetLimit {
         max_cost_microusd: Some(max_tasks.saturating_mul(100)),
         max_tokens: Some(max_tasks.saturating_mul(100)),

@@ -66,7 +66,14 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
         max_tasks: Some(1),
         max_tool_calls: Some(10),
         max_retrieved_bytes: Some(1_000),
-        deadline_at: Some(Utc::now() + Duration::hours(1)),
+        // Microsecond-truncated so Postgres round-trip equality is exact on
+        // nanosecond-granular CI clocks, not just microsecond-granular local ones.
+        deadline_at: Some(
+            chrono::DateTime::<Utc>::from_timestamp_micros(
+                (Utc::now() + Duration::hours(1)).timestamp_micros(),
+            )
+            .expect("hour-offset deadline is representable at microsecond precision"),
+        ),
     };
     let planning_snapshot = ExecutionPlanningContextSnapshot {
         schema_version: 1,
