@@ -286,7 +286,14 @@ async fn rate_limit_metrics_track_each_known_outcome_and_ignore_unknown_pairs() 
 }
 
 async fn wait_for_request_count(server: &Arc<wiremock::MockServer>, count: usize) {
-    for _ in 0..100 {
+    // The clock is paused, so `advance` moves virtual time only and the loop
+    // costs microseconds of wall time regardless of the budget. The budget
+    // must cover every virtual delay a send can legitimately sit behind —
+    // per-channel limiter refills and jittered retry backoff — or the wait
+    // panics on schedules that merely landed late, which is how this helper
+    // flaked on loaded CI runners while passing locally. Five virtual seconds
+    // dwarfs every configured delay without slowing the test at all.
+    for _ in 0..200 {
         let received = server
             .received_requests()
             .await
@@ -294,7 +301,7 @@ async fn wait_for_request_count(server: &Arc<wiremock::MockServer>, count: usize
         if received.len() >= count {
             return;
         }
-        advance(Duration::from_millis(1)).await;
+        advance(Duration::from_millis(25)).await;
         tokio::task::yield_now().await;
     }
     panic!("mock server did not receive {count} requests");

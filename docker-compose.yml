@@ -129,7 +129,9 @@ services:
     restart: unless-stopped
 
   rustfs:
-    image: rustfs/rustfs:latest
+    # Pinned by digest alongside rustfs/rc (see rustfs-init) so server and
+    # client revisions cannot drift apart.
+    image: rustfs/rustfs:latest@sha256:fa19210ac4697c79d7ccca1ec9b0eb91aebacc6691991ffb14014bb3c67e6cc3
     container_name: ${COMPOSE_PROJECT_NAME:-moa}-rustfs
     restart: unless-stopped
     environment:
@@ -149,7 +151,11 @@ services:
       - moa-rustfs-data:/data
 
   rustfs-init:
-    image: rustfs/rc:latest
+    # Pinned by digest: `:latest` drifted on CI (fresh pull) to a revision whose
+    # init invocation exits 7 while local caches kept a working image — the same
+    # unpinned-image failure mode the PII sidecar hit. This digest is the
+    # locally-verified working revision.
+    image: rustfs/rc:latest@sha256:7e488f0b71de2f5152777cbc8a8dd5b8370d99d3019fbfc7e196bdc6e3fa0285
     container_name: ${COMPOSE_PROJECT_NAME:-moa}-rustfs-init
     restart: "no"
     depends_on:

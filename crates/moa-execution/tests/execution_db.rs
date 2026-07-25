@@ -4652,13 +4652,20 @@ fn canonical_plan(seed: u8) -> CanonicalExecutionPlan {
 }
 
 fn budget(max_tasks: u64) -> ExecutionBudgetLimit {
+    // Postgres TIMESTAMPTZ carries microseconds, so a nanosecond-precision
+    // deadline only equals its repository round-trip when the wall clock
+    // happens to land on a whole microsecond. Truncate up front so equality
+    // assertions against read-back budgets are exact instead of clock-lucky.
+    let deadline = Utc::now() + Duration::hours(1);
+    let deadline = chrono::DateTime::<Utc>::from_timestamp_micros(deadline.timestamp_micros())
+        .expect("hour-offset deadline is representable at microsecond precision");
     ExecutionBudgetLimit {
         max_cost_microusd: Some(max_tasks.saturating_mul(100)),
         max_tokens: Some(max_tasks.saturating_mul(100)),
         max_tasks: Some(max_tasks),
         max_tool_calls: Some(max_tasks.saturating_mul(10)),
         max_retrieved_bytes: Some(max_tasks.saturating_mul(1_000)),
-        deadline_at: Some(Utc::now() + Duration::hours(1)),
+        deadline_at: Some(deadline),
     }
 }
 
