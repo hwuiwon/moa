@@ -286,13 +286,18 @@ async fn rate_limit_metrics_track_each_known_outcome_and_ignore_unknown_pairs() 
 }
 
 async fn wait_for_request_count(server: &Arc<wiremock::MockServer>, count: usize) {
-    // The clock is paused, so `advance` moves virtual time only and the loop
-    // costs microseconds of wall time regardless of the budget. The budget
-    // must cover every virtual delay a send can legitimately sit behind —
-    // per-channel limiter refills and jittered retry backoff — or the wait
-    // panics on schedules that merely landed late, which is how this helper
-    // flaked on loaded CI runners while passing locally. Five virtual seconds
-    // dwarfs every configured delay without slowing the test at all.
+    // Two different clocks gate a request's arrival, and the wait must fund
+    // both. Virtual time (the paused tokio clock) gates limiter refills and
+    // jittered retry backoff, so each iteration advances it far enough that
+    // five virtual seconds accumulate — dwarfing every configured delay while
+    // staying well under the 30s virtual HTTP request timeout. Real time
+    // gates the actual localhost round-trip to wiremock, which the OS delivers
+    // on its own schedule: a busy yield loop spins through its iterations in
+    // microseconds of wall time, so on a loaded CI runner the loop exhausted
+    // before the packets ever arrived (and which test in this family died was
+    // scheduling luck). The 1ms blocking-thread sleep awaited each iteration
+    // hands the runtime a real window to drive that I/O without freezing the
+    // executor, bounding the worst case near 200ms of wall time per wait.
     for _ in 0..200 {
         let received = server
             .received_requests()
@@ -301,8 +306,11 @@ async fn wait_for_request_count(server: &Arc<wiremock::MockServer>, count: usize
         if received.len() >= count {
             return;
         }
-        advance(Duration::from_millis(25)).await;
+        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1)))
+            .await
+            .expect("sleep helper thread should not panic");
         tokio::task::yield_now().await;
+        advance(Duration::from_millis(25)).await;
     }
     panic!("mock server did not receive {count} requests");
 }

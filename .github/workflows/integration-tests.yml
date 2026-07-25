@@ -10,12 +10,18 @@ permissions:
 jobs:
   restate-fixture-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The dedicated scripted fixture builds moa-orchestrator-bin inside the
+    # test, which the old always-bailing invocation never paid for.
+    timeout-minutes: 45
     env:
       MOA_PROVIDERS_OVERRIDE: scripted:/loadtest-scripts/perf-gate.json
-      MOA_RESTATE_INGRESS_URL: http://localhost:18080
-      MOA_RESTATE_ADMIN_URL: http://localhost:9070
-      MOA_DATABASE_URL: postgres://moa_owner:dev@localhost:25432/moa
+      # Compose publishes restate ingress/admin at 10010/10011 and postgres at
+      # 10040 (docker-compose.yml); these previously pointed at 18080/9070/25432,
+      # which nothing publishes, so the smoke could only ever fail with
+      # connection-refused.
+      MOA_RESTATE_INGRESS_URL: http://localhost:10010
+      MOA_RESTATE_ADMIN_URL: http://localhost:10011
+      MOA_DATABASE_URL: postgres://moa_owner:dev@localhost:10040/moa
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
@@ -68,8 +74,24 @@ jobs:
           docker compose logs restate-register
           exit 1
 
-      - name: Run fixture smoke
-        run: cargo test -p moa-test-support --features integration --test orchestrator_fixture_service_e2e -- --nocapture
+      # The two smoke tests need opposite environments, mirroring the
+      # clean-e2e ladder's restate-service-e2e vs fixture-service-e2e split:
+      # the session round trip targets the compose stack through the external
+      # orchestrator env, while the scripted execution-run fixture boots its
+      # own dedicated stack and refuses an external orchestrator by design.
+      - name: Run fixture smoke (compose-backed session round trip)
+        run: >-
+          cargo test -p moa-test-support --features integration
+          --test orchestrator_fixture_service_e2e
+          fixture_round_trips_session_turn_through_restate
+          -- --nocapture
+      - name: Run fixture smoke (dedicated scripted fixture)
+        run: >-
+          env -u MOA_RESTATE_INGRESS_URL -u MOA_RESTATE_ADMIN_URL
+          cargo test -p moa-test-support --features integration
+          --test orchestrator_fixture_service_e2e
+          fixture_round_trips_accepted_execution_run_through_restate
+          -- --nocapture
 
       - name: Dump compose logs
         if: failure()
