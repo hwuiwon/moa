@@ -85,6 +85,14 @@ jobs:
           --test orchestrator_fixture_service_e2e
           fixture_round_trips_session_turn_through_restate
           -- --nocapture
+      # The dedicated fixture boots its own Postgres/Restate/OpenFGA
+      # testcontainers and spawns its own orchestrator; running it beside the
+      # full compose stack starved the two-core runner badly enough that the
+      # route classifier's bounded call timed out and the router took its
+      # deliberate conservative Inline fallback, turning the expected Accepted
+      # outcome into Completed. Free the compose stack's cores first.
+      - name: Stop compose stack before the dedicated fixture
+        run: docker compose down -v
       - name: Run fixture smoke (dedicated scripted fixture)
         run: >-
           env -u MOA_RESTATE_INGRESS_URL -u MOA_RESTATE_ADMIN_URL
