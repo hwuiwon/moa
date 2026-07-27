@@ -85,7 +85,7 @@ fn audit(tenant_id: TenantId, operation_key: &str) -> ExecutionPlanningAuditEnve
             final_plan_hash: Some("2".repeat(64)),
             validation_report: compiler_report(),
             duration_micros: 23,
-            created_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
         },
     }
 }
@@ -116,7 +116,7 @@ async fn learning_candidate_finalization_requires_normalized_compile_audit_db() 
             "regression_report": {"decision": "promoted"},
             "terminal": {"keep": true},
         })),
-        updated_at: Utc::now(),
+        updated_at: moa_test_support::fixtures::pg_now(),
     };
 
     let missing = test_db
@@ -200,7 +200,7 @@ async fn learning_candidate_finalization_rejects_a_different_compile_operation_d
         status: LearningCandidateStatus::Rejected,
         status_reason: Some("review rejected".to_string()),
         evaluation_payload: Some(json!({"decision": "rejected"})),
-        updated_at: Utc::now(),
+        updated_at: moa_test_support::fixtures::pg_now(),
     };
 
     let error = test_db
@@ -246,7 +246,7 @@ async fn noncompiling_skill_review_finalizes_without_compile_audit_db() {
         status: LearningCandidateStatus::Rejected,
         status_reason: Some("review rejected".to_string()),
         evaluation_payload: Some(json!({"terminal": {"decision": "rejected"}})),
-        updated_at: Utc::now(),
+        updated_at: moa_test_support::fixtures::pg_now(),
     };
 
     assert!(

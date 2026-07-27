@@ -49,8 +49,8 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
             metadata: credentialish_metadata(),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -255,8 +255,8 @@ async fn deletion_writes_terminal_status_last_and_stays_retryable_on_invalidatio
             metadata: credentialish_metadata(),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -380,8 +380,8 @@ async fn ingestion_pipeline_prunes_unseen_objects_after_full_selection_refresh()
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await

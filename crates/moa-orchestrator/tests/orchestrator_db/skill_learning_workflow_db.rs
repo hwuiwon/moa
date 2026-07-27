@@ -626,7 +626,7 @@ async fn seed_recurrence_member(
             strength: 0.9,
             summary: "Focused tests passed".to_string(),
         }],
-        assessed_at: Utc::now(),
+        assessed_at: moa_test_support::fixtures::pg_now(),
         policy_version: "test-assessor".to_string(),
     };
     let segment = TaskSegment {
@@ -636,7 +636,7 @@ async fn seed_recurrence_member(
         segment_index: 0,
         task_summary: Some("Implement a reusable Rust workflow".to_string()),
         started_at: events[0].timestamp,
-        ended_at: Some(Utc::now()),
+        ended_at: Some(moa_test_support::fixtures::pg_now()),
         turn_count: 1,
         tools_used,
         skills_activated: Vec::new(),

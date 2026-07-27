@@ -136,8 +136,8 @@ async fn semantic_graph_extraction_is_cached_reported_and_written_db_memory() {
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -259,8 +259,8 @@ async fn generic_entity_fallback_writes_graph_entities_on_general_corpus_db_memo
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -352,8 +352,8 @@ async fn ingestion_preserves_chunk_structure_for_bounded_neighbor_context_db_mem
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -533,8 +533,8 @@ async fn semantic_graph_model_extraction_stamps_model_identity_db_memory() {
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -617,8 +617,8 @@ async fn semantic_graph_model_parse_failure_falls_back_to_deterministic_db_memor
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -689,8 +689,8 @@ async fn semantic_graph_cache_identity_distinguishes_extractors_db_memory() {
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await

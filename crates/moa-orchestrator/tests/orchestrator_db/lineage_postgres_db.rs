@@ -1,7 +1,6 @@
 //! Postgres lineage sink smoke coverage for the cloud orchestrator selector.
 
 use anyhow::Result;
-use chrono::Utc;
 use moa_config::MoaConfig;
 use moa_core::{
     types::identifiers::SessionId, types::identifiers::StoragePartitionId,
@@ -44,7 +43,7 @@ async fn postgres_lineage_sink_writes_rows() -> Result<()> {
         storage_partition_id: storage_partition_id.clone(),
         user_id: UserId::new("test-user"),
         scope: MemoryScope::Tenant { tenant_id },
-        ts: Utc::now(),
+        ts: moa_test_support::fixtures::pg_now(),
         query_original: "lineage smoke".to_string(),
         query_expansions: Vec::new(),
         vector_hits: Vec::new(),

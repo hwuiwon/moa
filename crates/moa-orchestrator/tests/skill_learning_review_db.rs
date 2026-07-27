@@ -1465,7 +1465,7 @@ mod skill_learning_review {
             confidence: None,
             source_refs: vec![promotion_candidate_id],
             actor: "review:user:reviewer".to_string(),
-            valid_from: Utc::now(),
+            valid_from: moa_test_support::fixtures::pg_now(),
             valid_to: None,
             batch_id: None,
             version: 1,

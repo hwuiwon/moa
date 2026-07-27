@@ -111,7 +111,7 @@ fn erase_test_intent(storage_partition_id: &str, user_id: &str, name: &str) -> N
         properties: json!({ "name": name, "user_id": user_id, "source": "privacy_erase_test" }),
         pii_class: SensitivityClass::Phi,
         confidence: Some(0.95),
-        valid_from: Utc::now(),
+        valid_from: moa_test_support::fixtures::pg_now(),
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,

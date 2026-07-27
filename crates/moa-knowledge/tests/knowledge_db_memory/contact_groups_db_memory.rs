@@ -56,7 +56,7 @@ fn object(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeObject {
             }
         }),
         status: ObjectStatus::Active,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         deleted_at: None,
     }
 }
@@ -88,7 +88,7 @@ fn object_with_member(
             }
         }),
         status: ObjectStatus::Active,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         deleted_at: None,
     }
 }

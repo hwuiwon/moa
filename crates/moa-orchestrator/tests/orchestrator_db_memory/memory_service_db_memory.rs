@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use moa_config::MoaConfig;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
@@ -53,7 +52,7 @@ async fn pinned_clearances_isolate_reads_and_replayed_audit_is_idempotent_db_mem
             properties: json!({ "summary": "pinned clearance alpha evidence" }),
             pii_class: SensitivityClass::None,
             confidence: Some(0.95),
-            valid_from: Utc::now(),
+            valid_from: moa_test_support::fixtures::pg_now(),
             embedding: None,
             embedding_model: None,
             embedding_model_version: None,

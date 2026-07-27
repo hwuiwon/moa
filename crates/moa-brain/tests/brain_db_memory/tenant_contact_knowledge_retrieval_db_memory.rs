@@ -4,7 +4,6 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use moa_brain::pipeline::memory::GraphMemoryRetriever;
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
@@ -956,7 +955,7 @@ fn node_intent(
         properties,
         pii_class: SensitivityClass::None,
         confidence: Some(0.95),
-        valid_from: Utc::now(),
+        valid_from: moa_test_support::fixtures::pg_now(),
         embedding: Some(test_embedding(name)),
         embedding_model: Some("embed-v4.0".to_string()),
         embedding_model_version: Some(1),

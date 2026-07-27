@@ -117,7 +117,7 @@ async fn claimed_candidate_keeps_review_state_on_remine_db() {
                 status: LearningCandidateStatus::Evaluating,
                 status_reason: Some("claimed by reviewer".to_string()),
                 evaluation_payload: None,
-                updated_at: Utc::now(),
+                updated_at: moa_test_support::fixtures::pg_now(),
             },
             LearningCandidateStatus::Proposed,
         )
@@ -164,7 +164,7 @@ fn durable_errors(session_id: SessionId, tool_name: &str, count: usize) -> Vec<E
                 sequence_num: index as u64 + 1,
                 event_type: event.event_type(),
                 event,
-                timestamp: Utc::now(),
+                timestamp: moa_test_support::fixtures::pg_now(),
                 brain_id: None,
                 hand_id: None,
                 token_count: None,

@@ -46,8 +46,8 @@ async fn embedding_cardinality_mismatch_rejects_batch_without_graph_write_db_mem
             metadata: credentialish_metadata(),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -123,8 +123,8 @@ async fn ingest_record_page_processes_records_concurrently_with_accurate_report_
             metadata: credentialish_metadata(),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -238,8 +238,8 @@ async fn ingestion_pipeline_duplicate_workers_coalesce_object_version_before_gra
             metadata: credentialish_metadata(),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await

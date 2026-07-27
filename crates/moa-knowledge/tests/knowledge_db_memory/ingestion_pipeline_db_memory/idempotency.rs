@@ -50,8 +50,8 @@ async fn ingestion_reconciles_stale_predecessor_when_retrying_incomplete_same_ha
             metadata: credentialish_metadata(),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -179,8 +179,8 @@ async fn ingestion_pipeline_replaying_same_page_keeps_counters_and_identities_on
             metadata: credentialish_metadata(),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -311,8 +311,8 @@ async fn ingestion_pipeline_replay_after_change_token_only_progress_finishes_ing
             metadata: credentialish_metadata(),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -332,7 +332,7 @@ async fn ingestion_pipeline_replay_after_change_token_only_progress_finishes_ing
             change_token: Some("partial-token".to_string()),
             metadata: credentialish_metadata(),
             status: ObjectStatus::Active,
-            source_updated_at: Some(Utc::now()),
+            source_updated_at: Some(moa_test_support::fixtures::pg_now()),
             deleted_at: None,
         })
         .await
@@ -345,8 +345,8 @@ async fn ingestion_pipeline_replay_after_change_token_only_progress_finishes_ing
                 object_uid: Some(object_uid),
                 step: "object_change_checked".to_string(),
                 status: IngestionStepStatus::Completed,
-                started_at: Utc::now(),
-                ended_at: Some(Utc::now()),
+                started_at: moa_test_support::fixtures::pg_now(),
+                ended_at: Some(moa_test_support::fixtures::pg_now()),
                 duration_ms: Some(1),
                 counters: json!({ "records_seen": 1, "records_changed": 1 }),
                 summary: None,
@@ -459,8 +459,8 @@ async fn ingestion_pipeline_reclaims_stale_started_claim_after_crash_db_knowledg
             metadata: credentialish_metadata(),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -481,7 +481,7 @@ async fn ingestion_pipeline_reclaims_stale_started_claim_after_crash_db_knowledg
             change_token: Some("stale-claim-token".to_string()),
             metadata: credentialish_metadata(),
             status: ObjectStatus::Active,
-            source_updated_at: Some(Utc::now()),
+            source_updated_at: Some(moa_test_support::fixtures::pg_now()),
             deleted_at: None,
         })
         .await
@@ -497,7 +497,7 @@ async fn ingestion_pipeline_reclaims_stale_started_claim_after_crash_db_knowledg
         parser_job_id: None,
         content_hash: hash,
         metadata: json!({ "crash": "after_claim" }),
-        created_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
     };
     assert!(matches!(
         repository
@@ -584,8 +584,8 @@ async fn ingestion_pipeline_replay_after_graph_uid_midpoint_finishes_ingestion()
             metadata: credentialish_metadata(),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -605,7 +605,7 @@ async fn ingestion_pipeline_replay_after_graph_uid_midpoint_finishes_ingestion()
             change_token: Some("graph-midpoint-token".to_string()),
             metadata: credentialish_metadata(),
             status: ObjectStatus::Active,
-            source_updated_at: Some(Utc::now()),
+            source_updated_at: Some(moa_test_support::fixtures::pg_now()),
             deleted_at: None,
         })
         .await
@@ -618,8 +618,8 @@ async fn ingestion_pipeline_replay_after_graph_uid_midpoint_finishes_ingestion()
                 object_uid: Some(object_uid),
                 step: "object_change_checked".to_string(),
                 status: IngestionStepStatus::Completed,
-                started_at: Utc::now(),
-                ended_at: Some(Utc::now()),
+                started_at: moa_test_support::fixtures::pg_now(),
+                ended_at: Some(moa_test_support::fixtures::pg_now()),
                 duration_ms: Some(1),
                 counters: json!({ "records_seen": 1, "records_changed": 1 }),
                 summary: None,

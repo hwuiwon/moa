@@ -108,6 +108,21 @@ pub fn session_meta_fixture(tenant_id: TenantId) -> SessionMeta {
     }
 }
 
+/// The current time truncated to what Postgres can round-trip.
+///
+/// `TIMESTAMPTZ` carries microseconds while `Utc::now()` carries nanoseconds,
+/// so an equality assertion between a fixture-held timestamp and its
+/// database round-trip passes on microsecond-granular macOS clocks and fails
+/// almost deterministically on nanosecond-granular Linux CI clocks. Every
+/// DB-lane fixture timestamp must come from this helper (or truncate the same
+/// way) so tests assert correctness rather than clock granularity.
+#[must_use]
+pub fn pg_now() -> chrono::DateTime<chrono::Utc> {
+    let now = chrono::Utc::now();
+    chrono::DateTime::<chrono::Utc>::from_timestamp_micros(now.timestamp_micros())
+        .expect("the current time is representable at microsecond precision")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{stable_uuid_from_label, tenant_id_from_storage_partition};

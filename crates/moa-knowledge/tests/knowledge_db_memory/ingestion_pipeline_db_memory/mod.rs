@@ -16,7 +16,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::Utc;
 use moa_core::types::memory::RlsContext;
 use moa_core::{traits::EmbeddingProvider, types::identifiers::TenantId};
 use moa_knowledge::{
@@ -448,8 +447,8 @@ fn drive_connection(connection_uid: Uuid, tenant_id: TenantId) -> KnowledgeConne
         metadata: json!({}),
         source_selection: json!({}),
         information_barrier: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
+        updated_at: moa_test_support::fixtures::pg_now(),
         last_synced_at: None,
     }
 }
@@ -463,7 +462,7 @@ fn metadata_only_record(source_id: &str, change_token: &str, title: &str) -> Pro
         source_uri: Some(format!("https://drive.google.com/file/d/{source_id}/view")),
         change_token: Some(change_token.to_string()),
         deleted: false,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         metadata: json!({ "safe": true }),
         payload: json!({ "mimeType": "text/plain", "name": format!("{title}.txt") }),
     }
@@ -494,8 +493,8 @@ async fn create_run(
             graph_nodes_upserted: 0,
             graph_edges_upserted: 0,
             error_code: None,
-            started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
+            started_at: moa_test_support::fixtures::pg_now(),
+            finished_at: Some(moa_test_support::fixtures::pg_now()),
             provider_trigger_completed_at: None,
         })
         .await
@@ -524,7 +523,7 @@ fn record_with_source(
         source_uri: Some(format!("https://example.test/{source_id}")),
         change_token: Some(change_token.to_string()),
         deleted,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         metadata: credentialish_metadata(),
         payload: json!({
             "text": text,
@@ -748,7 +747,7 @@ async fn seed_graph_linked_partial_version(
         parser_job_id: None,
         content_hash: hash.clone(),
         metadata: json!({ "partial": true }),
-        created_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
     };
     repository
         .insert_document_version(version.clone())

@@ -77,7 +77,10 @@ async fn start_contacts_upstream(conflicting_id: Option<&str>) -> ContactsUpstre
                             text: "seed".to_string(),
                             attachments: Vec::new(),
                         },
-                        timestamp: Utc::now(),
+                        timestamp: chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+                            chrono::Utc::now().timestamp_micros(),
+                        )
+                        .expect("microsecond timestamp"),
                         brain_id: None,
                         hand_id: None,
                         token_count: None,

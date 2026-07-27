@@ -267,7 +267,7 @@ async fn learning_log_round_trips_skill_entry() {
             confidence: Some(0.8),
             source_refs: vec![Uuid::now_v7()],
             actor: "system".to_string(),
-            valid_from: Utc::now(),
+            valid_from: moa_test_support::fixtures::pg_now(),
             valid_to: None,
             batch_id: Some(batch_id),
             version: 1,
@@ -955,7 +955,7 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
         .complete_segment(
             first_id,
             SegmentCompletion {
-                ended_at: Utc::now(),
+                ended_at: moa_test_support::fixtures::pg_now(),
                 turn_count: active.turn_count,
                 tools_used: active.tools_used,
                 skills_activated: active.skills_activated,
@@ -972,7 +972,7 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
             tenant_id: "pg-segments".to_string(),
             segment_index: 1,
             task_summary: Some("Update README".to_string()),
-            started_at: Utc::now(),
+            started_at: moa_test_support::fixtures::pg_now(),
             ended_at: None,
             turn_count: 0,
             tools_used: Vec::new(),
@@ -1201,7 +1201,7 @@ async fn postgres_snapshot_checkpoint_bounds_event_replay() {
                 format_version: moa_core::types::snapshot::CONTEXT_SNAPSHOT_FORMAT_VERSION,
                 session_id,
                 last_sequence_num: checkpoint_seq,
-                created_at: Utc::now(),
+                created_at: moa_test_support::fixtures::pg_now(),
                 messages: Vec::new(),
                 file_read_dedup_state: FileReadDedupState::default(),
                 token_count: 0,
@@ -1329,7 +1329,7 @@ async fn postgres_task_segment_assessments_and_views_refresh() {
                             summary: "verification command signal".to_string(),
                         },
                     ],
-                    assessed_at: Utc::now(),
+                    assessed_at: moa_test_support::fixtures::pg_now(),
                     policy_version: "segment-assessment-test".to_string(),
                 },
             )
@@ -1529,7 +1529,7 @@ async fn experience_records_and_candidates_round_trip() {
             status: LearningCandidateStatus::Evaluating,
             status_reason: Some("running regression".to_string()),
             evaluation_payload: Some(serde_json::json!({"suite": "generated"})),
-            updated_at: Utc::now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
         })
         .await
         .expect("candidate status update");
@@ -1689,7 +1689,7 @@ async fn postgres_store_learning_candidate_review_lookup() {
             status: LearningCandidateStatus::Rejected,
             status_reason: Some("stale reviewer".to_string()),
             evaluation_payload: Some(serde_json::json!({"reviewer_subject": "user:stale"})),
-            updated_at: Utc::now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
         };
         let stale_changed = store
             .update_learning_candidate_status_from(
@@ -1726,7 +1726,7 @@ async fn postgres_store_learning_candidate_review_lookup() {
                 status: LearningCandidateStatus::Rejected,
                 status_reason: Some("needs clearer evidence".to_string()),
                 evaluation_payload: Some(evaluation_payload.clone()),
-                updated_at: Utc::now(),
+                updated_at: moa_test_support::fixtures::pg_now(),
             })
             .await
             .expect("reject candidate");

@@ -67,7 +67,7 @@ fn sync_run(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeSyncRun {
         graph_nodes_upserted: 0,
         graph_edges_upserted: 0,
         error_code: None,
-        started_at: Utc::now(),
+        started_at: moa_test_support::fixtures::pg_now(),
         finished_at: None,
         provider_trigger_completed_at: None,
     }
@@ -86,7 +86,7 @@ fn object(tenant_id: TenantId, connection_uid: Uuid, label: &str) -> KnowledgeOb
         change_token: Some(format!("etag-{label}")),
         metadata: json!({ "safe_label": label }),
         status: ObjectStatus::Active,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         deleted_at: None,
     }
 }
@@ -177,7 +177,7 @@ async fn scoped_repository_hides_other_tenant_rows_and_returns_redacted_timeline
     let repo_b = repository(&db, tenant_b);
 
     let mut connection_a = connection(tenant_a, "tenant-a");
-    connection_a.last_synced_at = Some(Utc::now());
+    connection_a.last_synced_at = Some(moa_test_support::fixtures::pg_now());
     let connection_b = connection(tenant_b, "tenant-b");
     repo_a
         .upsert_connection(connection_a.clone())
@@ -415,7 +415,7 @@ fn document_version(object_uid: Uuid, label: &str) -> DocumentVersion {
         parser_job_id: None,
         content_hash: format!("content-hash-{label}"),
         metadata: json!({ "safe_label": label }),
-        created_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
     }
 }
 
