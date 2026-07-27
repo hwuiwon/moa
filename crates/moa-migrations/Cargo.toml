@@ -12,3 +12,9 @@ tokio.workspace = true
 tokio-postgres = "0.7"
 tracing.workspace = true
 workspace-hack = { workspace = true }
+
+[dev-dependencies]
+# Migration backfill coverage seeds and reads real UUID-keyed graph rows, so the
+# test build needs sqlx's UUID mapping on top of the runtime feature set.
+sqlx = { workspace = true, features = ["postgres", "uuid"] }
+uuid = { workspace = true }

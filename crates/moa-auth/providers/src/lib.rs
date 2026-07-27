@@ -10,6 +10,7 @@ pub mod null_vault;
 pub mod oauth_access_token;
 pub mod oauth_as;
 pub mod passwords;
+pub mod postgres_credential_vault;
 pub mod postgres_vault;
 pub mod user_sessions;
 
@@ -33,6 +34,7 @@ pub use oauth_as::{
     OAuthServer, OAuthStore, ResolvedAccessToken, TokenGrant,
 };
 pub use passwords::{PasswordError, hash_password, verify_password};
+pub use postgres_credential_vault::PostgresCredentialVault;
 pub use postgres_vault::{
     OAuthRefreshEndpoint, PostgresTokenVaultProvider, StoreTokenRequest, TokenRefresher,
 };

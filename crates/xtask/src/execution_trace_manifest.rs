@@ -334,6 +334,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         "run"
     ),
     sender!(
+        "crates/moa-orchestrator/src/objects/session/mod.rs",
+        "schedule_turn_admission_heartbeat",
+        TRACE_HELPER,
+        "SessionClient",
+        "turn_admission_heartbeat"
+    ),
+    sender!(
         "crates/moa-orchestrator/src/objects/session/narration.rs",
         "collect_active_marker_sources",
         TRACE_HELPER,
@@ -974,7 +981,7 @@ const SENDERS: &[SenderManifestEntry] = &[
     ),
     sender!(
         "crates/moa-orchestrator/src/workflows/turn_events.rs",
-        "append_session_event",
+        "append_with_identity",
         TRACE_HELPER,
         "RestateSessionStoreClient",
         "append_event"
@@ -1513,6 +1520,27 @@ struct DiscoveredSender {
     helper: Option<&'static str>,
     client: String,
     operation: String,
+}
+
+/// Returns every repository-relative path this manifest is configured against.
+///
+/// The architecture checker validates these before running any rule so a moved
+/// or deleted owner is reported as configuration drift instead of silently
+/// skipping a sender, receiver, or scan root. Covers sender paths (generated
+/// and raw), `MoaHandler` receiver paths, and the three scan roots the audit
+/// walks; `RestateRuntime` receivers name an endpoint kind, not a path, so they
+/// have nothing to validate.
+pub(crate) fn configured_paths() -> BTreeSet<&'static str> {
+    SENDERS
+        .iter()
+        .chain(RAW_SENDERS)
+        .map(|entry| entry.path)
+        .chain(RECEIVERS.iter().filter_map(|entry| match entry.receiver {
+            ReceiverKind::MoaHandler { path, .. } => Some(path),
+            ReceiverKind::RestateRuntime { .. } => None,
+        }))
+        .chain([ORCHESTRATOR_ROOT, MEMORY_INGEST_ROOT, EDGE_PROXY_PATH])
+        .collect()
 }
 
 /// Audits the repository's complete execution trace propagation manifest.

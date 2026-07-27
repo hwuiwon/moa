@@ -13,7 +13,7 @@ use moa_core::{
     events::Event,
     types::{
         agent::AgentContext,
-        contact::{ContactId, ContactRef, ContactVerificationState},
+        contact::{ClientMessageId, ContactId, ContactRef, ContactVerificationState},
         events_stream::EventRecord,
         execution_planning::{
             ExecutionAuditViolation, ExecutionCompileOutcome, ExecutionCompileSource,
@@ -123,6 +123,14 @@ pub(super) async fn run_agent_loop_target(
     with_identity_headers(
         ctx.object_client::<SessionClient>(session_id.to_string())
             .queue_message(Json::from(QueueMessageRequest {
+                // One agent-loop target submits exactly one prompt, so the run uid and
+                // ordinal zero identify it. Derived from durable workflow coordinates so
+                // a replay of this workflow re-submits the same identity instead of
+                // admitting a second paid turn.
+                client_message_id: ClientMessageId::internal("experiment-run", request.run_uid, 0)
+                    .map_err(moa_error_to_handler_error)?,
+                reply_to: None,
+                stream_cursor: None,
                 user_message: prompt,
                 attachments,
                 model: Some(model.to_string()),

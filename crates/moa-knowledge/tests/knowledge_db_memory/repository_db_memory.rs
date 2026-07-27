@@ -1,6 +1,6 @@
 //! Postgres repository coverage for tenant knowledge-base RLS and timelines.
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
 use moa_knowledge::{
@@ -30,7 +30,7 @@ fn discovery(db: &postgres::TestDb) -> PostgresKnowledgeDiscoveryStore {
 }
 
 fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
         connection_uid: Uuid::now_v7(),
         tenant_id,
@@ -67,8 +67,9 @@ fn sync_run(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeSyncRun {
         graph_nodes_upserted: 0,
         graph_edges_upserted: 0,
         error_code: None,
-        started_at: Utc::now(),
+        started_at: moa_test_support::fixtures::pg_now(),
         finished_at: None,
+        provider_trigger_completed_at: None,
     }
 }
 
@@ -85,7 +86,7 @@ fn object(tenant_id: TenantId, connection_uid: Uuid, label: &str) -> KnowledgeOb
         change_token: Some(format!("etag-{label}")),
         metadata: json!({ "safe_label": label }),
         status: ObjectStatus::Active,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         deleted_at: None,
     }
 }
@@ -97,7 +98,7 @@ fn step(
     status: IngestionStepStatus,
     offset_ms: i64,
 ) -> KnowledgeIngestionStep {
-    let started_at = Utc::now() + Duration::milliseconds(offset_ms);
+    let started_at = moa_test_support::fixtures::pg_now() + Duration::milliseconds(offset_ms);
     KnowledgeIngestionStep {
         step_uid: Uuid::now_v7(),
         sync_run_uid,
@@ -176,7 +177,7 @@ async fn scoped_repository_hides_other_tenant_rows_and_returns_redacted_timeline
     let repo_b = repository(&db, tenant_b);
 
     let mut connection_a = connection(tenant_a, "tenant-a");
-    connection_a.last_synced_at = Some(Utc::now());
+    connection_a.last_synced_at = Some(moa_test_support::fixtures::pg_now());
     let connection_b = connection(tenant_b, "tenant-b");
     repo_a
         .upsert_connection(connection_a.clone())
@@ -414,7 +415,7 @@ fn document_version(object_uid: Uuid, label: &str) -> DocumentVersion {
         parser_job_id: None,
         content_hash: format!("content-hash-{label}"),
         metadata: json!({ "safe_label": label }),
-        created_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
     }
 }
 
@@ -444,7 +445,6 @@ fn block(
 fn chunk(
     version_uid: Uuid,
     ordinal: u32,
-    graph_node_uid: Option<Uuid>,
     chunk_hash: &str,
     block_hashes: Vec<String>,
     text: &str,
@@ -454,7 +454,6 @@ fn chunk(
     KnowledgeChunk {
         chunk_uid: Uuid::now_v7(),
         version_uid,
-        graph_node_uid,
         chunk_hash: chunk_hash.to_string(),
         block_hashes,
         text: text.to_string(),
@@ -505,9 +504,10 @@ async fn stored_blocks(pool: &sqlx::PgPool, version_uid: Uuid) -> Vec<StoredBloc
 #[tokio::test]
 async fn replace_blocks_and_chunks_batch_round_trip_persists_all_rows_db_knowledge() {
     // Pins: the multi-row UNNEST batch insert persists every block and chunk row
-    // with the same content the former per-row loop wrote, keeps the folded
-    // graph_node_uid (including NULLs), preserves empty and populated TEXT[]
-    // arrays and JSON metadata, and still fully replaces prior rows.
+    // with the same content the former per-row loop wrote, stores each chunk's
+    // graph occurrence identity as its own `chunk_uid`, preserves empty and
+    // populated TEXT[] arrays and JSON metadata, and still fully replaces prior
+    // rows.
     let db = postgres::bootstrap_test_db()
         .await
         .expect("bootstrap isolated knowledge DB");
@@ -576,7 +576,6 @@ async fn replace_blocks_and_chunks_batch_round_trip_persists_all_rows_db_knowled
         chunk(
             version.version_uid,
             0,
-            Some(Uuid::now_v7()),
             "ch-0",
             vec!["bh-0".to_string()],
             "First chunk.",
@@ -586,7 +585,6 @@ async fn replace_blocks_and_chunks_batch_round_trip_persists_all_rows_db_knowled
         chunk(
             version.version_uid,
             1,
-            Some(Uuid::now_v7()),
             "ch-1",
             vec!["bh-1a".to_string(), "bh-1b".to_string()],
             "Second chunk.",
@@ -596,7 +594,6 @@ async fn replace_blocks_and_chunks_batch_round_trip_persists_all_rows_db_knowled
         chunk(
             version.version_uid,
             2,
-            None,
             "ch-2",
             Vec::new(),
             "Third chunk.",
@@ -615,7 +612,6 @@ async fn replace_blocks_and_chunks_batch_round_trip_persists_all_rows_db_knowled
     assert_eq!(stored_chunks.len(), 3);
     for (row, expected) in stored_chunks.iter().zip(chunks.iter()) {
         assert_eq!(row.chunk_uid, expected.chunk_uid);
-        assert_eq!(row.graph_node_uid, expected.graph_node_uid);
         assert_eq!(row.chunk_hash, expected.chunk_hash);
         assert_eq!(row.block_hashes, expected.block_hashes);
         assert_eq!(row.heading_path, expected.heading_path);
@@ -625,13 +621,30 @@ async fn replace_blocks_and_chunks_batch_round_trip_persists_all_rows_db_knowled
         assert_eq!(row.metadata, expected.metadata);
     }
 
+    // Storage owns the occurrence invariant: the persisted graph identity of every
+    // chunk row is that row's own `chunk_uid`.
+    let persisted_identities = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT chunk_uid, graph_node_uid FROM moa.knowledge_chunks \
+         WHERE document_version_id = $1 ORDER BY ordinal ASC",
+    )
+    .bind(version.version_uid)
+    .fetch_all(&pool)
+    .await
+    .expect("load persisted chunk identities");
+    assert_eq!(
+        persisted_identities,
+        chunks
+            .iter()
+            .map(|chunk| (chunk.chunk_uid, chunk.chunk_uid))
+            .collect::<Vec<_>>()
+    );
+
     // Replacing with a smaller set fully clears the prior rows.
     repo.replace_chunks(
         version.version_uid,
         vec![chunk(
             version.version_uid,
             0,
-            Some(Uuid::now_v7()),
             "ch-only",
             vec!["bh".to_string()],
             "Only chunk.",
@@ -674,7 +687,7 @@ async fn unseen_active_objects_for_connection_filters_seen_deleted_and_paginates
         object_uids.insert(label.to_string(), obj.object_uid);
     }
     // doc-c is deleted and must never appear even though it is not "seen".
-    repo.mark_object_deleted(object_uids["doc-c"], Utc::now())
+    repo.mark_object_deleted(object_uids["doc-c"], moa_test_support::fixtures::pg_now())
         .await
         .expect("delete doc-c");
 

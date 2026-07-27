@@ -52,7 +52,7 @@ impl SessionStore for MockSessionStore {
             sequence_num,
             event_type: event.event_type(),
             event,
-            timestamp: Utc::now(),
+            timestamp: moa_test_support::fixtures::pg_now(),
             brain_id: None,
             hand_id: None,
             token_count: None,

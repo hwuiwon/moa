@@ -3,7 +3,6 @@
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use moa_core::types::identifiers::TenantId;
 use moa_orchestrator::objects::tenant::{TenantConfig, TenantStatus};
 use moa_orchestrator::workflows::consolidate::{ConsolidateReport, ConsolidateRequest};
@@ -100,7 +99,7 @@ async fn tenant_consolidation_round_trip_through_restate() -> Result<()> {
             "expected the next consolidation to be scheduled after init"
         );
 
-        let target_date = Utc::now().date_naive();
+        let target_date = moa_test_support::fixtures::pg_now().date_naive();
         let workflow_id = format!(
             "{}:{target_date}:manual-{}",
             tenant_id,

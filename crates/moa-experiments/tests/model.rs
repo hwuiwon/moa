@@ -1,4 +1,3 @@
-use chrono::Utc;
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::{
     types::action_policy::ActionRuleScope, types::channel::Attachment,
@@ -159,7 +158,7 @@ fn action_policy_migration_allows_current_trial_stop_reasons_offline() {
 #[test]
 fn trial_record_round_trips_through_public_model_offline() {
     // Pins: trial records preserve simulator config, artifact pins, links, and stop reason.
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let session_id = SessionId::new();
     let execution_run_uid = Uuid::now_v7();
     let trial = ExperimentTrialRecord {
@@ -221,7 +220,7 @@ fn record_for_target(
     session_id: Option<SessionId>,
     execution_run_uid: Option<Uuid>,
 ) -> ExperimentRunRecord {
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     ExperimentRunRecord {
         scope: ActionRuleScope::Tenant {

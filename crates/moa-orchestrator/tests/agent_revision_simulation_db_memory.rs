@@ -1,7 +1,6 @@
 //! DB-backed coverage for agent revision simulation comparison.
 
 use anyhow::Result;
-use chrono::Utc;
 use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifactRevision};
 use moa_artifacts::simulation::ExperimentTargetKind;
@@ -74,7 +73,7 @@ async fn compare_agent_revision_simulation_groups_trials_by_exact_revision_db_me
             ExperimentTrialStatus::Completed,
             Some(ExperimentTrialStopReason::Success),
             None,
-            Some(Utc::now()),
+            Some(moa_test_support::fixtures::pg_now()),
         )
         .await?;
     experiment_store
@@ -84,7 +83,7 @@ async fn compare_agent_revision_simulation_groups_trials_by_exact_revision_db_me
             ExperimentTrialStatus::Failed,
             Some(ExperimentTrialStopReason::Error),
             Some("candidate policy blocked tool".to_string()),
-            Some(Utc::now()),
+            Some(moa_test_support::fixtures::pg_now()),
         )
         .await?;
 

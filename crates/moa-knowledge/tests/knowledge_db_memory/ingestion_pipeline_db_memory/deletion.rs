@@ -4,7 +4,9 @@ use super::*;
 
 #[tokio::test]
 async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_deletes() {
-    // Pins: provider-page ingestion is idempotent, re-embeds only changed chunks, and keeps DB audit rows.
+    // Pins: provider-page ingestion is idempotent, gives every occurrence of a new
+    // version its own embedding association, invalidates superseded occurrences,
+    // and keeps DB audit rows.
     let db = postgres::bootstrap_test_db()
         .await
         .expect("bootstrap isolated Postgres");
@@ -42,13 +44,13 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_1".to_string(),
-            credential_ref: "vault://knowledge/test".to_string(),
+            credential_ref: "44a8995d-d50b-6657-a037-a7839304535b".to_string(),
             status: ConnectionStatus::Active,
             metadata: credentialish_metadata(),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -89,7 +91,7 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
     assert_no_secret_material(&first_object_metadata);
     assert_eq!(version_count(&pool, object_uid).await, 1);
     assert_eq!(chunk_count(&pool, object_uid).await, 2);
-    assert_eq!(chunks_with_graph_uid(&pool, object_uid).await, 2);
+    assert_eq!(chunks_with_occurrence_identity(&pool, object_uid).await, 2);
 
     let unchanged_run = create_run(&repository, tenant_id, connection_uid).await;
     let unchanged = pipeline
@@ -127,13 +129,16 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
         .await
         .expect("ingest one-block edit");
     assert_eq!(edited.records_ingested, 1);
-    assert_eq!(edited.embeddings_created, 1);
-    assert_eq!(embedder.embedded_count(), 3);
+    // The new version re-occurs BOTH paragraphs, including the unchanged one, so
+    // both new occurrences get their own embedding association and both
+    // superseded occurrences are invalidated.
+    assert_eq!(edited.embeddings_created, 2);
+    assert_eq!(embedder.embedded_count(), 4);
     assert_eq!(graph.vector_count(), 2);
-    assert_eq!(graph.invalidated_count(), 1);
+    assert_eq!(graph.invalidated_count(), 2);
     assert_eq!(version_count(&pool, object_uid).await, 2);
     assert_eq!(chunk_count(&pool, object_uid).await, 4);
-    assert_eq!(tombstoned_chunk_count(&pool, object_uid).await, 1);
+    assert_eq!(tombstoned_chunk_count(&pool, object_uid).await, 2);
 
     let delete_run = create_run(&repository, tenant_id, connection_uid).await;
     let deleted = pipeline
@@ -154,7 +159,7 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
     assert_eq!(delete_counters.records_deleted, 1);
     assert_eq!(graph.vector_count(), 0);
     assert_eq!(object_status(&pool, object_uid).await, "deleted");
-    assert_eq!(tombstoned_chunk_count(&pool, object_uid).await, 3);
+    assert_eq!(tombstoned_chunk_count(&pool, object_uid).await, 4);
 
     let steps = repository
         .object_timeline(object_uid)
@@ -196,7 +201,7 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
     assert_eq!(counters.records_seen, 1);
     assert_eq!(counters.records_changed, 1);
     assert_eq!(counters.records_ingested, 1);
-    assert_eq!(counters.chunks_embedded, 1);
+    assert_eq!(counters.chunks_embedded, 2);
 
     let graph_json = graph.properties_json();
     assert_no_secret_text(&graph_json);
@@ -245,13 +250,13 @@ async fn deletion_writes_terminal_status_last_and_stays_retryable_on_invalidatio
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_1".to_string(),
-            credential_ref: "vault://knowledge/test".to_string(),
+            credential_ref: "44a8995d-d50b-6657-a037-a7839304535b".to_string(),
             status: ConnectionStatus::Active,
             metadata: credentialish_metadata(),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -370,13 +375,13 @@ async fn ingestion_pipeline_prunes_unseen_objects_after_full_selection_refresh()
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_prune".to_string(),
-            credential_ref: "vault://knowledge/prune".to_string(),
+            credential_ref: "d368fc66-a273-ada5-3573-0268ef320675".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await

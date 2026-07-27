@@ -16,7 +16,7 @@ pub mod knowledge_sync_ingestion;
 pub(crate) mod progress_delivery;
 pub mod skill_learning;
 pub mod tenant_purge;
-pub(crate) mod turn_events;
+pub mod turn_events;
 pub mod turn_execution;
 pub(crate) mod turn_progress;
 pub(crate) mod turn_responsiveness;

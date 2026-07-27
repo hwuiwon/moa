@@ -170,16 +170,20 @@ const ALLOWANCES: &[Allowance] = &[
     ),
 ];
 
-// Task 3 adds `moa-execution` as one first-class workspace/default member.
-const WORKSPACE_PACKAGE_COUNT_BUDGET: usize = 45;
-const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 42;
+// The workspace is deliberately split by category owner: core runtime, memory
+// and learning, agents/artifacts/experiments, tools and providers, auth and
+// lineage, and eval/dev tooling. These two numbers record that accepted split
+// exactly as it stands today. Growing either requires a new decision record,
+// not a silent bump.
+const WORKSPACE_PACKAGE_COUNT_BUDGET: usize = 51;
+const WORKSPACE_DEFAULT_MEMBER_COUNT_BUDGET: usize = 48;
 const MOA_CORE_ROOT_EXPORT_ALLOWLIST: &[&str] = &["MoaError", "Result", "WORKSPACE_ID"];
 
 const REVERSE_DEPENDENCY_BUDGETS: &[ReverseDependencyBudget] = &[ReverseDependencyBudget {
     package: "moa-core",
-    max_direct: 39,
-    max_transitive: 41,
-    reason: "Tasks 3-4 add moa-execution as a deliberate direct moa-core dependent for shared IDs, configuration, and events while preserving the moa-execution -> moa-core direction; new production fan-in must remain intentional",
+    max_direct: 43,
+    max_transitive: 46,
+    reason: "moa-core owns the shared ID newtypes, error/result, configuration, and event types every category-owner crate needs, so nearly the whole workspace depends on it directly; this is the accepted current fan-in, and further growth requires a new decision record rather than a budget bump",
 }];
 
 const LOC_BUDGETS: &[LocBudget] = &[
@@ -198,11 +202,11 @@ const LOC_BUDGETS: &[LocBudget] = &[
         reason: "Tasks 17-18 extract tenant-account routes and add durable purge admission/status orchestration; Task 27 makes its foundational imports explicit; tenant-operations MCP adds the authenticated edge-router composition seam",
     },
     LocBudget {
-        label: "moa-core env overlay",
-        path: "crates/moa-core/src/config/env_overlay/mod.rs",
+        label: "moa-config env overlay",
+        path: "crates/moa-config/src/env_overlay/mod.rs",
         scope: LocScope::File,
         max_lines: 1_664,
-        reason: "Task 7 adds the complete MOA_EXECUTION_* planning and resource override surface alongside the existing ownership split and shared runtime tuning knobs",
+        reason: "one flat MOA_* overlay owns every typed environment override in a single serde surface so unknown-key detection stays exhaustive; the cap holds at its pre-extraction value and further growth requires a new decision record",
     },
     LocBudget {
         label: "turn execution workflow",
@@ -215,8 +219,8 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "worker state types",
         path: "crates/moa-core/src/types/worker/state.rs",
         scope: LocScope::File,
-        max_lines: 340,
-        reason: "Task 28 isolates worker state and lifecycle DTOs from command and tool-schema concerns",
+        max_lines: 344,
+        reason: "worker state and lifecycle DTOs stay isolated from command and tool-schema concerns, and `WorkerInitialTask` now also owns the authenticated identity a child inherits from its parent; further growth requires a new decision record",
     },
     LocBudget {
         label: "worker command types",
@@ -234,9 +238,14 @@ const LOC_BUDGETS: &[LocBudget] = &[
     },
 ];
 
+const MOA_CORE_ROOT_PATH: &str = "crates/moa-core/src/lib.rs";
+// `moa-core`'s root re-exports its types module, so the root-export count is only
+// meaningful when that module is expanded alongside `lib.rs`.
+const MOA_CORE_TYPES_MODULE_PATH: &str = "crates/moa-core/src/types/mod.rs";
+
 const SYMBOL_BUDGETS: &[SymbolBudget] = &[SymbolBudget {
     label: "moa-core top-level pub use exports",
-    path: "crates/moa-core/src/lib.rs",
+    path: MOA_CORE_ROOT_PATH,
     max_count: 3,
     reason: "Task 29 limits the crate root to universal error/result and workspace identity exports",
 }];
@@ -603,8 +612,98 @@ struct SymbolBudgetReport {
     reason: &'static str,
 }
 
+/// One repository path the architecture policy is configured against, paired
+/// with the label of the configuration entry that owns it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ConfiguredPath {
+    owner: String,
+    path: String,
+}
+
+impl ConfiguredPath {
+    fn new(owner: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            owner: owner.into(),
+            path: path.into(),
+        }
+    }
+}
+
+// Every path any rule reads, labelled by the configuration entry that names it.
+// Collected as a set so a path shared by several entries is validated once per
+// distinct owner rather than once per occurrence.
+fn configured_paths() -> Vec<ConfiguredPath> {
+    SCAN_ROOTS
+        .iter()
+        .map(|root| ConfiguredPath::new("orchestrator scan root", *root))
+        .chain(ALLOWANCES.iter().map(|allowance| {
+            ConfiguredPath::new(
+                format!("{} allowance `{}`", allowance.rule, allowance.needle),
+                allowance.path,
+            )
+        }))
+        .chain(
+            LOC_BUDGETS.iter().map(|budget| {
+                ConfiguredPath::new(format!("{} LOC budget", budget.label), budget.path)
+            }),
+        )
+        .chain(SYMBOL_BUDGETS.iter().map(|budget| {
+            ConfiguredPath::new(format!("{} symbol budget", budget.label), budget.path)
+        }))
+        .chain(
+            SENSITIVE_EVENT_CONSUMERS
+                .iter()
+                .map(|consumer| ConfiguredPath::new("sensitive Event consumer", consumer.path)),
+        )
+        .chain([ConfiguredPath::new(
+            "moa-core types module expanded by the root symbol budget",
+            MOA_CORE_TYPES_MODULE_PATH,
+        )])
+        .chain(
+            crate::execution_trace_manifest::configured_paths()
+                .into_iter()
+                .map(|path| ConfiguredPath::new("execution trace manifest", path)),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+// Reports which configured paths are absent under `root`, so tests can point
+// the same validation at a synthetic tree instead of the repository.
+fn missing_configured_paths(root: &Path, configured: &[ConfiguredPath]) -> Vec<ConfiguredPath> {
+    configured
+        .iter()
+        .filter(|entry| !root.join(&entry.path).exists())
+        .cloned()
+        .collect()
+}
+
+/// Fails before any rule runs when a configured path no longer exists.
+///
+/// A moved or deleted owner otherwise aborts the scan mid-run with an opaque
+/// read error, so the remaining rules never report. Each missing entry names
+/// the configuration label that owns it and the exact path it expects.
+fn validate_configured_paths(root: &Path) -> Result<()> {
+    let missing = missing_configured_paths(root, &configured_paths());
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "architecture policy references {} path(s) that do not exist; repoint the owning configuration entry:\n{}",
+        missing.len(),
+        missing
+            .iter()
+            .map(|entry| format!("  owner `{}` -> missing path `{}`", entry.owner, entry.path))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
 /// Runs the architecture-boundary scanner.
 pub fn run() -> Result<()> {
+    validate_configured_paths(Path::new("."))?;
     let mut findings = scan_roots(SCAN_ROOTS)?;
     findings.extend(
         crate::execution_trace_manifest::audit(Path::new("."))?
@@ -914,8 +1013,8 @@ fn symbol_budget_reports(
         let path = root.join(budget.path);
         let source =
             fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let count = if budget.path == "crates/moa-core/src/lib.rs" {
-            let types_path = root.join("crates/moa-core/src/types/mod.rs");
+        let count = if budget.path == MOA_CORE_ROOT_PATH {
+            let types_path = root.join(MOA_CORE_TYPES_MODULE_PATH);
             let types_source = fs::read_to_string(&types_path)
                 .with_context(|| format!("read {}", types_path.display()))?;
             count_moa_core_root_exports(&source, &types_source)
@@ -932,7 +1031,7 @@ fn symbol_budget_reports(
         if let Some(finding) = symbol_budget_finding(*budget, count) {
             findings.push(finding);
         }
-        if budget.path == "crates/moa-core/src/lib.rs"
+        if budget.path == MOA_CORE_ROOT_PATH
             && let Some(finding) = moa_core_root_export_allowlist_finding(&source)
         {
             findings.push(finding);
@@ -965,7 +1064,7 @@ fn moa_core_root_export_allowlist_finding(source: &str) -> Option<Finding> {
     (has_wildcard || exports != expected).then(|| {
         Finding::budget(
             Rule::SymbolBudget,
-            "crates/moa-core/src/lib.rs",
+            MOA_CORE_ROOT_PATH,
             format!(
                 "moa-core root exports must exactly match {:?} with no wildcard; saw {:?}{}",
                 expected,
@@ -1756,14 +1855,90 @@ impl Finding {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::{
         DependencyKind, PackageGraph, ReverseDependencyBudget, Rule, SymbolBudget, classify_line,
-        count_moa_core_root_exports, count_pub_use_exports, event_wildcard_match_arms,
-        forbidden_dependency_findings, handler_authz_safety_findings, is_repository_code_path,
-        matching_allowance, moa_core_root_export_allowlist_finding, parse_package_graph,
+        configured_paths, count_moa_core_root_exports, count_pub_use_exports,
+        event_wildcard_match_arms, forbidden_dependency_findings, handler_authz_safety_findings,
+        is_repository_code_path, matching_allowance, missing_configured_paths,
+        moa_core_root_export_allowlist_finding, parse_package_graph,
         restate_service_traits_from_source, reverse_dependency_budget_reports, scan_source,
-        symbol_budget_finding,
+        symbol_budget_finding, validate_configured_paths,
     };
+
+    const ENV_OVERLAY_OWNER: &str = "moa-config env overlay LOC budget";
+    const ENV_OVERLAY_PATH: &str = "crates/moa-config/src/env_overlay/mod.rs";
+
+    fn repository_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("workspace root should resolve from the xtask manifest directory")
+    }
+
+    #[test]
+    fn configured_paths_name_their_owner_and_exist_in_the_real_tree() {
+        // Pins: every path the architecture policy is configured against exists,
+        // and the env-overlay LOC budget owner points at its current moa-config
+        // owner rather than the removed moa-core location.
+        let configured = configured_paths();
+
+        let env_overlay = configured
+            .iter()
+            .find(|entry| entry.owner == ENV_OVERLAY_OWNER)
+            .unwrap_or_else(|| {
+                panic!("configured paths should include an owner named `{ENV_OVERLAY_OWNER}`")
+            });
+        assert_eq!(
+            env_overlay.path, ENV_OVERLAY_PATH,
+            "the env-overlay LOC budget must be owned by moa-config"
+        );
+
+        let missing = missing_configured_paths(&repository_root(), &configured);
+        assert!(
+            missing.is_empty(),
+            "configured architecture paths must exist; missing: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn missing_configured_path_reports_its_owner_and_exact_path() {
+        // Pins: a configured owner whose file was moved or deleted fails the
+        // pre-scan with both the owner label and the exact path, instead of
+        // aborting a later rule with an opaque read error.
+        let root = tempfile::TempDir::new().expect("temp dir");
+        let configured = configured_paths();
+        for entry in &configured {
+            if entry.path == ENV_OVERLAY_PATH {
+                continue;
+            }
+            std::fs::create_dir_all(root.path().join(&entry.path))
+                .expect("materialize configured path");
+        }
+
+        let missing = missing_configured_paths(root.path(), &configured);
+        assert_eq!(
+            missing.len(),
+            1,
+            "only the removed env-overlay owner should be missing; saw {missing:?}"
+        );
+        assert_eq!(missing[0].owner, ENV_OVERLAY_OWNER);
+        assert_eq!(missing[0].path, ENV_OVERLAY_PATH);
+
+        let error = validate_configured_paths(root.path())
+            .expect_err("a missing configured path must fail the pre-scan")
+            .to_string();
+        assert!(
+            error.contains(ENV_OVERLAY_OWNER),
+            "error must name the configured owner; got {error}"
+        );
+        assert!(
+            error.contains(ENV_OVERLAY_PATH),
+            "error must name the exact missing path; got {error}"
+        );
+    }
 
     #[test]
     fn classifies_direct_sql() {

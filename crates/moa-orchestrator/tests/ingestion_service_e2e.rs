@@ -3,7 +3,6 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
-use chrono::Utc;
 use moa_config::MoaConfig;
 use moa_core::{
     types::contact::ContactId,
@@ -101,7 +100,7 @@ fn realistic_turn() -> SessionTurn {
         ]
         .join("\n"),
         dominant_pii_class: "none".to_string(),
-        finalized_at: Utc::now(),
+        finalized_at: moa_test_support::fixtures::pg_now(),
         barrier: None,
     }
 }
@@ -119,7 +118,7 @@ fn same_fact_turn(tenant_id: TenantId, session_id: SessionId, turn_seq: u64) -> 
         ]
         .join("\n"),
         dominant_pii_class: "none".to_string(),
-        finalized_at: Utc::now(),
+        finalized_at: moa_test_support::fixtures::pg_now(),
         barrier: None,
     }
 }
@@ -140,7 +139,7 @@ fn low_pii_degraded_skip_turn() -> SessionTurn {
             ]
             .join("\n"),
             dominant_pii_class: "none".to_string(),
-            finalized_at: Utc::now(),
+            finalized_at: moa_test_support::fixtures::pg_now(),
             barrier: None,
         };
         if !should_ingest_degraded(&turn) {
@@ -163,7 +162,7 @@ fn sensitive_degraded_turn() -> SessionTurn {
         ]
         .join("\n"),
         dominant_pii_class: "pii".to_string(),
-        finalized_at: Utc::now(),
+        finalized_at: moa_test_support::fixtures::pg_now(),
         barrier: None,
     }
 }

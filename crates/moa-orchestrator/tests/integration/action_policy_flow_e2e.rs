@@ -28,6 +28,7 @@ use moa_orchestrator::services::action_reviews::{
     ListActionReviewsRequest, RequestActionReview,
 };
 use moa_orchestrator::services::tool_executor::ExecutionTaskToolCallRequest;
+use moa_test_support::fixtures::fresh_client_message_id;
 use moa_test_support::{IsolatedTest, OrchestratorTestFixture, TestApiClient};
 use moa_wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use serde::Serialize;
@@ -122,7 +123,7 @@ async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
         origin_step_id: None,
         execution_origin: Some(origin),
         idempotency_key: None,
-        created_at: chrono::Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
     };
     sqlx::query(
         r#"
@@ -719,6 +720,9 @@ async fn run_scripted_turn(
         .session(session_id.to_string())
         .start_turn(
             StartTurnRequest {
+                client_message_id: fresh_client_message_id(),
+                reply_to: None,
+                stream_cursor: None,
                 user_message: message.to_string(),
                 attachments: Vec::new(),
                 model: None,

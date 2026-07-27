@@ -12,9 +12,10 @@ governance. See `docs/08-security.md` for the surrounding threat model.
 - `policies.rs` — tool action-policy evaluation (`ActionPolicies`), shell
   command parsing and glob matching, rule validation, and the
   `ActionPolicyRuleStore` abstraction.
-- `mcp_proxy.rs` — `MCPCredentialProxy`: session-scoped credential resolution
-  for MCP-backed tool calls, with `EnvironmentCredentialVault` as a simple
-  vault backend.
+- `mcp_proxy.rs` — `MCPCredentialProxy`: per-call credential resolution for
+  MCP-backed tool calls, backed by the durable tenant credential vault. The
+  caller supplies the typed credential source and resolution context; the
+  plaintext never outlives the header-shaping call.
 - `mcp_egress.rs` — `McpEgressGuard`: data-class egress governance for
   outbound MCP tool calls, since an external MCP server is a place where
   restricted data can leave the trust boundary.

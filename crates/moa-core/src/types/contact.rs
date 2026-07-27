@@ -8,11 +8,23 @@ use uuid::Uuid;
 use super::{
     agent::AgentSessionSelection, channel::Attachment, channel::Channel,
     channel::ChannelAccountRef, channel::ChannelRef, events_stream::EventRange,
-    identifiers::SessionId, identifiers::TenantId,
+    events_stream::SequenceNum, identifiers::SessionAttachmentId, identifiers::SessionId,
+    identifiers::TenantId, worker::state::WorkerId,
 };
+use crate::error::{MoaError, Result};
 
 /// Maximum UTF-8 byte length for one contact-authored session message.
 pub const MAX_CONTACT_SESSION_MESSAGE_TEXT_BYTES: usize = 64 * 1024;
+
+/// Maximum UTF-8 byte length for one caller-supplied [`ClientMessageId`].
+pub const MAX_CLIENT_MESSAGE_ID_BYTES: usize = 256;
+
+/// UUIDv5 namespace for deterministic session-attachment slot identities.
+///
+/// Fixed for the lifetime of the slot contract: changing it re-addresses every
+/// attachment slot and breaks upload replay detection.
+const SESSION_ATTACHMENT_SLOT_NAMESPACE: Uuid =
+    Uuid::from_u128(0x9f2b_7c1e_5d4a_4c8f_9b3e_7a1d_6c8e_4f20);
 
 /// Maximum number of attachments admitted with one contact-authored session message.
 pub const MAX_CONTACT_SESSION_ATTACHMENTS_PER_MESSAGE: usize = 4;
@@ -40,6 +52,110 @@ uuid_id!(
     /// Identifier for a contact verification challenge.
     pub struct ContactVerificationChallengeId
 );
+
+/// Caller-owned identity for one submitted session message.
+///
+/// Every message-submitting caller — REST client, Slack adapter, experiment, load
+/// generator — mints this value itself, so a retry after a lost response carries the
+/// same identity and is recognized as the same admission instead of duplicating
+/// attachments, queue entries, reply deliveries, and paid turns. MOA never
+/// synthesizes one: a submission without a valid id is a typed rejection.
+///
+/// The value is 1–[`MAX_CLIENT_MESSAGE_ID_BYTES`] UTF-8 bytes with control
+/// characters rejected, which admits both opaque REST identifiers (a UUID) and
+/// platform event identifiers (a Slack `Ev…` event id). It is compared
+/// byte-exactly, so callers must not pad or re-case it between attempts.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ClientMessageId(String);
+
+impl ClientMessageId {
+    /// Validates and wraps one caller-supplied message identity.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(MoaError::ValidationError(
+                "client message id must not be empty".to_string(),
+            ));
+        }
+        if value.len() > MAX_CLIENT_MESSAGE_ID_BYTES {
+            return Err(MoaError::ValidationError(format!(
+                "client message id must be at most {MAX_CLIENT_MESSAGE_ID_BYTES} bytes"
+            )));
+        }
+        if value.chars().any(char::is_control) {
+            return Err(MoaError::ValidationError(
+                "client message id must not contain control characters".to_string(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    /// Derives the identity for one internally submitted message.
+    ///
+    /// Internal submitters — experiment and evaluation workflows, the load generator,
+    /// test fixtures — have no client-supplied identity, so they derive one from stable
+    /// durable coordinates: a scope literal, the owning durable id (run, trial,
+    /// session), and the message's ordinal within it. Deriving from a clock or from
+    /// randomness would mint a fresh identity on every Restate replay and silently
+    /// disable the admission fence for exactly the callers that retry most.
+    pub fn internal(scope: &str, coordinate: Uuid, ordinal: u64) -> Result<Self> {
+        Self::new(format!("{scope}:{coordinate}:{ordinal}"))
+    }
+
+    /// Returns the exact caller-supplied identity.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ClientMessageId {
+    type Error = MoaError;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl std::fmt::Display for ClientMessageId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Exact user-addressed target a submitted message explicitly replies to.
+///
+/// Carries only the caller-verifiable coordinates of a pending request for user
+/// input. The approved budget and plan hash needed to act on a confirmation stay
+/// server-side, so a caller can address a target without being able to restate the
+/// terms it was shown. A target that no longer matches the session's pending
+/// request is a typed conflict, never a silent ordinary turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum MessageReplyTarget {
+    /// Reply approving or rejecting one admitted run's displayed plan and budget.
+    ExecutionConfirmation {
+        /// Durable execution-run identifier.
+        run_uid: Uuid,
+    },
+    /// Reply delivering one user-addressed execution task's generation-fenced input.
+    ExecutionInput {
+        /// Durable execution-run identifier.
+        run_uid: Uuid,
+        /// Stable logical task identifier.
+        task_id: Uuid,
+        /// Expected task generation fence.
+        generation: u64,
+    },
+    /// Reply answering one conversational worker's input request.
+    WorkerInput {
+        /// Durable worker identifier.
+        worker_id: WorkerId,
+        /// Exact worker input request identifier.
+        input_request_id: String,
+    },
+}
 
 /// Assurance state for an agent-facing contact.
 #[derive(
@@ -415,6 +531,89 @@ pub struct ContactSessionChannelChangeResponse {
     pub channel_account: Option<ChannelAccountRef>,
 }
 
+/// Deterministic storage slot identity for one attachment of one client message.
+///
+/// A retried upload of the same message addresses exactly the same slot, so the
+/// attachment store can detect a replay and reject a slot whose content or metadata
+/// changed instead of minting a second row and a second object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAttachmentSlot {
+    /// Tenant that owns the session.
+    pub tenant_id: TenantId,
+    /// Session receiving the attachment.
+    pub session_id: SessionId,
+    /// Caller-owned identity of the message carrying the attachment.
+    pub client_message_id: ClientMessageId,
+    /// Zero-based position of the attachment within that message.
+    pub ordinal: u16,
+}
+
+impl SessionAttachmentSlot {
+    /// Returns the stable attachment identifier this slot addresses.
+    ///
+    /// Derived as a UUIDv5 over the byte-length-prefixed slot coordinates, so the
+    /// name can never be ambiguous for a client message id that itself contains the
+    /// separator, and two different slots can never collide.
+    #[must_use]
+    pub fn attachment_id(&self) -> SessionAttachmentId {
+        let client_message_id = self.client_message_id.as_str();
+        let name = format!(
+            "{}:{}:{}:{client_message_id}:{}",
+            self.tenant_id,
+            self.session_id,
+            client_message_id.len(),
+            self.ordinal
+        );
+        SessionAttachmentId(Uuid::new_v5(
+            &SESSION_ATTACHMENT_SLOT_NAMESPACE,
+            name.as_bytes(),
+        ))
+    }
+}
+
+/// Validated attachment bytes and metadata submitted for one slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionAttachmentUpload {
+    /// Contact that authored the message, when the session is contact-owned.
+    pub contact_id: Option<ContactId>,
+    /// Display name admitted by the upload boundary.
+    pub name: String,
+    /// Canonical MIME type admitted by the upload boundary.
+    pub mime_type: String,
+    /// Attachment bytes.
+    pub content: Vec<u8>,
+}
+
+/// Whether one attachment slot write created storage or replayed an existing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAttachmentDisposition {
+    /// This request created the metadata row and the stored object.
+    Created,
+    /// The slot already held byte-identical content with identical metadata.
+    Replayed,
+}
+
+/// Durable attachment metadata plus the disposition of the write that produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSessionAttachment {
+    /// Durable attachment metadata safe to return to callers.
+    pub attachment: Attachment,
+    /// Whether this request created the stored attachment or replayed it.
+    pub disposition: SessionAttachmentDisposition,
+}
+
+impl StoredSessionAttachment {
+    /// Returns whether this request created the stored attachment.
+    ///
+    /// Rejection cleanup deletes only created attachments: deleting a replayed one
+    /// would destroy the original message's durable attachment.
+    #[must_use]
+    pub fn was_created(&self) -> bool {
+        matches!(self.disposition, SessionAttachmentDisposition::Created)
+    }
+}
+
 /// Request to send one user message to an existing contact-owned session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactSessionMessageRequest {
@@ -424,6 +623,19 @@ pub struct ContactSessionMessageRequest {
     pub session_id: SessionId,
     /// Current contact token.
     pub contact_token: String,
+    /// Caller-owned retry identity for this message. Required.
+    pub client_message_id: ClientMessageId,
+    /// Exact pending user-input target this message replies to, when the caller
+    /// addresses one explicitly.
+    #[serde(default)]
+    pub reply_to: Option<MessageReplyTarget>,
+    /// Event cursor the caller observed before submitting, retained by the session
+    /// admission so a retry resumes the same stream position.
+    ///
+    /// Transport state only: it is deliberately excluded from the semantic
+    /// admission hash, so reconnecting with a different cursor is not a conflict.
+    #[serde(default)]
+    pub stream_cursor: Option<SequenceNum>,
     /// User message text to enqueue or start immediately.
     #[serde(default)]
     pub user_message: String,
@@ -539,6 +751,13 @@ pub struct ContactSessionMessageResponse {
     /// Turn ID when the message started a workflow immediately.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_turn_id: Option<String>,
+    /// Pre-admission event cursor retained for this client message id.
+    ///
+    /// The first admission stores the cursor the caller observed; every later retry
+    /// of the same id returns that stored value rather than the newer stream head,
+    /// so a reconnect cannot skip events published by the original submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_cursor: Option<SequenceNum>,
 }
 
 /// Request to authorize access to a contact-owned session without loading progress.
@@ -602,8 +821,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ChannelRef, ContactSessionChannelRequest, ContactSessionMessageRequest,
-        MAX_CONTACT_SESSION_ATTACHMENT_BYTES,
+        ChannelRef, ClientMessageId, ContactSessionChannelRequest, ContactSessionMessageRequest,
+        MAX_CLIENT_MESSAGE_ID_BYTES, MAX_CONTACT_SESSION_ATTACHMENT_BYTES, MessageReplyTarget,
+        SessionAttachmentSlot,
     };
     use crate::types::{
         channel::Attachment, identifiers::SessionAttachmentId, identifiers::SessionId,
@@ -702,11 +922,149 @@ mod tests {
         );
     }
 
+    #[test]
+    fn client_message_id_rejects_missing_oversized_and_control_character_ids() {
+        // Pins: the caller-owned retry identity is validated at the type boundary, so no
+        // route can admit an empty, oversized, or control-character id and no code path can
+        // synthesize one for a client that omitted it.
+        assert!(ClientMessageId::new("Ev01J8ZY7M6QK").is_ok());
+        assert!(ClientMessageId::new("x".repeat(MAX_CLIENT_MESSAGE_ID_BYTES)).is_ok());
+
+        for invalid in [
+            String::new(),
+            "x".repeat(MAX_CLIENT_MESSAGE_ID_BYTES + 1),
+            "abc\ndef".to_string(),
+            "abc\u{0}".to_string(),
+        ] {
+            assert!(
+                ClientMessageId::new(invalid.clone()).is_err(),
+                "invalid client message id must be rejected: {invalid:?}"
+            );
+            assert!(
+                serde_json::from_value::<ClientMessageId>(serde_json::json!(invalid)).is_err(),
+                "deserialization must apply the same validation: {invalid:?}"
+            );
+        }
+
+        let id = ClientMessageId::new("client-message-1").expect("valid id");
+        assert_eq!(
+            serde_json::to_value(&id).expect("serialize client message id"),
+            serde_json::json!("client-message-1")
+        );
+    }
+
+    #[test]
+    fn attachment_slot_ids_are_deterministic_and_collision_free() {
+        // Pins: attachment identity is a pure function of tenant/session/message/ordinal, so a
+        // retried upload addresses the same row instead of minting a random second attachment,
+        // and a message id containing the separator cannot collide with another slot.
+        let tenant_id = TenantId(Uuid::from_u128(11));
+        let session_id = SessionId(Uuid::from_u128(12));
+        let slot = |client_message_id: &str, ordinal: u16| SessionAttachmentSlot {
+            tenant_id,
+            session_id,
+            client_message_id: ClientMessageId::new(client_message_id).expect("valid id"),
+            ordinal,
+        };
+
+        assert_eq!(
+            slot("m-1", 0).attachment_id(),
+            slot("m-1", 0).attachment_id()
+        );
+
+        let distinct = [
+            slot("m-1", 0).attachment_id(),
+            slot("m-1", 1).attachment_id(),
+            slot("m-2", 0).attachment_id(),
+            slot("m:1:0", 0).attachment_id(),
+            slot("m", 0).attachment_id(),
+            SessionAttachmentSlot {
+                session_id: SessionId(Uuid::from_u128(13)),
+                ..slot("m-1", 0)
+            }
+            .attachment_id(),
+        ];
+        let unique = distinct.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            unique.len(),
+            distinct.len(),
+            "distinct attachment slots must not share an id"
+        );
+    }
+
+    #[test]
+    fn message_reply_target_round_trips_exact_strict_variants() {
+        // Pins: an explicit reply target carries only caller-verifiable coordinates and rejects
+        // unknown fields, so a caller cannot smuggle approved-budget or plan-hash terms.
+        let cases = [
+            MessageReplyTarget::ExecutionConfirmation {
+                run_uid: Uuid::from_u128(21),
+            },
+            MessageReplyTarget::ExecutionInput {
+                run_uid: Uuid::from_u128(21),
+                task_id: Uuid::from_u128(22),
+                generation: 3,
+            },
+            MessageReplyTarget::WorkerInput {
+                worker_id: "worker-3".to_string(),
+                input_request_id: "request-1".to_string(),
+            },
+        ];
+
+        for target in cases {
+            let encoded = serde_json::to_value(&target).expect("serialize reply target");
+            assert_eq!(
+                serde_json::from_value::<MessageReplyTarget>(encoded.clone())
+                    .expect("deserialize reply target"),
+                target
+            );
+
+            let mut malformed = encoded;
+            malformed
+                .as_object_mut()
+                .and_then(|outer| outer.values_mut().next())
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("reply target payload is an object")
+                .insert("approved_budget".to_string(), serde_json::json!({}));
+            assert!(
+                serde_json::from_value::<MessageReplyTarget>(malformed).is_err(),
+                "reply target variants must reject unknown fields"
+            );
+        }
+    }
+
+    #[test]
+    fn contact_session_message_request_requires_a_client_message_id() {
+        // Pins: a stale client that omits the retry identity gets a typed decode error instead
+        // of a server-synthesized id that would silently lose retry protection.
+        let mut body = serde_json::json!({
+            "tenant_id": Uuid::nil(),
+            "session_id": Uuid::nil(),
+            "contact_token": "token",
+            "user_message": "hello",
+        });
+        assert!(
+            serde_json::from_value::<ContactSessionMessageRequest>(body.clone()).is_err(),
+            "request without client_message_id must fail to decode"
+        );
+
+        body["client_message_id"] = serde_json::json!("client-message-1");
+        let decoded = serde_json::from_value::<ContactSessionMessageRequest>(body)
+            .expect("request with client_message_id decodes");
+        assert_eq!(decoded.client_message_id.as_str(), "client-message-1");
+        assert_eq!(decoded.reply_to, None);
+        assert_eq!(decoded.stream_cursor, None);
+    }
+
     fn base_message_request() -> ContactSessionMessageRequest {
         ContactSessionMessageRequest {
             tenant_id: TenantId(Uuid::nil()),
             session_id: SessionId(Uuid::nil()),
             contact_token: "token".to_string(),
+            client_message_id: ClientMessageId::new("client-message-1")
+                .expect("fixture client message id is valid"),
+            reply_to: None,
+            stream_cursor: None,
             user_message: "hello".to_string(),
             attachments: Vec::new(),
             model: None,

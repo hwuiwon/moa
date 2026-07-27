@@ -454,9 +454,10 @@ sequenceDiagram
     participant K8s as Orchestrator pod
 
     Platform->>Messaging: inbound message
-    Messaging->>Restate: invoke Session/post_message
+    Messaging->>Restate: invoke Session/start_turn (client_message_id)
     Restate->>K8s: route invocation
-    K8s->>Session: post_message(session_id)
+    K8s->>Session: start_turn(session_id, client_message_id)
+    Note over Session: Admission fence replays the original response<br/>for a retried client_message_id.
 
     loop Until SessionCompleted
         Session->>Log: get_events + compile context

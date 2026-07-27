@@ -314,15 +314,20 @@ impl ToolRouter {
                 MoaError::ProviderError(format!("unknown MCP server: {server_name}"))
             })?;
             let client = self.mcp_client(server_name).await?;
-            let extra_headers = if let (Some(proxy), Some(credentials)) =
-                (&self.mcp_proxy, server.credentials.as_ref())
-            {
-                // Trusted host-side credential resolution: read this server's vault
-                // credential directly and shape it into request headers. No proxy
-                // token is minted because nothing crosses an isolation boundary here.
-                proxy
-                    .enrich_headers(&session.id, server_name, server_name, Some(credentials))
-                    .await?
+            let extra_headers = if let Some(credentials) = server.credentials.as_ref() {
+                // Trusted host-side credential resolution: shape this server's
+                // credential into request headers immediately before dispatch. No
+                // proxy token is minted because nothing crosses an isolation
+                // boundary here. Every configured MCP server is deployment-owned
+                // until tenant-owned bindings exist; construction already refused
+                // a credentialed server without an injected proxy, so a missing
+                // proxy here is an assembled-by-hand router and fails closed.
+                let proxy = self.mcp_proxy.as_ref().ok_or_else(|| {
+                    MoaError::ConfigError(format!(
+                        "MCP server '{server_name}' has no injected credential proxy"
+                    ))
+                })?;
+                proxy.deployment_headers(&session.id, server_name, Some(credentials))?
             } else {
                 HashMap::new()
             };

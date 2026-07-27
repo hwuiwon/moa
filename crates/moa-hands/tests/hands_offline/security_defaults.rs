@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_config::CloudHandsConfig;
 use moa_config::MoaConfig;
+use moa_config::SecurityProfile;
 use moa_core::{
     error::MoaError, error::Result, traits::BuiltInTool, traits::Identity, traits::IdentityType,
     traits::ToolContext, types::action_policy::ActionClass,
@@ -51,15 +52,42 @@ fn identity() -> Identity {
     }
 }
 
-fn local_config(allow_local_provider: bool) -> MoaConfig {
+fn local_config() -> MoaConfig {
     let mut config = MoaConfig::default();
     config.local.docker_enabled = true;
+    config.security_profile = SecurityProfile::Local;
     config.cloud.hands = Some(CloudHandsConfig {
         default_provider: Some("local".to_string()),
-        allow_local_provider,
         ..CloudHandsConfig::default()
     });
     config
+}
+
+/// Returns a fully valid `cloud` profile config: deny default, e2b backend, and
+/// a present backend credential. Individual tests break exactly one requirement.
+fn cloud_config() -> MoaConfig {
+    let mut config = MoaConfig {
+        security_profile: SecurityProfile::Cloud,
+        ..MoaConfig::default()
+    };
+    config.permissions.default_effect = ActionPolicyEffect::Deny;
+    config.cloud.hands = Some(CloudHandsConfig {
+        default_provider: Some("e2b".to_string()),
+        e2b_api_key: Some("MOA_TEST_E2B_KEY".to_string()),
+        ..CloudHandsConfig::default()
+    });
+    config
+}
+
+fn cloud_rule_store() -> Arc<dyn ActionPolicyRuleStore> {
+    Arc::new(StaticRuleStore { rules: Vec::new() })
+}
+
+fn config_error_message(error: MoaError) -> String {
+    match error {
+        MoaError::ConfigError(message) => message,
+        other => panic!("expected a ConfigError, got {other:?}"),
+    }
 }
 
 struct SecretErrorTool;
@@ -216,43 +244,121 @@ fn assert_trace_body_env_disabled() {
 }
 
 #[tokio::test]
-async fn local_route_without_opt_in_fails_closed() {
-    // Pins: local hand routing is a development opt-in; local Docker support is
-    // still the local provider and does not satisfy the enterprise sandbox tier.
-    let mut config = local_config(false);
+async fn cloud_profile_rejects_the_local_hand_provider() {
+    // Pins: the cloud profile is the fail-closed posture, so a local host route
+    // is refused before the router is returned even when every other cloud
+    // requirement is satisfied.
+    let mut config = cloud_config();
+    config
+        .cloud
+        .hands
+        .get_or_insert_with(CloudHandsConfig::default)
+        .default_provider = Some("local".to_string());
     let dir = tempdir().expect("tempdir should be created");
     config.local.sandbox_dir = dir.path().display().to_string();
 
-    let error = match ToolRouter::from_config(&config, None).await {
-        Ok(_) => panic!("local route without opt-in should fail closed"),
+    let error = match ToolRouter::from_config(&config, None, Some(cloud_rule_store())).await {
+        Ok(_) => panic!("cloud profile must reject a local hand route"),
         Err(error) => error,
     };
 
-    match error {
-        MoaError::ConfigError(message) => {
-            assert!(
-                message.contains("MOA_CLOUD_HANDS_ALLOW_LOCAL"),
-                "expected local opt-in env var in config error, got: {message}"
-            );
-            assert!(
-                message.contains("local hand provider"),
-                "expected local provider context in config error, got: {message}"
-            );
-        }
-        other => panic!("expected ConfigError for local route without opt-in, got {other:?}"),
-    }
+    let message = config_error_message(error);
+    assert!(
+        message.contains("security_profile=cloud"),
+        "error must name the profile, got: {message}"
+    );
+    assert!(
+        message.contains("local hand provider"),
+        "error must name the rejected provider, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn cloud_profile_rejects_an_allow_permission_default() {
+    // Pins: a cloud deployment cannot serve with a permissive permission
+    // posture; the deny default is a construction-time requirement, not a
+    // runtime suggestion.
+    let mut config = cloud_config();
+    config.permissions.default_effect = ActionPolicyEffect::Allow;
+
+    let error = match ToolRouter::from_config(&config, None, Some(cloud_rule_store())).await {
+        Ok(_) => panic!("cloud profile must reject an allow permission default"),
+        Err(error) => error,
+    };
+
+    let message = config_error_message(error);
+    assert!(
+        message.contains("permissions.default_effect=deny"),
+        "error must name the required posture, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn cloud_profile_rejects_a_missing_rule_store_owner() {
+    // Pins: a deny-by-default cloud deployment with no persisted-rule owner
+    // could never authorize any action, so construction fails instead of
+    // serving a router that denies everything.
+    let error = match ToolRouter::from_config(&cloud_config(), None, None).await {
+        Ok(_) => panic!("cloud profile must reject a missing rule store owner"),
+        Err(error) => error,
+    };
+
+    let message = config_error_message(error);
+    assert!(
+        message.contains("action-policy rule store"),
+        "error must name the missing owner, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn cloud_profile_rejects_a_selected_backend_without_credentials() {
+    // Pins: selecting a cloud sandbox without its credential fails closed at
+    // construction rather than at the first tool call.
+    let mut config = cloud_config();
+    config
+        .cloud
+        .hands
+        .get_or_insert_with(CloudHandsConfig::default)
+        .e2b_api_key = None;
+
+    let error = match ToolRouter::from_config(&config, None, Some(cloud_rule_store())).await {
+        Ok(_) => panic!("cloud profile must reject a backend without credentials"),
+        Err(error) => error,
+    };
+
+    let message = config_error_message(error);
+    assert!(
+        message.contains("requires credentials") && message.contains("e2b"),
+        "error must name the uncredentialed backend, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn cloud_profile_constructs_with_deny_default_owner_and_credentialed_backend() {
+    // Pins: the four cloud requirements together are sufficient — a valid cloud
+    // deployment builds a router whose hand tools target the cloud backend and
+    // never register the local host provider.
+    let router = ToolRouter::from_config(&cloud_config(), None, Some(cloud_rule_store()))
+        .await
+        .expect("a fully configured cloud profile should construct");
+
+    assert!(router.has_tool("bash"));
+    assert!(
+        !router.has_tool("__local_host__"),
+        "cloud router must not expose a local host tool"
+    );
 }
 
 #[tokio::test]
 async fn local_route_with_opt_in_registers_local_hands() {
-    // Pins: explicit development opt-in keeps the local hand provider usable for
-    // offline development without re-enabling it implicitly for cloud defaults.
-    let mut config = local_config(true);
+    // Pins: the local profile keeps the host hand provider usable for offline
+    // development with no rule-store owner required.
+    let mut config = local_config();
     config.local.docker_enabled = false;
     let dir = tempdir().expect("tempdir should be created");
     config.local.sandbox_dir = dir.path().display().to_string();
 
-    let router = ToolRouter::from_config(&config, None)
+    let router = ToolRouter::from_config(&config, None, None)
         .await
         .expect("local opt-in should allow router construction");
     assert!(router.has_tool("file_write"));
@@ -371,11 +477,11 @@ async fn local_hand_error_output_spans_redact_bodies_by_default() {
     let spans = capture_spans(|| {
         let input = input.clone();
         async move {
-            let mut config = local_config(true);
+            let mut config = local_config();
             config.local.docker_enabled = false;
             let dir = tempdir().expect("tempdir should be created");
             config.local.sandbox_dir = dir.path().display().to_string();
-            let router = ToolRouter::from_config(&config, None)
+            let router = ToolRouter::from_config(&config, None, None)
                 .await
                 .expect("local opt-in should allow router construction");
             let (_, output) = router
@@ -472,22 +578,76 @@ fn mcp_invocation(name: &str) -> ToolInvocation {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn mcp_tool_defaults_to_admin_review() {
-    // Pins: an MCP/third-party tool has no considered per-tool descriptor gate, so it
-    // resolves to AdminReview by default instead of a bare allow — unvetted external
-    // code must not execute unattended.
+async fn ungranted_mcp_tool_is_denied_under_the_cloud_deny_default() {
+    // Pins: an MCP/third-party tool declares no intrinsic gate of its own, so the
+    // deployment posture gates it. Under the cloud deny-by-default posture an
+    // ungranted external tool is denied outright — unvetted external code must
+    // not execute unattended — and the deployment default owns the decision.
     let mut registry = ToolRegistry::new();
     registry
         .register_mcp_tool("external-server", discovered_mcp_tool("external_action"))
         .expect("register mcp tool");
-    let router = ToolRouter::new(registry, HashMap::new());
+    let mut config = MoaConfig::default();
+    config.permissions.default_effect = ActionPolicyEffect::Deny;
+    let router = ToolRouter::new(registry, HashMap::new()).with_policies(
+        moa_security::ActionPolicies::from_config(&config).expect("deny-default policies"),
+    );
 
     let check = router
         .check_policy(&session(), &mcp_invocation("external_action"))
         .await
         .expect("policy check for mcp tool");
 
+    assert_eq!(check.effect, ActionPolicyEffect::Deny);
+    assert_eq!(
+        check.source,
+        moa_core::types::tools::ActionPolicyDecisionSource::DeploymentDefault
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn configured_admin_review_still_gates_mcp_tools_that_a_rule_cannot_lift() {
+    // Pins: an operator who wants every external tool review-gated configures it
+    // through `permissions.admin_review`, which is a floor a tenant Allow rule
+    // cannot weaken. This is the supported replacement for the per-tool MCP
+    // review fallback that a rule used to be able to downgrade.
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_mcp_tool("external-server", discovered_mcp_tool("external_action"))
+        .expect("register mcp tool");
+    let session = session();
+    let mut config = MoaConfig::default();
+    config.permissions.default_effect = ActionPolicyEffect::Deny;
+    config.permissions.admin_review = vec!["external_*".to_string()];
+    let router = ToolRouter::new(registry, HashMap::new())
+        .with_policies(
+            moa_security::ActionPolicies::from_config(&config).expect("review-config policies"),
+        )
+        .with_rule_store(Arc::new(StaticRuleStore {
+            rules: vec![ActionPolicyRule {
+                id: uuid::Uuid::now_v7(),
+                scope: ActionRuleScope::Tenant {
+                    tenant_id: session.tenant_id,
+                },
+                tool: "external_action".to_string(),
+                pattern: "*".to_string(),
+                effect: ActionPolicyEffect::Allow,
+                reason: Some("tenant grant".to_string()),
+                created_by: UserId::new("admin"),
+                created_at: chrono::Utc::now(),
+            }],
+        }));
+
+    let check = router
+        .check_policy(&session, &mcp_invocation("external_action"))
+        .await
+        .expect("policy check for configured-review mcp tool");
+
     assert_eq!(check.effect, ActionPolicyEffect::AdminReview);
+    assert_eq!(
+        check.source,
+        moa_core::types::tools::ActionPolicyDecisionSource::ConfiguredReview
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -507,14 +667,18 @@ async fn builtin_tool_keeps_its_descriptor_default_effect() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn explicitly_allowed_mcp_tool_resolves_to_allow() {
-    // Pins: an explicit operator allow rule overrides the MCP admin-review default, so
-    // operator config still wins over the new secure default.
+async fn tenant_granted_mcp_tool_resolves_to_allow_under_the_cloud_deny_default() {
+    // Pins: the deny-by-default cloud posture is not a ceiling on an explicit
+    // scoped grant, so a tenant that deliberately allows one external tool can
+    // still run it while every ungranted external tool stays denied.
     let session = session();
     let mut registry = ToolRegistry::new();
     registry
         .register_mcp_tool("external-server", discovered_mcp_tool("external_action"))
         .expect("register mcp tool");
+    registry
+        .register_mcp_tool("external-server", discovered_mcp_tool("external_other"))
+        .expect("register second mcp tool");
     let allow_rule = ActionPolicyRule {
         id: uuid::Uuid::now_v7(),
         scope: ActionRuleScope::Tenant {
@@ -527,15 +691,71 @@ async fn explicitly_allowed_mcp_tool_resolves_to_allow() {
         created_by: UserId::new("admin"),
         created_at: chrono::Utc::now(),
     };
-    let router =
-        ToolRouter::new(registry, HashMap::new()).with_rule_store(Arc::new(StaticRuleStore {
+    let mut config = MoaConfig::default();
+    config.permissions.default_effect = ActionPolicyEffect::Deny;
+    let router = ToolRouter::new(registry, HashMap::new())
+        .with_policies(
+            moa_security::ActionPolicies::from_config(&config).expect("deny-default policies"),
+        )
+        .with_rule_store(Arc::new(StaticRuleStore {
             rules: vec![allow_rule],
         }));
 
-    let check = router
+    let granted = router
         .check_policy(&session, &mcp_invocation("external_action"))
         .await
         .expect("policy check for allowed mcp tool");
+    assert_eq!(granted.effect, ActionPolicyEffect::Allow);
+    assert_eq!(
+        granted.source,
+        moa_core::types::tools::ActionPolicyDecisionSource::PersistedRule
+    );
 
-    assert_eq!(check.effect, ActionPolicyEffect::Allow);
+    let ungranted = router
+        .check_policy(&session, &mcp_invocation("external_other"))
+        .await
+        .expect("policy check for ungranted mcp tool");
+    assert_eq!(ungranted.effect, ActionPolicyEffect::Deny);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_rule_never_makes_an_unregistered_tool_visible() {
+    // Pins: policy evaluation happens only after the tool resolves in the
+    // registry, so a persisted Allow rule for a filtered or never-registered
+    // tool cannot conjure it into existence.
+    let session = session();
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_mcp_tool("external-server", discovered_mcp_tool("external_action"))
+        .expect("register mcp tool");
+    registry.retain_only(["external_action"]);
+    let router =
+        ToolRouter::new(registry, HashMap::new()).with_rule_store(Arc::new(StaticRuleStore {
+            rules: vec![ActionPolicyRule {
+                id: uuid::Uuid::now_v7(),
+                scope: ActionRuleScope::Tenant {
+                    tenant_id: session.tenant_id,
+                },
+                tool: "filtered_away".to_string(),
+                pattern: "*".to_string(),
+                effect: ActionPolicyEffect::Allow,
+                reason: Some("rule for a tool that is not registered".to_string()),
+                created_by: UserId::new("admin"),
+                created_at: chrono::Utc::now(),
+            }],
+        }));
+
+    assert!(!router.has_tool("filtered_away"));
+    let error = router
+        .check_policy(&session, &mcp_invocation("filtered_away"))
+        .await
+        .expect_err("an allow rule must not make an unregistered tool invocable");
+
+    match error {
+        MoaError::ToolError(message) => assert!(
+            message.contains("unknown tool"),
+            "expected an unknown-tool error, got: {message}"
+        ),
+        other => panic!("expected ToolError for an unregistered tool, got {other:?}"),
+    }
 }

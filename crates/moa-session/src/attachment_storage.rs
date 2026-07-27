@@ -9,8 +9,18 @@ use moa_core::{
     types::identifiers::SessionId, types::identifiers::TenantId,
 };
 use object_store::{
-    ObjectStore, PutPayload, aws::AmazonS3Builder, gcp::GoogleCloudStorageBuilder, path::Path,
+    ObjectStore, PutMode, PutOptions, PutPayload, aws::AmazonS3Builder, aws::S3ConditionalPut,
+    gcp::GoogleCloudStorageBuilder, path::Path,
 };
+
+/// Outcome of one create-only session attachment object write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttachmentObjectWrite {
+    /// This request created the object.
+    Created,
+    /// An object already occupied the key and was left untouched.
+    AlreadyPresent,
+}
 
 /// Shared object-store handle and key prefix for session attachments.
 #[derive(Clone)]
@@ -29,7 +39,11 @@ impl AttachmentObjectStore {
                 let mut builder = AmazonS3Builder::from_env()
                     .with_bucket_name(attachments.bucket.clone())
                     .with_allow_http(attachments.allow_http)
-                    .with_virtual_hosted_style_request(attachments.virtual_hosted_style);
+                    .with_virtual_hosted_style_request(attachments.virtual_hosted_style)
+                    // Attachment slots are written create-only, which S3 expresses as an
+                    // `If-None-Match: *` precondition. Without this the store rejects every
+                    // conditional put as unsupported and no upload can be stored at all.
+                    .with_conditional_put(S3ConditionalPut::ETagMatch);
 
                 if let Some(region) = non_empty(&attachments.region) {
                     builder = builder.with_region(region);
@@ -78,20 +92,45 @@ impl AttachmentObjectStore {
         })
     }
 
-    /// Stores one attachment object.
-    pub(crate) async fn put(
+    /// Stores one attachment object only when its key is still free.
+    ///
+    /// Create-only, so a retried upload can never overwrite the bytes an earlier
+    /// request stored in the same deterministic slot before Postgres has decided
+    /// whether the retry is a legitimate replay or a conflict. Backends without
+    /// conditional put support surface that as a storage error rather than silently
+    /// degrading to an unconditional overwrite.
+    pub(crate) async fn put_if_absent(
         &self,
-        tenant_id: TenantId,
-        session_id: SessionId,
-        attachment_id: SessionAttachmentId,
-        content: Vec<u8>,
-    ) -> Result<String> {
-        let object_key = self.object_key(tenant_id, session_id, attachment_id);
+        object_key: &str,
+        content: &[u8],
+    ) -> Result<AttachmentObjectWrite> {
+        let result = self
+            .store
+            .put_opts(
+                &Path::from(object_key),
+                PutPayload::from(content.to_vec()),
+                PutOptions {
+                    mode: PutMode::Create,
+                    ..PutOptions::default()
+                },
+            )
+            .await;
+        match result {
+            Ok(_) => Ok(AttachmentObjectWrite::Created),
+            Err(object_store::Error::AlreadyExists { .. }) => {
+                Ok(AttachmentObjectWrite::AlreadyPresent)
+            }
+            Err(error) => Err(map_object_store_error(error)),
+        }
+    }
+
+    /// Replaces one attachment object whose slot this caller already owns in Postgres.
+    pub(crate) async fn overwrite(&self, object_key: &str, content: &[u8]) -> Result<()> {
         self.store
-            .put(&Path::from(object_key.as_str()), PutPayload::from(content))
+            .put(&Path::from(object_key), PutPayload::from(content.to_vec()))
             .await
             .map_err(map_object_store_error)?;
-        Ok(object_key)
+        Ok(())
     }
 
     /// Loads one attachment object.
@@ -115,7 +154,8 @@ impl AttachmentObjectStore {
         }
     }
 
-    fn object_key(
+    /// Returns the deterministic object key for one attachment slot.
+    pub(crate) fn object_key(
         &self,
         tenant_id: TenantId,
         session_id: SessionId,

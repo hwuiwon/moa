@@ -545,7 +545,7 @@ fn execution_planning_request(
         durable_upgrade: None,
         planner_model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         config: moa_config::ExecutionConfig::default(),
-        now: Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     }
 }
 
@@ -632,7 +632,7 @@ fn execution_amendment_planning_request()
             authorization: context.authorization.clone(),
             approved_budget: context.budget.clone(),
             config: moa_config::ExecutionConfig::default(),
-            now: Utc::now(),
+            now: moa_test_support::fixtures::pg_now(),
         });
     let compiled = compile_outcome.compiled.unwrap_or_else(|| {
         panic!(
@@ -715,7 +715,7 @@ fn execution_amendment_planning_request()
         remaining_budget: context.budget,
         planner_model: moa_core::types::identifiers::ModelId::new("claude-sonnet-4-6"),
         config: moa_config::ExecutionConfig::default(),
-        now: Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     }
 }
 
@@ -1659,7 +1659,7 @@ async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execu
             text: "Find one current headline".to_string(),
             attachments: Vec::new(),
         },
-        timestamp: Utc::now(),
+        timestamp: moa_test_support::fixtures::pg_now(),
         brain_id: None,
         hand_id: None,
         token_count: None,
@@ -1747,7 +1747,7 @@ async fn canary_leaks_in_tool_input_are_detected_and_blocked() {
                 text: "Read the skill".to_string(),
                 attachments: Vec::new(),
             },
-            timestamp: Utc::now(),
+            timestamp: moa_test_support::fixtures::pg_now(),
             brain_id: None,
             hand_id: None,
             token_count: None,
@@ -1823,7 +1823,7 @@ async fn tool_content_blocks_wrap_malicious_tool_results_as_untrusted_content() 
                 text: "Read the unsafe skill".to_string(),
                 attachments: Vec::new(),
             },
-            timestamp: Utc::now(),
+            timestamp: moa_test_support::fixtures::pg_now(),
             brain_id: None,
             hand_id: None,
             token_count: None,
@@ -1985,7 +1985,7 @@ async fn streamed_turn_runtime_matches_buffered_response() {
             text: "stream parity".to_string(),
             attachments: Vec::new(),
         },
-        timestamp: Utc::now(),
+        timestamp: moa_test_support::fixtures::pg_now(),
         brain_id: None,
         hand_id: None,
         token_count: None,

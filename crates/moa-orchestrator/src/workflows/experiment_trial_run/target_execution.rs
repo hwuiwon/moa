@@ -17,7 +17,7 @@ use moa_artifacts::{
 };
 use moa_core::types::{
     agent::AgentContext,
-    contact::{ContactId, ContactRef, ContactVerificationState},
+    contact::{ClientMessageId, ContactId, ContactRef, ContactVerificationState},
     execution_planning::{
         ExecutionAuditViolation, ExecutionCompileOutcome, ExecutionCompileSource,
         ExecutionPlanningAuditEnvelope, ExecutionPlanningAuditPayload, ExecutionSourceProvenance,
@@ -152,6 +152,17 @@ pub(super) async fn run_agent_loop_trial(
         let response = with_identity_headers(
             ctx.object_client::<SessionClient>(session_id.to_string())
                 .queue_message(Json::from(QueueMessageRequest {
+                    // The trial uid plus this turn's index is the message's stable
+                    // durable coordinate, so a replay of the trial workflow resubmits the
+                    // same identity rather than starting a second simulated turn.
+                    client_message_id: ClientMessageId::internal(
+                        "experiment-trial",
+                        trial.trial_uid,
+                        u64::from(turn_index),
+                    )
+                    .map_err(moa_error_to_handler_error)?,
+                    reply_to: None,
+                    stream_cursor: None,
                     user_message: simulator_message.clone(),
                     attachments: Vec::new(),
                     model: target_model.as_ref().map(ToString::to_string),

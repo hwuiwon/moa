@@ -51,6 +51,18 @@ impl TestDb {
     pub fn schema_name(&self) -> &str {
         &self.schema_name
     }
+
+    /// Repoints the cleanup URL so drop-time behavior can be pinned by tests.
+    ///
+    /// Test-only seam for the cleanup-bound regression: it lets a test make
+    /// the drop-time maintenance connection hang (for example via a
+    /// blackholed address) and assert that the bounded cleanup still returns.
+    /// The clone database the bootstrap actually created is left to the
+    /// provisioning orphan sweep.
+    #[doc(hidden)]
+    pub fn override_cleanup_url_for_tests(&mut self, database_url: String) {
+        self.database_url = database_url;
+    }
 }
 
 impl Drop for TestDb {
@@ -69,9 +81,35 @@ impl Drop for TestDb {
                         "failed to create runtime for TestDb cleanup: {error}"
                     ))
                 })?;
+            // The whole cleanup future is bounded. This destructor blocks the
+            // test runtime's thread in `join()` below, so nothing on that
+            // runtime can make progress while cleanup runs; an unbounded await
+            // in here (observed parked in the io driver with no server-side
+            // backend, so before Postgres ever saw the connection) previously
+            // hung the owning test until the harness killed it at 240s. On
+            // elapse the clone database is deliberately left behind: cleanup
+            // is best-effort by design and the provisioning orphan sweep
+            // removes clones older than an hour.
             runtime.block_on(async move {
-                store.pool().close().await;
-                testing::cleanup_test_schema(&database_url, &schema_name).await
+                let bounded = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                    // Bounded close is a courtesy drain; `cleanup_test_schema`
+                    // drops the database `WITH (FORCE)`, which terminates any
+                    // straggler connection server-side.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        store.pool().close(),
+                    )
+                    .await;
+                    testing::cleanup_test_schema(&database_url, &schema_name).await
+                })
+                .await;
+                match bounded {
+                    Ok(result) => result,
+                    Err(_) => Err(MoaError::StorageError(
+                        "TestDb cleanup timed out; leaving the clone to the orphan sweep"
+                            .to_string(),
+                    )),
+                }
             })
         });
 

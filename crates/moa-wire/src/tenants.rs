@@ -28,6 +28,13 @@ pub enum TenantPurgeStatus {
     Pending,
     /// External vector rows were removed before relational source rows disappeared.
     VectorsPurged,
+    /// Every stored credential version and its permitted audit projection are gone.
+    ///
+    /// Credentials are swept before relational deletion because they grant live
+    /// third-party access: revoking that access must not wait on the rest of the
+    /// purge, and the credential owner — not any relational row — is
+    /// authoritative about what a tenant still holds.
+    CredentialsPurged,
     /// Product rows and inverse authorization tuples committed atomically.
     RelationallyCommitted,
     /// Configured ClickHouse lineage and analytics rows were purged.

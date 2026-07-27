@@ -2,7 +2,6 @@
 
 use chrono::{Duration, Utc};
 use moa_authz_schema::TupleOp;
-use moa_core::{types::identifiers::StoragePartitionId, types::identifiers::TenantId};
 use moa_messaging::{DeliveryMessage, ProviderDeliverySink};
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
@@ -268,9 +267,9 @@ pub(crate) async fn deliver_invitation(
     tenant_name: &str,
     token: &SecretString,
 ) -> Result<(), String> {
-    let scope = StoragePartitionId::for_tenant(TenantId::from(invitation.tenant_id));
-    let sink = ProviderDeliverySink::from_env(scope.as_str(), &state.config.messaging)
-        .await
+    // Email transport is deployment-owned, so no tenant partition selects the
+    // credential: every tenant's operator mail leaves through the same sender.
+    let sink = ProviderDeliverySink::from_env(&state.config.messaging)
         .map_err(|error| format!("build delivery sink: {error}"))?;
     let message = DeliveryMessage::account_invitation_email(
         invitation.tenant_id,

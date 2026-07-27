@@ -171,17 +171,15 @@ async fn active_key_cached(pool: &PgPool, tenant_id: Uuid) -> Result<ActiveKey, 
     let active = match active_key_for(pool, tenant_id).await {
         Ok(active) => active,
         Err(SigningError::NoActiveKey(_)) => {
-            if let Err(error) = rotate_key(pool, tenant_id).await
-                && !matches!(
-                    &error,
-                    SigningError::Database(database_error)
-                        if is_unique_violation(database_error)
-                )
-            {
-                return Err(error);
-            }
-            // Another first-event signer created the tenant's active key
-            // concurrently. Refetch it instead of dropping this audit row.
+            // First event for this tenant: claim the first key without ever
+            // deactivating anything. Running `rotate_key` here instead let a
+            // second first-event signer that arrived after the winner's commit
+            // deactivate the winner and mint a second generation, so
+            // concurrent signers could return two different key ids.
+            create_first_key_if_absent(pool, tenant_id).await?;
+            // Whether this signer's insert won or lost the partial-unique
+            // race, exactly one active key now exists. Refetch it instead of
+            // dropping this audit row.
             active_key_for(pool, tenant_id).await?
         }
         Err(error) => return Err(error),
@@ -190,12 +188,29 @@ async fn active_key_cached(pool: &PgPool, tenant_id: Uuid) -> Result<ActiveKey, 
     Ok(active)
 }
 
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(
-        error,
-        sqlx::Error::Database(database_error)
-            if database_error.code().as_deref() == Some("23505")
+/// Insert the tenant's first active signing key if no active key exists yet.
+///
+/// The partial unique index `idx_tenant_signing_keys_active` is the arbiter:
+/// concurrent first-event signers race on it, the loser's insert is a no-op,
+/// and every signer converges on the winner's key. Unlike [`rotate_key`], this
+/// never deactivates an existing key, so it cannot create a second generation.
+async fn create_first_key_if_absent(pool: &PgPool, tenant_id: Uuid) -> Result<(), SigningError> {
+    let mut key_bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut key_bytes);
+    let key_b64 = B64.encode(key_bytes);
+    sqlx::query(
+        r#"
+        INSERT INTO tenant_signing_keys (id, tenant_id, key_b64, active)
+        VALUES ($1, $2, $3, TRUE)
+        ON CONFLICT (tenant_id) WHERE active = TRUE DO NOTHING
+        "#,
     )
+    .bind(Uuid::new_v4())
+    .bind(tenant_id)
+    .bind(key_b64)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Sign a JSON event inside an existing transaction.

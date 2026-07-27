@@ -177,6 +177,11 @@ mod tests {
                 serde_json::json!({
                     "tenant_id": test_tenant_json(),
                     "provider": "merge",
+                    // Required: the connector the operator selected at
+                    // link-token time is what binds the connection to one Merge
+                    // product category, so a body omitting it is a typed error
+                    // rather than a silently defaulted link.
+                    "connector": "knowledgebase",
                     "exchange_token": "public-token"
                 }),
             ),

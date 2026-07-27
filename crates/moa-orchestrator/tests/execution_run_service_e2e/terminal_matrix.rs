@@ -428,13 +428,19 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
         1,
         "Durable upgrade must not reclassify the root objective"
     );
+    // The execution planner embeds the candidate schema in-prompt as
+    // `<response_schema>…</response_schema>` and sends no provider-native
+    // strict response format (planner candidates carry free-form JSON that
+    // strict schemas cannot represent), so the planner request is identified
+    // by that marker rather than a `response_format` name.
     let planner = requests
         .iter()
         .find(|request| {
-            request
-                .response_format
-                .as_ref()
-                .is_some_and(|format| format.name == "generated_execution_candidate")
+            request.response_format.is_none()
+                && request
+                    .messages
+                    .iter()
+                    .any(|message| message.content.contains("<response_schema>"))
         })
         .context("Durable upgrade omitted its sole generated planner request")?;
     let planner_context = planner
@@ -1725,7 +1731,7 @@ fn terminal_blueprint() -> Result<RunBlueprint> {
         authorization: authorization.clone(),
         approved_budget: budget.clone(),
         config: ExecutionConfig::default(),
-        now: chrono::Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     });
     let compiled = outcome.compiled.with_context(|| {
         format!(
@@ -1893,7 +1899,7 @@ fn generous_budget() -> ExecutionBudgetLimit {
         max_tasks: Some(100),
         max_tool_calls: Some(100),
         max_retrieved_bytes: Some(1_000_000),
-        deadline_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        deadline_at: Some(moa_test_support::fixtures::pg_now() + chrono::Duration::hours(1)),
     }
 }
 

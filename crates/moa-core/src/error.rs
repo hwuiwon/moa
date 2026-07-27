@@ -45,6 +45,15 @@ pub enum MoaError {
     #[error("session attachment object not found: {0}")]
     SessionAttachmentObjectNotFound(String),
 
+    /// A retried upload addressed an attachment slot that already holds different
+    /// content or metadata.
+    ///
+    /// The slot is identified by tenant, session, client message id, and ordinal, so
+    /// this is always a caller mistake — the same message identity resubmitted with
+    /// changed bytes — and never a transient storage failure.
+    #[error("session attachment slot conflict: {0}")]
+    SessionAttachmentSlotConflict(String),
+
     /// Tool execution failed.
     #[error("tool error: {0}")]
     ToolError(String),
@@ -205,7 +214,8 @@ impl MoaError {
             Self::SessionNotFound(_)
             | Self::BlobNotFound(_)
             | Self::SessionAttachmentNotFound(_)
-            | Self::SessionAttachmentObjectNotFound(_) => true,
+            | Self::SessionAttachmentObjectNotFound(_)
+            | Self::SessionAttachmentSlotConflict(_) => true,
             Self::Cancelled => true,
         }
     }
@@ -275,6 +285,9 @@ pub fn classify_tool_error(error: &MoaError, consecutive_timeouts: u32) -> ToolF
         },
         MoaError::SessionAttachmentObjectNotFound(object_key) => ToolFailureClass::Fatal {
             reason: format!("session attachment object was not found: {object_key}"),
+        },
+        MoaError::SessionAttachmentSlotConflict(message) => ToolFailureClass::Fatal {
+            reason: format!("session attachment slot conflicts with a stored upload: {message}"),
         },
         MoaError::SessionNotFound(session_id) => ToolFailureClass::Fatal {
             reason: format!("session not found: {session_id}"),

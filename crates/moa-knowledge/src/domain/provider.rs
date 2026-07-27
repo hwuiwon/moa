@@ -1,6 +1,7 @@
 //! Linked-provider request, response, and webhook domain types.
 
 use chrono::{DateTime, Utc};
+use moa_core::types::credentials::RedactedSecret;
 use moa_core::types::identifiers::TenantId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -122,6 +123,13 @@ pub struct LinkToken {
 pub struct ExchangePublicTokenRequest {
     /// Tenant that owns the link.
     pub tenant_id: TenantId,
+    /// Connector the link operation selected.
+    ///
+    /// For Merge this is the unified-API product category (for example
+    /// `knowledgebase`), and it is the category every later request for this
+    /// connection must use. Carrying it through the exchange is what stops a
+    /// connection linked for one category from being synced against another.
+    pub connector: String,
     /// Token returned by provider-hosted UI.
     pub public_token: String,
     /// Provider-native selected source state collected by the frontend.
@@ -156,16 +164,58 @@ pub struct LinkedAccount {
 }
 
 /// Request to trigger a provider sync.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Deliberately not `Clone`, `Serialize`, or `Deserialize`: it carries resolved
+/// credential material, so it must be impossible to persist into the durable
+/// sync journal, an event, Restate state, or a model payload. The plaintext
+/// lives only between vault resolution and the outbound provider request.
+#[derive(Debug)]
 pub struct TriggerSyncRequest {
     /// Connection to sync.
     pub connection: KnowledgeConnection,
+    /// Resolved credential for this connection's provider account.
+    pub credential: RedactedSecret,
     /// Provider model or collection to sync.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Provider sync variant or partition name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+}
+
+/// Request to start (or re-confirm) a newly linked connection's initial sync.
+///
+/// Separate from [`TriggerSyncRequest`] because the two have different
+/// contracts: an operator-requested re-sync may use a provider's one-off,
+/// credit-consuming endpoints, while the initial link runs inside a durable
+/// claim that can replay it after a crash. Implementations of the initial start
+/// must therefore be naturally idempotent or read-only.
+///
+/// Carries resolved credential material, so it is deliberately not `Clone`,
+/// `Serialize`, or `Deserialize`. See [`TriggerSyncRequest`].
+#[derive(Debug)]
+pub struct StartInitialSyncRequest {
+    /// Newly linked connection whose first provider sync should be running.
+    pub connection: KnowledgeConnection,
+    /// Resolved credential for this connection's provider account.
+    pub credential: RedactedSecret,
+}
+
+/// Outcome of an idempotent initial-sync start.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InitialSyncStarted {
+    /// Provider identifier.
+    pub provider: String,
+    /// Provider sync identifier, when the provider reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_sync_id: Option<String>,
+    /// Whether the provider reports the initial sync already finished.
+    ///
+    /// `false` means the sync is genuinely running. Providers must return an
+    /// error rather than `false` for failed, paused, or unrecognized states, so
+    /// an ambiguous provider answer never reads as "still working".
+    pub completed: bool,
+    /// Redacted provider metadata for observability.
+    #[serde(default)]
+    pub metadata: Value,
 }
 
 /// Provider sync trigger acknowledgement.
@@ -184,21 +234,22 @@ pub struct TriggeredSync {
 }
 
 /// Request to list changed provider records.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Carries resolved credential material, so it is deliberately not `Clone`,
+/// `Serialize`, or `Deserialize`. See [`TriggerSyncRequest`].
+#[derive(Debug)]
 pub struct ListChangedRecordsRequest {
     /// Connection to inspect.
     pub connection: KnowledgeConnection,
+    /// Resolved credential for this connection's provider account.
+    pub credential: RedactedSecret,
     /// Provider cursor.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     /// Lower bound for provider-side modified timestamps.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified_after: Option<DateTime<Utc>>,
     /// Maximum records to return.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
     /// Provider sync variant or partition name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
 }
 
@@ -247,12 +298,16 @@ pub struct ProviderRecord {
 ///
 /// Mirrors the owned-request shape of [`ListChangedRecordsRequest`] and
 /// [`TriggerSyncRequest`]: the connection carries the provider account identity
-/// and connector needed to authorize the fetch, and the record identifies the
-/// specific source object whose content should be downloaded.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// and connector needed to authorize the fetch, the resolved credential
+/// authenticates it, and the record identifies the specific source object whose
+/// content should be downloaded. Carrying credential material makes this type
+/// deliberately non-serializable.
+#[derive(Debug)]
 pub struct FetchRecordContentRequest {
     /// Connection whose provider account authorizes the fetch.
     pub connection: KnowledgeConnection,
+    /// Resolved credential for this connection's provider account.
+    pub credential: RedactedSecret,
     /// Normalized record whose byte content should be downloaded.
     pub record: ProviderRecord,
 }

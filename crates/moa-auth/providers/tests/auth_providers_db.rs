@@ -11,5 +11,7 @@ mod builtin_authz_request_db;
 mod oauth_access_token_auth_db;
 #[path = "auth_providers_db/oauth_authorization_server_db.rs"]
 mod oauth_authorization_server_db;
+#[path = "auth_providers_db/tenant_credential_vault_db.rs"]
+mod tenant_credential_vault_db;
 #[path = "auth_providers_db/token_vault_round_trip_db.rs"]
 mod token_vault_round_trip_db;

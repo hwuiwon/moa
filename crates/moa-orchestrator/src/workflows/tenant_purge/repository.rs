@@ -736,6 +736,18 @@ async fn assert_catalog_coverage(
             "moa.tenant_purge_operations",
             "public.authz_outbox",
             "public.tenants",
+            // Owned by the durable credential vault, which removes them in the
+            // strictly earlier `CredentialsPurged` stage through its own
+            // forced-RLS, purge-gated path. They cannot be deleted from this
+            // transaction: forced RLS admits only `moa_app` with the
+            // transaction-local purge flag set, so a raw DELETE here would
+            // silently affect nothing while appearing to cover them.
+            "public.tenant_credential_versions",
+            "public.tenant_credential_operations",
+            // Swept in the same earlier stage: the claim table holds credential
+            // references only, and its strict forced-RLS policy admits `moa_app`
+            // alone, so this transaction's role cannot see or delete its rows.
+            "moa.knowledge_link_claims",
         ]
         .into_iter()
         .map(str::to_string),
@@ -809,6 +821,36 @@ async fn assert_tenant_record_deleted(
             "tenant purge left {residue} unapproved rows in tenants"
         ))
     }
+}
+
+/// Loads one keyset page of node uids owned by the tenant, ordered by uid.
+///
+/// The external-vector purge stage walks the tenant's graph nodes in stable uid
+/// order so remote deletes run without holding a PostgreSQL connection. Returns
+/// at most `limit` uids strictly greater than `after_uid`, or all of the
+/// tenant's uids from the start when `after_uid` is `None`.
+pub(super) async fn load_external_vector_uid_page(
+    pool: &sqlx::PgPool,
+    tenant_id: moa_core::types::identifiers::TenantId,
+    after_uid: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<Uuid>, String> {
+    sqlx::query_scalar(
+        r#"
+        SELECT uid
+        FROM moa.node_index
+        WHERE tenant_id = $1
+          AND ($2::UUID IS NULL OR uid > $2)
+        ORDER BY uid
+        LIMIT $3
+        "#,
+    )
+    .bind(tenant_id.0)
+    .bind(after_uid)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load tenant vector ids: {error}"))
 }
 
 #[cfg(test)]

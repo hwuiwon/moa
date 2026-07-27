@@ -653,7 +653,7 @@ fn action_envelope(
         origin_step_id: None,
         execution_origin,
         idempotency_key: None,
-        created_at: chrono::Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
     }
 }
 

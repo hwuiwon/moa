@@ -274,12 +274,11 @@ impl Contacts for ContactsImpl {
                     )
                     .await?;
                 }
-                let delivery = ProviderDeliverySink::from_env(
-                    StoragePartitionId::for_tenant(tenant_id).as_str(),
-                    &messaging_config,
-                )
-                .await
-                .map_err(|error| contact_error_handler_error(contact_delivery_error(error)))?;
+                // Email/SMS transport credentials are deployment-owned, so the
+                // sink is built from the deployment secret source and carries no
+                // tenant scope.
+                let delivery = ProviderDeliverySink::from_env(&messaging_config)
+                    .map_err(|error| contact_error_handler_error(contact_delivery_error(error)))?;
                 ContactVerifier::new(pool, delivery)
                     .start_verification(ContactVerificationStartCommand {
                         tenant_id,
@@ -711,6 +710,12 @@ impl Contacts for ContactsImpl {
         let response = with_identity_headers(
             ctx.object_client::<SessionClient>(session_id.to_string())
                 .queue_message(Json::from(QueueMessageRequest {
+                    // The contact's own retry identity, reply target, and stream cursor
+                    // pass through untouched: this service authenticates and routes the
+                    // message, and the Session VO owns the admission decision.
+                    client_message_id: request.client_message_id,
+                    reply_to: request.reply_to,
+                    stream_cursor: request.stream_cursor,
                     user_message: request.user_message,
                     attachments: request.attachments,
                     model: request.model,
@@ -729,6 +734,7 @@ impl Contacts for ContactsImpl {
             session_id,
             queued: response.queued,
             started_turn_id: response.started_turn_id,
+            stream_cursor: response.stream_cursor,
         }))
     }
 

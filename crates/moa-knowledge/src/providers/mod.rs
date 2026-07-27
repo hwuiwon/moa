@@ -4,14 +4,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use moa_core::types::credentials::RedactedSecret;
 use reqwest::header::HeaderMap;
 
 use crate::{
     domain::{
         ApplySourceSelectionRequest, CreateLinkTokenRequest, ExchangePublicTokenRequest,
-        FetchRecordContentRequest, FetchedRecordContent, KnowledgeConnection, LinkToken,
-        LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord, RecordPage,
-        TriggerSyncRequest, TriggeredSync, WebhookEvent,
+        FetchRecordContentRequest, FetchedRecordContent, InitialSyncStarted, KnowledgeConnection,
+        LinkToken, LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord,
+        RecordPage, StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
     error::Result,
 };
@@ -42,8 +43,20 @@ pub trait LinkedIntegrationProvider: Send + Sync {
     async fn exchange_public_token(&self, req: ExchangePublicTokenRequest)
     -> Result<LinkedAccount>;
 
-    /// Triggers a provider-side sync for one connection.
+    /// Triggers an operator-requested provider-side sync for one connection.
+    ///
+    /// This is the re-sync path and may use one-off or plan-gated provider
+    /// endpoints. It is not safe to replay, so the initial link uses
+    /// [`LinkedIntegrationProvider::start_initial_sync`] instead.
     async fn trigger_sync(&self, req: TriggerSyncRequest) -> Result<TriggeredSync>;
+
+    /// Starts, or re-confirms, the initial sync for a newly linked connection.
+    ///
+    /// The link claim persists its trigger boundary only after this returns, so
+    /// a crash between claiming the sync run and dispatching replays this exact
+    /// call. Implementations must therefore be naturally idempotent or purely
+    /// read-only, and must never consume a provider quota per attempt.
+    async fn start_initial_sync(&self, req: StartInitialSyncRequest) -> Result<InitialSyncStarted>;
 
     /// Applies provider-native selected source state for one connection.
     async fn apply_source_selection(&self, _req: ApplySourceSelectionRequest) -> Result<()> {
@@ -103,6 +116,7 @@ pub trait RecordContentFetcher: Send + Sync {
 pub struct LinkedProviderContentFetcher {
     provider: Arc<dyn LinkedIntegrationProvider>,
     connection: KnowledgeConnection,
+    credentials: Arc<dyn ConnectionCredentialResolver>,
 }
 
 impl LinkedProviderContentFetcher {
@@ -111,10 +125,12 @@ impl LinkedProviderContentFetcher {
     pub fn new(
         provider: Arc<dyn LinkedIntegrationProvider>,
         connection: KnowledgeConnection,
+        credentials: Arc<dyn ConnectionCredentialResolver>,
     ) -> Self {
         Self {
             provider,
             connection,
+            credentials,
         }
     }
 }
@@ -125,13 +141,29 @@ impl RecordContentFetcher for LinkedProviderContentFetcher {
         &self,
         record: &ProviderRecord,
     ) -> Result<Option<FetchedRecordContent>> {
+        // Resolved per fetch, immediately before the outbound request, so a
+        // rotation or revocation takes effect on the very next record and no
+        // plaintext is held across the run.
+        let credential = self.credentials.resolve(&self.connection).await?;
         self.provider
             .fetch_record_content(FetchRecordContentRequest {
                 connection: self.connection.clone(),
+                credential,
                 record: record.clone(),
             })
             .await
     }
+}
+
+/// Resolves one connection's provider credential immediately before a request.
+///
+/// Kept as a narrow trait so this crate never depends on credential storage: the
+/// orchestrator implements it over the single durable credential owner under a
+/// closed service-actor identity, and tests implement it with a fixed value.
+#[async_trait]
+pub trait ConnectionCredentialResolver: Send + Sync {
+    /// Resolves the credential authorizing requests for `connection`.
+    async fn resolve(&self, connection: &KnowledgeConnection) -> Result<RedactedSecret>;
 }
 
 pub(crate) mod http {

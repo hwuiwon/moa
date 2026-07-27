@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use chrono::Utc;
 use moa_core::{
     types::identifiers::SessionId, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId, types::identifiers::UserId,
@@ -92,7 +91,10 @@ fn retrieval_record(
         scope: MemoryScope::Tenant {
             tenant_id: TenantId::from(Uuid::from_u128(0x42)),
         },
-        ts: Utc::now(),
+        ts: chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros(),
+        )
+        .expect("microsecond timestamp"),
         query_original: "what is oauth".to_string(),
         query_expansions: Vec::new(),
         vector_hits,
@@ -200,7 +202,10 @@ fn emit_context_attrs_snapshots_window_and_cache_attributes() {
         session_id: SessionId::new(),
         storage_partition_id: StoragePartitionId::new("tenant-otel"),
         user_id: UserId::new("user-otel"),
-        ts: Utc::now(),
+        ts: chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros(),
+        )
+        .expect("microsecond timestamp"),
         chunks_in_window: vec![context_chunk(0), context_chunk(1), context_chunk(2)],
         truncations: vec![
             TruncationEvent {
@@ -244,7 +249,10 @@ fn emit_generation_attrs_snapshots_model_usage_and_cost() {
         session_id: SessionId::new(),
         storage_partition_id: StoragePartitionId::new("tenant-otel"),
         user_id: UserId::new("user-otel"),
-        ts: Utc::now(),
+        ts: chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros(),
+        )
+        .expect("microsecond timestamp"),
         provider: "anthropic".to_string(),
         request_model: "claude-sonnet".to_string(),
         response_model: "claude-sonnet-20260101".to_string(),

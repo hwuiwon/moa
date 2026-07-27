@@ -1,4 +1,3 @@
-use chrono::Utc;
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::registry::{ArtifactFile, StoredArtifactRevision};
@@ -127,7 +126,7 @@ fn published_skill_artifact_revision_files_convert_to_skill_package() {
         .expect("valid skill package");
     let document = skill_artifact_document_from_package(&original, ArtifactStatus::Published)
         .expect("skill artifact document");
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let tenant_id = uuid::Uuid::now_v7();
     let revision = StoredArtifactRevision {
         artifact_uid: Uuid::now_v7(),

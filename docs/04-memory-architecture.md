@@ -154,10 +154,17 @@ knowledge through `moa-memory-graph` and `moa-memory-vector`. The session
 memory slow path may continue to accept explicit documents, but connector sync
 must not synthesize session turns or overload `Memory.ingest_documents`.
 
-`KnowledgeBlock` identity is `block_hash = blake3(normalized_text)`.
-`KnowledgeChunk` identity is `chunk_hash = blake3(ordered block_hashes)`.
-These identities let ingestion diff changed documents, reuse embeddings,
-tombstone deleted source content, and keep citations stable across re-syncs.
+`KnowledgeBlock` content identity is `block_hash = blake3(normalized_text)`.
+`KnowledgeChunk` content identity is `chunk_hash = blake3(ordered block_hashes)`;
+these let ingestion diff changed documents, decide when an embedding computation
+can be reused, and tombstone deleted source content.
+
+Chunk *occurrence* identity is separate: `chunk_uid` derives from the document
+version, the ordinal, and the content seed, and it is the chunk's graph node uid
+(`moa.knowledge_chunks.graph_node_uid` is NOT NULL and constrained equal to it).
+Equal text in two documents therefore never collapses into one graph node,
+embedding, citation, or deletion target, and one graph uid hydrates exactly one
+document-version occurrence. Content hashes stay for dedupe and diffing only.
 
 Re-observation reinforces instead of dropping. When the contradiction detector
 routes an extracted fact as a duplicate of an existing node (or the fast-path

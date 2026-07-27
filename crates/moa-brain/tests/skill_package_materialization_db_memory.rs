@@ -367,7 +367,7 @@ async fn allow_skill_package_bash(
             effect: moa_core::types::action_policy::ActionPolicyEffect::Allow,
             reason: Some("skill package materialization test bash opt-in".to_string()),
             created_by: UserId::new("skill-package-test"),
-            created_at: chrono::Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
         })
         .await
 }

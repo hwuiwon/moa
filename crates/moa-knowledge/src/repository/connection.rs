@@ -78,6 +78,61 @@ pub(super) async fn get_connection(
     row.as_ref().map(connection_from_row).transpose()
 }
 
+pub(super) async fn connection_by_provider_account(
+    repository: &PostgresKnowledgeRepository,
+    provider: &str,
+    connector: &str,
+    provider_account_id: &str,
+) -> Result<Option<KnowledgeConnection>> {
+    let mut conn = repository.begin().await?;
+    // Exactly `upsert_connection`'s conflict target, so the answer is what the
+    // upsert will do rather than a similar-looking lookup that could diverge.
+    let row = sqlx::query(
+        r#"
+        SELECT connection_uid, tenant_id, provider, connector, provider_connection_id,
+               credential_ref, status, metadata, source_selection, information_barrier,
+               created_at, updated_at, last_synced_at
+        FROM moa.knowledge_connections
+        WHERE tenant_id = $1
+          AND provider = $2
+          AND provider_config_key = $3
+          AND provider_connection_id = $4
+        "#,
+    )
+    .bind(repository.scoped_tenant_id().0)
+    .bind(provider)
+    .bind(connector)
+    .bind(provider_account_id)
+    .fetch_optional(conn.as_mut())
+    .await
+    .map_err(map_sqlx_error)?;
+    conn.commit().await.map_err(map_moa_error)?;
+    row.as_ref().map(connection_from_row).transpose()
+}
+
+pub(super) async fn restore_connection_credential(
+    repository: &PostgresKnowledgeRepository,
+    connection_uid: Uuid,
+    credential_ref: &str,
+) -> Result<bool> {
+    let mut conn = repository.begin().await?;
+    let result = sqlx::query(
+        r#"
+        UPDATE moa.knowledge_connections
+        SET credential_ref = $2,
+            updated_at = now()
+        WHERE connection_uid = $1
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(credential_ref)
+    .execute(conn.as_mut())
+    .await
+    .map_err(map_sqlx_error)?;
+    conn.commit().await.map_err(map_moa_error)?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub(super) async fn update_connection_source_selection(
     repository: &PostgresKnowledgeRepository,
     connection_uid: Uuid,

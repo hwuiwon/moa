@@ -2063,13 +2063,19 @@ mod tests {
     }
 
     fn replan_budget(max_resource: u64, max_tasks: u64) -> ExecutionBudgetLimit {
+        // Truncated to microseconds so equality against a Postgres round-trip
+        // is exact: nanosecond-granular CI clocks otherwise fail assertions
+        // that microsecond-granular local clocks let pass.
+        let deadline = Utc::now() + Duration::hours(1);
+        let deadline = chrono::DateTime::<Utc>::from_timestamp_micros(deadline.timestamp_micros())
+            .expect("hour-offset deadline is representable at microsecond precision");
         ExecutionBudgetLimit {
             max_cost_microusd: Some(max_resource),
             max_tokens: Some(max_resource / 10),
             max_tasks: Some(max_tasks),
             max_tool_calls: Some(max_resource / 10_000),
             max_retrieved_bytes: Some(max_resource.saturating_mul(20)),
-            deadline_at: Some(Utc::now() + Duration::hours(1)),
+            deadline_at: Some(deadline),
         }
     }
 

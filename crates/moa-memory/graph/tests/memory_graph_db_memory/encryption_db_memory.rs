@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use moa_core::types::contact::ContactId;
 use moa_core::types::identifiers::{StoragePartitionId, TenantId};
 use moa_core::types::memory::RlsContext;
@@ -71,7 +70,7 @@ fn tenant_node_intent(
         properties,
         pii_class,
         confidence: Some(0.9),
-        valid_from: Utc::now(),
+        valid_from: moa_test_support::fixtures::pg_now(),
         embedding,
         embedding_model: Some("test-model".to_string()),
         embedding_model_version: Some(1),

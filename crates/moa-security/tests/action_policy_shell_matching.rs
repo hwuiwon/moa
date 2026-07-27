@@ -5,7 +5,6 @@
 //! shell-chain/unsafe-syntax guard) instead of `parse_and_match_command` in
 //! isolation, which the inline `policies.rs` unit tests already cover.
 
-use chrono::Utc;
 use moa_config::MoaConfig;
 use moa_core::{
     types::action_policy::ActionClass, types::action_policy::ActionPolicyEffect,
@@ -31,7 +30,10 @@ fn bash_allow_rule() -> ActionPolicyRule {
         effect: ActionPolicyEffect::Allow,
         reason: Some("allow npm test".to_string()),
         created_by: UserId::new("admin"),
-        created_at: Utc::now(),
+        created_at: chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros(),
+        )
+        .expect("microsecond timestamp"),
     }
 }
 

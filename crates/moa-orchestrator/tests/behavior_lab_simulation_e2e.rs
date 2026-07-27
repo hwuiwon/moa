@@ -74,7 +74,7 @@ fn spawn_orchestrator(
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
-        .env("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true")
+        .env("MOA_SECURITY_PROFILE", "local")
         // Opt into the ephemeral in-process KMS so the fail-closed durability
         // guard permits startup (production uses a persistent postgres KMS).
         .env("MOA_KMS_ALLOW_EPHEMERAL", "true")

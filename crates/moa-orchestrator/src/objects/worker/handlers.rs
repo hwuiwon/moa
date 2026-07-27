@@ -86,6 +86,7 @@ impl Worker for WorkerImpl {
             .identity
             .clone()
             .ok_or_else(|| TerminalError::new("worker is missing its admitted caller identity"))?;
+        let parent_session = required_parent_session(&state)?;
         let trusted_sandbox_manifest = state.trusted_sandbox_manifest.clone();
         state.persist(&ctx);
 
@@ -94,6 +95,7 @@ impl Worker for WorkerImpl {
                 &ctx,
                 turn_id,
                 identity,
+                parent_session,
                 max_turns,
                 trusted_sandbox_manifest,
             );
@@ -471,6 +473,7 @@ impl Worker for WorkerImpl {
             .identity
             .clone()
             .ok_or_else(|| TerminalError::new("worker is missing its admitted caller identity"))?;
+        let parent_session = required_parent_session(&state)?;
         let trusted_sandbox_manifest = state.trusted_sandbox_manifest.clone();
         state.persist(&ctx);
 
@@ -479,6 +482,7 @@ impl Worker for WorkerImpl {
                 &ctx,
                 turn_id,
                 identity,
+                parent_session,
                 max_turns,
                 trusted_sandbox_manifest,
             );
@@ -979,10 +983,24 @@ async fn hydrate_claimed_history_entry(
     })
 }
 
+/// Returns the worker's owning session, or a terminal error when it has none.
+///
+/// Every worker turn request carries its parent session so a turn that fails
+/// before preparing its first iteration can still append the parent-session
+/// facts. A worker without a recorded parent cannot be dispatched, and the
+/// missing value is never inferred.
+fn required_parent_session(state: &WorkerVoState) -> Result<SessionId, HandlerError> {
+    state.parent_session.ok_or_else(|| {
+        TerminalError::new("worker is missing its owning parent session and cannot run a turn")
+            .into()
+    })
+}
+
 fn start_worker_turn_execution(
     ctx: &ObjectContext<'_>,
     turn_id: String,
     identity: moa_core::traits::Identity,
+    parent_session: SessionId,
     max_turns: Option<u32>,
     trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
 ) {
@@ -992,6 +1010,7 @@ fn start_worker_turn_execution(
                 worker_id: ctx.key().to_string(),
                 turn_id,
                 identity,
+                parent_session,
                 max_turns,
                 trusted_sandbox_manifest,
             })),

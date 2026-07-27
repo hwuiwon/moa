@@ -1308,11 +1308,6 @@ mod tests {
         let mut config = MoaConfig::default();
         config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
         config.local.docker_enabled = false;
-        config
-            .cloud
-            .hands
-            .get_or_insert_with(Default::default)
-            .allow_local_provider = true;
         config.mcp_servers = vec![McpServerConfig {
             name: "reviewed-mcp".to_string(),
             transport: McpTransportConfig::Http,
@@ -1329,7 +1324,7 @@ mod tests {
                 abstained: false,
             },
         })));
-        let router = ToolRouter::from_config(&config, Some(mcp_egress_guard))
+        let router = ToolRouter::from_config(&config, Some(mcp_egress_guard), None)
             .await
             .expect("build MCP router");
         let executor = ToolExecutorImpl::new(Arc::new(router));

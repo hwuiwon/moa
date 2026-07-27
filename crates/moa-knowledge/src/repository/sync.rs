@@ -15,7 +15,7 @@ pub(super) async fn create_sync_run(
             parser_provider, max_records, records_seen, records_changed, records_deleted,
             records_ingested, records_failed, objects_parsed, chunks_embedded,
             graph_nodes_upserted, graph_edges_upserted, error, started_at, finished_at,
-            information_barrier
+            information_barrier, provider_trigger_completed_at
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
@@ -24,7 +24,7 @@ pub(super) async fn create_sync_run(
                 WHEN $17::TEXT IS NULL THEN NULL
                 ELSE jsonb_build_object('code', $17::TEXT)
             END,
-            $18, $19, $20
+            $18, $19, $20, $21
         )
         "#,
     )
@@ -52,6 +52,7 @@ pub(super) async fn create_sync_run(
             .as_ref()
             .map(InformationBarrierId::as_str),
     )
+    .bind(run.provider_trigger_completed_at)
     .execute(conn.as_mut())
     .await
     .map_err(map_sqlx_error)?;
@@ -74,7 +75,7 @@ pub(super) async fn claim_sync_run(
             parser_provider, max_records, records_seen, records_changed, records_deleted,
             records_ingested, records_failed, objects_parsed, chunks_embedded,
             graph_nodes_upserted, graph_edges_upserted, error, started_at, finished_at,
-            information_barrier
+            information_barrier, provider_trigger_completed_at
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
@@ -83,7 +84,7 @@ pub(super) async fn claim_sync_run(
                 WHEN $17::TEXT IS NULL THEN NULL
                 ELSE jsonb_build_object('code', $17::TEXT)
             END,
-            $18, $19, $20
+            $18, $19, $20, $21
         )
         ON CONFLICT (tenant_id, connection_id)
         WHERE status IN (
@@ -99,7 +100,7 @@ pub(super) async fn claim_sync_run(
                   records_ingested, records_failed, objects_parsed, chunks_embedded,
                   graph_nodes_upserted, graph_edges_upserted,
                   error->>'code' AS error_code, started_at, finished_at,
-                  information_barrier
+                  information_barrier, provider_trigger_completed_at
         "#,
     )
     .bind(run.sync_run_uid)
@@ -126,6 +127,7 @@ pub(super) async fn claim_sync_run(
             .as_ref()
             .map(InformationBarrierId::as_str),
     )
+    .bind(run.provider_trigger_completed_at)
     .fetch_optional(conn.as_mut())
     .await
     .map_err(map_sqlx_error)?;
@@ -143,7 +145,7 @@ pub(super) async fn claim_sync_run(
                records_ingested, records_failed, objects_parsed, chunks_embedded,
                graph_nodes_upserted, graph_edges_upserted,
                error->>'code' AS error_code, started_at, finished_at,
-               information_barrier
+               information_barrier, provider_trigger_completed_at
         FROM moa.knowledge_sync_runs
         WHERE tenant_id = $1
           AND connection_id = $2
@@ -178,7 +180,8 @@ pub(super) async fn get_sync_run(
                records_seen, records_changed, records_deleted, records_ingested,
                records_failed, objects_parsed, chunks_embedded, graph_nodes_upserted,
                graph_edges_upserted, error->>'code' AS error_code,
-               started_at, finished_at, information_barrier
+               started_at, finished_at, information_barrier,
+               provider_trigger_completed_at
         FROM moa.knowledge_sync_runs
         WHERE sync_run_uid = $1
         "#,
@@ -208,7 +211,7 @@ pub(super) async fn latest_sync_run_for_connection(
                records_failed, objects_parsed, chunks_embedded,
                graph_nodes_upserted, graph_edges_upserted,
                error->>'code' AS error_code, started_at, finished_at,
-               information_barrier
+               information_barrier, provider_trigger_completed_at
         FROM moa.knowledge_sync_runs
         WHERE connection_id = $1
           AND (cardinality($2::TEXT[]) = 0 OR status = ANY($2::TEXT[]))
@@ -223,6 +226,30 @@ pub(super) async fn latest_sync_run_for_connection(
     .map_err(map_sqlx_error)?;
     conn.commit().await.map_err(map_moa_error)?;
     row.as_ref().map(sync_run_from_row).transpose()
+}
+
+pub(super) async fn mark_provider_trigger_completed(
+    repository: &PostgresKnowledgeRepository,
+    sync_run_uid: Uuid,
+) -> Result<()> {
+    let mut conn = repository.begin().await?;
+    // `COALESCE` keeps the first observation: replaying the trigger must not
+    // move the boundary, and a later status update never touches this column,
+    // so the evidence survives the rest of the run's lifecycle.
+    let result = sqlx::query(
+        r#"
+        UPDATE moa.knowledge_sync_runs
+        SET provider_trigger_completed_at = COALESCE(provider_trigger_completed_at, now()),
+            updated_at = now()
+        WHERE sync_run_uid = $1
+        "#,
+    )
+    .bind(sync_run_uid)
+    .execute(conn.as_mut())
+    .await
+    .map_err(map_sqlx_error)?;
+    conn.commit().await.map_err(map_moa_error)?;
+    ensure_rows_affected(result.rows_affected(), "mark provider trigger completed")
 }
 
 pub(super) async fn update_sync_run(

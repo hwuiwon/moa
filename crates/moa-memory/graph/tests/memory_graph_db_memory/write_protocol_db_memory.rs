@@ -138,7 +138,7 @@ fn edge_intent(
         label,
         start_uid,
         end_uid,
-        valid_from: Utc::now(),
+        valid_from: moa_test_support::fixtures::pg_now(),
         properties: json!({ "kind": "test-edge", "index": index }),
         storage_partition_id: Some(storage_partition_id.to_string()),
         contact_id: None,
@@ -263,7 +263,7 @@ async fn in_conn_write_primitives_compose_in_one_transaction_db_memory() {
     let scope = tenant_scope(&storage_partition_id);
     let store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope, super::test_kms());
 
-    let t0 = Utc::now() - Duration::minutes(5);
+    let t0 = moa_test_support::fixtures::pg_now() - Duration::minutes(5);
     let fact = node_intent(
         &storage_partition_id,
         NodeLabel::Fact,
@@ -384,7 +384,7 @@ async fn bulk_create_nodes_matches_looped_singles_including_changelog_db_memory(
     let loop_graph = graph_store(pool, &loop_partition);
     seed_workspace_embedder_state(pool, &batch_partition).await;
     seed_workspace_embedder_state(pool, &loop_partition).await;
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     let intents = |partition: &str| {
         vec![
@@ -491,7 +491,7 @@ async fn bulk_create_nodes_shared_uids_concurrent_do_not_deadlock_db_memory() {
     let pool = session_store.pool();
     let partition = Uuid::now_v7().to_string();
     seed_workspace_embedder_state(pool, &partition).await;
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     // Shared entity nodes every writer references, with stable uids so all
     // transactions contend on the same node_index rows.
@@ -699,7 +699,7 @@ async fn graph_write_with_vector_store_commits_node_state_db_memory() {
         &storage_partition_id,
         NodeLabel::Fact,
         "queue only vector sync fact",
-        Utc::now(),
+        moa_test_support::fixtures::pg_now(),
         Some(basis_vector(0)),
     );
     let graph = PostgresGraphStore::scoped_for_app_role(
@@ -739,7 +739,7 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
     let graph = graph_store(session_store.pool(), &storage_partition_id);
     seed_workspace_embedder_state(session_store.pool(), &storage_partition_id).await;
 
-    let t0 = Utc::now() - Duration::minutes(5);
+    let t0 = moa_test_support::fixtures::pg_now() - Duration::minutes(5);
     let old = node_intent(
         &storage_partition_id,
         NodeLabel::Fact,
@@ -934,7 +934,7 @@ async fn write_protocol_creates_every_edge_label() {
         .expect("create isolated Postgres store");
     let storage_partition_id = Uuid::now_v7().to_string();
     let graph = graph_store(session_store.pool(), &storage_partition_id);
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let start_uid = graph
         .create_node(node_intent(
             &storage_partition_id,
@@ -1001,7 +1001,7 @@ async fn rollback_on_failure_removes_relational_sidecar_rows() {
         &storage_partition_id,
         NodeLabel::Entity,
         "bad vector rollback",
-        Utc::now(),
+        moa_test_support::fixtures::pg_now(),
         Some(vec![1.0]),
     );
     let uid = bad.uid;

@@ -22,14 +22,13 @@ pub mod slack;
 
 pub use action_review::prepare_outbound_message;
 pub use delivery::{
-    DeliveryMessage, DeliveryPurpose, DeliveryReceipt, EnvironmentDeliveryCredentialVault,
-    ProviderDeliverySink,
+    DeliveryMessage, DeliveryPurpose, DeliveryReceipt, ProviderDeliverySink,
+    delivery_deployment_secrets_from_env,
 };
 #[cfg(feature = "postmark")]
 pub use postmark::{
-    POSTMARK_SERVER_API_TOKEN_ENV, POSTMARK_SERVER_TOKEN_SERVICE, POSTMARK_TEST_TOKEN,
-    PostmarkEmailClient, PostmarkEmailFailure, PostmarkEmailFailureClass, PostmarkEmailMessage,
-    PostmarkEmailSendResult,
+    POSTMARK_SERVER_API_TOKEN_ENV, POSTMARK_TEST_TOKEN, PostmarkEmailClient, PostmarkEmailFailure,
+    PostmarkEmailFailureClass, PostmarkEmailMessage, PostmarkEmailSendResult,
 };
 pub use rate_limit::{
     MessagingFailureClass, MessagingRateLimitMetrics, MessagingRateLimiter, MessagingSendFailure,
@@ -38,12 +37,10 @@ pub use rate_limit::{
 pub use renderer::SLACK_MAX_MESSAGE_LENGTH;
 #[cfg(feature = "twilio")]
 pub use twilio::{
-    TWILIO_ACCOUNT_SID_ENV, TWILIO_ACCOUNT_SID_SERVICE, TWILIO_API_KEY_SECRET_ENV,
-    TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SID_ENV, TWILIO_API_KEY_SID_SERVICE,
-    TWILIO_AUTH_TOKEN_ENV, TWILIO_AUTH_TOKEN_SERVICE, TWILIO_FROM_NUMBER_ENV,
-    TWILIO_FROM_NUMBER_SERVICE, TWILIO_MESSAGING_SERVICE_SID_ENV,
-    TWILIO_MESSAGING_SERVICE_SID_SERVICE, TwilioSmsClient, TwilioSmsDeliveryFailure,
-    TwilioSmsFailureClass, TwilioSmsMessage, TwilioSmsSendResult,
+    TWILIO_ACCOUNT_SID_ENV, TWILIO_API_KEY_SECRET_ENV, TWILIO_API_KEY_SID_ENV,
+    TWILIO_AUTH_TOKEN_ENV, TWILIO_FROM_NUMBER_ENV, TWILIO_MESSAGING_SERVICE_SID_ENV,
+    TwilioSmsClient, TwilioSmsDeliveryFailure, TwilioSmsFailureClass, TwilioSmsMessage,
+    TwilioSmsSendResult,
 };
 
 #[cfg(feature = "slack")]

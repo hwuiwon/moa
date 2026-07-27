@@ -7,7 +7,13 @@ use moa_analytics::AnalyticsClickHouseClient;
 use moa_authz::FgaClient;
 use moa_config::MoaConfig;
 use moa_core::{
-    types::identifiers::StoragePartitionId, types::identifiers::TenantId, types::memory::RlsContext,
+    traits::CredentialVault,
+    types::credentials::{
+        CredentialContext, CredentialOperation, CredentialPrincipal, CredentialServiceActor,
+    },
+    types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
+    types::memory::RlsContext,
 };
 use moa_lineage_sink::ClickHouseStore;
 use moa_memory_vector::{VectorStore, VectorStoreFactory};
@@ -17,6 +23,7 @@ use moa_wire::tenants::{
     tenant_purge_operation_id,
 };
 use restate_sdk::prelude::*;
+use sha2::{Digest, Sha256};
 
 pub mod repository;
 
@@ -43,6 +50,7 @@ pub trait TenantPurge {
 pub struct TenantPurgeImpl {
     pool: sqlx::PgPool,
     fga: Option<FgaClient>,
+    credential_vault: Arc<dyn CredentialVault>,
     lineage_clickhouse: Option<Arc<ClickHouseStore>>,
     analytics_clickhouse: Option<Arc<AnalyticsClickHouseClient>>,
     vector_factory: VectorStoreFactory,
@@ -50,11 +58,21 @@ pub struct TenantPurgeImpl {
 
 impl TenantPurgeImpl {
     /// Builds the workflow from the runtime pool, OpenFGA client, and ClickHouse config.
+    ///
+    /// `credential_vault` is the shared durable credential owner: credentials
+    /// can outlive the connections that created them, so the vault — not any
+    /// relational table — is authoritative about what a tenant still holds.
     #[must_use]
-    pub fn new(pool: sqlx::PgPool, fga: Option<FgaClient>, config: &MoaConfig) -> Self {
+    pub fn new(
+        pool: sqlx::PgPool,
+        fga: Option<FgaClient>,
+        credential_vault: Arc<dyn CredentialVault>,
+        config: &MoaConfig,
+    ) -> Self {
         Self {
             pool,
             fga,
+            credential_vault,
             lineage_clickhouse: config
                 .clickhouse
                 .as_ref()
@@ -110,6 +128,23 @@ impl TenantPurge for TenantPurgeImpl {
         }
 
         if status == TenantPurgeStatus::VectorsPurged {
+            let vault = self.credential_vault.clone();
+            let tenant_id = request.tenant_id;
+            let credential_operation_id = operation_id.clone();
+            let pool = self.pool.clone();
+            ctx.run(move || async move {
+                purge_credential_state(&pool, vault.as_ref(), tenant_id, &credential_operation_id)
+                    .await
+                    .map(Json::from)
+                    .map_err(|error| HandlerError::from(anyhow::anyhow!(error)))
+            })
+            .name("tenant_purge_credentials")
+            .await?;
+            status = TenantPurgeStatus::CredentialsPurged;
+            ctx.set(K_STATUS, Json(status));
+        }
+
+        if status == TenantPurgeStatus::CredentialsPurged {
             let Some(fga) = self.fga.clone() else {
                 status = TenantPurgeStatus::FailedTerminal;
                 ctx.set(K_STATUS, Json(status));
@@ -194,6 +229,86 @@ fn status_response(operation_id: String, status: TenantPurgeStatus) -> TenantPur
     }
 }
 
+/// Bounded, resumable sweep of one tenant's stored credential state.
+///
+/// The owner deletes at most one batch per call and reports how many rows it
+/// removed, so looping until zero gives bounded transactions, natural
+/// idempotency, and crash-resume: a workflow that dies mid-sweep simply resumes
+/// from whatever is still there.
+const CREDENTIAL_PURGE_BATCH_SIZE: u32 = 500;
+
+async fn purge_credential_state(
+    pool: &sqlx::PgPool,
+    vault: &dyn CredentialVault,
+    tenant_id: TenantId,
+    operation_id: &str,
+) -> Result<u64, String> {
+    let credentials = purge_credentials(vault, tenant_id, operation_id).await?;
+    // Link claims hold credential references and nothing else, so they belong to
+    // the same lifecycle stage. They are swept after the owner drains, which
+    // keeps the invariant that a claim never outlives what it points at.
+    let repository = moa_knowledge::repository::PostgresKnowledgeRepository::scoped(
+        pool.clone(),
+        RlsContext::tenant(tenant_id),
+    );
+    let mut claims = 0_u64;
+    loop {
+        let removed = moa_knowledge::repository::KnowledgeRepository::purge_tenant_link_claims(
+            &repository,
+            CREDENTIAL_PURGE_BATCH_SIZE,
+        )
+        .await
+        .map_err(|error| format!("tenant link claim purge: {error}"))?;
+        if removed == 0 {
+            return Ok(credentials.saturating_add(claims));
+        }
+        claims = claims.saturating_add(removed);
+    }
+}
+
+async fn purge_credentials(
+    vault: &dyn CredentialVault,
+    tenant_id: TenantId,
+    operation_id: &str,
+) -> Result<u64, String> {
+    let mut removed_total = 0_u64;
+    let mut batch_index = 0_u32;
+    loop {
+        let ctx = CredentialContext {
+            tenant_id,
+            principal: CredentialPrincipal::Service {
+                actor: CredentialServiceActor::TenantLifecyclePurge,
+            },
+            operation: CredentialOperation::Delete,
+            // Each batch is its own replayable operation; a resumed purge that
+            // repeats a batch replays that batch's audit row rather than
+            // colliding with the previous one.
+            operation_id: format!("{operation_id}:credentials:{batch_index}"),
+            request_hash: credential_purge_request_hash(tenant_id, batch_index),
+        };
+        let removed = vault
+            .purge_tenant(CREDENTIAL_PURGE_BATCH_SIZE, &ctx)
+            .await
+            .map_err(|error| format!("tenant credential purge: {error}"))?;
+        if removed == 0 {
+            return Ok(removed_total);
+        }
+        removed_total = removed_total.saturating_add(removed);
+        batch_index = batch_index.saturating_add(1);
+    }
+}
+
+/// Builds the canonical, secret-free request hash for one credential purge batch.
+fn credential_purge_request_hash(tenant_id: TenantId, batch_index: u32) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(tenant_id.to_string().as_bytes());
+    hasher.update([0]);
+    hasher.update(CredentialOperation::Delete.as_str().as_bytes());
+    hasher.update([0]);
+    hasher.update(batch_index.to_string().as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 async fn purge_analytics(
     pool: &sqlx::PgPool,
     lineage: Option<&ClickHouseStore>,
@@ -254,34 +369,12 @@ async fn purge_external_vectors(
     purge_external_vector_pages(
         store.as_ref(),
         EXTERNAL_VECTOR_PURGE_PAGE_SIZE,
-        |after_uid, limit| load_external_vector_uid_page(pool, tenant_id, after_uid, limit),
+        |after_uid, limit| {
+            repository::load_external_vector_uid_page(pool, tenant_id, after_uid, limit)
+        },
     )
     .await?;
     recheck_stage(pool, tenant_id, operation_id, "external vector completion").await
-}
-
-async fn load_external_vector_uid_page(
-    pool: &sqlx::PgPool,
-    tenant_id: TenantId,
-    after_uid: Option<uuid::Uuid>,
-    limit: i64,
-) -> Result<Vec<uuid::Uuid>, String> {
-    sqlx::query_scalar(
-        r#"
-        SELECT uid
-        FROM moa.node_index
-        WHERE tenant_id = $1
-          AND ($2::UUID IS NULL OR uid > $2)
-        ORDER BY uid
-        LIMIT $3
-        "#,
-    )
-    .bind(tenant_id.0)
-    .bind(after_uid)
-    .bind(limit)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| format!("load tenant vector ids: {error}"))
 }
 
 async fn purge_external_vector_pages<LoadPage, LoadFuture>(
@@ -359,6 +452,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
+    use moa_core::types::credentials::CredentialError;
     use moa_memory_vector::{VectorItem, VectorMatch, VectorQuery};
 
     use super::*;
@@ -442,6 +536,141 @@ mod tests {
         );
     }
 
+    /// Credential owner that drains a fixed number of rows per bounded batch.
+    struct BatchedCredentialVault {
+        remaining: Mutex<u64>,
+        operations: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CredentialVault for BatchedCredentialVault {
+        async fn create(
+            &self,
+            _identity: moa_core::types::credentials::CredentialIdentity,
+            _material: secrecy::SecretString,
+            _ctx: &CredentialContext,
+        ) -> Result<moa_core::types::credentials::CredentialVersion, CredentialError> {
+            unreachable!("tenant purge never creates credentials")
+        }
+
+        async fn resolve(
+            &self,
+            _source: &moa_core::types::credentials::CredentialSource,
+            _ctx: &CredentialContext,
+        ) -> Result<moa_core::types::credentials::RedactedSecret, CredentialError> {
+            unreachable!("tenant purge never resolves credentials")
+        }
+
+        async fn describe(
+            &self,
+            _reference: moa_core::types::credentials::CredentialRef,
+            _ctx: &CredentialContext,
+        ) -> Result<moa_core::types::credentials::CredentialVersion, CredentialError> {
+            unreachable!("tenant purge never describes credentials")
+        }
+
+        async fn rotate(
+            &self,
+            _current: moa_core::types::credentials::CredentialRef,
+            _material: secrecy::SecretString,
+            _ctx: &CredentialContext,
+        ) -> Result<moa_core::types::credentials::CredentialVersion, CredentialError> {
+            unreachable!("tenant purge never rotates credentials")
+        }
+
+        async fn revoke(
+            &self,
+            _reference: moa_core::types::credentials::CredentialRef,
+            _ctx: &CredentialContext,
+        ) -> Result<(), CredentialError> {
+            unreachable!("tenant purge never revokes credentials")
+        }
+
+        async fn delete_connection(
+            &self,
+            _connection_uid: uuid::Uuid,
+            _ctx: &CredentialContext,
+        ) -> Result<u64, CredentialError> {
+            unreachable!("tenant purge sweeps by tenant, not by connection")
+        }
+
+        async fn purge_tenant(
+            &self,
+            limit: u32,
+            ctx: &CredentialContext,
+        ) -> Result<u64, CredentialError> {
+            if !ctx.principal.permits(ctx.operation) {
+                return Err(CredentialError::Unauthorized);
+            }
+            self.operations
+                .lock()
+                .expect("purge operation log")
+                .push((ctx.operation_id.clone(), ctx.request_hash.clone()));
+            let mut remaining = self.remaining.lock().expect("purge remaining");
+            let removed = (*remaining).min(u64::from(limit));
+            *remaining -= removed;
+            Ok(removed)
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_purge_loops_until_the_owner_reports_nothing_left_offline() {
+        // Pins: the tenant-purge stage drains credential state through bounded
+        // batches and stops only when the owner reports zero. Stopping at the
+        // first batch would leave usable third-party credentials behind for a
+        // purged tenant, and every batch must be separately replayable rather
+        // than colliding on one audit key.
+        let tenant_id = TenantId::from(uuid::Uuid::from_u128(0x2358_1001));
+        let vault = BatchedCredentialVault {
+            remaining: Mutex::new(u64::from(CREDENTIAL_PURGE_BATCH_SIZE) * 2 + 7),
+            operations: Mutex::new(Vec::new()),
+        };
+
+        let removed = purge_credentials(&vault, tenant_id, "tenant-purge-op")
+            .await
+            .expect("bounded credential purge should drain");
+
+        assert_eq!(removed, u64::from(CREDENTIAL_PURGE_BATCH_SIZE) * 2 + 7);
+        let operations = vault.operations.into_inner().expect("purge operation log");
+        assert_eq!(
+            operations.len(),
+            4,
+            "three draining batches plus the zero batch that proves completion"
+        );
+        let ids: Vec<&str> = operations.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "tenant-purge-op:credentials:0",
+                "tenant-purge-op:credentials:1",
+                "tenant-purge-op:credentials:2",
+                "tenant-purge-op:credentials:3",
+            ],
+            "each batch must carry its own replay key"
+        );
+        let hashes: std::collections::BTreeSet<&str> =
+            operations.iter().map(|(_, hash)| hash.as_str()).collect();
+        assert_eq!(
+            hashes.len(),
+            operations.len(),
+            "a distinct batch must not reuse another batch's request hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_purge_actor_cannot_be_used_to_read_material_offline() {
+        // Pins: the purge stage acts as a delete-only service actor. If it could
+        // resolve, tenant offboarding would become a way to read every
+        // credential a tenant holds on the way to deleting them.
+        let purge = CredentialPrincipal::Service {
+            actor: CredentialServiceActor::TenantLifecyclePurge,
+        };
+
+        assert!(purge.permits(CredentialOperation::Delete));
+        assert!(!purge.permits(CredentialOperation::Resolve));
+        assert_eq!(purge.owner_identity(), None);
+    }
+
     #[test]
     fn post_commit_retry_never_selects_relational_work_again() {
         // Pins: once the relational state is durable, ClickHouse retries cannot replay PostgreSQL.
@@ -458,6 +687,10 @@ mod tests {
         assert_eq!(next_step(TenantPurgeStatus::Pending), Some("vectors"));
         assert_eq!(
             next_step(TenantPurgeStatus::VectorsPurged),
+            Some("credentials")
+        );
+        assert_eq!(
+            next_step(TenantPurgeStatus::CredentialsPurged),
             Some("relational")
         );
         assert_eq!(next_step(TenantPurgeStatus::FailedTerminal), None);
@@ -466,7 +699,8 @@ mod tests {
     fn next_step(status: TenantPurgeStatus) -> Option<&'static str> {
         match status {
             TenantPurgeStatus::Pending => Some("vectors"),
-            TenantPurgeStatus::VectorsPurged => Some("relational"),
+            TenantPurgeStatus::VectorsPurged => Some("credentials"),
+            TenantPurgeStatus::CredentialsPurged => Some("relational"),
             TenantPurgeStatus::RelationallyCommitted => Some("clickhouse"),
             TenantPurgeStatus::AnalyticsPurged | TenantPurgeStatus::FailedTerminal => None,
         }

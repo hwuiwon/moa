@@ -111,9 +111,15 @@ impl RegisteredTool {
                     // MCP/third-party tools have no considered per-tool descriptor
                     // gate (unlike builtins), so they default to admin review rather
                     // than a bare allow: unvetted external code should not execute
-                    // unattended. This is only the fallback effect — an explicit
-                    // operator rule or `permissions` config (allow/deny/admin_review)
-                    // still wins in `ActionPolicies::check`.
+                    // unattended.
+                    //
+                    // This is a *cautious default*, not a floor. `ActionPolicies::check`
+                    // implements two tiers: an explicit matched persisted rule may lift
+                    // an intrinsic `AdminReview`, while intrinsic `Deny` and configured
+                    // `permissions.always_deny`/`admin_review` overrides are unliftable.
+                    // So an operator rule still wins here, and a deployment that wants
+                    // external tools review-locked regardless of tenant rules configures
+                    // the override instead.
                     default_effect: ActionPolicyEffect::AdminReview,
                     action_class: ActionClass::ExternalWrite,
                     input_shape: ToolInputShape::Json,

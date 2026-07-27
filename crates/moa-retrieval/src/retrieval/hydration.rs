@@ -36,9 +36,13 @@ pub(super) async fn hydrate_knowledge_chunks(
             .execute(conn.as_mut())
             .await?;
     }
+    // One graph uid hydrates exactly one document-version occurrence: chunk rows
+    // store `graph_node_uid = chunk_uid` under a unique index, so there is no
+    // ambiguity for a newest-version tiebreak to resolve. Collapsing candidates
+    // here would silently drop a second document's occurrence of identical text.
     let rows = sqlx::query_as::<_, KnowledgeChunkRow>(
         r#"
-        SELECT DISTINCT ON (c.graph_node_uid)
+        SELECT
             c.graph_node_uid,
             c.chunk_uid,
             c.document_version_id AS document_version_uid,
@@ -61,7 +65,7 @@ pub(super) async fn hydrate_knowledge_chunks(
           AND c.graph_node_uid = ANY($2)
           AND o.status = 'active'
           AND c.metadata->>'active' IS DISTINCT FROM 'false'
-        ORDER BY c.graph_node_uid, v.created_at DESC, c.ordinal ASC
+        ORDER BY c.graph_node_uid
         "#,
     )
     .bind(scope.tenant_id().0)

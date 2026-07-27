@@ -6,7 +6,7 @@
 //! builders. Keeping a single copy here keeps behavior identical across lanes.
 
 use moa_core::{
-    types::contact::ContactId, types::contact::ContactRef,
+    types::contact::ClientMessageId, types::contact::ContactId, types::contact::ContactRef,
     types::contact::ContactVerificationState, types::contact::SessionActorRef,
     types::identifiers::ModelId, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId, types::session::SessionMeta,
@@ -20,6 +20,17 @@ use uuid::Uuid;
 #[must_use]
 pub fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+/// Mints a fresh caller retry identity for one submitted test message.
+///
+/// A test that drives several messages through one session needs a distinct identity per
+/// message, exactly like a real client: reusing one would be answered by the Session
+/// admission fence with the first message's response instead of starting new work. Tests
+/// that deliberately exercise a retry pass the same id twice themselves.
+#[must_use]
+pub fn fresh_client_message_id() -> ClientMessageId {
+    ClientMessageId::new(Uuid::now_v7().to_string()).expect("a uuid is a valid client message id")
 }
 
 /// Maps a storage partition identifier to the tenant ID used by test fixtures.
@@ -95,6 +106,21 @@ pub fn session_meta_fixture(tenant_id: TenantId) -> SessionMeta {
         model: ModelId::new("test-model"),
         ..SessionMeta::default()
     }
+}
+
+/// The current time truncated to what Postgres can round-trip.
+///
+/// `TIMESTAMPTZ` carries microseconds while `Utc::now()` carries nanoseconds,
+/// so an equality assertion between a fixture-held timestamp and its
+/// database round-trip passes on microsecond-granular macOS clocks and fails
+/// almost deterministically on nanosecond-granular Linux CI clocks. Every
+/// DB-lane fixture timestamp must come from this helper (or truncate the same
+/// way) so tests assert correctness rather than clock granularity.
+#[must_use]
+pub fn pg_now() -> chrono::DateTime<chrono::Utc> {
+    let now = chrono::Utc::now();
+    chrono::DateTime::<chrono::Utc>::from_timestamp_micros(now.timestamp_micros())
+        .expect("the current time is representable at microsecond precision")
 }
 
 #[cfg(test)]

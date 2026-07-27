@@ -59,6 +59,15 @@ pub struct KnowledgeSyncRun {
     /// Run finish time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
+    /// When this run's provider trigger was durably observed to have dispatched.
+    ///
+    /// A persisted queued run proves only that MOA claimed the run, not that the
+    /// provider was ever called. This is the separate, write-once boundary: it is
+    /// set by the step that saw a successful dispatch and is never rewritten by
+    /// ordinary status updates, so a crash between claim and dispatch is
+    /// distinguishable from a completed dispatch on replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_trigger_completed_at: Option<DateTime<Utc>>,
 }
 
 /// Counter update accumulated while processing one sync run.

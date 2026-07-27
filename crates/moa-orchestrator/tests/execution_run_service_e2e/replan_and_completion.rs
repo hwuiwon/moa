@@ -1313,7 +1313,7 @@ async fn execution_eval_amendment_cannot_broaden_authorization_service_e2e() -> 
         authorization: snapshot.authorization,
         remaining_budget,
         config: ExecutionConfig::default(),
-        now: chrono::Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     });
     assert!(validated.plan.is_none());
     assert!(
@@ -1441,7 +1441,7 @@ where
         authorization: planning.snapshot.authorization.clone(),
         approved_budget: planning.snapshot.budget.clone(),
         config: ExecutionConfig::default(),
-        now: chrono::Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     });
     let compiled = compile_outcome.compiled.with_context(|| {
         format!(
@@ -1586,7 +1586,7 @@ async fn assert_valid_amendment(
         authorization: snapshot.authorization,
         remaining_budget,
         config: moa_config::ExecutionConfig::default(),
-        now: chrono::Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     });
     if validated.plan.is_none() {
         bail!(

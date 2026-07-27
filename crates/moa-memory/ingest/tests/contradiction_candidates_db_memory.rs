@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{types::identifiers::TenantId, types::memory::RlsContext};
 use moa_crypto::LocalKmsProvider;
@@ -82,7 +81,7 @@ fn fact_intent(storage_partition_id: &str, uid: Uuid, name: &str) -> NodeWriteIn
         properties: json!({ "name": name, "summary": name, "source": "contradiction_candidates" }),
         pii_class: SensitivityClass::None,
         confidence: Some(0.9),
-        valid_from: Utc::now(),
+        valid_from: moa_test_support::fixtures::pg_now(),
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,

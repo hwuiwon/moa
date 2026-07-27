@@ -16,7 +16,6 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use chrono::Utc;
 use moa_artifacts::document::ArtifactStatus;
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
 use moa_artifacts::validation::validate_for_status;
@@ -327,7 +326,7 @@ mod skill_learning_gate {
             draft: &moa_artifacts::registry::StoredArtifactRevision,
             suite_override: Option<serde_json::Value>,
         ) -> LearningCandidate {
-            let now = Utc::now();
+            let now = moa_test_support::fixtures::pg_now();
             let skill_name = &self.skill_name;
             let suite = suite_override.unwrap_or_else(|| {
                 json!({

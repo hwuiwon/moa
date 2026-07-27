@@ -285,16 +285,37 @@ mod tests {
 
     use super::{JournalRequestRole, journal_roles};
 
+    /// Builds a planner prompt carrying the in-prompt candidate schema marker the
+    /// execution planner emits, optionally followed by a request-kind trailer.
+    fn planner_prompt(trailer: &str) -> String {
+        format!(
+            "Plan the execution run.\n<response_schema>{{\"type\":\"object\"}}</response_schema>\n{trailer}"
+        )
+    }
+
     #[test]
     fn journal_classification_distinguishes_normal_planner_agent_and_synthesis() {
-        // Pins: service assertions cannot mistake task-local or synthesis calls for root turns.
+        // Pins: service assertions cannot mistake task-local, restricted-amendment, or
+        // synthesis calls for root turns, and the initial-planner marker is the in-prompt
+        // `<response_schema>` block rather than a provider-native strict `response_format`.
         let normal = CompletionRequest::new("What is a DAG?");
-        let mut planner = CompletionRequest::new("strict planner");
-        planner.response_format = Some(JsonResponseFormat::strict_json_schema(
+
+        // A strict provider-native schema alone is not a planner request: the execution
+        // planner sends `response_format: None` because planner candidates carry free-form
+        // JSON that a provider-native strict schema cannot represent.
+        let mut strict_non_planner = CompletionRequest::new("strict but not a planner");
+        strict_non_planner.response_format = Some(JsonResponseFormat::strict_json_schema(
             "generated_execution_candidate",
             "candidate",
             json!({"type": "object"}),
         ));
+
+        let planner = CompletionRequest::new(planner_prompt(""));
+        // `planner_request` reuses the same schema marker for restricted amendments, which
+        // are task-local edits rather than root planning turns.
+        let amendment =
+            CompletionRequest::new(planner_prompt("Generate only a restricted plan amendment"));
+
         let mut agent = CompletionRequest::new("{}");
         agent.messages.insert(
             0,
@@ -307,10 +328,19 @@ mod tests {
         );
 
         assert_eq!(
-            journal_roles(&[normal, planner, agent, synthesis]),
+            journal_roles(&[
+                normal,
+                strict_non_planner,
+                planner,
+                amendment,
+                agent,
+                synthesis,
+            ]),
             vec![
                 JournalRequestRole::Normal,
+                JournalRequestRole::Normal,
                 JournalRequestRole::InitialPlanner,
+                JournalRequestRole::Normal,
                 JournalRequestRole::AgentTask,
                 JournalRequestRole::Synthesis,
             ]

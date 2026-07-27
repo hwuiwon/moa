@@ -1,6 +1,5 @@
 //! Tenant/contact RLS coverage for graph-memory writes.
 
-use chrono::Utc;
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{types::contact::ContactId, types::identifiers::TenantId};
@@ -38,7 +37,7 @@ fn node_intent(tenant_id: TenantId, contact_id: ContactId, name: &str) -> NodeWr
         properties: json!({ "name": name, "source": "contact_write_db_memory" }),
         pii_class: SensitivityClass::None,
         confidence: Some(0.9),
-        valid_from: Utc::now(),
+        valid_from: moa_test_support::fixtures::pg_now(),
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,

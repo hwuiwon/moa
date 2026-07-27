@@ -19,8 +19,8 @@ use crate::support::restate_runtime::{
     restate_ingress_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
-    get_events_request, init_session_vo_request, storage_partition_id_from_meta, test_session_meta,
-    user_message,
+    get_events_request, init_session_vo_request, start_turn_request,
+    storage_partition_id_from_meta, test_session_meta,
 };
 use moa_test_support::postgres::test_database_url;
 
@@ -130,14 +130,16 @@ async fn session_brain_round_trip_through_restate() -> Result<()> {
             .error_for_status()
             .context("init_session_vo should succeed")?;
 
-        let post_message = client.post(object_url(ingress, session_id, "post_message"));
-        with_identity(post_message, &identity)
-            .json(&user_message("What is 2 + 2? Just answer with the number."))
+        let start_turn = client.post(object_url(ingress, session_id, "start_turn"));
+        with_identity(start_turn, &identity)
+            .json(&start_turn_request(
+                "What is 2 + 2? Just answer with the number.",
+            ))
             .send()
             .await
-            .context("call Session/post_message")?
+            .context("call Session/start_turn")?
             .error_for_status()
-            .context("post_message should succeed")?;
+            .context("start_turn should succeed")?;
 
         let status = wait_for_status(
             &client,

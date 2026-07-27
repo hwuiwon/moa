@@ -2,8 +2,8 @@
 
 use chrono::Utc;
 use moa_knowledge::domain::{
-    IngestionStepStatus, KnowledgeIngestionStep, KnowledgeSyncRun, SyncRunStatus,
-    TriggerSyncRequest,
+    IngestionStepStatus, KnowledgeIngestionStep, KnowledgeSyncRun, LinkClaim, LinkClaimTransition,
+    StartInitialSyncRequest, SyncRunStatus, TriggerSyncRequest,
 };
 use moa_knowledge::observability::{build_step_row, classify_failure, failed_outcome};
 use moa_knowledge::providers::LinkedIntegrationProvider;
@@ -20,7 +20,10 @@ use serde_json::json;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use super::{KnowledgeService, KnowledgeServiceError, webhook::record_ingestion_enqueue_step};
+use super::{
+    KnowledgeCaller, KnowledgeService, KnowledgeServiceError,
+    webhook::record_ingestion_enqueue_step,
+};
 
 impl KnowledgeService {
     /// Starts a provider sync and returns after enqueueing provider-side work.
@@ -40,6 +43,32 @@ impl KnowledgeService {
     pub async fn sync_connection(
         &self,
         request: KnowledgeSyncRequest,
+        caller: &KnowledgeCaller,
+    ) -> Result<KnowledgeSyncResponse, KnowledgeServiceError> {
+        self.start_sync(request, caller, None).await
+    }
+
+    /// Runs the initial provider sync a link claim owns.
+    ///
+    /// Differs from the operator re-sync in three ways that the link's durability
+    /// depends on: it uses each provider's idempotent initial-sync call, it
+    /// records the claimed run on the claim before dispatching so a crash in
+    /// between is recoverable, and it accepts an already-running run as evidence
+    /// only when this claim is the run's owner.
+    pub(crate) async fn sync_connection_for_link(
+        &self,
+        request: KnowledgeSyncRequest,
+        caller: &KnowledgeCaller,
+        claim: &LinkClaim,
+    ) -> Result<KnowledgeSyncResponse, KnowledgeServiceError> {
+        self.start_sync(request, caller, Some(claim)).await
+    }
+
+    async fn start_sync(
+        &self,
+        request: KnowledgeSyncRequest,
+        caller: &KnowledgeCaller,
+        link: Option<&LinkClaim>,
     ) -> Result<KnowledgeSyncResponse, KnowledgeServiceError> {
         let repository = self.repository(request.tenant_id);
         let connection = repository
@@ -70,17 +99,59 @@ impl KnowledgeService {
             error_code: None,
             started_at: now,
             finished_at: None,
+            provider_trigger_completed_at: None,
         };
         match repository.claim_sync_run(run.clone()).await? {
             SyncRunClaim::Claimed(claimed) => {
                 run = claimed;
+                if let Some(claim) = link {
+                    // Durable *before* dispatch. This is what makes a crash
+                    // between claiming the run and calling the provider
+                    // recoverable rather than indistinguishable from success.
+                    repository
+                        .advance_link_claim(
+                            claim.tenant_id,
+                            &claim.operation_id,
+                            LinkClaimTransition::SyncRunClaimed {
+                                sync_run_uid: run.sync_run_uid,
+                            },
+                        )
+                        .await?
+                        .ok_or_else(|| {
+                            KnowledgeServiceError::InvalidRequest(
+                                "link claim was advanced concurrently before sync-run claim"
+                                    .to_string(),
+                            )
+                        })?;
+                }
             }
             SyncRunClaim::AlreadyRunning(existing) => {
-                return Ok(KnowledgeSyncResponse {
-                    sync_run_uid: existing.sync_run_uid,
-                    status: existing.status.as_str().to_string(),
-                    started_at: existing.started_at,
-                });
+                let Some(claim) = link else {
+                    return Ok(KnowledgeSyncResponse {
+                        sync_run_uid: existing.sync_run_uid,
+                        status: existing.status.as_str().to_string(),
+                        started_at: existing.started_at,
+                    });
+                };
+                // Another run holding the connection's active slot is not this
+                // link's evidence: it was triggered with a different credential,
+                // so finalizing on it would claim a sync the candidate never had.
+                if claim.sync_run_uid != Some(existing.sync_run_uid) {
+                    return Err(KnowledgeServiceError::InvalidRequest(
+                        "another sync run is active for this connection".to_string(),
+                    ));
+                }
+                // This link's own run. A durable boundary means dispatch already
+                // happened; its absence means the process died in between, so the
+                // exact idempotent trigger must be replayed before finalization.
+                if existing.provider_trigger_completed_at.is_some() {
+                    return Ok(KnowledgeSyncResponse {
+                        sync_run_uid: existing.sync_run_uid,
+                        status: existing.status.as_str().to_string(),
+                        started_at: existing.started_at,
+                    });
+                }
+                run = existing;
             }
         }
         let provider_label = connection.provider.clone();
@@ -92,7 +163,9 @@ impl KnowledgeService {
         record_knowledge_sync_run(&provider_label, run.status.as_str());
 
         let provider = self.provider(&connection.provider)?;
-        let provider_connection = self.connection_with_credential(&connection).await?;
+        let credential = self
+            .resolve_connection_credential(&connection, caller)
+            .await?;
         let provider_span = tracing::info_span!(
             "knowledge_provider_request",
             tenant_id = %request.tenant_id,
@@ -104,19 +177,36 @@ impl KnowledgeService {
             status = tracing::field::Empty,
             error_code = tracing::field::Empty
         );
-        let triggered = match provider
-            .trigger_sync(TriggerSyncRequest {
-                connection: provider_connection,
-                model: None,
-                variant: None,
-            })
-            .instrument(provider_span.clone())
-            .await
-        {
-            Ok(triggered) => {
+        let dispatch = match link {
+            Some(_) => provider
+                .start_initial_sync(StartInitialSyncRequest {
+                    connection: connection.clone(),
+                    credential,
+                })
+                .instrument(provider_span.clone())
+                .await
+                .map(|started| (started.completed, started.provider_sync_id)),
+            None => provider
+                .trigger_sync(TriggerSyncRequest {
+                    connection: connection.clone(),
+                    credential,
+                    model: None,
+                    variant: None,
+                })
+                .instrument(provider_span.clone())
+                .await
+                .map(|triggered| {
+                    (
+                        provider_trigger_completed(&triggered.status),
+                        triggered.provider_sync_id,
+                    )
+                }),
+        };
+        let (provider_completed, provider_sync_id) = match dispatch {
+            Ok(dispatch) => {
                 provider_span.record("status", "accepted");
                 provider_span.record("error_code", "none");
-                triggered
+                dispatch
             }
             Err(error) => {
                 let classification = classify_failure("provider_triggered", &error);
@@ -145,7 +235,12 @@ impl KnowledgeService {
                 return Err(error.into());
             }
         };
-        let provider_completed = provider_trigger_completed(&triggered.status);
+        // The dispatch is durable before anything else observes the run advancing.
+        // A link that crashes after this point replays into `AlreadyRunning` and
+        // sees the boundary, so it resumes rather than re-dispatching.
+        repository
+            .mark_provider_trigger_completed(run.sync_run_uid)
+            .await?;
         run.status = if provider_completed {
             SyncRunStatus::ProviderSynced
         } else {
@@ -177,7 +272,8 @@ impl KnowledgeService {
         tracing::info!(
             sync_run_id = %run.sync_run_uid,
             provider = %provider_label,
-            provider_status = %triggered.status,
+            provider_sync_id = provider_sync_id.as_deref().unwrap_or("none"),
+            provider_completed,
             "knowledge provider sync accepted"
         );
 
@@ -260,21 +356,22 @@ impl KnowledgeService {
     pub async fn list_connections(
         &self,
         request: KnowledgeConnectionListRequest,
+        caller: &KnowledgeCaller,
     ) -> Result<KnowledgeConnectionListResponse, KnowledgeServiceError> {
-        let credential_refs = self
-            .credentials
-            .list_linked_account_refs(request.tenant_id)
-            .await?;
-        let connections = self
+        let projections = self
             .repository(request.tenant_id)
             .list_connections(request.tenant_id, request.provider.as_deref())
-            .await?
-            .into_iter()
-            .map(|projection| KnowledgeConnectionSummary {
-                credential_status: credential_status(
-                    &projection.connection.credential_ref,
-                    &credential_refs,
-                ),
+            .await?;
+        let mut connections = Vec::with_capacity(projections.len());
+        for projection in projections {
+            // Status is read per connection through the exact reference this
+            // tenant already holds; there is no tenant-wide credential listing.
+            let credential_status = self
+                .credentials
+                .credential_status(request.tenant_id, &projection.connection, caller)
+                .await?;
+            connections.push(KnowledgeConnectionSummary {
+                credential_status,
                 connection_uid: projection.connection.connection_uid,
                 provider: projection.connection.provider,
                 connector: projection.connection.connector,
@@ -285,8 +382,8 @@ impl KnowledgeService {
                     .map(|status| status.as_str().to_string()),
                 last_synced_at: projection.connection.last_synced_at,
                 source_selection: projection.connection.source_selection,
-            })
-            .collect();
+            });
+        }
 
         Ok(KnowledgeConnectionListResponse { connections })
     }
@@ -343,20 +440,6 @@ impl KnowledgeService {
             integrations,
             unavailable_providers,
         })
-    }
-}
-
-fn credential_status(
-    credential_ref: &str,
-    credential_refs: &std::collections::BTreeSet<String>,
-) -> Option<String> {
-    if !credential_ref.starts_with("vault://") {
-        return None;
-    }
-    if credential_refs.contains(credential_ref) {
-        Some("present".to_string())
-    } else {
-        Some("missing".to_string())
     }
 }
 

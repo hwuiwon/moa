@@ -660,8 +660,9 @@ run cargo test -p moa-brain --features eval-harness --test brain_turn_cache_repl
 run cargo test -p moa-eval --test golden_eval --locked
 
 if [[ "${LIVE}" -eq 1 ]]; then
-  # Live local E2Es spawn host-local hands; production defaults keep this disabled.
-  export MOA_CLOUD_HANDS_ALLOW_LOCAL=true
+  # Live local E2Es spawn host-local hands, which only the local security
+  # profile permits; production selects the fail-closed cloud profile.
+  export MOA_SECURITY_PROFILE=local
 
   run cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile restate-service-e2e --run-ignored ignored-only --no-tests fail
 

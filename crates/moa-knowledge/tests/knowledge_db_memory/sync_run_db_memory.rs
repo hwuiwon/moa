@@ -1,6 +1,6 @@
 //! DB integration coverage for tenant knowledge sync-run inspection.
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
 use moa_knowledge::{
@@ -30,7 +30,7 @@ fn discovery(db: &postgres::TestDb) -> PostgresKnowledgeDiscoveryStore {
 }
 
 fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
         connection_uid: Uuid::now_v7(),
         tenant_id,
@@ -67,8 +67,9 @@ fn sync_run(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeSyncRun {
         graph_nodes_upserted: 0,
         graph_edges_upserted: 0,
         error_code: None,
-        started_at: Utc::now(),
+        started_at: moa_test_support::fixtures::pg_now(),
         finished_at: None,
+        provider_trigger_completed_at: None,
     }
 }
 
@@ -90,7 +91,7 @@ fn object(
         change_token: Some(format!("etag-{label}")),
         metadata: json!({ "safe_label": label }),
         status: ObjectStatus::Active,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         deleted_at: None,
     }
 }
@@ -102,7 +103,7 @@ fn step(
     status: IngestionStepStatus,
     offset_ms: i64,
 ) -> KnowledgeIngestionStep {
-    let started_at = Utc::now() + Duration::milliseconds(offset_ms);
+    let started_at = moa_test_support::fixtures::pg_now() + Duration::milliseconds(offset_ms);
     KnowledgeIngestionStep {
         step_uid: Uuid::now_v7(),
         sync_run_uid,
@@ -252,13 +253,13 @@ async fn document_version_claim_reclaims_stale_row_and_fences_old_token_db_knowl
 
     let mut first_run = sync_run(tenant_id, connection.connection_uid);
     first_run.status = SyncRunStatus::Completed;
-    first_run.finished_at = Some(Utc::now());
+    first_run.finished_at = Some(moa_test_support::fixtures::pg_now());
     repo.create_sync_run(first_run.clone())
         .await
         .expect("create first sync run");
     let mut second_run = sync_run(tenant_id, connection.connection_uid);
     second_run.status = SyncRunStatus::Completed;
-    second_run.finished_at = Some(Utc::now());
+    second_run.finished_at = Some(moa_test_support::fixtures::pg_now());
     repo.create_sync_run(second_run.clone())
         .await
         .expect("create second sync run");
@@ -270,7 +271,7 @@ async fn document_version_claim_reclaims_stale_row_and_fences_old_token_db_knowl
         parser_job_id: None,
         content_hash: "hash-stale-claim".to_string(),
         metadata: json!({ "safe": true }),
-        created_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
     };
     let (claimed_version, old_token) = claimed_version_and_token(
         repo.claim_document_version_ingestion(first_run.sync_run_uid, version.clone())
@@ -384,7 +385,7 @@ async fn sync_run_persistence_counters_timelines_filters_and_tenant_rls_db_knowl
     run_a.records_seen = 4;
     run_a.records_ingested = 3;
     run_a.records_failed = 1;
-    run_a.finished_at = Some(Utc::now());
+    run_a.finished_at = Some(moa_test_support::fixtures::pg_now());
     repo_a
         .update_sync_run(run_a.clone())
         .await

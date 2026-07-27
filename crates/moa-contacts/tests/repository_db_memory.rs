@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use moa_contacts::domain::hash_verification_code;
 use moa_contacts::repository::{
     complete_contact_verification, create_contact_token_grant, ensure_contact_token_grant_active,
@@ -66,7 +66,7 @@ async fn contacts_repository_issue_verify_and_grant_round_trip_db_memory() {
         pool.clone(),
         &claims,
         contact.contact_id,
-        Utc::now() + Duration::hours(1),
+        moa_test_support::fixtures::pg_now() + Duration::hours(1),
         "identity",
         None,
     )
@@ -556,7 +556,7 @@ async fn seed_challenge(
     .bind(tenant.0)
     .bind(StoragePartitionId::for_tenant(tenant).as_str())
     .bind(hash_verification_code(challenge_id, code))
-    .bind(Utc::now() + Duration::hours(1))
+    .bind(moa_test_support::fixtures::pg_now() + Duration::hours(1))
     .execute(pool)
     .await
     .expect("seed verification challenge");

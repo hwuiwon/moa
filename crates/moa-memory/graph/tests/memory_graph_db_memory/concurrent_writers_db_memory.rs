@@ -196,7 +196,7 @@ async fn concurrent_supersedes_of_same_node_serialize_with_monotonic_changelog_v
     };
     let storage_partition_id = Uuid::now_v7().to_string();
     let graph = graph_store(&test_db, &storage_partition_id);
-    let t0 = Utc::now();
+    let t0 = moa_test_support::fixtures::pg_now();
     let old_uid = create_seed(&graph, &storage_partition_id, "chain node", t0).await;
 
     let mut tasks = Vec::new();
@@ -247,7 +247,7 @@ async fn concurrent_writes_to_different_nodes_in_same_workspace_do_not_interfere
     };
     let storage_partition_id = Uuid::now_v7().to_string();
     let graph = graph_store(&test_db, &storage_partition_id);
-    let t0 = Utc::now();
+    let t0 = moa_test_support::fixtures::pg_now();
 
     let mut tasks = Vec::new();
     for index in 0..10 {
@@ -301,7 +301,7 @@ async fn concurrent_writes_to_same_node_across_workspaces_isolate_via_rls() {
     let workspace_b = Uuid::now_v7().to_string();
     let graph_a = graph_store(&test_db, &workspace_a);
     let graph_b = graph_store(&test_db, &workspace_b);
-    let t0 = Utc::now();
+    let t0 = moa_test_support::fixtures::pg_now();
     let logical_name = "shared logical node";
 
     let task_a = tokio::spawn({
@@ -370,7 +370,7 @@ async fn concurrent_supersede_with_contradicting_facts_chooses_one_deterministic
     };
     let storage_partition_id = Uuid::now_v7().to_string();
     let graph = graph_store(&test_db, &storage_partition_id);
-    let t0 = Utc::now();
+    let t0 = moa_test_support::fixtures::pg_now();
     let old_uid = create_seed(&graph, &storage_partition_id, "conflicting node", t0).await;
 
     let first = tokio::spawn({
@@ -460,7 +460,7 @@ async fn proptest_arbitrary_concurrent_supersedes_yield_valid_dag() {
 async fn run_concurrent_case(test_db: &TestDb, case_index: usize, writes_per_node: &[usize]) {
     let storage_partition_id = Uuid::now_v7().to_string();
     let graph = graph_store(test_db, &storage_partition_id);
-    let t0 = Utc::now();
+    let t0 = moa_test_support::fixtures::pg_now();
     let mut seed_by_node = HashMap::new();
 
     for node_index in 0..writes_per_node.len() {

@@ -3,13 +3,14 @@
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
+use moa_core::types::credentials::RedactedSecret;
 use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
     Error,
     domain::{
         ApplySourceSelectionRequest, ConnectionStatus, CreateLinkTokenRequest,
         FetchRecordContentRequest, KnowledgeConnection, ListChangedRecordsRequest,
-        ProviderIntegration, ProviderRecord, TriggerSyncRequest,
+        ProviderIntegration, ProviderRecord, StartInitialSyncRequest, TriggerSyncRequest,
     },
     providers::{LinkedIntegrationProvider, nango::NangoProvider},
 };
@@ -23,14 +24,16 @@ use wiremock::{
 };
 
 fn connection() -> KnowledgeConnection {
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
         connection_uid: Uuid::from_u128(101),
         tenant_id: TenantId::from(Uuid::from_u128(102)),
         provider: "nango".to_string(),
         connector: "google-drive".to_string(),
         provider_account_id: "conn_123".to_string(),
-        credential_ref: "vault://tenant/nango/google-drive".to_string(),
+        // Opaque durable reference only: the provider credential now arrives
+        // through the resolved secret, never through the connection row.
+        credential_ref: Uuid::from_u128(103).to_string(),
         status: ConnectionStatus::Active,
         metadata: json!({ "safe": true }),
         source_selection: json!({}),
@@ -106,6 +109,77 @@ async fn link_token_creation_forwards_nango_metadata_selection() {
 }
 
 #[tokio::test]
+async fn initial_link_sync_uses_idempotent_start_and_never_the_one_off_trigger() {
+    // Pins: the initial link uses Nango's naturally idempotent `/sync/start`, so
+    // a crash between the durable sync-run claim and dispatch can replay the
+    // exact call. The one-off `/sync/trigger` is not idempotent and must never
+    // be reachable from a link that replays.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/sync/start"))
+        .and(bearer_token("nango-test-key"))
+        .and(body_json(json!({
+            "connection_id": "conn_123",
+            "provider_config_key": "google-drive",
+            "syncs": []
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "provider_token": "must-redact"
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/sync/trigger"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true })))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    for _ in 0..2 {
+        let started = provider
+            .start_initial_sync(StartInitialSyncRequest {
+                credential: test_credential(),
+                connection: connection(),
+            })
+            .await
+            .expect("initial link sync start through local Nango fixture");
+
+        assert_eq!(started.provider, "nango");
+        assert!(
+            !started.completed,
+            "Nango starts asynchronously, so a successful start never proves completion"
+        );
+        assert!(started.metadata.get("provider_token").is_none());
+    }
+}
+
+#[tokio::test]
+async fn initial_link_sync_fails_closed_when_the_provider_rejects_the_start() {
+    // Pins: a rejected start is an error, not a silently "running" sync, so the
+    // owning link cannot finalize on a sync that never began.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/sync/start"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": false })))
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    provider
+        .start_initial_sync(StartInitialSyncRequest {
+            credential: test_credential(),
+            connection: connection(),
+        })
+        .await
+        .expect_err("a rejected start must fail the initial link closed");
+}
+
+#[tokio::test]
 async fn trigger_sync_posts_provider_config_connection_and_sync_name() {
     // Pins: Nango one-off sync trigger requests use the provider_config_key, connection_id, and sync name.
     let server = MockServer::start().await;
@@ -129,6 +203,7 @@ async fn trigger_sync_posts_provider_config_connection_and_sync_name() {
         NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
     let triggered = provider
         .trigger_sync(TriggerSyncRequest {
+            credential: test_credential(),
             connection: connection(),
             model: Some("documents".to_string()),
             variant: None,
@@ -288,6 +363,7 @@ async fn trigger_and_records_list_include_selected_variant() {
 
     provider
         .trigger_sync(TriggerSyncRequest {
+            credential: test_credential(),
             connection: connection.clone(),
             model: Some("documents".to_string()),
             variant: None,
@@ -296,6 +372,7 @@ async fn trigger_and_records_list_include_selected_variant() {
         .expect("trigger selected Nango variant");
     let page = provider
         .list_changed_records(ListChangedRecordsRequest {
+            credential: test_credential(),
             connection,
             cursor: None,
             modified_after: None,
@@ -326,6 +403,7 @@ async fn records_list_fails_fast_when_no_sync_model_selected() {
 
     let error = provider
         .list_changed_records(ListChangedRecordsRequest {
+            credential: test_credential(),
             connection,
             cursor: None,
             modified_after: None,
@@ -396,6 +474,7 @@ async fn records_list_maps_cursor_deleted_metadata_and_change_tokens() {
     connection.source_selection = json!({ "model": "documents" });
     let page = provider
         .list_changed_records(ListChangedRecordsRequest {
+            credential: test_credential(),
             connection,
             cursor: Some("cursor-1".to_string()),
             modified_after: None,
@@ -548,6 +627,7 @@ async fn content_fetch_exports_google_apps_files_as_plain_text() {
         NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
     let content = provider
         .fetch_record_content(FetchRecordContentRequest {
+            credential: test_credential(),
             connection: connection(),
             record: drive_record("doc-apps", "application/vnd.google-apps.document"),
         })
@@ -584,6 +664,7 @@ async fn content_fetch_streams_binary_files_via_alt_media() {
         NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
     let content = provider
         .fetch_record_content(FetchRecordContentRequest {
+            credential: test_credential(),
             connection: connection(),
             record: drive_record("doc-bin", "application/pdf"),
         })
@@ -614,6 +695,7 @@ async fn content_fetch_rejects_bodies_over_the_size_cap() {
         NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
     let error = provider
         .fetch_record_content(FetchRecordContentRequest {
+            credential: test_credential(),
             connection: connection(),
             record: drive_record("doc-huge", "application/octet-stream"),
         })
@@ -638,6 +720,7 @@ async fn content_fetch_returns_none_for_non_text_exportable_google_apps_types() 
 
     let content = provider
         .fetch_record_content(FetchRecordContentRequest {
+            credential: test_credential(),
             connection: connection(),
             record: drive_record("folder-1", "application/vnd.google-apps.folder"),
         })
@@ -670,6 +753,7 @@ async fn content_fetch_exports_spreadsheets_as_csv() {
         NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
     let content = provider
         .fetch_record_content(FetchRecordContentRequest {
+            credential: test_credential(),
             connection: connection(),
             record: drive_record("sheet-1", "application/vnd.google-apps.spreadsheet"),
         })
@@ -695,6 +779,7 @@ async fn content_fetch_returns_none_for_non_drive_integrations() {
 
     let content = provider
         .fetch_record_content(FetchRecordContentRequest {
+            credential: test_credential(),
             connection,
             record: drive_record("page-1", "text/markdown"),
         })
@@ -724,6 +809,7 @@ async fn content_fetch_surfaces_upstream_errors() {
         NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
     let error = provider
         .fetch_record_content(FetchRecordContentRequest {
+            credential: test_credential(),
             connection: connection(),
             record: drive_record("doc-error", "application/pdf"),
         })
@@ -778,4 +864,12 @@ async fn sync_completed_webhook_verifies_signature_and_rejects_bad_signature() {
         Error::Provider { provider, message }
             if provider == "nango" && message.contains("signature verification failed")
     ));
+}
+
+/// Builds the resolved credential a provider request carries.
+///
+/// Provider requests take a non-serializable redacted secret, so tests build one
+/// explicitly instead of smuggling material through the connection.
+fn test_credential() -> RedactedSecret {
+    RedactedSecret::new("test-provider-credential".to_string())
 }

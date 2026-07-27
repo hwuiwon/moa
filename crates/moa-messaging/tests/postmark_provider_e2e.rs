@@ -5,15 +5,11 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use async_trait::async_trait;
-use chrono::Utc;
 use moa_config::MessagingConfig;
-use moa_core::{error::MoaError, traits::CredentialVault, types::model::Credential};
+use moa_core::types::credentials::{DeploymentSecret, DeploymentSecrets};
 use moa_messaging::{
-    POSTMARK_SERVER_API_TOKEN_ENV, POSTMARK_SERVER_TOKEN_SERVICE, POSTMARK_TEST_TOKEN,
-    PostmarkEmailClient, PostmarkEmailMessage,
+    POSTMARK_SERVER_API_TOKEN_ENV, POSTMARK_TEST_TOKEN, PostmarkEmailClient, PostmarkEmailMessage,
 };
 
 const LIVE_FLAG_ENV: &str = "MOA_RUN_LIVE_POSTMARK_TESTS";
@@ -22,7 +18,6 @@ const POSTMARK_TEST_TO_ENV: &str = "POSTMARK_TEST_TO";
 const POSTMARK_TEST_MESSAGE_STREAM_ENV: &str = "POSTMARK_TEST_MESSAGE_STREAM";
 const DEFAULT_TEST_FROM: &str = "sender@example.com";
 const DEFAULT_TEST_TO: &str = "receiver@example.com";
-const TEST_SCOPE: &str = "postmark-provider-e2e";
 
 #[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_POSTMARK_TESTS=1 and POSTMARK_SERVER_API_TOKEN"]
@@ -30,16 +25,23 @@ async fn postmark_provider_e2e_sends_email_using_local_env_token() {
     let Some(env) = LocalPostmarkEnv::load() else {
         return;
     };
-    let vault = Arc::new(SingleCredentialVault::new(Credential::Bearer(env.token)));
+    let secrets =
+        DeploymentSecrets::new().with(DeploymentSecret::PostmarkServerToken, Some(env.token));
     let config = MessagingConfig {
         postmark_base_url: env.base_url,
         postmark_message_stream: env.message_stream,
         ..MessagingConfig::default()
     };
-    let client = PostmarkEmailClient::from_vault(vault, TEST_SCOPE, &config)
-        .await
-        .expect("Postmark e2e client should load the local token through CredentialVault");
-    let subject = format!("MOA Postmark e2e {}", Utc::now().to_rfc3339());
+    let client = PostmarkEmailClient::from_deployment_secrets(&secrets, &config)
+        .expect("Postmark e2e client should load the local token as a deployment secret");
+    let subject = format!(
+        "MOA Postmark e2e {}",
+        chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros()
+        )
+        .expect("microsecond timestamp")
+        .to_rfc3339()
+    );
     let message = PostmarkEmailMessage::new(env.from, env.to, subject)
         .with_text_body("MOA live Postmark e2e validation.")
         .with_html_body("<p>MOA live Postmark e2e validation.</p>")
@@ -107,55 +109,6 @@ impl LocalPostmarkEnv {
             base_url,
             message_stream,
         })
-    }
-}
-
-#[derive(Debug)]
-struct SingleCredentialVault {
-    credential: Credential,
-}
-
-impl SingleCredentialVault {
-    fn new(credential: Credential) -> Self {
-        Self { credential }
-    }
-}
-
-#[async_trait]
-impl CredentialVault for SingleCredentialVault {
-    async fn get(&self, service: &str, scope: &str) -> moa_core::error::Result<Credential> {
-        if service == POSTMARK_SERVER_TOKEN_SERVICE && scope == TEST_SCOPE {
-            return Ok(self.credential.clone());
-        }
-        Err(MoaError::StorageError(format!(
-            "missing credential {service} for {scope}"
-        )))
-    }
-
-    async fn set(
-        &self,
-        _service: &str,
-        _scope: &str,
-        _cred: Credential,
-    ) -> moa_core::error::Result<()> {
-        Err(MoaError::StorageError(
-            "Postmark e2e vault is read-only".to_string(),
-        ))
-    }
-
-    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::error::Result<bool> {
-        Err(MoaError::StorageError(
-            "Postmark e2e vault is read-only".to_string(),
-        ))
-    }
-
-    async fn list(
-        &self,
-        _service_prefix: &str,
-    ) -> moa_core::error::Result<Vec<moa_core::traits::StoredCredentialMetadata>> {
-        Err(MoaError::StorageError(
-            "Postmark e2e vault does not support listing".to_string(),
-        ))
     }
 }
 

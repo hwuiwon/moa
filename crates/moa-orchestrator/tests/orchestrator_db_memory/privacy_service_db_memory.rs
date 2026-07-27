@@ -3,7 +3,6 @@
 use std::{collections::BTreeMap, io::Read, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
@@ -61,7 +60,7 @@ fn valid_claims_for_user_id(subject_user_id: &str, tenant_id: Uuid, op: &str) ->
     ApprovalClaims {
         sub: "ops-admin".to_string(),
         jti: Uuid::now_v7().to_string(),
-        exp: Utc::now().timestamp() + 300,
+        exp: moa_test_support::fixtures::pg_now().timestamp() + 300,
         op: op.to_string(),
         subject_user_id: subject_user_id.to_string(),
         tenant_id: TenantId::from(tenant_id),
@@ -111,7 +110,7 @@ fn erase_test_intent(storage_partition_id: &str, user_id: &str, name: &str) -> N
         properties: json!({ "name": name, "user_id": user_id, "source": "privacy_erase_test" }),
         pii_class: SensitivityClass::Phi,
         confidence: Some(0.95),
-        valid_from: Utc::now(),
+        valid_from: moa_test_support::fixtures::pg_now(),
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,

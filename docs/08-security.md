@@ -5,15 +5,35 @@ injection defenses, and audit._
 
 ## Default Posture
 
-| Mode | Posture | Rationale |
+The posture is selected explicitly by `security_profile`
+(`MOA_SECURITY_PROFILE`), never inferred from the presence of other
+configuration. It defaults to `local`.
+
+| Profile | Posture | Rationale |
 |---|---|---|
-| Local development API | Usable by default | Engineer controls the dev stack. |
-| Cloud API and messaging | Secure by default | Agents run persistently and users may be offline. |
+| `local` | Usable by default | Engineer controls the dev stack. |
+| `cloud` | Secure by default | Agents run persistently and users may be offline. |
 
 Usable local mode allows tool execution by default so local development keeps
-moving. Secure cloud mode requires explicit tool enablement per tenant,
-action-policy rules for deny or tenant-admin review, sandboxed code execution,
-and host-side credential access only.
+moving, and it is the only profile under which host-local hands may run. Secure
+cloud mode requires explicit tool enablement per tenant, action-policy rules for
+deny or tenant-admin review, sandboxed code execution, and host-side credential
+access only.
+
+The `cloud` profile fails closed at construction and rejects all four of these
+before serving a single request:
+
+| Requirement | Rejected when |
+|---|---|
+| Deny-by-default permissions | `permissions.default_effect` is not `deny` |
+| A persisted rule owner | no action-policy rule store is supplied |
+| A non-local sandbox backend | the resolved hand route is local or absent |
+| Present backend credentials | the selected sandbox has no credential |
+
+Checked-in Kubernetes renders exactly one posture per overlay: base and local
+render `local` with a permissive default and the local hand provider;
+production renders `cloud` with a deny default and the E2B backend, and is the
+only overlay that references the cloud sandbox credential Secret.
 
 ## Identity And Authorization
 
@@ -97,6 +117,25 @@ Supported patterns:
 Local encrypted vault storage is no longer part of the active runtime. New
 credential sources should implement `CredentialVault` or a typed provider vault
 trait and stay behind the host-side credential boundary.
+
+MOA-managed tenant connector material lives in one durable owner. A credential's
+persistence identity is `(tenant, owning connection, kind, version)`; resolution
+separately carries the acting principal — a caller that passed
+`(Tenant, tenant_id, Operator)`, or a closed service actor bound to exactly one
+operation — plus a replay-stable operation id and canonical request hash. The
+audit row commits before any plaintext is returned, so a resolution cannot be
+observed without a durable record, and reusing an operation id with different
+inputs is a typed conflict rather than a silent overwrite. Both tables force
+row-level security with strict tenant isolation and no control-plane branch: a
+missing or wrong `moa.tenant_id` denies rather than widening. The audit is
+append-only twice over (no UPDATE policy, no UPDATE grant), and deletion is
+reachable only from a transaction that explicitly sets `moa.credential_purge`.
+
+Plaintext leaves the owner only as a non-serializable, redacted carrier that
+cannot be cloned into a model payload, serialized into Restate state or an
+event, or persisted on a knowledge row. Deployment-owned operator transport
+secrets are a separate typed source, so a tenant connection can never fall back
+to an operator credential.
 
 MCP credential proxy grants are private, process-local, and single-use: the
 runtime creates an opaque grant, consumes it while enriching one MCP request,
@@ -226,6 +265,37 @@ cover `&&`, `||`, `;`, or pipe-connected follow-up commands.
 
 Default tool policy is auto-mode `allow`. Tenant-level policy rows and config
 can return `allow`, `deny`, or `admin_review`.
+
+Every decision combines authorities by taking the strictest outcome, and reports
+a typed source (`deployment_default`, `tool_definition`, `persisted_rule`,
+`configured_review`, or `configured_deny`) that names the deciding authority
+without carrying the invocation input or the matched pattern.
+
+Restrictions come in two tiers, which differ in whether a tenant grant can lift
+them. A tool author's intrinsic `admin_review` is a **cautious default**: it
+applies whenever nothing has deliberately granted the operation, and a matched
+persisted rule for that exact tenant/contact and operation lifts it. Command
+execution and MCP tools both declare it, so this is what makes them grantable at
+all. An **unliftable floor** is either an intrinsic `deny` (an inherent
+restriction of the operation) or a configured `permissions.always_deny` /
+`permissions.admin_review` override — floors belong to the deployment operator,
+not the tool author, so a deployment that wants an operation review-locked
+regardless of tenant rules configures the override rather than relying on a tool
+default. Above both sits the profile: `security_profile = cloud` sets a
+deny-by-default posture, so an unmatched request is denied outright, which is
+stricter than any review gate.
+
+Concretely:
+
+- An unmatched request combines the deployment default with the tool
+  definition's own intrinsic default.
+- A matched persisted rule is not capped by the deployment default, so an
+  explicit scoped grant works under a deny-by-default deployment. It lifts an
+  intrinsic `admin_review` but never an intrinsic `deny` or a configured
+  override.
+- A rule never makes a filtered or unregistered tool visible; policy is
+  evaluated only after the tool resolves in the registry.
+
 `admin_review` persists a tenant action-review row plus event, returns a
 pending-review tool result to the model, and does not block the root or
 worker workflow. Tenant admins clear or deny the stored action later through

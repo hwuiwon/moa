@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::Utc;
 use httpmock::{Method::GET, MockServer};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use moa_auth_providers_auth0::Auth0AuthProvider;
@@ -111,7 +110,12 @@ fn signed_token(
         sub: sub.to_string(),
         iss: issuer.to_string(),
         aud: audience.to_string(),
-        exp: Utc::now().timestamp() + 600,
+        exp: chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros(),
+        )
+        .expect("microsecond timestamp")
+        .timestamp()
+            + 600,
         tenant_id: tenant_id.to_string(),
         identity_type: "operator".to_string(),
     };

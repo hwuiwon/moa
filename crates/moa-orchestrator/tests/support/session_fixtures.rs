@@ -7,10 +7,11 @@ use moa_core::{
     types::contact::ContactVerificationState, types::events_stream::EventRange,
     types::identifiers::ModelId, types::identifiers::SessionId,
     types::identifiers::StoragePartitionId, types::identifiers::TenantId,
-    types::session::SessionMeta, types::session::UserMessage,
+    types::session::SessionMeta,
 };
 use moa_test_support::fixtures::contact_ref_fixture;
 use moa_wire::session_store::{AppendEventRequest, GetEventsRequest, InitSessionVoRequest};
+use moa_wire::turn::StartTurnRequest;
 
 /// Returns a request payload for `append_event`.
 pub fn append_event_request(session_id: SessionId, event: Event) -> AppendEventRequest {
@@ -31,11 +32,25 @@ pub fn init_session_vo_request(session_id: SessionId, meta: SessionMeta) -> Init
     InitSessionVoRequest { session_id, meta }
 }
 
-/// Returns a user message payload suitable for `Session/post_message`.
-pub fn user_message(text: impl Into<String>) -> UserMessage {
-    UserMessage {
-        text: text.into(),
-        attachments: vec![],
+/// Returns a `Session/start_turn` payload carrying a fresh caller retry identity.
+///
+/// Every call mints a new client message id, which is what a real client does for a new
+/// message. A fixture that reused one id across messages would be answered by the
+/// admission fence with the first message's response instead of starting a turn.
+pub fn start_turn_request(text: impl Into<String>) -> StartTurnRequest {
+    StartTurnRequest {
+        client_message_id: moa_core::types::contact::ClientMessageId::new(
+            uuid::Uuid::now_v7().to_string(),
+        )
+        .expect("a uuid is a valid client message id"),
+        reply_to: None,
+        stream_cursor: None,
+        user_message: text.into(),
+        attachments: Vec::new(),
+        model: None,
+        contact: None,
+        max_turns: None,
+        execution_template: None,
     }
 }
 

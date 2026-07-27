@@ -67,7 +67,14 @@ async fn handle_delegation_tool(
         trusted_sandbox_manifest,
     } = request;
     let invocation = tool_call.invocation.clone();
-    append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
+    append_tool_call_event(
+        workflow.event_appender(),
+        ctx,
+        session_id,
+        tool_id,
+        tool_call,
+    )
+    .await?;
     let Some(tool) =
         moa_core::types::worker::tool_schema::DelegationTool::from_invocation(&invocation)
             .map_err(moa_error_to_handler_error)?
@@ -106,7 +113,15 @@ async fn handle_delegation_tool(
     .await?;
     record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
 
-    append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
+    append_tool_result_event(
+        workflow.event_appender(),
+        ctx,
+        session_id,
+        tool_id,
+        &invocation,
+        &output,
+    )
+    .await?;
     turn_evidence.record_tool_result(&invocation, &output);
     if !output.is_error {
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;

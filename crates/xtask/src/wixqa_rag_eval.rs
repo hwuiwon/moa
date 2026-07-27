@@ -595,6 +595,7 @@ async fn ingest_articles(
         error_code: None,
         started_at: now,
         finished_at: None,
+        provider_trigger_completed_at: None,
     };
     match repository.claim_sync_run(run).await? {
         SyncRunClaim::Claimed(_) => {}

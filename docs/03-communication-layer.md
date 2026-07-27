@@ -166,12 +166,48 @@ Each durable frame's SSE `id` is the event `sequence_num`, which clients use for
 their own ordering and dedupe. A reconnect carrying `Last-Event-ID` resumes after
 that sequence; a fresh connection seeds its cursor from the current event head.
 
+Every submitted message carries a caller-owned `client_message_id`; MOA never
+synthesizes one, and a missing, empty, oversized, or control-character id is a typed
+rejection before any session mutation. The Session admission fence is keyed on that id
+plus a canonical hash of the request's semantic fields, so a client that retries after a
+lost response receives the original response — same turn, same queue position, same
+pre-admission cursor — instead of a second paid turn, a second queue entry, a second
+reply delivery, or duplicated attachments. Reusing one id for a different request is a
+typed conflict. The guarantee is bounded: a terminal admission is retained until the
+earlier of 24 hours or 256 newer terminal admissions in that session, after which the id
+is admissible again as new work; unresolved and queued admissions are never evicted.
+
+A reconnect is not an exemption from the fence. The edge submits every attempt, including
+one carrying `Last-Event-ID`, and then resumes the stream from `Last-Event-ID + 1`; a
+first connection stores the cursor it observed before admission and every retry of that
+id receives that stored cursor rather than the newer stream head. The transport cursor is
+excluded from the semantic request hash.
+
+A message may address one waiting request for user input with an explicit typed
+`reply_to`. With no `reply_to`, zero waiting requests is an ordinary turn and exactly one
+is a convenience delivery, but several waiting requests is a typed rejection: guessing
+which one the user answered could approve the wrong plan or unblock the wrong task. An
+explicit target that matches nothing the session is waiting on — including a superseded
+execution generation — conflicts without mutation, and a reply cannot carry attachments,
+because reply delivery carries text only. An upload is therefore always ordinary work,
+never an implicit reply.
+
 The same route accepts multipart contact messages with text, photo uploads, or
-both. Upload bytes are validated by the edge and stored through `object_store`
-before session admission continues; local development uses RustFS, while cloud
-deployments use AWS S3 or GCS. The durable session message carries only
+both (`client_message_id` is a required part; an explicit `reply_to` is the same JSON
+object the JSON body would carry). Upload bytes are validated by the edge and stored
+through `object_store` before session admission continues; local development uses RustFS,
+while cloud deployments use AWS S3 or GCS. The durable session message carries only
 `Attachment` metadata with a `SessionAttachmentId`. Clients reload the session
 from events and fetch bytes through the authorized session attachment route.
+
+Each upload occupies a deterministic slot derived from tenant, session, client message
+id, and attachment ordinal, so a retried submission addresses the same row and the same
+stored object. The metadata row is claimed first and objects are written create-only, so
+a retry cannot overwrite stored bytes before Postgres has decided whether it is a replay
+or a conflict. A slot holding byte-identical content with identical metadata replays; a
+slot whose digest or metadata changed is a typed conflict. Cleanup after a rejected
+message deletes only the attachments that request created — never a replayed original
+belonging to the message that is still live.
 
 ## API Automation
 

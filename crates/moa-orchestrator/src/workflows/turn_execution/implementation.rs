@@ -4,7 +4,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use moa_config::MoaConfig;
 use moa_config::SessionLimitsConfig;
-use moa_core::{traits::ChannelAdapter, traits::LineageHandle, types::channel::Channel};
+use moa_core::{
+    events::TurnFailureActor, events::TurnFailureClass, traits::ChannelAdapter,
+    traits::LineageHandle, types::channel::Channel,
+};
 use moa_hands::ToolRouter;
 use moa_observability::{
     record_turn_workflow_outcome, restate_observability::annotate_restate_handler_span,
@@ -18,7 +21,13 @@ use super::{
     TurnExecution, execute_turn_inside_workflow, notify_session_of_outcome, parse_session_id,
     parse_turn_id, run_post_outcome_assessment,
 };
-use crate::{turn_driver::progress as driver_progress, workflows::turn_progress};
+use crate::{
+    turn_driver::progress as driver_progress,
+    workflows::{
+        turn_events::{TurnEventAppender, append_turn_failed},
+        turn_progress,
+    },
+};
 
 /// Concrete `TurnExecution` workflow implementation.
 #[derive(Clone)]
@@ -28,10 +37,11 @@ pub struct TurnExecutionImpl {
     pub(super) tool_router: Arc<ToolRouter>,
     pub(super) lineage: Arc<dyn LineageHandle>,
     pub(super) channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
+    event_appender: TurnEventAppender,
 }
 
 impl TurnExecutionImpl {
-    /// Creates a root-turn workflow with its persistence, tool, lineage, and delivery dependencies.
+    /// Creates a root-turn workflow with its persistence, tool, lineage, event-append, and delivery dependencies.
     #[must_use]
     pub fn new(
         session_store: Arc<PostgresSessionStore>,
@@ -40,6 +50,7 @@ impl TurnExecutionImpl {
         _tool_schemas: Arc<Vec<Value>>,
         lineage: Arc<dyn LineageHandle>,
         channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
+        event_appender: TurnEventAppender,
     ) -> Self {
         Self {
             session_store,
@@ -47,11 +58,17 @@ impl TurnExecutionImpl {
             tool_router,
             lineage,
             channel_adapters,
+            event_appender,
         }
     }
 
     pub(super) fn session_limits(&self) -> &SessionLimitsConfig {
         &self.config.session_limits
+    }
+
+    /// Returns the durable event-append dependency this workflow owns.
+    pub(super) fn event_appender(&self) -> &TurnEventAppender {
+        &self.event_appender
     }
 }
 
@@ -75,53 +92,81 @@ impl TurnExecution for TurnExecutionImpl {
 
         let session_id = parse_session_id(&request.session_id)?;
         let turn_id = parse_turn_id(&request.turn_id)?;
-        let (outcome, post_outcome_assessment) =
+        let (mut outcome, post_outcome_assessment) =
             match execute_turn_inside_workflow(self, &ctx, &request, session_id, turn_id).await {
-                Ok(body) => {
-                    let phase = match body.kind {
-                        TurnOutcomeKind::Completed => TurnPhase::Completed,
-                        TurnOutcomeKind::Accepted { .. } => TurnPhase::Accepted,
-                        TurnOutcomeKind::Cancelled => TurnPhase::Cancelled,
-                        TurnOutcomeKind::Failed => TurnPhase::Failed,
-                    };
-                    turn_progress::finish_with_live_delivery(
-                        &ctx,
-                        session_id,
-                        phase.clone(),
-                        self.session_store.clone(),
-                        self.channel_adapters.as_ref(),
-                    )
-                    .await?;
-                    driver_progress::set_phase(&ctx, phase);
-                    (
-                        TurnOutcome {
-                            turn_id: request.turn_id.clone(),
-                            kind: body.kind,
-                            message: body.message,
-                        },
-                        body.post_outcome_assessment,
-                    )
-                }
+                Ok(body) => (
+                    TurnOutcome {
+                        turn_id: request.turn_id.clone(),
+                        kind: body.kind,
+                        message: body.message,
+                    },
+                    body.post_outcome_assessment,
+                ),
                 Err(err) => {
-                    turn_progress::finish_with_live_delivery(
-                        &ctx,
-                        session_id,
-                        TurnPhase::Failed,
-                        self.session_store.clone(),
-                        self.channel_adapters.as_ref(),
-                    )
-                    .await?;
-                    driver_progress::set_phase(&ctx, TurnPhase::Failed);
+                    // The error is logged for operators and never persisted: it can
+                    // carry provider, tool, and prompt material. The one exception
+                    // is a hand-authored terminal rejection code from the closed
+                    // allowlist, which is a stable caller-facing contract.
+                    tracing::error!(
+                        session_id = %request.session_id,
+                        turn_id = %request.turn_id,
+                        error = ?err,
+                        "root turn workflow failed at its catch-all boundary"
+                    );
+                    let message = super::super::turn_events::safe_terminal_rejection_code(&err)
+                        .map(str::to_string)
+                        .unwrap_or_default();
                     (
                         TurnOutcome {
                             turn_id: request.turn_id.clone(),
                             kind: TurnOutcomeKind::Failed,
-                            message: format!("{err:?}"),
+                            message,
                         },
                         None,
                     )
                 }
             };
+
+        // One canonical fact for every failed root turn, whether it came from the
+        // catch-all boundary or from a body that reported a failed outcome. It is
+        // appended before the owner callback below, so the failure survives a lost
+        // or retried `record_turn_outcome`, and its dedupe key collapses a replay
+        // into the same single event. The outcome keeps an authored stable
+        // rejection code when one is present; every other failure carries only
+        // the fixed class sentence the append returns.
+        if matches!(outcome.kind, TurnOutcomeKind::Failed) {
+            // Attribute from the phase the turn died in, read before the terminal
+            // phase below overwrites it.
+            let class = TurnFailureClass::from(driver_progress::current_phase(&ctx).await?);
+            let summary = append_turn_failed(
+                self.event_appender(),
+                &ctx,
+                session_id,
+                TurnFailureActor::Coordinator,
+                &request.turn_id,
+                class,
+            )
+            .await?;
+            if super::super::turn_events::safe_terminal_rejection_code(&outcome.message).is_none() {
+                outcome.message = summary;
+            }
+        }
+
+        let phase = match outcome.kind {
+            TurnOutcomeKind::Completed => TurnPhase::Completed,
+            TurnOutcomeKind::Accepted { .. } => TurnPhase::Accepted,
+            TurnOutcomeKind::Cancelled => TurnPhase::Cancelled,
+            TurnOutcomeKind::Failed => TurnPhase::Failed,
+        };
+        turn_progress::finish_with_live_delivery(
+            &ctx,
+            session_id,
+            phase.clone(),
+            self.session_store.clone(),
+            self.channel_adapters.as_ref(),
+        )
+        .await?;
+        driver_progress::set_phase(&ctx, phase);
 
         record_turn_workflow_outcome(
             "root",

@@ -1,12 +1,14 @@
 //! Postmark email notification connector.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use moa_config::MessagingConfig;
-use moa_core::{error::MoaError, error::Result, traits::CredentialVault, types::model::Credential};
+use moa_core::{
+    error::MoaError, error::Result, types::credentials::DeploymentSecret,
+    types::credentials::DeploymentSecrets,
+};
 use reqwest::{StatusCode, header::HeaderMap};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -22,10 +24,7 @@ const POSTMARK_EMAIL_PATH: &str = "/email";
 const DEFAULT_RATE_LIMIT_RETRIES: usize = 3;
 const DEFAULT_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(1);
 
-/// Credential service key used for Postmark server tokens in `CredentialVault`.
-pub const POSTMARK_SERVER_TOKEN_SERVICE: &str = "platform.postmark.server_token";
-
-/// Local environment variable used by live Postmark tests for the server token.
+/// Deployment environment variable holding the Postmark server token.
 pub const POSTMARK_SERVER_API_TOKEN_ENV: &str = "POSTMARK_SERVER_API_TOKEN";
 
 /// Postmark's non-delivery server token for validating email API payloads.
@@ -208,17 +207,23 @@ impl PostmarkEmailClient {
         }
     }
 
-    /// Creates a Postmark client from a configured credential vault.
-    pub async fn from_vault(
-        vault: Arc<dyn CredentialVault>,
-        scope: &str,
+    /// Creates a Postmark client from the deployment's operator secrets.
+    ///
+    /// Postmark is a deployment-owned transport, not a tenant connection, so the
+    /// server token comes from [`DeploymentSecrets`] and never from the tenant
+    /// credential vault. Returns `None` when the deployment has not configured a
+    /// server token, which is how email delivery stays optional.
+    #[must_use]
+    pub fn from_deployment_secrets(
+        secrets: &DeploymentSecrets,
         config: &MessagingConfig,
-    ) -> Result<Self> {
-        let credential = vault.get(POSTMARK_SERVER_TOKEN_SERVICE, scope).await?;
-        let token = postmark_token_from_credential(credential)?;
-        Ok(Self::new(token)
-            .with_base_url(config.postmark_base_url.clone())
-            .with_default_message_stream(config.postmark_message_stream.clone()))
+    ) -> Option<Self> {
+        let token = secrets.resolve_optional(DeploymentSecret::PostmarkServerToken)?;
+        Some(
+            Self::new(token.expose_for_outbound_request())
+                .with_base_url(config.postmark_base_url.clone())
+                .with_default_message_stream(config.postmark_message_stream.clone()),
+        )
     }
 
     /// Overrides the HTTP client, primarily for tests.
@@ -544,16 +549,6 @@ impl PostmarkEmailMessage {
                 Some(self.metadata.clone())
             },
         })
-    }
-}
-
-fn postmark_token_from_credential(credential: Credential) -> Result<String> {
-    match credential {
-        Credential::Bearer(token) => Ok(token),
-        Credential::ApiKey { value, .. } => Ok(value),
-        Credential::OAuth { .. } => Err(MoaError::ConfigError(
-            "postmark server token credential must be bearer or api_key".to_string(),
-        )),
     }
 }
 

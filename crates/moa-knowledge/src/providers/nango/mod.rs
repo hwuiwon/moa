@@ -10,9 +10,9 @@ use sha2::Sha256;
 use crate::{
     domain::{
         ApplySourceSelectionRequest, CreateLinkTokenRequest, ExchangePublicTokenRequest,
-        FetchRecordContentRequest, FetchedRecordContent, KnowledgeConnection, LinkToken,
-        LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord, RecordPage,
-        TriggerSyncRequest, TriggeredSync, WebhookEvent,
+        FetchRecordContentRequest, FetchedRecordContent, InitialSyncStarted, KnowledgeConnection,
+        LinkToken, LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord,
+        RecordPage, StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
@@ -305,11 +305,7 @@ impl LinkedIntegrationProvider for NangoProvider {
         // all syncs configured for the connection, which is the intended behavior
         // when no specific sync model/variant is selected. The `/records` model
         // requirement is enforced separately in `list_changed_records`.
-        let syncs = match (selected_model, selected_variant) {
-            (Some(model), Some(variant)) => vec![json!({ "name": model, "variant": variant })],
-            (Some(model), None) => vec![Value::String(model)],
-            (None, _) => Vec::new(),
-        };
+        let syncs = nango_sync_selection_for(selected_model, selected_variant);
         let response = self
             .client
             .post(self.url("/sync/trigger"))
@@ -333,6 +329,44 @@ impl LinkedIntegrationProvider for NangoProvider {
                     None => None,
                 })
                 .unwrap_or_else(|| "triggered".to_string()),
+            metadata: redact_provider_metadata(value),
+        })
+    }
+
+    async fn start_initial_sync(&self, req: StartInitialSyncRequest) -> Result<InitialSyncStarted> {
+        // `/sync/start` enables and starts the connection's syncs and is
+        // naturally idempotent: starting an already-started sync is a no-op.
+        // The one-off `/sync/trigger` used by the operator re-sync path is not,
+        // so it must never be used for a link that can replay.
+        let syncs = nango_sync_selection(&req.connection);
+        let response = self
+            .client
+            .post(self.url("/sync/start"))
+            .bearer_auth(&self.api_key)
+            .json(&json!({
+                "connection_id": req.connection.provider_account_id,
+                "provider_config_key": req.connection.connector,
+                "syncs": syncs,
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                Error::provider("nango", format!("initial sync start failed: {error}"))
+            })?;
+        let value: Value = http::json_response(response).await?;
+        if value.get("success").and_then(Value::as_bool) == Some(false) {
+            return Err(Error::provider(
+                "nango",
+                "initial sync start was rejected by the provider",
+            ));
+        }
+        Ok(InitialSyncStarted {
+            provider: "nango".to_string(),
+            provider_sync_id: string_field(&value, &["sync_id", "id"]),
+            // Nango starts the sync asynchronously and reports completion
+            // through its webhook, so a successful start never proves the
+            // initial sync already finished.
+            completed: false,
             metadata: redact_provider_metadata(value),
         })
     }
@@ -560,6 +594,27 @@ fn nango_metadata(value: &Value) -> Option<Value> {
         return None;
     }
     Some(redact_provider_metadata(Value::Object(remaining)))
+}
+
+/// Builds the `syncs` selector for one connection's configured source selection.
+///
+/// An empty selector means "every sync configured for this connection", which is
+/// Nango's documented behavior and the right default when the operator selected
+/// no specific model or variant.
+fn nango_sync_selection(connection: &KnowledgeConnection) -> Vec<Value> {
+    nango_sync_selection_for(
+        nango_selected_model(&connection.source_selection),
+        nango_selected_variant(&connection.source_selection),
+    )
+}
+
+/// Builds the `syncs` selector from an explicit model and variant.
+fn nango_sync_selection_for(model: Option<String>, variant: Option<String>) -> Vec<Value> {
+    match (model, variant) {
+        (Some(model), Some(variant)) => vec![json!({ "name": model, "variant": variant })],
+        (Some(model), None) => vec![Value::String(model)],
+        (None, _) => Vec::new(),
+    }
 }
 
 fn nango_selected_variant(value: &Value) -> Option<String> {

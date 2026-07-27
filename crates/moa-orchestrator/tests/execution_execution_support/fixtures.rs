@@ -19,6 +19,7 @@ use moa_execution::wire::{
     ExecutionTaskListResponse,
 };
 use moa_orchestrator::services::action_policy::UpsertActionPolicyRuleRequest;
+use moa_test_support::fixtures::fresh_client_message_id;
 use moa_test_support::{IsolatedTest, OrchestratorTestFixture, TestApiClient};
 use moa_wire::artifacts::{
     ArtifactFileDocument, ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest,
@@ -170,6 +171,9 @@ pub(crate) async fn start_turn_in_session(
         .session(session_id.to_string())
         .start_turn(
             StartTurnRequest {
+                client_message_id: fresh_client_message_id(),
+                reply_to: None,
+                stream_cursor: None,
                 user_message: objective.to_string(),
                 attachments: Vec::new(),
                 model: None,

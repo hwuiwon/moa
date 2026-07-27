@@ -872,7 +872,7 @@ mod skill_learning_review {
         let previous = publish_skill_revision(&test_db, &scope, &package).await;
         let promoted = publish_skill_revision(&test_db, &scope, &package).await;
         let promotion_candidate_id = Uuid::now_v7();
-        let promoted_at = Utc::now() - chrono::Duration::days(1);
+        let promoted_at = moa_test_support::fixtures::pg_now() - chrono::Duration::days(1);
         seed_promotion_learning_at(
             &test_db,
             &storage_partition_id,
@@ -914,7 +914,7 @@ mod skill_learning_review {
         let filed = moa_skills::rollback::monitor_and_file_skill_regressions(
             test_db.store(),
             &RegressionMonitorConfig::default(),
-            Utc::now(),
+            moa_test_support::fixtures::pg_now(),
         )
         .await
         .expect("run regression monitor");
@@ -960,7 +960,7 @@ mod skill_learning_review {
         let refiled = moa_skills::rollback::monitor_and_file_skill_regressions(
             test_db.store(),
             &RegressionMonitorConfig::default(),
-            Utc::now(),
+            moa_test_support::fixtures::pg_now(),
         )
         .await
         .expect("re-run regression monitor");
@@ -1238,8 +1238,8 @@ mod skill_learning_review {
         let _v1 = publish_skill_revision(&test_db, &scope, &package).await;
         let v2 = publish_skill_revision(&test_db, &scope, &package).await;
         let v3 = publish_skill_revision(&test_db, &scope, &package).await;
-        let promoted_v2_at = Utc::now() - chrono::Duration::days(5);
-        let promoted_v3_at = Utc::now() - chrono::Duration::days(2);
+        let promoted_v2_at = moa_test_support::fixtures::pg_now() - chrono::Duration::days(5);
+        let promoted_v3_at = moa_test_support::fixtures::pg_now() - chrono::Duration::days(2);
         seed_promotion_learning_at(
             &test_db,
             &storage_partition_id,
@@ -1304,7 +1304,7 @@ mod skill_learning_review {
         let filed = moa_skills::rollback::monitor_and_file_skill_regressions(
             test_db.store(),
             &RegressionMonitorConfig::default(),
-            Utc::now(),
+            moa_test_support::fixtures::pg_now(),
         )
         .await
         .expect("run regression monitor");
@@ -1465,7 +1465,7 @@ mod skill_learning_review {
             confidence: None,
             source_refs: vec![promotion_candidate_id],
             actor: "review:user:reviewer".to_string(),
-            valid_from: Utc::now(),
+            valid_from: moa_test_support::fixtures::pg_now(),
             valid_to: None,
             batch_id: None,
             version: 1,
@@ -1488,7 +1488,7 @@ mod skill_learning_review {
         promotion_candidate_id: Uuid,
         status: LearningCandidateStatus,
     ) -> LearningCandidate {
-        let now = Utc::now();
+        let now = moa_test_support::fixtures::pg_now();
         let candidate = LearningCandidate {
             id: Uuid::now_v7(),
             tenant_id: tenant_id_from_storage_partition_id(storage_partition_id),
@@ -1765,7 +1765,7 @@ mod skill_learning_review {
         draft: &moa_artifacts::registry::StoredArtifactRevision,
         generated_suite: Option<serde_json::Value>,
     ) -> LearningCandidate {
-        let now = Utc::now();
+        let now = moa_test_support::fixtures::pg_now();
         let mut payload = json!({
             "kind": "skill_draft_proposal",
             "operation": operation,

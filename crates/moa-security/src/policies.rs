@@ -8,7 +8,8 @@ use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionPolicyEffect,
     types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
     types::contact::ContactId, types::identifiers::TenantId, types::identifiers::UserId,
-    types::session::SessionMeta, types::tools::ToolPolicyInput,
+    types::session::SessionMeta, types::tools::ActionPolicyDecisionSource,
+    types::tools::ToolPolicyInput,
 };
 
 /// Persistent action-policy rule storage used by policy-aware tool routing.
@@ -63,6 +64,8 @@ pub struct ActionPolicyCheck {
     pub reason: Option<String>,
     /// Rule that matched, if any.
     pub matched_rule: Option<ActionPolicyRule>,
+    /// Authority that produced [`Self::effect`], safe to log and audit.
+    pub source: ActionPolicyDecisionSource,
 }
 
 /// Policy engine for tool action decisions.
@@ -124,47 +127,77 @@ impl ActionPolicies {
 
         let configured = self.configured_tool_effect(&input.tool_name);
         if let Some(rule) = matched_rule {
-            let (effect, reason) = match configured {
-                Some((configured_effect, configured_reason)) => {
-                    let effect = stricter_effect(rule.effect, configured_effect);
-                    let reason = if effect == configured_effect && effect != rule.effect {
-                        Some(configured_reason)
-                    } else {
-                        rule.reason.clone()
-                    };
-                    (effect, reason)
-                }
-                None => (rule.effect, rule.reason.clone()),
+            // A matched persisted rule is a deliberate grant scoped to one
+            // tenant/contact and one operation, so the deployment default is not
+            // a ceiling on it. Two tiers of restriction still are:
+            //
+            // - Intrinsic `Deny` is an inherent restriction of the operation
+            //   itself and is unliftable.
+            // - Intrinsic `AdminReview` is the tool author's *cautious default*
+            //   for an operation with no considered per-tool gate, and a matched
+            //   rule may lift it. Command-execution tools and MCP tools both
+            //   declare it (see `moa-hands` `sandbox_descriptor`/`registration`),
+            //   so treating it as unliftable would make `bash` and every external
+            //   tool permanently ungrantable — which would defeat the point of
+            //   granting them at all.
+            // - Configured deny/admin-review overrides are unliftable regardless:
+            //   floors belong to the deployment operator, not the tool author.
+            //   A deployment that wants an operation review-locked forever
+            //   configures `permissions.admin_review`.
+            let base = match input.default_effect {
+                ActionPolicyEffect::Deny => combine(
+                    rule.effect,
+                    ActionPolicyDecisionSource::PersistedRule,
+                    rule.reason.clone(),
+                    ActionPolicyEffect::Deny,
+                    ActionPolicyDecisionSource::ToolDefinition,
+                    None,
+                ),
+                ActionPolicyEffect::AdminReview | ActionPolicyEffect::Allow => (
+                    rule.effect,
+                    ActionPolicyDecisionSource::PersistedRule,
+                    rule.reason.clone(),
+                ),
             };
+            let (effect, source, reason) = apply_configured_floor(base, configured);
             return Ok(ActionPolicyCheck {
                 effect,
                 reason,
                 matched_rule: Some(rule),
+                source,
             });
         }
 
-        if let Some((effect, reason)) = configured {
-            return Ok(ActionPolicyCheck {
-                effect,
-                reason: Some(reason),
-                matched_rule: None,
-            });
-        }
-
-        let effect = stricter_effect(input.default_effect, self.default_effect);
+        // No rule matched: combine the deployment posture with the tool's own
+        // intrinsic default, then let a configured override tighten it further.
+        // Here the cautious `AdminReview` default *does* apply — nothing has
+        // deliberately granted this operation, so the author's caution stands.
+        let (effect, source, reason) = apply_configured_floor(
+            combine(
+                self.default_effect,
+                ActionPolicyDecisionSource::DeploymentDefault,
+                None,
+                input.default_effect,
+                ActionPolicyDecisionSource::ToolDefinition,
+                None,
+            ),
+            configured,
+        );
 
         Ok(ActionPolicyCheck {
             effect,
-            reason: None,
+            reason,
             matched_rule: None,
+            source,
         })
     }
 
-    fn configured_tool_effect(&self, tool_name: &str) -> Option<(ActionPolicyEffect, String)> {
+    fn configured_tool_effect(&self, tool_name: &str) -> Option<Decision> {
         if self.always_deny.iter().any(|glob| glob.is_match(tool_name)) {
             return Some((
                 ActionPolicyEffect::Deny,
-                "tool is denied by action-policy config".to_string(),
+                ActionPolicyDecisionSource::ConfiguredDeny,
+                Some("tool is denied by action-policy config".to_string()),
             ));
         }
 
@@ -175,12 +208,55 @@ impl ActionPolicies {
         {
             return Some((
                 ActionPolicyEffect::AdminReview,
-                "tool requires tenant admin review by config".to_string(),
+                ActionPolicyDecisionSource::ConfiguredReview,
+                Some("tool requires tenant admin review by config".to_string()),
             ));
         }
 
         None
     }
+}
+
+/// One resolved policy outcome: effect, the authority that produced it, and the
+/// safe reason that authority supplied.
+type Decision = (
+    ActionPolicyEffect,
+    ActionPolicyDecisionSource,
+    Option<String>,
+);
+
+/// Returns the stricter of two candidate decisions, keeping the winner's
+/// authority and reason. Ties keep `primary`, which is always the more specific
+/// authority at each call site.
+fn combine(
+    primary_effect: ActionPolicyEffect,
+    primary_source: ActionPolicyDecisionSource,
+    primary_reason: Option<String>,
+    secondary_effect: ActionPolicyEffect,
+    secondary_source: ActionPolicyDecisionSource,
+    secondary_reason: Option<String>,
+) -> Decision {
+    let effect = stricter_effect(primary_effect, secondary_effect);
+    if effect == primary_effect {
+        (effect, primary_source, primary_reason)
+    } else {
+        (effect, secondary_source, secondary_reason)
+    }
+}
+
+/// Applies a configured deny/admin-review override as a floor on `decision`.
+///
+/// The override wins whenever it is at least as strict, so deployment deny and
+/// review configuration can never be weakened by a rule or a tool default.
+fn apply_configured_floor(decision: Decision, configured: Option<Decision>) -> Decision {
+    let (effect, source, reason) = decision;
+    let Some((configured_effect, configured_source, configured_reason)) = configured else {
+        return (effect, source, reason);
+    };
+    if stricter_effect(effect, configured_effect) == configured_effect {
+        return (configured_effect, configured_source, configured_reason);
+    }
+    (effect, source, reason)
 }
 
 impl Default for ActionPolicies {
@@ -312,8 +388,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ActionPolicies, ActionPolicyContext, glob_match, parse_and_match_command,
-        validate_action_policy_rule,
+        ActionPolicies, ActionPolicyContext, ActionPolicyDecisionSource, glob_match,
+        parse_and_match_command, validate_action_policy_rule,
     };
 
     fn tenant_id() -> TenantId {
@@ -838,6 +914,192 @@ mod tests {
         assert_eq!(
             check.matched_rule.expect("matched rule").pattern,
             "git status"
+        );
+    }
+
+    fn deny_default_policies() -> ActionPolicies {
+        let mut config = MoaConfig::default();
+        config.permissions.default_effect = ActionPolicyEffect::Deny;
+        ActionPolicies::from_config(&config).expect("deny-default config should build policies")
+    }
+
+    fn bash_rule(tenant: TenantId, pattern: &str, effect: ActionPolicyEffect) -> ActionPolicyRule {
+        ActionPolicyRule {
+            id: Uuid::now_v7(),
+            scope: ActionRuleScope::Tenant { tenant_id: tenant },
+            tool: "bash".to_string(),
+            pattern: pattern.to_string(),
+            effect,
+            reason: Some("scoped grant".to_string()),
+            created_by: UserId::new("admin"),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn bash_input(command: &str, default_effect: ActionPolicyEffect) -> ToolPolicyInput {
+        ToolPolicyInput {
+            tool_name: "bash".to_string(),
+            normalized_input: command.to_string(),
+            input_summary: format!("Command: {command}"),
+            risk_level: RiskLevel::Low,
+            default_effect,
+            action_class: moa_core::types::action_policy::ActionClass::CommandExecution,
+        }
+    }
+
+    #[test]
+    fn cloud_deny_default_denies_an_unmatched_request_from_the_deployment_default() {
+        // Pins: with no persisted rule, a deny deployment posture denies even a
+        // tool whose own intrinsic default is Allow, and the decision names the
+        // deployment default as the deciding authority.
+        let check = deny_default_policies()
+            .check(
+                &bash_input("git status", ActionPolicyEffect::Allow),
+                &ActionPolicyContext::from_session(&session()),
+                &[],
+            )
+            .expect("policy evaluation");
+
+        assert_eq!(check.effect, ActionPolicyEffect::Deny);
+        assert_eq!(check.source, ActionPolicyDecisionSource::DeploymentDefault);
+        assert!(check.matched_rule.is_none());
+    }
+
+    #[test]
+    fn scoped_allow_rule_grants_only_its_own_tenant_and_operation_under_deny_default() {
+        // Pins: the deployment deny default is not a ceiling on an explicit
+        // low-risk scoped grant, but the grant does not leak to another
+        // operation or another tenant, which both stay denied.
+        let policies = deny_default_policies();
+        let rule = bash_rule(tenant_id(), "git status", ActionPolicyEffect::Allow);
+
+        let granted = policies
+            .check(
+                &bash_input("git status", ActionPolicyEffect::Allow),
+                &ActionPolicyContext::from_session(&session()),
+                std::slice::from_ref(&rule),
+            )
+            .expect("policy evaluation");
+        assert_eq!(granted.effect, ActionPolicyEffect::Allow);
+        assert_eq!(granted.source, ActionPolicyDecisionSource::PersistedRule);
+
+        let other_operation = policies
+            .check(
+                &bash_input("git push", ActionPolicyEffect::Allow),
+                &ActionPolicyContext::from_session(&session()),
+                std::slice::from_ref(&rule),
+            )
+            .expect("policy evaluation");
+        assert_eq!(other_operation.effect, ActionPolicyEffect::Deny);
+        assert_eq!(
+            other_operation.source,
+            ActionPolicyDecisionSource::DeploymentDefault
+        );
+
+        let other_tenant_session = SessionMeta {
+            tenant_id: other_tenant_id(),
+            model: ModelId::new("claude-sonnet-4-6"),
+            ..SessionMeta::default()
+        };
+        let other_tenant = policies
+            .check(
+                &bash_input("git status", ActionPolicyEffect::Allow),
+                &ActionPolicyContext::from_session(&other_tenant_session),
+                &[rule],
+            )
+            .expect("policy evaluation");
+        assert_eq!(other_tenant.effect, ActionPolicyEffect::Deny);
+        assert_eq!(
+            other_tenant.source,
+            ActionPolicyDecisionSource::DeploymentDefault
+        );
+    }
+
+    #[test]
+    fn persisted_allow_rule_cannot_weaken_an_intrinsic_deny_tool_effect() {
+        // Pins: intrinsic Deny is an inherent restriction of the operation, so a
+        // tenant Allow grant cannot lift it and the tool definition is named as
+        // the deciding authority.
+        let policies = deny_default_policies();
+        let rule = bash_rule(tenant_id(), "deploy *", ActionPolicyEffect::Allow);
+
+        let check = policies
+            .check(
+                &bash_input("deploy production", ActionPolicyEffect::Deny),
+                &ActionPolicyContext::from_session(&session()),
+                std::slice::from_ref(&rule),
+            )
+            .expect("policy evaluation");
+
+        assert_eq!(check.effect, ActionPolicyEffect::Deny);
+        assert_eq!(check.source, ActionPolicyDecisionSource::ToolDefinition);
+        assert!(check.matched_rule.is_some());
+    }
+
+    #[test]
+    fn persisted_allow_rule_lifts_an_intrinsic_admin_review_default() {
+        // Pins: intrinsic AdminReview is the tool author's cautious default, not a
+        // floor, so an explicit scoped grant releases it and the rule owns the
+        // decision. Command-execution and MCP tools both declare AdminReview, so
+        // treating it as unliftable would make `bash` and every external tool
+        // permanently ungrantable even under a deliberate tenant grant.
+        let policies = deny_default_policies();
+        let rule = bash_rule(tenant_id(), "deploy *", ActionPolicyEffect::Allow);
+
+        let check = policies
+            .check(
+                &bash_input("deploy production", ActionPolicyEffect::AdminReview),
+                &ActionPolicyContext::from_session(&session()),
+                std::slice::from_ref(&rule),
+            )
+            .expect("policy evaluation");
+
+        assert_eq!(check.effect, ActionPolicyEffect::Allow);
+        assert_eq!(check.source, ActionPolicyDecisionSource::PersistedRule);
+        assert!(check.matched_rule.is_some());
+
+        // The same cautious default still applies to an operation the grant does
+        // not cover: nothing has deliberately released it, so it stays denied.
+        let ungranted = policies
+            .check(
+                &bash_input("publish production", ActionPolicyEffect::AdminReview),
+                &ActionPolicyContext::from_session(&session()),
+                &[rule],
+            )
+            .expect("policy evaluation");
+        assert_eq!(ungranted.effect, ActionPolicyEffect::Deny);
+        assert_eq!(
+            ungranted.source,
+            ActionPolicyDecisionSource::DeploymentDefault
+        );
+    }
+
+    #[test]
+    fn configured_review_cannot_be_weakened_by_a_persisted_allow_rule() {
+        // Pins: deployment admin-review configuration is a floor; a tenant Allow
+        // grant keeps the action in review and the configured owner is recorded.
+        let mut config = MoaConfig::default();
+        config.permissions.admin_review = vec!["bash".to_string()];
+        let policies =
+            ActionPolicies::from_config(&config).expect("review config should build policies");
+
+        let check = policies
+            .check(
+                &bash_input("git status", ActionPolicyEffect::Allow),
+                &ActionPolicyContext::from_session(&session()),
+                &[bash_rule(
+                    tenant_id(),
+                    "git status",
+                    ActionPolicyEffect::Allow,
+                )],
+            )
+            .expect("policy evaluation");
+
+        assert_eq!(check.effect, ActionPolicyEffect::AdminReview);
+        assert_eq!(check.source, ActionPolicyDecisionSource::ConfiguredReview);
+        assert_eq!(
+            check.reason.as_deref(),
+            Some("tool requires tenant admin review by config")
         );
     }
 

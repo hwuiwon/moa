@@ -2,9 +2,10 @@
 //!
 //! A privileged, irreversible operation can opt into dual control: it must be
 //! requested by one tenant admin and then approved by a SECOND, DISTINCT tenant
-//! admin before it may execute. This module owns the persistence and the
-//! segregation-of-duties (SoD) rule; the calling service owns authorization and
-//! decides when the control applies.
+//! admin before it may execute. This module owns the segregation-of-duties
+//! (SoD) rule and drives the storage transaction; its private `repository`
+//! submodule owns every statement and row mapping. The calling service owns
+//! authorization and decides when the control applies.
 //!
 //! # Model
 //!
@@ -40,15 +41,18 @@
 //! These functions perform NO authorization. Callers MUST authorize the actor as
 //! a tenant admin (e.g. `authorize_tenant(.., Relation::Admin)`) before invoking
 //! [`request`] or [`approve`]; the SoD check here is an additional control, not a
-//! substitute for authorization. Writes run against the RLS-protected table under
-//! a tenant-scoped `moa_app` transaction ([`moa_db::ScopedConn`]).
+//! substitute for authorization. The repository runs every write against the
+//! RLS-protected table under a tenant-scoped `moa_app` transaction
+//! ([`moa_db::ScopedConn`]).
 
 use moa_core::types::identifiers::TenantId;
-use moa_core::types::memory::RlsContext;
-use moa_db::ScopedConn;
 use restate_sdk::prelude::{HandlerError, TerminalError};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
+
+use self::repository::{DualControlTx, RequestStatus};
+
+mod repository;
 
 const OPERATION_REF_DIGEST_DOMAIN: &[u8] = b"moa.orchestrator.dual_control.operation_ref";
 const OPERATION_REF_DIGEST_VERSION: &str = "v1";
@@ -92,10 +96,6 @@ impl DualControlError {
     }
 }
 
-fn storage_error(error: impl std::fmt::Display) -> DualControlError {
-    DualControlError::Storage(error.to_string())
-}
-
 fn digest_operation_ref(tenant_id: TenantId, operation_type: &str, operation_ref: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     update_digest_field(&mut hasher, OPERATION_REF_DIGEST_DOMAIN);
@@ -127,25 +127,11 @@ pub async fn request(
     requested_by: &str,
 ) -> Result<Uuid, DualControlError> {
     let operation_digest = digest_operation_ref(tenant_id, operation_type, operation_ref);
-    let mut conn = ScopedConn::begin_as_app(pool, &RlsContext::tenant(tenant_id), true)
-        .await
-        .map_err(storage_error)?;
-    let id = sqlx::query_scalar::<_, Uuid>(
-        r#"
-        INSERT INTO moa.dual_control_request
-            (tenant_id, operation_type, operation_ref, requested_by)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id
-        "#,
-    )
-    .bind(tenant_id.0)
-    .bind(operation_type)
-    .bind(&operation_digest)
-    .bind(requested_by)
-    .fetch_one(conn.as_mut())
-    .await
-    .map_err(storage_error)?;
-    conn.commit().await.map_err(storage_error)?;
+    let mut tx = DualControlTx::begin(pool, tenant_id).await?;
+    let id = tx
+        .insert_pending_request(tenant_id, operation_type, &operation_digest, requested_by)
+        .await?;
+    tx.commit().await?;
     tracing::info!(
         tenant_id = %tenant_id,
         operation_type,
@@ -171,34 +157,17 @@ pub async fn approve(
     request_id: Uuid,
     approver: &str,
 ) -> Result<(), DualControlError> {
-    let mut conn = ScopedConn::begin_as_app(pool, &RlsContext::tenant(tenant_id), true)
-        .await
-        .map_err(storage_error)?;
-    let row = sqlx::query(
-        r#"
-        SELECT requested_by, status
-        FROM moa.dual_control_request
-        WHERE id = $1 AND tenant_id = $2
-        FOR UPDATE
-        "#,
-    )
-    .bind(request_id)
-    .bind(tenant_id.0)
-    .fetch_optional(conn.as_mut())
-    .await
-    .map_err(storage_error)?;
-    let Some(row) = row else {
+    let mut tx = DualControlTx::begin(pool, tenant_id).await?;
+    let Some(request) = tx.lock_request(tenant_id, request_id).await? else {
         return Err(DualControlError::NotFound);
     };
-    let requested_by: String = row.try_get("requested_by").map_err(storage_error)?;
-    let status: String = row.try_get("status").map_err(storage_error)?;
-    if status != "pending" {
+    if request.status != RequestStatus::Pending {
         return Err(DualControlError::AlreadyDecided);
     }
     // Segregation of duties: the operator that requested the privileged operation
     // may never be the one that authorizes it. This is the load-bearing SoD check;
     // the table's dual_control_sod_check constraint is a defense-in-depth backstop.
-    if approver == requested_by {
+    if approver == request.requested_by {
         tracing::warn!(
             tenant_id = %tenant_id,
             request_id = %request_id,
@@ -206,20 +175,8 @@ pub async fn approve(
         );
         return Err(DualControlError::SelfApproval);
     }
-    sqlx::query(
-        r#"
-        UPDATE moa.dual_control_request
-        SET status = 'approved', approved_by = $3, approved_at = NOW()
-        WHERE id = $1 AND tenant_id = $2
-        "#,
-    )
-    .bind(request_id)
-    .bind(tenant_id.0)
-    .bind(approver)
-    .execute(conn.as_mut())
-    .await
-    .map_err(storage_error)?;
-    conn.commit().await.map_err(storage_error)?;
+    tx.mark_approved(tenant_id, request_id, approver).await?;
+    tx.commit().await?;
     tracing::info!(
         tenant_id = %tenant_id,
         request_id = %request_id,
@@ -247,54 +204,20 @@ pub async fn consume_approval_for(
     consumer_ref: &str,
 ) -> Result<(), DualControlError> {
     let operation_digest = digest_operation_ref(tenant_id, operation_type, operation_ref);
-    let mut conn = ScopedConn::begin_as_app(pool, &RlsContext::tenant(tenant_id), true)
-        .await
-        .map_err(storage_error)?;
+    let mut tx = DualControlTx::begin(pool, tenant_id).await?;
 
     // Serialize consumption for this exact operation across every process and
-    // Kubernetes replica. Unlike SKIP LOCKED, waiting here cannot turn ordinary
-    // lock contention into a false missing-approval result.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(&operation_digest)
-        .execute(conn.as_mut())
-        .await
-        .map_err(storage_error)?;
+    // Kubernetes replica.
+    tx.lock_operation(&operation_digest).await?;
 
     // Prefer a row already consumed by this execution so a durable retry never
     // burns another approval. Otherwise lock exactly one valid approved row.
-    let candidate = sqlx::query(
-        r#"
-        SELECT id, status
-        FROM moa.dual_control_request
-        WHERE tenant_id = $1
-          AND operation_type = $2
-          AND operation_ref = $3
-          AND (
-              (status = 'consumed' AND consumed_ref = $4)
-              OR (
-                  status = 'approved'
-                  AND approved_by IS NOT NULL
-                  AND approved_by <> requested_by
-              )
-          )
-        ORDER BY
-            CASE WHEN status = 'consumed' THEN 0 ELSE 1 END,
-            approved_at,
-            id
-        LIMIT 1
-        FOR UPDATE
-        "#,
-    )
-    .bind(tenant_id.0)
-    .bind(operation_type)
-    .bind(&operation_digest)
-    .bind(consumer_ref)
-    .fetch_optional(conn.as_mut())
-    .await
-    .map_err(storage_error)?;
+    let candidate = tx
+        .lock_consumable_request(tenant_id, operation_type, &operation_digest, consumer_ref)
+        .await?;
 
     let Some(candidate) = candidate else {
-        conn.commit().await.map_err(storage_error)?;
+        tx.commit().await?;
         tracing::warn!(
             tenant_id = %tenant_id,
             operation_type,
@@ -303,10 +226,9 @@ pub async fn consume_approval_for(
         return Err(DualControlError::NoValidApproval);
     };
 
-    let request_id: Uuid = candidate.try_get("id").map_err(storage_error)?;
-    let status: String = candidate.try_get("status").map_err(storage_error)?;
-    if status == "consumed" {
-        conn.commit().await.map_err(storage_error)?;
+    let request_id = candidate.request_id;
+    if candidate.status == RequestStatus::Consumed {
+        tx.commit().await?;
         tracing::info!(
             tenant_id = %tenant_id,
             operation_type,
@@ -316,26 +238,10 @@ pub async fn consume_approval_for(
         return Ok(());
     }
 
-    let updated = sqlx::query(
-        r#"
-        UPDATE moa.dual_control_request
-        SET status = 'consumed', consumed_at = NOW(), consumed_ref = $3
-        WHERE id = $1 AND tenant_id = $2 AND status = 'approved'
-        "#,
-    )
-    .bind(request_id)
-    .bind(tenant_id.0)
-    .bind(consumer_ref)
-    .execute(conn.as_mut())
-    .await
-    .map_err(storage_error)?;
-    if updated.rows_affected() != 1 {
-        return Err(DualControlError::Storage(
-            "locked dual-control approval changed before consumption".to_string(),
-        ));
-    }
+    tx.mark_consumed(tenant_id, request_id, consumer_ref)
+        .await?;
 
-    conn.commit().await.map_err(storage_error)?;
+    tx.commit().await?;
     tracing::info!(
         tenant_id = %tenant_id,
         operation_type,

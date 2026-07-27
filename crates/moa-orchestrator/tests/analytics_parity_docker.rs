@@ -749,8 +749,8 @@ async fn execution_incremental_high_water_recovery_docker() -> TestResult<()> {
         tenant,
         run_uid,
         session,
-        Utc::now() - Duration::seconds(5),
-        Utc::now(),
+        moa_test_support::fixtures::pg_now() - Duration::seconds(5),
+        moa_test_support::fixtures::pg_now(),
     )
     .await?;
     let old_run: (i64, Uuid) = sqlx::query_as(
@@ -908,8 +908,8 @@ fn build_battery(
             field: field.to_string(),
             operator: AnalyticsFilterOperator::Between,
             value: Some(AnalyticsCell::Json(json!([
-                (Utc::now() - Duration::days(2)).to_rfc3339(),
-                (Utc::now() + Duration::days(1)).to_rfc3339(),
+                (moa_test_support::fixtures::pg_now() - Duration::days(2)).to_rfc3339(),
+                (moa_test_support::fixtures::pg_now() + Duration::days(1)).to_rfc3339(),
             ]))),
         });
     let base = |dataset_id: &str| AnalyticsQueryRequest {
@@ -975,8 +975,8 @@ fn build_battery(
     if let Some(time_field) = dataset.default_time_field.as_deref() {
         let mut request = base(&dataset.id);
         request.measures = vec![count_measure()];
-        let low = (Utc::now() - Duration::days(2)).to_rfc3339();
-        let high = (Utc::now() + Duration::days(1)).to_rfc3339();
+        let low = (moa_test_support::fixtures::pg_now() - Duration::days(2)).to_rfc3339();
+        let high = (moa_test_support::fixtures::pg_now() + Duration::days(1)).to_rfc3339();
         request.filters = vec![AnalyticsFilter {
             field: time_field.to_string(),
             operator: AnalyticsFilterOperator::Between,
@@ -1190,7 +1190,7 @@ fn floats_close(a: f64, b: f64) -> bool {
 
 /// Seeds a corpus rich enough that every catalog dataset has rows.
 async fn seed_corpus(pool: &PgPool, tenant: Uuid) -> TestResult<()> {
-    let base = Utc::now() - Duration::days(1);
+    let base = moa_test_support::fixtures::pg_now() - Duration::days(1);
 
     // Session 1: chat / completed / claude, two turns exercising ToolCall +
     // ToolResult (success) and ToolCall + ToolError, plus a standalone Error.

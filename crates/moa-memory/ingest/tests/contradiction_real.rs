@@ -40,9 +40,9 @@ fn candidate_with(
         name: summary.to_string(),
         pii_class: SensitivityClass::None,
         valid_to,
-        valid_from: Utc::now() - Duration::days(1),
+        valid_from: moa_test_support::fixtures::pg_now() - Duration::days(1),
         properties_summary: Some(properties),
-        last_accessed_at: Utc::now(),
+        last_accessed_at: moa_test_support::fixtures::pg_now(),
         quality_score: 0.5,
     }
 }
@@ -94,7 +94,7 @@ async fn contradiction_detector_does_not_flag_two_facts_with_different_predicate
 async fn contradiction_detector_handles_temporal_facts_correctly_when_ranges_overlap() {
     let candidate = candidate_with(
         "API runs_on_port 3000",
-        Some(Utc::now() - Duration::hours(1)),
+        Some(moa_test_support::fixtures::pg_now() - Duration::hours(1)),
         None,
     );
     let detector = RrfPlusJudgeDetector::default();

@@ -19,7 +19,6 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
 use moa_core::traits::Identity;
 use moa_core::{
     types::contact::SessionActorRef, types::identifiers::AgentSignalId,
@@ -539,7 +538,7 @@ async fn duplicate_child_signal_is_idempotent_service_e2e() -> Result<()> {
         severity: SignalSeverity::Info,
         summary: "intermediate finding worth recording".to_string(),
         payload: serde_json::Value::Null,
-        created_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
         resume_policy: ParentResumePolicy::Never,
         input_request_id: None,
         input_audience: None,
@@ -659,7 +658,7 @@ async fn unregistered_worker_signal_records_no_event_service_e2e() -> Result<()>
         severity: SignalSeverity::Warning,
         summary: "signal from a worker not registered on this session".to_string(),
         payload: serde_json::Value::Null,
-        created_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
         resume_policy: ParentResumePolicy::Never,
         input_request_id: None,
         input_audience: None,
@@ -680,7 +679,7 @@ async fn unregistered_worker_signal_records_no_event_service_e2e() -> Result<()>
         severity: SignalSeverity::Info,
         summary: "registered control finding".to_string(),
         payload: serde_json::Value::Null,
-        created_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
         resume_policy: ParentResumePolicy::Never,
         input_request_id: None,
         input_audience: None,

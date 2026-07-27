@@ -49,7 +49,7 @@ async fn analytics_query_applies_statement_timeout_and_runs_db() {
             field: "created_at".to_string(),
             operator: AnalyticsFilterOperator::Gte,
             value: Some(AnalyticsCell::String(
-                (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(),
+                (moa_test_support::fixtures::pg_now() - chrono::Duration::days(1)).to_rfc3339(),
             )),
         }],
         order_by: Vec::new(),
@@ -159,7 +159,7 @@ async fn seed_citation_lineage(
         session_id,
         storage_partition_id: storage_partition_id.clone(),
         user_id: user_id.clone(),
-        ts: chrono::Utc::now(),
+        ts: moa_test_support::fixtures::pg_now(),
         answer_text: "OAuth uses access tokens.".to_string(),
         answer_event_id: None,
         answer_event_sequence_num: None,
@@ -242,7 +242,7 @@ async fn citation_precision_counts_cited_injected_hits_db() {
     let cited_chunk_uid = Uuid::now_v7();
     let uncited_node_uid = Uuid::now_v7();
     let deep_node_uid = Uuid::now_v7();
-    let now = chrono::Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     // Two hits inside the injection window (one later cited, one not) plus a
     // rank-4 hit that was retrieved but never rendered.

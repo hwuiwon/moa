@@ -71,6 +71,17 @@ mod tests {
         }
     }
 
+    fn turn_failed_event(actor: crate::events::TurnFailureActor) -> Event {
+        Event::TurnFailed {
+            actor,
+            turn_id: "turn-1".to_string(),
+            class: crate::events::TurnFailureClass::ModelCall,
+            summary: crate::events::TurnFailureClass::ModelCall
+                .summary()
+                .to_string(),
+        }
+    }
+
     fn tool_result_event() -> Event {
         Event::ToolResult {
             tool_id: ToolCallId::new(),
@@ -375,5 +386,61 @@ mod tests {
         )];
 
         assert!(!session_requires_processing(&session, &events));
+    }
+
+    #[test]
+    fn a_worker_turn_failure_cannot_mask_pending_root_work() {
+        // Pins the CONSEQUENCE of classifying a worker failure as scheduling-neutral,
+        // not just the classification itself. A child's failure lands in the shared
+        // session log, so if it were scheduling-terminal the reverse tail scan would
+        // stop at it and conclude the root loop has nothing pending — stalling a
+        // coordinator that still owes the user a reply.
+        let session = SessionMeta::default();
+        let events = vec![
+            record(
+                1,
+                Event::UserMessage {
+                    text: "run it".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            record(
+                2,
+                turn_failed_event(crate::events::TurnFailureActor::Worker {
+                    worker_id: "worker-7".to_string(),
+                }),
+            ),
+        ];
+
+        assert!(
+            session_requires_processing(&session, &events),
+            "the root's pending user message must still drive a turn after a child failed"
+        );
+    }
+
+    #[test]
+    fn a_coordinator_turn_failure_concludes_the_root_loop() {
+        // Pins the opposite half: the coordinator's own failure is the end of its
+        // turn loop. Classifying it neutral would let the scan fall through to the
+        // user message it already failed on and re-trigger the same turn forever.
+        let session = SessionMeta::default();
+        let events = vec![
+            record(
+                1,
+                Event::UserMessage {
+                    text: "run it".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            record(
+                2,
+                turn_failed_event(crate::events::TurnFailureActor::Coordinator),
+            ),
+        ];
+
+        assert!(
+            !session_requires_processing(&session, &events),
+            "a failed coordinator turn concludes the loop instead of re-triggering itself"
+        );
     }
 }

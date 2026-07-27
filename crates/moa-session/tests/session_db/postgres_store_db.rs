@@ -149,7 +149,7 @@ async fn learning_candidate_summaries_project_contact_scope_and_redact_payload_d
     let tenant = tenant_id("candidate-summary");
     let other_tenant = tenant_id("candidate-summary-other");
     let contact_id = ContactId::new();
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let contact_candidate_id = Uuid::now_v7();
     let tenant_candidate_id = Uuid::now_v7();
 
@@ -267,7 +267,7 @@ async fn learning_log_round_trips_skill_entry() {
             confidence: Some(0.8),
             source_refs: vec![Uuid::now_v7()],
             actor: "system".to_string(),
-            valid_from: Utc::now(),
+            valid_from: moa_test_support::fixtures::pg_now(),
             valid_to: None,
             batch_id: Some(batch_id),
             version: 1,
@@ -891,7 +891,7 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
         .expect("create session");
     let first_id = deterministic_segment_id(session_id, 0);
     let second_id = deterministic_segment_id(session_id, 1);
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     store
         .create_segment(&TaskSegment {
@@ -955,7 +955,7 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
         .complete_segment(
             first_id,
             SegmentCompletion {
-                ended_at: Utc::now(),
+                ended_at: moa_test_support::fixtures::pg_now(),
                 turn_count: active.turn_count,
                 tools_used: active.tools_used,
                 skills_activated: active.skills_activated,
@@ -972,7 +972,7 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
             tenant_id: "pg-segments".to_string(),
             segment_index: 1,
             task_summary: Some("Update README".to_string()),
-            started_at: Utc::now(),
+            started_at: moa_test_support::fixtures::pg_now(),
             ended_at: None,
             turn_count: 0,
             tools_used: Vec::new(),
@@ -1011,7 +1011,7 @@ async fn postgres_task_segments_track_boundaries_and_usage() {
 async fn postgres_session_owned_writes_fail_when_session_is_missing() {
     let (store, database_url, schema_name) = create_test_store().await;
     let missing_session = SessionId::new();
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     let snapshot_error = store
         .put_snapshot(
@@ -1076,7 +1076,7 @@ async fn postgres_context_snapshot_upserts_overwrites_and_deletes() {
         .create_session(test_session_meta("pg-snapshot", "test-model"))
         .await
         .expect("create session");
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     assert!(
         store
@@ -1201,7 +1201,7 @@ async fn postgres_snapshot_checkpoint_bounds_event_replay() {
                 format_version: moa_core::types::snapshot::CONTEXT_SNAPSHOT_FORMAT_VERSION,
                 session_id,
                 last_sequence_num: checkpoint_seq,
-                created_at: Utc::now(),
+                created_at: moa_test_support::fixtures::pg_now(),
                 messages: Vec::new(),
                 file_read_dedup_state: FileReadDedupState::default(),
                 token_count: 0,
@@ -1267,7 +1267,7 @@ async fn postgres_task_segment_assessments_and_views_refresh() {
         .create_session(test_session_meta("pg-outcome", "test-model"))
         .await
         .expect("create session");
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     for index in 0..20 {
         let segment_id = deterministic_segment_id(session_id, index);
@@ -1329,7 +1329,7 @@ async fn postgres_task_segment_assessments_and_views_refresh() {
                             summary: "verification command signal".to_string(),
                         },
                     ],
-                    assessed_at: Utc::now(),
+                    assessed_at: moa_test_support::fixtures::pg_now(),
                     policy_version: "segment-assessment-test".to_string(),
                 },
             )
@@ -1386,7 +1386,7 @@ async fn experience_records_and_candidates_round_trip() {
         .await
         .expect("create session");
     let segment_id = deterministic_segment_id(session_id, 0);
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let tenant_id = tenant_id("pg-experience");
     let assessment = SegmentAssessment {
         outcome: SegmentOutcome::Resolved,
@@ -1529,14 +1529,14 @@ async fn experience_records_and_candidates_round_trip() {
             status: LearningCandidateStatus::Evaluating,
             status_reason: Some("running regression".to_string()),
             evaluation_payload: Some(serde_json::json!({"suite": "generated"})),
-            updated_at: Utc::now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
         })
         .await
         .expect("candidate status update");
     let mut duplicate_candidate = candidate.clone();
     duplicate_candidate.payload = serde_json::json!({"skill_markdown": "# moa-rust\nupdated"});
     duplicate_candidate.status = LearningCandidateStatus::Proposed;
-    duplicate_candidate.updated_at = Utc::now();
+    duplicate_candidate.updated_at = moa_test_support::fixtures::pg_now();
     store
         .append_learning_candidate(&duplicate_candidate)
         .await
@@ -1641,7 +1641,7 @@ async fn postgres_store_learning_candidate_review_lookup() {
                 ]
             }
         });
-        let now = Utc::now();
+        let now = moa_test_support::fixtures::pg_now();
         let candidate = LearningCandidate {
             id: Uuid::now_v7(),
             tenant_id: review_tenant_id,
@@ -1689,7 +1689,7 @@ async fn postgres_store_learning_candidate_review_lookup() {
             status: LearningCandidateStatus::Rejected,
             status_reason: Some("stale reviewer".to_string()),
             evaluation_payload: Some(serde_json::json!({"reviewer_subject": "user:stale"})),
-            updated_at: Utc::now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
         };
         let stale_changed = store
             .update_learning_candidate_status_from(
@@ -1726,7 +1726,7 @@ async fn postgres_store_learning_candidate_review_lookup() {
                 status: LearningCandidateStatus::Rejected,
                 status_reason: Some("needs clearer evidence".to_string()),
                 evaluation_payload: Some(evaluation_payload.clone()),
-                updated_at: Utc::now(),
+                updated_at: moa_test_support::fixtures::pg_now(),
             })
             .await
             .expect("reject candidate");
@@ -2353,7 +2353,7 @@ async fn postgres_analytics_query_read_models_refresh() {
     .await
     .expect("bind slack channel");
 
-    let started_at = Utc::now();
+    let started_at = moa_test_support::fixtures::pg_now();
     let segment_id = deterministic_segment_id(session_id, 0);
     store
         .create_segment(&TaskSegment {
@@ -3171,7 +3171,7 @@ async fn experience_task_embedding_backfill_lists_sets_and_ranks_neighbors() {
         .await
         .expect("create session");
     let tenant = tenant_id("pg-task-embedding");
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let older = now - chrono::Duration::seconds(30);
     let alpha = seed_experience_with_summary(&store, session_id, tenant, 0, "alpha", older).await;
     let beta = seed_experience_with_summary(&store, session_id, tenant, 1, "beta", now).await;
@@ -3257,7 +3257,7 @@ async fn experience_backfill_reselects_model_mismatched_rows() {
         .await
         .expect("create session");
     let tenant = tenant_id("pg-embed-mismatch");
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let exp = seed_experience_with_summary(&store, session_id, tenant, 0, "converge me", now).await;
 
     // Embed under the previous model.
@@ -3335,7 +3335,7 @@ async fn nearest_task_embeddings_for_experience_excludes_other_model_vectors() {
         .await
         .expect("create session");
     let tenant = tenant_id("pg-embed-scope");
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let representative =
         seed_experience_with_summary(&store, session_id, tenant, 0, "repr", now).await;
     let same_space = seed_experience_with_summary(&store, session_id, tenant, 1, "same", now).await;
@@ -3391,7 +3391,7 @@ async fn nearest_experience_task_embeddings_scoped_filters_by_model() {
         .await
         .expect("create session");
     let tenant = tenant_id("pg-embed-scoped-api");
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let x = seed_experience_with_summary(&store, session_id, tenant, 0, "x", now).await;
     let y = seed_experience_with_summary(&store, session_id, tenant, 1, "y", now).await;
     store
@@ -3446,7 +3446,7 @@ async fn experience_embedding_write_refuses_summary_changed_under_it() {
         .await
         .expect("create session");
     let tenant = tenant_id("pg-embed-race");
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     let segment_id = deterministic_segment_id(session_id, 7);
     store

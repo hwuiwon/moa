@@ -1,15 +1,12 @@
 //! Wiremock offline coverage for the Postmark email connector.
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use moa_config::MessagingConfig;
-use moa_core::{error::MoaError, traits::CredentialVault, types::model::Credential};
+use moa_core::error::MoaError;
+use moa_core::types::credentials::{DeploymentSecret, DeploymentSecrets};
 use moa_messaging::{
-    POSTMARK_SERVER_TOKEN_SERVICE, PostmarkEmailClient, PostmarkEmailFailureClass,
-    PostmarkEmailMessage, PostmarkEmailSendResult,
+    PostmarkEmailClient, PostmarkEmailFailureClass, PostmarkEmailMessage, PostmarkEmailSendResult,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};
@@ -74,12 +71,13 @@ async fn postmark_offline_sends_single_email_with_expected_request_shape() {
 }
 
 #[tokio::test]
-async fn postmark_offline_from_vault_uses_configured_token_and_message_stream() {
-    // Pins: production wiring can resolve the Postmark server token from CredentialVault.
+async fn postmark_offline_deployment_secret_supplies_token_and_message_stream() {
+    // Pins: production wiring resolves the Postmark server token from the typed
+    // deployment-secret source and sends it as the server-token header.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/email"))
-        .and(header("x-postmark-server-token", "vault-token"))
+        .and(header("x-postmark-server-token", "deployment-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "To": "ops@example.com",
             "SubmittedAt": null,
@@ -89,19 +87,17 @@ async fn postmark_offline_from_vault_uses_configured_token_and_message_stream() 
         })))
         .mount(&server)
         .await;
-    let vault = Arc::new(MockVault::with_credential(
-        POSTMARK_SERVER_TOKEN_SERVICE,
-        "tenant-1",
-        Credential::Bearer("vault-token".to_string()),
-    ));
+    let secrets = DeploymentSecrets::new().with(
+        DeploymentSecret::PostmarkServerToken,
+        Some("deployment-token".to_string()),
+    );
     let config = MessagingConfig {
         postmark_base_url: server.uri(),
         postmark_message_stream: "alerts".to_string(),
         ..MessagingConfig::default()
     };
-    let client = PostmarkEmailClient::from_vault(vault, "tenant-1", &config)
-        .await
-        .expect("Postmark client should build from vault token");
+    let client = PostmarkEmailClient::from_deployment_secrets(&secrets, &config)
+        .expect("Postmark client should build from the deployment server token");
     let message = PostmarkEmailMessage::new("moa@example.com", "ops@example.com", "Alert")
         .with_text_body("body");
 
@@ -115,6 +111,34 @@ async fn postmark_offline_from_vault_uses_configured_token_and_message_stream() 
     let body: Value =
         serde_json::from_slice(&request.body).expect("captured Postmark body should be JSON");
     assert_eq!(body["MessageStream"], "alerts");
+}
+
+#[tokio::test]
+async fn postmark_offline_absent_deployment_token_leaves_email_unconfigured() {
+    // Pins: a deployment without a Postmark token yields no client at all rather
+    // than a client that would send an empty server-token header.
+    let secrets = DeploymentSecrets::new();
+
+    assert!(
+        PostmarkEmailClient::from_deployment_secrets(&secrets, &MessagingConfig::default())
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn postmark_offline_blank_deployment_token_is_treated_as_unset() {
+    // Pins: a present-but-blank deployment variable cannot make email delivery
+    // look configured and then fail at the provider with an empty credential.
+    let secrets = DeploymentSecrets::new().with(
+        DeploymentSecret::PostmarkServerToken,
+        Some("   ".to_string()),
+    );
+
+    assert!(!secrets.contains(DeploymentSecret::PostmarkServerToken));
+    assert!(
+        PostmarkEmailClient::from_deployment_secrets(&secrets, &MessagingConfig::default())
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -290,53 +314,4 @@ async fn request_count(server: &MockServer) -> usize {
         .await
         .expect("wiremock should expose captured requests")
         .len()
-}
-
-#[derive(Debug)]
-struct MockVault {
-    credentials: HashMap<(String, String), Credential>,
-}
-
-impl MockVault {
-    fn with_credential(service: &str, scope: &str, credential: Credential) -> Self {
-        Self {
-            credentials: HashMap::from([((service.to_string(), scope.to_string()), credential)]),
-        }
-    }
-}
-
-#[async_trait]
-impl CredentialVault for MockVault {
-    async fn get(&self, service: &str, scope: &str) -> moa_core::error::Result<Credential> {
-        self.credentials
-            .get(&(service.to_string(), scope.to_string()))
-            .cloned()
-            .ok_or_else(|| MoaError::StorageError("missing credential".to_string()))
-    }
-
-    async fn set(
-        &self,
-        _service: &str,
-        _scope: &str,
-        _cred: Credential,
-    ) -> moa_core::error::Result<()> {
-        Err(MoaError::StorageError(
-            "mock vault is read-only".to_string(),
-        ))
-    }
-
-    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::error::Result<bool> {
-        Err(MoaError::StorageError(
-            "mock vault is read-only".to_string(),
-        ))
-    }
-
-    async fn list(
-        &self,
-        _service_prefix: &str,
-    ) -> moa_core::error::Result<Vec<moa_core::traits::StoredCredentialMetadata>> {
-        Err(MoaError::StorageError(
-            "mock vault does not support listing".to_string(),
-        ))
-    }
 }

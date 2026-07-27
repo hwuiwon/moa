@@ -507,6 +507,40 @@ pub struct ToolPolicyInput {
     pub action_class: ActionClass,
 }
 
+/// Owner that decided the effect of one tool-policy evaluation.
+///
+/// This is a closed, safe vocabulary: it names *which* authority produced the
+/// outcome so decisions can be logged and audited without ever carrying the
+/// invocation input, the matched glob pattern, or any credential material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionPolicyDecisionSource {
+    /// No rule or override applied; the deployment permission default decided.
+    DeploymentDefault,
+    /// No rule or override applied; the tool definition's intrinsic default decided.
+    ToolDefinition,
+    /// A persisted tenant or contact rule decided.
+    PersistedRule,
+    /// A configured admin-review override decided.
+    ConfiguredReview,
+    /// A configured always-deny override decided.
+    ConfiguredDeny,
+}
+
+impl ActionPolicyDecisionSource {
+    /// Returns the stable log/audit name for this decision source.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DeploymentDefault => "deployment_default",
+            Self::ToolDefinition => "tool_definition",
+            Self::PersistedRule => "persisted_rule",
+            Self::ConfiguredReview => "configured_review",
+            Self::ConfiguredDeny => "configured_deny",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

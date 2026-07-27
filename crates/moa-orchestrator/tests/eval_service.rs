@@ -18,7 +18,7 @@ use uuid::Uuid;
 #[tokio::test]
 async fn hosted_eval_reports_return_terminal_and_json_artifacts() {
     // Pins: hosted eval run honors terminal and JSON report requests without writing client paths on the server.
-    let now = chrono::Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let suite = TestSuite {
         name: "regression".to_string(),
         cases: vec![TestCase {

@@ -205,7 +205,7 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         .env("MOA_RESTATE_INGRESS_URL", config.ingress_url)
         .env("MOA_RUNTIME_CACHE_BACKEND", "redis")
         .env("MOA_RUNTIME_CACHE_REDIS_URL", config.redis_url)
-        .env("MOA_CLOUD_HANDS_ALLOW_LOCAL", "true")
+        .env("MOA_SECURITY_PROFILE", "local")
         // The spawned orchestrator boots with the in-process ephemeral KMS; opt
         // into it explicitly so the composition-root fail-closed durability guard
         // does not reject startup (production uses a persistent postgres KMS).
@@ -218,7 +218,13 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         .env("MOA_AUTHZ_OPENFGA_STORE_ID", &config.fga_config.store_id)
         .env("MOA_AUTHZ_OPENFGA_MODEL_ID", &config.fga_config.model_id)
         .env("MOA_LINEAGE_SINK", "null")
-        .env("RUST_LOG", "warn");
+        .env(
+            "RUST_LOG",
+            // Honor an ambient override so a failing fixture run can be
+            // re-executed with routing/provider logs without editing code;
+            // the quiet default keeps ordinary runs readable.
+            std::env::var("MOA_FIXTURE_RUST_LOG").unwrap_or_else(|_| "warn".to_string()),
+        );
     if let Some(script_path) = config.script_path {
         command.env(
             "MOA_PROVIDERS_OVERRIDE",

@@ -106,13 +106,14 @@ pub fn document_chunk_delta_with_semantics(
         }],
     };
     for chunk in chunks {
-        let chunk_key = format!("chunk:{}:{}", object.tenant_id, chunk.chunk_hash);
+        let chunk_key = chunk_occurrence_key(chunk);
         delta.nodes.push(GraphNodeUpsert {
             label: "Chunk".to_string(),
             key: chunk_key.clone(),
-            uid: stable_uid(&chunk_key),
+            uid: chunk.chunk_uid,
             properties: serde_json::json!({
                 "chunk_hash": chunk.chunk_hash,
+                "version_uid": chunk.version_uid,
                 "ordinal": chunk.ordinal,
                 "token_count": chunk.token_count,
                 "heading_path": chunk.heading_path,
@@ -178,6 +179,16 @@ pub fn document_chunk_delta_with_semantics(
     }
     append_semantic_graph(object, chunks, semantic_extractions, &mut delta);
     delta
+}
+
+/// Returns the graph delta key for one chunk occurrence.
+///
+/// The key is derived from `chunk_uid` — the occurrence identity — so the graph
+/// node written for a chunk belongs to exactly one document version. Content
+/// hashes stay in node properties for dedupe and diffing; they never form
+/// identity.
+fn chunk_occurrence_key(chunk: &KnowledgeChunk) -> String {
+    format!("chunk:{}", chunk.chunk_uid)
 }
 
 /// Returns a stable UID for graph nodes, edges, and document versions.
@@ -255,7 +266,7 @@ fn append_semantic_graph(
         let Some(extraction) = extraction_by_chunk.get(chunk.chunk_hash.as_str()).copied() else {
             continue;
         };
-        let chunk_key = format!("chunk:{}:{}", object.tenant_id, chunk.chunk_hash);
+        let chunk_key = chunk_occurrence_key(chunk);
         for entity in &extraction.entities {
             let entity_key = format!(
                 "semantic-entity:{}:{}",
@@ -338,11 +349,10 @@ fn append_semantic_graph(
         }
     }
 
-    append_same_document_semantic_chunk_links(object, &semantic_chunks_by_entity, delta);
+    append_same_document_semantic_chunk_links(&semantic_chunks_by_entity, delta);
 }
 
 fn append_same_document_semantic_chunk_links(
-    object: &KnowledgeObject,
     semantic_chunks_by_entity: &BTreeMap<String, Vec<(&KnowledgeChunk, f64)>>,
     delta: &mut KnowledgeGraphDelta,
 ) {
@@ -358,7 +368,6 @@ fn append_same_document_semantic_chunk_links(
                 continue;
             };
             append_semantic_chunk_link(
-                object,
                 from,
                 to,
                 entity_slug,
@@ -366,7 +375,6 @@ fn append_same_document_semantic_chunk_links(
                 delta,
             );
             append_semantic_chunk_link(
-                object,
                 to,
                 from,
                 entity_slug,
@@ -378,15 +386,14 @@ fn append_same_document_semantic_chunk_links(
 }
 
 fn append_semantic_chunk_link(
-    object: &KnowledgeObject,
     from: &KnowledgeChunk,
     to: &KnowledgeChunk,
     entity_slug: &str,
     confidence: f64,
     delta: &mut KnowledgeGraphDelta,
 ) {
-    let from_key = format!("chunk:{}:{}", object.tenant_id, from.chunk_hash);
-    let to_key = format!("chunk:{}:{}", object.tenant_id, to.chunk_hash);
+    let from_key = chunk_occurrence_key(from);
+    let to_key = chunk_occurrence_key(to);
     delta.edges.push(GraphEdgeUpsert {
         from_key: from_key.clone(),
         to_key: to_key.clone(),

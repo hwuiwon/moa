@@ -52,6 +52,12 @@ pub struct KnowledgeExchangeTokenRequest {
     pub tenant_id: TenantId,
     /// Linked-account provider identifier.
     pub provider: String,
+    /// Connector the link operation selected, echoed back from link-token creation.
+    ///
+    /// Providers that model integrations as product categories (Merge) validate
+    /// this against the linked integration, so the connection is bound to the
+    /// exact category the operator chose rather than a provider default.
+    pub connector: String,
     /// Token or code returned by the provider link flow.
     pub exchange_token: String,
     /// Provider-native selected source state collected by the frontend.
@@ -427,11 +433,11 @@ pub struct KnowledgeObjectInspectResponse {
     #[serde(default)]
     pub heading_paths: Vec<Vec<String>>,
     /// Current chunk summaries for inspection and citation rendering.
+    ///
+    /// Each entry's `chunk_uid` is also its graph occurrence uid, so a separate
+    /// graph-identity list would only repeat these values.
     #[serde(default)]
     pub chunks: Vec<KnowledgeObjectChunkInspectView>,
-    /// Graph node UIDs written for current chunks.
-    #[serde(default)]
-    pub graph_node_uids: Vec<Uuid>,
     /// Safe citation metadata assembled from chunk metadata.
     #[serde(default)]
     pub citation_metadata: Value,
@@ -446,7 +452,7 @@ pub struct KnowledgeObjectInspectResponse {
 /// Renderer-safe summary of one tenant knowledge chunk.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeObjectChunkInspectView {
-    /// Tenant-owned chunk identifier.
+    /// Tenant-owned chunk occurrence identifier, and this chunk's graph node uid.
     pub chunk_uid: Uuid,
     /// Chunk ordinal within the document version.
     pub ordinal: u32,
@@ -459,9 +465,6 @@ pub struct KnowledgeObjectChunkInspectView {
     pub token_count: usize,
     /// Bounded safe text preview for this chunk.
     pub preview: String,
-    /// Graph node UID written for this chunk, when present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub graph_node_uid: Option<Uuid>,
     /// Safe chunk metadata.
     #[serde(default)]
     pub metadata: Value,

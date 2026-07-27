@@ -4,7 +4,6 @@
 //! session failure signals and reviewable learning candidates — against an
 //! isolated database.
 
-use chrono::Utc;
 use moa_core::{
     events::Event, types::events_stream::EventRecord, types::experience::LearningCandidateStatus,
     types::experience::LearningCandidateStatusUpdate, types::experience::LearningCandidateType,
@@ -22,9 +21,14 @@ async fn recurring_durable_tool_errors_file_one_reviewable_candidate_db() {
     let tenant_id = TenantId::new();
     let events = durable_errors(SessionId::new(), "bash", 3);
 
-    let applied = mine_and_file_session_failures(test_db.store(), tenant_id, &events, Utc::now())
-        .await
-        .expect("mine recurring failures");
+    let applied = mine_and_file_session_failures(
+        test_db.store(),
+        tenant_id,
+        &events,
+        moa_test_support::fixtures::pg_now(),
+    )
+    .await
+    .expect("mine recurring failures");
 
     assert_eq!(applied, 1);
     let candidates = open_candidates(&test_db, tenant_id).await;
@@ -51,9 +55,14 @@ async fn below_threshold_failures_file_nothing_db() {
     let tenant_id = TenantId::new();
     let events = durable_errors(SessionId::new(), "bash", 2);
 
-    let applied = mine_and_file_session_failures(test_db.store(), tenant_id, &events, Utc::now())
-        .await
-        .expect("mine below-threshold failures");
+    let applied = mine_and_file_session_failures(
+        test_db.store(),
+        tenant_id,
+        &events,
+        moa_test_support::fixtures::pg_now(),
+    )
+    .await
+    .expect("mine below-threshold failures");
 
     assert_eq!(applied, 0);
     assert!(open_candidates(&test_db, tenant_id).await.is_empty());
@@ -70,7 +79,7 @@ async fn remining_bumps_open_candidate_instead_of_duplicating_db() {
         test_db.store(),
         tenant_id,
         &durable_errors(SessionId::new(), "bash", 3),
-        Utc::now(),
+        moa_test_support::fixtures::pg_now(),
     )
     .await
     .expect("first mining pass");
@@ -78,7 +87,7 @@ async fn remining_bumps_open_candidate_instead_of_duplicating_db() {
         test_db.store(),
         tenant_id,
         &durable_errors(SessionId::new(), "bash", 4),
-        Utc::now(),
+        moa_test_support::fixtures::pg_now(),
     )
     .await
     .expect("second mining pass");
@@ -104,7 +113,7 @@ async fn claimed_candidate_keeps_review_state_on_remine_db() {
         test_db.store(),
         tenant_id,
         &durable_errors(SessionId::new(), "bash", 3),
-        Utc::now(),
+        moa_test_support::fixtures::pg_now(),
     )
     .await
     .expect("first mining pass");
@@ -117,7 +126,7 @@ async fn claimed_candidate_keeps_review_state_on_remine_db() {
                 status: LearningCandidateStatus::Evaluating,
                 status_reason: Some("claimed by reviewer".to_string()),
                 evaluation_payload: None,
-                updated_at: Utc::now(),
+                updated_at: moa_test_support::fixtures::pg_now(),
             },
             LearningCandidateStatus::Proposed,
         )
@@ -129,7 +138,7 @@ async fn claimed_candidate_keeps_review_state_on_remine_db() {
         test_db.store(),
         tenant_id,
         &durable_errors(SessionId::new(), "bash", 5),
-        Utc::now(),
+        moa_test_support::fixtures::pg_now(),
     )
     .await
     .expect("re-mine while claimed");
@@ -164,7 +173,7 @@ fn durable_errors(session_id: SessionId, tool_name: &str, count: usize) -> Vec<E
                 sequence_num: index as u64 + 1,
                 event_type: event.event_type(),
                 event,
-                timestamp: Utc::now(),
+                timestamp: moa_test_support::fixtures::pg_now(),
                 brain_id: None,
                 hand_id: None,
                 token_count: None,

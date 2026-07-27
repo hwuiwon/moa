@@ -7,7 +7,7 @@ mod support;
 
 use std::sync::atomic::Ordering;
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use moa_config::MoaConfig;
 use moa_config::RecurrenceConfig;
 use moa_core::{types::identifiers::TenantId, types::segment_assessment::SegmentOutcome};
@@ -306,7 +306,7 @@ async fn semantic_dedup_accumulates_sibling_instead_of_filing_a_near_duplicate()
         "fixture-rotate-the-alpha-deploy-token-safely",
         "rotate the alpha deploy token safely",
         &learning_probe_vector(),
-        Utc::now(),
+        moa_test_support::fixtures::pg_now(),
     )
     .await;
 
@@ -382,7 +382,7 @@ async fn absent_embedder_skips_semantic_dedup_and_files_a_new_proposal() {
         "fixture-rotate-the-alpha-deploy-token-safely",
         "rotate the alpha deploy token safely",
         &learning_probe_vector(),
-        Utc::now(),
+        moa_test_support::fixtures::pg_now(),
     )
     .await;
 
@@ -429,7 +429,7 @@ async fn semantically_close_fingerprint_groups_merge_into_one_recurrence_cluster
     let test_db = setup_test_db().await;
     let store = learning_store(&test_db);
     let tenant = TenantId::new();
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     // Three occurrences of each of two differently-worded-but-equivalent tasks,
     // all embedded to the same probe vector so they cluster.
@@ -505,7 +505,7 @@ async fn qualify_sub_threshold_aliases(
     let test_db = setup_test_db().await;
     let store = learning_store(&test_db);
     let tenant = TenantId::new();
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     // One occurrence of each differently-worded alias — every alias is below the
     // occurrence floor on its own, all embedded to the same probe so they cluster.

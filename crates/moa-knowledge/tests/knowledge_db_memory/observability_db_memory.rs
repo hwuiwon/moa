@@ -6,7 +6,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::Utc;
 use moa_core::types::memory::RlsContext;
 use moa_core::{error::MoaError, traits::EmbeddingProvider, types::identifiers::TenantId};
 use moa_knowledge::{
@@ -194,8 +193,8 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
             metadata: json!({ "safe": "connection", "access_token": SECRET_TOKEN }),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -447,8 +446,9 @@ async fn create_counter_seed_run(
             graph_nodes_upserted: 88,
             graph_edges_upserted: 99,
             error_code: Some("seed_error_code".to_string()),
-            started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
+            started_at: moa_test_support::fixtures::pg_now(),
+            finished_at: Some(moa_test_support::fixtures::pg_now()),
+            provider_trigger_completed_at: None,
         })
         .await
         .expect("create counter seed run");
@@ -503,8 +503,9 @@ async fn run_failure_case(case: FailureCase) -> Uuid {
             graph_nodes_upserted: 0,
             graph_edges_upserted: 0,
             error_code: None,
-            started_at: Utc::now(),
+            started_at: moa_test_support::fixtures::pg_now(),
             finished_at: None,
+            provider_trigger_completed_at: None,
         })
         .await
         .expect("create failure run");
@@ -647,7 +648,7 @@ fn provider_failure_record() -> ProviderRecord {
         source_uri: Some("https://example.test/provider-missing-text".to_string()),
         change_token: Some("provider-v1".to_string()),
         deleted: false,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         metadata: json!({ "safe": "metadata", "access_token": SECRET_TOKEN }),
         payload: json!({ "safe": "payload", "access_token": SECRET_TOKEN }),
     }
@@ -661,7 +662,7 @@ fn content_record(label: &str) -> ProviderRecord {
         source_uri: Some(format!("https://example.test/{label}")),
         change_token: Some(format!("{label}-v1")),
         deleted: false,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         metadata: json!({ "safe": "metadata", "access_token": SECRET_TOKEN }),
         payload: json!({
             "text": format!("Safe fixture text for {label}. {RAW_DOCUMENT}"),

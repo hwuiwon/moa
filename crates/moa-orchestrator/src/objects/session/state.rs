@@ -3,9 +3,9 @@
 use super::*;
 use moa_core::traits::Identity;
 use moa_core::{
-    types::identifiers::AgentSignalId, types::session::TurnOutcome,
-    types::worker::state::ChildSignalKind, types::worker::state::ParentResumePolicy,
-    types::worker::state::UnreadChildSignal, types::worker::state::WorkerSignal,
+    types::identifiers::AgentSignalId, types::worker::state::ChildSignalKind,
+    types::worker::state::ParentResumePolicy, types::worker::state::UnreadChildSignal,
+    types::worker::state::WorkerSignal,
 };
 
 /// Cycle-safe core pending target instantiated with the artifact-owned execution budget.
@@ -14,10 +14,8 @@ pub type PendingUserReplyTarget =
 
 pub(super) const K_META: &str = "meta";
 pub(super) const K_STATUS: &str = "status";
-pub(super) const K_PENDING: &str = "pending";
 pub(super) const K_CHILDREN: &str = "children";
 pub(super) const K_LAST_TURN_SUMMARY: &str = "last_turn_summary";
-pub(super) const K_CANCEL_FLAG: &str = "cancel_flag";
 pub(super) const K_CURRENT_SEGMENT: &str = "current_segment";
 pub(super) const K_NARRATION_TICK_GENERATION: &str = "narration_tick_generation";
 pub(super) const K_NARRATION_TICK_OUTSTANDING: &str = "narration_tick_outstanding";
@@ -276,14 +274,10 @@ pub struct SessionVoState {
     pub meta: Option<SessionMeta>,
     /// Current lifecycle status held in Restate state.
     pub status: Option<SessionStatus>,
-    /// Buffered user messages waiting for the next `TurnExecution` workflow.
-    pub pending: Vec<UserMessage>,
     /// Placeholder for worker children introduced in R08.
     pub children: Vec<WorkerChildRef>,
     /// Human-readable stub summary of the last drained turn.
     pub last_turn_summary: Option<String>,
-    /// Requested cancellation scope, recorded at the most recent cancel request.
-    pub cancel_flag: Option<CancelScope>,
     /// Active task segment, when one has been created for the session.
     pub current_segment: Option<ActiveSegment>,
     /// Current progress-narration scheduling generation. Bumped on each active-edge
@@ -454,15 +448,6 @@ impl SessionVoState {
         true
     }
 
-    /// Returns the only user-addressed target, or `None` when zero or ambiguous.
-    #[must_use]
-    pub fn exact_pending_user_reply_target(&self) -> Option<PendingUserReplyTarget> {
-        match self.pending_user_reply_targets.as_slice() {
-            [target] => Some(target.clone()),
-            _ => None,
-        }
-    }
-
     /// Clears an exact pending target only after an applied or replayed delivery.
     pub fn clear_pending_user_reply_target(&mut self, target: &PendingUserReplyTarget) -> bool {
         let before = self.pending_user_reply_targets.len();
@@ -563,59 +548,10 @@ impl SessionVoState {
         })
     }
 
-    /// Queues one user message and transitions the session into `Running`.
-    pub fn enqueue_message(&mut self, msg: UserMessage, now: DateTime<Utc>) -> MoaResult<()> {
-        self.ensure_initialized()?;
-        self.pending.push(msg);
-        self.set_status(SessionStatus::Running, now);
-        Ok(())
-    }
-
-    /// Applies a turn outcome to the lifecycle state.
-    ///
-    /// In the existing MOA status model, an idle turn parks the session in `Paused`.
-    pub fn apply_turn_outcome(
-        &mut self,
-        outcome: TurnOutcome,
-        now: DateTime<Utc>,
-    ) -> SessionStatus {
-        let next_status = match outcome {
-            TurnOutcome::Continue => SessionStatus::Running,
-            TurnOutcome::Idle => SessionStatus::Paused,
-            TurnOutcome::Cancelled => SessionStatus::Cancelled,
-        };
-        self.set_status(next_status.clone(), now);
-        next_status
-    }
-
     /// Keeps the owning session active after a detached execution run is admitted.
     pub fn apply_accepted_execution_turn(&mut self, now: DateTime<Utc>) {
         self.last_turn_summary = Some("Execution accepted.".to_string());
         self.set_status(SessionStatus::Running, now);
-    }
-
-    /// Records the requested cancellation scope.
-    pub fn set_cancel_flag(&mut self, scope: CancelScope) {
-        self.cancel_flag = Some(scope);
-    }
-
-    /// Consumes the current cancellation scope, if any.
-    pub fn take_cancel_flag(&mut self) -> Option<CancelScope> {
-        self.cancel_flag.take()
-    }
-
-    /// Drains buffered user messages and records a short stub summary.
-    pub fn drain_pending_messages(&mut self) -> usize {
-        let drained = self.pending.len();
-        self.pending.clear();
-        self.last_turn_summary = if drained == 0 {
-            None
-        } else if drained == 1 {
-            Some("drained 1 queued message".to_string())
-        } else {
-            Some(format!("drained {drained} queued messages"))
-        };
-        drained
     }
 
     /// Clears the in-memory projection back to an empty VO.
@@ -1041,10 +977,8 @@ impl VoState for SessionVoState {
         Ok(Self {
             meta: reader.get_json(K_META).await?,
             status: reader.get_json(K_STATUS).await?,
-            pending: reader.get_json(K_PENDING).await?.unwrap_or_default(),
             children: reader.get_json(K_CHILDREN).await?.unwrap_or_default(),
             last_turn_summary: reader.get_json(K_LAST_TURN_SUMMARY).await?,
-            cancel_flag: reader.get_json(K_CANCEL_FLAG).await?,
             current_segment: reader.get_json(K_CURRENT_SEGMENT).await?,
             narration_tick_generation: reader
                 .get_json(K_NARRATION_TICK_GENERATION)
@@ -1097,10 +1031,8 @@ impl VoState for SessionVoState {
     fn persist_into(&self, ctx: &ObjectContext<'_>) {
         set_or_clear_opt(ctx, K_META, self.meta.as_ref());
         set_or_clear_opt(ctx, K_STATUS, self.status.as_ref());
-        set_or_clear_vec(ctx, K_PENDING, &self.pending);
         set_or_clear_vec(ctx, K_CHILDREN, &self.children);
         set_or_clear_opt(ctx, K_LAST_TURN_SUMMARY, self.last_turn_summary.as_ref());
-        set_or_clear_opt(ctx, K_CANCEL_FLAG, self.cancel_flag.as_ref());
         set_or_clear_opt(ctx, K_CURRENT_SEGMENT, self.current_segment.as_ref());
         set_or_clear_scalar(
             ctx,
@@ -1175,19 +1107,12 @@ impl VoState for SessionVoState {
             self.status.as_ref(),
             baseline.status.as_ref(),
         );
-        set_changed_vec(ctx, K_PENDING, &self.pending, &baseline.pending);
         set_changed_vec(ctx, K_CHILDREN, &self.children, &baseline.children);
         set_changed_opt(
             ctx,
             K_LAST_TURN_SUMMARY,
             self.last_turn_summary.as_ref(),
             baseline.last_turn_summary.as_ref(),
-        );
-        set_changed_opt(
-            ctx,
-            K_CANCEL_FLAG,
-            self.cancel_flag.as_ref(),
-            baseline.cancel_flag.as_ref(),
         );
         set_changed_opt(
             ctx,
@@ -1315,30 +1240,12 @@ impl VoState for SessionVoState {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{
-        types::channel::Attachment, types::channel::Channel, types::identifiers::ModelId,
-    };
+    use moa_core::{types::channel::Channel, types::identifiers::ModelId};
 
     use super::{CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES, SessionVoState};
     use moa_core::{
-        types::events_stream::ClaimCheck, types::session::TurnOutcome,
-        types::worker::commands::MarkWorkerChildTerminalInput,
+        types::events_stream::ClaimCheck, types::worker::commands::MarkWorkerChildTerminalInput,
     };
-
-    fn test_message(text: &str) -> moa_core::types::session::UserMessage {
-        moa_core::types::session::UserMessage {
-            text: text.to_string(),
-            attachments: vec![Attachment {
-                id: None,
-                name: "a.txt".to_string(),
-                mime_type: Some("text/plain".to_string()),
-                sha256: None,
-                url: None,
-                path: None,
-                size_bytes: Some(3),
-            }],
-        }
-    }
 
     fn test_meta() -> moa_core::types::session::SessionMeta {
         moa_core::types::session::SessionMeta {
@@ -1376,62 +1283,22 @@ mod tests {
     }
 
     #[test]
-    fn session_vo_requires_meta_before_enqueue() {
-        let mut state = SessionVoState::default();
+    fn session_vo_requires_meta_before_use() {
+        // Pins: an uninitialized session VO refuses to act instead of inventing
+        // metadata, so every handler that needs tenant or model context fails
+        // closed until `SessionStore` has initialized the object.
+        let state = SessionVoState::default();
         let error = state
-            .enqueue_message(test_message("hello"), Utc::now())
-            .expect_err("enqueue should fail without metadata");
+            .ensure_initialized()
+            .expect_err("an uninitialized VO must not yield metadata");
 
         assert!(error.to_string().contains("Session metadata missing"));
-    }
-
-    #[test]
-    fn session_vo_queues_messages_and_transitions_to_running() {
-        let mut state = SessionVoState::default();
-        state.set_meta(test_meta());
-        state
-            .enqueue_message(test_message("hello"), Utc::now())
-            .expect("enqueue should succeed");
-
-        assert_eq!(state.pending.len(), 1);
-        assert_eq!(
-            state.current_status(),
-            moa_core::types::session::SessionStatus::Running
-        );
-    }
-
-    #[test]
-    fn session_vo_idle_turn_maps_to_paused_status() {
-        let mut state = SessionVoState::default();
-        state.set_meta(test_meta());
-        let status = state.apply_turn_outcome(TurnOutcome::Idle, Utc::now());
-
-        assert_eq!(status, moa_core::types::session::SessionStatus::Paused);
-        assert_eq!(
-            state.current_status(),
-            moa_core::types::session::SessionStatus::Paused
-        );
-    }
-
-    #[test]
-    fn session_vo_cancel_flag_round_trips() {
-        let mut state = SessionVoState::default();
-        state.set_cancel_flag(moa_core::types::session::CancelScope::CoordinatorOnly);
-
-        assert_eq!(
-            state.take_cancel_flag(),
-            Some(moa_core::types::session::CancelScope::CoordinatorOnly)
-        );
-        assert_eq!(state.take_cancel_flag(), None);
     }
 
     #[test]
     fn session_vo_destroy_clears_projection() {
         let mut state = SessionVoState::default();
         state.set_meta(test_meta());
-        state
-            .enqueue_message(test_message("hello"), Utc::now())
-            .expect("enqueue should succeed");
         state
             .children
             .push(moa_core::types::worker::state::WorkerChildRef {
@@ -1441,7 +1308,6 @@ mod tests {
                 terminal: None,
             });
         state.last_turn_summary = Some("summary".to_string());
-        state.set_cancel_flag(moa_core::types::session::CancelScope::TaskTree);
         state.destroy();
 
         assert_eq!(state, SessionVoState::default());

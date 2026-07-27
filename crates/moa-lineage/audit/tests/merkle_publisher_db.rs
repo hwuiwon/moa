@@ -4,7 +4,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::Duration as ChronoDuration;
 use moa_lineage_audit::{MerkleRootPublisher, RootPublisherConfig, SigningKey};
 use object_store::memory::InMemory;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -189,7 +189,11 @@ async fn install_merkle_schema(pool: &sqlx::PgPool) -> sqlx::Result<()> {
 }
 
 async fn seed_lineage_window(pool: &sqlx::PgPool, storage_partition_id: &str) -> sqlx::Result<()> {
-    let base_ts = Utc::now() - ChronoDuration::minutes(5);
+    let base_ts = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+        chrono::Utc::now().timestamp_micros(),
+    )
+    .expect("microsecond timestamp")
+        - ChronoDuration::minutes(5);
     for idx in 0_i64..3 {
         let leaf = blake3::hash(format!("lineage-{idx}").as_bytes());
         sqlx::query(

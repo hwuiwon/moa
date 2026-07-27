@@ -1,6 +1,5 @@
 //! Native parser coverage for deterministic local structures and liteparse layout mapping.
 
-use chrono::Utc;
 use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
     chunking::elements_to_blocks,
@@ -47,8 +46,8 @@ fn parse_input(file_name: &str, mime_type: &str, text: &str) -> ParseInput {
         metadata: json!({}),
         source_selection: json!({}),
         information_barrier: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
+        updated_at: moa_test_support::fixtures::pg_now(),
         last_synced_at: None,
     };
     ParseInput {

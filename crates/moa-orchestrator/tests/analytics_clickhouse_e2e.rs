@@ -176,8 +176,8 @@ fn recent_time_window(field: &str) -> AnalyticsFilter {
         field: field.to_string(),
         operator: AnalyticsFilterOperator::Between,
         value: Some(AnalyticsCell::Json(json!([
-            (Utc::now() - Duration::days(2)).to_rfc3339(),
-            (Utc::now() + Duration::days(1)).to_rfc3339(),
+            (moa_test_support::fixtures::pg_now() - Duration::days(2)).to_rfc3339(),
+            (moa_test_support::fixtures::pg_now() + Duration::days(1)).to_rfc3339(),
         ]))),
     }
 }
@@ -244,7 +244,7 @@ async fn insert_event(
 /// Two turns: each a ToolCall + ToolResult + BrainResponse; costs 5 and 8.
 async fn seed_two_turn_session(pool: &PgPool, tenant: Uuid, session: Uuid) -> TestResult<()> {
     seed_session(pool, tenant, session).await?;
-    let base = Utc::now() - Duration::days(1);
+    let base = moa_test_support::fixtures::pg_now() - Duration::days(1);
     let tool_a = Uuid::now_v7();
     let tool_b = Uuid::now_v7();
 

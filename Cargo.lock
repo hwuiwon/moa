@@ -4316,6 +4316,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "uuid",
  "workspace-hack",
 ]
 
@@ -4550,6 +4551,7 @@ dependencies = [
  "moa-core",
  "moa-memory-graph",
  "moa-memory-pii",
+ "secrecy",
  "serde_json",
  "shell-words",
  "thiserror 2.0.18",
@@ -4660,6 +4662,7 @@ dependencies = [
 name = "moa-wire"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "chrono",
  "moa-core",
  "serde",

@@ -100,6 +100,32 @@ validate_manifests() {
   done
   assert_contains "${local_key_secret}" "primary:" "local KMS Secret lacks the stable primary key"
 
+  # Each overlay must render exactly one explicit security posture. Local is the
+  # development contract (host-local hands, permissive default); production is
+  # the fail-closed cloud contract (deny default, credentialed cloud sandbox).
+  assert_contains "${local_runtime_config}" "MOA_SECURITY_PROFILE: local" "local overlay does not select the local security profile"
+  assert_contains "${local_runtime_config}" "MOA_PERMISSIONS_DEFAULT_EFFECT: allow" "local overlay does not render the permissive permission default"
+  assert_contains "${local_runtime_config}" "MOA_CLOUD_HANDS_DEFAULT_PROVIDER: local" "local overlay does not select the local hand provider"
+  assert_excludes "${local_runtime_config}" "MOA_SECURITY_PROFILE: cloud" "local overlay leaks the cloud security profile"
+  assert_contains "${production_runtime_config}" "MOA_SECURITY_PROFILE: cloud" "production overlay does not select the cloud security profile"
+  assert_contains "${production_runtime_config}" "MOA_PERMISSIONS_DEFAULT_EFFECT: deny" "production overlay does not render the deny permission default"
+  assert_contains "${production_runtime_config}" "MOA_CLOUD_HANDS_DEFAULT_PROVIDER: e2b" "production overlay does not select the E2B sandbox backend"
+  assert_excludes "${production_runtime_config}" "MOA_PERMISSIONS_DEFAULT_EFFECT: allow" "production overlay leaks a permissive permission default"
+
+  # The cloud sandbox credential belongs to production only; base and local must
+  # not reference it. The cloud profile refuses to serve without it.
+  assert_contains "${production_orchestrator}" "MOA_CLOUD_HANDS_E2B_API_KEY" "production orchestrator is missing the E2B sandbox credential"
+  assert_contains "${production_orchestrator}" "name: moa-hand-provider-keys" "production orchestrator is missing the hand-provider Secret"
+  assert_excludes "${local_orchestrator}" "MOA_CLOUD_HANDS_E2B_API_KEY" "local orchestrator unexpectedly receives the E2B sandbox credential"
+  assert_excludes "${local_orchestrator}" "moa-hand-provider-keys" "local orchestrator unexpectedly references the hand-provider Secret"
+
+  # The deleted development opt-in has exactly one post-change contract: the
+  # security profile. No manifest may reintroduce the removed key, whose name is
+  # matched on its distinctive suffix so the dead name is not restated here.
+  for application in "${local_manifest}" "${production_manifest}"; do
+    assert_excludes "$(<"${application}")" "ALLOW_LOCAL" "overlay reintroduces the deleted local-hands opt-in key"
+  done
+
   for edge in "${local_edge}" "${production_edge}"; do
     assert_excludes "${edge}" "MOA_KMS_" "edge unexpectedly receives KMS configuration"
     assert_excludes "${edge}" "moa-kms-root-keys" "edge unexpectedly mounts the KMS Secret"

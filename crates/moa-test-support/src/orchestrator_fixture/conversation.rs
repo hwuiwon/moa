@@ -14,6 +14,7 @@
 //! projection is empty or terminal.
 
 use super::*;
+use moa_core::types::contact::ClientMessageId;
 use moa_core::types::worker::state::{WorkerProgressSummary, WorkerState};
 use moa_wire::turn::{
     QueueMessageRequest, QueueMessageResponse, SessionProgress, SessionProgressRequest,
@@ -58,9 +59,9 @@ pub async fn drive_conversation(
 ) -> Result<Vec<EventRecord>> {
     for (index, message) in turns.iter().enumerate() {
         if index == 0 {
-            start_first_turn(client, session_id, message).await?;
+            start_first_turn(client, session_id, message, index as u64).await?;
         } else {
-            queue_followup_turn(client, session_id, message).await?;
+            queue_followup_turn(client, session_id, message, index as u64).await?;
         }
         await_conversation_settled(client, session_id, &opts)
             .await
@@ -111,10 +112,12 @@ async fn start_first_turn(
     client: &TestApiClient,
     session_id: SessionId,
     message: &str,
+    ordinal: u64,
 ) -> Result<()> {
+    let request = start_turn_request(message, session_id, ordinal)?;
     let response = client
         .session(session_id.to_string())
-        .start_turn(start_turn_request(message), None)
+        .start_turn(request, None)
         .await
         .context("start first conversation turn")?;
     response
@@ -131,11 +134,12 @@ async fn queue_followup_turn(
     client: &TestApiClient,
     session_id: SessionId,
     message: &str,
+    ordinal: u64,
 ) -> Result<()> {
     let response: QueueMessageResponse = client
         .post_call(
             &format!("/Session/{session_id}/queue_message"),
-            &queue_message_request(message),
+            &queue_message_request(message, session_id, ordinal)?,
         )
         .await
         .context("queue follow-up conversation turn")?;
@@ -234,27 +238,51 @@ fn worker_is_terminal(state: WorkerState) -> bool {
 }
 
 /// Builds a minimal `Session/start_turn` request carrying only the user text.
-fn start_turn_request(message: &str) -> StartTurnRequest {
-    StartTurnRequest {
+///
+/// The client message id is derived from the driven session and the message's position
+/// in the script, so a driver retry submits the same identity the Session admission
+/// fence already recorded instead of duplicating the conversation turn.
+fn start_turn_request(
+    message: &str,
+    session_id: SessionId,
+    ordinal: u64,
+) -> Result<StartTurnRequest> {
+    Ok(StartTurnRequest {
+        client_message_id: conversation_message_id(session_id, ordinal)?,
+        reply_to: None,
+        stream_cursor: None,
         user_message: message.to_string(),
         attachments: Vec::new(),
         model: None,
         contact: None,
         max_turns: None,
         execution_template: None,
-    }
+    })
 }
 
 /// Builds a minimal `Session/queue_message` request carrying only the user text.
-fn queue_message_request(message: &str) -> QueueMessageRequest {
-    QueueMessageRequest {
+fn queue_message_request(
+    message: &str,
+    session_id: SessionId,
+    ordinal: u64,
+) -> Result<QueueMessageRequest> {
+    Ok(QueueMessageRequest {
+        client_message_id: conversation_message_id(session_id, ordinal)?,
+        reply_to: None,
+        stream_cursor: None,
         user_message: message.to_string(),
         attachments: Vec::new(),
         model: None,
         contact: None,
         max_turns: None,
         execution_template: None,
-    }
+    })
+}
+
+/// Derives the driver's deterministic client message id for one scripted turn.
+fn conversation_message_id(session_id: SessionId, ordinal: u64) -> Result<ClientMessageId> {
+    ClientMessageId::internal("fixture-conversation", session_id.0, ordinal)
+        .context("derive conversation client message id")
 }
 
 #[cfg(test)]

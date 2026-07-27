@@ -63,15 +63,17 @@ where
             });
         }
 
-        // F07: reconcile against every currently active chunk for the object, not
-        // just the latest version's chunks. A failed or retried same-hash version
+        // Reconcile against every currently active chunk for the object, not just
+        // the latest version's chunks. A failed or retried same-hash version
         // transition leaves the newest version incomplete; keying `previous_chunks`
         // off that version (previously an empty list) forgot the real predecessor
-        // and left both versions' chunks active. The new version's chunk hashes are
-        // the desired state, and any active prior chunk whose hash is absent is
-        // invalidated in `persist_claimed_version` — so a same-hash chunk (including
-        // the current version's own chunks re-persisted on retry) is preserved while
-        // a stale predecessor is reliably orphaned.
+        // and left both versions' chunks active. The new version's chunk
+        // occurrences are the desired state, and every active prior chunk whose
+        // occurrence uid is absent from them is invalidated in
+        // `persist_claimed_version` — so this version's own chunks re-persisted on
+        // retry keep their identity while superseded occurrences (including
+        // byte-identical text carried over from an older version) are reliably
+        // orphaned.
         let previous_chunks = self
             .repository
             .active_chunks_for_object(object.object_uid)
@@ -179,7 +181,7 @@ where
         )
         .await?;
 
-        let mut chunks = blocks_to_chunks(version.version_uid, &blocks, self.chunking);
+        let chunks = blocks_to_chunks(version.version_uid, &blocks, self.chunking);
         let semantic_report = match self
             .semantic_graph_extractions(object.tenant_id, &object, &chunks)
             .await
@@ -217,32 +219,36 @@ where
             &chunks,
             &semantic_report.extractions,
         );
-        // Fold each chunk's graph node UID and the `active` retrieval marker into
-        // the rows before the batch insert. Persisting them up front makes chunk
-        // storage a single multi-row write.
+        // Fold the `active` retrieval marker into the rows before the batch
+        // insert. Graph identity needs no folding: `chunk_uid` is the occurrence
+        // node uid, and `replace_chunks` persists it into `graph_node_uid`.
+        let mut chunks = chunks;
         for chunk in &mut chunks {
-            let graph_uid = chunk_graph_uid(&delta, object.tenant_id, chunk)?;
-            chunk.graph_node_uid = Some(graph_uid);
             chunk.metadata = mark_metadata_active(std::mem::take(&mut chunk.metadata));
         }
         self.repository
             .replace_chunks(version.version_uid, chunks.clone())
             .await?;
-        let old_by_hash = previous_chunks
-            .iter()
-            .map(|chunk| (chunk.chunk_hash.clone(), chunk.clone()))
-            .collect::<HashMap<_, _>>();
-        let chunks_new = chunks
-            .iter()
-            .filter(|chunk| !old_by_hash.contains_key(&chunk.chunk_hash))
-            .count();
-        let new_hashes = chunks
+        let old_hashes = previous_chunks
             .iter()
             .map(|chunk| chunk.chunk_hash.as_str())
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<HashSet<_>>();
+        let chunks_new = chunks
+            .iter()
+            .filter(|chunk| !old_hashes.contains(chunk.chunk_hash.as_str()))
+            .count();
+        // Orphaning is keyed on occurrence identity, never on content: a chunk
+        // carried over unchanged into a new document version is a NEW occurrence
+        // with its own node, embedding, and citation, so the superseded
+        // occurrence must be invalidated. Re-persisting this same version yields
+        // identical `chunk_uid`s, so a retry orphans nothing of its own.
+        let current_uids = chunks
+            .iter()
+            .map(|chunk| chunk.chunk_uid)
+            .collect::<HashSet<_>>();
         let orphan_chunks = previous_chunks
             .iter()
-            .filter(|chunk| !new_hashes.contains(chunk.chunk_hash.as_str()))
+            .filter(|chunk| !current_uids.contains(&chunk.chunk_uid))
             .cloned()
             .collect::<Vec<_>>();
         self.record_step(
@@ -257,21 +263,29 @@ where
         )
         .await?;
 
-        let mut embedding_inputs = Vec::new();
-        let mut embedding_uids = Vec::new();
+        // Every occurrence gets its own embedding row and vector association keyed
+        // by `chunk_uid`. Only the *computation* is ever shared, and only when the
+        // complete contextual input — document title, heading path, and chunk text
+        // — is identical under this pipeline's embedding model and version. Equal
+        // chunk text alone is never sufficient: the same sentence under a different
+        // title or heading path embeds differently, and reusing one occurrence's
+        // association for another is exactly the cross-document collapse this
+        // pipeline must not perform.
+        let mut unique_inputs: Vec<String> = Vec::new();
+        let mut input_index_by_text: HashMap<String, usize> = HashMap::new();
+        let mut chunk_inputs: Vec<(Uuid, usize)> = Vec::with_capacity(chunks.len());
         for chunk in &chunks {
-            if old_by_hash.contains_key(&chunk.chunk_hash) {
-                continue;
-            }
-            if let Some(graph_uid) = chunk.graph_node_uid {
-                embedding_uids.push(graph_uid);
-                embedding_inputs.push(contextual_embedding_input(object.title.as_deref(), chunk));
-            }
+            let input = contextual_embedding_input(object.title.as_deref(), chunk);
+            let index = *input_index_by_text.entry(input.clone()).or_insert_with(|| {
+                unique_inputs.push(input);
+                unique_inputs.len() - 1
+            });
+            chunk_inputs.push((chunk.chunk_uid, index));
         }
-        let embeddings = if embedding_inputs.is_empty() {
+        let embeddings = if unique_inputs.is_empty() {
             HashMap::new()
         } else {
-            let vectors = match self.embedder.embed(&embedding_inputs).await {
+            let vectors = match self.embedder.embed(&unique_inputs).await {
                 Ok(vectors) => vectors,
                 Err(error) => {
                     let error = Error::Repository(format!("embedding failed: {error}"));
@@ -288,27 +302,31 @@ where
             // F08: reject the batch on an embedding cardinality mismatch rather than
             // zipping, which would silently drop or misalign chunk embeddings. The
             // failed version claim stays retryable; no graph/vector write happens.
-            if vectors.len() != embedding_inputs.len() {
+            if vectors.len() != unique_inputs.len() {
                 let error = Error::EmbeddingCardinalityMismatch {
-                    expected: embedding_inputs.len(),
+                    expected: unique_inputs.len(),
                     actual: vectors.len(),
                 };
                 self.record_failure_step(sync_run_uid, Some(object.object_uid), "embedded", &error)
                     .await?;
                 return Err(error);
             }
-            embedding_uids
-                .into_iter()
-                .zip(vectors)
+            chunk_inputs
+                .iter()
+                .map(|(chunk_uid, index)| (*chunk_uid, vectors[*index].clone()))
                 .collect::<HashMap<_, _>>()
         };
+        // `embeddings_created` counts per-occurrence associations written;
+        // `embeddings_reused` counts the associations served from another
+        // occurrence's computation in this pass, so their difference is the number
+        // of embedder computations paid for.
         self.record_counter_step(
             sync_run_uid,
             Some(object.object_uid),
             "embedded",
             StepOutcome::completed_with_counters(json!({
                     "embeddings_created": embeddings.len(),
-                    "embeddings_reused": chunks.len().saturating_sub(embeddings.len()),
+                    "embeddings_reused": chunks.len().saturating_sub(unique_inputs.len()),
                     "chunks_embedded": embeddings.len(),
             })),
             KnowledgeSyncCounters {
@@ -376,10 +394,13 @@ where
         )
         .await?;
 
+        // Invalidate exactly the persisted occurrence identities that were
+        // superseded. The uid comes from the stored chunk row, never from a
+        // recomputed tenant-plus-content-hash seed, so a shared-content chunk in
+        // another document is untouched.
         let orphan_uids = orphan_chunks
             .iter()
-            .filter_map(|chunk| old_by_hash.get(&chunk.chunk_hash))
-            .map(|chunk| stable_uid(&format!("chunk:{}:{}", object.tenant_id, chunk.chunk_hash)))
+            .map(|chunk| chunk.chunk_uid)
             .collect::<Vec<_>>();
         let invalidation_span = tracing::info_span!(
             "knowledge_graph_write",
@@ -619,18 +640,4 @@ fn contextual_embedding_input(
         return chunk.text.clone();
     }
     format!("{}\n\n{}", context.join(" > "), chunk.text)
-}
-
-fn chunk_graph_uid(
-    delta: &KnowledgeGraphDelta,
-    tenant_id: moa_core::types::identifiers::TenantId,
-    chunk: &KnowledgeChunk,
-) -> Result<Uuid> {
-    let key = format!("chunk:{}:{}", tenant_id, chunk.chunk_hash);
-    delta
-        .nodes
-        .iter()
-        .find(|node| node.key == key)
-        .map(|node| node.uid)
-        .ok_or_else(|| Error::Repository(format!("missing graph node for chunk {key}")))
 }

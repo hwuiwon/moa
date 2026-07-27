@@ -3,7 +3,6 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::{
     events::Event, types::agent::AgentContext, types::agent::AgentKnowledgePolicy,
@@ -15,6 +14,7 @@ use moa_core::{
     types::identifiers::TenantId, types::provider::ModelTier, types::session::SessionMeta,
     types::session::SessionStatus,
 };
+use moa_test_support::fixtures::fresh_client_message_id;
 use moa_test_support::{OrchestratorTestFixture, TestApiClient};
 use moa_wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use serde_json::json;
@@ -134,7 +134,7 @@ async fn create_guardrailed_session_with_context(
 
     let session_id = SessionId::new();
     grant_session_participant(fixture, &identity, session_id).await?;
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let meta = SessionMeta {
         id: session_id,
         tenant_id: identity.tenant_id,
@@ -269,6 +269,9 @@ async fn run_turn(
         .session(session_id.to_string())
         .start_turn(
             StartTurnRequest {
+                client_message_id: fresh_client_message_id(),
+                reply_to: None,
+                stream_cursor: None,
                 user_message: message.to_string(),
                 attachments: Vec::new(),
                 model: None,

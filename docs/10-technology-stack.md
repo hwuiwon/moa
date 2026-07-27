@@ -15,7 +15,8 @@ The root workspace package inventory comes from `cargo metadata --no-deps`:
   `moa-memory-types`, `moa-memory-vector`,
   `moa-retrieval` (hybrid graph-memory retrieval engine and query planner).
 - Auth/security/audit: `moa-authz`, `moa-authz-schema`,
-  `moa-auth-providers`, `moa-auth-providers-auth0`, `moa-fga-bootstrap`,
+  `moa-auth-providers` (identity, token vault, and the durable tenant
+  credential owner), `moa-auth-providers-auth0`, `moa-fga-bootstrap`,
   `moa-ocsf`, `moa-security`, `moa-crypto` (envelope encryption and BYOK),
   `moa-kms` (Postgres-backed key management),
   `moa-dlp` (provider-egress PII tokenization).

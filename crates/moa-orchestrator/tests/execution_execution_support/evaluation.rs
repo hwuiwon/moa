@@ -171,6 +171,12 @@ fn summarize_session_events(
             | Event::MemoryIngest { .. }
             | Event::Checkpoint { .. }
             | Event::CacheReport { .. }
+            // Turn-level scheduling facts. This snapshot measures the execution-run
+            // lifecycle, and folding a turn failure into `error` would double-count
+            // the inner `Error` a failing run already records. Turn failures are
+            // counted by `ConversationCost::failed_turns` instead.
+            | Event::TurnFailed { .. }
+            | Event::QueuedMessageRejected { .. }
             | Event::Warning { .. } => {}
         }
     }

@@ -259,7 +259,10 @@ async fn lineage_writer_compliance_partition_writes_verifiable_hash_chain_db() -
 
     // Distinct, strictly increasing timestamps so read-back `ORDER BY ts` matches the send/chain
     // order deterministically.
-    let base = Utc::now();
+    let base = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+        chrono::Utc::now().timestamp_micros(),
+    )
+    .expect("microsecond timestamp");
     for offset in 0..3_i64 {
         let ts = base + chrono::Duration::seconds(offset);
         tx.send(retrieval_event_at(Uuid::now_v7(), partition, ts))
@@ -379,7 +382,10 @@ async fn lineage_writer_clickhouse_backend_splits_rows_from_scores_db() -> TestR
         .map_err(|error| test_error(format!("send should enqueue event: {error}")))?;
     tx.send(LineageEvent::Eval(moa_lineage_core::ScoreRecord {
         score_id,
-        ts: Utc::now(),
+        ts: chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros(),
+        )
+        .expect("microsecond timestamp"),
         target: moa_lineage_core::ScoreTarget::Turn {
             turn_id: moa_lineage_core::TurnId(turn_id),
         },
@@ -450,7 +456,14 @@ async fn lineage_writer_clickhouse_backend_splits_rows_from_scores_db() -> TestR
 
 /// Builds a minimal but valid retrieval lineage event for one turn.
 fn retrieval_event(turn_id: Uuid, storage_partition_id: &str) -> LineageEvent {
-    retrieval_event_at(turn_id, storage_partition_id, Utc::now())
+    retrieval_event_at(
+        turn_id,
+        storage_partition_id,
+        chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros(),
+        )
+        .expect("microsecond timestamp"),
+    )
 }
 
 /// Builds a retrieval lineage event with an explicit timestamp for deterministic chain ordering.

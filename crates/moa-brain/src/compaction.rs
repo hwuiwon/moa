@@ -358,6 +358,25 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
             record.sequence_num,
             crate::text::truncate_chars(message, 240)
         )),
+        // A dropped queued message is model-relevant: the user's message was
+        // acknowledged and then discarded, so the model must not assume it ran.
+        Event::QueuedMessageRejected { rejection, .. } => Some(format!(
+            "#{} queued_message_rejected: {}",
+            record.sequence_num,
+            rejection.reason()
+        )),
+        // A failed turn is model-relevant history: the model must know the prior
+        // attempt died and where. The summary is already bounded and secret-free.
+        Event::TurnFailed {
+            actor,
+            class,
+            summary,
+            ..
+        } => Some(format!(
+            "#{} turn_failed actor={} class={class:?}: {summary}",
+            record.sequence_num,
+            actor.actor_key()
+        )),
         Event::GuardrailCheck { .. } => None,
         // Per-turn telemetry (coordination/replay/latency) is never part of a compaction summary.
         Event::TurnMetrics { .. } => None,

@@ -3,6 +3,7 @@
 mod connections;
 mod ingestion;
 mod inspection;
+mod link_claim;
 mod trace;
 mod webhook;
 
@@ -14,11 +15,15 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
+use moa_core::types::credentials::{CredentialPrincipal, RedactedSecret};
 use moa_core::types::memory::{InformationBarrierId, RlsContext};
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
-    traits::EmbeddingProvider, types::contact::ContactId, types::identifiers::SessionId,
-    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    traits::{EmbeddingProvider, Identity, IdentityType},
+    types::contact::ContactId,
+    types::identifiers::SessionId,
+    types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId,
     types::identifiers::UserId,
 };
 use moa_db::ScopedConn;
@@ -29,13 +34,14 @@ use moa_knowledge::{
     domain::{
         ApplySourceSelectionRequest, ConnectionStatus, ContactGroup, ContactGroupMembership,
         ContactGroupTarget, CreateLinkTokenRequest, DocumentElement, DocumentElementKind,
-        DocumentVersion, ElementLayout, ExchangePublicTokenRequest, KnowledgeBlock, KnowledgeChunk,
-        KnowledgeConnection, KnowledgeConnectionProjection, KnowledgeIngestionStep,
-        KnowledgeObject, KnowledgeObjectInspection, KnowledgeObjectProjection,
-        KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, LinkToken,
-        LinkedAccount, ListChangedRecordsRequest, ObjectStatus, ParseInput, ParsedDocument,
-        ProviderIntegration, ProviderRecord, RecordPage, SyncRunStatus, TriggerSyncRequest,
-        TriggeredSync, WebhookEvent,
+        DocumentVersion, ElementLayout, ExchangePublicTokenRequest, InitialSyncStarted,
+        KnowledgeBlock, KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionProjection,
+        KnowledgeIngestionStep, KnowledgeObject, KnowledgeObjectInspection,
+        KnowledgeObjectProjection, KnowledgeProviderEventRecord, KnowledgeSyncCounters,
+        KnowledgeSyncRun, LinkClaim, LinkClaimReservation, LinkClaimState, LinkClaimTransition,
+        LinkToken, LinkedAccount, ListChangedRecordsRequest, NewLinkClaim, ObjectStatus,
+        ParseInput, ParsedDocument, ProviderIntegration, ProviderRecord, RecordPage,
+        StartInitialSyncRequest, SyncRunStatus, TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
     ingestion::{
         KnowledgeIngestionPipeline, KnowledgeIngestionPipelineConfig, MemoryKnowledgeGraphWriter,
@@ -56,8 +62,9 @@ use moa_memory_graph::{GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStor
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_orchestrator::services::knowledge::{
-    KnowledgeCredentialStore, KnowledgeIngestionRunner, KnowledgeService, KnowledgeServiceError,
-    KnowledgeWebhookVerifier, ParserWebhookVerifier, StaticKnowledgeProviders,
+    KnowledgeCaller, KnowledgeCredentialStore, KnowledgeIngestionRunner, KnowledgeService,
+    KnowledgeServiceError, KnowledgeWebhookVerifier, ParserWebhookVerifier,
+    StaticKnowledgeProviders,
 };
 use moa_orchestrator::workflows::knowledge_sync_ingestion::{
     KnowledgeSyncIngestionRequest, KnowledgeSyncIngestionSteps, KnowledgeSyncPageApplication,
@@ -116,8 +123,34 @@ fn fixture_webhook_service(
     )
 }
 
+/// Mirrors the service's provider-completion classification for fake providers.
+fn provider_status_is_completed(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "completed" | "complete" | "success" | "succeeded"
+    )
+}
+
 fn fake_ingestion_runner() -> Arc<dyn KnowledgeIngestionRunner> {
     Arc::new(FakeKnowledgeIngestionRunner::default())
+}
+
+/// Builds an authorized caller context with a per-call unique operation root.
+///
+/// Mirrors what the Restate handler does after `(Tenant, tenant_id, Operator)`
+/// authorization succeeds. The operation root is fresh per call so concurrently
+/// running tests never share a credential replay key.
+fn test_caller(tenant_id: TenantId) -> KnowledgeCaller {
+    KnowledgeCaller::authorized(
+        &Identity {
+            identity_type: IdentityType::Operator,
+            id: Uuid::now_v7(),
+            tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        },
+        Uuid::now_v7().to_string(),
+    )
 }
 
 #[derive(Debug)]
@@ -322,8 +355,9 @@ fn fake_prepared_sync_run(
             graph_nodes_upserted: 0,
             graph_edges_upserted: 0,
             error_code: None,
-            started_at: Utc::now(),
+            started_at: moa_test_support::fixtures::pg_now(),
             finished_at: None,
+            provider_trigger_completed_at: None,
         },
         connection: KnowledgeConnection {
             connection_uid,
@@ -336,8 +370,8 @@ fn fake_prepared_sync_run(
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         },
         provider: PROVIDER.to_string(),
@@ -452,6 +486,9 @@ impl KnowledgeSyncIngestionSteps for DbKnowledgeAutoSyncSteps {
             .provider
             .list_changed_records(ListChangedRecordsRequest {
                 connection: prepared.connection.clone(),
+                // The workflow body under test owns paging, not resolution; the
+                // durable steps resolve through the shared owner instead.
+                credential: RedactedSecret::new(prepared.connection.credential_ref.clone()),
                 cursor,
                 modified_after: prepared.connection.last_synced_at,
                 limit: Some(limit),
@@ -516,7 +553,7 @@ impl KnowledgeSyncIngestionSteps for DbKnowledgeAutoSyncSteps {
             .ok_or_else(|| TerminalError::new_with_code(404, "knowledge sync run not found"))?;
         run.status = SyncRunStatus::Completed;
         run.error_code = None;
-        run.finished_at = Some(Utc::now());
+        run.finished_at = Some(moa_test_support::fixtures::pg_now());
         self.repository
             .update_sync_run(run)
             .await
@@ -528,7 +565,7 @@ impl KnowledgeSyncIngestionSteps for DbKnowledgeAutoSyncSteps {
             .await
             .map_err(test_handler_error)?
             .ok_or_else(|| TerminalError::new_with_code(404, "knowledge connection not found"))?;
-        connection.last_synced_at = Some(Utc::now());
+        connection.last_synced_at = Some(moa_test_support::fixtures::pg_now());
         self.repository
             .upsert_connection(connection)
             .await
@@ -561,7 +598,7 @@ impl KnowledgeSyncIngestionSteps for DbKnowledgeAutoSyncSteps {
         };
         run.records_failed = run.records_failed.saturating_add(1);
         run.error_code = Some(classification.error_code.to_string());
-        run.finished_at = Some(Utc::now());
+        run.finished_at = Some(moa_test_support::fixtures::pg_now());
         self.repository
             .update_sync_run(run)
             .await
@@ -596,8 +633,9 @@ async fn create_provider_synced_run(
             graph_nodes_upserted: 0,
             graph_edges_upserted: 0,
             error_code: None,
-            started_at: Utc::now(),
+            started_at: moa_test_support::fixtures::pg_now(),
             finished_at: None,
+            provider_trigger_completed_at: None,
         })
         .await
         .expect("create provider-synced sync run");
@@ -733,8 +771,8 @@ fn fixture_connection(tenant_id: TenantId) -> KnowledgeConnection {
         metadata: json!({ "safe": "connection" }),
         source_selection: json!({}),
         information_barrier: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
+        updated_at: moa_test_support::fixtures::pg_now(),
         last_synced_at: None,
     }
 }
@@ -769,7 +807,7 @@ fn fixture_object(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeObject 
             "nested": { "authorization": SECRET_BEARER }
         }),
         status: ObjectStatus::Active,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         deleted_at: None,
     }
 }
@@ -785,7 +823,7 @@ fn fixture_version(object_uid: Uuid) -> DocumentVersion {
             "safe": "version",
             "refresh_token": SECRET_TOKEN
         }),
-        created_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
     }
 }
 
@@ -923,7 +961,7 @@ async fn complete_sync_run(
         )));
     };
     run.status = SyncRunStatus::Completed;
-    run.finished_at = Some(Utc::now());
+    run.finished_at = Some(moa_test_support::fixtures::pg_now());
     repository.update_sync_run(run).await
 }
 
@@ -986,7 +1024,7 @@ async fn insert_retrieval_lineage_row(
     .bind(SessionId::new().0)
     .bind("task14-contact")
     .bind(StoragePartitionId::for_tenant(tenant_id).to_string())
-    .bind(Utc::now())
+    .bind(moa_test_support::fixtures::pg_now())
     .bind(1_i16)
     .bind(RecordKind::Retrieval.as_i16())
     .bind(serde_json::to_value(event).expect("retrieval lineage should serialize"))
@@ -1052,7 +1090,7 @@ async fn create_contact_group_graph_node(
             }),
             pii_class: SensitivityClass::None,
             confidence: Some(0.95),
-            valid_from: Utc::now(),
+            valid_from: moa_test_support::fixtures::pg_now(),
             embedding: None,
             embedding_model: None,
             embedding_model_version: None,
@@ -1134,6 +1172,10 @@ impl Task14LinkedIntegrationProvider {
         self.calls().trigger_sync
     }
 
+    fn start_initial_sync_count(&self) -> usize {
+        self.calls().start_initial_sync
+    }
+
     fn list_changed_records_count(&self) -> usize {
         self.calls().list_changed_records
     }
@@ -1198,6 +1240,25 @@ impl LinkedIntegrationProvider for Task14LinkedIntegrationProvider {
             )),
             status: "accepted".to_string(),
             metadata: json!({ "provider_trigger": "accepted" }),
+        })
+    }
+
+    async fn start_initial_sync(
+        &self,
+        req: StartInitialSyncRequest,
+    ) -> moa_knowledge::Result<InitialSyncStarted> {
+        self.calls
+            .lock()
+            .expect("task14 fake provider call log should not be poisoned")
+            .start_initial_sync += 1;
+        Ok(InitialSyncStarted {
+            provider: self.provider.to_string(),
+            provider_sync_id: Some(format!(
+                "{}-initial-{}",
+                self.provider, req.connection.connection_uid
+            )),
+            completed: false,
+            metadata: json!({ "initial_sync": "started" }),
         })
     }
 
@@ -1589,7 +1650,7 @@ fn provider_record(
         source_uri: Some(source_uri.to_string()),
         change_token: Some(format!("{source_id}-v1")),
         deleted: false,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         metadata,
         payload: json!({ "text": text }),
     }
@@ -1601,6 +1662,7 @@ struct FakeLinkedIntegrationProvider {
     trigger_status: String,
     integrations: Vec<ProviderIntegration>,
     integrations_error: Option<String>,
+    initial_sync_error: Option<String>,
 }
 
 impl Default for FakeLinkedIntegrationProvider {
@@ -1610,6 +1672,7 @@ impl Default for FakeLinkedIntegrationProvider {
             trigger_status: "accepted".to_string(),
             integrations: Vec::new(),
             integrations_error: None,
+            initial_sync_error: None,
         }
     }
 }
@@ -1636,8 +1699,20 @@ impl FakeLinkedIntegrationProvider {
         }
     }
 
+    /// Fails only the initial-link sync start, leaving link steps before it intact.
+    fn with_initial_sync_error(message: impl Into<String>) -> Self {
+        Self {
+            initial_sync_error: Some(message.into()),
+            ..Self::default()
+        }
+    }
+
     fn trigger_sync_count(&self) -> usize {
         self.calls().trigger_sync
+    }
+
+    fn start_initial_sync_count(&self) -> usize {
+        self.calls().start_initial_sync
     }
 
     fn list_changed_records_count(&self) -> usize {
@@ -1669,6 +1744,7 @@ struct FakeProviderCalls {
     exchange_public_token: usize,
     apply_source_selection: usize,
     trigger_sync: usize,
+    start_initial_sync: usize,
     list_changed_records: usize,
     verify_webhook: usize,
     list_changed_record_requests: Vec<FakeListChangedRecordsRequest>,
@@ -1806,6 +1882,26 @@ impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
         })
     }
 
+    async fn start_initial_sync(
+        &self,
+        req: StartInitialSyncRequest,
+    ) -> moa_knowledge::Result<InitialSyncStarted> {
+        let mut calls = self
+            .calls
+            .lock()
+            .expect("fake provider call log should not be poisoned");
+        calls.start_initial_sync += 1;
+        if let Some(message) = self.initial_sync_error.clone() {
+            return Err(KnowledgeError::provider(PROVIDER, message));
+        }
+        Ok(InitialSyncStarted {
+            provider: PROVIDER.to_string(),
+            provider_sync_id: Some(format!("initial-{}", req.connection.connection_uid)),
+            completed: provider_status_is_completed(&self.trigger_status),
+            metadata: json!({ "status": self.trigger_status.clone() }),
+        })
+    }
+
     async fn apply_source_selection(
         &self,
         req: ApplySourceSelectionRequest,
@@ -1855,25 +1951,105 @@ impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
     }
 }
 
+/// One stored credential version in the in-memory credential store double.
+#[derive(Debug, Clone)]
+struct FakeCredentialVersion {
+    tenant_id: TenantId,
+    connection_uid: Uuid,
+    material: String,
+    revoked: bool,
+}
+
+/// In-memory stand-in for the durable credential owner.
+///
+/// Mirrors the properties the service depends on: references are opaque
+/// identifiers with no parseable address, material is keyed by the owning
+/// connection rather than by provider account, and every operation records the
+/// acting principal so tests can assert who a resolution was attributed to.
 #[derive(Debug, Clone, Default)]
 struct FakeKnowledgeCredentialStore {
-    accounts: Arc<Mutex<Vec<(TenantId, LinkedAccount)>>>,
+    state: Arc<Mutex<FakeCredentialState>>,
+}
+
+#[derive(Debug, Default)]
+struct FakeCredentialState {
+    versions: HashMap<Uuid, FakeCredentialVersion>,
+    operations: Vec<(String, CredentialPrincipal)>,
 }
 
 impl FakeKnowledgeCredentialStore {
-    fn stored_account_count(&self) -> usize {
-        self.accounts
+    fn lock(&self) -> std::sync::MutexGuard<'_, FakeCredentialState> {
+        self.state
             .lock()
             .expect("fake credential store should not be poisoned")
-            .len()
     }
 
-    fn vault_ref_for(&self, tenant_id: TenantId) -> String {
-        self.vault_ref_for_account(tenant_id, "provider-account-1")
+    fn stored_account_count(&self) -> usize {
+        self.lock().versions.len()
     }
 
-    fn vault_ref_for_account(&self, tenant_id: TenantId, provider_account_id: &str) -> String {
-        format!("vault://tenant/{tenant_id}/knowledge/{PROVIDER}/{provider_account_id}")
+    /// Returns the opaque reference issued for one connection, if any.
+    fn reference_for_connection(&self, connection_uid: Uuid) -> Option<String> {
+        self.lock()
+            .versions
+            .iter()
+            .find(|(_, version)| version.connection_uid == connection_uid)
+            .map(|(reference, _)| reference.to_string())
+    }
+
+    /// Returns the connection a stored reference belongs to.
+    fn connection_for_reference(&self, reference: &str) -> Option<Uuid> {
+        let reference = Uuid::parse_str(reference).ok()?;
+        self.lock()
+            .versions
+            .get(&reference)
+            .map(|version| version.connection_uid)
+    }
+
+    /// Returns every reference the store has issued, in creation order.
+    fn references(&self) -> Vec<String> {
+        let state = self.lock();
+        let mut references: Vec<(Uuid, String)> = state
+            .versions
+            .keys()
+            .map(|reference| (*reference, reference.to_string()))
+            .collect();
+        references.sort_by_key(|(uid, _)| *uid);
+        references
+            .into_iter()
+            .map(|(_, reference)| reference)
+            .collect()
+    }
+
+    /// Returns the references that have been revoked, in creation order.
+    fn revoked_references(&self) -> Vec<String> {
+        let state = self.lock();
+        let mut revoked: Vec<Uuid> = state
+            .versions
+            .iter()
+            .filter(|(_, version)| version.revoked)
+            .map(|(reference, _)| *reference)
+            .collect();
+        revoked.sort_unstable();
+        revoked
+            .into_iter()
+            .map(|reference| reference.to_string())
+            .collect()
+    }
+
+    /// Returns the principals recorded for operations whose id ends with `step`.
+    fn principals_for_step(&self, step: &str) -> Vec<CredentialPrincipal> {
+        let suffix = format!(":{step}");
+        self.lock()
+            .operations
+            .iter()
+            .filter(|(operation_id, _)| operation_id.ends_with(&suffix))
+            .map(|(_, principal)| *principal)
+            .collect()
+    }
+
+    fn record(&self, operation_id: String, principal: CredentialPrincipal) {
+        self.lock().operations.push((operation_id, principal));
     }
 }
 
@@ -1882,71 +2058,104 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
     async fn store_linked_account(
         &self,
         tenant_id: TenantId,
+        connection_uid: Uuid,
+        caller: &KnowledgeCaller,
         account: &LinkedAccount,
-    ) -> Result<String, moa_orchestrator::services::knowledge::KnowledgeServiceError> {
-        self.accounts
-            .lock()
-            .expect("fake credential store should not be poisoned")
-            .push((tenant_id, account.clone()));
-        Ok(self.vault_ref_for_account(tenant_id, &account.provider_account_id))
+    ) -> Result<String, KnowledgeServiceError> {
+        self.record(caller.step("credential-create"), caller.principal());
+        let Some(material) = account.credential_material.clone() else {
+            return Ok(account.credential_ref.clone());
+        };
+        let reference = Uuid::now_v7();
+        self.lock().versions.insert(
+            reference,
+            FakeCredentialVersion {
+                tenant_id,
+                connection_uid,
+                material,
+                revoked: false,
+            },
+        );
+        Ok(reference.to_string())
     }
 
     async fn resolve_linked_account(
         &self,
-        _tenant_id: TenantId,
+        tenant_id: TenantId,
         connection: &KnowledgeConnection,
-    ) -> Result<String, moa_orchestrator::services::knowledge::KnowledgeServiceError> {
-        let accounts = self
-            .accounts
-            .lock()
-            .expect("fake credential store should not be poisoned");
-        accounts
-            .iter()
-            .find(|(tenant_id, account)| {
-                *tenant_id == connection.tenant_id
-                    && account.provider_account_id == connection.provider_account_id
-            })
-            .and_then(|(_, account)| account.credential_material.clone())
-            .or_else(|| Some(connection.credential_ref.clone()))
-            .ok_or_else(|| {
-                moa_orchestrator::services::knowledge::KnowledgeServiceError::Credential(
-                    "fake credential not found".to_string(),
-                )
-            })
+        caller: &KnowledgeCaller,
+    ) -> Result<RedactedSecret, KnowledgeServiceError> {
+        self.record(caller.step("credential-resolve"), caller.principal());
+        let Some(reference) = Uuid::parse_str(&connection.credential_ref).ok() else {
+            return Ok(RedactedSecret::new(connection.credential_ref.clone()));
+        };
+        let state = self.lock();
+        let version = state.versions.get(&reference).ok_or_else(|| {
+            KnowledgeServiceError::Credential("fake credential not found".to_string())
+        })?;
+        if version.tenant_id != tenant_id || version.revoked {
+            return Err(KnowledgeServiceError::Credential(
+                "fake credential is not resolvable".to_string(),
+            ));
+        }
+        Ok(RedactedSecret::new(version.material.clone()))
     }
 
     async fn delete_linked_account(
         &self,
         tenant_id: TenantId,
         connection: &KnowledgeConnection,
-    ) -> Result<bool, moa_orchestrator::services::knowledge::KnowledgeServiceError> {
-        let mut accounts = self
-            .accounts
-            .lock()
-            .expect("fake credential store should not be poisoned");
-        let before = accounts.len();
-        accounts.retain(|(account_tenant_id, account)| {
-            !(*account_tenant_id == tenant_id
-                && account.provider_account_id == connection.provider_account_id)
+        caller: &KnowledgeCaller,
+    ) -> Result<bool, KnowledgeServiceError> {
+        self.record(caller.step("credential-delete"), caller.principal());
+        let mut state = self.lock();
+        let before = state.versions.len();
+        state.versions.retain(|_, version| {
+            !(version.tenant_id == tenant_id && version.connection_uid == connection.connection_uid)
         });
-        Ok(accounts.len() != before)
+        Ok(state.versions.len() != before)
     }
 
-    async fn list_linked_account_refs(
+    async fn revoke_credential(
         &self,
         tenant_id: TenantId,
-    ) -> Result<
-        std::collections::BTreeSet<String>,
-        moa_orchestrator::services::knowledge::KnowledgeServiceError,
-    > {
-        Ok(self
-            .accounts
-            .lock()
-            .expect("fake credential store should not be poisoned")
-            .iter()
-            .filter(|(account_tenant_id, _)| *account_tenant_id == tenant_id)
-            .map(|(_, account)| self.vault_ref_for_account(tenant_id, &account.provider_account_id))
-            .collect())
+        reference: &str,
+        caller: &KnowledgeCaller,
+    ) -> Result<(), KnowledgeServiceError> {
+        self.record(caller.step("credential-revoke"), caller.principal());
+        let Some(reference) = Uuid::parse_str(reference).ok() else {
+            return Ok(());
+        };
+        let mut state = self.lock();
+        if let Some(version) = state.versions.get_mut(&reference)
+            && version.tenant_id == tenant_id
+        {
+            version.revoked = true;
+        }
+        Ok(())
+    }
+
+    async fn credential_status(
+        &self,
+        tenant_id: TenantId,
+        connection: &KnowledgeConnection,
+        _caller: &KnowledgeCaller,
+    ) -> Result<Option<String>, KnowledgeServiceError> {
+        let Some(reference) = Uuid::parse_str(&connection.credential_ref).ok() else {
+            return Ok(None);
+        };
+        let state = self.lock();
+        Ok(Some(
+            match state
+                .versions
+                .get(&reference)
+                .filter(|version| version.tenant_id == tenant_id)
+            {
+                Some(version) if version.revoked => "revoked".to_string(),
+                Some(_) => "present".to_string(),
+                None => "missing".to_string(),
+            },
+        ))
     }
 }
 
@@ -1994,6 +2203,84 @@ impl InMemoryKnowledgeRepository {
             .get(op)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Returns the only link claim recorded, failing when there is not exactly one.
+    fn only_link_claim(&self) -> LinkClaim {
+        let state = self
+            .state
+            .lock()
+            .expect("repository state should not be poisoned");
+        assert_eq!(
+            state.link_claims.len(),
+            1,
+            "expected exactly one link claim, found {}",
+            state.link_claims.len()
+        );
+        state
+            .link_claims
+            .values()
+            .next()
+            .cloned()
+            .expect("link claim should be present")
+    }
+
+    /// Marks one sync run completed so the connection's active slot is free.
+    fn finish_sync_run(&self, sync_run_uid: Uuid) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("repository state should not be poisoned");
+        let run = state
+            .sync_runs
+            .get_mut(&sync_run_uid)
+            .expect("sync run should exist");
+        run.status = SyncRunStatus::Completed;
+        run.finished_at = Some(moa_test_support::fixtures::pg_now());
+    }
+
+    /// Returns every recorded link claim state.
+    fn link_claim_states(&self) -> Vec<LinkClaimState> {
+        self.state
+            .lock()
+            .expect("repository state should not be poisoned")
+            .link_claims
+            .values()
+            .map(|claim| claim.state)
+            .collect()
+    }
+
+    /// Replaces one recorded claim, used to model a divergent replay.
+    fn overwrite_link_claim(&self, claim: LinkClaim) {
+        self.state
+            .lock()
+            .expect("repository state should not be poisoned")
+            .link_claims
+            .insert((claim.tenant_id, claim.operation_id.clone()), claim);
+    }
+
+    /// Rewinds every finalized claim to `credential_written`, modelling a crash
+    /// after the credential exists but before the link finalized.
+    fn rewind_link_claim_to_credential_written(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("repository state should not be poisoned");
+        for claim in state.link_claims.values_mut() {
+            claim.state = LinkClaimState::CredentialWritten;
+        }
+    }
+
+    /// Clears a claimed run's durable trigger boundary, modelling a crash between
+    /// the durable sync-run claim and the provider dispatch.
+    fn clear_provider_trigger_boundary(&self, sync_run_uid: Uuid) {
+        self.state
+            .lock()
+            .expect("repository state should not be poisoned")
+            .sync_runs
+            .get_mut(&sync_run_uid)
+            .expect("sync run should exist")
+            .provider_trigger_completed_at = None;
     }
 
     fn sync_run_count(&self) -> usize {
@@ -2076,6 +2363,7 @@ struct RepositoryState {
     ingestion_claims: HashMap<(Uuid, String), InMemoryDocumentIngestionClaim>,
     chunks: HashMap<Uuid, Vec<KnowledgeChunk>>,
     provider_events: HashMap<(TenantId, String, String), KnowledgeProviderEventRecord>,
+    link_claims: HashMap<(TenantId, String), LinkClaim>,
     op_counts: HashMap<&'static str, usize>,
 }
 
@@ -2153,10 +2441,28 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
     ) -> moa_knowledge::Result<KnowledgeConnection> {
         self.record_op("upsert_connection")?;
         self.with_state(|state| {
+            // Mirrors the Postgres conflict target
+            // `(tenant_id, provider, provider_config_key, provider_connection_id)`:
+            // re-linking the same provider account keeps the existing
+            // connection identifier rather than adopting the caller's.
+            let existing = state
+                .connections
+                .values()
+                .find(|candidate| {
+                    candidate.tenant_id == connection.tenant_id
+                        && candidate.provider == connection.provider
+                        && candidate.connector == connection.connector
+                        && candidate.provider_account_id == connection.provider_account_id
+                })
+                .map(|candidate| candidate.connection_uid);
+            let mut stored = connection;
+            if let Some(connection_uid) = existing {
+                stored.connection_uid = connection_uid;
+            }
             state
                 .connections
-                .insert(connection.connection_uid, connection.clone());
-            connection
+                .insert(stored.connection_uid, stored.clone());
+            stored
         })
     }
 
@@ -2166,6 +2472,151 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
     ) -> moa_knowledge::Result<Option<KnowledgeConnection>> {
         self.record_op("get_connection")?;
         self.with_state(|state| state.connections.get(&connection_uid).cloned())
+    }
+
+    async fn connection_by_provider_account(
+        &self,
+        provider: &str,
+        connector: &str,
+        provider_account_id: &str,
+    ) -> moa_knowledge::Result<Option<KnowledgeConnection>> {
+        self.record_op("connection_by_provider_account")?;
+        self.with_state(|state| {
+            state
+                .connections
+                .values()
+                .find(|candidate| {
+                    candidate.provider == provider
+                        && candidate.connector == connector
+                        && candidate.provider_account_id == provider_account_id
+                })
+                .cloned()
+        })
+    }
+
+    async fn reserve_link_claim(
+        &self,
+        claim: NewLinkClaim,
+    ) -> moa_knowledge::Result<LinkClaimReservation> {
+        self.record_op("reserve_link_claim")?;
+        self.with_state(|state| {
+            let key = (claim.tenant_id, claim.operation_id.clone());
+            if let Some(existing) = state.link_claims.get(&key) {
+                if existing.request_hash != claim.request_hash
+                    || existing.connection_uid != claim.connection_uid
+                {
+                    return LinkClaimReservation::Conflict;
+                }
+                return LinkClaimReservation::Existing(existing.clone());
+            }
+            let now = moa_test_support::fixtures::pg_now();
+            let reserved = LinkClaim {
+                tenant_id: claim.tenant_id,
+                operation_id: claim.operation_id,
+                request_hash: claim.request_hash,
+                owner_identity_id: claim.owner_identity_id,
+                connection_uid: claim.connection_uid,
+                previous_credential_ref: claim.previous_credential_ref,
+                candidate_credential_ref: None,
+                state: LinkClaimState::Reserved,
+                sync_run_uid: None,
+                created_at: now,
+                updated_at: now,
+            };
+            state.link_claims.insert(key, reserved.clone());
+            LinkClaimReservation::Reserved(reserved)
+        })
+    }
+
+    async fn advance_link_claim(
+        &self,
+        tenant_id: TenantId,
+        operation_id: &str,
+        transition: LinkClaimTransition,
+    ) -> moa_knowledge::Result<Option<LinkClaim>> {
+        self.record_op("advance_link_claim")?;
+        self.with_state(|state| {
+            let claim = state
+                .link_claims
+                .get_mut(&(tenant_id, operation_id.to_string()))?;
+            if !transition.permitted_source_states().contains(&claim.state) {
+                return None;
+            }
+            match &transition {
+                LinkClaimTransition::CredentialWritten {
+                    candidate_credential_ref,
+                } => {
+                    claim.candidate_credential_ref = Some(candidate_credential_ref.clone());
+                }
+                LinkClaimTransition::SyncRunClaimed { sync_run_uid }
+                | LinkClaimTransition::Finalized { sync_run_uid } => {
+                    claim.sync_run_uid = Some(*sync_run_uid);
+                }
+                LinkClaimTransition::Compensating | LinkClaimTransition::Compensated => {}
+            }
+            claim.state = transition.target_state();
+            claim.updated_at = moa_test_support::fixtures::pg_now();
+            Some(claim.clone())
+        })
+    }
+
+    async fn get_link_claim(
+        &self,
+        tenant_id: TenantId,
+        operation_id: &str,
+    ) -> moa_knowledge::Result<Option<LinkClaim>> {
+        self.record_op("get_link_claim")?;
+        self.with_state(|state| {
+            state
+                .link_claims
+                .get(&(tenant_id, operation_id.to_string()))
+                .cloned()
+        })
+    }
+
+    async fn restore_connection_credential(
+        &self,
+        connection_uid: Uuid,
+        credential_ref: &str,
+    ) -> moa_knowledge::Result<bool> {
+        self.record_op("restore_connection_credential")?;
+        self.with_state(|state| {
+            state
+                .connections
+                .get_mut(&connection_uid)
+                .is_some_and(|connection| {
+                    connection.credential_ref = credential_ref.to_string();
+                    true
+                })
+        })
+    }
+
+    async fn purge_tenant_link_claims(&self, limit: u32) -> moa_knowledge::Result<u64> {
+        self.record_op("purge_tenant_link_claims")?;
+        self.with_state(|state| {
+            let mut keys: Vec<(TenantId, String)> = state.link_claims.keys().cloned().collect();
+            keys.sort_by(|left, right| (left.0.0, &left.1).cmp(&(right.0.0, &right.1)));
+            keys.truncate(limit.max(1) as usize);
+            for key in &keys {
+                state.link_claims.remove(key);
+            }
+            keys.len() as u64
+        })
+    }
+
+    async fn mark_provider_trigger_completed(
+        &self,
+        sync_run_uid: Uuid,
+    ) -> moa_knowledge::Result<()> {
+        self.record_op("mark_provider_trigger_completed")?;
+        self.with_state(|state| {
+            if let Some(run) = state.sync_runs.get_mut(&sync_run_uid) {
+                // Write-once, matching the Postgres `COALESCE`.
+                run.provider_trigger_completed_at = run
+                    .provider_trigger_completed_at
+                    .or_else(|| Some(moa_test_support::fixtures::pg_now()));
+            }
+        })
     }
 
     async fn update_connection_source_selection(
@@ -2180,7 +2631,7 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
             })?;
             connection.source_selection = source_selection;
             connection.last_synced_at = None;
-            connection.updated_at = Utc::now();
+            connection.updated_at = moa_test_support::fixtures::pg_now();
             Ok(connection.clone())
         })?
     }
@@ -2203,7 +2654,7 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
                 ));
             }
             connection.status = ConnectionStatus::Disabled;
-            connection.updated_at = Utc::now();
+            connection.updated_at = moa_test_support::fixtures::pg_now();
             Ok(connection.clone())
         })?
     }
@@ -2289,9 +2740,15 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
         })
     }
 
-    async fn update_sync_run(&self, run: KnowledgeSyncRun) -> moa_knowledge::Result<()> {
+    async fn update_sync_run(&self, mut run: KnowledgeSyncRun) -> moa_knowledge::Result<()> {
         self.record_op("update_sync_run")?;
         self.with_state(|state| {
+            // The Postgres statement deliberately omits the trigger boundary, so
+            // a status update can never erase evidence of a dispatch. Mirroring
+            // that here is what makes the crash-replay tests meaningful.
+            if let Some(existing) = state.sync_runs.get(&run.sync_run_uid) {
+                run.provider_trigger_completed_at = existing.provider_trigger_completed_at;
+            }
             state.sync_runs.insert(run.sync_run_uid, run);
         })
     }
@@ -2429,10 +2886,6 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
                             "pending".to_string()
                         },
                         chunk_count: chunks.len() as u64,
-                        graph_node_count: chunks
-                            .iter()
-                            .filter(|chunk| chunk.graph_node_uid.is_some())
-                            .count() as u64,
                         object,
                     }
                 })

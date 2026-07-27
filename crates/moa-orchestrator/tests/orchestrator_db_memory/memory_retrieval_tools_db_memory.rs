@@ -3,7 +3,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use chrono::Utc;
 use moa_config::MoaConfig;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
@@ -93,7 +92,7 @@ async fn search_and_navigation_share_the_contact_memory_admission_boundary() {
             label: EdgeLabel::RelatesTo,
             start_uid: tenant_chunk_uid,
             end_uid: hidden_tenant_fact_uid,
-            valid_from: Utc::now(),
+            valid_from: moa_test_support::fixtures::pg_now(),
             properties: json!({ "source": "memory-admission-test" }),
             storage_partition_id: Some(tenant_id.to_string()),
             contact_id: None,
@@ -225,7 +224,7 @@ fn node_intent(
         properties: json!({ "summary": summary }),
         pii_class: SensitivityClass::None,
         confidence: Some(0.95),
-        valid_from: Utc::now(),
+        valid_from: moa_test_support::fixtures::pg_now(),
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,

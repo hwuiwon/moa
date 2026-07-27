@@ -75,6 +75,13 @@ pub struct ConversationCost {
     pub worker_spawns: u64,
     /// Durable error events (`Error` + `ToolError`).
     pub error_events: u64,
+    /// Canonical failed-turn facts (`TurnFailed`), counted for both coordinator
+    /// and worker actors.
+    ///
+    /// Kept separate from [`Self::error_events`] on purpose: a failed turn often
+    /// also records an inner `Error`, so folding the two together would
+    /// double-count one failure and move every existing error baseline.
+    pub failed_turns: u64,
     /// Trimmed text of the LAST `BrainResponse` event (the conversation's final model reply), or
     /// `None` when no `BrainResponse` was recorded. `Some("")` distinguishes an empty final reply
     /// (a coordinator that returned nothing) from the absence of any model turn.
@@ -134,6 +141,7 @@ impl ConversationCost {
             total_cost_cents: 0,
             worker_spawns: 0,
             error_events: 0,
+            failed_turns: 0,
             final_text: None,
             coordination_present: false,
             coordination: CoordinationSnapshot::default(),
@@ -193,6 +201,7 @@ impl ConversationCost {
                 }
                 Event::WorkerSpawned { .. } => cost.worker_spawns += 1,
                 Event::Error { .. } | Event::ToolError { .. } => cost.error_events += 1,
+                Event::TurnFailed { .. } => cost.failed_turns += 1,
                 Event::TurnMetrics {
                     session_vo_calls,
                     worker_vo_calls,

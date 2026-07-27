@@ -1,17 +1,14 @@
 //! Wiremock offline coverage for the Twilio SMS connector.
 
-use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
 use moa_config::MessagingConfig;
-use moa_core::{error::MoaError, traits::CredentialVault, types::model::Credential};
+use moa_core::error::MoaError;
+use moa_core::types::credentials::{DeploymentSecret, DeploymentSecrets};
 use moa_messaging::{
-    TWILIO_ACCOUNT_SID_SERVICE, TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SID_SERVICE,
-    TWILIO_MESSAGING_SERVICE_SID_SERVICE, TwilioSmsClient, TwilioSmsFailureClass, TwilioSmsMessage,
-    TwilioSmsSendResult,
+    TwilioSmsClient, TwilioSmsFailureClass, TwilioSmsMessage, TwilioSmsSendResult,
 };
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -85,8 +82,10 @@ async fn twilio_offline_sends_sms_with_form_body_and_basic_auth() {
 }
 
 #[tokio::test]
-async fn twilio_offline_from_vault_uses_api_key_and_messaging_service() {
-    // Pins: production wiring can resolve Twilio API-key credentials and sender defaults from CredentialVault.
+async fn twilio_offline_deployment_secrets_use_api_key_and_messaging_service() {
+    // Pins: production wiring resolves Twilio API-key credentials and sender
+    // defaults from the typed deployment-secret source, and prefers the API key
+    // pair over the broader account auth token when both are configured.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(format!(
@@ -99,23 +98,34 @@ async fn twilio_offline_from_vault_uses_api_key_and_messaging_service() {
         )))
         .mount(&server)
         .await;
-    let vault = Arc::new(
-        MockVault::default()
-            .with(TWILIO_ACCOUNT_SID_SERVICE, ACCOUNT_SID)
-            .with(
-                TWILIO_API_KEY_SID_SERVICE,
-                "SK11111111111111111111111111111111",
-            )
-            .with(TWILIO_API_KEY_SECRET_SERVICE, "api-secret")
-            .with(TWILIO_MESSAGING_SERVICE_SID_SERVICE, MESSAGING_SERVICE_SID),
-    );
+    let secrets = DeploymentSecrets::new()
+        .with(
+            DeploymentSecret::TwilioAccountSid,
+            Some(ACCOUNT_SID.to_string()),
+        )
+        .with(
+            DeploymentSecret::TwilioApiKeySid,
+            Some("SK11111111111111111111111111111111".to_string()),
+        )
+        .with(
+            DeploymentSecret::TwilioApiKeySecret,
+            Some("api-secret".to_string()),
+        )
+        .with(
+            DeploymentSecret::TwilioAuthToken,
+            Some("account-auth-token".to_string()),
+        )
+        .with(
+            DeploymentSecret::TwilioMessagingServiceSid,
+            Some(MESSAGING_SERVICE_SID.to_string()),
+        );
     let config = MessagingConfig {
         twilio_base_url: server.uri(),
         ..MessagingConfig::default()
     };
-    let client = TwilioSmsClient::from_vault(vault, "tenant-1", &config)
-        .await
-        .expect("Twilio client should build from vault credentials");
+    let client = TwilioSmsClient::from_deployment_secrets(&secrets, &config)
+        .expect("Twilio client should build from deployment secrets")
+        .expect("an account sid is configured, so a client is built");
     let message = TwilioSmsMessage::new(TEST_TO_NUMBER, "moa-alert");
 
     let result = client
@@ -149,6 +159,49 @@ async fn twilio_offline_from_vault_uses_api_key_and_messaging_service() {
             TEST_TO_FORM_PAIR.to_string(),
         ])
     );
+}
+
+#[tokio::test]
+async fn twilio_offline_absent_account_sid_leaves_sms_unconfigured() {
+    // Pins: a deployment without Twilio configured yields no client rather than
+    // one that would authenticate with empty credentials.
+    let client = TwilioSmsClient::from_deployment_secrets(
+        &DeploymentSecrets::new(),
+        &MessagingConfig::default(),
+    )
+    .expect("an unconfigured deployment is not an error");
+
+    assert!(client.is_none());
+}
+
+#[tokio::test]
+async fn twilio_offline_half_configured_api_key_fails_instead_of_downgrading() {
+    // Pins: an API key SID without its secret is a typed configuration error. It
+    // must not silently fall back to the account auth token, which is a broader
+    // credential than the operator asked to use.
+    let secrets = DeploymentSecrets::new()
+        .with(
+            DeploymentSecret::TwilioAccountSid,
+            Some(ACCOUNT_SID.to_string()),
+        )
+        .with(
+            DeploymentSecret::TwilioApiKeySid,
+            Some("SK11111111111111111111111111111111".to_string()),
+        )
+        .with(
+            DeploymentSecret::TwilioAuthToken,
+            Some("account-auth-token".to_string()),
+        );
+
+    // `TwilioSmsClient` deliberately has no `Debug`, so the success arm is
+    // matched rather than unwrapped through `expect_err`.
+    let error =
+        match TwilioSmsClient::from_deployment_secrets(&secrets, &MessagingConfig::default()) {
+            Ok(_) => panic!("a half-configured api key pair must fail closed"),
+            Err(error) => error,
+        };
+
+    assert!(matches!(error, MoaError::ConfigError(_)), "{error:?}");
 }
 
 #[tokio::test]
@@ -380,55 +433,4 @@ fn form_pairs(body: &[u8]) -> BTreeSet<String> {
         .split('&')
         .map(ToOwned::to_owned)
         .collect()
-}
-
-#[derive(Debug, Default)]
-struct MockVault {
-    credentials: HashMap<(String, String), Credential>,
-}
-
-impl MockVault {
-    fn with(mut self, service: &str, value: &str) -> Self {
-        self.credentials.insert(
-            (service.to_string(), "tenant-1".to_string()),
-            Credential::Bearer(value.to_string()),
-        );
-        self
-    }
-}
-
-#[async_trait]
-impl CredentialVault for MockVault {
-    async fn get(&self, service: &str, scope: &str) -> moa_core::error::Result<Credential> {
-        self.credentials
-            .get(&(service.to_string(), scope.to_string()))
-            .cloned()
-            .ok_or_else(|| MoaError::MissingEnvironmentVariable(service.to_string()))
-    }
-
-    async fn set(
-        &self,
-        _service: &str,
-        _scope: &str,
-        _cred: Credential,
-    ) -> moa_core::error::Result<()> {
-        Err(MoaError::StorageError(
-            "mock vault is read-only".to_string(),
-        ))
-    }
-
-    async fn delete(&self, _service: &str, _scope: &str) -> moa_core::error::Result<bool> {
-        Err(MoaError::StorageError(
-            "mock vault is read-only".to_string(),
-        ))
-    }
-
-    async fn list(
-        &self,
-        _service_prefix: &str,
-    ) -> moa_core::error::Result<Vec<moa_core::traits::StoredCredentialMetadata>> {
-        Err(MoaError::StorageError(
-            "mock vault does not support listing".to_string(),
-        ))
-    }
 }

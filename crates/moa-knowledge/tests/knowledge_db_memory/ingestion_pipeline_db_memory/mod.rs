@@ -4,6 +4,7 @@ mod concurrency;
 mod content_fetch;
 mod deletion;
 mod idempotency;
+mod occurrence_identity;
 mod semantic_graph;
 
 use std::{
@@ -15,7 +16,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::Utc;
 use moa_core::types::memory::RlsContext;
 use moa_core::{traits::EmbeddingProvider, types::identifiers::TenantId};
 use moa_knowledge::{
@@ -240,6 +240,10 @@ impl EmbeddingProvider for MiscountingEmbedder {
 struct FakeGraphWriter {
     nodes: Mutex<HashMap<Uuid, Value>>,
     edges: Mutex<HashMap<Uuid, (String, Value)>>,
+    /// Every applied edge as `(from_key, to_key, relationship)`, so occurrence
+    /// tests can assert which chunk an edge actually attaches to instead of only
+    /// counting edges.
+    edge_keys: Mutex<Vec<(String, String, String)>>,
     vectors: Mutex<HashSet<Uuid>>,
     invalidated: Mutex<Vec<Uuid>>,
     /// When set, `invalidate_chunks` fails for any non-empty request, simulating
@@ -257,6 +261,49 @@ impl FakeGraphWriter {
             .lock()
             .expect("vector mutex should not be poisoned")
             .len()
+    }
+
+    fn has_vector(&self, uid: Uuid) -> bool {
+        self.vectors
+            .lock()
+            .expect("vector mutex should not be poisoned")
+            .contains(&uid)
+    }
+
+    fn has_node(&self, uid: Uuid) -> bool {
+        self.nodes
+            .lock()
+            .expect("node mutex should not be poisoned")
+            .contains_key(&uid)
+    }
+
+    fn node_properties(&self, uid: Uuid) -> Option<Value> {
+        self.nodes
+            .lock()
+            .expect("node mutex should not be poisoned")
+            .get(&uid)
+            .cloned()
+    }
+
+    fn invalidated_uids(&self) -> Vec<Uuid> {
+        self.invalidated
+            .lock()
+            .expect("invalidated mutex should not be poisoned")
+            .clone()
+    }
+
+    /// Returns the `from_key`s of applied edges with `relationship` pointing at
+    /// `to_key`.
+    fn edge_sources_into(&self, to_key: &str, relationship: &str) -> Vec<String> {
+        self.edge_keys
+            .lock()
+            .expect("edge key mutex should not be poisoned")
+            .iter()
+            .filter(|(_, edge_to, edge_relationship)| {
+                edge_to == to_key && edge_relationship == relationship
+            })
+            .map(|(from, _, _)| from.clone())
+            .collect()
     }
 
     fn invalidated_count(&self) -> usize {
@@ -312,6 +359,10 @@ impl KnowledgeGraphWriter for FakeGraphWriter {
             .edges
             .lock()
             .expect("edge mutex should not be poisoned");
+        let mut edge_keys = self
+            .edge_keys
+            .lock()
+            .expect("edge key mutex should not be poisoned");
         let mut edge_count = 0_u64;
         for edge in &delta.edges {
             if edges
@@ -321,15 +372,30 @@ impl KnowledgeGraphWriter for FakeGraphWriter {
                 )
                 .is_none()
             {
+                edge_keys.push((
+                    edge.from_key.clone(),
+                    edge.to_key.clone(),
+                    edge.relationship.clone(),
+                ));
                 edge_count += 1;
             }
         }
+        drop(edge_keys);
         drop(edges);
 
-        self.vectors
+        // Mirror the production writer: a vector row is attached to the graph node
+        // whose uid the embedding is keyed by, so an embedding whose uid matches no
+        // node in the delta writes nothing.
+        let mut vectors = self
+            .vectors
             .lock()
-            .expect("vector mutex should not be poisoned")
-            .extend(embeddings.keys().copied());
+            .expect("vector mutex should not be poisoned");
+        for node in &delta.nodes {
+            if embeddings.contains_key(&node.uid) {
+                vectors.insert(node.uid);
+            }
+        }
+        drop(vectors);
         Ok(GraphWriteReport {
             nodes_upserted: node_count,
             edges_upserted: edge_count,
@@ -376,13 +442,13 @@ fn drive_connection(connection_uid: Uuid, tenant_id: TenantId) -> KnowledgeConne
         provider: "test_provider".to_string(),
         connector: "google-drive".to_string(),
         provider_account_id: "acct_fetch".to_string(),
-        credential_ref: "vault://knowledge/fetch".to_string(),
+        credential_ref: "cb57cc63-b5cf-a112-f438-761700b5648c".to_string(),
         status: ConnectionStatus::Active,
         metadata: json!({}),
         source_selection: json!({}),
         information_barrier: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
+        updated_at: moa_test_support::fixtures::pg_now(),
         last_synced_at: None,
     }
 }
@@ -396,7 +462,7 @@ fn metadata_only_record(source_id: &str, change_token: &str, title: &str) -> Pro
         source_uri: Some(format!("https://drive.google.com/file/d/{source_id}/view")),
         change_token: Some(change_token.to_string()),
         deleted: false,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         metadata: json!({ "safe": true }),
         payload: json!({ "mimeType": "text/plain", "name": format!("{title}.txt") }),
     }
@@ -427,8 +493,9 @@ async fn create_run(
             graph_nodes_upserted: 0,
             graph_edges_upserted: 0,
             error_code: None,
-            started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
+            started_at: moa_test_support::fixtures::pg_now(),
+            finished_at: Some(moa_test_support::fixtures::pg_now()),
+            provider_trigger_completed_at: None,
         })
         .await
         .expect("create sync run");
@@ -456,7 +523,7 @@ fn record_with_source(
         source_uri: Some(format!("https://example.test/{source_id}")),
         change_token: Some(change_token.to_string()),
         deleted,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         metadata: credentialish_metadata(),
         payload: json!({
             "text": text,
@@ -577,7 +644,13 @@ async fn completed_ingestion_step_count(
     .expect("count completed object ingestion steps")
 }
 
-async fn chunks_with_graph_uid(pool: &sqlx::PgPool, object_uid: Uuid) -> i64 {
+/// Counts this object's chunk rows whose persisted graph identity is their own
+/// occurrence identity.
+///
+/// A caller asserting this equals the chunk count is asserting the occurrence
+/// invariant end to end: identity was written by ingestion (not recomputed from
+/// a tenant-plus-content-hash seed) and survived storage.
+async fn chunks_with_occurrence_identity(pool: &sqlx::PgPool, object_uid: Uuid) -> i64 {
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT count(*)
@@ -585,13 +658,13 @@ async fn chunks_with_graph_uid(pool: &sqlx::PgPool, object_uid: Uuid) -> i64 {
         JOIN moa.knowledge_document_versions v
           ON v.document_version_uid = c.document_version_id
         WHERE v.object_id = $1
-          AND c.graph_node_uid IS NOT NULL
+          AND c.graph_node_uid = c.chunk_uid
         "#,
     )
     .bind(object_uid)
     .fetch_one(pool)
     .await
-    .expect("count graph uid chunks")
+    .expect("count occurrence-identity chunks")
 }
 
 async fn tombstoned_chunk_count(pool: &sqlx::PgPool, object_uid: Uuid) -> i64 {
@@ -674,7 +747,7 @@ async fn seed_graph_linked_partial_version(
         parser_job_id: None,
         content_hash: hash.clone(),
         metadata: json!({ "partial": true }),
-        created_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
     };
     repository
         .insert_document_version(version.clone())
@@ -689,9 +762,6 @@ async fn seed_graph_linked_partial_version(
                     version.version_uid
                 )),
                 version_uid: version.version_uid,
-                graph_node_uid: Some(moa_knowledge::graph_delta::stable_uid(&format!(
-                    "partial-graph-node:{object_uid}:{hash}"
-                ))),
                 chunk_hash: format!("partial-{hash}"),
                 block_hashes: vec![hash],
                 text: text.to_string(),
@@ -857,11 +927,86 @@ async fn semantic_graph_cache_row_count(pool: &sqlx::PgPool, tenant_id: TenantId
     .expect("count semantic graph extraction cache rows")
 }
 
+/// One persisted chunk occurrence, as storage sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OccurrenceRow {
+    version_uid: Uuid,
+    chunk_uid: Uuid,
+    graph_node_uid: Uuid,
+    chunk_hash: String,
+    ordinal: i32,
+    active: bool,
+}
+
+/// Loads every chunk occurrence of one object in (version, ordinal) order,
+/// across all document versions.
+///
+/// Occurrence tests read this instead of a per-version query because the
+/// behaviour under test is precisely that older versions keep their own
+/// occurrences until they are invalidated.
+async fn occurrence_rows(pool: &sqlx::PgPool, object_uid: Uuid) -> Vec<OccurrenceRow> {
+    sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, i32, bool)>(
+        r#"
+        SELECT c.document_version_id,
+               c.chunk_uid,
+               c.graph_node_uid,
+               c.chunk_hash,
+               c.ordinal,
+               COALESCE(c.metadata->>'active', 'true') <> 'false' AS active
+        FROM moa.knowledge_chunks c
+        JOIN moa.knowledge_document_versions v
+          ON v.document_version_uid = c.document_version_id
+        WHERE v.object_id = $1
+        ORDER BY v.created_at ASC, v.document_version_uid ASC, c.ordinal ASC
+        "#,
+    )
+    .bind(object_uid)
+    .fetch_all(pool)
+    .await
+    .expect("load chunk occurrences")
+    .into_iter()
+    .map(
+        |(version_uid, chunk_uid, graph_node_uid, chunk_hash, ordinal, active)| OccurrenceRow {
+            version_uid,
+            chunk_uid,
+            graph_node_uid,
+            chunk_hash,
+            ordinal,
+            active,
+        },
+    )
+    .collect()
+}
+
+/// Reads one ingestion step's counters for an object.
+async fn ingestion_step_counters(
+    pool: &sqlx::PgPool,
+    sync_run_uid: Uuid,
+    object_uid: Uuid,
+    stage: &str,
+) -> Value {
+    sqlx::query_scalar::<_, Value>(
+        r#"
+        SELECT counters
+        FROM moa.knowledge_ingestion_steps
+        WHERE sync_run_id = $1
+          AND object_id = $2
+          AND stage = $3
+        "#,
+    )
+    .bind(sync_run_uid)
+    .bind(object_uid)
+    .bind(stage)
+    .fetch_one(pool)
+    .await
+    .expect("read ingestion step counters")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StoredIdentities {
     object_uid: Uuid,
     version_uids: Vec<Uuid>,
-    chunks: Vec<(Uuid, Option<Uuid>, String)>,
+    chunks: Vec<(Uuid, Uuid, String)>,
 }
 
 async fn stored_identities(pool: &sqlx::PgPool, object_uid: Uuid) -> StoredIdentities {
@@ -877,7 +1022,7 @@ async fn stored_identities(pool: &sqlx::PgPool, object_uid: Uuid) -> StoredIdent
     .fetch_all(pool)
     .await
     .expect("read document version identities");
-    let chunks = sqlx::query_as::<_, (Uuid, Option<Uuid>, String)>(
+    let chunks = sqlx::query_as::<_, (Uuid, Uuid, String)>(
         r#"
         SELECT chunk_uid, graph_node_uid, chunk_hash
         FROM moa.knowledge_chunks c

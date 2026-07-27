@@ -131,13 +131,13 @@ async fn semantic_graph_extraction_is_cached_reported_and_written_db_memory() {
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_semantic".to_string(),
-            credential_ref: "vault://knowledge/semantic".to_string(),
+            credential_ref: "7bf8acf9-754e-7a67-b773-1ae68be8d3b8".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -254,13 +254,13 @@ async fn generic_entity_fallback_writes_graph_entities_on_general_corpus_db_memo
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_generic".to_string(),
-            credential_ref: "vault://knowledge/generic".to_string(),
+            credential_ref: "77903500-8e95-6ed7-9053-77c0dcc70fb8".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -347,13 +347,13 @@ async fn ingestion_preserves_chunk_structure_for_bounded_neighbor_context_db_mem
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_structure_audit".to_string(),
-            credential_ref: "vault://knowledge/structure-audit".to_string(),
+            credential_ref: "48344059-1fe3-e088-283b-d2f3d3a66d08".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -402,9 +402,10 @@ async fn ingestion_preserves_chunk_structure_for_bounded_neighbor_context_db_mem
         chunks.iter().map(|chunk| chunk.ordinal).collect::<Vec<_>>(),
         vec![0, 1, 2]
     );
-    assert!(
-        chunks.iter().all(|chunk| chunk.graph_node_uid.is_some()),
-        "{chunks:?}"
+    assert_eq!(
+        chunks_with_occurrence_identity(&pool, object_uid).await,
+        3,
+        "every chunk's persisted graph identity is its own occurrence identity"
     );
     assert!(
         chunks
@@ -527,13 +528,13 @@ async fn semantic_graph_model_extraction_stamps_model_identity_db_memory() {
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_model_identity".to_string(),
-            credential_ref: "vault://knowledge/model-identity".to_string(),
+            credential_ref: "09cacda2-c906-6bb3-ad7d-417cb2d66f6d".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -611,13 +612,13 @@ async fn semantic_graph_model_parse_failure_falls_back_to_deterministic_db_memor
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_model_fallback".to_string(),
-            credential_ref: "vault://knowledge/model-fallback".to_string(),
+            credential_ref: "653a5843-5972-d5d5-ec41-bc43e59384ad".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await
@@ -683,13 +684,13 @@ async fn semantic_graph_cache_identity_distinguishes_extractors_db_memory() {
             provider: "test_provider".to_string(),
             connector: "docs".to_string(),
             provider_account_id: "acct_cache_identity".to_string(),
-            credential_ref: "vault://knowledge/cache-identity".to_string(),
+            credential_ref: "5e6e91f9-98a7-e0e2-149b-3b8cfe5adeb8".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         })
         .await

@@ -63,7 +63,13 @@ pub(super) async fn evaluate_input_guardrail(
         stage,
         &response,
     );
-    append_session_event(ctx, session_id, evaluation.to_event()).await?;
+    append_session_event(
+        workflow.event_appender(),
+        ctx,
+        session_id,
+        evaluation.to_event(),
+    )
+    .await?;
 
     if matches!(evaluation.decision, GuardrailDecision::Block) {
         let text = driver_guardrails::block_message(driver_guardrails::GuardrailBlockMessage {
@@ -71,6 +77,7 @@ pub(super) async fn evaluate_input_guardrail(
             fallback: "I can't help with that request.",
         });
         append_session_event(
+            workflow.event_appender(),
             ctx,
             session_id,
             Event::BrainResponse {
@@ -149,7 +156,13 @@ pub(super) async fn visible_response_after_output_guardrail(
         stage,
         &judge_response,
     );
-    append_session_event(ctx, session_id, evaluation.to_event()).await?;
+    append_session_event(
+        workflow.event_appender(),
+        ctx,
+        session_id,
+        evaluation.to_event(),
+    )
+    .await?;
 
     if matches!(evaluation.decision, GuardrailDecision::Block) {
         let visible_response =

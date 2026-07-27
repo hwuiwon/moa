@@ -3,11 +3,14 @@
 use crate::*;
 use moa_authz::{FgaClient, FgaConfig};
 use moa_core::traits::Identity;
+use moa_core::types::contact::ClientMessageId;
 use moa_wire::session_store::{AppendEventRequest, GetEventsRequest, InitSessionVoRequest};
 use moa_wire::turn::{SessionSnapshot, StartTurnRequest, TurnOutcome};
 use serde::Serialize;
 
 const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Scope literal for load-generator client message ids.
+const LOADTEST_MESSAGE_SCOPE: &str = "loadtest-turn";
 const CANCEL_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Classification of a failed turn attempt, used by the error taxonomy.
@@ -45,9 +48,16 @@ impl std::fmt::Display for TurnFailure {
 #[async_trait]
 pub(crate) trait SessionTarget: Send + Sync {
     async fn start_session(&self, plan: &SessionPlan) -> Result<SessionId>;
+    /// Runs one scheduled turn.
+    ///
+    /// `turn_ordinal` is the message's position in the session plan and is the load
+    /// generator's stable coordinate for it: the client message id is derived from
+    /// `(session_id, turn_ordinal)` so a retried submission is recognized as the same
+    /// message instead of buying a second turn.
     async fn run_turn(
         &self,
         session_id: SessionId,
+        turn_ordinal: u64,
         prompt: &str,
         timeout: Duration,
     ) -> std::result::Result<TurnObservation, TurnFailure>;
@@ -135,13 +145,25 @@ impl SessionTarget for RemoteTarget {
     async fn run_turn(
         &self,
         session_id: SessionId,
+        turn_ordinal: u64,
         prompt: &str,
         timeout: Duration,
     ) -> std::result::Result<TurnObservation, TurnFailure> {
         let handle = self.client.session(session_id.to_string());
+        let client_message_id =
+            ClientMessageId::internal(LOADTEST_MESSAGE_SCOPE, session_id.0, turn_ordinal).map_err(
+                |error| TurnFailure {
+                    kind: TurnFailureKind::StartFailed,
+                    message: error.to_string(),
+                    replacement_safe: false,
+                },
+            )?;
         let response = handle
             .start_turn(
                 StartTurnRequest {
+                    client_message_id: client_message_id.clone(),
+                    reply_to: None,
+                    stream_cursor: None,
                     user_message: prompt.to_string(),
                     attachments: Vec::new(),
                     model: Some(self.model.to_string()),
@@ -149,7 +171,7 @@ impl SessionTarget for RemoteTarget {
                     max_turns: None,
                     execution_template: None,
                 },
-                Some(&format!("loadtest-turn-{session_id}-{}", Uuid::now_v7())),
+                Some(client_message_id.as_str()),
             )
             .await
             .map_err(|error| {

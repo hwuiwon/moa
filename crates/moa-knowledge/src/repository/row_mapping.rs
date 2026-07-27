@@ -144,6 +144,35 @@ pub(super) fn sync_run_from_row(row: &sqlx::postgres::PgRow) -> Result<Knowledge
         error_code: row.try_get("error_code").map_err(map_sqlx_error)?,
         started_at: row.try_get("started_at").map_err(map_sqlx_error)?,
         finished_at: row.try_get("finished_at").map_err(map_sqlx_error)?,
+        provider_trigger_completed_at: row
+            .try_get("provider_trigger_completed_at")
+            .map_err(map_sqlx_error)?,
+    })
+}
+
+pub(super) fn link_claim_from_row(row: &sqlx::postgres::PgRow) -> Result<LinkClaim> {
+    let state: String = row.try_get("state").map_err(map_sqlx_error)?;
+    Ok(LinkClaim {
+        tenant_id: TenantId::from(
+            row.try_get::<Uuid, _>("tenant_id")
+                .map_err(map_sqlx_error)?,
+        ),
+        operation_id: row.try_get("operation_id").map_err(map_sqlx_error)?,
+        request_hash: row.try_get("request_hash").map_err(map_sqlx_error)?,
+        owner_identity_id: row.try_get("owner_identity_id").map_err(map_sqlx_error)?,
+        connection_uid: row.try_get("connection_uid").map_err(map_sqlx_error)?,
+        previous_credential_ref: row
+            .try_get("previous_credential_ref")
+            .map_err(map_sqlx_error)?,
+        candidate_credential_ref: row
+            .try_get("candidate_credential_ref")
+            .map_err(map_sqlx_error)?,
+        state: LinkClaimState::from_str_exact(&state).ok_or_else(|| {
+            Error::Repository(format!("unknown knowledge link claim state `{state}`"))
+        })?,
+        sync_run_uid: row.try_get("sync_run_uid").map_err(map_sqlx_error)?,
+        created_at: row.try_get("created_at").map_err(map_sqlx_error)?,
+        updated_at: row.try_get("updated_at").map_err(map_sqlx_error)?,
     })
 }
 
@@ -174,13 +203,11 @@ pub(super) fn object_projection_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<KnowledgeObjectProjection> {
     let chunk_count: i64 = row.try_get("chunk_count").map_err(map_sqlx_error)?;
-    let graph_node_count: i64 = row.try_get("graph_node_count").map_err(map_sqlx_error)?;
     Ok(KnowledgeObjectProjection {
         object: object_from_row(row)?,
         parser: row.try_get("parser_provider").map_err(map_sqlx_error)?,
         parser_status: row.try_get("parser_status").map_err(map_sqlx_error)?,
         chunk_count: u64::try_from(chunk_count).map_err(map_int_error)?,
-        graph_node_count: u64::try_from(graph_node_count).map_err(map_int_error)?,
     })
 }
 
@@ -204,7 +231,6 @@ pub(super) fn chunk_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeChu
     Ok(KnowledgeChunk {
         chunk_uid: row.try_get("chunk_uid").map_err(map_sqlx_error)?,
         version_uid: row.try_get("document_version_id").map_err(map_sqlx_error)?,
-        graph_node_uid: row.try_get("graph_node_uid").map_err(map_sqlx_error)?,
         chunk_hash: row.try_get("chunk_hash").map_err(map_sqlx_error)?,
         block_hashes: row.try_get("block_hashes").map_err(map_sqlx_error)?,
         text: row.try_get("text").map_err(map_sqlx_error)?,
@@ -340,7 +366,21 @@ pub(super) fn ingestion_step_status(value: String) -> Result<IngestionStepStatus
 }
 
 pub(super) fn map_sqlx_error(error: sqlx::Error) -> Error {
-    Error::Repository(error.to_string())
+    match error {
+        // Preserve the driver diagnostics: SQLSTATE, constraint, table, and
+        // the DETAIL line are what distinguish a duplicate-key race (23505 on
+        // a named constraint) from a deadlock (40P01) in test and log output.
+        sqlx::Error::Database(database) => Error::Database {
+            code: database.code().map(|code| code.into_owned()),
+            constraint: database.constraint().map(str::to_owned),
+            table: database.table().map(str::to_owned),
+            message: database.message().to_owned(),
+            detail: database
+                .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+                .and_then(|postgres| postgres.detail().map(str::to_owned)),
+        },
+        other => Error::Repository(other.to_string()),
+    }
 }
 
 pub(super) fn map_moa_error(error: moa_core::error::MoaError) -> Error {

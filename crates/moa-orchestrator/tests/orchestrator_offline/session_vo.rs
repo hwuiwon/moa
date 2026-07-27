@@ -1,6 +1,5 @@
 //! Unit coverage for the Session virtual object's state projection helpers.
 
-use chrono::Utc;
 use moa_core::{
     types::channel::Channel, types::contact::SessionActorRef, types::identifiers::ModelId,
     types::identifiers::TenantId, types::session::CancelScope, types::session::SessionMeta,
@@ -29,13 +28,6 @@ fn test_meta() -> SessionMeta {
         channel: Channel::Chat,
         model: ModelId::new("test-model"),
         ..SessionMeta::default()
-    }
-}
-
-fn test_message(text: &str) -> moa_core::types::session::UserMessage {
-    moa_core::types::session::UserMessage {
-        text: text.to_string(),
-        attachments: vec![],
     }
 }
 
@@ -108,61 +100,20 @@ fn execution_template_admission_replay_state_is_semantic() {
 }
 
 #[test]
-fn session_vo_post_message_without_meta_errors() {
-    let mut state = SessionVoState::default();
-    let error = state
-        .enqueue_message(test_message("hello"), Utc::now())
-        .expect_err("enqueue should fail without metadata");
-
-    assert!(error.to_string().contains("Session metadata missing"));
-}
-
-#[test]
-fn session_vo_post_message_queues_in_state() {
-    let mut state = SessionVoState::default();
-    state.set_meta(test_meta());
-    state
-        .enqueue_message(test_message("hello"), Utc::now())
-        .expect("enqueue should succeed");
-
-    assert_eq!(state.pending.len(), 1);
-    assert_eq!(state.pending[0].text, "hello");
-}
-
-#[test]
-fn session_vo_post_message_updates_status_to_running_then_idle_parks_paused() {
-    let mut state = SessionVoState::default();
-    state.set_meta(test_meta());
-    state
-        .enqueue_message(test_message("hello"), Utc::now())
-        .expect("enqueue should succeed");
-    assert_eq!(state.current_status(), SessionStatus::Running);
-
-    state.drain_pending_messages();
-    let status = state.apply_turn_outcome(moa_core::types::session::TurnOutcome::Idle, Utc::now());
-
-    assert_eq!(status, SessionStatus::Paused);
-    assert_eq!(state.current_status(), SessionStatus::Paused);
-}
-
-#[test]
-fn accepted_execution_run_keeps_session_running_and_drains_queue() {
-    // Pins: detached Run admission settles the root turn without idling the owning session.
+fn accepted_execution_run_keeps_session_running() {
+    // Pins: detached Run admission settles the root turn without idling the owning
+    // session, so a session with a live execution run stays Running rather than
+    // parking and stalling the run's own progress and terminal delivery.
     let mut state = SessionVoState::default();
     state.set_meta(test_meta());
     state.active_execution_runs.push(active_execution_run(
         Uuid::parse_str("33333333-3333-3333-3333-333333333333").expect("fixture run id parses"),
         1,
     ));
-    state
-        .enqueue_message(test_message("queued follow-up"), Utc::now())
-        .expect("queue follow-up");
 
-    assert_eq!(state.drain_pending_messages(), 1);
-    state.apply_accepted_execution_turn(Utc::now());
+    state.apply_accepted_execution_turn(moa_test_support::fixtures::pg_now());
 
     assert_eq!(state.current_status(), SessionStatus::Running);
-    assert!(state.pending.is_empty());
     assert_eq!(
         state.last_turn_summary.as_deref(),
         Some("Execution accepted.")
@@ -227,7 +178,7 @@ fn execution_progress_requires_cadence_and_changed_exact_aggregate_tuple() {
     // Pins: every tuple member participates in delta detection, while an early changed tuple
     // and a due identical tuple are both suppressed.
     let run_uid = Uuid::from_u128(70);
-    let start = Utc::now();
+    let start = moa_test_support::fixtures::pg_now();
     let baseline = execution_progress(run_uid);
     let mut state = SessionVoState::default();
     state
@@ -343,55 +294,45 @@ fn terminal_synthesis_dispatch_clears_active_state_once_and_replays_stable_marke
 }
 
 #[test]
-fn plain_reply_has_a_target_only_when_exactly_one_user_addressed_target_exists() {
-    // Pins: zero and ambiguous execution/worker targets remain ordinary turns; exactly one
-    // target is consumed and only its exact acknowledgement may clear it.
+fn pending_reply_targets_accumulate_and_clear_only_on_an_accepted_delivery() {
+    // Pins: the session tracks every user-addressed request that is waiting — the count is
+    // what makes an implicit reply ambiguous — and a target leaves that set only when its
+    // delivery was applied or replayed. Clearing on a conflicted delivery would silently
+    // drop a request the user still has to answer.
     let mut state = SessionVoState::default();
-    assert_eq!(state.exact_pending_user_reply_target(), None);
+    assert!(state.pending_user_reply_targets.is_empty());
 
     let execution = PendingUserReplyTarget::ExecutionInput {
         run_uid: Uuid::from_u128(73),
         task_id: Uuid::from_u128(74),
         generation: 2,
     };
-    state.upsert_pending_user_reply_target(execution.clone());
-    assert_eq!(
-        state.exact_pending_user_reply_target(),
-        Some(execution.clone())
-    );
-
     let worker = PendingUserReplyTarget::WorkerInput {
         worker_id: "worker-1".to_string(),
         input_request_id: "request-1".to_string(),
     };
+    state.upsert_pending_user_reply_target(execution.clone());
     state.upsert_pending_user_reply_target(worker.clone());
-    assert_eq!(state.exact_pending_user_reply_target(), None);
-    assert!(state.clear_pending_user_reply_target(&execution));
     assert_eq!(
-        state.exact_pending_user_reply_target(),
-        Some(worker.clone())
+        state.pending_user_reply_targets,
+        vec![execution.clone(), worker.clone()]
     );
+
+    assert!(state.clear_pending_user_reply_target(&execution));
+    assert_eq!(state.pending_user_reply_targets, vec![worker.clone()]);
+
     assert!(!state.apply_pending_user_reply_ack(&worker, UserReplyDeliveryAck::Conflict));
     assert_eq!(
-        state.exact_pending_user_reply_target(),
-        Some(worker.clone()),
+        state.pending_user_reply_targets,
+        vec![worker.clone()],
         "conflicted delivery must remain pending for a later exact retry"
     );
     assert!(state.apply_pending_user_reply_ack(&worker, UserReplyDeliveryAck::Applied));
-    assert_eq!(state.exact_pending_user_reply_target(), None);
+    assert!(state.pending_user_reply_targets.is_empty());
 
     state.upsert_pending_user_reply_target(worker.clone());
     assert!(state.apply_pending_user_reply_ack(&worker, UserReplyDeliveryAck::Replayed));
-    assert_eq!(state.exact_pending_user_reply_target(), None);
-}
-
-#[test]
-fn session_vo_cancel_sets_flag() {
-    let mut state = SessionVoState::default();
-    state.set_cancel_flag(CancelScope::CoordinatorOnly);
-
-    assert_eq!(state.take_cancel_flag(), Some(CancelScope::CoordinatorOnly));
-    assert_eq!(state.take_cancel_flag(), None);
+    assert!(state.pending_user_reply_targets.is_empty());
 }
 
 fn test_child_ref(id: &str) -> moa_core::types::worker::state::WorkerChildRef {
@@ -412,13 +353,10 @@ fn coordinator_only_cancel_preserves_child_refs() {
     state.children.push(test_child_ref("child-1"));
     state.children.push(test_child_ref("child-2"));
 
-    state.set_cancel_flag(CancelScope::CoordinatorOnly);
-
     // The production branch the handler uses to decide whether to cascade to children.
     assert!(!CancelScope::CoordinatorOnly.cancels_task_tree());
     // Children remain registered on the coordinator (left running).
     assert_eq!(state.children.len(), 2);
-    assert_eq!(state.take_cancel_flag(), Some(CancelScope::CoordinatorOnly));
 }
 
 #[test]
@@ -430,15 +368,12 @@ fn task_tree_cancel_cancels_children() {
     state.children.push(test_child_ref("child-1"));
     state.children.push(test_child_ref("child-2"));
 
-    state.set_cancel_flag(CancelScope::TaskTree);
-
     // The production branch the handler uses to decide whether to cascade to children.
     assert!(CancelScope::TaskTree.cancels_task_tree());
     // TaskTree is also the default scope (a bare "stop" cancels everything).
     assert_eq!(CancelScope::default(), CancelScope::TaskTree);
     // Child refs remain available for the handler's forward-to-children loop.
     assert_eq!(state.children.len(), 2);
-    assert_eq!(state.take_cancel_flag(), Some(CancelScope::TaskTree));
 }
 
 fn terminal_child_ref(id: &str, output: &str) -> moa_core::types::worker::state::WorkerChildRef {
@@ -565,9 +500,6 @@ fn session_progress_fan_in_restores_plan_order_and_omits_failed_reads() {
 fn session_vo_destroy_clears_state() {
     let mut state = SessionVoState::default();
     state.set_meta(test_meta());
-    state
-        .enqueue_message(test_message("hello"), Utc::now())
-        .expect("enqueue should succeed");
     state.last_turn_summary = Some("summary".to_string());
     state
         .children
@@ -577,7 +509,6 @@ fn session_vo_destroy_clears_state() {
             budget_tokens: 0,
             terminal: None,
         });
-    state.set_cancel_flag(CancelScope::TaskTree);
     state.destroy();
 
     assert_eq!(state, SessionVoState::default());

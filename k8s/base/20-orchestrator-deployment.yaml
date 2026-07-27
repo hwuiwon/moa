@@ -122,18 +122,6 @@ spec:
                   name: moa-llm-keys
                   key: zeroentropy
                   optional: true
-            # Cloud hand execution must use a non-local provider by default.
-            # Set MOA_CLOUD_HANDS_DEFAULT_PROVIDER=local and
-            # MOA_CLOUD_HANDS_ALLOW_LOCAL=true only for development-only clusters.
-            - name: MOA_CLOUD_HANDS_DEFAULT_PROVIDER
-              value: e2b
-            - name: MOA_CLOUD_HANDS_ALLOW_LOCAL
-              value: "false"
-            - name: MOA_CLOUD_HANDS_E2B_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: moa-hand-provider-keys
-                  key: e2b
             - name: OPENROUTER_API_KEY
               valueFrom:
                 secretKeyRef:

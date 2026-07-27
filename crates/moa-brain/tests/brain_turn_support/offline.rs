@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use moa_brain::{
     TurnResult, pipeline::history::HistoryCompiler, run_brain_turn, run_streamed_turn,
     runtime_events::RuntimeEvent,
@@ -677,7 +676,7 @@ fn make_event_record(session_id: &SessionId, sequence_num: u64, event: Event) ->
         sequence_num,
         event_type: event.event_type(),
         event,
-        timestamp: Utc::now(),
+        timestamp: moa_test_support::fixtures::pg_now(),
         brain_id: None,
         hand_id: None,
         token_count: None,
@@ -741,7 +740,7 @@ fn allow_bash_commands_for_tenant<const N: usize>(
                 effect: ActionPolicyEffect::Allow,
                 reason: Some("offline test fixture allows this exact command".to_string()),
                 created_by: UserId::new("offline-test-admin"),
-                created_at: Utc::now(),
+                created_at: moa_test_support::fixtures::pg_now(),
             })
             .collect(),
     })

@@ -224,6 +224,7 @@ async fn async_main() -> anyhow::Result<()> {
         moa_config.session_limits.clone(),
         moa_config.clone(),
         runtime_deps.contact_token_issuer.clone(),
+        runtime_deps.credential_vault.clone(),
         runtime_deps.lineage.handle.clone(),
         runtime_deps.embedding_provider.clone(),
         Arc::new(runtime_deps.channel_adapters.clone()),

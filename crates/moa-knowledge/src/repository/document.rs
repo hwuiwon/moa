@@ -86,8 +86,7 @@ pub(super) async fn list_objects(
                o.title, o.change_token, o.metadata, o.status, o.last_modified_at,
                o.deleted_at, latest.parser_provider,
                CASE WHEN latest.document_version_uid IS NULL THEN 'pending' ELSE 'parsed' END AS parser_status,
-               COALESCE(chunk_counts.chunk_count, 0) AS chunk_count,
-               COALESCE(chunk_counts.graph_node_count, 0) AS graph_node_count
+               COALESCE(chunk_counts.chunk_count, 0) AS chunk_count
         FROM moa.knowledge_objects o
         LEFT JOIN LATERAL (
             SELECT document_version_uid, parser_provider
@@ -97,7 +96,7 @@ pub(super) async fn list_objects(
             LIMIT 1
         ) latest ON TRUE
         LEFT JOIN LATERAL (
-            SELECT count(*) AS chunk_count, count(graph_node_uid) AS graph_node_count
+            SELECT count(*) AS chunk_count
             FROM moa.knowledge_chunks
             WHERE document_version_id = latest.document_version_uid
         ) chunk_counts ON TRUE
@@ -214,7 +213,7 @@ pub(super) async fn chunks_for_version(
     let mut conn = repository.begin().await?;
     let rows = sqlx::query(
         r#"
-        SELECT chunk_uid, document_version_id, graph_node_uid, chunk_hash, block_hashes,
+        SELECT chunk_uid, document_version_id, chunk_hash, block_hashes,
                heading_path, text, ordinal, token_count, metadata
         FROM moa.knowledge_chunks
         WHERE document_version_id = $1
@@ -236,7 +235,7 @@ pub(super) async fn active_chunks_for_object(
     let mut conn = repository.begin().await?;
     let rows = sqlx::query(
         r#"
-        SELECT c.chunk_uid, c.document_version_id, c.graph_node_uid, c.chunk_hash,
+        SELECT c.chunk_uid, c.document_version_id, c.chunk_hash,
                c.block_hashes, c.heading_path, c.text, c.ordinal, c.token_count, c.metadata
         FROM moa.knowledge_chunks c
         JOIN moa.knowledge_document_versions v
@@ -630,7 +629,6 @@ pub(super) async fn replace_chunks(
     }
     let expected = chunks.len() as u64;
     let mut chunk_uids = Vec::with_capacity(chunks.len());
-    let mut graph_node_uids: Vec<Option<Uuid>> = Vec::with_capacity(chunks.len());
     let mut chunk_hashes = Vec::with_capacity(chunks.len());
     let mut block_hashes = Vec::with_capacity(chunks.len());
     let mut heading_paths = Vec::with_capacity(chunks.len());
@@ -640,7 +638,6 @@ pub(super) async fn replace_chunks(
     let mut metadatas = Vec::with_capacity(chunks.len());
     for chunk in chunks {
         chunk_uids.push(chunk.chunk_uid);
-        graph_node_uids.push(chunk.graph_node_uid);
         chunk_hashes.push(chunk.chunk_hash);
         block_hashes.push(encode_text_array(&chunk.block_hashes)?);
         heading_paths.push(encode_text_array(&chunk.heading_path)?);
@@ -651,7 +648,9 @@ pub(super) async fn replace_chunks(
     }
     // Single multi-row insert: UNNEST the parallel arrays and join once to the
     // parent version. `block_hashes`/`heading_path` travel as JSON text and are
-    // rebuilt into `TEXT[]`; `graph_node_uid` NULLs are preserved.
+    // rebuilt into `TEXT[]`. `graph_node_uid` is written from `chunk_uid`: one
+    // chunk row is one graph occurrence, and the database CHECK constraint
+    // rejects any other value.
     let result = sqlx::query(
         r#"
         INSERT INTO moa.knowledge_chunks (
@@ -660,22 +659,21 @@ pub(super) async fn replace_chunks(
             token_count, metadata
         )
         SELECT c.chunk_uid, dv.tenant_id, dv.storage_partition_id, dv.document_version_uid,
-               c.graph_node_uid, c.chunk_hash,
+               c.chunk_uid, c.chunk_hash,
                ARRAY(SELECT jsonb_array_elements_text(c.block_hashes::JSONB)),
                ARRAY(SELECT jsonb_array_elements_text(c.heading_path::JSONB)),
                c.text, c.ordinal, c.token_count, c.metadata::JSONB
         FROM moa.knowledge_document_versions dv
         CROSS JOIN UNNEST(
-            $2::UUID[], $3::UUID[], $4::TEXT[], $5::TEXT[], $6::TEXT[], $7::TEXT[],
-            $8::INT[], $9::INT[], $10::TEXT[]
-        ) AS c(chunk_uid, graph_node_uid, chunk_hash, block_hashes, heading_path, text,
+            $2::UUID[], $3::TEXT[], $4::TEXT[], $5::TEXT[], $6::TEXT[],
+            $7::INT[], $8::INT[], $9::TEXT[]
+        ) AS c(chunk_uid, chunk_hash, block_hashes, heading_path, text,
                ordinal, token_count, metadata)
         WHERE dv.document_version_uid = $1
         "#,
     )
     .bind(version_uid)
     .bind(&chunk_uids)
-    .bind(&graph_node_uids)
     .bind(&chunk_hashes)
     .bind(&block_hashes)
     .bind(&heading_paths)
