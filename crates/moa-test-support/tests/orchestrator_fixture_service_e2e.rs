@@ -71,11 +71,27 @@ async fn fixture_round_trips_accepted_execution_run_through_restate() -> anyhow:
     // Pins: a real Restate Session turn admits one detached execution run, returns its committed
     // UID as Accepted, and keeps the owning session Running after the root turn detaches.
     let objective = "Start an execution run for a durable fixture report";
+    // Keyed entries resolve first-match-wins in registration order, and the
+    // route classifier's prompt embeds the user objective. Without its own
+    // earlier entry the classifier receives the planner candidate JSON,
+    // rejects it against the strict route schema, and the router takes its
+    // deliberate conservative Inline fallback — the inline loop then echoes
+    // the candidate as the final reply and the turn completes instead of
+    // admitting a durable run. The classifier entry must stay registered
+    // before the objective entry.
     let fixture = OrchestratorTestFixture::with_script(json!({
-        "keyed": [{
-            "match": objective,
-            "completion": { "content": execution_candidate(objective) }
-        }],
+        "keyed": [
+            {
+                "match": "You classify one user turn into MOA's public execution decision.",
+                "completion": {
+                    "content": r#"{"label":"execute","strategy":"durable","rationale":"The turn requests a durable fixture report run.","confidence_bps":9500,"missing_inputs":[]}"#
+                }
+            },
+            {
+                "match": objective,
+                "completion": { "content": execution_candidate(objective) }
+            }
+        ],
         "default": { "completion": { "content": "unexpected scripted request" } }
     }))
     .await?;

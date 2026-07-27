@@ -218,7 +218,13 @@ pub(super) fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<
         .env("MOA_AUTHZ_OPENFGA_STORE_ID", &config.fga_config.store_id)
         .env("MOA_AUTHZ_OPENFGA_MODEL_ID", &config.fga_config.model_id)
         .env("MOA_LINEAGE_SINK", "null")
-        .env("RUST_LOG", "warn");
+        .env(
+            "RUST_LOG",
+            // Honor an ambient override so a failing fixture run can be
+            // re-executed with routing/provider logs without editing code;
+            // the quiet default keeps ordinary runs readable.
+            std::env::var("MOA_FIXTURE_RUST_LOG").unwrap_or_else(|_| "warn".to_string()),
+        );
     if let Some(script_path) = config.script_path {
         command.env(
             "MOA_PROVIDERS_OVERRIDE",
