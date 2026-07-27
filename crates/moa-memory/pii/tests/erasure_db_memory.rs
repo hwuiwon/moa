@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
     types::contact::ContactId,
@@ -320,7 +319,10 @@ fn contact_node(
         }),
         pii_class: SensitivityClass::Phi,
         confidence: Some(0.97),
-        valid_from: Utc::now(),
+        valid_from: chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros(),
+        )
+        .expect("microsecond timestamp"),
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,
@@ -524,7 +526,10 @@ fn contact_edge(
         label: EdgeLabel::RelatesTo,
         start_uid,
         end_uid,
-        valid_from: Utc::now(),
+        valid_from: chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros(),
+        )
+        .expect("microsecond timestamp"),
         properties: json!({"source": "erasure_db_memory"}),
         storage_partition_id: Some(StoragePartitionId::for_tenant(tenant_id).to_string()),
         contact_id: Some(contact_id.to_string()),

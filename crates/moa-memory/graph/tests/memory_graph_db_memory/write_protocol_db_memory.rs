@@ -138,7 +138,7 @@ fn edge_intent(
         label,
         start_uid,
         end_uid,
-        valid_from: Utc::now(),
+        valid_from: moa_test_support::fixtures::pg_now(),
         properties: json!({ "kind": "test-edge", "index": index }),
         storage_partition_id: Some(storage_partition_id.to_string()),
         contact_id: None,

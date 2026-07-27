@@ -379,7 +379,10 @@ async fn lineage_writer_clickhouse_backend_splits_rows_from_scores_db() -> TestR
         .map_err(|error| test_error(format!("send should enqueue event: {error}")))?;
     tx.send(LineageEvent::Eval(moa_lineage_core::ScoreRecord {
         score_id,
-        ts: Utc::now(),
+        ts: chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros(),
+        )
+        .expect("microsecond timestamp"),
         target: moa_lineage_core::ScoreTarget::Turn {
             turn_id: moa_lineage_core::TurnId(turn_id),
         },

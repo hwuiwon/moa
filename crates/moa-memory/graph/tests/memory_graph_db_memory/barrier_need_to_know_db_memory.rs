@@ -7,7 +7,6 @@
 //! clearance travels the production path: `RlsContext::with_cleared_barriers` ->
 //! `ScopedConn` GUC -> the `rd_barrier_need_to_know` RESTRICTIVE policy.
 
-use chrono::Utc;
 use moa_core::types::identifiers::{StoragePartitionId, TenantId};
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
@@ -34,7 +33,7 @@ fn barrier_node_intent(tenant_id: TenantId, name: &str, barrier: Option<&str>) -
             moa_core::types::memory::InformationBarrierId::parse(value).expect("valid barrier")
         }),
         confidence: Some(0.9),
-        valid_from: Utc::now(),
+        valid_from: moa_test_support::fixtures::pg_now(),
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,
