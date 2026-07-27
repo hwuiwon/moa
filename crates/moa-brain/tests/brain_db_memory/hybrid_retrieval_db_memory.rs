@@ -1262,7 +1262,7 @@ async fn reinforced_fact_survives_consolidation_while_idle_one_off_expires_from_
 
     // Simulate two idle years for the one-off fact; the retained fact keeps
     // the fresh access stamp reinforcement just gave it.
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let aged = sqlx::query(
         "UPDATE moa.node_index SET last_accessed_at = $2 \
          WHERE tenant_id = $1 AND label = 'Fact' AND name = 'quarterly-report'",
@@ -1728,7 +1728,7 @@ async fn temporal_dual_read_as_of_uses_pgvector_without_calling_turbopuffer() {
         &storage_partition_id,
         "turbopuffer",
         "dual_read",
-        Some(Utc::now() + chrono::Duration::hours(1)),
+        Some(moa_test_support::fixtures::pg_now() + chrono::Duration::hours(1)),
     )
     .await;
 

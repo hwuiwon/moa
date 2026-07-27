@@ -70,7 +70,7 @@ async fn execution_task_citation_lineage_survives_reload_and_terminal_summary_db
         // nanosecond-granular CI clocks, not just microsecond-granular local ones.
         deadline_at: Some(
             chrono::DateTime::<Utc>::from_timestamp_micros(
-                (Utc::now() + Duration::hours(1)).timestamp_micros(),
+                (moa_test_support::fixtures::pg_now() + Duration::hours(1)).timestamp_micros(),
             )
             .expect("hour-offset deadline is representable at microsecond precision"),
         ),

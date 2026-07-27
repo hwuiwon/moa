@@ -1090,7 +1090,7 @@ async fn insert_lineage_row(
     .bind(session_id)
     .bind(user_id)
     .bind(tenant_id.to_string())
-    .bind(Utc::now())
+    .bind(chrono::DateTime::<chrono::Utc>::from_timestamp_micros(chrono::Utc::now().timestamp_micros()).expect("microsecond timestamp"))
     .bind(record_kind)
     .bind(json!({ "answer": answer_text }))
     .bind(answer_text)
@@ -1417,7 +1417,7 @@ async fn lineage_query_uses_typed_filters_and_rejects_legacy_sql_db() {
         .json(&json!({
             "filters": {
                 "record_kind": 7,
-                "from_time": (Utc::now() - Duration::minutes(5)).to_rfc3339()
+                "from_time": (chrono::DateTime::<chrono::Utc>::from_timestamp_micros(chrono::Utc::now().timestamp_micros()).expect("microsecond timestamp") - Duration::minutes(5)).to_rfc3339()
             },
             "order": "timestamp_asc",
             "limit": 10

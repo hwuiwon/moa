@@ -338,7 +338,7 @@ async fn consolidation_excludes_sealed_entity_content_db_memory() {
             super::test_kms(),
             tenant_id,
             ConsolidationOptions::default(),
-            Utc::now(),
+            moa_test_support::fixtures::pg_now(),
             Some(embedder.clone()),
         )
         .await

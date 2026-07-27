@@ -1,6 +1,5 @@
 //! PostgreSQL contracts for normalized skill-regression compile audits.
 
-use chrono::Utc;
 use moa_core::types::{
     execution_planning::{
         ExecutionCompileOutcome, ExecutionCompileSource, ExecutionPlanningAuditEnvelope,
@@ -28,7 +27,7 @@ fn candidate(
     draft_revision_uid: Uuid,
     evaluation_payload: Option<Value>,
 ) -> LearningCandidate {
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     LearningCandidate {
         id: Uuid::now_v7(),
         tenant_id,

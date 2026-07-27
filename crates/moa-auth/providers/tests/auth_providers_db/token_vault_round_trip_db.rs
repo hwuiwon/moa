@@ -45,7 +45,7 @@ async fn store_get_list_round_trip_db() {
                 "1//refresh-token".to_string().into_boxed_str(),
             )),
             token_type: Some("Bearer"),
-            expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            expires_at: Some(moa_test_support::fixtures::pg_now() + ChronoDuration::hours(1)),
             scopes: &["email".to_string(), "profile".to_string()],
         })
         .await
@@ -108,7 +108,7 @@ async fn store_token_upsert_overwrites_existing_db() {
                 access_token: SecretString::new(secret.to_string().into_boxed_str()),
                 refresh_token: None,
                 token_type: Some("Bearer"),
-                expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+                expires_at: Some(moa_test_support::fixtures::pg_now() + ChronoDuration::hours(1)),
                 scopes: &["email".to_string()],
             })
             .await
@@ -163,7 +163,7 @@ async fn get_token_expired_returns_unavailable_db() {
             access_token: SecretString::new("stale-token".to_string().into_boxed_str()),
             refresh_token: Some(SecretString::new("refresh".to_string().into_boxed_str())),
             token_type: Some("Bearer"),
-            expires_at: Some(Utc::now() - ChronoDuration::hours(1)),
+            expires_at: Some(moa_test_support::fixtures::pg_now() - ChronoDuration::hours(1)),
             scopes: &["email".to_string()],
         })
         .await
@@ -199,7 +199,7 @@ async fn envelope_encrypts_token_at_rest_db() {
             access_token: SecretString::new(plaintext.to_string().into_boxed_str()),
             refresh_token: Some(SecretString::new("1//refresh".to_string().into_boxed_str())),
             token_type: Some("Bearer"),
-            expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            expires_at: Some(moa_test_support::fixtures::pg_now() + ChronoDuration::hours(1)),
             scopes: &["email".to_string()],
         })
         .await
@@ -296,7 +296,7 @@ async fn get_token_expired_refreshes_and_persists_db() {
                 "old-refresh".to_string().into_boxed_str(),
             )),
             token_type: Some("Bearer"),
-            expires_at: Some(Utc::now() - ChronoDuration::hours(1)),
+            expires_at: Some(moa_test_support::fixtures::pg_now() - ChronoDuration::hours(1)),
             scopes: &["email".to_string()],
         })
         .await
@@ -312,7 +312,9 @@ async fn get_token_expired_refreshes_and_persists_db() {
         vec!["email".to_string(), "profile".to_string()]
     );
     assert!(
-        token.expires_at.is_some_and(|expiry| expiry > Utc::now()),
+        token
+            .expires_at
+            .is_some_and(|expiry| expiry > moa_test_support::fixtures::pg_now()),
         "refreshed token must carry a future expiry"
     );
 
@@ -450,7 +452,7 @@ async fn expired_lease_requires_explicit_relink_without_remote_retry_db() {
                 "relinked-refresh".to_string().into_boxed_str(),
             )),
             token_type: Some("Bearer"),
-            expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            expires_at: Some(moa_test_support::fixtures::pg_now() + ChronoDuration::hours(1)),
             scopes: &["email".to_string()],
         })
         .await
@@ -598,7 +600,7 @@ fn expired_google_token(
             refresh_token.to_string().into_boxed_str(),
         )),
         token_type: Some("Bearer"),
-        expires_at: Some(Utc::now() - ChronoDuration::hours(1)),
+        expires_at: Some(moa_test_support::fixtures::pg_now() - ChronoDuration::hours(1)),
         scopes: &[],
     }
 }

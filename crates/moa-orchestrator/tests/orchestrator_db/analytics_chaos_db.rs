@@ -90,7 +90,7 @@ async fn insert_event(
 /// Seeds a two-turn session (six events) so the events pass has real rows.
 async fn seed_two_turn_session(pool: &PgPool, tenant: Uuid, session: Uuid) -> TestResult<()> {
     seed_session(pool, tenant, session).await?;
-    let base = Utc::now() - ChronoDuration::days(1);
+    let base = moa_test_support::fixtures::pg_now() - ChronoDuration::days(1);
     let tool_a = Uuid::now_v7();
     let tool_b = Uuid::now_v7();
     for (seq, event_type, payload, offset_ms) in [

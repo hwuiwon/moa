@@ -74,7 +74,7 @@ async fn analytics_export_full_pass_load_db() -> TestResult<()> {
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
     let tenant = Uuid::now_v7();
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     let seed_start = Instant::now();
     seed_sessions(&pool, tenant, now).await?;

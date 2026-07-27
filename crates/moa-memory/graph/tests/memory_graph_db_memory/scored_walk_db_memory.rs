@@ -85,7 +85,7 @@ async fn zero_prior_hub_fanout_is_pruned_in_walk_and_deep_paths_survive_with_sco
         tenant_scope(&storage_partition_id),
         super::test_kms(),
     );
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let seed_uid = graph
         .create_node(node_intent(
             &storage_partition_id,

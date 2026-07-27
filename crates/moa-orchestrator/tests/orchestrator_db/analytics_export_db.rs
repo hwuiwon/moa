@@ -100,7 +100,7 @@ async fn insert_event(
 /// BrainResponse carrying token/cost/model data.
 async fn seed_two_turn_session(pool: &PgPool, tenant: Uuid, session: Uuid) -> TestResult<()> {
     seed_session(pool, tenant, session).await?;
-    let base = Utc::now() - Duration::days(1);
+    let base = moa_test_support::fixtures::pg_now() - Duration::days(1);
     let tool_a = Uuid::now_v7();
     let tool_b = Uuid::now_v7();
 
@@ -814,7 +814,7 @@ async fn execution_analytics_export_matches_postgres_facts_field_for_field_db() 
     .fetch_one(&pool)
     .await?;
 
-    let future_floor = Utc::now() + Duration::days(1);
+    let future_floor = moa_test_support::fixtures::pg_now() + Duration::days(1);
     seed_completed_execution_upgrade_state(&pool, future_floor).await?;
     let mock = Mock::new();
     let run_handler = mock.add(handlers::record::<DimExecutionRunRow>());
@@ -877,7 +877,7 @@ async fn execution_export_completes_when_the_captured_high_water_row_moves_db() 
     let session = Uuid::now_v7();
     seed_session(&pool, tenant, session).await?;
     let fixture = seed_execution_analytics_fixture(&pool, tenant, session).await?;
-    seed_completed_execution_upgrade_state(&pool, Utc::now()).await?;
+    seed_completed_execution_upgrade_state(&pool, moa_test_support::fixtures::pg_now()).await?;
 
     let old_run_seq: i64 =
         sqlx::query_scalar("SELECT analytics_change_seq FROM moa.execution_run WHERE run_uid = $1")
@@ -962,7 +962,7 @@ async fn analytics_export_events_cursor_resumes_after_restart_db() -> TestResult
     let session = Uuid::now_v7();
     seed_session(&pool, tenant, session).await?;
 
-    let base = Utc::now() - Duration::days(1);
+    let base = moa_test_support::fixtures::pg_now() - Duration::days(1);
     let empty = json!({"data": {}});
     insert_event(
         &pool,

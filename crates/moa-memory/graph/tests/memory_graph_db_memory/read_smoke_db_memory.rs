@@ -54,7 +54,7 @@ async fn graph_store_create_node_projects_relational_node_index_row() {
             NodeLabel::Entity,
             uid,
             &format!("template smoke {run_id}"),
-            Utc::now(),
+            moa_test_support::fixtures::pg_now(),
         ))
         .await
         .expect("create relational graph node");

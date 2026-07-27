@@ -140,7 +140,7 @@ async fn candidate_groups_include_below_floor_exclude_failed_and_out_of_window()
     // populated.
     with_test_store(|store| async move {
         let tenant = tenant_id("recurrence-grouping");
-        let now = Utc::now();
+        let now = moa_test_support::fixtures::pg_now();
 
         // `hot`: three resolved in-window, plus one failed that must be excluded
         // from the count and members.
@@ -261,7 +261,7 @@ async fn candidate_groups_are_bounded_to_the_most_recent_fingerprints() {
     // unbounded number of distinct low-count tasks cannot blow up the tick.
     with_test_store(|store| async move {
         let tenant = tenant_id("recurrence-bound");
-        let now = Utc::now();
+        let now = moa_test_support::fixtures::pg_now();
 
         // Three single-occurrence fingerprints at descending recency: `newest`,
         // `middle`, `oldest`.
@@ -309,7 +309,7 @@ async fn candidate_decisions_lookup_returns_status_and_time() {
     // suppression sees exactly the decisions for the fingerprint it is judging.
     with_test_store(|store| async move {
         let tenant = tenant_id("recurrence-decisions");
-        let now = Utc::now();
+        let now = moa_test_support::fixtures::pg_now();
         let candidate = LearningCandidate {
             id: Uuid::now_v7(),
             tenant_id: tenant,
@@ -368,7 +368,7 @@ async fn batched_candidate_decisions_key_each_fingerprint_and_ignore_others() {
     // per-fingerprint N+1.
     with_test_store(|store| async move {
         let tenant = tenant_id("recurrence-batch-decisions");
-        let now = Utc::now();
+        let now = moa_test_support::fixtures::pg_now();
         for (hash, status) in [
             ("alpha", LearningCandidateStatus::Rejected),
             ("beta", LearningCandidateStatus::Promoted),

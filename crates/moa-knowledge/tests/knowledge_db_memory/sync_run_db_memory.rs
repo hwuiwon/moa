@@ -1,6 +1,6 @@
 //! DB integration coverage for tenant knowledge sync-run inspection.
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
 use moa_knowledge::{
@@ -30,7 +30,7 @@ fn discovery(db: &postgres::TestDb) -> PostgresKnowledgeDiscoveryStore {
 }
 
 fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
         connection_uid: Uuid::now_v7(),
         tenant_id,
@@ -103,7 +103,7 @@ fn step(
     status: IngestionStepStatus,
     offset_ms: i64,
 ) -> KnowledgeIngestionStep {
-    let started_at = Utc::now() + Duration::milliseconds(offset_ms);
+    let started_at = moa_test_support::fixtures::pg_now() + Duration::milliseconds(offset_ms);
     KnowledgeIngestionStep {
         step_uid: Uuid::now_v7(),
         sync_run_uid,

@@ -41,7 +41,7 @@ async fn quality_scores_count_only_resolved_outcomes_and_are_idempotent() {
     let unresolved_uid = Uuid::now_v7();
     let pending_uid = Uuid::now_v7();
     let outside_segment_uid = Uuid::now_v7();
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     test_db
         .store()
@@ -234,7 +234,7 @@ async fn quality_scores_skip_when_task_segment_outcome_source_is_unavailable() {
     let user_id = UserId::new("quality-no-source-user");
     let session_id = SessionId::new();
     let node_uid = Uuid::now_v7();
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     test_db
         .store()
@@ -297,7 +297,7 @@ async fn quality_scoring_weights_rendered_window_hits_above_deep_rank_passengers
     let session_id = SessionId::new();
     let rendered_uid = Uuid::now_v7();
     let passenger_uid = Uuid::now_v7();
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     test_db
         .store()
@@ -392,7 +392,7 @@ async fn quality_scoring_excludes_task_segments_outside_lookback_window() {
     let out_of_window_session = SessionId::new();
     let in_window_uid = Uuid::now_v7();
     let out_of_window_uid = Uuid::now_v7();
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let out_of_window = now - chrono::Duration::days(60);
 
     for session_id in [in_window_session, out_of_window_session] {

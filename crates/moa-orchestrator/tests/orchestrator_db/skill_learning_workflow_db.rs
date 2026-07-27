@@ -160,7 +160,7 @@ mod skill_learning {
         let tenant_id = TenantId::new();
         let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
         let task = "Rotate the tenant deploy token";
-        let now = Utc::now();
+        let now = moa_test_support::fixtures::pg_now();
 
         // Each session holds 4 tool calls — below the single-session floor of 8, at
         // or above the relaxed recurrence floor of 3. Confidence orders the exemplar.
@@ -334,7 +334,7 @@ mod skill_learning {
         let tenant_id = TenantId::new();
         let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
         let task = "Reconcile the billing ledger";
-        let now = Utc::now();
+        let now = moa_test_support::fixtures::pg_now();
         let member = seed_recurrence_member(
             &test_db,
             tenant_id,
@@ -449,7 +449,7 @@ async fn seed_experience_fixture(
         "Distill a reusable Rust workflow",
         config.learning.skills.min_tool_calls,
         0.95,
-        Utc::now(),
+        moa_test_support::fixtures::pg_now(),
     )
     .await;
     (

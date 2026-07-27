@@ -1,6 +1,5 @@
 //! DB integration coverage for operation-fenced knowledge link claims.
 
-use chrono::Utc;
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
 use moa_knowledge::{
@@ -33,7 +32,7 @@ fn new_claim(tenant_id: TenantId, connection_uid: Uuid, operation_id: &str) -> N
 }
 
 fn connection(tenant_id: TenantId) -> KnowledgeConnection {
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
         connection_uid: Uuid::now_v7(),
         tenant_id,

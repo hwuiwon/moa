@@ -118,7 +118,7 @@ async fn lexical_search_orders_results_by_combined_recency_confidence_reference_
     };
     let storage_partition_id = format!("lexical-ranking-{}", Uuid::now_v7().simple());
     let graph = graph_store(&test_db, &storage_partition_id);
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     let medium = insert_fact(
         &graph,
@@ -169,7 +169,7 @@ async fn lexical_search_recency_weight_dominates_when_confidence_and_refs_equal(
     };
     let storage_partition_id = format!("lexical-recency-{}", Uuid::now_v7().simple());
     let graph = graph_store(&test_db, &storage_partition_id);
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     let old = insert_fact(
         &graph,
@@ -211,7 +211,7 @@ async fn lexical_search_confidence_weight_dominates_when_recency_and_refs_equal(
     };
     let storage_partition_id = format!("lexical-confidence-{}", Uuid::now_v7().simple());
     let graph = graph_store(&test_db, &storage_partition_id);
-    let valid_from = Utc::now() - Duration::days(1);
+    let valid_from = moa_test_support::fixtures::pg_now() - Duration::days(1);
 
     let low = insert_fact(&graph, &storage_partition_id, valid_from, 0.2, 8).await;
     let high = insert_fact(&graph, &storage_partition_id, valid_from, 0.9, 8).await;
@@ -232,7 +232,7 @@ async fn lexical_search_reference_count_breaks_ties_when_recency_and_confidence_
     };
     let storage_partition_id = format!("lexical-refs-{}", Uuid::now_v7().simple());
     let graph = graph_store(&test_db, &storage_partition_id);
-    let valid_from = Utc::now() - Duration::days(1);
+    let valid_from = moa_test_support::fixtures::pg_now() - Duration::days(1);
 
     let few = insert_fact(&graph, &storage_partition_id, valid_from, 0.7, 1).await;
     let many = insert_fact(&graph, &storage_partition_id, valid_from, 0.7, 30).await;
@@ -253,7 +253,7 @@ async fn lexical_search_returns_top_k_when_more_than_k_match() {
     };
     let storage_partition_id = format!("lexical-topk-{}", Uuid::now_v7().simple());
     let graph = graph_store(&test_db, &storage_partition_id);
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     let mut expected = Vec::new();
 
     for offset in (0..20).rev() {
@@ -285,7 +285,7 @@ async fn lexical_search_excludes_invalidated_nodes_with_valid_to_set() {
     };
     let storage_partition_id = format!("lexical-validto-{}", Uuid::now_v7().simple());
     let graph = graph_store(&test_db, &storage_partition_id);
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     let keep_a = insert_fact(
         &graph,
@@ -391,7 +391,7 @@ async fn lookup_seeds_batch_matches_single_name_lookups() {
     };
     let storage_partition_id = format!("lexical-batch-{}", Uuid::now_v7().simple());
     let graph = graph_store(&test_db, &storage_partition_id);
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
 
     // "alpha" matches two facts whose ranking hinges on the recency weight: the
     // fresh-but-low-quality fact must outrank the old-but-high-quality one, so a

@@ -161,7 +161,7 @@ async fn normalized_planning_audits_return_first_measurements_and_conflict_db() 
     let tenant_id = TenantId::new();
     let scope = ExecutionScope::Tenant { tenant_id };
     let session_id = SessionId::new();
-    let first_at = Utc::now();
+    let first_at = moa_test_support::fixtures::pg_now();
 
     let decision = ExecutionRouteDecision::Execute {
         strategy: ExecutionStrategy::Durable,
@@ -2166,7 +2166,7 @@ async fn reservation_budget_or_deadline_rejection_consumes_zero_task_units_db() 
         (
             "deadline",
             ExecutionBudgetLimit {
-                deadline_at: Some(Utc::now() - Duration::seconds(1)),
+                deadline_at: Some(moa_test_support::fixtures::pg_now() - Duration::seconds(1)),
                 ..budget(1)
             },
             ReservationRejection::DeadlineElapsed,
@@ -2318,7 +2318,9 @@ async fn retry_and_input_resume_terminalize_elapsed_or_exhausted_run_envelope_db
                 &format!("elapsed-{kind}"),
                 ExecutionRunStatus::Queued,
                 ExecutionBudgetLimit {
-                    deadline_at: Some(Utc::now() + Duration::milliseconds(150)),
+                    deadline_at: Some(
+                        moa_test_support::fixtures::pg_now() + Duration::milliseconds(150),
+                    ),
                     ..budget(2)
                 },
             ),
@@ -4659,7 +4661,7 @@ fn canonical_plan(seed: u8) -> CanonicalExecutionPlan {
 /// almost always on nanosecond-granular Linux CI clocks. Every budget a test
 /// may read back must build its deadline through this helper.
 fn pg_deadline(offset: Duration) -> chrono::DateTime<Utc> {
-    let deadline = Utc::now() + offset;
+    let deadline = moa_test_support::fixtures::pg_now() + offset;
     chrono::DateTime::<Utc>::from_timestamp_micros(deadline.timestamp_micros())
         .expect("test deadline offsets are representable at microsecond precision")
 }
