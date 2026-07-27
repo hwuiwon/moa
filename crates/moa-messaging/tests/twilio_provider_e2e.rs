@@ -7,7 +7,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::Utc;
 use moa_config::MessagingConfig;
 use moa_core::types::credentials::{DeploymentSecret, DeploymentSecrets};
 use moa_messaging::{
@@ -42,7 +41,14 @@ async fn twilio_provider_e2e_sends_sms_to_configured_test_number() {
         .expect("the live lane configures an account sid");
     let message = TwilioSmsMessage::new(
         test_to.clone(),
-        format!("MOA Twilio SMS e2e {}", Utc::now().to_rfc3339()),
+        format!(
+            "MOA Twilio SMS e2e {}",
+            chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+                chrono::Utc::now().timestamp_micros()
+            )
+            .expect("microsecond timestamp")
+            .to_rfc3339()
+        ),
     );
 
     let initial = client

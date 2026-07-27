@@ -35,7 +35,7 @@ async fn knowledge_service_accepts_injected_ingestion_runner_without_global_conf
         graph_nodes_upserted: 0,
         graph_edges_upserted: 0,
         error_code: None,
-        started_at: Utc::now(),
+        started_at: moa_test_support::fixtures::pg_now(),
         finished_at: None,
         provider_trigger_completed_at: None,
     };

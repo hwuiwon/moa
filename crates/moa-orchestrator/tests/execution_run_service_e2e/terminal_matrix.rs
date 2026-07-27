@@ -1731,7 +1731,7 @@ fn terminal_blueprint() -> Result<RunBlueprint> {
         authorization: authorization.clone(),
         approved_budget: budget.clone(),
         config: ExecutionConfig::default(),
-        now: chrono::Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     });
     let compiled = outcome.compiled.with_context(|| {
         format!(
@@ -1899,7 +1899,7 @@ fn generous_budget() -> ExecutionBudgetLimit {
         max_tasks: Some(100),
         max_tool_calls: Some(100),
         max_retrieved_bytes: Some(1_000_000),
-        deadline_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        deadline_at: Some(moa_test_support::fixtures::pg_now() + chrono::Duration::hours(1)),
     }
 }
 

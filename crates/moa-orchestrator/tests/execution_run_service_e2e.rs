@@ -167,7 +167,7 @@ async fn output_only_run_is_durable_detached_and_reaches_terminal_state() -> Res
         authorization: authorization.clone(),
         approved_budget: approved_budget.clone(),
         config: ExecutionConfig::default(),
-        now: chrono::Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     })
     .compiled
     .context("output-only execution plan should compile")?;
@@ -322,7 +322,7 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
         max_tasks: Some(1),
         max_tool_calls: Some(1),
         max_retrieved_bytes: Some(1_000),
-        deadline_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        deadline_at: Some(moa_test_support::fixtures::pg_now() + chrono::Duration::minutes(5)),
     };
     let compiled = compile(CompileExecutionRequest {
         goal: ExecutionGoalContract {
@@ -363,7 +363,7 @@ async fn cancellation_preserves_preconfirmation_null_and_postqueue_timestamp() -
         authorization: authorization.clone(),
         approved_budget: approved_budget.clone(),
         config: ExecutionConfig::default(),
-        now: chrono::Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     })
     .compiled
     .context("cancellation queue-history plan should compile")?;
@@ -587,7 +587,7 @@ async fn run_wake_handoff_case(mode: &str) -> Result<()> {
         max_tasks: Some(1),
         max_tool_calls: Some(1),
         max_retrieved_bytes: Some(1),
-        deadline_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        deadline_at: Some(moa_test_support::fixtures::pg_now() + chrono::Duration::minutes(5)),
     };
     let compiled = compile(CompileExecutionRequest {
         goal: ExecutionGoalContract {
@@ -634,7 +634,7 @@ async fn run_wake_handoff_case(mode: &str) -> Result<()> {
         authorization: authorization.clone(),
         approved_budget: approved_budget.clone(),
         config: ExecutionConfig::default(),
-        now: chrono::Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     })
     .compiled
     .context("wake handoff plan should compile")?;
@@ -814,7 +814,7 @@ async fn waiting_replan_with_exhausted_budget_finalizes_without_amendment() -> R
         max_tasks: Some(3),
         max_tool_calls: Some(100),
         max_retrieved_bytes: Some(100),
-        deadline_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        deadline_at: Some(moa_test_support::fixtures::pg_now() + chrono::Duration::minutes(5)),
     };
     let compiled = compile(CompileExecutionRequest {
         goal: ExecutionGoalContract {
@@ -861,7 +861,7 @@ async fn waiting_replan_with_exhausted_budget_finalizes_without_amendment() -> R
         authorization: authorization.clone(),
         approved_budget: approved_budget.clone(),
         config: ExecutionConfig::default(),
-        now: chrono::Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     })
     .compiled
     .context("waiting-replan fixture plan should compile")?;
@@ -1162,7 +1162,7 @@ async fn elapsed_reservation_persists_typed_failure_and_run_finalizes() -> Resul
         max_tasks: Some(1),
         max_tool_calls: Some(1),
         max_retrieved_bytes: Some(1),
-        deadline_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        deadline_at: Some(moa_test_support::fixtures::pg_now() + chrono::Duration::minutes(5)),
     };
     let compiled = compile(CompileExecutionRequest {
         goal: ExecutionGoalContract {
@@ -1203,7 +1203,7 @@ async fn elapsed_reservation_persists_typed_failure_and_run_finalizes() -> Resul
         authorization: authorization.clone(),
         approved_budget: compile_budget.clone(),
         config: ExecutionConfig::default(),
-        now: chrono::Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     })
     .compiled
     .context("elapsed reservation fixture plan should compile")?;
@@ -1216,7 +1216,7 @@ async fn elapsed_reservation_persists_typed_failure_and_run_finalizes() -> Resul
         tenant_id: session.tenant_id,
     };
     let runtime_budget = ExecutionBudgetLimit {
-        deadline_at: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+        deadline_at: Some(moa_test_support::fixtures::pg_now() - chrono::Duration::seconds(1)),
         ..compile_budget
     };
     let (planning_context_uid, planning_context_hash) = create_test_planning_context(

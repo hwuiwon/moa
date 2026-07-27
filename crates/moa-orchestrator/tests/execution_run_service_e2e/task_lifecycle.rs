@@ -166,7 +166,7 @@ async fn elapsed_deadline_dispatches_zero_service_e2e() -> Result<()> {
     );
     let runtime_budget = ExecutionBudgetLimit {
         max_tasks: Some(0),
-        deadline_at: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+        deadline_at: Some(moa_test_support::fixtures::pg_now() - chrono::Duration::seconds(1)),
         ..prepared.planning.snapshot.budget.clone()
     };
     let run = create_direct_run(&prepared, runtime_budget, None).await?;
@@ -1177,7 +1177,7 @@ async fn prepare_capability_run(
         authorization: planning.snapshot.authorization.clone(),
         approved_budget: planning.snapshot.budget.clone(),
         config: moa_config::ExecutionConfig::default(),
-        now: chrono::Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     })
     .compiled
     .with_context(|| format!("compile lifecycle plan for `{label}`"))?;
@@ -1216,7 +1216,7 @@ fn recompile_with_node_output_schema(
         authorization: prepared.planning.snapshot.authorization.clone(),
         approved_budget: prepared.planning.snapshot.budget.clone(),
         config: moa_config::ExecutionConfig::default(),
-        now: chrono::Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     });
     prepared.compiled = outcome.compiled.with_context(|| {
         format!(

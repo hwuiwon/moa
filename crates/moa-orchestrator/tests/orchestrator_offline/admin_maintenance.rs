@@ -1,6 +1,5 @@
 //! Admin maintenance service helper coverage.
 
-use chrono::Utc;
 use moa_core::traits::IdentityType;
 use moa_core::{types::identifiers::TenantId, types::session::CheckpointHandle};
 use moa_memory_vector::PromotionReport;
@@ -125,7 +124,7 @@ fn checkpoint_rollback_response_does_not_carry_database_url_field() {
             id: "br-checkpoint".to_string(),
             label: "before-deploy".to_string(),
             connection_url: "postgres://checkpoint.example/moa".to_string(),
-            created_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
             session_id: None,
         },
     };

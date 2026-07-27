@@ -47,7 +47,7 @@ async fn query_trace_renders_populated_retrieval_lineage_db_memory() {
         storage_partition_id: storage_partition_id.clone(),
         user_id: UserId::new("query-trace-user"),
         scope: MemoryScope::Tenant { tenant_id },
-        ts: Utc::now(),
+        ts: moa_test_support::fixtures::pg_now(),
         query_original: "How do I rotate payroll keys?".to_string(),
         query_expansions: vec!["rotate payroll keys".to_string()],
         vector_hits: vec![VecHit {
@@ -130,7 +130,7 @@ async fn query_trace_renders_populated_retrieval_lineage_db_memory() {
     .bind(session_id.0)
     .bind("query-trace-user")
     .bind(storage_partition_id.as_str())
-    .bind(Utc::now())
+    .bind(moa_test_support::fixtures::pg_now())
     .bind(1_i16)
     .bind(RecordKind::Retrieval.as_i16())
     .bind(serde_json::to_value(event).expect("retrieval lineage should serialize"))

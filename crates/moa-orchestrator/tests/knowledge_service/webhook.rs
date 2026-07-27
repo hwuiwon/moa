@@ -103,7 +103,7 @@ async fn provider_cdc_webhook_advances_provider_syncing_run_and_dispatches() {
             graph_nodes_upserted: 0,
             graph_edges_upserted: 0,
             error_code: None,
-            started_at: Utc::now(),
+            started_at: moa_test_support::fixtures::pg_now(),
             finished_at: None,
             provider_trigger_completed_at: None,
         })
@@ -482,7 +482,7 @@ async fn knowledge_auto_sync_parser_webhook_rejects_bad_signature_and_stores_red
             graph_nodes_upserted: 0,
             graph_edges_upserted: 0,
             error_code: None,
-            started_at: Utc::now(),
+            started_at: moa_test_support::fixtures::pg_now(),
             finished_at: None,
             provider_trigger_completed_at: None,
         })
@@ -618,7 +618,7 @@ async fn knowledge_auto_sync_parser_webhook_rejects_bad_custom_header_and_accept
             graph_nodes_upserted: 0,
             graph_edges_upserted: 0,
             error_code: None,
-            started_at: Utc::now(),
+            started_at: moa_test_support::fixtures::pg_now(),
             finished_at: None,
             provider_trigger_completed_at: None,
         })
@@ -727,7 +727,7 @@ async fn parser_completion_webhook_rejects_unbound_object_before_recording() {
             graph_nodes_upserted: 0,
             graph_edges_upserted: 0,
             error_code: None,
-            started_at: Utc::now(),
+            started_at: moa_test_support::fixtures::pg_now(),
             finished_at: None,
             provider_trigger_completed_at: None,
         })

@@ -47,7 +47,7 @@ async fn clickhouse_executor_returns_empty_result_and_metadata_offline() {
             field: "created_at".to_string(),
             operator: AnalyticsFilterOperator::Gte,
             value: Some(AnalyticsCell::String(
-                (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(),
+                (moa_test_support::fixtures::pg_now() - chrono::Duration::days(1)).to_rfc3339(),
             )),
         }],
         order_by: Vec::new(),

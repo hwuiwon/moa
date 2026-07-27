@@ -280,7 +280,7 @@ pub fn experience_input(loaded: &LoadedSession, task_summary: &str) -> Experienc
         duration_ms: Some(100),
         assessment_policy_version: "assessment_v1".to_string(),
         extraction_policy_version: "experience_v1".to_string(),
-        created_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
     };
     ExperienceDistillationInput {
         experience,
@@ -414,7 +414,7 @@ fn push_event(events: &mut Vec<EventRecord>, session_id: SessionId, event: Event
         sequence_num: events.len() as u64 + 1,
         event_type: event.event_type(),
         event,
-        timestamp: Utc::now(),
+        timestamp: moa_test_support::fixtures::pg_now(),
         brain_id: None,
         hand_id: None,
         token_count: None,
@@ -556,7 +556,7 @@ impl LLMProvider for RaceMutatingProvider {
                         Value::String(Uuid::now_v7().to_string()),
                     );
                 }
-                candidate.updated_at = Utc::now();
+                candidate.updated_at = moa_test_support::fixtures::pg_now();
                 self.store.append_learning_candidate(&candidate).await?;
             }
         }

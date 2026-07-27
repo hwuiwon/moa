@@ -522,7 +522,7 @@ async fn mock_connector_end_to_end_db_memory() {
             tenant_id,
             contact_id,
         },
-        ts: Utc::now(),
+        ts: moa_test_support::fixtures::pg_now(),
         query_original: "Where is the finance payroll control?".to_string(),
         query_expansions: vec!["finance payroll control".to_string()],
         vector_hits: vec![VecHit {
@@ -762,7 +762,7 @@ async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_inges
     let pool = db.store().pool().clone();
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
-    let modified_after = Utc::now();
+    let modified_after = moa_test_support::fixtures::pg_now();
     let scope = RlsContext::tenant(tenant_id);
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
         pool.clone(),
@@ -780,8 +780,8 @@ async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_inges
             metadata: json!({ "safe": "connection" }),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: Some(modified_after),
         })
         .await
@@ -902,7 +902,7 @@ async fn knowledge_auto_sync_record_listing_failure_marks_sync_retryable_db_memo
     let pool = db.store().pool().clone();
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
-    let modified_after = Utc::now();
+    let modified_after = moa_test_support::fixtures::pg_now();
     let scope = RlsContext::tenant(tenant_id);
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
         pool.clone(),
@@ -920,8 +920,8 @@ async fn knowledge_auto_sync_record_listing_failure_marks_sync_retryable_db_memo
             metadata: json!({ "safe": "connection" }),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: Some(modified_after),
         })
         .await
@@ -985,7 +985,7 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
     let sync_run_uid = Uuid::now_v7();
-    let modified_after = Utc::now();
+    let modified_after = moa_test_support::fixtures::pg_now();
     let mut steps = FakeKnowledgeSyncIngestionSteps::new(KnowledgeSyncPreparedRun {
         run: KnowledgeSyncRun {
             sync_run_uid,
@@ -1005,7 +1005,7 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
             graph_nodes_upserted: 0,
             graph_edges_upserted: 0,
             error_code: None,
-            started_at: Utc::now(),
+            started_at: moa_test_support::fixtures::pg_now(),
             finished_at: None,
             provider_trigger_completed_at: None,
         },
@@ -1020,8 +1020,8 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: Some(modified_after),
         },
         provider: PROVIDER.to_string(),
@@ -1172,7 +1172,7 @@ async fn knowledge_sync_ingestion_workflow_derives_run_identity_and_pages_journa
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
     let sync_run_uid = Uuid::now_v7();
-    let last_synced_at = Utc::now();
+    let last_synced_at = moa_test_support::fixtures::pg_now();
     let mut prepared = fake_prepared_sync_run(tenant_id, connection_uid, sync_run_uid, 10);
     // A prior watermark keeps this an incremental sync so the listing step receives
     // `modified_after` and the exhaustive-prune branch stays inactive.

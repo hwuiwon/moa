@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use moa_core::{
     events::Event, events::EventType, traits::BuiltInTool, traits::Identity, traits::IdentityType,
     traits::ToolContext, types::action_policy::ActionClass, types::action_policy::RiskLevel,
@@ -140,7 +139,7 @@ fn tool_result_record(tool_call_id: ToolCallId) -> EventRecord {
             success: true,
             duration_ms: 1,
         },
-        timestamp: Utc::now(),
+        timestamp: moa_test_support::fixtures::pg_now(),
         brain_id: None,
         hand_id: None,
         token_count: None,

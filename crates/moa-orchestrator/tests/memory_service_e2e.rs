@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
 use moa_authz::fga_subject;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
@@ -121,7 +120,7 @@ async fn public_memory_reads_use_persisted_session_policy_and_durable_audit_serv
                     label: EdgeLabel::RelatesTo,
                     start_uid: seed_uid,
                     end_uid: neighbor_uid,
-                    valid_from: Utc::now(),
+                    valid_from: moa_test_support::fixtures::pg_now(),
                     properties: json!({ "source": "memory-service-e2e" }),
                     storage_partition_id: Some(tenant_id.to_string()),
                     contact_id: None,
@@ -621,7 +620,7 @@ fn node(
         properties: json!({ "summary": name }),
         pii_class: SensitivityClass::None,
         confidence: Some(0.95),
-        valid_from: Utc::now(),
+        valid_from: moa_test_support::fixtures::pg_now(),
         embedding: None,
         embedding_model: None,
         embedding_model_version: None,

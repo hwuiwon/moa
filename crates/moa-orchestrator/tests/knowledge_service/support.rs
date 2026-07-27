@@ -355,7 +355,7 @@ fn fake_prepared_sync_run(
             graph_nodes_upserted: 0,
             graph_edges_upserted: 0,
             error_code: None,
-            started_at: Utc::now(),
+            started_at: moa_test_support::fixtures::pg_now(),
             finished_at: None,
             provider_trigger_completed_at: None,
         },
@@ -370,8 +370,8 @@ fn fake_prepared_sync_run(
             metadata: json!({}),
             source_selection: json!({}),
             information_barrier: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
             last_synced_at: None,
         },
         provider: PROVIDER.to_string(),
@@ -553,7 +553,7 @@ impl KnowledgeSyncIngestionSteps for DbKnowledgeAutoSyncSteps {
             .ok_or_else(|| TerminalError::new_with_code(404, "knowledge sync run not found"))?;
         run.status = SyncRunStatus::Completed;
         run.error_code = None;
-        run.finished_at = Some(Utc::now());
+        run.finished_at = Some(moa_test_support::fixtures::pg_now());
         self.repository
             .update_sync_run(run)
             .await
@@ -565,7 +565,7 @@ impl KnowledgeSyncIngestionSteps for DbKnowledgeAutoSyncSteps {
             .await
             .map_err(test_handler_error)?
             .ok_or_else(|| TerminalError::new_with_code(404, "knowledge connection not found"))?;
-        connection.last_synced_at = Some(Utc::now());
+        connection.last_synced_at = Some(moa_test_support::fixtures::pg_now());
         self.repository
             .upsert_connection(connection)
             .await
@@ -598,7 +598,7 @@ impl KnowledgeSyncIngestionSteps for DbKnowledgeAutoSyncSteps {
         };
         run.records_failed = run.records_failed.saturating_add(1);
         run.error_code = Some(classification.error_code.to_string());
-        run.finished_at = Some(Utc::now());
+        run.finished_at = Some(moa_test_support::fixtures::pg_now());
         self.repository
             .update_sync_run(run)
             .await
@@ -633,7 +633,7 @@ async fn create_provider_synced_run(
             graph_nodes_upserted: 0,
             graph_edges_upserted: 0,
             error_code: None,
-            started_at: Utc::now(),
+            started_at: moa_test_support::fixtures::pg_now(),
             finished_at: None,
             provider_trigger_completed_at: None,
         })
@@ -771,8 +771,8 @@ fn fixture_connection(tenant_id: TenantId) -> KnowledgeConnection {
         metadata: json!({ "safe": "connection" }),
         source_selection: json!({}),
         information_barrier: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
+        updated_at: moa_test_support::fixtures::pg_now(),
         last_synced_at: None,
     }
 }
@@ -807,7 +807,7 @@ fn fixture_object(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeObject 
             "nested": { "authorization": SECRET_BEARER }
         }),
         status: ObjectStatus::Active,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         deleted_at: None,
     }
 }
@@ -823,7 +823,7 @@ fn fixture_version(object_uid: Uuid) -> DocumentVersion {
             "safe": "version",
             "refresh_token": SECRET_TOKEN
         }),
-        created_at: Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
     }
 }
 
@@ -961,7 +961,7 @@ async fn complete_sync_run(
         )));
     };
     run.status = SyncRunStatus::Completed;
-    run.finished_at = Some(Utc::now());
+    run.finished_at = Some(moa_test_support::fixtures::pg_now());
     repository.update_sync_run(run).await
 }
 
@@ -1024,7 +1024,7 @@ async fn insert_retrieval_lineage_row(
     .bind(SessionId::new().0)
     .bind("task14-contact")
     .bind(StoragePartitionId::for_tenant(tenant_id).to_string())
-    .bind(Utc::now())
+    .bind(moa_test_support::fixtures::pg_now())
     .bind(1_i16)
     .bind(RecordKind::Retrieval.as_i16())
     .bind(serde_json::to_value(event).expect("retrieval lineage should serialize"))
@@ -1090,7 +1090,7 @@ async fn create_contact_group_graph_node(
             }),
             pii_class: SensitivityClass::None,
             confidence: Some(0.95),
-            valid_from: Utc::now(),
+            valid_from: moa_test_support::fixtures::pg_now(),
             embedding: None,
             embedding_model: None,
             embedding_model_version: None,
@@ -1650,7 +1650,7 @@ fn provider_record(
         source_uri: Some(source_uri.to_string()),
         change_token: Some(format!("{source_id}-v1")),
         deleted: false,
-        source_updated_at: Some(Utc::now()),
+        source_updated_at: Some(moa_test_support::fixtures::pg_now()),
         metadata,
         payload: json!({ "text": text }),
     }
@@ -2236,7 +2236,7 @@ impl InMemoryKnowledgeRepository {
             .get_mut(&sync_run_uid)
             .expect("sync run should exist");
         run.status = SyncRunStatus::Completed;
-        run.finished_at = Some(Utc::now());
+        run.finished_at = Some(moa_test_support::fixtures::pg_now());
     }
 
     /// Returns every recorded link claim state.
@@ -2509,7 +2509,7 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
                 }
                 return LinkClaimReservation::Existing(existing.clone());
             }
-            let now = Utc::now();
+            let now = moa_test_support::fixtures::pg_now();
             let reserved = LinkClaim {
                 tenant_id: claim.tenant_id,
                 operation_id: claim.operation_id,
@@ -2555,7 +2555,7 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
                 LinkClaimTransition::Compensating | LinkClaimTransition::Compensated => {}
             }
             claim.state = transition.target_state();
-            claim.updated_at = Utc::now();
+            claim.updated_at = moa_test_support::fixtures::pg_now();
             Some(claim.clone())
         })
     }
@@ -2614,7 +2614,7 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
                 // Write-once, matching the Postgres `COALESCE`.
                 run.provider_trigger_completed_at = run
                     .provider_trigger_completed_at
-                    .or_else(|| Some(Utc::now()));
+                    .or_else(|| Some(moa_test_support::fixtures::pg_now()));
             }
         })
     }
@@ -2631,7 +2631,7 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
             })?;
             connection.source_selection = source_selection;
             connection.last_synced_at = None;
-            connection.updated_at = Utc::now();
+            connection.updated_at = moa_test_support::fixtures::pg_now();
             Ok(connection.clone())
         })?
     }
@@ -2654,7 +2654,7 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
                 ));
             }
             connection.status = ConnectionStatus::Disabled;
-            connection.updated_at = Utc::now();
+            connection.updated_at = moa_test_support::fixtures::pg_now();
             Ok(connection.clone())
         })?
     }

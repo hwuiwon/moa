@@ -236,9 +236,9 @@ fn row(uid: Uuid, name: &str) -> NodeIndexRow {
         name: name.to_string(),
         pii_class: SensitivityClass::None,
         valid_to: None,
-        valid_from: Utc::now(),
+        valid_from: moa_test_support::fixtures::pg_now(),
         properties_summary: None,
-        last_accessed_at: Utc::now(),
+        last_accessed_at: moa_test_support::fixtures::pg_now(),
         quality_score: 0.5,
     }
 }

@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use moa_config::MessagingConfig;
 use moa_core::types::credentials::{DeploymentSecret, DeploymentSecrets};
 use moa_messaging::{
@@ -35,7 +34,14 @@ async fn postmark_provider_e2e_sends_email_using_local_env_token() {
     };
     let client = PostmarkEmailClient::from_deployment_secrets(&secrets, &config)
         .expect("Postmark e2e client should load the local token as a deployment secret");
-    let subject = format!("MOA Postmark e2e {}", Utc::now().to_rfc3339());
+    let subject = format!(
+        "MOA Postmark e2e {}",
+        chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros()
+        )
+        .expect("microsecond timestamp")
+        .to_rfc3339()
+    );
     let message = PostmarkEmailMessage::new(env.from, env.to, subject)
         .with_text_body("MOA live Postmark e2e validation.")
         .with_html_body("<p>MOA live Postmark e2e validation.</p>")

@@ -52,7 +52,7 @@ async fn allow_cache_replay_bash(
             effect: moa_core::types::action_policy::ActionPolicyEffect::Allow,
             reason: Some("cache replay test bash opt-in".to_string()),
             created_by: moa_core::types::identifiers::UserId::new("cache-replay-test"),
-            created_at: chrono::Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
         })
         .await
 }

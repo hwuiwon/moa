@@ -2,7 +2,6 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
-use chrono::Utc;
 use moa_core::types::credentials::RedactedSecret;
 use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
@@ -444,7 +443,7 @@ async fn discover_sync_model(
 /// Builds a live connection targeting `connector`/`connection_id` with `model`
 /// selected as the Nango sync model.
 fn live_connection(connector: &str, connection_id: &str, model: &str) -> KnowledgeConnection {
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
         connection_uid: Uuid::now_v7(),
         tenant_id: TenantId::from(Uuid::now_v7()),

@@ -473,7 +473,7 @@ async fn update_source_selection_persists_applies_and_optionally_syncs() {
     let tenant_id = TenantId::from(Uuid::now_v7());
     let caller = test_caller(tenant_id);
     let mut connection = fixture_connection(tenant_id);
-    connection.last_synced_at = Some(Utc::now());
+    connection.last_synced_at = Some(moa_test_support::fixtures::pg_now());
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     repository
         .insert_connection(connection.clone())

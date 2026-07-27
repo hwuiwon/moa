@@ -26,7 +26,7 @@ async fn allow_artifact_capture_bash(
             effect: moa_core::types::action_policy::ActionPolicyEffect::Allow,
             reason: Some("artifact capture test bash opt-in".to_string()),
             created_by: moa_core::types::identifiers::UserId::new("artifact-capture-test"),
-            created_at: chrono::Utc::now(),
+            created_at: moa_test_support::fixtures::pg_now(),
         })
         .await
         .expect("seed artifact test bash allow rule");

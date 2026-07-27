@@ -8,7 +8,6 @@
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::Utc;
 use httpmock::{Method::GET, MockServer};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use moa_auth_providers_auth0::Auth0AuthProvider;
@@ -107,7 +106,12 @@ async fn jwt_validation_rejects_expired_token() {
     // Pins: a token whose exp is well past (beyond the 30s leeway) is Expired.
     let key = RsaPrivateKey::new(&mut OsRng, 2048).expect("generate RSA test key");
     let fx = fixture(&key);
-    let expired = Utc::now().timestamp() - 3_600;
+    let expired = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+        chrono::Utc::now().timestamp_micros(),
+    )
+    .expect("microsecond timestamp")
+    .timestamp()
+        - 3_600;
     let token = sign(&key, &fx.issuer, AUDIENCE, expired);
 
     let error = fx
@@ -127,7 +131,12 @@ async fn jwt_validation_rejects_wrong_audience() {
     // Pins: a correctly-signed token minted for another audience is Rejected.
     let key = RsaPrivateKey::new(&mut OsRng, 2048).expect("generate RSA test key");
     let fx = fixture(&key);
-    let exp = Utc::now().timestamp() + 600;
+    let exp = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+        chrono::Utc::now().timestamp_micros(),
+    )
+    .expect("microsecond timestamp")
+    .timestamp()
+        + 600;
     let token = sign(&key, &fx.issuer, "https://attacker.example/api", exp);
 
     let error = fx
@@ -147,7 +156,12 @@ async fn jwt_validation_rejects_wrong_issuer() {
     // Pins: a correctly-signed token from a different issuer is Rejected.
     let key = RsaPrivateKey::new(&mut OsRng, 2048).expect("generate RSA test key");
     let fx = fixture(&key);
-    let exp = Utc::now().timestamp() + 600;
+    let exp = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+        chrono::Utc::now().timestamp_micros(),
+    )
+    .expect("microsecond timestamp")
+    .timestamp()
+        + 600;
     let token = sign(&key, "https://attacker.example/", AUDIENCE, exp);
 
     let error = fx
@@ -170,7 +184,12 @@ async fn jwt_validation_rejects_bad_signature() {
     let published = RsaPrivateKey::new(&mut OsRng, 2048).expect("generate RSA test key");
     let attacker = RsaPrivateKey::new(&mut OsRng, 2048).expect("generate RSA attacker key");
     let fx = fixture(&published);
-    let exp = Utc::now().timestamp() + 600;
+    let exp = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+        chrono::Utc::now().timestamp_micros(),
+    )
+    .expect("microsecond timestamp")
+    .timestamp()
+        + 600;
     let token = sign(&attacker, &fx.issuer, AUDIENCE, exp);
 
     let error = fx

@@ -126,7 +126,7 @@ async fn execution_observability_exports_stable_identity_and_replay_safe_service
         authorization: planning.snapshot.authorization.clone(),
         approved_budget: planning.snapshot.budget.clone(),
         config: ExecutionConfig::default(),
-        now: chrono::Utc::now(),
+        now: moa_test_support::fixtures::pg_now(),
     })
     .compiled
     .context("compile observable output-only execution")?;

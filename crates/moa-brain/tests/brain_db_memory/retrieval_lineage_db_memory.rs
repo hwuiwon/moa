@@ -55,7 +55,7 @@ async fn retrieval_lineage_rows_record_chunk_and_document_provenance_db_memory()
                 document_version_uid: None,
             },
         ],
-        chrono::Utc::now(),
+        moa_test_support::fixtures::pg_now(),
         true,
     )
     .await

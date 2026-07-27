@@ -28,7 +28,7 @@ fn tenant_id() -> TenantId {
 }
 
 fn connection() -> KnowledgeConnection {
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
         connection_uid: Uuid::from_u128(201),
         tenant_id: tenant_id(),

@@ -24,7 +24,7 @@ use wiremock::{
 };
 
 fn connection() -> KnowledgeConnection {
-    let now = Utc::now();
+    let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
         connection_uid: Uuid::from_u128(101),
         tenant_id: TenantId::from(Uuid::from_u128(102)),

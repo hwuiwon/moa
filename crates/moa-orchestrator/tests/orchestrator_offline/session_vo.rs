@@ -1,6 +1,5 @@
 //! Unit coverage for the Session virtual object's state projection helpers.
 
-use chrono::Utc;
 use moa_core::{
     types::channel::Channel, types::contact::SessionActorRef, types::identifiers::ModelId,
     types::identifiers::TenantId, types::session::CancelScope, types::session::SessionMeta,
@@ -112,7 +111,7 @@ fn accepted_execution_run_keeps_session_running() {
         1,
     ));
 
-    state.apply_accepted_execution_turn(Utc::now());
+    state.apply_accepted_execution_turn(moa_test_support::fixtures::pg_now());
 
     assert_eq!(state.current_status(), SessionStatus::Running);
     assert_eq!(
@@ -179,7 +178,7 @@ fn execution_progress_requires_cadence_and_changed_exact_aggregate_tuple() {
     // Pins: every tuple member participates in delta detection, while an early changed tuple
     // and a due identical tuple are both suppressed.
     let run_uid = Uuid::from_u128(70);
-    let start = Utc::now();
+    let start = moa_test_support::fixtures::pg_now();
     let baseline = execution_progress(run_uid);
     let mut state = SessionVoState::default();
     state

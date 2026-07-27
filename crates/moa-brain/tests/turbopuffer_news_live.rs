@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use moa_config::MoaConfig;
 use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
@@ -118,7 +117,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         turn_seq: 1,
         transcript,
         dominant_pii_class: "none".to_string(),
-        finalized_at: Utc::now(),
+        finalized_at: moa_test_support::fixtures::pg_now(),
         barrier: None,
     };
 

@@ -6,7 +6,6 @@ use std::sync::{
 };
 
 use base64::{Engine as _, engine::general_purpose};
-use chrono::Utc;
 use hmac::{Hmac, Mac};
 use moa_core::types::identifiers::TenantId;
 use moa_knowledge::{
@@ -212,7 +211,7 @@ fn svix_webhook_payload_maps_job_object_and_rejects_bad_signature() {
     // Pins: Reducto Svix webhook verification maps job/object metadata and rejects invalid signatures.
     let signing_key = "reducto-svix-secret";
     let message_id = "msg_reducto_1";
-    let timestamp = Utc::now().timestamp().to_string();
+    let timestamp = moa_test_support::fixtures::pg_now().timestamp().to_string();
     let object_uid = Uuid::from_u128(41).to_string();
     let body = serde_json::to_vec(&json!({
         "event": "parse.completed",

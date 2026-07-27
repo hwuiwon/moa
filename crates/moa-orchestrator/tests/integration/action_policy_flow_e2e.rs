@@ -123,7 +123,7 @@ async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
         origin_step_id: None,
         execution_origin: Some(origin),
         idempotency_key: None,
-        created_at: chrono::Utc::now(),
+        created_at: moa_test_support::fixtures::pg_now(),
     };
     sqlx::query(
         r#"

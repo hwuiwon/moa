@@ -371,7 +371,7 @@ async fn terminal_run_status_cannot_be_overwritten_db() -> Result<()> {
             new_experiment("run-terminal-guard", None, Vec::new()),
         )
         .await?;
-    let completed_at = chrono::Utc::now();
+    let completed_at = moa_test_support::fixtures::pg_now();
     let completed = store
         .update_run_status(
             &scope,
@@ -389,7 +389,7 @@ async fn terminal_run_status_cannot_be_overwritten_db() -> Result<()> {
             run.run_uid,
             ExperimentRunStatus::Cancelled,
             Some("late cancel".to_string()),
-            Some(chrono::Utc::now()),
+            Some(moa_test_support::fixtures::pg_now()),
         )
         .await?;
     let loaded = store
@@ -852,7 +852,7 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
             ExperimentTrialStatus::Completed,
             Some(ExperimentTrialStopReason::Success),
             None,
-            Some(chrono::Utc::now()),
+            Some(moa_test_support::fixtures::pg_now()),
         )
         .await?
         .expect("status update should return the trial");
@@ -955,7 +955,7 @@ async fn cancel_active_trials_marks_remaining_work_without_mutating_terminal_tri
             ExperimentTrialStatus::Completed,
             Some(ExperimentTrialStopReason::Success),
             None,
-            Some(chrono::Utc::now()),
+            Some(moa_test_support::fixtures::pg_now()),
         )
         .await?
         .expect("completed status update should return trial");
@@ -972,7 +972,7 @@ async fn cancel_active_trials_marks_remaining_work_without_mutating_terminal_tri
             ExperimentTrialStatus::Failed,
             Some(ExperimentTrialStopReason::Error),
             Some("target failed".to_string()),
-            Some(chrono::Utc::now()),
+            Some(moa_test_support::fixtures::pg_now()),
         )
         .await?
         .expect("failed status update should return trial");
@@ -1064,7 +1064,7 @@ async fn cancel_run_and_active_trials_reconciles_behind_already_cancelled_parent
             ExperimentTrialStatus::Completed,
             Some(ExperimentTrialStopReason::Success),
             None,
-            Some(chrono::Utc::now()),
+            Some(moa_test_support::fixtures::pg_now()),
         )
         .await?
         .expect("completed status update should return trial");
@@ -1077,7 +1077,7 @@ async fn cancel_run_and_active_trials_reconciles_behind_already_cancelled_parent
             run.run_uid,
             ExperimentRunStatus::Cancelled,
             Some("first attempt".to_string()),
-            Some(chrono::Utc::now()),
+            Some(moa_test_support::fixtures::pg_now()),
         )
         .await?
         .expect("run cancel should return run");
@@ -1137,7 +1137,7 @@ async fn cancel_run_and_active_trials_does_not_override_completed_run_db() -> Re
             run.run_uid,
             ExperimentRunStatus::Completed,
             None,
-            Some(chrono::Utc::now()),
+            Some(moa_test_support::fixtures::pg_now()),
         )
         .await?
         .expect("run completion should return run");
@@ -1205,7 +1205,7 @@ async fn cancel_run_app_reconciles_active_trials_behind_terminal_cancelled_paren
             run.run_uid,
             ExperimentRunStatus::Cancelled,
             Some("first attempt".to_string()),
-            Some(chrono::Utc::now()),
+            Some(moa_test_support::fixtures::pg_now()),
         )
         .await?
         .expect("run cancel should return run");
