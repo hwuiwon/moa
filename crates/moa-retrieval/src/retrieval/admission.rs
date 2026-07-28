@@ -2,6 +2,7 @@
 
 use std::str::FromStr;
 
+use moa_core::types::memory::{SOURCE_ACL_EPOCH_UNRESOLVED, SourceAclContext};
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
     error::MoaError, error::Result, types::agent::AgentKnowledgePolicy,
@@ -54,6 +55,7 @@ pub struct MemoryAdmissionPolicy {
     contact_id: Option<ContactId>,
     agent_policy: AgentKnowledgePolicy,
     plans: Vec<RetrievalScopePlan>,
+    source_acl: SourceAclContext,
 }
 
 impl MemoryAdmissionPolicy {
@@ -116,7 +118,43 @@ impl MemoryAdmissionPolicy {
             contact_id,
             agent_policy,
             plans,
+            // Deliberately unresolved: the agent knowledge policy is authored
+            // configuration, while provider-source admission is durable identity
+            // state that only a database read can establish. Until the retrieval
+            // entry point attaches it, this policy admits tenant-public sources
+            // only and its results are not cacheable.
+            source_acl: SourceAclContext::empty(SOURCE_ACL_EPOCH_UNRESOLVED),
         }
+    }
+
+    /// Returns this policy carrying the caller's resolved source-ACL context.
+    ///
+    /// Attached once per turn from durable identity state, never from a request
+    /// payload. Tenant role or operator status does not widen it: an operator
+    /// authorized to list a connection's control-plane metadata still needs the
+    /// source's own permission to read a single chunk of its content.
+    #[must_use]
+    pub fn with_source_acl(mut self, source_acl: SourceAclContext) -> Self {
+        self.source_acl = source_acl;
+        self
+    }
+
+    /// Returns the caller's resolved provider-source admission context.
+    #[must_use]
+    pub fn source_acl(&self) -> &SourceAclContext {
+        &self.source_acl
+    }
+
+    /// Returns the tenant this policy admits for.
+    #[must_use]
+    pub fn tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
+
+    /// Returns the contact this policy admits for, when the session has one.
+    #[must_use]
+    pub fn contact_id(&self) -> Option<ContactId> {
+        self.contact_id
     }
 
     /// Returns whether memory retrieval is enabled by the pinned agent policy.

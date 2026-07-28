@@ -1639,7 +1639,8 @@ async fn await_execution_review(
         if let Some(review) = reviews.into_iter().find(|review| {
             review
                 .envelope
-                .execution_origin
+                .owner
+                .execution_origin()
                 .is_some_and(|origin| origin.task_uid == task_id.as_uuid())
         }) {
             assert_eq!(review.status, ActionReviewStatus::Pending);

@@ -26,8 +26,9 @@ use crate::retrieval::graph_seed::{
 use crate::retrieval::hydration::hydrate_knowledge_chunks;
 use crate::retrieval::legs::{
     GRAPH_BUDGET, GRAPH_WEIGHT, LEXICAL_BUDGET, LEXICAL_WEIGHT, LegCandidate, RRF_K, VECTOR_BUDGET,
-    VECTOR_WEIGHT, graph_expansion_leg_with_diagnostics, hydrate_nodes, lexical_leg, rrf_fuse,
-    timed_leg, turbopuffer_bm25_leg, vector_leg as run_vector_leg, walk_scoring,
+    VECTOR_WEIGHT, admit_external_candidates, graph_expansion_leg_with_diagnostics, hydrate_nodes,
+    lexical_leg, rrf_fuse, timed_leg, turbopuffer_bm25_leg, vector_leg as run_vector_leg,
+    walk_scoring,
 };
 use crate::retrieval::policy::{GraphRetrievalPolicy, effective_graph_policy};
 use crate::retrieval::ranking::{
@@ -424,6 +425,7 @@ impl HybridRetriever {
             &self.pool,
             &req.scope,
             &req.cleared_barriers,
+            &req.source_acl,
             &fused_uids,
             self.assume_app_role,
             req.as_of,
@@ -431,7 +433,14 @@ impl HybridRetriever {
         .await?;
         let mut hits = build_hits(fused, nodes, &vector_hits);
         annotate_lexical_backend(&mut hits, lexical_hits.backend);
-        hydrate_knowledge_chunks(&self.pool, &req.scope, &mut hits, self.assume_app_role).await?;
+        hydrate_knowledge_chunks(
+            &self.pool,
+            &req.scope,
+            &req.source_acl,
+            &mut hits,
+            self.assume_app_role,
+        )
+        .await?;
         rank_hydrated_hits_for_policy(
             &mut hits,
             &self.ranking_config,
@@ -531,8 +540,12 @@ impl HybridRetriever {
             return Ok(Vec::new());
         }
 
+        // The shared pgvector store is long-lived; the caller's admission
+        // context is per request, so it is rebound here rather than the store
+        // holding a stale one.
+        let pgvector = self.pgvector_source.with_source_acl(req.source_acl.clone());
         if req.as_of.is_some() {
-            return run_vector_leg(self.pgvector_source.as_ref(), req).await;
+            return run_vector_leg(&pgvector, req).await;
         }
 
         let tenant_id = req.scope.tenant_id();
@@ -545,10 +558,24 @@ impl HybridRetriever {
                 .as_ref()
                 .ok_or_else(|| turbopuffer_unavailable_for_request(req))?;
             let scoped_turbopuffer = turbopuffer.scoped_to_tenant(tenant_id);
-            return run_vector_leg(&scoped_turbopuffer, req).await;
+            let candidates = run_vector_leg(&scoped_turbopuffer, req).await?;
+            return self.admit_external(req, candidates).await;
         }
 
-        run_vector_leg(self.pgvector_source.as_ref(), req).await
+        run_vector_leg(&pgvector, req).await
+    }
+
+    /// Runs the one batched Postgres admission check external backends need.
+    ///
+    /// Turbopuffer answers outside Postgres, so its candidates are checked here
+    /// — before fusion and before graph seeding — rather than inside the query
+    /// that produced them.
+    async fn admit_external(
+        &self,
+        req: &RetrievalRequest,
+        candidates: Vec<LegCandidate>,
+    ) -> Result<Vec<LegCandidate>> {
+        admit_external_candidates(&self.pool, req, self.assume_app_role, candidates).await
     }
 
     async fn lexical_leg(
@@ -567,6 +594,7 @@ impl HybridRetriever {
             let scoped_turbopuffer = turbopuffer.scoped_to_tenant(req.scope.tenant_id());
             match turbopuffer_bm25_leg(&scoped_turbopuffer, req).await {
                 Ok(hits) => {
+                    let hits = self.admit_external(req, hits).await?;
                     if request_is_tenant_chunk_only(req) {
                         record_lexical_backend(LexicalBackend::TurbopufferBm25, "success");
                         return Ok(LexicalLegOutput::new(hits, LexicalBackend::TurbopufferBm25));
@@ -603,12 +631,13 @@ impl HybridRetriever {
         };
 
         let scoped_turbopuffer = turbopuffer.scoped_to_tenant(req.scope.tenant_id());
-        let pg_future = run_vector_leg(self.pgvector_source.as_ref(), req);
+        let pgvector = self.pgvector_source.with_source_acl(req.source_acl.clone());
+        let pg_future = run_vector_leg(&pgvector, req);
         let tp_future = run_vector_leg(&scoped_turbopuffer, req);
         let (pg_result, tp_result) = tokio::join!(pg_future, tp_future);
 
         match (tp_result, pg_result) {
-            (Ok(tp_hits), _) => Ok(tp_hits),
+            (Ok(tp_hits), _) => self.admit_external(req, tp_hits).await,
             (Err(error), Ok(pg_hits)) => {
                 tracing::warn!(error = %error, "Turbopuffer vector dual-read leg failed; using pgvector result");
                 Ok(pg_hits)
@@ -988,6 +1017,11 @@ fn is_fatal_retrieval_error(error: &RetrievalError) -> bool {
         RetrievalError::Sqlx(_) => false,
         RetrievalError::Graph(error) => is_fatal_graph_error(error),
         RetrievalError::Vector(error) => is_fatal_vector_error(error),
+        // The query and the served generation disagree about the vector space.
+        // Degrading would drop the vector leg and answer from lexical and graph
+        // alone, which looks like a thin but valid result; the caller must see
+        // that the partition cannot answer this query at all.
+        RetrievalError::GenerationEmbedderMismatch { .. } => true,
     }
 }
 
@@ -1039,7 +1073,22 @@ fn is_fatal_vector_error(error: &VectorError) -> bool {
         | VectorError::TransactionalWritesUnsupported(_)
         | VectorError::InvalidVectorSyncOperation(_)
         | VectorError::UnsupportedVectorBackend { .. }
-        | VectorError::UnsupportedQueryFeature { .. } => true,
+        | VectorError::UnsupportedQueryFeature { .. }
+        // Rebuild-state invariants. A partition whose rebuild state is
+        // inconsistent (missing pointer, lost fence, unreconstructable input)
+        // must not answer from whatever vectors happen to be present.
+        | VectorError::RebuildProvenanceMissing { .. }
+        | VectorError::RebuildLabelUnsupported { .. }
+        | VectorError::RebuildPartitionBusy { .. }
+        | VectorError::RebuildOperationNotFound { .. }
+        | VectorError::RebuildGenerationNotFound { .. }
+        | VectorError::RebuildFenceLost { .. }
+        | VectorError::RebuildGenerationMismatch { .. }
+        | VectorError::RebuildGenerationIncomplete { .. }
+        | VectorError::RebuildGenerationNotActivatable { .. }
+        | VectorError::ActiveGenerationMissing { .. }
+        | VectorError::ActiveGenerationPointerConflict { .. }
+        | VectorError::RebuildRollbackUnavailable { .. } => true,
         // Transient backend/provider/network/response failures degrade the leg.
         VectorError::EmbeddingResponseLength { .. }
         | VectorError::ProviderStatus { .. }

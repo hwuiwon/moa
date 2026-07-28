@@ -71,18 +71,93 @@ pub enum WorkerMessage {
     },
 }
 
+/// Exact coordinates addressing one worker `request_input` round-trip.
+///
+/// The request id alone is not an ownership fence: a worker turn that is
+/// superseded, cancelled, or retried can leave a request id behind that a later
+/// turn re-raises. Carrying the raising turn and its admission generation makes
+/// every clear and every reply name exactly one owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerInputTarget {
+    /// Worker turn that raised the request.
+    pub turn_id: String,
+    /// Worker admission generation that owns the raising turn.
+    pub generation: u64,
+    /// Stable identifier the child minted for this input request.
+    pub input_request_id: String,
+}
+
+/// One in-flight worker input request and who must answer it.
+///
+/// Carried on the child→parent `NeedsInput` signal so the owning coordinator
+/// session can advertise — and later retract — the exact user-addressable reply
+/// target instead of a bare request id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerInputRequest {
+    /// Worker turn that raised the request.
+    pub turn_id: String,
+    /// Worker admission generation that owns the raising turn.
+    pub generation: u64,
+    /// Stable identifier the child minted for this input request.
+    pub input_request_id: String,
+    /// Who must answer the question.
+    pub audience: InputAudience,
+}
+
+impl WorkerInputRequest {
+    /// Returns the exact coordinates addressing this request.
+    #[must_use]
+    pub fn target(&self) -> WorkerInputTarget {
+        WorkerInputTarget {
+            turn_id: self.turn_id.clone(),
+            generation: self.generation,
+            input_request_id: self.input_request_id.clone(),
+        }
+    }
+}
+
 /// Durable mapping from one child input request to its Restate awakeable id.
 ///
 /// Stored on the `Worker` VO while a `request_input` round-trip is in flight so
 /// a later `ProvideInput` message can resolve the correct awakeable. Used both as
 /// the `Worker/register_input_request` wire input and as the persisted VO-state
 /// element.
+///
+/// `turn_id`/`generation` are the ownership fence and `waiting_workflow_id`
+/// identifies the invocation parked on `awakeable_id`, so a clear removes exactly
+/// the registration it owns rather than every request sharing a request id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerPendingInput {
+    /// Worker turn that raised the request.
+    pub turn_id: String,
+    /// Worker admission generation that owns the raising turn.
+    pub generation: u64,
     /// Stable identifier the child minted for this input request.
     pub input_request_id: String,
     /// Restate awakeable id the child turn is blocked on.
     pub awakeable_id: String,
+    /// Workflow invocation that is waiting on `awakeable_id`.
+    ///
+    /// Recorded so a timeout, cancellation, or terminal outcome clears the *exact*
+    /// target rather than every request that happens to share a turn id: two
+    /// invocations of one logical turn (an original and its retry) can both hold
+    /// registrations, and clearing by turn alone would drop the live one.
+    pub waiting_workflow_id: String,
+}
+
+impl WorkerPendingInput {
+    /// Returns the exact coordinates addressing this registration.
+    #[must_use]
+    pub fn target(&self) -> WorkerInputTarget {
+        WorkerInputTarget {
+            turn_id: self.turn_id.clone(),
+            generation: self.generation,
+            input_request_id: self.input_request_id.clone(),
+        }
+    }
 }
 
 /// Result resolved back to the parent awakeable when a worker finishes.
@@ -212,12 +287,13 @@ pub struct WorkerSignal {
     pub created_at: DateTime<Utc>,
     /// Whether this signal may wake an idle coordinator.
     pub resume_policy: ParentResumePolicy,
-    /// Awakeable id the child is blocked on; `Some` only for `NeedsInput`.
+    /// Exact in-flight input request; `Some` only for `NeedsInput`.
+    ///
+    /// One field rather than parallel optionals: the coordinates and the audience
+    /// are meaningless apart, and the coordinator session advertises the reply
+    /// target from exactly these coordinates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_request_id: Option<String>,
-    /// Who should answer the request; `Some` only for `NeedsInput`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_audience: Option<InputAudience>,
+    pub input_request: Option<WorkerInputRequest>,
 }
 
 /// Compact, persisted projection of one unread child→parent control-plane signal.
@@ -236,12 +312,9 @@ pub struct UnreadChildSignal {
     pub kind: ChildSignalKind,
     /// Short, safe human-readable summary carried for the resume/drain turn.
     pub summary: String,
-    /// Awakeable id the child is blocked on; `Some` only for `NeedsInput`.
+    /// Exact in-flight input request; `Some` only for `NeedsInput`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_request_id: Option<String>,
-    /// Who should answer the request; `Some` only for `NeedsInput`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_audience: Option<InputAudience>,
+    pub input_request: Option<WorkerInputRequest>,
 }
 
 /// Compact fan-in summary read on demand by `Session/progress` and

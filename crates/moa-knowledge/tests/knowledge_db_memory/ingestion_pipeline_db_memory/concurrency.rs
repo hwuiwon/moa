@@ -33,9 +33,13 @@ async fn embedding_cardinality_mismatch_rejects_batch_without_graph_write_db_mem
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -110,9 +114,13 @@ async fn ingest_record_page_processes_records_concurrently_with_accurate_report_
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -209,6 +217,9 @@ async fn ingestion_pipeline_duplicate_workers_coalesce_object_version_before_gra
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
     let pipeline_b = KnowledgeIngestionPipeline::new(
         repository_b.clone(),
@@ -224,10 +235,14 @@ async fn ingestion_pipeline_duplicate_workers_coalesce_object_version_before_gra
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
 
     repository_a
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),

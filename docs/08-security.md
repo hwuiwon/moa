@@ -91,15 +91,30 @@ Contact-point lookup hashes use a separate 32-byte key from
 `MOA_AUTH_CONTACT_TOKENS_CONTACT_POINT_HASH_KEY_HEX`; raw emails and phone numbers must not be
 stored in contact lookup columns.
 
-Tenant knowledge base content is tenant-public by design: synced documents are
-written tenant-scoped and admitted to every enabled contact session, and
-connector-source ACLs (Drive per-file sharing, Nango scopes, Merge HRIS) are not
-mirrored or enforced at retrieval — tenant remains the only isolation boundary
-for this content. The prerequisite before connecting permission-bearing
-enterprise sources is indexed source-ACL admission: store each document version's
-source ACL principals at sync time, then join the caller's principal set in the
-retrieval admission filter so only authorized chunks are admitted. See
-[Tenant Knowledge Base](21-tenant-knowledge-base.md) for the operator contract.
+Tenant knowledge content is admitted under the source system's own permissions,
+not merely the tenant boundary. A connection is `TenantPublic` or
+`ProviderManaged`, and the connector's declared `ProviderAclCapability` — never a
+caller or operator choice — decides which; a re-link cannot widen an existing
+`ProviderManaged` connection. `ProviderManaged` content is admitted only through
+an immutable snapshot that is complete and revision-matched, with a matching
+allow entry and no matching deny entry. Missing, incomplete, stale, or
+revision-drifted ACLs deny, an empty caller principal set denies, and tenant role
+or operator status grants no content bypass.
+
+Principals are persisted only as keyed opaque fingerprints (HMAC-SHA256 under a
+KMS-wrapped, versioned per-tenant ACL key, with the key version encoded into the
+value), so no email address, phone number, or provider label reaches a row, log,
+trace, or cache key. The caller's principal set is resolved once per turn from
+authenticated identity plus verified bindings, never from request JSON and never
+re-fetched inside a retrieval leg.
+
+One shared SQL predicate enforces this on every path that can surface source
+content — lexical, pgvector, every recursive graph hop, hydration, and each
+context-window neighbour — with a single batched check for external vector
+candidates before fusion. Tenant RLS remains underneath as defense in depth. The
+tenant ACL epoch and the aggregate principal-set fingerprint are part of
+retrieval cache identity, so a revocation cannot be served from a warm cache. See
+[Tenant Knowledge Base](21-tenant-knowledge-base.md) for the full contract.
 
 ## Credential Isolation
 
@@ -137,11 +152,22 @@ event, or persisted on a knowledge row. Deployment-owned operator transport
 secrets are a separate typed source, so a tenant connection can never fall back
 to an operator credential.
 
-MCP credential proxy grants are private, process-local, and single-use: the
-runtime creates an opaque grant, consumes it while enriching one MCP request,
-and rejects reuse. Until MOA has a shared durable grant store, code must not
-expose MCP credential grants across requests or depend on another Kubernetes
-replica being able to resolve them.
+Outbound MCP calls carry one owner's credential, decided by the server's
+required `credential_scope`. A deployment-owned server uses one operator secret
+read from deployment environment; a tenant-owned server is served only through a
+forced-RLS connection binding that names the tenant's own connection, the exact
+stored credential version, and a closed operation allowlist. Delegated
+`(Tenant, tenant_id, Operator)` authorization runs before the first binding
+read, the stored version's identity is checked against the binding before
+anything is decrypted, and plaintext is shaped into headers immediately before
+`tools/call` and dropped. No tenant-owned failure falls back to the deployment
+branch, and environment credentials are unreachable from a tenant-owned
+connector.
+
+The proxy mints no grant token: it resolves and consumes the credential inside
+one host function, so an opaque grant would add cache, expiry, and reuse risk
+without crossing an isolation boundary. Reintroduce a single-use grant only when
+a real remote proxy boundary sits between the resolver and the MCP transport.
 
 ## Encryption And Key Management
 
@@ -208,11 +234,62 @@ Current defenses:
 - A per-turn canary is injected into tool-enabled requests.
 - Tool calls are blocked if they leak the active canary or any
   `moa_canary_*` marker.
-- Suspicious output emits warning events.
+- Every tool output is classified by the typed security circuit below before it
+  reaches any durable or model-facing surface.
 
-If a model repeatedly emits malicious tool calls after receiving blocked-tool
-feedback, the remaining control point is the turn retry/circuit-breaker policy.
-Do not treat prompt filtering as a complete security boundary.
+### The typed prompt-injection circuit
+
+Wrapping untrusted output is containment, not a control: it still delivers the
+attacker's text to the model. The circuit is the control.
+
+**One classifier, at the raw-output source.** `moa_security::classify_tool_output`
+runs immediately after every built-in, Hand, and MCP provider return, on
+recovery-created error output, and in the trusted-file branch that bypasses the
+router — always *before* output budgeting, artifactization, telemetry,
+persistence, tracing, or any logging of provider text. It is carrier-aware: it
+scans text blocks, JSON blocks, the structured payload, process stdout/stderr and
+error carriers, and collapses byte-identical bodies first, so one malicious
+paragraph echoed into several carriers scores once. Nothing downstream
+reclassifies.
+
+**One envelope.** The classifier returns `SecuredToolOutput { safe_output,
+assessment, capability, hand_id }`, and that is the only shape a classified
+output travels in. Router and executor APIs return it; `Event::tool_result`
+consumes it whole. Security metadata is never optional, so no surface can hold
+output whose provenance through the detector is unknown.
+
+**Typed classes with an additive score.** `Safe = 0`,
+`SuspiciousInstruction = 1`, `ConfirmedInjection = 2`, `CanaryLeak = 4`,
+`RestrictedOrSecretOutput = 4`. Suspicious matched spans are redacted in place;
+the three higher classes destroy every raw carrier — content, structured payload,
+and artifact reference — and substitute one fixed safe string, regardless of the
+capability's current score.
+
+**Per-owner, per-capability accumulation.** Score 1 warns, 2 disables the
+capability, 3 suspends for user input, 4 or more halts the owner. Only the first
+highest stage reached transitions, so a clear-to-4 canary leak emits one halt
+rather than walking the intermediate stages. The circuit is keyed by the exact
+generation-fenced owner plus the *router-resolved* canonical capability
+(`builtin:<tool>`, `mcp:<server>:<tool>`, or one logical Hand capability
+independent of which sandbox provider served it). State resets only for a
+genuinely new owner generation — never for a new input fingerprint, new tool
+arguments, a fallback Hand provider, or a workflow replay. That is what makes the
+circuit hold while an attacker varies the payload, and why it catches what a
+generic repetition cap does not.
+
+**Neutral, replay-stable facts.** Crossing a stage boundary appends one
+`Event::PromptInjectionCircuitTransition` carrying no output — only the safe
+class, detector revision, owner and capability identifiers, the transition, and
+counts. Its dedupe key is the transition digest itself
+(`prompt_injection_circuit:v1:<64 lowercase blake3 hex>` over domain-separated
+canonical JSON of the schema version, session, owner, capability, tool-call id,
+prior stage, and reached stage), so a replayed or retried owner collapses onto one
+Session fact. The Session and Worker virtual objects own the read-score-write step,
+which makes it atomic against concurrent tool results in the same turn.
+
+Do not treat prompt filtering as a complete security boundary. The circuit bounds
+the blast radius of a successful injection; it does not make untrusted output
+trustworthy.
 
 Execution plans do not bypass these controls. The compiler accepts only
 registered capabilities with schema, policy, authorization, risk, idempotency,
@@ -296,10 +373,17 @@ Concretely:
 - A rule never makes a filtered or unregistered tool visible; policy is
   evaluated only after the tool resolves in the registry.
 
-`admin_review` persists a tenant action-review row plus event, returns a
-pending-review tool result to the model, and does not block the root or
-worker workflow. Tenant admins clear or deny the stored action later through
-the action-review service.
+`admin_review` persists a tenant action-review row plus event, registers the
+review on its one typed owner, returns a pending-review tool result to the model,
+and does not block the root or worker workflow. Tenant admins clear or deny the
+stored action later through the action-review service.
+
+A cleared action executes as a new MOA-owned invocation: fresh internal tool-call
+id, no reused provider tool-use id, and a canary-screened stored request. Its
+conversational owner is resumed only after the decision and the executed tool's
+terminal event are durable, and only through a bounded no-tools continuation turn,
+so an approval cannot silently re-open tool access or planning. A review that
+times out fails closed and produces no continuation.
 
 ## Security Audit
 

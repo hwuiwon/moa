@@ -26,6 +26,7 @@ use wiremock::{
 fn connection() -> KnowledgeConnection {
     let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
+        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid: Uuid::from_u128(101),
         tenant_id: TenantId::from(Uuid::from_u128(102)),
         provider: "nango".to_string(),
@@ -372,6 +373,7 @@ async fn trigger_and_records_list_include_selected_variant() {
         .expect("trigger selected Nango variant");
     let page = provider
         .list_changed_records(ListChangedRecordsRequest {
+            acl_key: std::sync::Arc::new(moa_knowledge::acl_key::SourceAclKey::new(1, vec![7; 32])),
             credential: test_credential(),
             connection,
             cursor: None,
@@ -403,6 +405,7 @@ async fn records_list_fails_fast_when_no_sync_model_selected() {
 
     let error = provider
         .list_changed_records(ListChangedRecordsRequest {
+            acl_key: std::sync::Arc::new(moa_knowledge::acl_key::SourceAclKey::new(1, vec![7; 32])),
             credential: test_credential(),
             connection,
             cursor: None,
@@ -474,6 +477,7 @@ async fn records_list_maps_cursor_deleted_metadata_and_change_tokens() {
     connection.source_selection = json!({ "model": "documents" });
     let page = provider
         .list_changed_records(ListChangedRecordsRequest {
+            acl_key: std::sync::Arc::new(moa_knowledge::acl_key::SourceAclKey::new(1, vec![7; 32])),
             credential: test_credential(),
             connection,
             cursor: Some("cursor-1".to_string()),
@@ -589,6 +593,7 @@ async fn list_integrations_surfaces_upstream_errors() {
 
 fn drive_record(source_id: &str, mime_type: &str) -> ProviderRecord {
     ProviderRecord {
+        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
         source_id: source_id.to_string(),
         object_type: "drive_file".to_string(),
         title: Some(format!("{source_id} title")),

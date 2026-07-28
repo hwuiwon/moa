@@ -3,9 +3,10 @@
 use chrono::{DateTime, Utc};
 use moa_core::{
     types::action_policy::ActionClass, types::action_policy::ActionEnvelope,
-    types::action_policy::ActionReviewStatus, types::action_policy::ExecutionTaskOrigin,
-    types::contact::SessionActorRef, types::identifiers::StoragePartitionId,
-    types::identifiers::TenantId, types::identifiers::ToolCallId, types::tools::ToolCallRequest,
+    types::action_policy::ActionReviewOwner, types::action_policy::ActionReviewStatus,
+    types::action_policy::ExecutionTaskOrigin, types::contact::SessionActorRef,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::identifiers::ToolCallId, types::tools::ToolCallRequest,
 };
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use serde_json::Value;
@@ -35,8 +36,10 @@ pub(crate) struct StoredReview {
 
 /// Durable row state needed to apply an action-review decision.
 pub(crate) struct ReviewDecisionRow {
-    /// Owning session, when the action came from a session turn.
-    pub(crate) session_id: Option<moa_core::types::identifiers::SessionId>,
+    /// Exact owner resumed when this review resolves.
+    pub(crate) owner: ActionReviewOwner,
+    /// Reviewed tool name, carried into the typed resolution receipt.
+    pub(crate) tool_name: String,
     /// Action class used for decision metrics.
     pub(crate) action_class: ActionClass,
     /// Timestamp the review was created, used for approval-wait metrics.
@@ -45,8 +48,6 @@ pub(crate) struct ReviewDecisionRow {
     pub(crate) status: ActionReviewStatus,
     /// Stored tool request to execute after a clear decision.
     pub(crate) tool_request: ToolCallRequest,
-    /// Dynamic execution task that owns cleared dispatch, when present.
-    pub(crate) execution_origin: Option<ExecutionTaskOrigin>,
     /// Original execution-task context stored when the review was created.
     pub(crate) execution_task_trace_context: Option<ValidatedTraceContext>,
     /// User that already decided the review, if any.
@@ -116,7 +117,8 @@ pub(crate) async fn insert_review(
     let requested_by = session_actor_ref_to_storage(&request.envelope.requested_by);
     let execution_task_trace_context = request
         .envelope
-        .execution_origin
+        .owner
+        .execution_origin()
         .is_some()
         .then_some(execution_task_trace_context)
         .flatten();
@@ -136,8 +138,8 @@ pub(crate) async fn insert_review(
     .bind(request.envelope.review_id)
     .bind(tenant_id.0)
     .bind(storage_partition_id.to_string())
-    .bind(request.envelope.session_id.map(|id| id.0))
-    .bind(request.envelope.worker_id.clone())
+    .bind(request.envelope.owner.session_id().0)
+    .bind(request.envelope.owner.worker_id().cloned())
     .bind(request.envelope.tool_call_id.0)
     .bind(&request.envelope.tool_name)
     .bind(request.envelope.action_class.as_str())
@@ -217,7 +219,7 @@ pub(crate) async fn load_review_for_update(
 ) -> Result<ReviewDecisionRow, HandlerError> {
     let row = sqlx::query(
         r#"
-        SELECT id, tenant_id, storage_partition_id, session_id, action_class, status, tool_request, envelope,
+        SELECT id, tenant_id, storage_partition_id, action_class, status, tool_request, envelope,
                decided_by, deny_reason, created_at, decided_at, decision_event_recorded_at,
                execution_tool_call_id, execution_requested_at,
                execution_task_traceparent, execution_task_tracestate
@@ -239,10 +241,8 @@ pub(crate) async fn load_review_for_update(
     )
     .map_err(|error| TerminalError::new(format!("decode stored action envelope: {error}")))?;
     Ok(ReviewDecisionRow {
-        session_id: row
-            .try_get::<Option<Uuid>, _>("session_id")
-            .map_err(db_error)?
-            .map(moa_core::types::identifiers::SessionId),
+        owner: envelope.owner.clone(),
+        tool_name: envelope.tool_name.clone(),
         action_class: parse_db_enum(
             "action_class",
             row.try_get::<String, _>("action_class").map_err(db_error)?,
@@ -257,7 +257,6 @@ pub(crate) async fn load_review_for_update(
                 .map_err(db_error)?,
         )
         .map_err(|error| TerminalError::new(format!("decode stored tool request: {error}")))?,
-        execution_origin: envelope.execution_origin,
         execution_task_trace_context: trace_context_from_columns(
             row.try_get("execution_task_traceparent")
                 .map_err(db_error)?,
@@ -477,7 +476,7 @@ pub(crate) async fn timeout_expired_reviews(
     for row in &rows {
         let envelope: ActionEnvelope = serde_json::from_value(row.try_get("envelope")?)
             .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
-        if let Some(origin) = envelope.execution_origin {
+        if let Some(origin) = envelope.owner.execution_origin() {
             let reason = "review expired without a decision".to_string();
             let task_trace_context = trace_context_from_columns(
                 row.try_get("execution_task_traceparent")?,
@@ -804,11 +803,6 @@ fn summary_from_row(row: &sqlx::postgres::PgRow) -> Result<ActionReviewSummary, 
     Ok(ActionReviewSummary {
         id: row.try_get("id").map_err(db_error)?,
         tenant_id: TenantId::from(row.try_get::<Uuid, _>("tenant_id").map_err(db_error)?),
-        session_id: row
-            .try_get::<Option<Uuid>, _>("session_id")
-            .map_err(db_error)?
-            .map(moa_core::types::identifiers::SessionId),
-        worker_id: row.try_get("worker_id").map_err(db_error)?,
         tool_call_id: ToolCallId(row.try_get("tool_call_id").map_err(db_error)?),
         tool_name: row.try_get("tool_name").map_err(db_error)?,
         action_class: parse_db_enum(

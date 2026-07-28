@@ -18,6 +18,7 @@ use uuid::Uuid;
 fn object() -> KnowledgeObject {
     let tenant_id = TenantId::from(Uuid::from_u128(1));
     KnowledgeObject {
+        acl: moa_knowledge::domain::ObjectAcl::incomplete(),
         object_uid: Uuid::from_u128(2),
         tenant_id,
         connection_uid: Uuid::from_u128(3),
@@ -36,6 +37,7 @@ fn object() -> KnowledgeObject {
 
 fn parse_input(file_name: &str, mime_type: &str, text: &str) -> ParseInput {
     let _connection = KnowledgeConnection {
+        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid: Uuid::from_u128(3),
         tenant_id: TenantId::from(Uuid::from_u128(1)),
         provider: "nango".to_string(),

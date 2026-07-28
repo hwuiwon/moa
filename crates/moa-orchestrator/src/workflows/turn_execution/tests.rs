@@ -18,6 +18,7 @@ fn run_turn_request(trigger: TurnTrigger) -> RunTurnRequest {
             acting_on_behalf_of: None,
         },
         contact: None,
+        generation: 1,
         user_message: "Inspect every account".to_string(),
         attachments: Vec::new(),
         model: None,
@@ -25,6 +26,39 @@ fn run_turn_request(trigger: TurnTrigger) -> RunTurnRequest {
         trigger,
         child_signal_id: None,
         execution_template: None,
+        action_review: None,
+    }
+}
+
+fn action_review_continuation() -> moa_core::types::action_policy::ActionReviewContinuation {
+    use moa_core::types::action_policy::{
+        ActionReviewContinuation, ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt,
+        ActionReviewTerminalEvent,
+    };
+
+    let review_id = uuid::Uuid::from_u128(0x13_0001);
+    ActionReviewContinuation {
+        review_id,
+        receipt: ActionReviewReceipt {
+            review_id,
+            owner: ActionReviewOwner::Coordinator {
+                session_id: moa_core::types::identifiers::SessionId::new(),
+                turn_id: "turn-1".to_string(),
+                generation: 1,
+            },
+            tool_name: "bash".to_string(),
+            requested_tool_call_id: moa_core::types::identifiers::ToolCallId::new(),
+            executed_tool_call_id: Some(moa_core::types::identifiers::ToolCallId::new()),
+            outcome: ActionReviewOutcome::ClearedSuccess {
+                summary: "reviewed".to_string(),
+                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
+            },
+            terminal_events: vec![
+                ActionReviewTerminalEvent::Decided,
+                ActionReviewTerminalEvent::ToolResult,
+            ],
+        },
     }
 }
 
@@ -39,6 +73,7 @@ fn user_message_origin_is_trigger_based_for_zero_based_events() {
         TurnTrigger::ChildSignal,
         TurnTrigger::WorkerResults,
         TurnTrigger::ExecutionSynthesis,
+        TurnTrigger::ActionReview,
     ] {
         request.trigger = trigger;
         assert!(
@@ -46,6 +81,58 @@ fn user_message_origin_is_trigger_based_for_zero_based_events() {
             "system continuation must not gain user-message origin: {trigger:?}"
         );
     }
+}
+
+#[test]
+fn action_review_continuation_turn_skips_routing_and_never_reopens_planning() {
+    // Pins: the exact continuation matrix at the routing seam. A resolved review
+    // continues on a bounded Respond path only: it must not spend a classifier call,
+    // must not gain user-message origin (which is what authorizes durable execution
+    // and pinned templates), and must not be able to consume a Durable upgrade.
+    let mut request = run_turn_request(TurnTrigger::ActionReview);
+    request.action_review = Some(action_review_continuation());
+
+    assert!(is_action_review_turn(&request));
+    assert!(!is_execution_synthesis_turn(&request));
+    assert!(!has_user_message_origin(&request));
+
+    let inline_route = ExecutionRouteDecision::Execute {
+        strategy: ExecutionStrategy::Inline,
+        rationale: "unused".to_string(),
+    };
+    assert!(
+        !DurableUpgradeGuard::new(&request, &inline_route).allows_tool_signal(),
+        "a review continuation must not be able to upgrade itself to durable execution"
+    );
+}
+
+#[test]
+fn trigger_and_continuation_context_must_agree_exactly() {
+    // Pins: the typed pairing is enforced, not inferred. An ActionReview turn without a
+    // receipt has nothing to render, and a receipt riding an ordinary user turn would
+    // inject review state into work that never raised a review.
+    let mut missing = run_turn_request(TurnTrigger::ActionReview);
+    missing.action_review = None;
+    assert_eq!(
+        missing.action_review_continuation(),
+        Err(moa_wire::turn::TurnTriggerContextError::MissingContinuation)
+    );
+
+    let mut unexpected = run_turn_request(TurnTrigger::UserMessage);
+    unexpected.action_review = Some(action_review_continuation());
+    assert_eq!(
+        unexpected.action_review_continuation(),
+        Err(moa_wire::turn::TurnTriggerContextError::UnexpectedContinuation)
+    );
+
+    let mut paired = run_turn_request(TurnTrigger::ActionReview);
+    paired.action_review = Some(action_review_continuation());
+    assert!(
+        paired
+            .action_review_continuation()
+            .expect("a paired trigger and receipt is valid")
+            .is_some()
+    );
 }
 
 #[test]
@@ -119,6 +206,7 @@ fn durable_upgrade_guard_is_root_inline_byte_exact_and_single_use() {
         TurnTrigger::WorkerResults,
         TurnTrigger::ChildSignal,
         TurnTrigger::ExecutionSynthesis,
+        TurnTrigger::ActionReview,
     ] {
         request.trigger = trigger;
         assert!(

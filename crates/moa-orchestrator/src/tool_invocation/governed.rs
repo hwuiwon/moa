@@ -8,15 +8,18 @@ use moa_config::SessionLimitsConfig;
 use moa_core::traits::ChannelAdapter;
 use moa_core::{
     events::Event, types::action_policy::ActionPolicyEffect,
-    types::action_policy::CapabilityProvenance, types::action_policy::ExecutionTaskOrigin,
-    types::channel::Channel, types::completion::ToolCallContent, types::completion::ToolInvocation,
-    types::identifiers::SessionId, types::identifiers::ToolCallId, types::session::SessionMeta,
-    types::tools::ToolCallRequest, types::tools::ToolOutput,
-    types::tools::TrustedSandboxFileManifestRef, types::worker::state::WorkerId,
+    types::action_policy::ActionReviewOwner, types::action_policy::CapabilityProvenance,
+    types::action_policy::ExecutionTaskOrigin, types::channel::Channel,
+    types::completion::ToolCallContent, types::completion::ToolInvocation,
+    types::identifiers::SessionId, types::identifiers::ToolCallId,
+    types::security::ToolCapabilityId, types::session::SessionMeta,
+    types::tools::SecuredToolOutput, types::tools::ToolCallRequest, types::tools::ToolOutput,
+    types::tools::TrustedSandboxFileManifestRef,
     types::worker::tool_schema::is_delegation_tool_name,
 };
 use moa_observability::restate_observability::{event_persist_span, tool_dispatch_span};
 use moa_observability::{record_turn_event_persist_duration, record_turn_tool_dispatch_duration};
+use moa_security::{OutputClassification, classify_tool_output};
 use moa_session::PostgresSessionStore;
 use moa_wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
 use restate_sdk::prelude::*;
@@ -37,16 +40,27 @@ use crate::turn::util::{
 use crate::workflows::turn_progress;
 
 /// Workflow origin metadata for a governed tool invocation.
+///
+/// Every variant carries the exact fence the owning runtime admitted the call
+/// under, so an action review queued from this call records a typed
+/// [`ActionReviewOwner`] instead of leaving ownership to later inference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GovernedInvocationOrigin<'a> {
     /// Tool call came from the root session turn.
-    RootTurn,
+    RootTurn {
+        /// Coordinator turn id that produced the tool call.
+        turn_id: &'a str,
+        /// Session turn generation that admitted the coordinator turn.
+        generation: u64,
+    },
     /// Tool call came from a worker turn.
     Worker {
         /// Worker object id.
         worker_id: &'a str,
         /// Worker turn id that produced the tool call.
         turn_id: &'a str,
+        /// Worker generation that admitted the worker turn.
+        generation: u64,
     },
     /// Tool call belongs to one persisted dynamic execution task.
     ExecutionTask {
@@ -57,6 +71,44 @@ pub(crate) enum GovernedInvocationOrigin<'a> {
         /// Task generation fenced by the execution workflow.
         generation: u64,
     },
+}
+
+impl GovernedInvocationOrigin<'_> {
+    /// Returns the typed action-review owner for this origin.
+    fn action_review_owner(self, session_id: SessionId) -> ActionReviewOwner {
+        match self {
+            Self::RootTurn {
+                turn_id,
+                generation,
+            } => ActionReviewOwner::Coordinator {
+                session_id,
+                turn_id: turn_id.to_string(),
+                generation,
+            },
+            Self::Worker {
+                worker_id,
+                turn_id,
+                generation,
+            } => ActionReviewOwner::Worker {
+                session_id,
+                worker_id: worker_id.to_string(),
+                turn_id: turn_id.to_string(),
+                generation,
+            },
+            Self::ExecutionTask {
+                run_uid,
+                task_uid,
+                generation,
+            } => ActionReviewOwner::ExecutionTask {
+                session_id,
+                origin: ExecutionTaskOrigin {
+                    run_uid,
+                    task_uid,
+                    generation,
+                },
+            },
+        }
+    }
 }
 
 /// Request for coordinating one governed tool invocation.
@@ -91,8 +143,8 @@ pub(crate) struct GovernedInvocationResult {
     pub(crate) tool_id: ToolCallId,
     /// Tool invocation copied from the provider tool call.
     pub(crate) invocation: ToolInvocation,
-    /// Model-visible tool output.
-    pub(crate) output: ToolOutput,
+    /// Model-visible classified tool output.
+    pub(crate) output: SecuredToolOutput,
     /// Outcome classification for workflow-local recording.
     pub(crate) disposition: GovernedInvocationDisposition,
     /// Event ownership plan used for the output event.
@@ -102,7 +154,7 @@ pub(crate) struct GovernedInvocationResult {
 impl GovernedInvocationResult {
     /// Returns whether the caller should record a successful segment tool use.
     pub(crate) fn should_record_segment_tool_use(&self) -> bool {
-        self.disposition == GovernedInvocationDisposition::Executed && !self.output.is_error
+        self.disposition == GovernedInvocationDisposition::Executed && !self.output.is_error()
     }
 
     /// Returns whether a worker should record the result as denied.
@@ -334,7 +386,7 @@ async fn execute_allowed_tool(
             .instrument(span)
             .await?
             .into_inner(),
-        GovernedInvocationOrigin::RootTurn | GovernedInvocationOrigin::Worker { .. } => span
+        GovernedInvocationOrigin::RootTurn { .. } | GovernedInvocationOrigin::Worker { .. } => span
             .in_scope(|| {
                 crate::restate_identity::replay_safe_request(
                     ctx.service_client::<ToolExecutorClient>()
@@ -382,6 +434,7 @@ fn completed_result(
     output: ToolOutput,
     disposition: GovernedInvocationDisposition,
 ) -> GovernedInvocationResult {
+    let output = secured_synthetic_output(&invocation, output);
     GovernedInvocationResult {
         tool_id,
         invocation,
@@ -391,34 +444,36 @@ fn completed_result(
     }
 }
 
+/// Classifies one workflow-authored refusal or notice.
+///
+/// These bytes are MOA's, not a capability's — the tool never ran — so they are
+/// keyed under the built-in namespace rather than the tool's real routing
+/// identity. Classifying them is not paranoia about MOA's own strings: several
+/// embed a model-authored input summary, which an earlier injection can shape.
+fn secured_synthetic_output(invocation: &ToolInvocation, raw: ToolOutput) -> SecuredToolOutput {
+    classify_tool_output(
+        &raw,
+        OutputClassification {
+            capability: &ToolCapabilityId::builtin(&invocation.name),
+            active_canary: None,
+        },
+    )
+}
+
 fn prepare_action_review_request(
     request: &GovernedInvocationRequest<'_>,
     invocation: &ToolInvocation,
 ) -> PrepareActionReviewRequest {
-    let (worker_id, default_provenance, execution_origin) = match request.origin {
-        GovernedInvocationOrigin::RootTurn => (None, CapabilityProvenance::default(), None),
-        GovernedInvocationOrigin::Worker { worker_id, turn_id } => (
-            Some(WorkerId::from(worker_id)),
-            CapabilityProvenance {
-                kind: Some("worker".to_string()),
-                id: Some(worker_id.to_string()),
-                step_id: Some(turn_id.to_string()),
-            },
-            None,
-        ),
-        GovernedInvocationOrigin::ExecutionTask {
-            run_uid,
-            task_uid,
-            generation,
-        } => (
-            None,
-            CapabilityProvenance::default(),
-            Some(ExecutionTaskOrigin {
-                run_uid,
-                task_uid,
-                generation,
-            }),
-        ),
+    let default_provenance = match request.origin {
+        GovernedInvocationOrigin::RootTurn { .. }
+        | GovernedInvocationOrigin::ExecutionTask { .. } => CapabilityProvenance::default(),
+        GovernedInvocationOrigin::Worker {
+            worker_id, turn_id, ..
+        } => CapabilityProvenance {
+            kind: Some("worker".to_string()),
+            id: Some(worker_id.to_string()),
+            step_id: Some(turn_id.to_string()),
+        },
     };
 
     PrepareActionReviewRequest {
@@ -426,12 +481,11 @@ fn prepare_action_review_request(
         invocation: invocation.clone(),
         review_id: request.tool_id.0,
         tool_call_id: request.tool_id,
-        worker_id,
+        owner: request.origin.action_review_owner(request.session_id),
         capability_provenance: request
             .capability_provenance
             .cloned()
             .unwrap_or(default_provenance),
-        execution_origin,
         idempotency_key: invocation.id.clone(),
     }
 }
@@ -450,9 +504,9 @@ fn tool_call_request(
         session_id: request.session_id,
         trusted_sandbox_manifest: request.trusted_sandbox_manifest.cloned(),
         worker_id: match request.origin {
-            GovernedInvocationOrigin::RootTurn => None,
+            GovernedInvocationOrigin::RootTurn { .. }
+            | GovernedInvocationOrigin::ExecutionTask { .. } => None,
             GovernedInvocationOrigin::Worker { worker_id, .. } => Some(worker_id.to_string()),
-            GovernedInvocationOrigin::ExecutionTask { .. } => None,
         },
     }
 }
@@ -528,17 +582,15 @@ async fn append_synthetic_tool_result(
     if !owns_root_session_tool_events(request.origin) {
         return Ok(());
     }
+    let mut secured = secured_synthetic_output(invocation, output.clone());
+    // A synthetic result is a refusal: it is durably a failure regardless of
+    // whether the notice text happens to render as an error output.
+    secured.safe_output.is_error = true;
+    secured.safe_output.duration = std::time::Duration::ZERO;
     append_session_event(
         ctx,
         request.session_id,
-        Event::ToolResult {
-            tool_id: request.tool_id,
-            provider_tool_use_id: invocation.id.clone(),
-            output: output.clone(),
-            original_output_tokens: output.original_output_tokens,
-            success: false,
-            duration_ms: 0,
-        },
+        Event::tool_result(request.tool_id, invocation.id.clone(), secured),
     )
     .await
     .map(|_| ())
@@ -569,6 +621,8 @@ pub(crate) async fn append_cached_tool_result(
             original_output_tokens: output.original_output_tokens,
             success: true,
             duration_ms: 0,
+            assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+            capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
         },
     )
     .await
@@ -620,6 +674,7 @@ mod tests {
         types::contact::ContactRef,
         types::contact::ContactVerificationState,
         types::contact::SessionActorRef,
+        types::identifiers::SessionId,
         types::identifiers::TenantId,
         types::identifiers::ToolCallId,
         types::identifiers::UserId,
@@ -632,9 +687,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        GovernedInvocationDisposition, GovernedInvocationEventPlan, GovernedInvocationOrigin,
-        GovernedInvocationRequest, completed_result, owns_root_session_tool_events,
-        pending_review_output, prepare_action_review_request, tool_call_request,
+        ActionReviewOwner, GovernedInvocationDisposition, GovernedInvocationEventPlan,
+        GovernedInvocationOrigin, GovernedInvocationRequest, completed_result,
+        owns_root_session_tool_events, pending_review_output, prepare_action_review_request,
+        tool_call_request,
     };
     use crate::delegation::storage_user_id;
 
@@ -697,7 +753,10 @@ mod tests {
             &session,
             &tool_call,
             &allowed_tools,
-            GovernedInvocationOrigin::RootTurn,
+            GovernedInvocationOrigin::RootTurn {
+                turn_id: "turn-governed-1",
+                generation: 3,
+            },
         );
 
         let policy_request = prepare_action_review_request(&request, &tool_call.invocation);
@@ -706,9 +765,15 @@ mod tests {
         assert_eq!(policy_request.invocation, tool_call.invocation);
         assert_eq!(policy_request.review_id, request.tool_id.0);
         assert_eq!(policy_request.tool_call_id, request.tool_id);
-        assert_eq!(policy_request.worker_id, None);
+        assert_eq!(
+            policy_request.owner,
+            ActionReviewOwner::Coordinator {
+                session_id: session.id,
+                turn_id: "turn-governed-1".to_string(),
+                generation: 3,
+            }
+        );
         assert_eq!(policy_request.capability_provenance, Default::default());
-        assert_eq!(policy_request.execution_origin, None);
         assert_eq!(
             policy_request.idempotency_key.as_deref(),
             Some("provider-tool-1")
@@ -716,8 +781,71 @@ mod tests {
     }
 
     #[test]
+    fn governed_origin_maps_to_exactly_one_typed_action_review_owner() {
+        // Pins: who is resumed after a review is decided at the moment the tool call is
+        // issued, by the runtime that issued it, with the fence it was admitted under.
+        // Nothing downstream may infer ownership from optional envelope fields.
+        let session_id = SessionId::new();
+
+        let root = GovernedInvocationOrigin::RootTurn {
+            turn_id: "turn-owner-1",
+            generation: 4,
+        }
+        .action_review_owner(session_id);
+        assert_eq!(
+            root,
+            ActionReviewOwner::Coordinator {
+                session_id,
+                turn_id: "turn-owner-1".to_string(),
+                generation: 4,
+            }
+        );
+
+        let worker = GovernedInvocationOrigin::Worker {
+            worker_id: "worker-owner-1",
+            turn_id: "worker-owner-1-turn-2",
+            generation: 6,
+        }
+        .action_review_owner(session_id);
+        assert_eq!(
+            worker,
+            ActionReviewOwner::Worker {
+                session_id,
+                worker_id: "worker-owner-1".to_string(),
+                turn_id: "worker-owner-1-turn-2".to_string(),
+                generation: 6,
+            }
+        );
+
+        let execution = GovernedInvocationOrigin::ExecutionTask {
+            run_uid: Uuid::from_u128(50),
+            task_uid: Uuid::from_u128(51),
+            generation: 2,
+        }
+        .action_review_owner(session_id);
+        assert_eq!(
+            execution,
+            ActionReviewOwner::ExecutionTask {
+                session_id,
+                origin: moa_core::types::action_policy::ExecutionTaskOrigin {
+                    run_uid: Uuid::from_u128(50),
+                    task_uid: Uuid::from_u128(51),
+                    generation: 2,
+                },
+            }
+        );
+        assert!(root.is_conversational());
+        assert!(worker.is_conversational());
+        assert!(
+            !execution.is_conversational(),
+            "an execution task must never route a conversational callback"
+        );
+    }
+
+    #[test]
     fn action_policy_worker_request_sets_origin_fields() {
-        // Pins: worker review records remain traceable to the child turn.
+        // Pins: worker review records remain traceable to the child turn, on both the
+        // capability-provenance axis and the typed owner axis.
         let session = test_session_meta();
         let tool_call = tool_call();
         let allowed_tools = BTreeSet::from(["file_read".to_string()]);
@@ -728,12 +856,21 @@ mod tests {
             GovernedInvocationOrigin::Worker {
                 worker_id: "worker-1",
                 turn_id: "child-turn-1",
+                generation: 5,
             },
         );
 
         let policy_request = prepare_action_review_request(&request, &tool_call.invocation);
 
-        assert_eq!(policy_request.worker_id.as_deref(), Some("worker-1"));
+        assert!(
+            matches!(
+                &policy_request.owner,
+                moa_core::types::action_policy::ActionReviewOwner::Worker { worker_id, .. }
+                    if worker_id.as_str() == "worker-1"
+            ),
+            "worker origin must map to a Worker review owner: {:?}",
+            policy_request.owner
+        );
         assert_eq!(
             policy_request.capability_provenance.kind.as_deref(),
             Some("worker")
@@ -746,7 +883,11 @@ mod tests {
             policy_request.capability_provenance.step_id.as_deref(),
             Some("child-turn-1")
         );
-        assert_eq!(policy_request.execution_origin, None);
+        assert_eq!(policy_request.owner.execution_origin(), None);
+        assert_eq!(
+            policy_request.owner.worker_id().map(String::as_str),
+            Some("worker-1")
+        );
     }
 
     #[test]
@@ -776,10 +917,10 @@ mod tests {
 
         assert_eq!(policy_request.session, session);
         assert_eq!(policy_request.invocation, tool_call.invocation);
-        assert_eq!(policy_request.worker_id, None);
+        assert_eq!(policy_request.owner.worker_id(), None);
         assert_eq!(policy_request.capability_provenance, capability);
         assert_eq!(
-            policy_request.execution_origin,
+            policy_request.owner.execution_origin(),
             Some(moa_core::types::action_policy::ExecutionTaskOrigin {
                 run_uid: Uuid::from_u128(40),
                 task_uid: Uuid::from_u128(41),
@@ -798,7 +939,10 @@ mod tests {
             &session,
             &tool_call,
             &allowed_tools,
-            GovernedInvocationOrigin::RootTurn,
+            GovernedInvocationOrigin::RootTurn {
+                turn_id: "turn-governed-1",
+                generation: 3,
+            },
         );
         let worker = request(
             &session,
@@ -807,6 +951,7 @@ mod tests {
             GovernedInvocationOrigin::Worker {
                 worker_id: "worker-1",
                 turn_id: "turn-1",
+                generation: 5,
             },
         );
         let execution = request(
@@ -836,21 +981,25 @@ mod tests {
                 .iter()
                 .all(|request| request.idempotency_key.as_deref() == Some("provider-tool-1"))
         );
-        assert_eq!(prepared[0].execution_origin, None);
-        assert_eq!(prepared[1].execution_origin, None);
-        assert!(prepared[2].execution_origin.is_some());
+        assert_eq!(prepared[0].owner.execution_origin(), None);
+        assert_eq!(prepared[1].owner.execution_origin(), None);
+        assert!(prepared[2].owner.execution_origin().is_some());
     }
 
     #[test]
     fn execution_task_origin_never_owns_root_session_tool_events() {
         // Pins: all governed root event appenders share one execution-task exclusion guard.
         assert!(owns_root_session_tool_events(
-            GovernedInvocationOrigin::RootTurn
+            GovernedInvocationOrigin::RootTurn {
+                turn_id: "turn-1",
+                generation: 1,
+            }
         ));
         assert!(owns_root_session_tool_events(
             GovernedInvocationOrigin::Worker {
                 worker_id: "worker-1",
                 turn_id: "turn-1",
+                generation: 1,
             }
         ));
         assert!(!owns_root_session_tool_events(
@@ -874,7 +1023,10 @@ mod tests {
             &session,
             &tool_call,
             &allowed_tools,
-            GovernedInvocationOrigin::RootTurn,
+            GovernedInvocationOrigin::RootTurn {
+                turn_id: "turn-governed-1",
+                generation: 3,
+            },
         );
 
         let tool_request = tool_call_request(&request, &tool_call.invocation);
@@ -906,6 +1058,7 @@ mod tests {
             GovernedInvocationOrigin::Worker {
                 worker_id: "worker-1",
                 turn_id: "child-turn-1",
+                generation: 5,
             },
         );
 
@@ -924,7 +1077,10 @@ mod tests {
             &session,
             &tool_call,
             &allowed_tools,
-            GovernedInvocationOrigin::RootTurn,
+            GovernedInvocationOrigin::RootTurn {
+                turn_id: "turn-governed-1",
+                generation: 3,
+            },
         );
 
         let tool_request = tool_call_request(&request, &tool_call.invocation);
@@ -953,7 +1109,10 @@ mod tests {
             &session,
             &tool_call,
             &allowed_tools,
-            GovernedInvocationOrigin::RootTurn,
+            GovernedInvocationOrigin::RootTurn {
+                turn_id: "turn-governed-1",
+                generation: 3,
+            },
         );
         request.trusted_sandbox_manifest = Some(&manifest);
 
@@ -993,9 +1152,9 @@ mod tests {
         let result = super::GovernedInvocationResult {
             tool_id: ToolCallId(Uuid::from_u128(1)),
             invocation: tool_call().invocation,
-            output: moa_core::types::tools::ToolOutput::text(
-                "ok",
-                std::time::Duration::from_millis(5),
+            output: moa_core::types::tools::SecuredToolOutput::assessed_safe(
+                moa_core::types::tools::ToolOutput::text("ok", std::time::Duration::from_millis(5)),
+                moa_core::types::security::ToolCapabilityId::builtin("noop"),
             ),
             disposition: GovernedInvocationDisposition::Executed,
             event_plan: GovernedInvocationEventPlan::ToolExecutorResult,

@@ -208,7 +208,13 @@ async fn knowledge_graph_labels_create_read_and_delete() {
     }
 
     let source_hits = graph
-        .expand_seeds(&[source_uid], 2, None, &GraphWalkScoring::default())
+        .expand_seeds(
+            &[source_uid],
+            2,
+            None,
+            &GraphWalkScoring::default(),
+            &moa_core::types::memory::SourceAclContext::empty(0),
+        )
         .await
         .expect("expand source document chain");
     let document = source_hits
@@ -225,7 +231,13 @@ async fn knowledge_graph_labels_create_read_and_delete() {
     assert_eq!(chunk.edges, vec![EdgeLabel::Contains, EdgeLabel::Contains]);
 
     let entity_hits = graph
-        .expand_seeds(&[entity_uid], 1, None, &GraphWalkScoring::default())
+        .expand_seeds(
+            &[entity_uid],
+            1,
+            None,
+            &GraphWalkScoring::default(),
+            &moa_core::types::memory::SourceAclContext::empty(0),
+        )
         .await
         .expect("expand entity memberships and mentions");
     assert!(entity_hits.iter().any(|hit| {

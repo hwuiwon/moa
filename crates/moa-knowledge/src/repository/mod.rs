@@ -1,5 +1,6 @@
 //! Repository traits and Postgres implementations for tenant knowledge persistence.
 
+mod acl;
 mod connection;
 mod contact_group;
 mod document;
@@ -10,7 +11,7 @@ mod sync;
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use moa_core::types::memory::{InformationBarrierId, RlsContext};
+use moa_core::types::memory::{InformationBarrierId, RlsContext, SourcePrincipalFingerprint};
 use moa_core::{
     types::contact::ContactId, types::identifiers::StoragePartitionId, types::identifiers::TenantId,
 };
@@ -22,13 +23,15 @@ use row_mapping::*;
 
 use crate::{
     domain::{
-        ConnectionStatus, ContactGroup, ContactGroupMembership, ContactGroupTarget,
-        ContactGroupTargetMember, DocumentVersion, IngestionStepStatus, KnowledgeBlock,
-        KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionProjection, KnowledgeIngestionStep,
-        KnowledgeObject, KnowledgeObjectInspection, KnowledgeObjectProjection,
-        KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, LinkClaim,
-        LinkClaimReservation, LinkClaimState, LinkClaimTransition, NewLinkClaim, ObjectStatus,
-        SyncRunStatus,
+        ConnectionAclMode, ConnectionStatus, ContactGroup, ContactGroupMembership,
+        ContactGroupTarget, ContactGroupTargetMember, DocumentVersion, IngestionStepStatus,
+        KnowledgeBlock, KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionProjection,
+        KnowledgeIngestionStep, KnowledgeObject, KnowledgeObjectInspection,
+        KnowledgeObjectProjection, KnowledgeProviderEventRecord, KnowledgeSyncCounters,
+        KnowledgeSyncRun, LinkClaim, LinkClaimReservation, LinkClaimState, LinkClaimTransition,
+        NewLinkClaim, ObjectAcl, ObjectStatus, ProviderAclEntry, ProviderAclSnapshot,
+        SourceAclEntryKind, SourceAclState, SourcePrincipalBinding, SourcePrincipalGroupBinding,
+        SourcePrincipalKind, SyncRunStatus,
     },
     error::{Error, Result},
     normalize::{normalize_source_selection, redact_provider_metadata},
@@ -252,6 +255,41 @@ pub trait KnowledgeRepository: Send + Sync {
 
     /// Gets a knowledge object by identifier.
     async fn get_object(&self, object_uid: Uuid) -> Result<Option<KnowledgeObject>>;
+
+    /// Replaces one object's provider ACL snapshot and moves its current pointer.
+    ///
+    /// Runs before the content change-token and content-hash fences, so an
+    /// ACL-only change takes effect without re-parsing or re-embedding. An
+    /// incomplete capture is still recorded, but leaves the object hidden.
+    async fn replace_object_acl_snapshot(
+        &self,
+        snapshot: ProviderAclSnapshot,
+    ) -> Result<ProviderAclSnapshot>;
+
+    /// Marks one object's ACL stale after the provider announced a new revision.
+    ///
+    /// Takes effect before MOA has captured the new permissions, so a revoked
+    /// share stops being retrievable at announcement rather than at resync.
+    async fn mark_object_acl_stale(
+        &self,
+        object_uid: Uuid,
+        announced_revision: Option<&str>,
+    ) -> Result<()>;
+
+    /// Reads one object's stored ACL position.
+    async fn object_acl(&self, object_uid: Uuid) -> Result<Option<ObjectAcl>>;
+
+    /// Reads the fingerprinted entries of one stored snapshot.
+    async fn snapshot_entries(&self, snapshot_uid: Uuid) -> Result<Vec<ProviderAclEntry>>;
+
+    /// Binds one verified provider principal to a contact or to the whole tenant.
+    async fn upsert_principal_binding(&self, binding: SourcePrincipalBinding) -> Result<()>;
+
+    /// Records that holders of one principal also hold a group or domain principal.
+    async fn upsert_group_binding(&self, binding: SourcePrincipalGroupBinding) -> Result<()>;
+
+    /// Removes every principal binding held by one contact.
+    async fn revoke_contact_principals(&self, contact_id: Uuid) -> Result<u64>;
 
     /// Lists source object projections for a tenant.
     async fn list_objects(
@@ -731,6 +769,41 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
 
     async fn get_object(&self, object_uid: Uuid) -> Result<Option<KnowledgeObject>> {
         document::get_object(self, object_uid).await
+    }
+
+    async fn replace_object_acl_snapshot(
+        &self,
+        snapshot: ProviderAclSnapshot,
+    ) -> Result<ProviderAclSnapshot> {
+        acl::replace_object_acl_snapshot(self, snapshot).await
+    }
+
+    async fn mark_object_acl_stale(
+        &self,
+        object_uid: Uuid,
+        announced_revision: Option<&str>,
+    ) -> Result<()> {
+        acl::mark_object_acl_stale(self, object_uid, announced_revision).await
+    }
+
+    async fn object_acl(&self, object_uid: Uuid) -> Result<Option<ObjectAcl>> {
+        acl::object_acl(self, object_uid).await
+    }
+
+    async fn snapshot_entries(&self, snapshot_uid: Uuid) -> Result<Vec<ProviderAclEntry>> {
+        acl::snapshot_entries(self, snapshot_uid).await
+    }
+
+    async fn upsert_principal_binding(&self, binding: SourcePrincipalBinding) -> Result<()> {
+        acl::upsert_principal_binding(self, binding).await
+    }
+
+    async fn upsert_group_binding(&self, binding: SourcePrincipalGroupBinding) -> Result<()> {
+        acl::upsert_group_binding(self, binding).await
+    }
+
+    async fn revoke_contact_principals(&self, contact_id: Uuid) -> Result<u64> {
+        acl::revoke_contact_principals(self, contact_id).await
     }
 
     async fn list_objects(

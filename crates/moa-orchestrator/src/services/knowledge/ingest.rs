@@ -9,10 +9,10 @@ use moa_core::{traits::EmbeddingProvider, types::identifiers::TenantId};
 use moa_crypto::KeyManagementProvider;
 use moa_knowledge::{
     chunking::ChunkingConfig,
-    domain::{KnowledgeSyncRun, ParseInput, ParsedDocument, RecordPage},
+    domain::{KnowledgeSyncRun, ParseInput, ParsedDocument, ProviderAclCapability, RecordPage},
     ingestion::{
-        KnowledgeIngestionPipeline, KnowledgeIngestionPipelineConfig, MemoryKnowledgeGraphWriter,
-        PageIngestionReport,
+        KnowledgeIngestionPipeline, KnowledgeIngestionPipelineConfig, KnowledgeSourceAclContext,
+        MemoryKnowledgeGraphWriter, PageIngestionReport,
     },
     parser::{
         DocumentParser, llamaparse::LlamaParseParser, native::NativeDocumentParser,
@@ -102,7 +102,8 @@ impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
             parser_label,
             run.information_barrier.clone(),
             self.content_fetcher.clone(),
-        )?;
+        )
+        .await?;
         pipeline
             .ingest_record_page(run.sync_run_uid, run.connection_uid, run.tenant_id, page)
             .await
@@ -127,7 +128,8 @@ impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
             parser_label,
             run.information_barrier.clone(),
             None,
-        )?;
+        )
+        .await?;
         pipeline
             .prune_unseen_objects(
                 run.sync_run_uid,
@@ -151,7 +153,7 @@ type ProductionKnowledgeIngestionPipeline = KnowledgeIngestionPipeline<
     clippy::too_many_arguments,
     reason = "the production factory keeps storage, KMS, scope, parser, and content dependencies explicit"
 )]
-fn build_ingestion_pipeline(
+async fn build_ingestion_pipeline(
     pool: sqlx::PgPool,
     kms: Arc<dyn KeyManagementProvider>,
     tenant_id: TenantId,
@@ -169,6 +171,12 @@ fn build_ingestion_pipeline(
         pool.clone(),
         scope.clone(),
     ));
+    // The connector's declared capability, not an operator preference, decides
+    // whether this run's records are tenant-public or provider-managed. An
+    // unrecognized provider is a typed error rather than a guess. No fingerprint
+    // key is needed here: principals were keyed by the adapter during listing.
+    let source_acl =
+        KnowledgeSourceAclContext::for_capability(ProviderAclCapability::for_provider(&provider)?);
     let parser = Arc::new(build_document_parser(config, &parser_label)?);
     let embedder = Arc::new(SharedEmbeddingProvider::new(
         build_embedder_from_config(config, EmbedderConstructionRole::Ingestion)
@@ -199,6 +207,7 @@ fn build_ingestion_pipeline(
             provider,
             parser_label,
         },
+        source_acl,
     )
     .with_semantic_generic_entities(config.knowledge.semantic.generic_entities)
     .with_semantic_model_extractor(build_semantic_model_extractor(config))

@@ -212,6 +212,7 @@ fn planned_for_policy(strategy: Strategy, temporal_filter: Option<DateTime<Utc>>
 
 fn request_for_policy(query_text: &str) -> RetrievalRequest {
     RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: query_text.to_string(),

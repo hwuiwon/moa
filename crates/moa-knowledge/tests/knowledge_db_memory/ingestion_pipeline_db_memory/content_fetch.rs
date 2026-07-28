@@ -35,6 +35,9 @@ async fn ingestion_pipeline_fetches_content_for_metadata_only_records_db_memory(
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     )
     .with_content_fetcher(Some(Arc::new(FakeContentFetcher::new(
         FetchOutcome::Bytes(fetched.clone(), Some("text/plain".to_string())),
@@ -125,6 +128,9 @@ async fn ingestion_pipeline_falls_back_to_title_when_content_fetch_fails_db_memo
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     )
     .with_content_fetcher(Some(Arc::new(FakeContentFetcher::new(FetchOutcome::Error))));
 
@@ -231,6 +237,9 @@ async fn ingestion_pipeline_skips_unchanged_fetched_content_without_refetching_d
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     )
     .with_content_fetcher(Some(fetcher.clone()));
 

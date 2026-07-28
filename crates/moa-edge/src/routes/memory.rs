@@ -26,6 +26,35 @@ pub(super) fn translate(
         "/v1/memory/retrieve-debug" => {
             translate_session_memory_request(body, "/Memory/retrieve_debug")
         }
+        // Index-rebuild control. The tenant is stamped server-side from the
+        // authenticated caller rather than read from the body, and every one of
+        // these handlers re-checks tenant-admin authority before it touches
+        // rebuild state.
+        "/v1/memory/index-rebuild/start" => translate_json_object_with_tenant_id(
+            body,
+            "/GraphMemoryMaint/start_index_rebuild",
+            tenant_id,
+        ),
+        "/v1/memory/index-rebuild/status" => translate_json_object_with_tenant_id(
+            body,
+            "/GraphMemoryMaint/index_rebuild_status",
+            tenant_id,
+        ),
+        "/v1/memory/index-rebuild/cancel" => translate_json_object_with_tenant_id(
+            body,
+            "/GraphMemoryMaint/cancel_index_rebuild",
+            tenant_id,
+        ),
+        "/v1/memory/index-rebuild/rollback" => translate_json_object_with_tenant_id(
+            body,
+            "/GraphMemoryMaint/rollback_index_rebuild",
+            tenant_id,
+        ),
+        "/v1/memory/index-rebuild/finalize" => translate_json_object_with_tenant_id(
+            body,
+            "/GraphMemoryMaint/finalize_index_rebuild",
+            tenant_id,
+        ),
         _ => return None,
     };
     Some(translation)
@@ -49,6 +78,67 @@ mod tests {
 
     use crate::routes::RouteTranslation;
     use crate::routes::test_support::{test_tenant_json, translate};
+
+    #[test]
+    fn index_rebuild_routes_stamp_the_tenant_server_side() {
+        // Pins: a caller cannot name the tenant whose index is rebuilt. The
+        // edge overwrites `tenant_id` from the authenticated request, so a
+        // forged body cannot start, inspect, cancel, roll back, or finalize a
+        // rebuild in someone else's tenant.
+        let cases = [
+            (
+                "/v1/memory/index-rebuild/start",
+                "/GraphMemoryMaint/start_index_rebuild",
+            ),
+            (
+                "/v1/memory/index-rebuild/status",
+                "/GraphMemoryMaint/index_rebuild_status",
+            ),
+            (
+                "/v1/memory/index-rebuild/cancel",
+                "/GraphMemoryMaint/cancel_index_rebuild",
+            ),
+            (
+                "/v1/memory/index-rebuild/rollback",
+                "/GraphMemoryMaint/rollback_index_rebuild",
+            ),
+            (
+                "/v1/memory/index-rebuild/finalize",
+                "/GraphMemoryMaint/finalize_index_rebuild",
+            ),
+        ];
+
+        for (public_path, internal_path) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from(
+                serde_json::json!({
+                    "tenant_id": "99999999-9999-9999-9999-999999999999",
+                    "kind": "reembed",
+                    "operation_uid": "33333333-3333-3333-3333-333333333333"
+                })
+                .to_string(),
+            );
+
+            match translate(&Method::POST, &uri, &body) {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+                    assert_eq!(
+                        forwarded.get("tenant_id"),
+                        Some(&test_tenant_json()),
+                        "{public_path} must overwrite a caller-supplied tenant"
+                    );
+                }
+                other => panic!("{public_path} should forward, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn memory_public_routes_translate_to_restate_handlers() {

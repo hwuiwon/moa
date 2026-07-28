@@ -225,6 +225,9 @@ async fn mock_connector_end_to_end_db_memory() {
             provider: "mock_connector".to_string(),
             parser_label: "task14".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
 
     let merge_connection_row = repository
@@ -239,6 +242,7 @@ async fn mock_connector_end_to_end_db_memory() {
         .expect("nango connection should exist");
     let merge_page = merge_provider
         .list_changed_records(ListChangedRecordsRequest {
+            acl_key: std::sync::Arc::new(moa_knowledge::acl_key::SourceAclKey::new(1, vec![7; 32])),
             connection: merge_connection_row,
             credential: RedactedSecret::new("merge-provider-credential".to_string()),
             cursor: None,
@@ -250,6 +254,7 @@ async fn mock_connector_end_to_end_db_memory() {
         .expect("merge fake provider should return changed records");
     let nango_page = nango_provider
         .list_changed_records(ListChangedRecordsRequest {
+            acl_key: std::sync::Arc::new(moa_knowledge::acl_key::SourceAclKey::new(1, vec![7; 32])),
             connection: nango_connection_row,
             credential: RedactedSecret::new("nango-provider-credential".to_string()),
             cursor: None,
@@ -770,6 +775,7 @@ async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_inges
     ));
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "nango".to_string(),
@@ -910,6 +916,7 @@ async fn knowledge_auto_sync_record_listing_failure_marks_sync_retryable_db_memo
     ));
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "nango".to_string(),
@@ -1010,6 +1017,7 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
             provider_trigger_completed_at: None,
         },
         connection: KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: PROVIDER.to_string(),

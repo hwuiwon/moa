@@ -37,9 +37,13 @@ async fn ingestion_reconciles_stale_predecessor_when_retrying_incomplete_same_ha
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -165,10 +169,14 @@ async fn ingestion_pipeline_replaying_same_page_keeps_counters_and_identities_on
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
 
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -297,10 +305,14 @@ async fn ingestion_pipeline_replay_after_change_token_only_progress_finishes_ing
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
 
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -321,6 +333,7 @@ async fn ingestion_pipeline_replay_after_change_token_only_progress_finishes_ing
     let object_uid = object_uid(connection_uid);
     repository
         .upsert_object(KnowledgeObject {
+            acl: moa_knowledge::domain::ObjectAcl::incomplete(),
             object_uid,
             tenant_id,
             connection_uid,
@@ -445,10 +458,14 @@ async fn ingestion_pipeline_reclaims_stale_started_claim_after_crash_db_knowledg
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
 
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -470,6 +487,7 @@ async fn ingestion_pipeline_reclaims_stale_started_claim_after_crash_db_knowledg
     let text = "Alpha is ready.\n\nBudget is 10.";
     repository
         .upsert_object(KnowledgeObject {
+            acl: moa_knowledge::domain::ObjectAcl::incomplete(),
             object_uid,
             tenant_id,
             connection_uid,
@@ -570,10 +588,14 @@ async fn ingestion_pipeline_replay_after_graph_uid_midpoint_finishes_ingestion()
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
 
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -594,6 +616,7 @@ async fn ingestion_pipeline_replay_after_graph_uid_midpoint_finishes_ingestion()
     let object_uid = object_uid(connection_uid);
     repository
         .upsert_object(KnowledgeObject {
+            acl: moa_knowledge::domain::ObjectAcl::incomplete(),
             object_uid,
             tenant_id,
             connection_uid,
@@ -703,6 +726,9 @@ async fn ingestion_pipeline_reingests_inline_edit_under_unchanged_token_db_memor
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
 
     repository

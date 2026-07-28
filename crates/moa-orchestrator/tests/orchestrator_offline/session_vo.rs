@@ -309,6 +309,8 @@ fn pending_reply_targets_accumulate_and_clear_only_on_an_accepted_delivery() {
     };
     let worker = PendingUserReplyTarget::WorkerInput {
         worker_id: "worker-1".to_string(),
+        turn_id: "worker-turn-1".to_string(),
+        generation: 2,
         input_request_id: "request-1".to_string(),
     };
     state.upsert_pending_user_reply_target(execution.clone());

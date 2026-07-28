@@ -15,7 +15,7 @@ use crate::{
         NODE_INDEX_COLUMNS, NodeIndexRow, NodeLabel, NodeReinforcementIntent, NodeWriteIntent,
         SEALED_NODE_INDEX_EXTRA_COLUMNS, SealedNodeRow,
     },
-    write::{SEALED_CONTENT_VERSION, SealedNodeContent, is_sealed_class},
+    write::{SEALED_CONTENT_VERSION, SealedNodeContent},
 };
 
 impl PostgresGraphStore {
@@ -44,7 +44,7 @@ impl PostgresGraphStore {
                     "decryption row slot was unexpectedly empty".to_string(),
                 ));
             };
-            if !is_sealed_class(sealed.row.pii_class) {
+            if !sealed.row.pii_class.is_sealed() {
                 if sealed.content_sealed.is_some() {
                     return Err(Error::Backfill(format!(
                         "unsealed node {} unexpectedly carries sealed content",
@@ -237,6 +237,7 @@ impl GraphStore for PostgresGraphStore {
         max_hops: u8,
         as_of: Option<DateTime<Utc>>,
         scoring: &GraphWalkScoring,
+        source_acl: &moa_core::types::memory::SourceAclContext,
     ) -> Result<Vec<GraphExpansionHit>, Error> {
         let seeds = unique_uids(seeds);
         if seeds.is_empty() || max_hops == 0 {
@@ -246,7 +247,7 @@ impl GraphStore for PostgresGraphStore {
         let max_hops = max_hops.min(3);
         let limit = (seeds.len() as i64 * 200).clamp(1, 5_000);
         let raw_hits = if let Some(mut conn) = self.begin().await? {
-            let rows = build_expansion_query(&seeds, max_hops, as_of, limit, scoring)
+            let rows = build_expansion_query(&seeds, max_hops, as_of, limit, scoring, source_acl)
                 .build()
                 .fetch_all(conn.as_mut())
                 .await
@@ -254,7 +255,7 @@ impl GraphStore for PostgresGraphStore {
             conn.commit().await?;
             expansion_hits_from_rows(rows)?
         } else {
-            let rows = build_expansion_query(&seeds, max_hops, as_of, limit, scoring)
+            let rows = build_expansion_query(&seeds, max_hops, as_of, limit, scoring, source_acl)
                 .build()
                 .fetch_all(&self.pool)
                 .await
@@ -468,6 +469,7 @@ fn build_expansion_query<'a>(
     as_of: Option<DateTime<Utc>>,
     limit: i64,
     scoring: &'a GraphWalkScoring,
+    source_acl: &'a moa_core::types::memory::SourceAclContext,
 ) -> QueryBuilder<'a, Postgres> {
     // Seed-anchored traversal: rather than materializing every visible node in
     // the tenant into a CTE and joining against it (which forced a full
@@ -514,6 +516,11 @@ fn build_expansion_query<'a>(
              AND "#,
     );
     crate::push_validity_filter(&mut builder, Some("seed_node"), as_of);
+    // A denied seed must not enter the walk at all: admitting it "just as a
+    // starting point" would let the caller reach its neighbours, which is the
+    // disclosure the seed itself was refused for.
+    builder.push(" AND ");
+    moa_db::push_source_acl_predicate(&mut builder, "seed_node.uid", source_acl);
     builder.push(
         r#"
             UNION ALL
@@ -570,6 +577,11 @@ fn build_expansion_query<'a>(
              AND "#,
     );
     crate::push_validity_filter(&mut builder, Some("next_node"), as_of);
+    // Applied inside the recursive JOIN rather than to the final SELECT, so a
+    // denied node is removed from the frontier and cannot bridge the walk to a
+    // node the caller would otherwise never have reached.
+    builder.push(" AND ");
+    moa_db::push_source_acl_predicate(&mut builder, "next_node.uid", source_acl);
     builder.push(" WHERE walk.hop < ");
     builder.push_bind(i32::from(max_hops));
     builder.push(" AND walk.path_score * ");

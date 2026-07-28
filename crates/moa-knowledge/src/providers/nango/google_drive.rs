@@ -86,6 +86,7 @@ mod tests {
 
     fn record(source_id: &str, payload: Value) -> ProviderRecord {
         ProviderRecord {
+            acl: crate::domain::RecordAcl::UniformlyPublic,
             source_id: source_id.to_string(),
             object_type: "drive_file".to_string(),
             title: Some("Doc".to_string()),

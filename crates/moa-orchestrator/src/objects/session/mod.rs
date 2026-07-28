@@ -15,6 +15,7 @@ use moa_core::{
     types::events_stream::EventRecord, types::execution_planning::ExecutionRunStarted,
     types::identifiers::SessionId, types::segments::ActiveSegment, types::session::CancelScope,
     types::session::SessionMeta, types::session::SessionStatus,
+    types::worker::commands::ClearWorkerInputTargetsInput,
     types::worker::commands::ConsumeWorkerChildResultInput,
     types::worker::commands::ConsumeWorkerChildResultOutput,
     types::worker::commands::MarkWorkerChildTerminalInput,
@@ -22,21 +23,23 @@ use moa_core::{
     types::worker::state::InputAudience, types::worker::state::ParentResumePolicy,
     types::worker::state::SignalSeverity, types::worker::state::UnreadChildSignal,
     types::worker::state::WorkerChildRef, types::worker::state::WorkerId,
-    types::worker::state::WorkerProgressSummary, types::worker::state::WorkerSignal,
-    types::worker::state::WorkerTerminalResult,
+    types::worker::state::WorkerInputTarget, types::worker::state::WorkerProgressSummary,
+    types::worker::state::WorkerSignal, types::worker::state::WorkerTerminalResult,
 };
 use moa_observability::record_turn_event_persist_duration;
 use moa_session::PostgresSessionStore;
 use moa_wire::session_store::{AppendEventRequest, GetEventsRequest, UpdateStatusRequest};
 use moa_wire::turn::{
-    CancelResponse, PendingMessage, QueueMessageRequest, QueueMessageResponse, RunTurnRequest,
-    SessionProgress, SessionProgressRequest, SessionSnapshot, StartTurnRequest, StartTurnResponse,
-    TurnOutcome as ExecutionTurnOutcome, TurnOutcomeKind as ExecutionTurnOutcomeKind, TurnProgress,
-    TurnTrigger,
+    ApplySecurityAssessmentRequest, ApplySecurityAssessmentResponse, CancelResponse,
+    PendingMessage, QueueMessageRequest, QueueMessageResponse, RegisterCoordinatorInputRequest,
+    RunTurnRequest, SessionProgress, SessionProgressRequest, SessionSnapshot, StartTurnRequest,
+    StartTurnResponse, TurnOutcome as ExecutionTurnOutcome,
+    TurnOutcomeKind as ExecutionTurnOutcomeKind, TurnProgress, TurnTrigger,
 };
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
+use crate::action_reviews::scheduling::{ActionReviewSchedule, QueuedActionReviewContinuation};
 use crate::objects::durable_utc_now;
 use crate::objects::worker::WorkerClient;
 use crate::objects::worker::WorkerProvideInputRequest;
@@ -71,7 +74,9 @@ pub use state::{
     ExecutionTemplateAdmissionReplayState, ExecutionTemplateAdmissionResume,
     PendingUserReplyTarget,
 };
-pub use state::{ChildLivenessState, ResumeBudget, ResumeTurnContext, SessionVoState};
+pub use state::{
+    ChildLivenessState, CoordinatorPendingInput, ResumeBudget, ResumeTurnContext, SessionVoState,
+};
 
 const K_PENDING_STATE: &str = "pending_state";
 
@@ -90,6 +95,16 @@ struct SessionPendingState {
     /// arrives, so it must be remembered between the request and the callback.
     #[serde(default)]
     pending_cancellation: Option<PendingCancellation>,
+    /// Monotonic turn-admission generation for this session.
+    ///
+    /// Advanced by every admitted user message, whether it starts a turn
+    /// immediately or is queued. An action review registered under an older
+    /// generation has been superseded by newer user work and never continues.
+    #[serde(default)]
+    turn_generation: u64,
+    /// Derived scheduling index for this session's conversational action reviews.
+    #[serde(default)]
+    action_reviews: ActionReviewSchedule,
 }
 
 /// Cancellation requested for one turn, awaiting that turn's outcome callback.
@@ -127,6 +142,24 @@ impl SessionPendingState {
     /// queue, and a `Cancelled` outcome with no recorded request — an externally
     /// cancelled invocation — dispatches nothing, because nothing asked for the
     /// queue to continue.
+    /// Advances the admission generation for one accepted user message.
+    ///
+    /// Returns the generation the admitted message runs under. Every action review
+    /// registered under an older generation is discarded: the user has since asked
+    /// for something newer, and a late approval must not preempt it.
+    fn advance_turn_generation(&mut self) -> u64 {
+        self.turn_generation = self.turn_generation.saturating_add(1);
+        let discarded = self.action_reviews.discard_below(self.turn_generation);
+        if discarded > 0 {
+            tracing::debug!(
+                generation = self.turn_generation,
+                discarded,
+                "discarded superseded session action reviews on new admission"
+            );
+        }
+        self.turn_generation
+    }
+
     fn dispatches_next_after(&self, outcome: &ExecutionTurnOutcome) -> bool {
         match outcome.kind {
             ExecutionTurnOutcomeKind::Completed
@@ -260,6 +293,20 @@ pub trait Session {
     /// Publishes one cadence- and delta-gated aggregate execution progress event.
     async fn execution_progress(progress: Json<ExecutionProgress>) -> Result<(), HandlerError>;
 
+    /// Registers one coordinator input request so a plain user reply can resolve it.
+    async fn register_coordinator_input(
+        request: Json<RegisterCoordinatorInputRequest>,
+    ) -> Result<(), HandlerError>;
+
+    /// Atomically applies one classified tool output to the coordinator's circuit.
+    ///
+    /// Single-writer by virtue of being a virtual-object handler, which is what
+    /// makes the read-score-write step atomic against concurrent tool results in
+    /// the same turn.
+    async fn apply_security_assessment(
+        request: Json<ApplySecurityAssessmentRequest>,
+    ) -> Result<Json<ApplySecurityAssessmentResponse>, HandlerError>;
+
     /// Publishes and activates one exact user-addressed execution input request.
     async fn execution_input_required(
         input: Json<ExecutionInputRequired>,
@@ -269,6 +316,23 @@ pub trait Session {
     async fn execution_terminal(
         delivery: Json<moa_execution::wire::ExecutionTerminalDelivery>,
     ) -> Result<Json<ExecutionSynthesisDispatch>, HandlerError>;
+
+    /// Registers one pending action review this session's coordinator raised.
+    ///
+    /// Called synchronously by `ActionReviews/request` before the reviewing turn
+    /// learns the action is pending. Registering the same review id twice is a
+    /// no-op.
+    async fn register_action_review(
+        registration: Json<moa_core::types::action_policy::ActionReviewRegistration>,
+    ) -> Result<(), HandlerError>;
+
+    /// Applies one resolved action review and schedules the coordinator continuation.
+    ///
+    /// A receipt for an unknown or already-resolved review is a no-op, and a receipt
+    /// whose generation was superseded produces no continuation.
+    async fn action_review_resolved(
+        receipt: Json<moa_core::types::action_policy::ActionReviewReceipt>,
+    ) -> Result<(), HandlerError>;
 
     /// Registers a workflow awakeable that should resolve when the turn completes.
     async fn attach_turn_waiter(
@@ -303,6 +367,16 @@ pub trait Session {
 
     /// Removes a root-owned child worker from the active registry.
     async fn remove_child(worker_id: String) -> Result<(), HandlerError>;
+
+    /// Retracts the reply targets advertised for input requests a child has cleared.
+    ///
+    /// Called by the child whenever an in-flight `request_input` round-trip dies — wait
+    /// timeout, cancellation, terminal turn outcome, or an answered request — so a plain
+    /// user reply is never delivered to an awakeable nothing is parked on. Idempotent:
+    /// retracting an unknown or already-retracted target is a no-op.
+    async fn clear_worker_input_targets(
+        input: Json<ClearWorkerInputTargetsInput>,
+    ) -> Result<(), HandlerError>;
 
     /// Caches a root child terminal result until a wait consumes it.
     async fn mark_child_terminal(
@@ -622,6 +696,78 @@ mod tests {
 
         assert!(!unrequested.dispatches_next_after(&cancelled));
         assert!(!other_turn.dispatches_next_after(&cancelled));
+    }
+
+    #[test]
+    fn a_resolved_continuation_runs_before_the_ordinary_queue_at_its_own_generation() {
+        // Pins: a same-generation continuation is the tail of work the session already
+        // acknowledged, so it goes ahead of ordinary FIFO. It stays eligible only while
+        // it is current: the moment a newer user message is admitted, the older review's
+        // continuation is stranded and the queued user message runs instead.
+        use moa_core::types::action_policy::{
+            ActionReviewContinuation, ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt,
+            ActionReviewTerminalEvent,
+        };
+        use moa_core::types::identifiers::{SessionId, ToolCallId};
+
+        let session_id = SessionId::new();
+        let review_id = uuid::Uuid::from_u128(0x13_2001);
+        let mut state = SessionPendingState::default();
+        let generation = state.advance_turn_generation();
+        assert_eq!(generation, 1);
+        assert!(
+            state
+                .action_reviews
+                .register(review_id, "turn-origin".to_string(), generation)
+        );
+
+        let registered = state
+            .action_reviews
+            .resolve(review_id)
+            .expect("registered review resolves once");
+        assert!(
+            state
+                .action_reviews
+                .enqueue(QueuedActionReviewContinuation {
+                    continuation: ActionReviewContinuation {
+                        review_id,
+                        receipt: ActionReviewReceipt {
+                            review_id,
+                            owner: ActionReviewOwner::Coordinator {
+                                session_id,
+                                turn_id: "turn-origin".to_string(),
+                                generation,
+                            },
+                            tool_name: "bash".to_string(),
+                            requested_tool_call_id: ToolCallId::new(),
+                            executed_tool_call_id: Some(ToolCallId::new()),
+                            outcome: ActionReviewOutcome::ClearedSuccess {
+                                summary: "ok".to_string(),
+                                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                                capability: moa_core::types::security::ToolCapabilityId::builtin(
+                                    "bash"
+                                ),
+                            },
+                            terminal_events: vec![
+                                ActionReviewTerminalEvent::Decided,
+                                ActionReviewTerminalEvent::ToolResult,
+                            ],
+                        },
+                    },
+                    turn_id: "turn-continuation".to_string(),
+                    generation: registered.generation,
+                    ordinal: registered.ordinal,
+                })
+        );
+        assert!(state.action_reviews.has_queued(generation));
+
+        let newer = state.advance_turn_generation();
+        assert_eq!(newer, 2);
+        assert!(
+            state.action_reviews.take_next(newer).is_none(),
+            "a superseded continuation must not run ahead of the newer user message"
+        );
+        assert!(!state.action_reviews.has_queued(generation));
     }
 
     #[test]

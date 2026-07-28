@@ -11,5 +11,7 @@ mod data_access_db;
 mod emit_authn_success_db;
 #[path = "ocsf_db/emit_matrix_db.rs"]
 mod emit_matrix_db;
+#[path = "ocsf_db/prompt_injection_finding_db.rs"]
+mod prompt_injection_finding_db;
 #[path = "ocsf_db/sign_verify_roundtrip_db.rs"]
 mod sign_verify_roundtrip_db;

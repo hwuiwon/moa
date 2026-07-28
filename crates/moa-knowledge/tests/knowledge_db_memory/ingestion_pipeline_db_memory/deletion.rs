@@ -35,10 +35,14 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
 
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -173,6 +177,10 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
     assert_eq!(
         first_run_steps,
         vec![
+            // The ACL is captured before either content fence, so it is the
+            // first step of every record: a permission change must take effect
+            // even when nothing about the content changed.
+            "source_acl_captured",
             "object_change_checked",
             "content_fetched",
             "parse_submitted",
@@ -191,10 +199,24 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
         .iter()
         .filter(|step| step.sync_run_uid == unchanged_run)
         .collect::<Vec<_>>();
-    assert_eq!(unchanged_steps.len(), 1);
+    // An unchanged record still captures its ACL and only then skips the
+    // content work: permissions are re-read every pass, parsing and embedding
+    // are not.
     assert_eq!(
-        unchanged_steps[0].status,
-        moa_knowledge::domain::IngestionStepStatus::Skipped
+        unchanged_steps
+            .iter()
+            .map(|step| (step.step.as_str(), step.status))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "source_acl_captured",
+                moa_knowledge::domain::IngestionStepStatus::Completed
+            ),
+            (
+                "object_change_checked",
+                moa_knowledge::domain::IngestionStepStatus::Skipped
+            ),
+        ]
     );
 
     let counters = sync_counters(&pool, edit_run).await;
@@ -242,9 +264,13 @@ async fn deletion_writes_terminal_status_last_and_stays_retryable_on_invalidatio
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -366,10 +392,14 @@ async fn ingestion_pipeline_prunes_unseen_objects_after_full_selection_refresh()
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
 
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),

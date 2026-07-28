@@ -149,10 +149,32 @@ pub enum MessageReplyTarget {
         generation: u64,
     },
     /// Reply answering one conversational worker's input request.
+    ///
+    /// Fenced by the worker turn and admission generation that raised the request:
+    /// a reply naming a superseded owner addresses work that has already moved on
+    /// and must conflict rather than resolve a replacement round-trip.
     WorkerInput {
         /// Durable worker identifier.
         worker_id: WorkerId,
+        /// Worker turn that raised the request.
+        turn_id: String,
+        /// Worker admission generation that owns the raising turn.
+        generation: u64,
         /// Exact worker input request identifier.
+        input_request_id: String,
+    },
+    /// Reply answering one root coordinator turn's own input request.
+    ///
+    /// Distinct from `WorkerInput`: the coordinator is not a child, so it has no
+    /// worker id, and its request is fenced by the turn generation that raised
+    /// it. A reply naming a superseded generation addresses work that has already
+    /// moved on and must conflict rather than be delivered.
+    CoordinatorInput {
+        /// Coordinator turn that raised the request.
+        turn_id: String,
+        /// Session turn generation that admitted the owning turn.
+        generation: u64,
+        /// Exact coordinator input request identifier.
         input_request_id: String,
     },
 }
@@ -1007,6 +1029,8 @@ mod tests {
             },
             MessageReplyTarget::WorkerInput {
                 worker_id: "worker-3".to_string(),
+                turn_id: "worker-turn-1".to_string(),
+                generation: 2,
                 input_request_id: "request-1".to_string(),
             },
         ];

@@ -8,6 +8,7 @@ use serde_json::Value;
 use super::{
     action_policy::ActionClass, action_policy::ActionPolicyEffect, action_policy::RiskLevel,
     events_stream::ClaimCheck, hands::SandboxFile, identifiers::SessionId, identifiers::ToolCallId,
+    security::ToolCapabilityId, security::ToolOutputAssessment,
 };
 
 fn default_tool_max_output_tokens() -> u32 {
@@ -428,6 +429,61 @@ impl ToolOutput {
         } else {
             rendered.join("\n\n")
         }
+    }
+}
+
+/// The only shape a classified tool output may travel in.
+///
+/// Every router and executor API returns this envelope rather than a bare
+/// [`ToolOutput`]: the safe output, the assessment that produced it, and the
+/// canonical capability identity the circuit is keyed by are inseparable. A
+/// consumer therefore cannot obtain output without also obtaining the security
+/// metadata, and no downstream surface ever re-runs the classifier.
+///
+/// `safe_output` is the *post-classification* output. Suspicious spans are
+/// already redacted, and for every non-safe class the structured payload and
+/// artifact reference are already cleared, so persisting or rendering it needs
+/// no further sanitization.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecuredToolOutput {
+    /// Post-classification output that is safe to persist, render, and replay.
+    pub safe_output: ToolOutput,
+    /// Required security metadata describing how the output was classified.
+    pub assessment: ToolOutputAssessment,
+    /// Canonical capability identity resolved by the router.
+    pub capability: ToolCapabilityId,
+    /// Sandbox hand that served the call, when one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hand_id: Option<String>,
+}
+
+impl SecuredToolOutput {
+    /// Wraps an output that the classifier assessed as safe.
+    ///
+    /// Test and construction seam only: production output reaches this shape
+    /// through the classifier in `moa-security`, never by asserting safety here.
+    #[must_use]
+    pub fn assessed_safe(safe_output: ToolOutput, capability: ToolCapabilityId) -> Self {
+        Self {
+            safe_output,
+            assessment: ToolOutputAssessment::safe(),
+            capability,
+            hand_id: None,
+        }
+    }
+
+    /// Attaches the sandbox hand that served the call.
+    #[must_use]
+    pub fn with_hand_id(mut self, hand_id: Option<String>) -> Self {
+        self.hand_id = hand_id;
+        self
+    }
+
+    /// Returns whether the underlying output represents a tool error.
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.safe_output.is_error
     }
 }
 

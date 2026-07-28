@@ -1,18 +1,32 @@
 //! Periodic graph-memory maintenance triggered by the CronJob virtual object.
 
 use chrono::{NaiveDate, Utc};
+use moa_authz::{FgaClient, require_authz_with_delegation};
+use moa_authz_schema::{ObjectType, Relation};
 use moa_config::MoaConfig;
+use moa_core::traits::Identity;
 use moa_core::types::identifiers::TenantId;
+use moa_core::types::memory::{RebuildLifecycle, RebuildOperationId, RlsContext};
 use moa_memory_lifecycle::TenantConsolidationCursor;
+use moa_memory_vector::rebuild::RebuildRepository;
 use moa_memory_vector::{VectorStoreFactory, VectorSyncReport};
 use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_wire::memory::{
+    RebuildActionResponse, RebuildOperationRequest, RebuildStartRequest, RebuildStatusResponse,
+};
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::handlers::authz_shim::{
+    require_configured_fga_client, require_identity, translate_authz_error,
+};
 use crate::workflows::consolidate::{
     ConsolidateClient, ConsolidateRequest, consolidate_workflow_id,
+};
+use crate::workflows::knowledge_index_rebuild::{
+    KnowledgeIndexRebuildClient, KnowledgeIndexRebuildRequest, knowledge_index_rebuild_workflow_id,
 };
 
 /// Request payload for graph-memory compaction.
@@ -98,19 +112,55 @@ pub trait GraphMemoryMaint {
     async fn redrive_dead_lettered_vectors(
         req: Json<VectorSyncRedriveRequest>,
     ) -> Result<Json<VectorSyncRedriveReport>, HandlerError>;
+
+    /// Starts a durable storage-partition index rebuild.
+    async fn start_index_rebuild(
+        req: Json<RebuildStartRequest>,
+    ) -> Result<Json<RebuildStatusResponse>, HandlerError>;
+
+    /// Reports one rebuild operation's progress, cost estimate, and safe errors.
+    async fn index_rebuild_status(
+        req: Json<RebuildOperationRequest>,
+    ) -> Result<Json<RebuildStatusResponse>, HandlerError>;
+
+    /// Asks a running rebuild to stop at its next committed checkpoint.
+    async fn cancel_index_rebuild(
+        req: Json<RebuildOperationRequest>,
+    ) -> Result<Json<RebuildActionResponse>, HandlerError>;
+
+    /// Restores the retained prior generation as the production read generation.
+    async fn rollback_index_rebuild(
+        req: Json<RebuildOperationRequest>,
+    ) -> Result<Json<RebuildActionResponse>, HandlerError>;
+
+    /// Discards retired generation data, ending the rollback window.
+    async fn finalize_index_rebuild(
+        req: Json<RebuildOperationRequest>,
+    ) -> Result<Json<RebuildActionResponse>, HandlerError>;
 }
 
 /// Concrete graph-memory maintenance service implementation.
 pub struct GraphMemoryMaintImpl {
     pool: PgPool,
     config: Arc<MoaConfig>,
+    fga_client: Option<FgaClient>,
 }
 
 impl GraphMemoryMaintImpl {
-    /// Creates graph-memory maintenance with its persistence and vector configuration.
+    /// Creates graph-memory maintenance with its persistence, vector, and
+    /// authorization dependencies.
+    ///
+    /// The authorization client is required by the operator rebuild handlers:
+    /// starting, cancelling, rolling back, or finalizing a rebuild changes what
+    /// an entire tenant retrieves, so those calls are tenant-admin gated rather
+    /// than treated as internal maintenance like the cron handlers above.
     #[must_use]
-    pub fn new(pool: PgPool, config: Arc<MoaConfig>) -> Self {
-        Self { pool, config }
+    pub fn new(pool: PgPool, config: Arc<MoaConfig>, fga_client: Option<FgaClient>) -> Self {
+        Self {
+            pool,
+            config,
+            fga_client,
+        }
     }
 }
 
@@ -223,6 +273,343 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
         );
         Ok(Json::from(report))
     }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn start_index_rebuild(
+        &self,
+        ctx: Context<'_>,
+        request: Json<RebuildStartRequest>,
+    ) -> Result<Json<RebuildStatusResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("GraphMemoryMaint", "start_index_rebuild");
+        let identity = require_identity(&ctx)?;
+        let request = request.into_inner();
+        require_rebuild_authority(self.fga_client.clone(), &identity, request.tenant_id).await?;
+
+        // The operation id is minted durably so a retried call resumes the same
+        // rebuild rather than racing a second one against the partition.
+        let operation_uid = ctx
+            .run(|| async { Ok::<_, HandlerError>(Json::from(RebuildOperationId::new())) })
+            .name("index_rebuild_operation_id")
+            .await?
+            .into_inner();
+
+        crate::restate_identity::replay_safe_request(
+            ctx.workflow_client::<KnowledgeIndexRebuildClient>(
+                knowledge_index_rebuild_workflow_id(operation_uid),
+            )
+            .run(Json::from(KnowledgeIndexRebuildRequest {
+                operation_uid,
+                tenant_id: request.tenant_id,
+                kind: request.kind,
+            })),
+        )
+        .send();
+
+        tracing::info!(
+            tenant_id = %request.tenant_id,
+            operation_uid = %operation_uid,
+            kind = %request.kind,
+            "queued storage-partition index rebuild"
+        );
+        Ok(Json::from(RebuildStatusResponse {
+            operation_uid,
+            tenant_id: request.tenant_id,
+            storage_partition_id: moa_core::types::identifiers::StoragePartitionId::for_tenant(
+                request.tenant_id,
+            )
+            .to_string(),
+            kind: request.kind,
+            lifecycle: RebuildLifecycle::Planning,
+            candidate_generation_uid: None,
+            active_generation_uid: None,
+            previous_generation_uid: None,
+            vectors_total: 0,
+            vectors_rebuilt: 0,
+            vectors_failed: 0,
+            estimated_input_tokens: 0,
+            estimated_cost_micros: 0,
+            provider_requests: 0,
+            provider_throttles: 0,
+            provider_retries: 0,
+            validation_overlap: None,
+            cancel_requested: false,
+            last_error_code: None,
+            last_error_message: None,
+        }))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn index_rebuild_status(
+        &self,
+        ctx: Context<'_>,
+        request: Json<RebuildOperationRequest>,
+    ) -> Result<Json<RebuildStatusResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("GraphMemoryMaint", "index_rebuild_status");
+        let identity = require_identity(&ctx)?;
+        let request = request.into_inner();
+        require_rebuild_authority(self.fga_client.clone(), &identity, request.tenant_id).await?;
+        let pool = self.pool.clone();
+        Ok(ctx
+            .run(move || {
+                let pool = pool.clone();
+                async move {
+                    load_rebuild_status(pool, request.tenant_id, request.operation_uid)
+                        .await
+                        .map(Json::from)
+                }
+            })
+            .name("index_rebuild_status")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn cancel_index_rebuild(
+        &self,
+        ctx: Context<'_>,
+        request: Json<RebuildOperationRequest>,
+    ) -> Result<Json<RebuildActionResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("GraphMemoryMaint", "cancel_index_rebuild");
+        let identity = require_identity(&ctx)?;
+        let request = request.into_inner();
+        require_rebuild_authority(self.fga_client.clone(), &identity, request.tenant_id).await?;
+        let pool = self.pool.clone();
+        Ok(ctx
+            .run(move || {
+                let pool = pool.clone();
+                async move {
+                    let repository =
+                        RebuildRepository::new(pool.clone(), RlsContext::tenant(request.tenant_id));
+                    // Cooperative: the running build observes the request at its
+                    // next batch boundary and stops on a committed checkpoint.
+                    let applied = repository
+                        .request_cancel(request.operation_uid)
+                        .await
+                        .map_err(rebuild_handler_error)?;
+                    let status =
+                        load_rebuild_status(pool, request.tenant_id, request.operation_uid).await?;
+                    Ok::<_, HandlerError>(Json::from(RebuildActionResponse {
+                        operation_uid: request.operation_uid,
+                        lifecycle: status.lifecycle,
+                        applied,
+                    }))
+                }
+            })
+            .name("index_rebuild_cancel")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn rollback_index_rebuild(
+        &self,
+        ctx: Context<'_>,
+        request: Json<RebuildOperationRequest>,
+    ) -> Result<Json<RebuildActionResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("GraphMemoryMaint", "rollback_index_rebuild");
+        let identity = require_identity(&ctx)?;
+        let request = request.into_inner();
+        require_rebuild_authority(self.fga_client.clone(), &identity, request.tenant_id).await?;
+        let pool = self.pool.clone();
+        Ok(ctx
+            .run(move || {
+                let pool = pool.clone();
+                async move {
+                    let repository =
+                        RebuildRepository::new(pool.clone(), RlsContext::tenant(request.tenant_id));
+                    let operation = repository
+                        .load_operation(request.operation_uid)
+                        .await
+                        .map_err(rebuild_handler_error)?
+                        .ok_or_else(|| {
+                            TerminalError::new_with_code(404, "rebuild operation not found")
+                        })?;
+                    if operation.lifecycle != RebuildLifecycle::Activated {
+                        return Err(TerminalError::new_with_code(
+                            409,
+                            "only an activated rebuild can be rolled back",
+                        )
+                        .into());
+                    }
+                    let pointer = repository
+                        .load_active_generation()
+                        .await
+                        .map_err(rebuild_handler_error)?
+                        .ok_or_else(|| {
+                            TerminalError::new_with_code(409, "no active generation to roll back")
+                        })?;
+                    repository
+                        .rollback_generation(pointer.pointer_version)
+                        .await
+                        .map_err(rebuild_handler_error)?;
+                    let rolled_back = repository
+                        .transition(
+                            request.operation_uid,
+                            operation.owner_token,
+                            RebuildLifecycle::Activated,
+                            RebuildLifecycle::RolledBack,
+                        )
+                        .await
+                        .map_err(rebuild_handler_error)?;
+                    Ok::<_, HandlerError>(Json::from(RebuildActionResponse {
+                        operation_uid: request.operation_uid,
+                        lifecycle: rolled_back.operation().lifecycle,
+                        applied: true,
+                    }))
+                }
+            })
+            .name("index_rebuild_rollback")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn finalize_index_rebuild(
+        &self,
+        ctx: Context<'_>,
+        request: Json<RebuildOperationRequest>,
+    ) -> Result<Json<RebuildActionResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("GraphMemoryMaint", "finalize_index_rebuild");
+        let identity = require_identity(&ctx)?;
+        let request = request.into_inner();
+        require_rebuild_authority(self.fga_client.clone(), &identity, request.tenant_id).await?;
+        let pool = self.pool.clone();
+        Ok(ctx
+            .run(move || {
+                let pool = pool.clone();
+                async move {
+                    let repository =
+                        RebuildRepository::new(pool.clone(), RlsContext::tenant(request.tenant_id));
+                    let operation = repository
+                        .load_operation(request.operation_uid)
+                        .await
+                        .map_err(rebuild_handler_error)?
+                        .ok_or_else(|| {
+                            TerminalError::new_with_code(404, "rebuild operation not found")
+                        })?;
+                    if operation.lifecycle != RebuildLifecycle::Activated {
+                        return Err(TerminalError::new_with_code(
+                            409,
+                            "only an activated rebuild can be finalized",
+                        )
+                        .into());
+                    }
+                    let generation_uid = operation.candidate_generation_uid.ok_or_else(|| {
+                        TerminalError::new_with_code(409, "rebuild has no activated generation")
+                    })?;
+                    // After this the retired vectors are gone: rollback is no
+                    // longer possible and no reader can reconstruct the retired
+                    // contract.
+                    repository
+                        .finalize_generation(generation_uid)
+                        .await
+                        .map_err(rebuild_handler_error)?;
+                    let finalized = repository
+                        .transition(
+                            request.operation_uid,
+                            operation.owner_token,
+                            RebuildLifecycle::Activated,
+                            RebuildLifecycle::Finalized,
+                        )
+                        .await
+                        .map_err(rebuild_handler_error)?;
+                    Ok::<_, HandlerError>(Json::from(RebuildActionResponse {
+                        operation_uid: request.operation_uid,
+                        lifecycle: finalized.operation().lifecycle,
+                        applied: true,
+                    }))
+                }
+            })
+            .name("index_rebuild_finalize")
+            .await?)
+    }
+}
+
+/// Requires tenant-admin authority over the rebuild's own tenant.
+///
+/// A rebuild rewrites every vector the tenant retrieves from, and activation
+/// changes what every member of that tenant sees. Tenant membership is not
+/// enough, and the check runs before the operation row is read so an
+/// unauthorized caller cannot learn that a rebuild exists.
+async fn require_rebuild_authority(
+    fga_client: Option<FgaClient>,
+    identity: &Identity,
+    tenant_id: TenantId,
+) -> Result<(), HandlerError> {
+    if identity.tenant_id != tenant_id {
+        return Err(TerminalError::new_with_code(
+            403,
+            "rebuild requests are scoped to the caller's own tenant",
+        )
+        .into());
+    }
+    let fga = require_configured_fga_client(fga_client)?;
+    require_authz_with_delegation(
+        &fga,
+        identity,
+        ObjectType::Tenant,
+        tenant_id,
+        Relation::Admin,
+    )
+    .await
+    .map_err(translate_authz_error)
+}
+
+/// Projects durable rebuild state into the operator-visible status shape.
+async fn load_rebuild_status(
+    pool: PgPool,
+    tenant_id: TenantId,
+    operation_uid: RebuildOperationId,
+) -> Result<RebuildStatusResponse, HandlerError> {
+    let repository = RebuildRepository::new(pool, RlsContext::tenant(tenant_id));
+    let operation = repository
+        .load_operation(operation_uid)
+        .await
+        .map_err(rebuild_handler_error)?
+        .ok_or_else(|| TerminalError::new_with_code(404, "rebuild operation not found"))?;
+    let pointer = repository
+        .load_active_generation()
+        .await
+        .map_err(rebuild_handler_error)?;
+    let validation_overlap = match operation.candidate_generation_uid {
+        Some(generation_uid) => repository
+            .load_generation(generation_uid)
+            .await
+            .map_err(rebuild_handler_error)?
+            .and_then(|generation| generation.validation_overlap),
+        None => None,
+    };
+
+    Ok(RebuildStatusResponse {
+        operation_uid: operation.operation_uid,
+        tenant_id: operation.tenant_id,
+        storage_partition_id: operation.storage_partition_id,
+        kind: operation.kind,
+        lifecycle: operation.lifecycle,
+        candidate_generation_uid: operation.candidate_generation_uid,
+        active_generation_uid: pointer.as_ref().map(|pointer| pointer.generation_uid),
+        previous_generation_uid: pointer
+            .as_ref()
+            .and_then(|pointer| pointer.previous_generation_uid),
+        vectors_total: operation.vectors_total,
+        vectors_rebuilt: operation.vectors_rebuilt,
+        vectors_failed: operation.vectors_failed,
+        estimated_input_tokens: operation.estimated_input_tokens,
+        estimated_cost_micros: operation.estimated_cost_micros,
+        provider_requests: operation.provider_requests,
+        provider_throttles: operation.provider_throttles,
+        provider_retries: operation.provider_retries,
+        validation_overlap,
+        cancel_requested: operation.cancel_requested_at.is_some(),
+        last_error_code: operation.last_error_code,
+        last_error_message: operation.last_error_message,
+    })
+}
+
+fn rebuild_handler_error(error: moa_memory_vector::Error) -> HandlerError {
+    TerminalError::new(error.to_string()).into()
 }
 
 fn default_vector_sync_drain_limit() -> i64 {

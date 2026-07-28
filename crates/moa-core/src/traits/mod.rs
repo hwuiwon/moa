@@ -41,6 +41,7 @@ use crate::types::{
     hands::SandboxFile, identifiers::SegmentId, identifiers::SessionAttachmentId,
     identifiers::SessionId, identifiers::StoragePartitionId, identifiers::TenantId,
     identifiers::ToolCallId, learning::LearningEntry, model::ModelCapabilities,
+    security::ToolCapabilityId, security::ToolOutputAssessment,
     segment_assessment::SegmentAssessment, segment_assessment::SegmentBaseline,
     segment_assessment::SkillResolutionRate, segments::SegmentCompletion, segments::TaskSegment,
     session::Checkpoint, session::CheckpointHandle, session::SessionFilter, session::SessionMeta,
@@ -261,6 +262,20 @@ pub trait SessionEventLookupStore: Send + Sync {
         event_type: EventType,
         review_id: uuid::Uuid,
     ) -> Result<bool>;
+
+    /// Loads the security metadata recorded on one durable `ToolResult`.
+    ///
+    /// Needed by recovery paths that must rebuild a receipt for a tool call whose
+    /// output they no longer hold. Reading the metadata back is what keeps those
+    /// receipts honest: the alternative — stamping a fresh "safe" assessment onto
+    /// output nobody re-examined — would assert a security property that was never
+    /// checked on that path.
+    async fn tool_result_security_metadata(
+        &self,
+        storage_partition_id: &StoragePartitionId,
+        session_id: SessionId,
+        tool_call_id: ToolCallId,
+    ) -> Result<Option<(ToolOutputAssessment, ToolCapabilityId)>>;
 }
 
 /// Focused contract for analytics read models derived from the session log.

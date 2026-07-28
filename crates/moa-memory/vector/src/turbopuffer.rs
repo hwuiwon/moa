@@ -40,6 +40,7 @@ pub struct TurbopufferStore {
     baa_enabled: bool,
     vector_type: TurbopufferVectorType,
     storage_partition_id: Option<String>,
+    generation_namespace: Option<String>,
 }
 
 /// Turbopuffer full-text BM25 query parameters.
@@ -150,6 +151,7 @@ impl TurbopufferStore {
             baa_enabled,
             vector_type,
             storage_partition_id: None,
+            generation_namespace: None,
         })
     }
 
@@ -173,8 +175,34 @@ impl TurbopufferStore {
         store
     }
 
+    /// Returns a clone pinned to one embedding generation's namespace.
+    ///
+    /// A rebuild builds its candidate vectors into the generation's own
+    /// namespace while the active generation keeps serving from its. Without
+    /// this pin both would write the partition's single derived namespace, and
+    /// the candidate build would overwrite the vectors production is reading —
+    /// the one failure a shadow build must not be able to cause.
+    #[must_use]
+    pub fn with_generation_namespace(&self, namespace: impl Into<String>) -> Self {
+        let mut store = self.clone();
+        store.generation_namespace = Some(namespace.into());
+        store
+    }
+
     /// Returns the Turbopuffer namespace for one storage partition.
+    ///
+    /// A generation pin wins over the derived name: once a caller has resolved
+    /// which generation it is reading or writing, the derived partition-wide
+    /// name is the wrong answer.
     pub fn namespace_for_storage_partition(&self, storage_partition_id: &str) -> Result<String> {
+        if let Some(namespace) = &self.generation_namespace {
+            if namespace.is_empty() || namespace.len() > 128 {
+                return Err(Error::TurbopufferConfig(format!(
+                    "generation namespace `{namespace}` is not a valid Turbopuffer namespace"
+                )));
+            }
+            return Ok(namespace.clone());
+        }
         let storage_partition_segment = namespace_segment(storage_partition_id);
         if storage_partition_segment.is_empty() {
             return Err(Error::TurbopufferConfig(

@@ -6,11 +6,11 @@ use jsonschema::{Draft, Retrieve, Uri};
 use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionEnvelope,
     types::action_policy::ActionPolicyEffect, types::action_policy::ActionReviewField,
-    types::action_policy::ActionReviewFileDiff, types::action_policy::ActionReviewPreview,
-    types::action_policy::CapabilityProvenance, types::action_policy::ExecutionTaskOrigin,
+    types::action_policy::ActionReviewFileDiff, types::action_policy::ActionReviewOwner,
+    types::action_policy::ActionReviewPreview, types::action_policy::CapabilityProvenance,
     types::completion::ToolInvocation, types::contact::SessionActorRef,
     types::identifiers::ToolCallId, types::identifiers::UserId, types::session::SessionMeta,
-    types::tools::ToolPolicyInput, types::worker::state::WorkerId,
+    types::tools::ToolPolicyInput,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -21,12 +21,14 @@ use super::normalization::{
 };
 
 /// Optional origin metadata attached to an action envelope.
+///
+/// Capability provenance describes which artifact or skill surface produced the
+/// call. It is deliberately independent of the envelope's
+/// [`ActionReviewOwner`], which decides who is resumed when the review resolves.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActionOrigin {
     /// Capability-level source provenance.
     pub capability: CapabilityProvenance,
-    /// Execution task identity, independent of capability provenance.
-    pub execution: Option<ExecutionTaskOrigin>,
     /// Explicit idempotency key supplied for side-effecting tools.
     pub idempotency_key: Option<String>,
 }
@@ -63,12 +65,16 @@ impl PreparedActionInvocation {
     }
 
     /// Builds the durable action envelope for this invocation.
+    ///
+    /// `owner` is the exact runtime resumed when the review resolves; it is
+    /// supplied by the caller that issued the tool call and is never derived from
+    /// the session metadata.
     pub fn envelope(
         &self,
         review_id: Uuid,
         session: &SessionMeta,
         tool_call_id: ToolCallId,
-        worker_id: Option<WorkerId>,
+        owner: ActionReviewOwner,
         origin: ActionOrigin,
     ) -> ActionEnvelope {
         ActionEnvelope {
@@ -78,8 +84,7 @@ impl PreparedActionInvocation {
                 .created_by
                 .clone()
                 .unwrap_or(SessionActorRef::Anonymous),
-            session_id: Some(session.id),
-            worker_id,
+            owner,
             tool_call_id,
             tool_name: self.policy_input.tool_name.clone(),
             normalized_input: self.policy_input.normalized_input.clone(),
@@ -89,7 +94,6 @@ impl PreparedActionInvocation {
             origin_kind: origin.capability.kind,
             origin_id: origin.capability.id,
             origin_step_id: origin.capability.step_id,
-            execution_origin: origin.execution,
             idempotency_key: origin.idempotency_key,
             created_at: chrono::Utc::now(),
         }

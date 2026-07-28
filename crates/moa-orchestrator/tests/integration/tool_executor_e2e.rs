@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use moa_core::{
     events::Event, traits::Identity, types::events_stream::EventRange,
-    types::identifiers::ToolCallId, types::tools::ToolCallRequest, types::tools::ToolOutput,
+    types::identifiers::ToolCallId, types::tools::SecuredToolOutput, types::tools::ToolCallRequest,
 };
 use moa_test_support::postgres::test_database_url;
 use serde_json::json;
@@ -151,9 +151,10 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             .context("call ToolExecutor/file_write via restate ingress")?
             .error_for_status()
             .context("file_write should succeed")?
-            .json::<ToolOutput>()
+            .json::<SecuredToolOutput>()
             .await
-            .context("deserialize file_write output")?;
+            .context("deserialize file_write output")?
+            .safe_output;
         assert!(write_output.to_text().contains("note.txt"));
 
         let mut read_request = tool_request(
@@ -175,9 +176,10 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             .context("call ToolExecutor/file_read via restate ingress")?
             .error_for_status()
             .context("file_read should succeed")?
-            .json::<ToolOutput>()
+            .json::<SecuredToolOutput>()
             .await
-            .context("deserialize file_read output")?;
+            .context("deserialize file_read output")?
+            .safe_output;
         let read_text = read_output.to_text();
         assert!(
             read_text.contains("hello from tool executor"),
@@ -204,9 +206,10 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             .context("call ToolExecutor/file_read at root scope via restate ingress")?
             .error_for_status()
             .context("root file_read call should return a tool output")?
-            .json::<ToolOutput>()
+            .json::<SecuredToolOutput>()
             .await
-            .context("deserialize root file_read output")?;
+            .context("deserialize root file_read output")?
+            .safe_output;
         let root_read_text = root_read_output.to_text();
         assert!(
             root_read_text.contains("root coordinator"),
@@ -232,9 +235,10 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
             .context("call ToolExecutor/bash via restate ingress")?
             .error_for_status()
             .context("bash should succeed")?
-            .json::<ToolOutput>()
+            .json::<SecuredToolOutput>()
             .await
-            .context("deserialize bash output")?;
+            .context("deserialize bash output")?
+            .safe_output;
         assert!(bash_output.to_text().contains("hello-from-bash"));
 
         let duplicate_response = client
@@ -361,9 +365,10 @@ async fn tool_executor_blocks_canary_input_before_backend_execution() -> Result<
             .context("call ToolExecutor/file_write with canary input")?
             .error_for_status()
             .context("canary block should return a successful handler response")?
-            .json::<ToolOutput>()
+            .json::<SecuredToolOutput>()
             .await
-            .context("deserialize canary block output")?;
+            .context("deserialize canary block output")?
+            .safe_output;
         assert!(write_output.is_error);
         assert!(
             write_output.to_text().contains("protected canary token"),
@@ -516,9 +521,10 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
             .context("call ToolExecutor/bash with preexisting ToolCall")?
             .error_for_status()
             .context("bash should succeed")?
-            .json::<ToolOutput>()
+            .json::<SecuredToolOutput>()
             .await
-            .context("deserialize bash output")?;
+            .context("deserialize bash output")?
+            .safe_output;
         assert!(output.to_text().contains("duplicate-check"));
 
         let events = wait_for_tool_result_events(&client, ingress, &identity, session_id, 1).await?;

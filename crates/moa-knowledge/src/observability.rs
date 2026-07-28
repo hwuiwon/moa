@@ -168,6 +168,12 @@ pub fn classify_failure(stage: &str, error: &Error) -> FailureClassification {
             error_code: "semantic_model_extraction_failed",
             retryable: false,
         },
+        // Incomplete rechunk staging is an operator-visible refusal, not a
+        // transient fault: the missing member will still be missing on retry.
+        Error::RechunkStagingIncomplete { .. } => FailureClassification {
+            error_code: "rechunk_staging_incomplete",
+            retryable: false,
+        },
         Error::Repository(_) | Error::Database { .. } => FailureClassification {
             error_code: "repository_failed_retryable",
             retryable: true,

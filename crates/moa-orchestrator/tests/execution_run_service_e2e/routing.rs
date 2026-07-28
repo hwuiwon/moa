@@ -797,6 +797,7 @@ async fn non_root_continuations_cannot_enter_or_upgrade_to_durable_service_e2e()
                     turn_id,
                     identity: fixture_identity(&session)?,
                     contact: None,
+                    generation: 1,
                     user_message: CONTINUATION_OBJECTIVE.to_string(),
                     attachments: Vec::new(),
                     model: None,
@@ -804,6 +805,7 @@ async fn non_root_continuations_cannot_enter_or_upgrade_to_durable_service_e2e()
                     trigger,
                     child_signal_id: None,
                     execution_template: None,
+                    action_review: None,
                 },
             )
             .await?;
@@ -873,6 +875,7 @@ async fn non_root_continuations_cannot_enter_or_upgrade_to_durable_service_e2e()
                 turn_id: synthesis_turn_id.clone(),
                 identity: fixture_identity(&synthesis_session)?,
                 contact: None,
+                generation: 1,
                 user_message: CONTINUATION_OBJECTIVE.to_string(),
                 attachments: Vec::new(),
                 model: None,
@@ -880,6 +883,7 @@ async fn non_root_continuations_cannot_enter_or_upgrade_to_durable_service_e2e()
                 trigger: TurnTrigger::ExecutionSynthesis,
                 child_signal_id: None,
                 execution_template: None,
+                action_review: None,
             },
         )
         .await?;

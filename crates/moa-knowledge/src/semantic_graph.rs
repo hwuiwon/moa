@@ -700,6 +700,7 @@ mod tests {
         // entities and relations without provider calls.
         let tenant_id = TenantId::from(Uuid::from_u128(1));
         let object = KnowledgeObject {
+            acl: crate::domain::ObjectAcl::incomplete(),
             object_uid: Uuid::from_u128(2),
             tenant_id,
             connection_uid: Uuid::from_u128(3),
@@ -799,6 +800,7 @@ mod tests {
         // when enabled and stays empty when disabled or when domain rules fire.
         let tenant_id = TenantId::from(Uuid::from_u128(11));
         let object = KnowledgeObject {
+            acl: crate::domain::ObjectAcl::incomplete(),
             object_uid: Uuid::from_u128(12),
             tenant_id,
             connection_uid: Uuid::from_u128(13),

@@ -16,9 +16,9 @@ what must stay out of Restate state.
 
 | Restate primitive | Use in MOA | Reason |
 |---|---|---|
-| Service | Durable stateless calls such as `ActionReviews`, `AuthzChallenges`, `Execution`, `LearningReview`, `ToolExecutor`, `LLMGateway`, `SessionStore`, `Authz`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
+| Service | Durable stateless calls such as `ActionReviews`, `AuthzChallenges`, `Execution`, `LearningReview`, `ToolExecutor`, `LLMGateway`, `SecurityEvents`, `SessionStore`, `Authz`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` | Single-writer-per-key semantics and small hot state. |
-| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run or task per ID with explicit progress and completion. |
+| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `KnowledgeIndexRebuild`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run or task per ID with explicit progress and completion. |
 
 Use the weakest primitive that gives the needed correctness property. Do not
 use a workflow for conversational actors; do not use virtual-object state as a
@@ -156,8 +156,8 @@ Core production bindings:
 | Primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO` |
-| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` |
-| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Eval`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
+| Workflow | `TurnExecution`, `WorkerTurnExecution`, `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`, `KnowledgeIndexRebuild`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` |
+| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `Eval`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SecurityEvents`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy` |
 
 Feature-gated bindings:
 
@@ -196,6 +196,10 @@ Restate state should be small, replay-safe, and useful only for orchestration.
 | Unread child signals, resume budget, pending resume | `Session` VO state (`unread_child_signals`, `resume_budget`, `pending_parent_resume_signal`, `resume_turn`) |
 | Narration scheduling cursor and per-window cap | `Session` VO state (`narration_tick_generation`, `narration_tick_outstanding`, `narration_seq`, `last_narrated_marker`, `narration_window_*`) |
 | Child liveness watchdog generations | `Session` VO state (`child_liveness`, `child_liveness_generation`) |
+| Prompt-injection circuit for the coordinator turn | `Session` VO state (`security_circuit`) |
+| Prompt-injection circuit for worker turns | `Worker` VO state (`security_circuit`) |
+| Prompt-injection circuit for one execution task turn | `ExecutionTask` workflow, journaled. Deliberately not merged into the Session VO: a shared circuit alternating owners would let a detached task's generation switch clear a tripped coordinator's score. See `docs/02-brain-orchestration.md`. |
+| Signed prompt-injection Detection Findings | Postgres `security_events`, written synchronously by the `SecurityEvents` service |
 | Tool result and assistant output | Postgres event log |
 | Graph memory, vectors, changelog | Postgres |
 | Learning log | Postgres |
@@ -375,6 +379,13 @@ Code inside Restate handlers must keep replay safety in mind:
   be produced inside journaled blocks.
 - Retried handlers must be idempotent or guarded by product-level idempotency
   keys.
+- Prefer a *derived* identity over a journaled generated one where the fact has
+  natural coordinates. A prompt-injection circuit transition keys its session
+  fact and its OCSF finding off a digest of the transition's own coordinates and
+  a UUIDv5 over that digest, so a replay reproduces both without depending on
+  the journal replaying an id in the same order. Time still has to be journaled:
+  the owner reads the clock once inside a named `ctx.run` and passes that value
+  to everything downstream, so nothing re-reads it on a later attempt.
 - Do not perform direct network or filesystem side effects in replay-sensitive
   sections unless they are journaled.
 
@@ -387,10 +398,21 @@ pending-review tool result to the model, and continues:
 ```text
 tool call requires admin review
   -> workflow stores tenant action review
+  -> the review is registered on its typed owner (Session or Worker VO)
   -> action-review event is persisted
   -> pending-review tool result is appended
   -> tenant admin decides later through ActionReviews
+  -> after the decision and the cleared tool's terminal event are durable, the
+     owner receives one typed receipt and runs one continuation turn
 ```
+
+The continuation fact `ActionReviewContinuationRequested` is deduped on
+`action_review_continuation:{review_id}`, so replay neither appends it twice nor
+dispatches a second continuation turn. Owner generations and continuation
+scheduling live in Restate VO state as a derived index; the authoritative facts
+remain the `tenant_action_reviews` row plus the durable `ActionReviewDecided` and
+terminal `ToolResult`/`ToolError` events. An `ExecutionTask` owner is excluded
+from this path and keeps its run/task/generation outbox and ack contract.
 
 Gateway processes never own pending review state. If a gateway restarts, it can
 reconstruct pending tenant action reviews from Postgres.

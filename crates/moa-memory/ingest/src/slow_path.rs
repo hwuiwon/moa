@@ -17,7 +17,7 @@ use crate::{
 use futures_util::{StreamExt, TryStreamExt, stream};
 use moa_config::MoaConfig;
 use moa_core::traits::EmbeddingProvider;
-use moa_core::types::{memory::RlsContext, security::SensitivityClass};
+use moa_core::types::memory::RlsContext;
 use moa_crypto::KeyManagementProvider;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
@@ -538,7 +538,7 @@ async fn embed_batch_with(
     let embeddable = facts
         .iter()
         .enumerate()
-        .filter(|(_, fact)| !is_sealed_class(fact.pii_class))
+        .filter(|(_, fact)| !fact.pii_class.is_sealed())
         .collect::<Vec<_>>();
     let texts = embeddable
         .iter()
@@ -575,10 +575,6 @@ async fn embed_batch_with(
         fact.embedding_model_version = Some(embedder.model_version());
     }
     Ok(embedded)
-}
-
-fn is_sealed_class(class: SensitivityClass) -> bool {
-    matches!(class, SensitivityClass::Phi | SensitivityClass::Restricted)
 }
 
 async fn detect_contradictions_with(
@@ -835,7 +831,7 @@ async fn apply_one_decision(
         return Ok(ApplyOutcome::Skipped);
     };
     let use_entity_embeddings =
-        deps.entity_blocking_embedder.is_some() && !is_sealed_class(fact.classified.pii_class);
+        deps.entity_blocking_embedder.is_some() && !fact.classified.pii_class.is_sealed();
     let entity_vector = if use_entity_embeddings {
         Some(
             deps.vector_cache
@@ -1183,7 +1179,7 @@ async fn precompute_entity_embeddings(
         let Some(fact) = decision_fact(decision) else {
             continue;
         };
-        if is_sealed_class(fact.classified.pii_class) {
+        if fact.classified.pii_class.is_sealed() {
             continue;
         }
         let extracted = &fact.classified.fact;

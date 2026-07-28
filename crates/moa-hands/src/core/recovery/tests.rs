@@ -8,9 +8,9 @@ use moa_core::{
     types::action_policy::ActionClass, types::action_policy::ActionPolicyEffect,
     types::action_policy::RiskLevel, types::completion::ToolInvocation, types::hands::HandHandle,
     types::hands::HandSpec, types::hands::HandStatus, types::hands::SandboxTier,
-    types::identifiers::SessionId, types::identifiers::TenantId, types::session::SessionMeta,
-    types::tools::IdempotencyClass, types::tools::ToolDiffStrategy, types::tools::ToolInputShape,
-    types::tools::ToolOutput, types::tools::ToolPolicySpec,
+    types::identifiers::SessionId, types::identifiers::TenantId, types::identifiers::ToolCallId,
+    types::session::SessionMeta, types::tools::IdempotencyClass, types::tools::ToolDiffStrategy,
+    types::tools::ToolInputShape, types::tools::ToolOutput, types::tools::ToolPolicySpec,
 };
 use serde_json::json;
 
@@ -256,10 +256,21 @@ async fn recovery_retries_retryable_failures_up_to_three_attempts() {
     let router =
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
-    let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &identity(), None, &bash_invocation())
+    let secured = router
+        .execute_authorized_with_recovery(
+            &session(),
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
         .await
         .expect("recovery path should return a tool output");
+
+    let _hand_id = secured.hand_id.clone();
+
+    let output = secured.safe_output;
 
     assert!(output.is_error);
     assert!(
@@ -291,10 +302,21 @@ async fn recovery_reprovisions_and_succeeds_after_transient_sandbox_death() {
     let router =
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
-    let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &identity(), None, &bash_invocation())
+    let secured_2 = router
+        .execute_authorized_with_recovery(
+            &session(),
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
         .await
         .expect("recovery path should return a tool output");
+
+    let _hand_id = secured_2.hand_id.clone();
+
+    let output = secured_2.safe_output;
 
     assert!(!output.is_error);
     assert_eq!(output.to_text(), "recovered");
@@ -321,10 +343,21 @@ async fn recovery_returns_fatal_failures_immediately() {
     let router =
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
-    let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &identity(), None, &bash_invocation())
+    let secured_3 = router
+        .execute_authorized_with_recovery(
+            &session(),
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
         .await
         .expect("recovery path should return a tool output");
+
+    let _hand_id = secured_3.hand_id.clone();
+
+    let output = secured_3.safe_output;
 
     assert!(output.is_error);
     assert!(output.to_text().contains("tool execution failed"));
@@ -361,10 +394,21 @@ async fn recovery_caps_reprovision_attempts_per_session() {
     let router =
         router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
-    let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &identity(), None, &bash_invocation())
+    let secured_4 = router
+        .execute_authorized_with_recovery(
+            &session(),
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
         .await
         .expect("recovery path should return a tool output");
+
+    let _hand_id = secured_4.hand_id.clone();
+
+    let output = secured_4.safe_output;
 
     assert!(output.is_error);
     assert!(output.to_text().contains("tool sandbox became unavailable"));
@@ -391,10 +435,21 @@ async fn recovery_does_not_retry_non_idempotent_execution_failure() {
     ));
     let router = router_with_provider(provider.clone()).await;
 
-    let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &identity(), None, &bash_invocation())
+    let secured_5 = router
+        .execute_authorized_with_recovery(
+            &session(),
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
         .await
         .expect("recovery path should return a tool output");
+
+    let _hand_id = secured_5.hand_id.clone();
+
+    let output = secured_5.safe_output;
 
     assert!(output.is_error);
     assert!(
@@ -424,10 +479,21 @@ async fn recovery_does_not_reprovision_non_idempotent_execution_failure() {
     ));
     let router = router_with_provider(provider.clone()).await;
 
-    let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &identity(), None, &bash_invocation())
+    let secured_6 = router
+        .execute_authorized_with_recovery(
+            &session(),
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
         .await
         .expect("recovery path should return a tool output");
+
+    let _hand_id = secured_6.hand_id.clone();
+
+    let output = secured_6.safe_output;
 
     assert!(output.is_error);
     assert!(
@@ -456,10 +522,21 @@ async fn recovery_reprovisions_non_idempotent_before_execution() {
     ));
     let router = router_with_provider(provider.clone()).await;
 
-    let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &identity(), None, &bash_invocation())
+    let secured_7 = router
+        .execute_authorized_with_recovery(
+            &session(),
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
         .await
         .expect("recovery path should return a tool output");
+
+    let _hand_id = secured_7.hand_id.clone();
+
+    let output = secured_7.safe_output;
 
     assert!(!output.is_error);
     assert_eq!(output.to_text(), "ran once");
@@ -506,10 +583,21 @@ async fn recovery_falls_back_when_primary_provider_fails_before_execution() {
     )
     .await;
 
-    let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &identity(), None, &bash_invocation())
+    let secured_8 = router
+        .execute_authorized_with_recovery(
+            &session(),
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
         .await
         .expect("fallback route should return a tool output");
+
+    let _hand_id = secured_8.hand_id.clone();
+
+    let output = secured_8.safe_output;
 
     assert!(!output.is_error);
     assert_eq!(output.to_text(), "fallback ran");
@@ -562,10 +650,21 @@ async fn recovery_falls_back_after_execution_only_for_idempotent_tools() {
     )
     .await;
 
-    let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &identity(), None, &bash_invocation())
+    let secured_9 = router
+        .execute_authorized_with_recovery(
+            &session(),
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
         .await
         .expect("idempotent fallback route should return a tool output");
+
+    let _hand_id = secured_9.hand_id.clone();
+
+    let output = secured_9.safe_output;
 
     assert!(!output.is_error);
     assert_eq!(output.to_text(), "idempotent fallback");
@@ -613,10 +712,21 @@ async fn recovery_does_not_fallback_after_non_idempotent_execution_failure() {
     )
     .await;
 
-    let (_hand_id, output) = router
-        .execute_authorized_with_recovery(&session(), &identity(), None, &bash_invocation())
+    let secured_10 = router
+        .execute_authorized_with_recovery(
+            &session(),
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
         .await
         .expect("non-idempotent failure should return a tool output");
+
+    let _hand_id = secured_10.hand_id.clone();
+
+    let output = secured_10.safe_output;
 
     assert!(output.is_error);
     assert!(
@@ -668,14 +778,34 @@ async fn recovery_prefers_successful_fallback_for_same_scope() {
     .await;
     let session = session();
 
-    let (_first_hand_id, first_output) = router
-        .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
+    let secured_11 = router
+        .execute_authorized_with_recovery(
+            &session,
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
         .await
         .expect("first call should use fallback");
-    let (_second_hand_id, second_output) = router
-        .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
+
+    let _first_hand_id = secured_11.hand_id.clone();
+
+    let first_output = secured_11.safe_output;
+    let secured_12 = router
+        .execute_authorized_with_recovery(
+            &session,
+            &identity(),
+            None,
+            &bash_invocation(),
+            ToolCallId::new(),
+            None,
+        )
         .await
         .expect("second call should prefer the proven fallback");
+    let _second_hand_id = secured_12.hand_id.clone();
+    let second_output = secured_12.safe_output;
 
     assert_eq!(first_output.to_text(), "first fallback");
     assert_eq!(second_output.to_text(), "ok");

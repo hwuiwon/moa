@@ -127,6 +127,7 @@ fn require_live_flag() {
 fn input(source_id: &str, file_name: &str) -> ParseInput {
     ParseInput {
         object: KnowledgeObject {
+            acl: moa_knowledge::domain::ObjectAcl::incomplete(),
             object_uid: Uuid::now_v7(),
             tenant_id: TenantId::from(Uuid::now_v7()),
             connection_uid: Uuid::now_v7(),

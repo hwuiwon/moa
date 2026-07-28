@@ -11,10 +11,12 @@ chrono.workspace = true
 eventsource-stream.workspace = true
 futures-util.workspace = true
 globset.workspace = true
+hex.workspace = true
 ignore = "0.4"
 jsonschema = { version = "0.47.0", default-features = false }
 moa-core = { workspace = true }
 moa-config = { workspace = true }
+moa-db = { workspace = true }
 moa-observability = { workspace = true }
 moa-security = { workspace = true }
 opentelemetry.workspace = true
@@ -22,6 +24,7 @@ regex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 shell-words.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "json", "uuid", "chrono"] }
 tokio.workspace = true
@@ -32,9 +35,14 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+moa-auth-providers = { workspace = true }
+moa-crypto = { workspace = true }
 moa-memory-graph = { workspace = true }
+moa-migrations = { workspace = true }
 moa-memory-pii = { workspace = true }
 moa-session = { workspace = true }
+moa-test-support = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
+secrecy.workspace = true
 tempfile.workspace = true
 tracing-subscriber.workspace = true

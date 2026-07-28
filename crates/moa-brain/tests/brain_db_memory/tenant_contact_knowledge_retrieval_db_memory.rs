@@ -1060,10 +1060,10 @@ async fn seed_knowledge_chunk_with_text(
         r#"
         INSERT INTO moa.knowledge_connections (
             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
-            provider_connection_id, connector, credential_ref, status, metadata
+            provider_connection_id, connector, credential_ref, status, acl_mode, metadata
         )
         VALUES ($1, $2, $3, 'merge', 'test-config', $4, 'drive',
-                'vault://tenant-contact-test', 'active', '{}'::jsonb)
+                'vault://tenant-contact-test', 'active', 'tenant_public', '{}'::jsonb)
         "#,
     )
     .bind(connection_uid)
@@ -1076,10 +1076,10 @@ async fn seed_knowledge_chunk_with_text(
         r#"
         INSERT INTO moa.knowledge_objects (
             object_uid, tenant_id, storage_partition_id, connection_id, object_type,
-            external_object_id, title, change_token, source_uri, status, metadata
+            external_object_id, title, change_token, source_uri, status, acl_state, metadata
         )
         VALUES ($1, $2, $3, $4, 'document', $5, 'PTO Runbook',
-                'etag-1', $6, 'active', '{}'::jsonb)
+                'etag-1', $6, 'active', 'incomplete', '{}'::jsonb)
         "#,
     )
     .bind(object_uid)
@@ -1172,6 +1172,7 @@ fn planned_chunk_query(tenant_id: TenantId, _query: &str) -> PlannedQuery {
 
 fn tenant_chunk_request(tenant_id: TenantId, query: &str) -> RetrievalRequest {
     RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: query.to_string(),

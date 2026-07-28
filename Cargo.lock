@@ -3667,6 +3667,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "hex",
  "schemars 1.2.1",
  "secrecy",
  "serde",
@@ -3704,10 +3705,13 @@ dependencies = [
 name = "moa-db"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "metrics",
  "moa-core",
  "sqlx",
  "tokio",
+ "tracing",
+ "uuid",
  "workspace-hack",
 ]
 
@@ -3908,21 +3912,29 @@ dependencies = [
  "eventsource-stream",
  "futures-util",
  "globset",
+ "hex",
  "ignore",
  "jsonschema",
+ "moa-auth-providers",
  "moa-config",
  "moa-core",
+ "moa-crypto",
+ "moa-db",
  "moa-memory-graph",
  "moa-memory-pii",
+ "moa-migrations",
  "moa-observability",
  "moa-security",
  "moa-session",
+ "moa-test-support",
  "opentelemetry",
  "opentelemetry_sdk",
  "regex",
  "reqwest 0.13.4",
+ "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "shell-words",
  "sqlx",
  "tempfile",
@@ -3970,9 +3982,11 @@ dependencies = [
  "metrics",
  "moa-contacts",
  "moa-core",
+ "moa-crypto",
  "moa-db",
  "moa-memory-graph",
  "moa-memory-types",
+ "moa-memory-vector",
  "moa-test-support",
  "reqwest 0.13.4",
  "serde",
@@ -3986,6 +4000,7 @@ dependencies = [
  "uuid",
  "wiremock",
  "workspace-hack",
+ "zeroize",
 ]
 
 [[package]]
@@ -4266,6 +4281,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
@@ -4311,6 +4327,8 @@ name = "moa-migrations"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "moa-core",
+ "moa-db",
  "refinery",
  "sqlx",
  "tokio",

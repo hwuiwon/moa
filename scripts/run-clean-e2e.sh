@@ -4,6 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
+# Incremental artifacts regrow by tens of gigabytes per gate run — this script
+# builds into both the shared target dir and its own fixture target dir, and
+# neither cache survives long enough to pay for itself here.
+export CARGO_INCREMENTAL=0
+
 LIVE=0
 RUN_PROVIDERS=0
 RUN_LONG_EVAL=0

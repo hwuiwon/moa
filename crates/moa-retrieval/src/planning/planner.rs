@@ -89,6 +89,13 @@ impl PlannedQuery {
             // information-barrier clearances from the agent knowledge policy and
             // sets this before the request reaches a scoped leg.
             cleared_barriers: Default::default(),
+            // Same fail-closed default: an unattached admission context admits
+            // only tenant-public sources, and its unresolved epoch keeps the
+            // result out of any cache. The retrieval entry point resolves the
+            // caller's real principal set before the request reaches a leg.
+            source_acl: moa_core::types::memory::SourceAclContext::empty(
+                moa_core::types::memory::SOURCE_ACL_EPOCH_UNRESOLVED,
+            ),
             // A planner-inferred label hint is a keyword guess, so it becomes a
             // SOFT ranking boost, never a hard filter. Callers with structured,
             // explicit label intent (a scope plan) set `label_filter` directly.

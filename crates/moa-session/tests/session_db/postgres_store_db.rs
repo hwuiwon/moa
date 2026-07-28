@@ -724,6 +724,8 @@ async fn postgres_event_payloads_round_trip_as_jsonb() {
                 original_output_tokens: None,
                 success: true,
                 duration_ms: 25,
+                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
             },
         )
         .await
@@ -802,6 +804,8 @@ async fn postgres_tool_event_exists_matches_session_workspace_type_and_tool_id()
                 original_output_tokens: None,
                 success: true,
                 duration_ms: 5,
+                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
             },
         )
         .await
@@ -1919,6 +1923,8 @@ async fn postgres_session_summary_tracks_model_tier_costs() {
                 original_output_tokens: None,
                 success: true,
                 duration_ms: 10,
+                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
             },
         )
         .await
@@ -2127,6 +2133,8 @@ async fn postgres_tool_call_summary_view_reports_percentiles() {
                     original_output_tokens: None,
                     success,
                     duration_ms,
+                    assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                    capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
                 },
             )
             .await
@@ -2207,6 +2215,8 @@ async fn postgres_materialized_analytics_views_refresh() {
                 original_output_tokens: None,
                 success: true,
                 duration_ms: 120,
+                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                capability: moa_core::types::security::ToolCapabilityId::builtin("file_read"),
             },
         )
         .await
@@ -2402,6 +2412,8 @@ async fn postgres_analytics_query_read_models_refresh() {
                 original_output_tokens: None,
                 success: true,
                 duration_ms: 120,
+                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                capability: moa_core::types::security::ToolCapabilityId::builtin("file_read"),
             },
         )
         .await

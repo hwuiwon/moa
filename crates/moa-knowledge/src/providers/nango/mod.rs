@@ -7,12 +7,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
 
+use crate::acl_key::SourceAclKey;
 use crate::{
     domain::{
         ApplySourceSelectionRequest, CreateLinkTokenRequest, ExchangePublicTokenRequest,
         FetchRecordContentRequest, FetchedRecordContent, InitialSyncStarted, KnowledgeConnection,
-        LinkToken, LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord,
-        RecordPage, StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync, WebhookEvent,
+        LinkToken, LinkedAccount, ListChangedRecordsRequest, ProviderAclCapability,
+        ProviderIntegration, ProviderRecord, RecordPage, StartInitialSyncRequest,
+        TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
@@ -178,6 +180,14 @@ impl NangoProvider {
 
 #[async_trait::async_trait]
 impl LinkedIntegrationProvider for NangoProvider {
+    /// Nango proxies permission-bearing sources (Google Drive above all), so it
+    /// always returns native ACLs and can never produce a tenant-public
+    /// connection. A Nango connector whose records carry no permission listing
+    /// normalizes to an INCOMPLETE ACL and stays hidden.
+    fn acl_capability(&self) -> ProviderAclCapability {
+        ProviderAclCapability::NativeSnapshots
+    }
+
     async fn create_link_token(&self, req: CreateLinkTokenRequest) -> Result<LinkToken> {
         #[derive(Deserialize)]
         struct ResponseData {
@@ -461,7 +471,10 @@ impl LinkedIntegrationProvider for NangoProvider {
             .await
             .map_err(|error| Error::provider("nango", format!("record listing failed: {error}")))?;
         let page: NangoRecordPage = http::json_response(response).await?;
-        Ok(page.into_record_page())
+        // Principals are scoped to the connector, so an identity in Drive is not
+        // silently the same principal as a same-named identity in another
+        // connector on the same Nango account.
+        Ok(page.into_record_page(&format!("nango:{}", req.connection.connector), &req.acl_key))
     }
 
     async fn fetch_record_content(
@@ -670,12 +683,12 @@ struct NangoRecordPage {
 }
 
 impl NangoRecordPage {
-    fn into_record_page(self) -> RecordPage {
+    fn into_record_page(self, namespace: &str, acl_key: &SourceAclKey) -> RecordPage {
         RecordPage {
             records: self
                 .data
                 .into_iter()
-                .map(NangoRecord::into_provider_record)
+                .map(|record| record.into_provider_record(namespace, acl_key))
                 .collect(),
             next_cursor: self.next_cursor,
         }
@@ -698,8 +711,20 @@ struct NangoRecord {
 }
 
 impl NangoRecord {
-    fn into_provider_record(self) -> ProviderRecord {
+    /// Converts one Nango record into a provider record, normalizing the
+    /// connector's native permissions in the same pass.
+    ///
+    /// `namespace` scopes the resulting principals to this connector's identity
+    /// domain, so a Drive user and a same-named identity in another connector
+    /// are never treated as the same principal.
+    fn into_provider_record(self, namespace: &str, acl_key: &SourceAclKey) -> ProviderRecord {
         let payload = redact_provider_metadata(self.payload);
+        let acl = crate::providers::acl_normalize::record_acl_from_payload(
+            namespace,
+            &payload,
+            crate::domain::ProviderAclProvenance::ProviderListing,
+            acl_key,
+        );
         ProviderRecord {
             source_id: self.id.unwrap_or_else(|| stable_payload_id(&payload)),
             object_type: self.model.unwrap_or_else(|| "record".to_string()),
@@ -713,6 +738,7 @@ impl NangoRecord {
             source_updated_at: self.modified_at,
             metadata: redact_provider_metadata(self.metadata),
             payload,
+            acl,
         }
     }
 }

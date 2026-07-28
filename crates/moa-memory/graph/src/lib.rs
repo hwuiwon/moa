@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_core::types::memory::SourceAclContext;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use uuid::Uuid;
@@ -222,12 +223,19 @@ pub trait GraphStore: Send + Sync {
     /// labeled path to visible nodes, pruning low-score branches inside the
     /// walk. Multiple paths per (seed, candidate) may be returned so policy
     /// layers can filter by path shape before deduplicating.
+    ///
+    /// `source_acl` is the caller's provider-source admission context, applied
+    /// to the seeds AND to every intermediate hop inside the recursive walk. A
+    /// denied node is not merely dropped from the result: it is removed from the
+    /// frontier, so it can neither be returned nor act as a bridge to a node the
+    /// caller reaches only through content they may not read.
     async fn expand_seeds(
         &self,
         seeds: &[Uuid],
         max_hops: u8,
         as_of: Option<DateTime<Utc>>,
         scoring: &GraphWalkScoring,
+        source_acl: &SourceAclContext,
     ) -> Result<Vec<GraphExpansionHit>>;
 
     /// Looks up NER seed nodes by name through the sidecar full-text index.

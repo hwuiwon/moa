@@ -12,21 +12,32 @@ pub(super) async fn upsert_connection(
         r#"
         INSERT INTO moa.knowledge_connections (
             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
-            provider_connection_id, connector, credential_ref, status, metadata,
+            provider_connection_id, connector, credential_ref, status, acl_mode, metadata,
             source_selection, information_barrier, created_at, updated_at, last_synced_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $5, $7, $8, $9, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6, $5, $7, $8, $15, $9, $10, $11, $12, $13, $14)
         ON CONFLICT (tenant_id, provider, provider_config_key, provider_connection_id)
         DO UPDATE SET
             credential_ref = EXCLUDED.credential_ref,
             status = EXCLUDED.status,
+            -- A re-link can never widen an existing connection. If the stored
+            -- mode is already provider-managed it stays that way whatever the
+            -- caller supplies, so a downgrade needs a deliberate migration
+            -- rather than a replayed link. The returned row carries the mode the
+            -- database kept, so the service can tell a retained mode from an
+            -- applied one instead of assuming its request won.
+            acl_mode = CASE
+                WHEN moa.knowledge_connections.acl_mode = 'provider_managed'
+                    THEN 'provider_managed'
+                ELSE EXCLUDED.acl_mode
+            END,
             metadata = EXCLUDED.metadata,
             source_selection = EXCLUDED.source_selection,
             information_barrier = EXCLUDED.information_barrier,
             last_synced_at = EXCLUDED.last_synced_at,
             updated_at = EXCLUDED.updated_at
         RETURNING connection_uid, tenant_id, provider, connector, provider_connection_id,
-                  credential_ref, status, metadata, source_selection, information_barrier,
+                  credential_ref, status, acl_mode, metadata, source_selection, information_barrier,
                   created_at, updated_at, last_synced_at
         "#,
     )
@@ -49,6 +60,7 @@ pub(super) async fn upsert_connection(
     .bind(connection.created_at)
     .bind(connection.updated_at)
     .bind(connection.last_synced_at)
+    .bind(connection.acl_mode.as_str())
     .fetch_one(conn.as_mut())
     .await
     .map_err(map_sqlx_error)?;
@@ -64,7 +76,7 @@ pub(super) async fn get_connection(
     let row = sqlx::query(
         r#"
         SELECT connection_uid, tenant_id, provider, connector, provider_connection_id,
-               credential_ref, status, metadata, source_selection, information_barrier,
+               credential_ref, status, acl_mode, metadata, source_selection, information_barrier,
                created_at, updated_at, last_synced_at
         FROM moa.knowledge_connections
         WHERE connection_uid = $1
@@ -90,7 +102,7 @@ pub(super) async fn connection_by_provider_account(
     let row = sqlx::query(
         r#"
         SELECT connection_uid, tenant_id, provider, connector, provider_connection_id,
-               credential_ref, status, metadata, source_selection, information_barrier,
+               credential_ref, status, acl_mode, metadata, source_selection, information_barrier,
                created_at, updated_at, last_synced_at
         FROM moa.knowledge_connections
         WHERE tenant_id = $1
@@ -147,7 +159,7 @@ pub(super) async fn update_connection_source_selection(
             updated_at = now()
         WHERE connection_uid = $1
         RETURNING connection_uid, tenant_id, provider, connector, provider_connection_id,
-                  credential_ref, status, metadata, source_selection, information_barrier,
+                  credential_ref, status, acl_mode, metadata, source_selection, information_barrier,
                   created_at, updated_at, last_synced_at
         "#,
     )
@@ -174,7 +186,7 @@ pub(super) async fn list_connections(
     let rows = sqlx::query(
         r#"
         SELECT c.connection_uid, c.tenant_id, c.provider, c.connector,
-               c.provider_connection_id, c.credential_ref, c.status, c.metadata,
+               c.provider_connection_id, c.credential_ref, c.status, c.acl_mode, c.metadata,
                c.source_selection, c.information_barrier, c.created_at, c.updated_at,
                c.last_synced_at,
                latest.status AS last_sync_status
@@ -216,7 +228,7 @@ pub(super) async fn disable_connection(
         WHERE tenant_id = $1
           AND connection_uid = $2
         RETURNING connection_uid, tenant_id, provider, connector, provider_connection_id,
-                  credential_ref, status, metadata, source_selection, information_barrier,
+                  credential_ref, status, acl_mode, metadata, source_selection, information_barrier,
                   created_at, updated_at, last_synced_at
         "#,
     )

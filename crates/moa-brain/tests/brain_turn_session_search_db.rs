@@ -155,6 +155,8 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
                 original_output_tokens: Some(8_000),
                 success: true,
                 duration_ms: 7,
+                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
             },
         )
         .await

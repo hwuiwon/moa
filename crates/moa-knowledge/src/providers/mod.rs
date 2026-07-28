@@ -11,18 +11,33 @@ use crate::{
     domain::{
         ApplySourceSelectionRequest, CreateLinkTokenRequest, ExchangePublicTokenRequest,
         FetchRecordContentRequest, FetchedRecordContent, InitialSyncStarted, KnowledgeConnection,
-        LinkToken, LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord,
-        RecordPage, StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync, WebhookEvent,
+        LinkToken, LinkedAccount, ListChangedRecordsRequest, ProviderAclCapability,
+        ProviderIntegration, ProviderRecord, RecordPage, StartInitialSyncRequest,
+        TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
     error::Result,
 };
 
+pub(crate) mod acl_normalize;
 pub mod merge;
 pub mod nango;
 
 /// Tenant knowledge linked-account provider seam.
 #[async_trait]
 pub trait LinkedIntegrationProvider: Send + Sync {
+    /// Declares what this adapter can tell MOA about source permissions.
+    ///
+    /// There is no default. An adapter that has not stated its capability cannot
+    /// be linked, because the link flow would otherwise have to decide on its
+    /// behalf whether every record it returns is readable by the whole tenant —
+    /// and the convenient answer to that question is the unsafe one.
+    ///
+    /// The declaration is authoritative: it, not the caller or the operator,
+    /// selects the connection's [`ConnectionAclMode`], and a
+    /// [`ProviderAclCapability::NativeSnapshots`] adapter can never produce a
+    /// tenant-public connection.
+    fn acl_capability(&self) -> ProviderAclCapability;
+
     /// Lists the integrations this provider can connect for a tenant.
     ///
     /// The returned `id`s are the values passed as `connector` in the link flow.

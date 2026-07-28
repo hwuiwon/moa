@@ -165,7 +165,13 @@ async fn zero_prior_hub_fanout_is_pruned_in_walk_and_deep_paths_survive_with_sco
 
     let scoring = GraphWalkScoring::default();
     let hits = graph
-        .expand_seeds(&[seed_uid], 3, None, &scoring)
+        .expand_seeds(
+            &[seed_uid],
+            3,
+            None,
+            &scoring,
+            &moa_core::types::memory::SourceAclContext::empty(0),
+        )
         .await
         .expect("expand scored walk");
 

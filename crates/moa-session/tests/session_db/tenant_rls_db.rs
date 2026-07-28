@@ -151,6 +151,8 @@ async fn tenant_rls_blocks_cross_tenant_event_reads_db() {
                 original_output_tokens: None,
                 success: true,
                 duration_ms: 1,
+                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
             },
         )
         .await
@@ -166,6 +168,8 @@ async fn tenant_rls_blocks_cross_tenant_event_reads_db() {
                 original_output_tokens: None,
                 success: true,
                 duration_ms: 1,
+                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
             },
         )
         .await

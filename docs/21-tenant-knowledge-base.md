@@ -222,36 +222,84 @@ context.
 
 ## Visibility And Access Control
 
-Tenant knowledge is tenant-public by design. Every synced document is visible to
-every contact of the owning tenant. Knowledge nodes are written tenant-scoped
-with `SensitivityClass::None`, and retrieval admission adds a fixed
-`SourceTier::TenantKnowledge` leg to every session whose agent knowledge policy is
-enabled. The only admission controls today are that pinned agent knowledge policy
-— which can disable knowledge retrieval entirely, cap the retrieval budget, and
-set a PII floor — plus tenant-level RLS isolation. There is no per-contact,
-per-source, or per-document visibility filter.
+Tenant knowledge admission has two modes, and the connector — not an operator —
+decides which one applies. A `LinkedIntegrationProvider` declares a
+`ProviderAclCapability`; `UniformlyPublic` produces a `TenantPublic` connection,
+`NativeSnapshots` produces a `ProviderManaged` one. There is no default and no
+caller-supplied override, and a re-link can never widen an existing
+`ProviderManaged` connection back to `TenantPublic`.
 
-Source-system permissions are not mirrored. Connector-source ACLs — Google Drive
-per-file sharing, Nango record scopes, Merge HRIS object permissions — are neither
-read at sync time nor enforced at retrieval. A document that only one person could
-open in the source system becomes visible to every contact of the tenant once it
-is synced.
+`TenantPublic` is the old behavior: every synced document is visible to every
+contact of the owning tenant, bounded only by the pinned agent knowledge policy
+(which can disable knowledge retrieval, cap the retrieval budget, and set a PII
+floor) and tenant RLS.
 
-Operator contract: only connect sources whose full content is acceptable
-tenant-wide. Treat linking a `KnowledgeConnection` as publishing its selected
-objects to the entire tenant. Do not connect permission-bearing sources —
-per-file-shared Drive folders, HRIS records, access-controlled ticket queues —
-whose contents are not uniformly safe for every contact of the tenant.
+`ProviderManaged` reproduces the source system's own decision. Admission requires
+all of:
 
-Indexed per-source ACL admission filters are the documented prerequisite before
-permission-bearing enterprise sources (Drive per-file sharing, Merge HRIS) can be
-connected safely. The intended design stores each document version's source ACL
-principals at sync time and joins the caller's principal set against them in the
-retrieval admission filter, so only authorized chunks are admitted. Until that
-ships, tenant-public is the enforced and intended semantics, and connectors that
-carry per-record permissions must not be treated as access-controlled. See
-[Security](08-security.md) for the cross-referenced policy and admission-filter
-sketch.
+- the object's ACL state is `current`;
+- its `current_acl_snapshot_id` names a snapshot that is `complete` and whose
+  `provider_revision` equals the object's recorded `acl_revision`;
+- at least one `allow` entry in that snapshot matches one of the caller's
+  principals;
+- no `deny` entry in that snapshot matches any of them.
+
+Anything missing, incomplete, stale, or revision-mismatched denies. A caller with
+no resolved principals is denied. Tenant role and operator status do not bypass
+this: an operator authorized to list a connection's control-plane metadata still
+needs the source's own permission to read one chunk of its content.
+
+Principals are stored only as keyed opaque fingerprints. A provider identity is
+canonicalized to `namespace/kind/subject`, HMAC-SHA256'd with the tenant's
+versioned ACL key (KMS-wrapped, in `moa.knowledge_source_acl_keys`), and encoded
+as two key-version bytes plus the digest. No email address, phone number, or
+provider label reaches a row, a log line, a trace, or a cache key. Because the key
+version is inside the fingerprint, a rotation stops old entries from matching —
+which fails closed.
+
+The caller's principal set is resolved once per turn, durably, from the
+authenticated session/contact identity plus verified bindings in
+`moa.knowledge_source_principal_bindings` (direct) and
+`moa.knowledge_source_principal_group_bindings` (one level of group/domain
+expansion). It is never read from a request payload and never re-fetched inside a
+retrieval leg. A provider "anyone with access" grant is bound once per connection
+under the tenant-wide holder sentinel rather than fanned out per contact.
+
+Enforcement is one shared SQL predicate (`moa_db::push_source_acl_predicate`)
+applied by every path that can surface source content: Postgres lexical search
+(primary and prefix fallback), pgvector KNN (single-stage and the Matryoshka
+shortlist), the recursive graph walk's seed base case *and* every intermediate
+hop, chunk hydration, and each context-window neighbour. Candidates from an
+external vector backend, which answers outside Postgres, get one batched
+admission check before fusion and before graph seeding. Tenant RLS remains
+underneath as defense in depth.
+
+Snapshots and their entries are immutable: `moa.knowledge_source_acl_snapshots`
+and `moa.knowledge_source_acl_entries` have no `UPDATE` policy and no `UPDATE`
+grant, so a permission set cannot be edited in place under an unchanged revision.
+A permission change mints a new snapshot and moves the object's pointer
+atomically.
+
+Every snapshot, binding, and object-state change bumps the tenant's
+`moa.knowledge_source_acl_epochs` counter. That epoch, together with the
+aggregate principal-set fingerprint, is part of retrieval cache identity, so a
+revocation invalidates warm result caches without any explicit cache plumbing. A
+request whose ACL context was never resolved carries `SOURCE_ACL_EPOCH_UNRESOLVED`
+and bypasses the cache entirely — an entry with no epoch could never be
+invalidated.
+
+Ingestion captures the ACL *before* the change-token and content-hash skip
+fences, so an unshared folder stops being retrievable on the next sync pass
+without re-parsing or re-embedding anything. A permission-bearing record whose
+ACL could not be fully enumerated is recorded as `incomplete` — which hides it —
+and only then raises a typed error.
+
+Migration semantics: V000348 promotes nothing. Both shipped adapters are
+permission-bearing, so every pre-existing connection becomes `ProviderManaged`
+and every pre-existing object becomes `incomplete`. Content ingested before ACLs
+were captured is invisible to everyone until a resync captures real permissions.
+
+See [Security](08-security.md) for the cross-referenced policy.
 
 ## Public Endpoints
 
@@ -273,6 +321,23 @@ The public HTTP routes for this surface are:
 - `POST /v1/knowledge/webhooks/reducto`
 - `POST /v1/knowledge/webhooks/nango`
 - `POST /v1/knowledge/webhooks/merge`
+
+Index rebuilds are exposed on the memory surface rather than the knowledge one,
+because a rebuild covers the tenant's whole storage partition and not only its
+synced documents:
+
+- `POST /v1/memory/index-rebuild/start`
+- `POST /v1/memory/index-rebuild/status`
+- `POST /v1/memory/index-rebuild/cancel`
+- `POST /v1/memory/index-rebuild/rollback`
+- `POST /v1/memory/index-rebuild/finalize`
+
+Each requires tenant-admin authority and is mirrored by an operator MCP tool
+(`index_rebuild_start`, `index_rebuild_status`, `index_rebuild_cancel`,
+`index_rebuild_rollback`, `index_rebuild_finalize`). A rechunk activates its
+staged chunks, graph deltas, embeddings, ACL snapshot fingerprints, occurrence
+identity, and provenance in one scoped transaction; see "Storage-partition index
+rebuilds" in `docs/04-memory-architecture.md`.
 
 Authenticated routes inject tenant identity before calling Restate. Provider
 webhook routes do not expose tenant reads; the orchestrator verifies provider

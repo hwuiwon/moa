@@ -338,6 +338,8 @@ pub(crate) fn file_read_tool_result(
             original_output_tokens: None,
             success: true,
             duration_ms: 5,
+            assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+            capability: moa_core::types::security::ToolCapabilityId::builtin("file_read"),
         },
     )
 }

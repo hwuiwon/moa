@@ -950,6 +950,7 @@ mod tests {
         types::action_policy::ActionPolicyEffect,
         types::action_policy::RiskLevel,
         types::completion::ToolInvocation,
+        types::identifiers::ToolCallId,
         types::tools::IdempotencyClass,
         types::tools::ToolDiffStrategy,
         types::tools::ToolInputShape,
@@ -1145,11 +1146,25 @@ mod tests {
         let second_router = router(provider.clone(), lease_store);
 
         first_router
-            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
+            .execute_authorized_with_recovery(
+                &session,
+                &identity(),
+                None,
+                &bash_invocation(),
+                ToolCallId::new(),
+                None,
+            )
             .await
             .expect("first router provisions and executes");
         second_router
-            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
+            .execute_authorized_with_recovery(
+                &session,
+                &identity(),
+                None,
+                &bash_invocation(),
+                ToolCallId::new(),
+                None,
+            )
             .await
             .expect("second router reuses durable lease");
 
@@ -1174,20 +1189,26 @@ mod tests {
         let left_invocation = bash_invocation();
         let right_invocation = bash_invocation();
 
-        let (left, right) = tokio::join!(
+        let secured = tokio::join!(
             left_router.execute_authorized_with_recovery(
                 &left_session,
                 &left_identity,
                 None,
-                &left_invocation
+                &left_invocation,
+                ToolCallId::new(),
+                None,
             ),
             right_router.execute_authorized_with_recovery(
                 &right_session,
                 &right_identity,
                 None,
-                &right_invocation
+                &right_invocation,
+                ToolCallId::new(),
+                None,
             )
         );
+
+        let (left, right) = secured;
 
         left.expect("left router should execute");
         right.expect("right router should execute");
@@ -1205,7 +1226,14 @@ mod tests {
         let cleanup_router = router(provider.clone(), lease_store);
 
         first_router
-            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
+            .execute_authorized_with_recovery(
+                &session,
+                &identity(),
+                None,
+                &bash_invocation(),
+                ToolCallId::new(),
+                None,
+            )
             .await
             .expect("first router provisions and executes");
         cleanup_router.reclaim_hands(&session.id, None).await;
@@ -1222,7 +1250,14 @@ mod tests {
         let router = router(provider.clone(), lease_store.clone());
 
         router
-            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
+            .execute_authorized_with_recovery(
+                &session,
+                &identity(),
+                None,
+                &bash_invocation(),
+                ToolCallId::new(),
+                None,
+            )
             .await
             .expect("first execution provisions");
         let first = lease_store
@@ -1245,7 +1280,14 @@ mod tests {
         );
 
         router
-            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
+            .execute_authorized_with_recovery(
+                &session,
+                &identity(),
+                None,
+                &bash_invocation(),
+                ToolCallId::new(),
+                None,
+            )
             .await
             .expect("second execution reuses renewed lease");
         let renewed = lease_store
@@ -1277,6 +1319,8 @@ mod tests {
                 &identity(),
                 None,
                 &bash_invocation(),
+                ToolCallId::new(),
+                None,
             ),
         )
         .await;
@@ -1317,7 +1361,14 @@ mod tests {
         let router = router(provider.clone(), lease_store.clone());
 
         let error = router
-            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
+            .execute_authorized_with_recovery(
+                &session,
+                &identity(),
+                None,
+                &bash_invocation(),
+                ToolCallId::new(),
+                None,
+            )
             .await
             .expect_err("activation fence loss should fail execution");
 
@@ -1345,7 +1396,14 @@ mod tests {
         let cleanup_router = router(provider.clone(), lease_store.clone());
 
         first_router
-            .execute_authorized_with_recovery(&session, &identity(), None, &bash_invocation())
+            .execute_authorized_with_recovery(
+                &session,
+                &identity(),
+                None,
+                &bash_invocation(),
+                ToolCallId::new(),
+                None,
+            )
             .await
             .expect("provision before cleanup");
         cleanup_router.reclaim_hands(&session.id, None).await;

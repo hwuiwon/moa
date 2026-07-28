@@ -219,14 +219,47 @@ the router exposes the selected tools exactly like built-ins and hand tools.
 MCP servers must be reachable over HTTP/SSE so any Kubernetes replica can handle
 a request without depending on a pod-local process.
 
+### Credential ownership
+
+Every configured MCP server declares one required `credential_scope`, and there
+is no default: `deployment_owned` means one operator credential, read from a
+deployment environment variable, serves every tenant; `tenant_owned` means each
+tenant presents its own connection credential. A server that omits the scope is
+a typed configuration error.
+
+The two branches never mix. A deployment-owned server must name an environment
+variable (`bearer`, `oauth`, or `api_key`); a tenant-owned server must declare
+only the header shape its resolved secret is presented in (`tenant_bearer` or
+`tenant_api_key`) and is rejected at construction if it names an environment
+variable. Configuring a tenant-owned server without the credential vault,
+binding owner, and tenant-operator authorizer fails when the router is built.
+
+A tenant-owned server is served through a **connection binding**
+(`tenant_mcp_connection_bindings`): one forced-RLS, secret-free row per
+`(tenant, connection, server)` naming the exact stored credential version and a
+closed allowlist of operations that credential may be used for. At most one
+binding per `(tenant, server)` is active.
+
 Credential handling is host-side:
 
 1. The brain emits a normal tool call.
-2. The MCP credential proxy resolves session-scoped access.
-3. The proxy resolves the credential from its typed source: a deployment-owned
-   operator secret, or the durable tenant credential owner.
-4. The remote MCP request is enriched.
-5. The result is returned with credentials stripped.
+2. The router derives the invocation's credential scope from the registered
+   tool and requires it to still agree with the server's configured scope.
+3. Data-class egress governance runs before any credential is opened.
+4. For a tenant-owned server, delegated tenant-operator authorization runs
+   before the first binding read; the binding must then agree exactly on
+   tenant, connection, server, canonical operation, and active status.
+5. The MCP credential proxy verifies the stored version's identity against the
+   binding and resolves the exact version through the durable tenant credential
+   owner — a deployment-owned server instead resolves its operator secret.
+6. Plaintext headers are shaped immediately before `tools/call` and dropped.
+7. The result is returned with credentials stripped.
+
+No tenant-owned failure falls back to the deployment branch: an authorization,
+binding, vault, header, or egress failure is the outcome of the call. Only
+payload-safe metadata — server name, canonical operation, and the opaque
+credential reference — reaches Restate state, events, logs, traces, or model
+context.
 
 HTTP/SSE MCP servers get host-side credential isolation because the proxy can
 inject headers per request. The MCP client does not launch local subprocesses or

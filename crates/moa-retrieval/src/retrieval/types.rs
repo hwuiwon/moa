@@ -4,7 +4,10 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use moa_core::types::security::SensitivityClass;
-use moa_core::types::{identifiers::SessionId, memory::InformationBarrierClearances};
+use moa_core::types::{
+    identifiers::SessionId,
+    memory::{InformationBarrierClearances, SourceAclContext},
+};
 use moa_lineage_core::TurnId;
 use moa_memory_graph::{Error, NodeIndexRow, NodeLabel};
 use moa_memory_types::MemoryScope;
@@ -34,6 +37,18 @@ pub enum RetrievalError {
     /// Scoped Postgres connection setup failed.
     #[error("scope setup: {0}")]
     Scope(#[from] moa_core::error::MoaError),
+    /// The query embedder does not match the partition's active generation.
+    #[error(
+        "storage partition {storage_partition_id} serves generation embedded by `{generation_model}`, but the query was embedded by `{query_model}`"
+    )]
+    GenerationEmbedderMismatch {
+        /// Storage partition whose generation was consulted.
+        storage_partition_id: String,
+        /// Embedding identity of the served generation.
+        generation_model: String,
+        /// Embedding identity of the query.
+        query_model: String,
+    },
 }
 
 /// Evidence-window policy applied to the final hits of one retrieval.
@@ -66,6 +81,16 @@ pub struct RetrievalRequest {
     pub query_embedding: Vec<f32>,
     /// Request memory scope used for sidecar RLS GUCs.
     pub scope: MemoryScope,
+    /// The caller's resolved provider-source admission context.
+    ///
+    /// Resolved once, durably, at the retrieval entry point from authenticated
+    /// session/contact identity plus verified provider bindings — never from a
+    /// request payload and never refreshed inside a leg. Every leg passes its
+    /// bounded opaque fingerprints as bind parameters to the shared SQL
+    /// admission predicate, and the aggregate fingerprint plus ACL epoch are
+    /// part of cache identity. Required with no default: a retrieval that had to
+    /// infer it would infer the permissive answer.
+    pub source_acl: SourceAclContext,
     /// Information barriers the caller is cleared for (need-to-know).
     ///
     /// Sourced from the running agent's knowledge policy at the retrieval entry

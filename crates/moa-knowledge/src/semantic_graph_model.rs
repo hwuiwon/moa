@@ -628,6 +628,7 @@ mod tests {
 
     fn object_with_title(title: Option<&str>) -> KnowledgeObject {
         KnowledgeObject {
+            acl: crate::domain::ObjectAcl::incomplete(),
             object_uid: Uuid::from_u128(2),
             tenant_id: moa_core::types::identifiers::TenantId::from(Uuid::from_u128(1)),
             connection_uid: Uuid::from_u128(3),

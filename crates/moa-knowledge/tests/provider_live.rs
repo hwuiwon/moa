@@ -128,6 +128,7 @@ async fn nango_live_google_drive_lists_records_with_content() {
 
     let page = provider
         .list_changed_records(ListChangedRecordsRequest {
+            acl_key: std::sync::Arc::new(moa_knowledge::acl_key::SourceAclKey::new(1, vec![7; 32])),
             credential: test_credential(),
             connection,
             cursor: None,
@@ -271,6 +272,7 @@ async fn nango_live_google_drive_fetches_record_content() {
     let connection = live_connection(&connector, &connection_id, &model);
     let page = provider
         .list_changed_records(ListChangedRecordsRequest {
+            acl_key: std::sync::Arc::new(moa_knowledge::acl_key::SourceAclKey::new(1, vec![7; 32])),
             credential: test_credential(),
             connection: connection.clone(),
             cursor: None,
@@ -445,6 +447,7 @@ async fn discover_sync_model(
 fn live_connection(connector: &str, connection_id: &str, model: &str) -> KnowledgeConnection {
     let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
+        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid: Uuid::now_v7(),
         tenant_id: TenantId::from(Uuid::now_v7()),
         provider: "nango".to_string(),
@@ -464,6 +467,7 @@ fn live_connection(connector: &str, connection_id: &str, model: &str) -> Knowled
 /// Builds a throwaway knowledge object for materialization checks.
 fn live_object() -> KnowledgeObject {
     KnowledgeObject {
+        acl: moa_knowledge::domain::ObjectAcl::incomplete(),
         object_uid: Uuid::now_v7(),
         tenant_id: TenantId::from(Uuid::now_v7()),
         connection_uid: Uuid::now_v7(),

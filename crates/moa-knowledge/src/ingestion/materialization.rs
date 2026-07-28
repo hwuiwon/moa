@@ -618,26 +618,17 @@ fn mark_metadata_active(metadata: Value) -> Value {
 /// the vector without changing the stored chunk text, chunk hash, or the
 /// evidence excerpt shown to the model. Only newly embedded chunks pick this
 /// up — unchanged chunk hashes keep their cached vectors, so mixed corpora
-/// converge as content changes; rebuild embeddings to convert wholesale.
+/// converge as content changes; a partition rebuild converts wholesale.
+///
+/// The format itself lives in `moa_core` because the rebuild path must
+/// reproduce it exactly and neither crate can depend on the other.
 fn contextual_embedding_input(
     document_title: Option<&str>,
     chunk: &crate::domain::KnowledgeChunk,
 ) -> String {
-    let mut context = Vec::new();
-    if let Some(title) = document_title {
-        let title = title.trim();
-        if !title.is_empty() {
-            context.push(title.to_string());
-        }
-    }
-    for heading in &chunk.heading_path {
-        let heading = heading.trim();
-        if !heading.is_empty() && context.last().map(String::as_str) != Some(heading) {
-            context.push(heading.to_string());
-        }
-    }
-    if context.is_empty() {
-        return chunk.text.clone();
-    }
-    format!("{}\n\n{}", context.join(" > "), chunk.text)
+    moa_core::types::memory::contextual_chunk_embedding_input(
+        document_title,
+        &chunk.heading_path,
+        &chunk.text,
+    )
 }

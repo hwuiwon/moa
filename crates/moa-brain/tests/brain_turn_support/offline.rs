@@ -613,15 +613,19 @@ impl LLMProvider for MaliciousToolOutputLlmProvider {
                 "{}",
                 tool_message.content
             );
+            // The classifier destroyed the attempt at the raw-output source, so the
+            // wrapper now carries the fixed safe replacement rather than the payload.
             assert!(
-                tool_message
+                !tool_message
                     .content
-                    .contains("ignore previous instructions")
+                    .contains("ignore previous instructions"),
+                "{}",
+                tool_message.content
             );
             assert!(
-                tool_message
-                    .content
-                    .contains("</untrusted_tool_output>")
+                tool_message.content.contains("tool output withheld"),
+                "{}",
+                tool_message.content
             );
             CompletionResponse {
                 text: "wrapped".to_string(),

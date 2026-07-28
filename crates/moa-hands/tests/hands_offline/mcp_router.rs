@@ -1,12 +1,13 @@
 use moa_config::McpCredentialConfig;
 use moa_config::McpServerConfig;
+use moa_config::McpServerCredentialScope;
 use moa_config::McpTransportConfig;
 use moa_config::MoaConfig;
 use moa_config::SecurityProfile;
 use moa_core::{
     traits::Identity, traits::IdentityType, types::completion::ToolInvocation,
-    types::identifiers::ModelId, types::identifiers::TenantId, types::security::SensitivityClass,
-    types::session::SessionMeta, types::tools::IdempotencyClass,
+    types::identifiers::ModelId, types::identifiers::TenantId, types::identifiers::ToolCallId,
+    types::security::SensitivityClass, types::session::SessionMeta, types::tools::IdempotencyClass,
 };
 use moa_hands::ToolRouter;
 use moa_memory_pii::{MockClassifier, PiiResult};
@@ -36,12 +37,12 @@ fn identity() -> Identity {
     }
 }
 
-fn opt_into_development_local_hands(config: &mut MoaConfig) {
+pub(super) fn opt_into_development_local_hands(config: &mut MoaConfig) {
     config.local.docker_enabled = false;
     config.security_profile = SecurityProfile::Local;
 }
 
-fn mcp_egress_guard() -> std::sync::Arc<McpEgressGuard> {
+pub(super) fn mcp_egress_guard() -> std::sync::Arc<McpEgressGuard> {
     std::sync::Arc::new(McpEgressGuard::new(std::sync::Arc::new(MockClassifier {
         fixed: PiiResult {
             class: SensitivityClass::None,
@@ -61,12 +62,15 @@ async fn configured_mcp_server_without_egress_guard_fails_before_connecting_offl
             name: "guard-required".to_string(),
             transport: McpTransportConfig::Http,
             url: Some("http://127.0.0.1:1".to_string()),
-            ..McpServerConfig::default()
+            allowed_data_classes: Vec::new(),
+            credential_scope: McpServerCredentialScope::DeploymentOwned,
+            credentials: None,
+            trust_tool_annotations: false,
         }],
         ..MoaConfig::default()
     };
 
-    let error = match ToolRouter::from_config(&config, None, None).await {
+    let error = match ToolRouter::from_config(&config, None, None, None).await {
         Ok(_) => panic!("configured MCP without an egress guard must fail startup"),
         Err(error) => error,
     };
@@ -134,13 +138,14 @@ async fn router_injects_mcp_credentials_via_proxy() {
             token_env: token_env.clone(),
         }),
         trust_tool_annotations: false,
-        ..McpServerConfig::default()
+        allowed_data_classes: Vec::new(),
+        credential_scope: McpServerCredentialScope::DeploymentOwned,
     }];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
         .await
         .unwrap();
-    let (_, output) = router
+    let secured = router
         .execute_authorized(
             &session(),
             &identity(),
@@ -149,9 +154,12 @@ async fn router_injects_mcp_credentials_via_proxy() {
                 name: "ping".to_string(),
                 input: json!({}),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+    let output = secured.safe_output;
 
     assert_eq!(output.to_text(), "pong");
     server.await.expect("fake MCP server should finish");
@@ -208,10 +216,11 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
         url: Some(format!("http://{addr}")),
         credentials: None,
         trust_tool_annotations: false,
-        ..McpServerConfig::default()
+        allowed_data_classes: Vec::new(),
+        credential_scope: McpServerCredentialScope::DeploymentOwned,
     }];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
         .await
         .unwrap();
     let malformed = router
@@ -224,6 +233,8 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
                 name: "lookup_filing".to_string(),
                 input: json!({"item_key": 7}),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .expect_err("malformed MCP input must fail before dispatch");
@@ -245,7 +256,7 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
         other => panic!("expected ValidationError, got {other:?}"),
     }
 
-    let (_, output) = router
+    let secured_2 = router
         .execute_authorized_with_recovery(
             &session(),
             &identity(),
@@ -255,9 +266,13 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
                 name: "lookup_filing".to_string(),
                 input: json!({"item_key": "AAPL-10K"}),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .expect("valid MCP input should dispatch");
+
+    let output = secured_2.safe_output;
     assert_eq!(output.to_text(), "filing");
     timeout(Duration::from_secs(2), server)
         .await
@@ -292,10 +307,11 @@ async fn router_fails_closed_when_credentialed_mcp_token_env_is_unset() {
             token_env: token_env.clone(),
         }),
         trust_tool_annotations: false,
-        ..McpServerConfig::default()
+        allowed_data_classes: Vec::new(),
+        credential_scope: McpServerCredentialScope::DeploymentOwned,
     }];
 
-    let error = match ToolRouter::from_config(&config, Some(mcp_egress_guard()), None).await {
+    let error = match ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None).await {
         Ok(_) => panic!("expected from_config to fail closed on the unset MCP token env var"),
         Err(error) => error,
     };
@@ -356,10 +372,12 @@ async fn router_calls_http_mcp_server_and_surfaces_jsonrpc_errors() {
         transport: McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),
         trust_tool_annotations: false,
-        ..McpServerConfig::default()
+        allowed_data_classes: Vec::new(),
+        credential_scope: McpServerCredentialScope::DeploymentOwned,
+        credentials: None,
     }];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
         .await
         .unwrap();
     let error = router
@@ -371,6 +389,8 @@ async fn router_calls_http_mcp_server_and_surfaces_jsonrpc_errors() {
                 name: "explode".to_string(),
                 input: json!({}),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap_err();
@@ -421,10 +441,12 @@ async fn from_config_rejects_mcp_tool_name_that_collides_with_local_tool() {
         transport: McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),
         trust_tool_annotations: false,
-        ..McpServerConfig::default()
+        allowed_data_classes: Vec::new(),
+        credential_scope: McpServerCredentialScope::DeploymentOwned,
+        credentials: None,
     }];
 
-    let error = match ToolRouter::from_config(&config, Some(mcp_egress_guard()), None).await {
+    let error = match ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None).await {
         Ok(_) => panic!("MCP tool name collision should reject router construction"),
         Err(error) => error,
     };
@@ -490,10 +512,12 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
         transport: McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),
         trust_tool_annotations: false,
-        ..McpServerConfig::default()
+        allowed_data_classes: Vec::new(),
+        credential_scope: McpServerCredentialScope::DeploymentOwned,
+        credentials: None,
     }];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
         .await
         .unwrap();
     assert!(
@@ -503,7 +527,7 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
             .any(|tool| tool.get("name").and_then(|value| value.as_str()) == Some("sse_echo"))
     );
 
-    let (_, output) = router
+    let secured_3 = router
         .execute_authorized(
             &session(),
             &identity(),
@@ -512,9 +536,13 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
                 name: "sse_echo".to_string(),
                 input: json!({ "text": "hello" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_3.safe_output;
 
     assert_eq!(output.to_text(), "sse-pong");
 }
@@ -591,10 +619,11 @@ async fn discovered_tool_idempotency(
         url: Some(format!("http://{addr}")),
         credentials: None,
         trust_tool_annotations,
-        ..McpServerConfig::default()
+        allowed_data_classes: Vec::new(),
+        credential_scope: McpServerCredentialScope::DeploymentOwned,
     }];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
         .await
         .expect("build router from discovered MCP tool");
     server.await.expect("fake MCP server should finish");

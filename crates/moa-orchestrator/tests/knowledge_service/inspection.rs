@@ -41,6 +41,7 @@ async fn knowledge_service_accepts_injected_ingestion_runner_without_global_conf
     };
     let page = RecordPage {
         records: vec![ProviderRecord {
+            acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
             source_id: "doc-1".to_string(),
             object_type: "document".to_string(),
             title: Some("Doc 1".to_string()),

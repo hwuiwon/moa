@@ -2,10 +2,12 @@
 
 use super::state::{ClaimedHistoryEntry, MAX_CLEANUP_RELEASE_ATTEMPTS, WorkerHistoryEntry};
 use super::*;
+use crate::action_reviews::scheduling::QueuedActionReviewContinuation;
 use crate::handlers::authz_shim::{authorize_session_participant, require_identity};
 use crate::objects::session::SessionClient;
 use crate::services::tool_executor::{ReleaseWorkerHandsRequest, ToolExecutorClient};
 use crate::workflows::worker_turn_execution::WorkerTurnExecutionClient;
+use moa_core::types::worker::commands::ClearWorkerInputTargetsInput;
 use moa_security::{canary_system_message, new_canary_token};
 use moa_wire::turn::{RunWorkerTurnRequest, TurnOutcomeKind};
 
@@ -30,11 +32,17 @@ impl Worker for WorkerImpl {
                 text,
             } => {
                 let reply = serde_json::Value::String(text.clone());
-                let (acknowledgement, awakeable_id) =
+                let parent_session = state.parent_session;
+                let (acknowledgement, applied) =
                     state.apply_input_reply(input_request_id, &reply)?;
-                if let Some(awakeable_id) = awakeable_id {
-                    ctx.resolve_awakeable(&awakeable_id, text.clone());
+                if let Some(applied) = applied {
+                    ctx.resolve_awakeable(&applied.awakeable_id, text.clone());
                     state.persist(&ctx);
+                    // An answered round-trip is no longer user-addressable, so the
+                    // advertised target is retracted on the same path as every other clear.
+                    if let Some(parent_session) = parent_session {
+                        retract_session_input_targets(&ctx, parent_session, vec![applied.target()]);
+                    }
                     tracing::info!(
                         key = %ctx.key(),
                         input_request_id = %input_request_id,
@@ -74,6 +82,9 @@ impl Worker for WorkerImpl {
         // grace window, so a message arriving mid-grace revives the child instead of
         // letting the delayed `cleanup` tick clear it.
         state.bump_cleanup_generation();
+        // New parent instructions supersede every action review this worker raised
+        // under an older generation, so a late approval cannot preempt them.
+        let generation = state.advance_generation();
         let turn_id = if state.active_turn_id.is_none() {
             let turn_id = generate_turn_id(&mut ctx);
             let _started = state.start_workflow_turn(turn_id.clone());
@@ -93,11 +104,15 @@ impl Worker for WorkerImpl {
         if let Some(turn_id) = turn_id {
             start_worker_turn_execution(
                 &ctx,
-                turn_id,
-                identity,
-                parent_session,
-                max_turns,
-                trusted_sandbox_manifest,
+                WorkerTurnDispatch {
+                    turn_id,
+                    identity,
+                    parent_session,
+                    generation,
+                    max_turns,
+                    trusted_sandbox_manifest,
+                    action_review: None,
+                },
             );
         }
         Ok(())
@@ -121,10 +136,13 @@ impl Worker for WorkerImpl {
             .to_string();
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         state.ensure_parent_session_scope(input.parent_session)?;
-        let (acknowledgement, awakeable_id) =
-            state.apply_input_reply(&input.input_request_id, &input.input)?;
-        if let Some(awakeable_id) = awakeable_id {
-            ctx.resolve_awakeable(&awakeable_id, text);
+        // No target retraction here: the caller IS the owning Session, which clears the
+        // target it advertised from this handler's acknowledgement. Calling back into
+        // its single-writer queue while it waits on this call would deadlock.
+        let (acknowledgement, applied) =
+            state.apply_user_input_reply(&input.target, &input.input)?;
+        if let Some(applied) = applied {
+            ctx.resolve_awakeable(&applied.awakeable_id, text);
             state.persist(&ctx);
         }
         Ok(Json::from(acknowledgement))
@@ -200,8 +218,22 @@ impl Worker for WorkerImpl {
         annotate_restate_handler_span("Worker", "cancel");
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
         let active_turn_id = state.active_turn_id.clone();
+        let parent_session = state.parent_session;
         state.cancel_reason = Some(reason.clone());
         state.status = Some(WorkerState::Cancelled);
+        // Nothing will resolve this child's awakeables once it is cancelled, so every
+        // in-flight round-trip is dropped and its advertised reply target retracted.
+        let cleared_inputs = state.clear_all_input_requests();
+        // A cancelled worker runs no continuation: the tree it belongs to is being
+        // torn down, so every held review is released instead of resumed.
+        let discarded_reviews = state.discard_action_reviews();
+        if discarded_reviews > 0 {
+            tracing::info!(
+                key = %ctx.key(),
+                discarded_reviews,
+                "released held action reviews on worker cancellation"
+            );
+        }
         let children = state
             .children
             .iter()
@@ -210,6 +242,16 @@ impl Worker for WorkerImpl {
             .collect::<Vec<_>>();
         state.persist(&ctx);
 
+        if let Some(parent_session) = parent_session {
+            retract_session_input_targets(
+                &ctx,
+                parent_session,
+                cleared_inputs
+                    .iter()
+                    .map(WorkerPendingInput::target)
+                    .collect(),
+            );
+        }
         if let Some(turn_id) = active_turn_id {
             crate::restate_identity::replay_safe_request(
                 ctx.workflow_client::<WorkerTurnExecutionClient>(turn_id)
@@ -328,6 +370,44 @@ impl Worker for WorkerImpl {
         .await
     }
 
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal workflow delivery of an assessment the router already produced;
+    // it reads no caller-owned data back and returns only closed-vocabulary state.
+    async fn apply_security_assessment(
+        &self,
+        ctx: ObjectContext<'_>,
+        request: Json<moa_wire::turn::ApplySecurityAssessmentRequest>,
+    ) -> Result<Json<moa_wire::turn::ApplySecurityAssessmentResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Worker", "apply_security_assessment");
+        let request = request.into_inner();
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
+        // The session that owns this worker also owns the transition key namespace,
+        // so a worker's transitions land in its parent session's history.
+        let session_id = state.parent_session.ok_or_else(|| {
+            HandlerError::from(TerminalError::new(
+                "worker has no parent session to scope its security circuit",
+            ))
+        })?;
+        let transition = moa_security::apply_owner_assessment(
+            &mut state.security_circuit,
+            moa_security::CircuitTarget {
+                session_id,
+                owner: &request.owner,
+                capability: &request.capability,
+                tool_call_id: request.tool_call_id,
+            },
+            &request.assessment,
+        );
+        let stage = state
+            .security_circuit
+            .stage(&request.owner, &request.capability);
+        state.persist(&ctx);
+        Ok(Json::from(
+            moa_wire::turn::ApplySecurityAssessmentResponse { transition, stage },
+        ))
+    }
+
     #[tracing::instrument(skip(self, ctx, outcome))]
     async fn apply_turn_outcome(
         &self,
@@ -368,7 +448,12 @@ impl Worker for WorkerImpl {
         annotate_restate_handler_span("Worker", "attach_result_waiter");
         let input = input.into_inner();
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
-        if let Some(terminal) = state.terminal_result(ctx.key().to_string()) {
+        // A worker holding an unresolved review is not finished, so a parent that waits
+        // on it must be parked rather than handed a result that does not yet include
+        // the reviewed action's outcome.
+        if !state.action_review_holds_lifecycle()
+            && let Some(terminal) = state.terminal_result(ctx.key().to_string())
+        {
             return Ok(Json::from(AttachWorkerResultWaiterOutput {
                 terminal: Some(terminal),
             }));
@@ -415,23 +500,28 @@ impl Worker for WorkerImpl {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self, ctx, input_request_id))]
+    #[tracing::instrument(skip(self, ctx, request))]
     // SAFETY: internal control-plane write invoked only by this child's own turn
     // workflow when its `request_input` wait times out. It clears the child's own pending
     // input mapping and reads no caller-owned data.
     async fn clear_input_request(
         &self,
         ctx: ObjectContext<'_>,
-        input_request_id: Json<String>,
+        request: Json<WorkerClearInputRequest>,
     ) -> Result<(), HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Worker", "clear_input_request");
+        let request = request.into_inner();
         let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
-        if state
-            .take_input_awakeable(&input_request_id.into_inner())
-            .is_some()
-        {
-            state.persist(&ctx);
+        let parent_session = state.parent_session;
+        let Some(cleared) =
+            state.clear_input_request_for_workflow(&request.target, &request.waiting_workflow_id)
+        else {
+            return Ok(());
+        };
+        state.persist(&ctx);
+        if let Some(parent_session) = parent_session {
+            retract_session_input_targets(&ctx, parent_session, vec![cleared.target()]);
         }
         Ok(())
     }
@@ -455,19 +545,55 @@ impl Worker for WorkerImpl {
             state.last_outcome = Some(outcome.clone());
         }
 
-        let should_restart = matches_active
-            && !state.pending.is_empty()
-            && !matches!(
-                state.current_status(),
-                WorkerState::Failed | WorkerState::Cancelled
-            );
-        let next_turn_id = if should_restart {
-            let turn_id = generate_turn_id(&mut ctx);
-            let _started = state.start_workflow_turn(turn_id.clone());
-            Some(turn_id)
+        // A turn that reported its outcome is no longer parked on anything it
+        // registered, so its own round-trips die with it; a terminal worker's
+        // remaining registrations die too. Both retract their advertised targets.
+        let mut cleared_inputs = if matches_active {
+            state.clear_input_requests_for_turn(&outcome.turn_id)
+        } else {
+            Vec::new()
+        };
+
+        let terminal_status = matches!(
+            state.current_status(),
+            WorkerState::Failed | WorkerState::Cancelled
+        );
+        // A failed or cancelled worker runs no continuation, and its held reviews must
+        // be released here — otherwise the lifecycle gate below would keep a dead
+        // worker nonterminal forever and its parent would never get a report. Its
+        // remaining input round-trips are equally dead and give up their targets too.
+        if terminal_status {
+            cleared_inputs.extend(state.clear_all_input_requests());
+            let discarded = state.discard_action_reviews();
+            if discarded > 0 {
+                tracing::info!(
+                    key = %ctx.key(),
+                    turn_id = %outcome.turn_id,
+                    discarded,
+                    "released action reviews held by a worker that did not complete"
+                );
+            }
+        }
+        let should_restart = matches_active && !state.pending.is_empty() && !terminal_status;
+        // A queued continuation runs before ordinary buffered work only when the
+        // worker is otherwise idle; a pending parent message is newer instruction and
+        // already advanced the generation, so it wins.
+        let continuation = if matches_active && !should_restart && !terminal_status {
+            state.take_action_review_continuation()
         } else {
             None
         };
+        // A continuation keeps the turn id minted when its review resolved, because
+        // that is the id the durable continuation fact already named.
+        let next_turn = match (&continuation, should_restart) {
+            (Some(queued), _) => Some((queued.turn_id.clone(), Some(queued.continuation.clone()))),
+            (None, true) => Some((generate_turn_id(&mut ctx), None)),
+            (None, false) => None,
+        };
+        if let Some((turn_id, _)) = next_turn.as_ref() {
+            let _started = state.start_workflow_turn(turn_id.clone());
+        }
+        let generation = state.generation;
         let max_turns = state.max_turns;
         let identity = state
             .identity
@@ -477,18 +603,193 @@ impl Worker for WorkerImpl {
         let trusted_sandbox_manifest = state.trusted_sandbox_manifest.clone();
         state.persist(&ctx);
 
-        if let Some(turn_id) = next_turn_id {
+        retract_session_input_targets(
+            &ctx,
+            parent_session,
+            cleared_inputs
+                .iter()
+                .map(WorkerPendingInput::target)
+                .collect(),
+        );
+
+        if let Some((turn_id, action_review)) = next_turn {
             start_worker_turn_execution(
                 &ctx,
-                turn_id,
-                identity,
-                parent_session,
-                max_turns,
-                trusted_sandbox_manifest,
+                WorkerTurnDispatch {
+                    turn_id,
+                    identity,
+                    parent_session,
+                    generation,
+                    max_turns,
+                    trusted_sandbox_manifest,
+                    action_review,
+                },
             );
             return Ok(());
         }
         maybe_resolve_parent_awakeable(&ctx, &self.session_limits).await
+    }
+
+    #[tracing::instrument(skip(self, ctx, registration))]
+    // SAFETY: internal control-plane write from `ActionReviews/request`, which runs
+    // only after the owning session admitted the caller and the worker's own turn
+    // issued the reviewed tool call. It records the review id on this worker's own VO
+    // state and returns no caller-owned data.
+    async fn register_action_review(
+        &self,
+        ctx: ObjectContext<'_>,
+        registration: Json<ActionReviewRegistration>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Worker", "register_action_review");
+        let registration = registration.into_inner();
+        let turn_id = registration
+            .owner
+            .turn_id()
+            .ok_or_else(|| {
+                TerminalError::new("worker action review registration requires an owning turn")
+            })?
+            .to_string();
+        // The generation comes from the worker turn that issued the tool call, not from
+        // whatever this worker happens to be on now: a follow-up admitted between the
+        // tool call and this registration must not re-stamp a stale review as current.
+        let generation = registration.owner.generation().ok_or_else(|| {
+            TerminalError::new("worker action review registration requires an owner generation")
+        })?;
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
+        if generation < state.generation {
+            tracing::info!(
+                key = %ctx.key(),
+                review_id = %registration.review_id,
+                generation,
+                current_generation = state.generation,
+                "skipped registering an already-superseded worker action review"
+            );
+            return Ok(());
+        }
+        if state.register_action_review(registration.review_id, turn_id, generation) {
+            state.persist(&ctx);
+            tracing::info!(
+                key = %ctx.key(),
+                review_id = %registration.review_id,
+                generation = state.generation,
+                "registered pending action review on worker"
+            );
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, receipt))]
+    // SAFETY: internal control-plane write from `ActionReviews/decide`, which
+    // authorizes the deciding tenant admin before resolving. It writes only this
+    // worker's own state plus its own parent-session event log.
+    async fn action_review_resolved(
+        &self,
+        mut ctx: ObjectContext<'_>,
+        receipt: Json<ActionReviewReceipt>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Worker", "action_review_resolved");
+        let receipt = receipt.into_inner();
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
+        // Unknown or already-resolved review: a duplicated callback changes nothing.
+        let Some(registered) = state.resolve_action_review(receipt.review_id) else {
+            tracing::debug!(
+                key = %ctx.key(),
+                review_id = %receipt.review_id,
+                "ignored resolution for an unknown or already-resolved worker action review"
+            );
+            return Ok(());
+        };
+        let superseded = registered.generation != state.generation;
+        let terminal_status = matches!(
+            state.current_status(),
+            WorkerState::Failed | WorkerState::Cancelled
+        );
+        if superseded || terminal_status {
+            // Releasing the lifecycle is the point: the review was holding this
+            // worker's terminal report open, and it no longer may.
+            state.persist(&ctx);
+            tracing::info!(
+                key = %ctx.key(),
+                review_id = %receipt.review_id,
+                registered_generation = registered.generation,
+                current_generation = state.generation,
+                superseded,
+                terminal_status,
+                "released worker action review without a continuation"
+            );
+            return maybe_resolve_parent_awakeable(&ctx, &self.session_limits).await;
+        }
+
+        let parent_session = required_parent_session(&state)?;
+        let directive = receipt.system_directive();
+        // The continuation turn id is minted now, before any scheduling decision, so
+        // the durable continuation fact names the exact turn that will run it even
+        // when the worker is busy and the turn starts later.
+        let continuation_turn_id = generate_turn_id(&mut ctx);
+        let entry = QueuedActionReviewContinuation {
+            continuation: ActionReviewContinuation {
+                review_id: receipt.review_id,
+                receipt,
+            },
+            turn_id: continuation_turn_id,
+            generation: registered.generation,
+            ordinal: registered.ordinal,
+        };
+        let fact = entry.clone();
+        if !state.queue_action_review_continuation(entry) {
+            state.persist(&ctx);
+            return Ok(());
+        }
+        // The worker's own history is VO-local, so the directive is folded in here;
+        // the parent-session fact appended below is what operators and the session
+        // stream observe.
+        state
+            .history
+            .push(WorkerHistoryEntry::inline(ContextMessage::system(
+                directive,
+            )));
+        let dispatch = if state.active_turn_id.is_some() {
+            None
+        } else {
+            state.take_action_review_continuation()
+        };
+        if let Some(dispatch) = dispatch.as_ref() {
+            let _started = state.start_workflow_turn(dispatch.turn_id.clone());
+        }
+        let generation = state.generation;
+        let identity = state
+            .identity
+            .clone()
+            .ok_or_else(|| TerminalError::new("worker is missing its admitted caller identity"))?;
+        let max_turns = state.max_turns;
+        let trusted_sandbox_manifest = state.trusted_sandbox_manifest.clone();
+        state.persist(&ctx);
+
+        append_action_review_continuation_fact(
+            &ctx,
+            parent_session,
+            &fact.continuation,
+            &fact.turn_id,
+        )
+        .await?;
+
+        if let Some(dispatch) = dispatch {
+            start_worker_turn_execution(
+                &ctx,
+                WorkerTurnDispatch {
+                    turn_id: dispatch.turn_id,
+                    identity,
+                    parent_session,
+                    generation,
+                    max_turns,
+                    trusted_sandbox_manifest,
+                    action_review: Some(dispatch.continuation),
+                },
+            );
+        }
+        Ok(())
     }
 
     #[tracing::instrument(skip(self, ctx))]
@@ -518,7 +819,8 @@ impl Worker for WorkerImpl {
         let has_non_terminal_child = state.children.iter().any(|child| child.terminal.is_none());
         let decision = decide_cleanup(
             req.generation == state.cleanup_generation,
-            crate::delegation::is_terminal_worker_state(state.current_status()),
+            crate::delegation::is_terminal_worker_state(state.current_status())
+                && !state.action_review_holds_lifecycle(),
             has_non_terminal_child,
             state.notification_delivered,
         );
@@ -675,6 +977,33 @@ async fn release_and_clear_worker(
         "worker self-cleaned after terminal report"
     );
     Ok(true)
+}
+
+/// Retracts at the owning Session every reply target the cleared requests advertised.
+///
+/// The single retraction seam for the child side: every path that drops an in-flight
+/// `request_input` registration (wait timeout, cancellation, terminal turn outcome, an
+/// answered round-trip) routes through here, so an advertised target can never outlive
+/// the awakeable behind it. Dispatched detached — the Session may be the very caller
+/// waiting on this handler, and a synchronous call back into its single-writer queue
+/// would deadlock. Retraction is idempotent, so at-least-once delivery is safe.
+fn retract_session_input_targets(
+    ctx: &ObjectContext<'_>,
+    parent_session: SessionId,
+    cleared: Vec<WorkerInputTarget>,
+) {
+    if cleared.is_empty() {
+        return;
+    }
+    let worker_id = ctx.key().to_string();
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<SessionClient>(parent_session.to_string())
+            .clear_worker_input_targets(Json::from(ClearWorkerInputTargetsInput {
+                worker_id,
+                cleared,
+            })),
+    )
+    .send();
 }
 
 async fn reschedule_cleanup(
@@ -877,8 +1206,8 @@ async fn record_tool_result_inner(
                 .id
                 .clone()
                 .unwrap_or_else(|| record.tool_id.0.to_string()),
-            record.output.to_text(),
-            Some(record.output.content.clone()),
+            record.output.safe_output.to_text(),
+            Some(record.output.safe_output.content.clone()),
         )));
     if kind.counts_invocation() {
         state.tools_invoked = state.tools_invoked.saturating_add(1);
@@ -996,26 +1325,68 @@ fn required_parent_session(state: &WorkerVoState) -> Result<SessionId, HandlerEr
     })
 }
 
-fn start_worker_turn_execution(
-    ctx: &ObjectContext<'_>,
+/// Everything one worker turn dispatch needs from the VO.
+struct WorkerTurnDispatch {
+    /// Stable workflow key for the turn.
     turn_id: String,
+    /// Exact identity inherited from the root turn.
     identity: moa_core::traits::Identity,
+    /// Owning session.
     parent_session: SessionId,
+    /// Worker generation admitting the turn.
+    generation: u64,
+    /// Optional per-turn iteration cap.
     max_turns: Option<u32>,
+    /// Trusted sandbox manifest inherited from the root turn.
     trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
-) {
+    /// Resolved review this turn continues, when it is a continuation turn.
+    action_review: Option<ActionReviewContinuation>,
+}
+
+fn start_worker_turn_execution(ctx: &ObjectContext<'_>, dispatch: WorkerTurnDispatch) {
     crate::restate_identity::replay_safe_request(
-        ctx.workflow_client::<WorkerTurnExecutionClient>(turn_id.clone())
+        ctx.workflow_client::<WorkerTurnExecutionClient>(dispatch.turn_id.clone())
             .run(Json::from(RunWorkerTurnRequest {
                 worker_id: ctx.key().to_string(),
-                turn_id,
-                identity,
-                parent_session,
-                max_turns,
-                trusted_sandbox_manifest,
+                turn_id: dispatch.turn_id,
+                identity: dispatch.identity,
+                parent_session: dispatch.parent_session,
+                generation: dispatch.generation,
+                max_turns: dispatch.max_turns,
+                trusted_sandbox_manifest: dispatch.trusted_sandbox_manifest,
+                action_review: dispatch.action_review,
             })),
     )
     .send();
+}
+
+/// Appends the deduped continuation fact to the owner's session event log.
+///
+/// One review yields exactly one continuation fact: the dedupe key makes a
+/// replayed or duplicated resolution callback append nothing.
+async fn append_action_review_continuation_fact(
+    ctx: &ObjectContext<'_>,
+    session_id: SessionId,
+    continuation: &ActionReviewContinuation,
+    turn_id: &str,
+) -> Result<(), HandlerError> {
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_event(Json(AppendEventRequest {
+                session_id,
+                event: Event::ActionReviewContinuationRequested {
+                    review_id: continuation.review_id,
+                    turn_id: turn_id.to_string(),
+                    receipt: continuation.receipt.clone(),
+                },
+                dedupe_key: Some(action_review_continuation_dedupe_key(
+                    continuation.review_id,
+                )),
+            })),
+    )
+    .call()
+    .await?;
+    Ok(())
 }
 
 async fn maybe_resolve_parent_awakeable(
@@ -1023,6 +1394,19 @@ async fn maybe_resolve_parent_awakeable(
     session_limits: &SessionLimitsConfig,
 ) -> Result<(), HandlerError> {
     let mut state = Tracked::<WorkerVoState>::load(ctx).await?;
+    // A worker whose own action is still awaiting (or has just been granted) a
+    // tenant-admin decision is NOT finished, even though its model loop returned.
+    // Resolving parent waiters, emitting the terminal report, or scheduling cleanup
+    // here would strand the approved action's answer and destroy the local history
+    // the continuation turn needs.
+    if state.action_review_holds_lifecycle() {
+        tracing::info!(
+            key = %ctx.key(),
+            generation = state.generation,
+            "worker stays nonterminal while a current-generation action review is unresolved"
+        );
+        return Ok(());
+    }
     let Some(terminal) = state.terminal_result(ctx.key().to_string()) else {
         return Ok(());
     };
@@ -1172,8 +1556,7 @@ async fn emit_terminal_idle_wake(
                 payload: serde_json::Value::Null,
                 created_at,
                 resume_policy: ParentResumePolicy::IfIdle,
-                input_request_id: None,
-                input_audience: None,
+                input_request: None,
             })),
     )
     .send();
@@ -1203,7 +1586,181 @@ async fn cache_parent_terminal_result(
 #[cfg(test)]
 mod tests {
     use super::{CleanupDecision, decide_cleanup, release_worker_hands_request};
-    use moa_core::types::identifiers::SessionId;
+    use crate::action_reviews::scheduling::QueuedActionReviewContinuation;
+    use crate::objects::worker::WorkerVoState;
+    use moa_core::types::action_policy::{
+        ActionReviewContinuation, ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt,
+        ActionReviewTerminalEvent,
+    };
+    use moa_core::types::identifiers::{SessionId, ToolCallId};
+    use moa_core::types::worker::state::WorkerState;
+    use uuid::Uuid;
+
+    fn continuation_for(
+        review_id: Uuid,
+        session_id: SessionId,
+        worker_id: &str,
+        generation: u64,
+    ) -> ActionReviewContinuation {
+        ActionReviewContinuation {
+            review_id,
+            receipt: ActionReviewReceipt {
+                review_id,
+                owner: ActionReviewOwner::Worker {
+                    session_id,
+                    worker_id: worker_id.to_string(),
+                    turn_id: format!("{worker_id}-turn-1"),
+                    generation,
+                },
+                tool_name: "bash".to_string(),
+                requested_tool_call_id: ToolCallId::new(),
+                executed_tool_call_id: Some(ToolCallId::new()),
+                outcome: ActionReviewOutcome::ClearedSuccess {
+                    summary: "ok".to_string(),
+                    assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                    capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
+                },
+                terminal_events: vec![
+                    ActionReviewTerminalEvent::Decided,
+                    ActionReviewTerminalEvent::ToolResult,
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn pending_worker_reviews_hold_lifecycle_until_ordered_continuations_finish() {
+        // Pins: a worker whose model loop ended while its own actions await tenant-admin
+        // decisions is NOT finished. While any current-generation review is unresolved it
+        // must stay nonterminal — no parent-result delivery, no cleanup — and its two
+        // reviews must continue in the order they were raised, not the order the admin
+        // happened to decide them. Only after the last continuation is drained does the
+        // worker become eligible to report and self-clean.
+        let session_id = SessionId::new();
+        let worker_id = "worker-lifecycle-hold-1";
+        let first_review = Uuid::from_u128(0x13_1001);
+        let second_review = Uuid::from_u128(0x13_1002);
+        let mut state = WorkerVoState {
+            status: Some(WorkerState::Completed),
+            parent_session: Some(session_id),
+            notification_delivered: false,
+            ..WorkerVoState::default()
+        };
+        let generation = state.advance_generation();
+
+        assert!(state.register_action_review(
+            first_review,
+            format!("{worker_id}-turn-1"),
+            generation
+        ));
+        assert!(state.register_action_review(
+            second_review,
+            format!("{worker_id}-turn-1"),
+            generation
+        ));
+        assert!(
+            state.action_review_holds_lifecycle(),
+            "an unresolved current-generation review keeps the worker nonterminal"
+        );
+        assert_eq!(
+            decide_cleanup(
+                true,
+                crate::delegation::is_terminal_worker_state(state.current_status())
+                    && !state.action_review_holds_lifecycle(),
+                false,
+                true,
+            ),
+            CleanupDecision::Skip,
+            "cleanup must not clear the local history the continuation still needs"
+        );
+
+        // The admin decides the second review first; registration order still wins.
+        let second = state
+            .resolve_action_review(second_review)
+            .expect("second review is registered");
+        assert!(
+            state.queue_action_review_continuation(QueuedActionReviewContinuation {
+                continuation: continuation_for(second_review, session_id, worker_id, generation),
+                turn_id: format!("{worker_id}-continuation-2"),
+                generation: second.generation,
+                ordinal: second.ordinal,
+            })
+        );
+        let first = state
+            .resolve_action_review(first_review)
+            .expect("first review is registered");
+        assert!(
+            state.queue_action_review_continuation(QueuedActionReviewContinuation {
+                continuation: continuation_for(first_review, session_id, worker_id, generation),
+                turn_id: format!("{worker_id}-continuation-1"),
+                generation: first.generation,
+                ordinal: first.ordinal,
+            })
+        );
+        assert!(
+            state.action_review_holds_lifecycle(),
+            "a queued continuation still holds the worker open"
+        );
+
+        assert_eq!(
+            state
+                .take_action_review_continuation()
+                .map(|entry| entry.continuation.review_id),
+            Some(first_review),
+            "continuations run in durable registration order"
+        );
+        assert!(state.action_review_holds_lifecycle());
+        assert_eq!(
+            state
+                .take_action_review_continuation()
+                .map(|entry| entry.continuation.review_id),
+            Some(second_review)
+        );
+
+        assert!(
+            !state.action_review_holds_lifecycle(),
+            "the worker is releasable once its last continuation is drained"
+        );
+        assert_eq!(
+            decide_cleanup(
+                true,
+                crate::delegation::is_terminal_worker_state(state.current_status())
+                    && !state.action_review_holds_lifecycle(),
+                false,
+                true,
+            ),
+            CleanupDecision::Proceed
+        );
+    }
+
+    #[test]
+    fn a_worker_follow_up_supersedes_and_releases_an_older_action_review() {
+        // Pins: an unresolved review must never pin a worker forever. New parent
+        // instructions advance the generation, strand the older review, and release the
+        // lifecycle the review was holding — so a late approval cannot preempt the newer
+        // work or resurrect a worker that has moved on.
+        let session_id = SessionId::new();
+        let review_id = Uuid::from_u128(0x13_1003);
+        let mut state = WorkerVoState {
+            status: Some(WorkerState::Completed),
+            parent_session: Some(session_id),
+            ..WorkerVoState::default()
+        };
+        let generation = state.advance_generation();
+        state.register_action_review(review_id, "worker-supersede-turn-1".to_string(), generation);
+        assert!(state.action_review_holds_lifecycle());
+
+        let newer = state.advance_generation();
+        assert_eq!(newer, 2);
+        assert!(
+            !state.action_review_holds_lifecycle(),
+            "a superseded review no longer holds the worker open"
+        );
+        assert!(
+            state.resolve_action_review(review_id).is_none(),
+            "the superseded registration is gone, so its callback is a no-op"
+        );
+    }
 
     #[test]
     fn cleanup_release_request_targets_owning_session_and_child() {

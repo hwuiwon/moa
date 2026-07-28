@@ -71,6 +71,7 @@ async fn reranker_reorders_candidates_when_enabled() {
     )
     .with_reranker(Arc::new(ReverseReranker));
     let req = RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: "deploy provider".to_string(),
@@ -123,6 +124,7 @@ async fn reranker_receives_hydrated_chunk_text_for_knowledge_hits() {
         documents: Arc::clone(&observed),
     }));
     let req = RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: "how do I connect a custom domain?".to_string(),
@@ -201,6 +203,7 @@ fn feature_ranker_rescues_lexical_non_vector_hit_over_vector_noise() {
         &mut hits,
         &RankingConfig::default(),
         &RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "contact email".to_string(),
@@ -253,6 +256,7 @@ fn label_boost_reorders_without_excluding_non_hinted() {
         &mut hits,
         &RankingConfig::default(),
         &RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "what did we learn from the auth outage?".to_string(),
@@ -314,6 +318,7 @@ fn feature_ranker_rescue_skips_graph_lexical_neighbors() {
         &mut hits,
         &config,
         &RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "regional network".to_string(),
@@ -373,6 +378,7 @@ fn feature_ranker_rescues_graph_only_expansion_hit() {
         &mut hits,
         &config,
         &RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "library owner".to_string(),
@@ -434,6 +440,7 @@ fn anchored_rescue_preserves_vector_rank_one_over_graph_only_hit() {
         &mut hits,
         &config,
         &RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "library owner".to_string(),
@@ -520,6 +527,7 @@ fn source_graph_ranking_groups_chunks_and_reports_typed_graph_features() {
     let diagnostics = apply_source_object_graph_ranking(
         &mut hits,
         &RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "custom domain dns records".to_string(),
@@ -611,6 +619,7 @@ fn source_graph_preserves_vector_article_without_typed_graph_evidence() {
     let diagnostics = apply_source_object_graph_ranking(
         &mut hits,
         &RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "custom domain dns records".to_string(),
@@ -690,6 +699,7 @@ fn source_graph_keeps_original_order_when_top_article_is_unchanged() {
     let diagnostics = apply_source_object_graph_ranking(
         &mut hits,
         &RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "custom domain dns records".to_string(),
@@ -781,6 +791,7 @@ fn entity_local_search_keeps_original_order_when_top_article_is_unchanged() {
     let diagnostics = apply_source_object_graph_ranking(
         &mut hits,
         &RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "custom domain dns records".to_string(),
@@ -867,6 +878,7 @@ fn entity_local_source_object_ranking_preserves_vector_rank_one_with_semantic_pa
     let diagnostics = apply_source_object_graph_ranking(
         &mut hits,
         &RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "custom domain dns records".to_string(),
@@ -940,6 +952,7 @@ fn entity_local_source_object_ranking_ignores_disallowed_raw_paths() {
     let diagnostics = apply_source_object_graph_ranking(
         &mut hits,
         &RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "custom domain dns records".to_string(),
@@ -1689,6 +1702,7 @@ fn lazy_retriever() -> HybridRetriever {
 
 fn empty_corpus_request(k_final: usize, use_reranker: bool) -> RetrievalRequest {
     RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: String::new(),
@@ -1711,6 +1725,7 @@ fn empty_corpus_request(k_final: usize, use_reranker: bool) -> RetrievalRequest 
 
 fn vector_request() -> RetrievalRequest {
     RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         query_text: "deployment runbook".to_string(),
         query_embedding: vec![0.0; 1024],
@@ -2051,6 +2066,7 @@ impl GraphStore for EmptyGraph {
         _max_hops: u8,
         _as_of: Option<DateTime<Utc>>,
         _scoring: &moa_memory_graph::GraphWalkScoring,
+        _source_acl: &moa_core::types::memory::SourceAclContext,
     ) -> std::result::Result<Vec<moa_memory_graph::GraphExpansionHit>, Error> {
         Ok(Vec::new())
     }
@@ -2073,6 +2089,7 @@ fn evidence_floor_drops_lexically_unsupported_hits_but_keeps_graph_hits() {
     // 2026-07-11 hermetic sweep showed a lexical-only floor trades recall@4
     // for precision, so it must never fire unless explicitly configured.
     let query = RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: "what is the deploy target for checkout".to_string(),
@@ -2172,6 +2189,7 @@ fn evidence_floor_drops_lexically_unsupported_hits_but_keeps_graph_hits() {
         "sandwiches",
     )];
     let abstaining = RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         window_policy: crate::retrieval::EvidenceWindowPolicy {
             rerank_window: 0,
@@ -2193,6 +2211,7 @@ fn window_abstention_clears_low_evidence_windows_but_spares_supported_and_graph_
     // returns nothing instead of nearest-of-nothing noise, while one supported
     // hit (or any graph-admitted hit) keeps the whole window alive.
     let query = RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: "what is the deploy target for checkout".to_string(),
@@ -2256,6 +2275,7 @@ fn default_window_policy_never_abstains() {
     // against the 2026-07-11 clamp where a retriever-global window policy cut a
     // knowledge-lane retrieval down to the memory-lane window.
     let query = RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: "what is the deploy target for checkout".to_string(),

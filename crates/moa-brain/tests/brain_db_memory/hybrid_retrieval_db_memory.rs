@@ -405,10 +405,10 @@ async fn seed_knowledge_document_chunks(
         r#"
         INSERT INTO moa.knowledge_connections (
             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
-            provider_connection_id, connector, credential_ref, status, metadata
+            provider_connection_id, connector, credential_ref, status, acl_mode, metadata
         )
         VALUES ($1, $2, $3, 'merge', $4, $5, 'drive',
-                'vault://hybrid-duplicate-test', 'active', '{}'::jsonb)
+                'vault://hybrid-duplicate-test', 'active', 'tenant_public', '{}'::jsonb)
         "#,
     )
     .bind(connection_uid)
@@ -424,10 +424,10 @@ async fn seed_knowledge_document_chunks(
         r#"
         INSERT INTO moa.knowledge_objects (
             object_uid, tenant_id, storage_partition_id, connection_id, object_type,
-            external_object_id, title, change_token, source_uri, status, metadata
+            external_object_id, title, change_token, source_uri, status, acl_state, metadata
         )
         VALUES ($1, $2, $3, $4, 'document', $5, $6,
-                'etag-1', $7, 'active', '{}'::jsonb)
+                'etag-1', $7, 'active', 'incomplete', '{}'::jsonb)
         "#,
     )
     .bind(object_uid)
@@ -565,6 +565,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
     )
     .with_assume_app_role(true);
     let request = RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         seeds: vec![seed_uid],
         query_text: exact_text.to_string(),
@@ -615,6 +616,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
 
     let graph_only_hits = retriever
         .retrieve(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: vec![seed_uid],
             query_text: String::new(),
@@ -645,6 +647,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
 
     let graph_disabled_hits = retriever
         .retrieve(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: vec![seed_uid],
             query_text: String::new(),
@@ -736,6 +739,7 @@ async fn barrier_cleared_agent_retrieves_node_uncleared_fails_closed_db_memory()
     .with_assume_app_role(true);
 
     let make_request = |cleared: Vec<&str>| RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: cleared
             .into_iter()
             .map(|barrier| {
@@ -878,6 +882,7 @@ async fn duplicate_crowding_keeps_distinct_supporting_knowledge_chunk() {
         .with_assume_app_role(true);
     let hits = retriever
         .retrieve(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: query.to_string(),
@@ -982,6 +987,7 @@ async fn identical_text_in_two_documents_hydrates_each_source_occurrence_db_memo
         .with_assume_app_role(true);
     let hits = retriever
         .retrieve(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: query.to_string(),
@@ -1107,6 +1113,7 @@ async fn parent_document_retrieval_hydrates_ordinal_adjacent_neighbors() {
         .with_assume_app_role(true);
     let hits = retriever
         .retrieve(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: query.to_string(),
@@ -1299,6 +1306,7 @@ async fn reinforced_fact_survives_consolidation_while_idle_one_off_expires_from_
     )
     .with_assume_app_role(true);
     let request = |query: &str| RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: query.to_string(),
@@ -1435,6 +1443,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
         HybridRetriever::new(pool.clone(), Arc::new(owner_graph), Arc::new(owner_vector))
             .with_assume_app_role(true)
             .retrieve(RetrievalRequest {
+                source_acl: moa_core::types::memory::SourceAclContext::empty(0),
                 cleared_barriers: Default::default(),
                 seeds: Vec::new(),
                 query_text: summary.to_string(),
@@ -1469,6 +1478,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
         HybridRetriever::new(pool.clone(), Arc::new(other_graph), Arc::new(other_vector))
             .with_assume_app_role(true)
             .retrieve(RetrievalRequest {
+                source_acl: moa_core::types::memory::SourceAclContext::empty(0),
                 cleared_barriers: Default::default(),
                 seeds: Vec::new(),
                 query_text: summary.to_string(),
@@ -1541,6 +1551,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
     .with_assume_app_role(true);
     let scope = tenant_memory_scope(&storage_partition_id);
     let historical = RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: old_name.to_string(),
@@ -1573,6 +1584,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
     assert_eq!(hits[0].node.valid_to, Some(replacement.valid_from));
 
     let current = RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: old_name.to_string(),
@@ -1661,6 +1673,7 @@ async fn temporal_turbopuffer_as_of_uses_pgvector_without_calling_turbopuffer() 
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: String::new(),
@@ -1754,6 +1767,7 @@ async fn temporal_dual_read_as_of_uses_pgvector_without_calling_turbopuffer() {
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: String::new(),
@@ -1854,6 +1868,7 @@ async fn turbopuffer_backend_uses_bm25_for_lexical_candidates_db_memory() {
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "abc-123".to_string(),
@@ -1946,6 +1961,7 @@ async fn turbopuffer_backend_keeps_postgres_lexical_for_fact_candidates_db_memor
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "fact-456".to_string(),
@@ -2043,6 +2059,7 @@ async fn turbopuffer_bm25_error_falls_back_to_postgres_lexical_db_memory() {
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "xyz-987".to_string(),
@@ -2119,6 +2136,7 @@ async fn lexical_prefix_fallback_matches_word_prefix_when_primary_misses_db_memo
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "auth".to_string(),
@@ -2216,6 +2234,7 @@ async fn lexical_fallback_matches_structured_predicate_in_properties_db_memory()
 
     let hits = retriever
         .retrieve(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "Which private work repository should you use for me?".to_string(),
@@ -2248,6 +2267,474 @@ async fn lexical_fallback_matches_structured_predicate_in_properties_db_memory()
 
     let _ = graph
         .hard_purge(node_uid, "redacted:properties-fallback-test")
+        .await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+/// Seeds one `provider_managed` knowledge object with a complete ACL snapshot,
+/// returning `(chunk uid, document node uid)`.
+///
+/// Written through raw SQL rather than the ingestion pipeline so the test states
+/// the exact stored ACL position it is asserting against, with no dependence on
+/// how ingestion happened to normalize a provider payload.
+#[allow(clippy::too_many_arguments)]
+async fn seed_provider_managed_chunk(
+    pool: &PgPool,
+    storage_partition_id: &str,
+    object_slug: &str,
+    text: &str,
+    chunk_uid: Uuid,
+    document_node_uid: Uuid,
+    allow: &[&[u8]],
+    deny: &[&[u8]],
+    revision: &str,
+) {
+    let tenant_id = tenant_id_from_storage_partition_id(storage_partition_id);
+    let connection_uid = Uuid::now_v7();
+    let object_uid = Uuid::now_v7();
+    let version_uid = Uuid::now_v7();
+    let snapshot_uid = Uuid::now_v7();
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_connections (
+            connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
+            provider_connection_id, connector, credential_ref, status, acl_mode, metadata
+        )
+        VALUES ($1, $2, $3, 'nango', $4, $5, 'google-drive',
+                'vault://source-acl-test', 'active', 'provider_managed', '{}'::jsonb)
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(tenant_id.0)
+    .bind(storage_partition_id)
+    .bind(format!("source-acl-{object_slug}"))
+    .bind(format!("acct-{object_slug}"))
+    .execute(pool)
+    .await
+    .expect("insert provider-managed connection");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_objects (
+            object_uid, tenant_id, storage_partition_id, connection_id, object_type,
+            external_object_id, title, change_token, source_uri, status, acl_state, metadata
+        )
+        VALUES ($1, $2, $3, $4, 'document', $5, $6, 'etag-1',
+                'https://drive.example.test/' || $5, 'active', 'incomplete', '{}'::jsonb)
+        "#,
+    )
+    .bind(object_uid)
+    .bind(tenant_id.0)
+    .bind(storage_partition_id)
+    .bind(connection_uid)
+    .bind(object_slug)
+    .bind(format!("{object_slug} memo"))
+    .execute(pool)
+    .await
+    .expect("insert provider-managed object");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_source_acl_snapshots (
+            snapshot_uid, tenant_id, storage_partition_id, connection_id, object_id,
+            provider_revision, snapshot_hash, provenance, complete, entry_count, captured_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 'hash-' || $6, 'provider_listing', TRUE, $7, now())
+        "#,
+    )
+    .bind(snapshot_uid)
+    .bind(tenant_id.0)
+    .bind(storage_partition_id)
+    .bind(connection_uid)
+    .bind(object_uid)
+    .bind(revision)
+    .bind(i32::try_from(allow.len() + deny.len()).expect("entry count fits"))
+    .execute(pool)
+    .await
+    .expect("insert acl snapshot");
+
+    for (entry_kind, principals) in [("allow", allow), ("deny", deny)] {
+        for principal in principals {
+            sqlx::query(
+                r#"
+                INSERT INTO moa.knowledge_source_acl_entries (
+                    entry_uid, tenant_id, storage_partition_id, snapshot_id, entry_kind,
+                    principal_kind, principal_fingerprint, fingerprint_key_version
+                )
+                VALUES ($1, $2, $3, $4, $5, 'user', $6, 1)
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(tenant_id.0)
+            .bind(storage_partition_id)
+            .bind(snapshot_uid)
+            .bind(entry_kind)
+            .bind(*principal)
+            .execute(pool)
+            .await
+            .expect("insert acl entry");
+        }
+    }
+
+    // Only now can the object point at a snapshot that exists — the same order
+    // the repository uses, and the reason the FK is there.
+    sqlx::query(
+        r#"
+        UPDATE moa.knowledge_objects
+        SET acl_state = 'current', acl_revision = $2, current_acl_snapshot_id = $3
+        WHERE object_uid = $1
+        "#,
+    )
+    .bind(object_uid)
+    .bind(revision)
+    .bind(snapshot_uid)
+    .execute(pool)
+    .await
+    .expect("promote object to current acl");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_document_versions (
+            document_version_uid, tenant_id, storage_partition_id, object_id,
+            parser_provider, parser_job_id, content_hash, graph_node_uid, metadata
+        )
+        VALUES ($1, $2, $3, $4, 'native', 'native-job-source-acl', $5, $6, '{}'::jsonb)
+        "#,
+    )
+    .bind(version_uid)
+    .bind(tenant_id.0)
+    .bind(storage_partition_id)
+    .bind(object_uid)
+    .bind(format!("content-{object_slug}"))
+    .bind(document_node_uid)
+    .execute(pool)
+    .await
+    .expect("insert document version");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_chunks (
+            chunk_uid, tenant_id, storage_partition_id, document_version_id, graph_node_uid,
+            chunk_hash, block_hashes, heading_path, text, ordinal, token_count, metadata
+        )
+        VALUES ($1, $2, $3, $4, $1, $5, ARRAY['block-1']::TEXT[],
+                ARRAY['Compensation']::TEXT[], $6, 0, 8, '{}'::jsonb)
+        "#,
+    )
+    .bind(chunk_uid)
+    .bind(tenant_id.0)
+    .bind(storage_partition_id)
+    .bind(version_uid)
+    .bind(format!("chunk-hash-{object_slug}"))
+    .bind(text)
+    .execute(pool)
+    .await
+    .expect("insert chunk");
+}
+
+#[tokio::test]
+async fn provider_managed_chunk_is_admitted_only_for_its_own_principals_db_memory() {
+    // Pins the security claim end to end, through the PRODUCTION `retrieve`
+    // path: two colleagues in one tenant issue the same query against the same
+    // document, and only the one the source shared it with gets it back. The
+    // denial has to hold on every leg at once — vector, lexical, graph
+    // expansion, hydration — because `retrieve` runs them all and fuses the
+    // results; a leg that forgot the predicate would surface the chunk here.
+    //
+    // It also pins that the denial reaches the CONTENT, not just the ranking:
+    // the denied caller gets no hydrated chunk text and no document node, so
+    // nothing can leak into a citation or a prompt.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let pool = session_store.pool().clone();
+    let storage_partition_id = test_storage_partition_id();
+    let graph = graph_store(&pool, &storage_partition_id);
+    set_workspace_embedder_state(&pool, &storage_partition_id, "test-model").await;
+
+    // Two opaque fingerprints, exactly as the ACL key would mint them: two
+    // version bytes followed by a 32-byte digest.
+    let mut alice = vec![0_u8, 1_u8];
+    alice.extend(std::iter::repeat_n(0xA1_u8, 32));
+    let mut bob = vec![0_u8, 1_u8];
+    bob.extend(std::iter::repeat_n(0xB2_u8, 32));
+
+    const SHARED_TEXT: &str = "quarterly executive bonus approval memo";
+    let chunk_uid = Uuid::now_v7();
+    let document_node_uid = Uuid::now_v7();
+
+    seed_provider_managed_chunk(
+        &pool,
+        &storage_partition_id,
+        "restricted",
+        SHARED_TEXT,
+        chunk_uid,
+        document_node_uid,
+        &[alice.as_slice()],
+        &[],
+        "acl-rev-1",
+    )
+    .await;
+
+    // The graph nodes ingestion would have written for that chunk and document.
+    let mut chunk_node = node_intent(
+        &storage_partition_id,
+        NodeLabel::Chunk,
+        SHARED_TEXT,
+        Some(deterministic_vector(SHARED_TEXT)),
+    );
+    chunk_node.uid = chunk_uid;
+    graph
+        .create_node(chunk_node)
+        .await
+        .expect("create chunk node");
+    let mut document_node = node_intent(
+        &storage_partition_id,
+        NodeLabel::Document,
+        SHARED_TEXT,
+        None,
+    );
+    document_node.uid = document_node_uid;
+    graph
+        .create_node(document_node)
+        .await
+        .expect("create document node");
+
+    let scope = tenant_memory_scope(&storage_partition_id);
+    let vector: Arc<PgvectorStore> = Arc::new(PgvectorStore::new_for_app_role(
+        pool.clone(),
+        tenant_scope(&storage_partition_id),
+    ));
+    let retriever = HybridRetriever::new(pool.clone(), Arc::new(graph.clone()), vector)
+        .with_assume_app_role(true);
+
+    let make_request = |principals: Vec<Vec<u8>>| RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::new(
+            principals.iter().map(|bytes| {
+                moa_core::types::memory::SourcePrincipalFingerprint::from_bytes(bytes)
+                    .expect("valid fingerprint")
+            }),
+            7,
+        ),
+        cleared_barriers: Default::default(),
+        seeds: Vec::new(),
+        query_text: SHARED_TEXT.to_string(),
+        query_embedding: deterministic_vector(SHARED_TEXT),
+        scope: scope.clone(),
+        label_filter: Some(vec![NodeLabel::Chunk, NodeLabel::Document]),
+        label_boost: None,
+        max_pii_class: SensitivityClass::Restricted,
+        k_final: 10,
+        use_reranker: false,
+        strategy: None,
+        as_of: None,
+        ranking_reference_time: None,
+        lineage: None,
+        disable_leg_timeouts: false,
+        disable_graph_expansion: false,
+        window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
+    };
+
+    let allowed = retriever
+        .retrieve(make_request(vec![alice.clone()]))
+        .await
+        .expect("allowed retrieval");
+    let allowed_chunk = allowed
+        .iter()
+        .find(|hit| hit.uid == chunk_uid)
+        .expect("the principal the source shared with must retrieve the chunk");
+    assert_eq!(
+        allowed_chunk
+            .knowledge_chunk
+            .as_ref()
+            .map(|chunk| chunk.text.as_str()),
+        Some(SHARED_TEXT),
+        "the admitted caller must get hydrated chunk text"
+    );
+    assert!(
+        allowed.iter().any(|hit| hit.uid == document_node_uid),
+        "the admitted caller must also see the document node: {allowed:?}"
+    );
+
+    for (label, principals) in [
+        (
+            "a colleague the source did not share with",
+            vec![bob.clone()],
+        ),
+        ("a caller with no resolved principals", Vec::new()),
+    ] {
+        let denied = retriever
+            .retrieve(make_request(principals))
+            .await
+            .expect("denied retrieval");
+        assert!(
+            denied.iter().all(|hit| hit.uid != chunk_uid),
+            "{label} must not retrieve the chunk: {denied:?}"
+        );
+        assert!(
+            denied.iter().all(|hit| hit.uid != document_node_uid),
+            "{label} must not retrieve the document node either: {denied:?}"
+        );
+        assert!(
+            denied.iter().all(|hit| hit.knowledge_chunk.is_none()),
+            "{label} must receive no hydrated chunk content at all: {denied:?}"
+        );
+    }
+
+    // Each admitting leg must refuse the denied caller ON ITS OWN, not merely be
+    // cleaned up by a later fence. A leg that surfaced the chunk and relied on
+    // hydration to drop it would still be a leak of ranking position: the denied
+    // document would silently displace an admitted one from the top-k, and the
+    // caller would lose an answer they were entitled to without any signal.
+    let denied_request = make_request(vec![bob.clone()]);
+    let lexical_candidates =
+        moa_retrieval::retrieval::legs::lexical_leg(&pool, &denied_request, true)
+            .await
+            .expect("lexical leg");
+    assert!(
+        lexical_candidates
+            .iter()
+            .all(|candidate| candidate.uid != chunk_uid),
+        "the lexical leg must not produce a denied candidate at all: {lexical_candidates:?}"
+    );
+    let allowed_request = make_request(vec![alice.clone()]);
+    let allowed_lexical =
+        moa_retrieval::retrieval::legs::lexical_leg(&pool, &allowed_request, true)
+            .await
+            .expect("lexical leg");
+    assert!(
+        allowed_lexical
+            .iter()
+            .any(|candidate| candidate.uid == chunk_uid),
+        "the same leg must still produce the candidate for the admitted caller"
+    );
+
+    // Graph traversal is admitted at the SEED and at every intermediate hop, not
+    // only in the returned set. An admitted neighbour with an edge into the
+    // denied chunk is the shape that matters: if the walk could step through the
+    // denied node it would both reveal it and let the caller reach whatever lies
+    // beyond it.
+    let neighbour_text = "public onboarding checklist";
+    let neighbour_node = node_intent(
+        &storage_partition_id,
+        NodeLabel::Fact,
+        neighbour_text,
+        Some(deterministic_vector(neighbour_text)),
+    );
+    let neighbour_uid = graph
+        .create_node(neighbour_node)
+        .await
+        .expect("create neighbour node");
+    graph
+        .create_edge(EdgeWriteIntent {
+            uid: Uuid::now_v7(),
+            label: EdgeLabel::RelatesTo,
+            start_uid: neighbour_uid,
+            end_uid: chunk_uid,
+            valid_from: moa_test_support::fixtures::pg_now(),
+            properties: json!({ "source": "source_acl_test" }),
+            storage_partition_id: Some(storage_partition_id.clone()),
+            contact_id: None,
+            scope: "tenant".to_string(),
+            actor_id: Uuid::now_v7().to_string(),
+            actor_kind: "system".to_string(),
+        })
+        .await
+        .expect("create edge into the restricted chunk");
+
+    let denied_acl = moa_core::types::memory::SourceAclContext::new(
+        [
+            moa_core::types::memory::SourcePrincipalFingerprint::from_bytes(&bob)
+                .expect("valid fingerprint"),
+        ],
+        7,
+    );
+    let allowed_acl = moa_core::types::memory::SourceAclContext::new(
+        [
+            moa_core::types::memory::SourcePrincipalFingerprint::from_bytes(&alice)
+                .expect("valid fingerprint"),
+        ],
+        7,
+    );
+    let scoring = moa_memory_graph::GraphWalkScoring::default();
+
+    let denied_hop = graph
+        .expand_seeds(&[neighbour_uid], 2, None, &scoring, &denied_acl)
+        .await
+        .expect("expand from the admitted neighbour");
+    assert!(
+        denied_hop.iter().all(|hit| hit.uid != chunk_uid),
+        "a denied node must be removed from the walk frontier: {denied_hop:?}"
+    );
+    let allowed_hop = graph
+        .expand_seeds(&[neighbour_uid], 2, None, &scoring, &allowed_acl)
+        .await
+        .expect("expand from the admitted neighbour");
+    assert!(
+        allowed_hop.iter().any(|hit| hit.uid == chunk_uid),
+        "the same walk must reach it for the admitted caller: {allowed_hop:?}"
+    );
+
+    assert!(
+        graph
+            .expand_seeds(&[chunk_uid], 2, None, &scoring, &denied_acl)
+            .await
+            .expect("expand from the restricted chunk")
+            .is_empty(),
+        "a denied node must not even be usable as a traversal seed"
+    );
+
+    // A deny entry for a principal the caller also holds beats the allow.
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_source_acl_entries (
+            entry_uid, tenant_id, storage_partition_id, snapshot_id, entry_kind,
+            principal_kind, principal_fingerprint, fingerprint_key_version
+        )
+        SELECT $1, tenant_id, storage_partition_id, snapshot_uid, 'deny', 'user', $2, 1
+        FROM moa.knowledge_source_acl_snapshots
+        WHERE provider_revision = 'acl-rev-1'
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(alice.as_slice())
+    .execute(&pool)
+    .await
+    .expect("insert deny entry");
+
+    let after_deny = retriever
+        .retrieve(make_request(vec![alice.clone()]))
+        .await
+        .expect("post-deny retrieval");
+    assert!(
+        after_deny.iter().all(|hit| hit.uid != chunk_uid),
+        "an explicit deny must beat the same principal's allow: {after_deny:?}"
+    );
+
+    // Revision drift alone denies, with no change to entries or content.
+    sqlx::query("UPDATE moa.knowledge_objects SET acl_revision = 'acl-rev-2'")
+        .execute(&pool)
+        .await
+        .expect("drift the object revision");
+    let after_drift = retriever
+        .retrieve(make_request(vec![alice]))
+        .await
+        .expect("post-drift retrieval");
+    assert!(
+        after_drift.iter().all(|hit| hit.uid != chunk_uid),
+        "a snapshot for an older revision must not admit the object: {after_drift:?}"
+    );
+
+    let _ = graph
+        .hard_purge(chunk_uid, "redacted:source-acl-test")
+        .await;
+    let _ = graph
+        .hard_purge(document_node_uid, "redacted:source-acl-test")
         .await;
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)

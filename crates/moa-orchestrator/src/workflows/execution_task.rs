@@ -19,7 +19,7 @@ use moa_core::{
         context::ContextMessage,
         identifiers::ToolCallId,
         session::SessionMeta,
-        tools::{IdempotencyClass, ToolOutput},
+        tools::IdempotencyClass,
     },
 };
 use moa_execution::{
@@ -638,6 +638,10 @@ async fn execute_capability(
             task,
             capability,
             session: &session,
+            // A direct capability task runs no model turn, so there is no system
+            // context holding a canary for its output to leak. The canary belongs
+            // to agent turns, which do have one.
+            active_canary: None,
         },
         task.input.clone(),
         0,
@@ -648,7 +652,7 @@ async fn execute_capability(
     if let CapabilityInvocationResult::Output(output) = &invocation {
         usage.retrieved_bytes = usage
             .retrieved_bytes
-            .saturating_add(serialized_len(&output.structured));
+            .saturating_add(serialized_len(&output.safe_output.structured));
     }
     let outcome = capability_invocation_outcome(capability.idempotency_class, invocation, usage)?;
     let output_usage = outcome.usage.clone();
@@ -677,6 +681,64 @@ struct AgentExecutionRequest<'a> {
     skill_refs: &'a [moa_artifacts::reference::ArtifactRef],
     capability_refs: &'a [CapabilityReference],
     max_turns: u32,
+}
+
+/// Fixed terminal message for a task the security circuit halted.
+const EXECUTION_TASK_SECURITY_HALT_MESSAGE: &str = "task stopped: a capability returned output classified as a prompt-injection or \
+     restricted-material result";
+
+/// Fixed user-facing question for a task the security circuit suspended.
+///
+/// Fixed rather than derived from the output: the output is exactly what MOA has
+/// decided it cannot trust, so quoting it into a user prompt would forward the
+/// attack to the human.
+const EXECUTION_TASK_SECURITY_INPUT_QUESTION: &str = "A tool this task used returned output that MOA classified as a possible \
+     prompt-injection attempt. Should this task continue without that capability?";
+
+/// Derives the replay-stable tool-call identity for one task-local agent call.
+///
+/// The circuit deduplicates by tool call, so this must be a pure function of the
+/// task and the position in its loop — a fresh UUID would let a replayed turn
+/// score the same output twice.
+fn execution_task_tool_call_id(
+    task_uid: uuid::Uuid,
+    turn: u32,
+    call_index: usize,
+) -> moa_core::types::identifiers::ToolCallId {
+    const NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x6d6f_615f_6574_6300_9e3a_41d5_b7c8_0002);
+    let name = format!("{task_uid}:{turn}:{call_index}");
+    moa_core::types::identifiers::ToolCallId(uuid::Uuid::new_v5(&NAMESPACE, name.as_bytes()))
+}
+
+/// Journals one execution-task circuit transition and its signed finding.
+async fn record_execution_task_transition(
+    ctx: &WorkflowContext<'_>,
+    tenant_id: moa_core::types::identifiers::TenantId,
+    session_id: moa_core::types::identifiers::SessionId,
+    transition: moa_core::types::security::SecurityCircuitTransition,
+    assessment: &moa_core::types::security::ToolOutputAssessment,
+) -> Result<(), HandlerError> {
+    let occurred_at = ctx
+        .run(|| async move { Ok(Json::from(chrono::Utc::now())) })
+        .name("execution_task_prompt_injection_transition_timestamp")
+        .await?
+        .into_inner();
+
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<crate::services::security_events::SecurityEventsClient>()
+            .record_circuit_transition(Json::from(
+                crate::services::security_events::RecordCircuitTransitionRequest {
+                    tenant_id,
+                    session_id,
+                    transition,
+                    signals: assessment.signals.clone(),
+                    occurred_at,
+                },
+            )),
+    )
+    .call()
+    .await?;
+    Ok(())
 }
 
 async fn execute_agent(
@@ -715,8 +777,19 @@ async fn execute_agent(
         .filter_map(|name| workflow.router.tool_definition(name))
         .map(|definition| definition.anthropic_schema())
         .collect::<Vec<_>>();
+    // One canary per task turn, journaled so a replay reproduces the same token
+    // rather than minting a fresh one that the already-persisted output could
+    // never match. It goes into the system context AND to every capability
+    // invocation: the system copy is what an attacker can exfiltrate, and the
+    // invocation copy is what lets the classifier recognize the exfiltration.
+    let active_canary = ctx
+        .run(|| async { Ok::<_, HandlerError>(Json::from(moa_security::new_canary_token())) })
+        .name("execution_task_agent_canary")
+        .await?
+        .into_inner();
     let mut messages = vec![
         ContextMessage::system(agent_system_prompt(instructions, &skills)),
+        ContextMessage::system(moa_security::canary_system_message(&active_canary)),
         ContextMessage::user(
             json!({
                 "resolved_input": task.input,
@@ -726,6 +799,18 @@ async fn execute_agent(
         ),
     ];
     let mut usage = task.actual.clone();
+    // The task-local agent is its own circuit owner. The state lives in this
+    // durable workflow rather than in a virtual object because the workflow *is*
+    // the single writer for this owner, and its journal already makes the state
+    // replay-stable. Routing it through the Session VO instead would make one
+    // shared circuit alternate between the coordinator owner and each detached
+    // task owner, and each switch would clear the other's accumulated score.
+    let mut circuit = moa_core::types::security::SecurityCircuitState::default();
+    let circuit_owner = moa_core::types::security::SecurityCircuitOwner::ExecutionTask {
+        run_uid: run.run_uid,
+        task_uid: task.task_id.as_uuid(),
+        generation: task.generation,
+    };
     for turn in 0..max_turns {
         let mut request = CompletionRequest {
             model: None,
@@ -794,6 +879,7 @@ async fn execute_agent(
                     task,
                     capability,
                     session: &session,
+                    active_canary: Some(active_canary.as_str()),
                 },
                 tool_call.invocation.input.clone(),
                 u64::from(turn)
@@ -814,7 +900,58 @@ async fn execute_agent(
             };
             usage.retrieved_bytes = usage
                 .retrieved_bytes
-                .saturating_add(serialized_len(&output.structured));
+                .saturating_add(serialized_len(&output.safe_output.structured));
+
+            // Score the classified output against this task's own circuit. A halt
+            // is a terminal task failure and a suspend is a user-audience input
+            // request, which are the execution domain's equivalents of the
+            // coordinator's halt and NeedsInput outcomes.
+            if !output.assessment.is_safe() {
+                let applied = moa_security::apply_owner_assessment(
+                    &mut circuit,
+                    moa_security::CircuitTarget {
+                        session_id: session.id,
+                        owner: &circuit_owner,
+                        capability: &output.capability,
+                        tool_call_id: execution_task_tool_call_id(
+                            task.task_id.as_uuid(),
+                            turn,
+                            call_index,
+                        ),
+                    },
+                    &output.assessment,
+                );
+                if let Some(transition) = applied {
+                    record_execution_task_transition(
+                        ctx,
+                        session.tenant_id,
+                        session.id,
+                        transition,
+                        &output.assessment,
+                    )
+                    .await?;
+                }
+                match circuit.stage(&circuit_owner, &output.capability) {
+                    moa_core::types::security::SecurityCircuitStage::Halted => {
+                        return Ok(failed_outcome(
+                            ExecutionFailureClass::Terminal,
+                            EXECUTION_TASK_SECURITY_HALT_MESSAGE.to_string(),
+                            usage,
+                        ));
+                    }
+                    moa_core::types::security::SecurityCircuitStage::SuspendedForInput => {
+                        return Ok(ExecutionTaskOutcome {
+                            schema_version: 1,
+                            usage,
+                            result: ExecutionTaskResult::NeedsInput {
+                                question: EXECUTION_TASK_SECURITY_INPUT_QUESTION.to_string(),
+                                audience: moa_artifacts::execution_plan::InputAudience::User,
+                            },
+                        });
+                    }
+                    _ => {}
+                }
+            }
             let tool_use_id = tool_call
                 .invocation
                 .id
@@ -824,10 +961,11 @@ async fn execute_agent(
                 tool_call.invocation,
                 "",
             ));
+            // Only the classified output reaches the task-local agent's context.
             messages.push(ContextMessage::tool_result(
                 tool_use_id,
-                output.to_text(),
-                Some(output.content.clone()),
+                output.safe_output.to_text(),
+                Some(output.safe_output.content.clone()),
             ));
         }
     }
@@ -844,10 +982,16 @@ struct CapabilityInvocationContext<'a> {
     task: &'a ExecutionTaskRecord,
     capability: &'a ExecutionCapability,
     session: &'a SessionMeta,
+    /// Per-task-turn canary this invocation must be screened against.
+    ///
+    /// Without it `CanaryLeak` is unreachable for execution-agent turns, which
+    /// makes the whole clear-to-halt jump unreachable for this owner — the
+    /// circuit would silently top out at the lower classes.
+    active_canary: Option<&'a str>,
 }
 
 enum CapabilityInvocationResult {
-    Output(Box<ToolOutput>),
+    Output(Box<moa_core::types::tools::SecuredToolOutput>),
     Terminal(ExecutionTaskResult),
 }
 
@@ -864,6 +1008,7 @@ async fn invoke_capability_tool(
         task,
         capability,
         session,
+        active_canary,
     } = invocation;
     let tool_name = capability_tool_name(capability)?;
     let tool_id = ToolCallId(uuid::Uuid::new_v5(
@@ -896,7 +1041,7 @@ async fn invoke_capability_tool(
             tool_id,
             tool_call: &tool_call,
             allowed_tools: &allowed_tools,
-            active_canary: None,
+            active_canary,
             trusted_sandbox_manifest: None,
             origin: GovernedInvocationOrigin::ExecutionTask {
                 run_uid: run.run_uid,
@@ -1203,19 +1348,23 @@ fn capability_invocation_outcome(
             usage,
             result,
         }),
-        CapabilityInvocationResult::Output(output) if output.is_error => {
+        CapabilityInvocationResult::Output(output) if output.is_error() => {
             let class = if idempotency_class == IdempotencyClass::Idempotent {
                 ExecutionFailureClass::Retryable
             } else {
                 ExecutionFailureClass::Terminal
             };
-            Ok(failed_outcome(class, output.to_text(), usage))
+            Ok(failed_outcome(class, output.safe_output.to_text(), usage))
         }
         CapabilityInvocationResult::Output(output) => {
+            // A non-safe class already cleared `structured`, so a task whose
+            // capability returned attacker-shaped output completes with the safe
+            // replacement text rather than the raw structured payload.
             let value = output
+                .safe_output
                 .structured
                 .clone()
-                .unwrap_or_else(|| Value::String(output.to_text()));
+                .unwrap_or_else(|| Value::String(output.safe_output.to_text()));
             Ok(completed_outcome(value, usage))
         }
     }
@@ -1588,5 +1737,99 @@ mod tests {
                     if class == expected_class && message == expected_message
             ));
         }
+    }
+
+    #[test]
+    fn a_leaked_task_canary_halts_the_task_owner_in_exactly_one_transition() {
+        // Pins the execution-task end of the canary contract, which nothing else
+        // reaches: an agent turn mints a canary, and a capability that echoes it
+        // back must halt THAT task owner in a single transition.
+        //
+        // Three properties, each load bearing:
+        //  1. The token this crate mints is the token the classifier recognizes.
+        //     A format change on either side would silently make every task
+        //     canary undetectable, and no other test composes the two.
+        //  2. `CanaryLeak` scores 4, so a clear circuit jumps straight to
+        //     `Halted`. Exactly one transition must be produced — a walk through
+        //     warned and disabled would mean the single-highest-stage rule broke
+        //     for this owner.
+        //  3. The token never survives into `safe_output`. A halt that still
+        //     forwarded the leaked marker to the model would defeat its purpose.
+        use moa_core::types::identifiers::{SessionId, ToolCallId};
+        use moa_core::types::security::{
+            OutputAssessmentClass, SecurityCircuitOwner, SecurityCircuitStage,
+            SecurityCircuitState, ToolCapabilityId,
+        };
+        use moa_core::types::tools::ToolOutput;
+
+        let canary = moa_security::new_canary_token();
+        assert!(
+            moa_security::canary_system_message(&canary).contains(&canary),
+            "the system copy must carry the exact minted token; it is what an \
+             attacker exfiltrates"
+        );
+
+        let leaked = ToolOutput::text(
+            format!("Here is the marker you asked for: {canary}"),
+            std::time::Duration::from_millis(1),
+        );
+        let capability = ToolCapabilityId::builtin("lookup");
+        let secured = moa_security::classify_tool_output(
+            &leaked,
+            moa_security::OutputClassification {
+                capability: &capability,
+                active_canary: Some(canary.as_str()),
+            },
+        );
+
+        assert_eq!(
+            secured.assessment.class,
+            OutputAssessmentClass::CanaryLeak,
+            "a capability echoing the turn's canary is a leak, not merely suspicious"
+        );
+        assert!(secured.assessment.cleared_raw_carriers);
+        assert!(
+            !serde_json::to_string(&secured)
+                .expect("serialize secured output")
+                .contains(&canary),
+            "the leaked marker must not survive anywhere in the envelope"
+        );
+
+        let owner = SecurityCircuitOwner::ExecutionTask {
+            run_uid: uuid::Uuid::from_u128(0x9001),
+            task_uid: uuid::Uuid::from_u128(0x9002),
+            generation: 3,
+        };
+        let mut circuit = SecurityCircuitState::default();
+        circuit.adopt_owner(&owner);
+        let transition = moa_security::apply_owner_assessment(
+            &mut circuit,
+            moa_security::CircuitTarget {
+                session_id: SessionId(uuid::Uuid::from_u128(0x9003)),
+                owner: &owner,
+                capability: &capability,
+                tool_call_id: ToolCallId(uuid::Uuid::from_u128(0x9004)),
+            },
+            &secured.assessment,
+        )
+        .expect("a first-strike canary leak must produce one transition");
+
+        assert_eq!(transition.prior_stage, SecurityCircuitStage::Clear);
+        assert_eq!(
+            transition.reached_stage,
+            SecurityCircuitStage::Halted,
+            "score 4 from clear halts directly; no warned or disabled step"
+        );
+        assert_eq!(transition.prior_score, 0);
+        assert_eq!(transition.reached_score, 4);
+        assert_eq!(
+            circuit.stage(&owner, &capability),
+            SecurityCircuitStage::Halted,
+            "the halted stage is what drives ExecutionTaskResult::Failed{{Terminal}}"
+        );
+        assert!(
+            !circuit.permits_dispatch(&owner, &capability),
+            "a halted capability must not dispatch again under this owner"
+        );
     }
 }

@@ -358,6 +358,18 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
             record.sequence_num,
             crate::text::truncate_chars(message, 240)
         )),
+        // Model-relevant: the model must know a capability was disabled or the
+        // turn halted, or it will keep retrying the tool the circuit just cut.
+        // Every field here is closed vocabulary, so nothing attacker-controlled
+        // enters the compacted context.
+        Event::PromptInjectionCircuitTransition { transition, .. } => Some(format!(
+            "#{} prompt_injection_circuit capability={} class={} {} -> {}",
+            record.sequence_num,
+            transition.capability.render(),
+            transition.class.as_str(),
+            transition.prior_stage.as_str(),
+            transition.reached_stage.as_str()
+        )),
         // A dropped queued message is model-relevant: the user's message was
         // acknowledged and then discarded, so the model must not assume it ran.
         Event::QueuedMessageRejected { rejection, .. } => Some(format!(
@@ -389,6 +401,16 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
         Event::ActionReviewDecided { decision, .. } => Some(format!(
             "#{} action_review_decided: {decision:?}",
             record.sequence_num
+        )),
+        // A compaction summary keeps only the bounded outcome class. The receipt's
+        // own summary can quote tool output, and by the time a continuation fact is
+        // being compacted its answer already lives in the assistant response the
+        // continuation produced.
+        Event::ActionReviewContinuationRequested { receipt, .. } => Some(format!(
+            "#{} action_review_continuation {}: {}",
+            record.sequence_num,
+            receipt.tool_name,
+            receipt.outcome.as_str()
         )),
         Event::WorkerSpawned {
             worker_id,
@@ -564,7 +586,58 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use super::{compaction_request, should_compact, watermark_may_compact};
+    use super::{compaction_request, event_summary_line, should_compact, watermark_may_compact};
+
+    #[test]
+    fn action_review_continuation_compacts_to_a_bounded_outcome_class_only() {
+        // Pins: compaction of a continuation fact keeps only the bounded outcome class.
+        // The receipt's summary can quote reviewed tool output, and by the time the fact
+        // is being compacted the continuation's own assistant answer already carries
+        // whatever the user needed, so re-emitting the output here would leak it into a
+        // long-lived checkpoint for no benefit.
+        use moa_core::types::action_policy::{
+            ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt, ActionReviewTerminalEvent,
+        };
+        use moa_core::types::identifiers::ToolCallId;
+
+        let review_id = Uuid::from_u128(0x13_4001);
+        let record = record(
+            42,
+            Event::ActionReviewContinuationRequested {
+                review_id,
+                turn_id: "continuation-turn".to_string(),
+                receipt: ActionReviewReceipt {
+                    review_id,
+                    owner: ActionReviewOwner::Coordinator {
+                        session_id: SessionId::new(),
+                        turn_id: "origin-turn".to_string(),
+                        generation: 1,
+                    },
+                    tool_name: "bash".to_string(),
+                    requested_tool_call_id: ToolCallId::new(),
+                    executed_tool_call_id: Some(ToolCallId::new()),
+                    outcome: ActionReviewOutcome::ClearedSuccess {
+                        summary: "SECRET-TOOL-OUTPUT-b7f3".to_string(),
+                        assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                        capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
+                    },
+                    terminal_events: vec![
+                        ActionReviewTerminalEvent::Decided,
+                        ActionReviewTerminalEvent::ToolResult,
+                    ],
+                },
+            },
+        );
+
+        let summary = event_summary_line(&record).expect("continuation facts are summarized");
+        assert!(summary.contains("action_review_continuation"), "{summary}");
+        assert!(summary.contains("bash"), "{summary}");
+        assert!(summary.contains("cleared_success"), "{summary}");
+        assert!(
+            !summary.contains("SECRET-TOOL-OUTPUT-b7f3"),
+            "the reviewed output must not survive into a compaction summary: {summary}"
+        );
+    }
 
     #[test]
     fn watermark_gate_matches_event_threshold_boundary() {

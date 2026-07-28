@@ -142,6 +142,8 @@ mod tests {
                 original_output_tokens: None,
                 success,
                 duration_ms: 10,
+                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
             },
         )
     }

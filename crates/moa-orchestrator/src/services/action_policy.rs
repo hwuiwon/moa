@@ -8,11 +8,11 @@ use moa_authz_schema::{ObjectType, Relation};
 use moa_core::{
     error::MoaError, types::action_policy::ActionEnvelope,
     types::action_policy::ActionPolicyEffect, types::action_policy::ActionPolicyRule,
-    types::action_policy::ActionReviewPreview, types::action_policy::ActionRuleScope,
-    types::action_policy::CapabilityProvenance, types::action_policy::ExecutionTaskOrigin,
+    types::action_policy::ActionReviewOwner, types::action_policy::ActionReviewPreview,
+    types::action_policy::ActionRuleScope, types::action_policy::CapabilityProvenance,
     types::agent::AgentPolicySnapshot, types::completion::ToolInvocation,
     types::contact::ContactId, types::identifiers::TenantId, types::identifiers::ToolCallId,
-    types::identifiers::UserId, types::session::SessionMeta, types::worker::state::WorkerId,
+    types::identifiers::UserId, types::session::SessionMeta,
 };
 use moa_hands::{ActionOrigin, ToolRouter};
 use moa_security::{ActionPolicyRuleStore, stricter_effect};
@@ -34,15 +34,11 @@ pub struct PrepareActionReviewRequest {
     pub review_id: Uuid,
     /// Stable tool-call identifier for event correlation.
     pub tool_call_id: ToolCallId,
-    /// Worker that requested the action, when present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_id: Option<WorkerId>,
+    /// Exact owner resumed if this action is queued for review. Required.
+    pub owner: ActionReviewOwner,
     /// Capability-level provenance, independent of execution ownership.
     #[serde(default)]
     pub capability_provenance: CapabilityProvenance,
-    /// Execution task identity, when the capability belongs to a dynamic run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_origin: Option<ExecutionTaskOrigin>,
     /// Explicit idempotency key supplied for side-effecting tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
@@ -229,7 +225,6 @@ async fn prepare_action_review_inner(
     };
     let origin = ActionOrigin {
         capability: request.capability_provenance,
-        execution: request.execution_origin,
         idempotency_key: request.idempotency_key,
     };
     Ok(PreparedActionReviewResponse::Prepared(Box::new(
@@ -242,7 +237,7 @@ async fn prepare_action_review_inner(
                 request.review_id,
                 &request.session,
                 request.tool_call_id,
-                request.worker_id,
+                request.owner,
                 origin,
             ),
             preview: prepared.review_preview(),
@@ -363,13 +358,14 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
 
     use moa_core::{
-        types::action_policy::ActionPolicyEffect, types::action_policy::CapabilityProvenance,
-        types::action_policy::ExecutionTaskOrigin, types::agent::AgentActionPolicy,
-        types::agent::AgentContext, types::agent::AgentPolicySnapshot,
-        types::agent::AgentToolPolicy, types::agent::AgentToolPolicyMode,
-        types::agent::SYSTEM_DEFAULT_AGENT_POLICY_HASH, types::agent::SYSTEM_DEFAULT_AGENT_REF,
-        types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID, types::completion::ToolInvocation,
-        types::identifiers::ToolCallId, types::session::SessionMeta,
+        types::action_policy::ActionPolicyEffect, types::action_policy::ActionReviewOwner,
+        types::action_policy::CapabilityProvenance, types::action_policy::ExecutionTaskOrigin,
+        types::agent::AgentActionPolicy, types::agent::AgentContext,
+        types::agent::AgentPolicySnapshot, types::agent::AgentToolPolicy,
+        types::agent::AgentToolPolicyMode, types::agent::SYSTEM_DEFAULT_AGENT_POLICY_HASH,
+        types::agent::SYSTEM_DEFAULT_AGENT_REF, types::agent::SYSTEM_DEFAULT_AGENT_REVISION_UID,
+        types::completion::ToolInvocation, types::identifiers::ToolCallId,
+        types::session::SessionMeta,
     };
     use moa_hands::{McpDiscoveredTool, ToolRegistry, ToolRouter};
     use serde_json::json;
@@ -390,6 +386,7 @@ mod tests {
         registry
             .register_mcp_tool(
                 "github",
+                moa_config::McpServerCredentialScope::DeploymentOwned,
                 McpDiscoveredTool {
                     name: "github_issue_create".to_string(),
                     description: "create an issue".to_string(),
@@ -428,6 +425,7 @@ mod tests {
         registry
             .register_mcp_tool(
                 "github",
+                moa_config::McpServerCredentialScope::DeploymentOwned,
                 McpDiscoveredTool {
                     name: "github_issue_create".to_string(),
                     description: "create an issue".to_string(),
@@ -536,8 +534,10 @@ mod tests {
                 "{label} execution effect changed"
             );
             assert_eq!(root.effect, execution.effect, "{label} parity changed");
-            assert_eq!(root.envelope.execution_origin, None);
-            assert!(execution.envelope.execution_origin.is_some());
+            assert_eq!(root.envelope.owner.execution_origin(), None);
+            assert!(execution.envelope.owner.execution_origin().is_some());
+            assert!(root.envelope.owner.is_conversational());
+            assert!(!execution.envelope.owner.is_conversational());
             assert_eq!(
                 root.envelope.normalized_input, execution.envelope.normalized_input,
                 "{label} normalization must be origin-independent"
@@ -550,14 +550,22 @@ mod tests {
         invocation: ToolInvocation,
         execution_origin: Option<ExecutionTaskOrigin>,
     ) -> PrepareActionReviewRequest {
+        let session_id = session.id;
+        let owner = match execution_origin {
+            Some(origin) => ActionReviewOwner::ExecutionTask { session_id, origin },
+            None => ActionReviewOwner::Coordinator {
+                session_id,
+                turn_id: "turn-policy-fixture".to_string(),
+                generation: 1,
+            },
+        };
         PrepareActionReviewRequest {
             session,
             invocation,
             review_id: Uuid::now_v7(),
             tool_call_id: ToolCallId::new(),
-            worker_id: None,
+            owner,
             capability_provenance: CapabilityProvenance::default(),
-            execution_origin,
             idempotency_key: None,
         }
     }

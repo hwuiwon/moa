@@ -11,6 +11,7 @@ use std::{panic::AssertUnwindSafe, panic::resume_unwind};
 use futures_util::FutureExt;
 use moa_config::CloudHandsConfig;
 use moa_config::MoaConfig;
+use moa_core::types::identifiers::ToolCallId;
 use moa_core::{
     error::MoaError,
     error::Result,
@@ -310,7 +311,7 @@ async fn daytona_router_reuses_and_isolates() {
     let temp = tempdir().expect("tempdir");
     config.local.sandbox_dir = temp.path().join("sandbox").display().to_string();
 
-    let router = ToolRouter::from_config(&config, None, None)
+    let router = ToolRouter::from_config(&config, None, None, None)
         .await
         .expect("router should load Daytona from config");
     let provider = DaytonaHandProvider::from_config(&config).expect("provider from config");
@@ -323,7 +324,7 @@ async fn daytona_router_reuses_and_isolates() {
     let content_two = format!("router-two-{}", Uuid::now_v7().simple());
 
     let handle_one_id = {
-        let (hand_id, write) = router
+        let secured = router
             .execute_authorized(
                 &session_one,
                 &identity(),
@@ -332,9 +333,13 @@ async fn daytona_router_reuses_and_isolates() {
                     name: "file_write".to_string(),
                     input: json!({ "path": file_one, "content": content_one }),
                 },
+                ToolCallId::new(),
+                None,
             )
             .await
             .expect("first router write should provision a hand");
+        let hand_id = secured.hand_id.clone();
+        let write = secured.safe_output;
         assert_eq!(
             write.to_text(),
             format!("[new file created: {file_one}, 1 lines]")
@@ -345,7 +350,7 @@ async fn daytona_router_reuses_and_isolates() {
     let handle_one = HandHandle::daytona(handle_one_id.clone());
     let mut handle_two: Option<HandHandle> = None;
     let test_result = AssertUnwindSafe(async {
-        let (same_hand_id, read) = router
+        let secured_2 = router
             .execute_authorized(
                 &session_one,
                 &identity(),
@@ -354,8 +359,12 @@ async fn daytona_router_reuses_and_isolates() {
                     name: "file_read".to_string(),
                     input: json!({ "path": file_one }),
                 },
+                ToolCallId::new(),
+                None,
             )
             .await?;
+        let same_hand_id = secured_2.hand_id.clone();
+        let read = secured_2.safe_output;
         assert_eq!(same_hand_id.as_deref(), Some(handle_one_id.as_str()));
         assert_eq!(read.to_text(), content_one);
 
@@ -367,7 +376,7 @@ async fn daytona_router_reuses_and_isolates() {
             Duration::from_secs(60),
         )
         .await?;
-        let (resumed_hand_id, resumed_read) = router
+        let secured_3 = router
             .execute_authorized(
                 &session_one,
                 &identity(),
@@ -376,12 +385,16 @@ async fn daytona_router_reuses_and_isolates() {
                     name: "file_read".to_string(),
                     input: json!({ "path": file_one }),
                 },
+                ToolCallId::new(),
+                None,
             )
             .await?;
+        let resumed_hand_id = secured_3.hand_id.clone();
+        let resumed_read = secured_3.safe_output;
         assert_eq!(resumed_hand_id.as_deref(), Some(handle_one_id.as_str()));
         assert_eq!(resumed_read.to_text(), content_one);
 
-        let (hand_two_id, second_write) = router
+        let secured_4 = router
             .execute_authorized(
                 &session_two,
                 &identity(),
@@ -390,8 +403,14 @@ async fn daytona_router_reuses_and_isolates() {
                     name: "file_write".to_string(),
                     input: json!({ "path": file_two, "content": content_two }),
                 },
+                ToolCallId::new(),
+                None,
             )
             .await?;
+
+        let hand_two_id = secured_4.hand_id.clone();
+
+        let second_write = secured_4.safe_output;
         assert_eq!(
             second_write.to_text(),
             format!("[new file created: {file_two}, 1 lines]")
@@ -400,7 +419,7 @@ async fn daytona_router_reuses_and_isolates() {
         assert_ne!(hand_two_id, handle_one_id);
         handle_two = Some(HandHandle::daytona(hand_two_id.clone()));
 
-        let (_, bash) = router
+        let secured_5 = router
             .execute_authorized(
                 &session_two,
                 &identity(),
@@ -409,8 +428,12 @@ async fn daytona_router_reuses_and_isolates() {
                     name: "bash".to_string(),
                     input: json!({ "cmd": "sh -lc 'printf router-bash'", "timeout_secs": 60 }),
                 },
+                ToolCallId::new(),
+                None,
             )
             .await?;
+
+        let bash = secured_5.safe_output;
         assert_eq!(bash.process_exit_code(), Some(0));
         assert!(bash.to_text().contains("router-bash"));
 

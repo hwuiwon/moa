@@ -44,6 +44,9 @@ async fn occurrence_pipeline(
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
     repository
         .upsert_connection(drive_connection(connection_uid, tenant_id))

@@ -540,8 +540,7 @@ async fn duplicate_child_signal_is_idempotent_service_e2e() -> Result<()> {
         payload: serde_json::Value::Null,
         created_at: moa_test_support::fixtures::pg_now(),
         resume_policy: ParentResumePolicy::Never,
-        input_request_id: None,
-        input_audience: None,
+        input_request: None,
     };
 
     // Same signal delivered twice — the second is a retried delivery.
@@ -660,8 +659,7 @@ async fn unregistered_worker_signal_records_no_event_service_e2e() -> Result<()>
         payload: serde_json::Value::Null,
         created_at: moa_test_support::fixtures::pg_now(),
         resume_policy: ParentResumePolicy::Never,
-        input_request_id: None,
-        input_audience: None,
+        input_request: None,
     };
     // The handler returns success (a no-op), not an error, for a parent-matching unregistered worker.
     record_child_signal(&client, &session, &unregistered_signal).await?;
@@ -681,8 +679,7 @@ async fn unregistered_worker_signal_records_no_event_service_e2e() -> Result<()>
         payload: serde_json::Value::Null,
         created_at: moa_test_support::fixtures::pg_now(),
         resume_policy: ParentResumePolicy::Never,
-        input_request_id: None,
-        input_audience: None,
+        input_request: None,
     };
     record_child_signal(&client, &session, &control_signal).await?;
 

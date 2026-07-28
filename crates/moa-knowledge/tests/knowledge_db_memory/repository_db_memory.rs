@@ -32,6 +32,7 @@ fn discovery(db: &postgres::TestDb) -> PostgresKnowledgeDiscoveryStore {
 fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
     let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
+        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid: Uuid::now_v7(),
         tenant_id,
         provider: "nango".to_string(),
@@ -75,6 +76,7 @@ fn sync_run(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeSyncRun {
 
 fn object(tenant_id: TenantId, connection_uid: Uuid, label: &str) -> KnowledgeObject {
     KnowledgeObject {
+        acl: moa_knowledge::domain::ObjectAcl::incomplete(),
         object_uid: Uuid::now_v7(),
         tenant_id,
         connection_uid,

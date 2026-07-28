@@ -2,12 +2,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use moa_core::types::memory::RlsContext;
-use moa_db::ScopedConn;
+use moa_core::types::memory::{RlsContext, SourceAclContext};
+use moa_db::{ScopedConn, push_source_acl_predicate};
 use moa_memory_graph::NodeLabel;
 use moa_memory_types::MemoryScope;
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::retrieval::types::{
@@ -17,6 +17,7 @@ use crate::retrieval::types::{
 pub(super) async fn hydrate_knowledge_chunks(
     pool: &PgPool,
     scope: &MemoryScope,
+    source_acl: &SourceAclContext,
     hits: &mut [RetrievalHit],
     assume_app_role: bool,
 ) -> Result<()> {
@@ -30,7 +31,11 @@ pub(super) async fn hydrate_knowledge_chunks(
         return Ok(());
     }
 
-    let mut conn = ScopedConn::begin(pool, &RlsContext::tenant(scope.tenant_id())).await?;
+    let mut conn = ScopedConn::begin(
+        pool,
+        &RlsContext::tenant(scope.tenant_id()).with_source_acl(source_acl.clone()),
+    )
+    .await?;
     if assume_app_role {
         sqlx::query("SET LOCAL ROLE moa_app")
             .execute(conn.as_mut())
@@ -40,7 +45,7 @@ pub(super) async fn hydrate_knowledge_chunks(
     // store `graph_node_uid = chunk_uid` under a unique index, so there is no
     // ambiguity for a newest-version tiebreak to resolve. Collapsing candidates
     // here would silently drop a second document's occurrence of identical text.
-    let rows = sqlx::query_as::<_, KnowledgeChunkRow>(
+    let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT
             c.graph_node_uid,
@@ -61,17 +66,27 @@ pub(super) async fn hydrate_knowledge_chunks(
           ON v.document_version_uid = c.document_version_id
         JOIN moa.knowledge_objects o
           ON o.object_uid = v.object_id
-        WHERE c.tenant_id = $1
-          AND c.graph_node_uid = ANY($2)
+        WHERE c.tenant_id = "#,
+    );
+    builder.push_bind(scope.tenant_id().0);
+    builder.push(" AND c.graph_node_uid = ANY(");
+    builder.push_bind(&chunk_uids);
+    builder.push(
+        r#")
           AND o.status = 'active'
           AND c.metadata->>'active' IS DISTINCT FROM 'false'
-        ORDER BY c.graph_node_uid
-        "#,
-    )
-    .bind(scope.tenant_id().0)
-    .bind(&chunk_uids)
-    .fetch_all(conn.as_mut())
-    .await?;
+          AND "#,
+    );
+    // Hydration is where chunk TEXT is read. Every earlier leg already applied
+    // this predicate, so a denied chunk should never reach here — which is
+    // exactly why it is applied again: the moment one leg is added without it,
+    // this is the fence that keeps denied text out of the prompt.
+    push_source_acl_predicate(&mut builder, "c.chunk_uid", source_acl);
+    builder.push(" ORDER BY c.graph_node_uid");
+    let rows = builder
+        .build_query_as::<KnowledgeChunkRow>()
+        .fetch_all(conn.as_mut())
+        .await?;
 
     let mut chunks_by_graph_uid = rows
         .into_iter()
@@ -97,7 +112,7 @@ pub(super) async fn hydrate_knowledge_chunks(
         })
         .collect::<HashMap<_, _>>();
 
-    hydrate_context_windows(conn.as_mut(), scope, &mut chunks_by_graph_uid).await?;
+    hydrate_context_windows(conn.as_mut(), scope, source_acl, &mut chunks_by_graph_uid).await?;
     conn.commit().await?;
 
     for hit in hits {
@@ -117,6 +132,7 @@ pub(super) async fn hydrate_knowledge_chunks(
 async fn hydrate_context_windows(
     conn: &mut sqlx::PgConnection,
     scope: &MemoryScope,
+    source_acl: &SourceAclContext,
     chunks_by_graph_uid: &mut HashMap<Uuid, KnowledgeChunkHydration>,
 ) -> Result<()> {
     let mut wanted_pairs = HashSet::new();
@@ -134,25 +150,39 @@ async fn hydrate_context_windows(
         return Ok(());
     }
 
-    let neighbor_rows = sqlx::query_as::<_, KnowledgeChunkNeighborRow>(
+    let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT
             c.document_version_id AS document_version_uid,
             c.ordinal,
             c.text
         FROM moa.knowledge_chunks c
-        JOIN unnest($2::uuid[], $3::int4[]) AS wanted(document_version_uid, ordinal)
+        JOIN unnest("#,
+    );
+    builder.push_bind(&version_ids);
+    builder.push("::uuid[], ");
+    builder.push_bind(&ordinals);
+    builder.push(
+        r#"::int4[]) AS wanted(document_version_uid, ordinal)
           ON c.document_version_id = wanted.document_version_uid
          AND c.ordinal = wanted.ordinal
-        WHERE c.tenant_id = $1
+        WHERE c.tenant_id = "#,
+    );
+    builder.push_bind(scope.tenant_id().0);
+    builder.push(
+        r#"
           AND c.metadata->>'active' IS DISTINCT FROM 'false'
-        "#,
-    )
-    .bind(scope.tenant_id().0)
-    .bind(&version_ids)
-    .bind(&ordinals)
-    .fetch_all(conn)
-    .await?;
+          AND "#,
+    );
+    // A neighbour is expanded context the caller never asked for by name, so it
+    // is the easiest place to leak a denied paragraph: the matched chunk is
+    // admitted, and its sibling silently rides along. Each neighbour is admitted
+    // on its own.
+    push_source_acl_predicate(&mut builder, "c.chunk_uid", source_acl);
+    let neighbor_rows = builder
+        .build_query_as::<KnowledgeChunkNeighborRow>()
+        .fetch_all(conn)
+        .await?;
 
     let neighbor_texts = neighbor_rows
         .into_iter()

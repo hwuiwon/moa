@@ -497,7 +497,13 @@ async fn expand_seeds_returns_two_hop_fact_via_shared_entity() {
     .await;
 
     let hits = graph
-        .expand_seeds(&[source_uid], 3, None, &GraphWalkScoring::default())
+        .expand_seeds(
+            &[source_uid],
+            3,
+            None,
+            &GraphWalkScoring::default(),
+            &moa_core::types::memory::SourceAclContext::empty(0),
+        )
         .await
         .expect("expand source fact");
     let related = hits
@@ -593,7 +599,13 @@ async fn expand_seeds_reaches_both_edge_directions_from_one_seed() {
     .await;
 
     let hits = graph
-        .expand_seeds(&[seed_uid], 1, None, &GraphWalkScoring::default())
+        .expand_seeds(
+            &[seed_uid],
+            1,
+            None,
+            &GraphWalkScoring::default(),
+            &moa_core::types::memory::SourceAclContext::empty(0),
+        )
         .await
         .expect("expand seed in both edge directions");
     let hop_one = hits
@@ -692,7 +704,13 @@ async fn expand_seeds_traverses_incoming_subject_edge_from_fact_seed() {
     .await;
 
     let hits = graph
-        .expand_seeds(&[seed_uid], 2, None, &GraphWalkScoring::default())
+        .expand_seeds(
+            &[seed_uid],
+            2,
+            None,
+            &GraphWalkScoring::default(),
+            &moa_core::types::memory::SourceAclContext::empty(0),
+        )
         .await
         .expect("expand fact seed through incoming subject edge");
     let entity = hits
@@ -816,7 +834,13 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
         .expect("supersede intermediate entity");
 
     let current_hits = graph
-        .expand_seeds(&[seed_uid], 3, None, &GraphWalkScoring::default())
+        .expand_seeds(
+            &[seed_uid],
+            3,
+            None,
+            &GraphWalkScoring::default(),
+            &moa_core::types::memory::SourceAclContext::empty(0),
+        )
         .await
         .expect("expand present-time paths");
     let historical_hits = graph
@@ -825,6 +849,7 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
             3,
             Some(old_valid_from + Duration::minutes(5)),
             &GraphWalkScoring::default(),
+            &moa_core::types::memory::SourceAclContext::empty(0),
         )
         .await
         .expect("expand historical paths");

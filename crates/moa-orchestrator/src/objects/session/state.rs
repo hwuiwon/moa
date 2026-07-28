@@ -3,10 +3,36 @@
 use super::*;
 use moa_core::traits::Identity;
 use moa_core::{
-    types::identifiers::AgentSignalId, types::worker::state::ChildSignalKind,
-    types::worker::state::ParentResumePolicy, types::worker::state::UnreadChildSignal,
+    types::identifiers::AgentSignalId, types::security::SecurityCircuitState,
+    types::worker::state::ChildSignalKind, types::worker::state::ParentResumePolicy,
+    types::worker::state::UnreadChildSignal, types::worker::state::WorkerInputTarget,
     types::worker::state::WorkerSignal,
 };
+
+/// One in-flight coordinator input request and the awakeable its turn is parked on.
+///
+/// `waiting_turn_id` and `generation` are the ownership fence: a reply may only
+/// resolve the awakeable of the exact turn generation that raised the request, so
+/// a superseded turn's stale awakeable can never be resolved by a later reply.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoordinatorPendingInput {
+    /// Coordinator turn that raised the request.
+    pub turn_id: String,
+    /// Session turn generation that admitted the owning turn.
+    pub generation: u64,
+    /// Exact request identifier.
+    pub input_request_id: String,
+    /// Restate awakeable the blocked coordinator turn is parked on.
+    pub awakeable_id: String,
+    /// Workflow invocation that is waiting on `awakeable_id`.
+    ///
+    /// Recorded so cancellation and terminal outcomes can clear the *exact*
+    /// target rather than every request that happens to share a turn id. Two
+    /// invocations of one logical turn (an original and its retry) can both hold
+    /// registrations; clearing by turn alone would drop the live one.
+    pub waiting_workflow_id: String,
+}
 
 /// Cycle-safe core pending target instantiated with the artifact-owned execution budget.
 pub type PendingUserReplyTarget =
@@ -35,6 +61,9 @@ pub(super) const K_CHILD_TERMINAL_BLOBS: &str = "child_terminal_blobs";
 pub(super) const K_ACTIVE_EXECUTION_RUNS: &str = "active_execution_runs";
 pub(super) const K_PENDING_USER_REPLY_TARGETS: &str = "pending_user_reply_targets";
 pub(super) const K_EXECUTION_SYNTHESIS_DEDUPE: &str = "execution_synthesis_dedupe";
+pub(super) const K_SECURITY_CIRCUIT: &str = "security_circuit";
+pub(super) const K_PENDING_COORDINATOR_INPUTS: &str = "pending_coordinator_inputs";
+pub(super) const K_COORDINATOR_INPUT_HISTORY: &str = "coordinator_input_history";
 
 /// Byte threshold above which a terminal child's output is offloaded from `K_CHILDREN` to a
 /// content-addressed claim-check blob, leaving a compact preview inline in VO state.
@@ -335,6 +364,21 @@ pub struct SessionVoState {
     pub pending_user_reply_targets: Vec<PendingUserReplyTarget>,
     /// Stable terminal synthesis dispatch markers retained for replay dedupe.
     pub execution_synthesis_dedupe: Vec<ExecutionSynthesisDedupe>,
+    /// In-flight coordinator input requests, one awakeable per request id.
+    pub pending_coordinator_inputs: Vec<CoordinatorPendingInput>,
+    /// Request ids whose reply was already delivered.
+    ///
+    /// Kept after the awakeable is taken so a late duplicate reply is recognized
+    /// as a replay instead of resolving a *replacement* awakeable that a newer
+    /// request happens to have registered under the same id.
+    pub coordinator_input_history: Vec<String>,
+    /// Prompt-injection circuit for the session's current coordinator generation.
+    ///
+    /// Deliberately separate from the admission allocator `turn_generation`:
+    /// queuing later work advances that counter while the current turn is still
+    /// live, so using it as the owner fence would reset a tripped circuit
+    /// mid-attack. The owner stored inside the circuit is the fence.
+    pub security_circuit: SecurityCircuitState,
 }
 
 impl SessionVoState {
@@ -342,6 +386,110 @@ impl SessionVoState {
     pub fn set_meta(&mut self, meta: SessionMeta) {
         self.status = Some(meta.status.clone());
         self.meta = Some(meta);
+    }
+
+    /// Registers one coordinator input awakeable, or reports a duplicate request id.
+    ///
+    /// A retried registration of the same request id is a no-op rather than a
+    /// second entry, so a replayed turn does not leave an orphaned awakeable that
+    /// nothing will ever resolve.
+    pub fn register_coordinator_input(&mut self, pending: CoordinatorPendingInput) -> bool {
+        if self
+            .pending_coordinator_inputs
+            .iter()
+            .any(|entry| entry.input_request_id == pending.input_request_id)
+        {
+            return false;
+        }
+        self.pending_coordinator_inputs.push(pending);
+        true
+    }
+
+    /// Takes the awakeable for one coordinator input request under an exact fence.
+    ///
+    /// Returns `None` when the request is unknown, already delivered, or belongs to
+    /// a different turn generation. Each of those must be a non-delivery rather
+    /// than a best-effort match: resolving the wrong awakeable would unblock a turn
+    /// with an answer meant for different work.
+    pub fn take_coordinator_input_awakeable(
+        &mut self,
+        turn_id: &str,
+        generation: u64,
+        input_request_id: &str,
+    ) -> Option<String> {
+        let index = self.pending_coordinator_inputs.iter().position(|entry| {
+            entry.input_request_id == input_request_id
+                && entry.turn_id == turn_id
+                && entry.generation == generation
+        })?;
+        let taken = self.pending_coordinator_inputs.remove(index);
+        self.coordinator_input_history
+            .push(taken.input_request_id.clone());
+        Some(taken.awakeable_id)
+    }
+
+    /// Returns whether one coordinator input request was already delivered.
+    #[must_use]
+    pub fn coordinator_input_already_delivered(&self, input_request_id: &str) -> bool {
+        self.coordinator_input_history
+            .iter()
+            .any(|entry| entry == input_request_id)
+    }
+
+    /// Drops every coordinator input request raised by a superseded generation.
+    ///
+    /// Called when a turn ends for any reason. Without it a cancelled or failed
+    /// turn would leave its pending target advertised, and the next plain user
+    /// message would be swallowed as a reply to work that no longer exists.
+    pub fn clear_coordinator_inputs_before(&mut self, generation: u64) -> Vec<String> {
+        let (stale, live): (Vec<_>, Vec<_>) = self
+            .pending_coordinator_inputs
+            .drain(..)
+            .partition(|entry| entry.generation < generation);
+        self.pending_coordinator_inputs = live;
+        for entry in &stale {
+            self.pending_user_reply_targets.retain(|target| {
+                !matches!(
+                    target,
+                    PendingUserReplyTarget::CoordinatorInput {
+                        input_request_id,
+                        ..
+                    } if input_request_id == &entry.input_request_id
+                )
+            });
+        }
+        stale.into_iter().map(|entry| entry.awakeable_id).collect()
+    }
+
+    /// Drops the coordinator input requests one finished workflow invocation owns.
+    ///
+    /// Keyed on the waiting workflow, not the turn: a retried invocation of the
+    /// same logical turn registers its own awakeable, and clearing by turn id
+    /// would take down the live retry along with the dead original.
+    pub fn clear_coordinator_inputs_for_workflow(
+        &mut self,
+        waiting_workflow_id: &str,
+    ) -> Vec<String> {
+        let (finished, live): (Vec<_>, Vec<_>) = self
+            .pending_coordinator_inputs
+            .drain(..)
+            .partition(|entry| entry.waiting_workflow_id == waiting_workflow_id);
+        self.pending_coordinator_inputs = live;
+        for entry in &finished {
+            self.pending_user_reply_targets.retain(|target| {
+                !matches!(
+                    target,
+                    PendingUserReplyTarget::CoordinatorInput {
+                        input_request_id,
+                        ..
+                    } if input_request_id == &entry.input_request_id
+                )
+            });
+        }
+        finished
+            .into_iter()
+            .map(|entry| entry.awakeable_id)
+            .collect()
     }
 
     /// Returns the current lifecycle status, defaulting to `Created` when state is empty.
@@ -471,6 +619,64 @@ impl SessionVoState {
         false
     }
 
+    /// Retracts the advertised reply target for one exact worker input request.
+    ///
+    /// Matching is exact on every coordinate, including the worker generation: a clear
+    /// must remove the target it owns and nothing else, or a live round-trip raised by
+    /// a newer turn would silently stop being user-addressable. The paired unread
+    /// `NeedsInput` signal goes with it — the question is moot once nothing can answer it.
+    pub fn clear_worker_input_target(
+        &mut self,
+        worker_id: &str,
+        target: &WorkerInputTarget,
+    ) -> bool {
+        let before = self.pending_user_reply_targets.len();
+        self.pending_user_reply_targets.retain(|entry| {
+            !matches!(
+                entry,
+                PendingUserReplyTarget::WorkerInput {
+                    worker_id: entry_worker_id,
+                    turn_id,
+                    generation,
+                    input_request_id,
+                } if entry_worker_id == worker_id
+                    && turn_id == &target.turn_id
+                    && generation == &target.generation
+                    && input_request_id == &target.input_request_id
+            )
+        });
+        let retracted = before != self.pending_user_reply_targets.len();
+        self.unread_child_signals.retain(|signal| {
+            !(signal.worker_id == worker_id
+                && signal
+                    .input_request
+                    .as_ref()
+                    .is_some_and(|request| request.input_request_id == target.input_request_id))
+        });
+        retracted
+    }
+
+    /// Retracts every advertised worker-input reply target one child owns.
+    ///
+    /// Used where the Session itself ends the child's participation — removal from the
+    /// fan-out and task-tree cancellation — and no per-request coordinates are available.
+    /// Returns how many targets were retracted.
+    pub fn clear_worker_input_targets_for_worker(&mut self, worker_id: &str) -> usize {
+        let before = self.pending_user_reply_targets.len();
+        self.pending_user_reply_targets.retain(|entry| {
+            !matches!(
+                entry,
+                PendingUserReplyTarget::WorkerInput {
+                    worker_id: entry_worker_id,
+                    ..
+                } if entry_worker_id == worker_id
+            )
+        });
+        self.unread_child_signals
+            .retain(|signal| !(signal.worker_id == worker_id && signal.input_request.is_some()));
+        before - self.pending_user_reply_targets.len()
+    }
+
     /// Clears the unread user-input signal paired with one successfully delivered worker reply.
     pub fn clear_unread_worker_input(
         &mut self,
@@ -480,7 +686,10 @@ impl SessionVoState {
         let before = self.unread_child_signals.len();
         self.unread_child_signals.retain(|signal| {
             !(signal.worker_id == *worker_id
-                && signal.input_request_id.as_deref() == Some(input_request_id))
+                && signal
+                    .input_request
+                    .as_ref()
+                    .is_some_and(|request| request.input_request_id == input_request_id))
         });
         before != self.unread_child_signals.len()
     }
@@ -633,6 +842,9 @@ impl SessionVoState {
         self.children.retain(|child| child.id != worker_id);
         // Drop any outstanding liveness watchdog for the now-removed child.
         self.clear_child_liveness(worker_id);
+        // A child that left the fan-out can no longer be answered, so any reply target
+        // it still advertises would swallow the next plain user message.
+        self.clear_worker_input_targets_for_worker(worker_id);
         // Drop any claim-check reference for the now-removed child's output; the blob is
         // reclaimed at session teardown.
         self.remove_child_terminal_blob(worker_id);
@@ -918,16 +1130,36 @@ fn pending_reply_identity_matches(
                 ..
             },
         ) => left_run_uid == right_run_uid && left_task_id == right_task_id,
+        // Identity deliberately excludes the generation: a re-registration under a newer
+        // worker generation REPLACES the advertised target instead of accumulating a
+        // second one, which would make the same request ambiguous to an unaddressed reply.
         (
             PendingUserReplyTarget::WorkerInput {
                 worker_id: left_worker_id,
                 input_request_id: left_request_id,
+                ..
             },
             PendingUserReplyTarget::WorkerInput {
                 worker_id: right_worker_id,
                 input_request_id: right_request_id,
+                ..
             },
         ) => left_worker_id == right_worker_id && left_request_id == right_request_id,
+        // Same asymmetry for the coordinator's own requests, and for the same reason:
+        // delivery matching is exact on the generation, but advertising is not, so one
+        // request re-raised at a newer generation supersedes the target it replaces.
+        (
+            PendingUserReplyTarget::CoordinatorInput {
+                turn_id: left_turn_id,
+                input_request_id: left_request_id,
+                ..
+            },
+            PendingUserReplyTarget::CoordinatorInput {
+                turn_id: right_turn_id,
+                input_request_id: right_request_id,
+                ..
+            },
+        ) => left_turn_id == right_turn_id && left_request_id == right_request_id,
         _ => false,
     }
 }
@@ -1025,6 +1257,18 @@ impl VoState for SessionVoState {
                 .get_json(K_EXECUTION_SYNTHESIS_DEDUPE)
                 .await?
                 .unwrap_or_default(),
+            pending_coordinator_inputs: reader
+                .get_json(K_PENDING_COORDINATOR_INPUTS)
+                .await?
+                .unwrap_or_default(),
+            coordinator_input_history: reader
+                .get_json(K_COORDINATOR_INPUT_HISTORY)
+                .await?
+                .unwrap_or_default(),
+            security_circuit: reader
+                .get_json(K_SECURITY_CIRCUIT)
+                .await?
+                .unwrap_or_default(),
         })
     }
 
@@ -1096,6 +1340,22 @@ impl VoState for SessionVoState {
             ctx,
             K_EXECUTION_SYNTHESIS_DEDUPE,
             &self.execution_synthesis_dedupe,
+        );
+        set_or_clear_vec(
+            ctx,
+            K_PENDING_COORDINATOR_INPUTS,
+            &self.pending_coordinator_inputs,
+        );
+        set_or_clear_vec(
+            ctx,
+            K_COORDINATOR_INPUT_HISTORY,
+            &self.coordinator_input_history,
+        );
+        set_or_clear_opt(
+            ctx,
+            K_SECURITY_CIRCUIT,
+            (self.security_circuit != SecurityCircuitState::default())
+                .then_some(&self.security_circuit),
         );
     }
 
@@ -1234,6 +1494,26 @@ impl VoState for SessionVoState {
             &self.execution_synthesis_dedupe,
             &baseline.execution_synthesis_dedupe,
         );
+        set_changed_vec(
+            ctx,
+            K_PENDING_COORDINATOR_INPUTS,
+            &self.pending_coordinator_inputs,
+            &baseline.pending_coordinator_inputs,
+        );
+        set_changed_vec(
+            ctx,
+            K_COORDINATOR_INPUT_HISTORY,
+            &self.coordinator_input_history,
+            &baseline.coordinator_input_history,
+        );
+        if self.security_circuit != baseline.security_circuit {
+            set_or_clear_opt(
+                ctx,
+                K_SECURITY_CIRCUIT,
+                (self.security_circuit != SecurityCircuitState::default())
+                    .then_some(&self.security_circuit),
+            );
+        }
     }
 }
 
@@ -1242,9 +1522,15 @@ mod tests {
     use chrono::Utc;
     use moa_core::{types::channel::Channel, types::identifiers::ModelId};
 
-    use super::{CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES, SessionVoState};
+    use super::{
+        CHILD_OUTPUT_CLAIM_CHECK_THRESHOLD_BYTES, CoordinatorPendingInput, PendingUserReplyTarget,
+        SessionVoState,
+    };
     use moa_core::{
-        types::events_stream::ClaimCheck, types::worker::commands::MarkWorkerChildTerminalInput,
+        types::events_stream::ClaimCheck, types::identifiers::AgentSignalId,
+        types::worker::commands::MarkWorkerChildTerminalInput,
+        types::worker::state::ChildSignalKind, types::worker::state::UnreadChildSignal,
+        types::worker::state::WorkerChildRef, types::worker::state::WorkerInputTarget,
     };
 
     fn test_meta() -> moa_core::types::session::SessionMeta {
@@ -1430,8 +1716,7 @@ mod tests {
             worker_id: "child".to_string(),
             kind,
             summary: "summary".to_string(),
-            input_request_id: None,
-            input_audience: None,
+            input_request: None,
         }
     }
 
@@ -1449,8 +1734,7 @@ mod tests {
             payload: serde_json::Value::Null,
             created_at: Utc::now(),
             resume_policy,
-            input_request_id: None,
-            input_audience: None,
+            input_request: None,
         }
     }
 
@@ -1789,5 +2073,353 @@ mod tests {
 
         assert!(state.remove_child("worker-1"));
         assert_eq!(state.take_child_terminal_blob("worker-1"), None);
+    }
+
+    fn pending_input(request: &str, generation: u64, awakeable: &str) -> CoordinatorPendingInput {
+        CoordinatorPendingInput {
+            turn_id: "turn-1".to_string(),
+            generation,
+            input_request_id: request.to_string(),
+            awakeable_id: awakeable.to_string(),
+            waiting_workflow_id: format!("workflow-{awakeable}"),
+        }
+    }
+
+    #[test]
+    fn coordinator_input_registration_is_idempotent_and_fenced_on_generation() {
+        // Pins: a replayed registration must not create a second entry (the orphan
+        // would never be resolved), and a reply naming a superseded generation must
+        // resolve nothing rather than unblock a turn with an answer meant for
+        // different work.
+        let mut state = SessionVoState::default();
+
+        assert!(state.register_coordinator_input(pending_input("req-1", 4, "awk-1")));
+        assert!(
+            !state.register_coordinator_input(pending_input("req-1", 4, "awk-1b")),
+            "a duplicate request id must be a no-op"
+        );
+        assert_eq!(state.pending_coordinator_inputs.len(), 1);
+
+        assert_eq!(
+            state.take_coordinator_input_awakeable("turn-1", 5, "req-1"),
+            None,
+            "a superseded generation must not resolve the awakeable"
+        );
+        assert_eq!(
+            state.take_coordinator_input_awakeable("turn-other", 4, "req-1"),
+            None,
+            "another turn must not resolve this turn's awakeable"
+        );
+        assert_eq!(
+            state.take_coordinator_input_awakeable("turn-1", 4, "req-1"),
+            Some("awk-1".to_string()),
+            "the exact owner resolves its own awakeable"
+        );
+    }
+
+    #[test]
+    fn a_late_duplicate_reply_cannot_resolve_a_replacement_awakeable() {
+        // Pins: delivery history outlives the awakeable. Without it, a late second
+        // reply carrying the same request id would resolve whatever awakeable a
+        // *newer* request had since registered under that id — unblocking the wrong
+        // turn with a stale answer.
+        let mut state = SessionVoState::default();
+        state.register_coordinator_input(pending_input("req-1", 4, "awk-first"));
+
+        assert_eq!(
+            state.take_coordinator_input_awakeable("turn-1", 4, "req-1"),
+            Some("awk-first".to_string())
+        );
+        assert!(state.coordinator_input_already_delivered("req-1"));
+
+        // A newer request reuses the id and registers a fresh awakeable.
+        state.register_coordinator_input(pending_input("req-1", 4, "awk-replacement"));
+        assert!(
+            state.coordinator_input_already_delivered("req-1"),
+            "history must still record the earlier delivery"
+        );
+    }
+
+    #[test]
+    fn ending_a_turn_clears_the_coordinator_inputs_it_raised() {
+        // Pins: a cancelled or failed turn must not leave its pending target
+        // advertised. Otherwise the next plain user message is swallowed as a reply
+        // to work that no longer exists.
+        let mut state = SessionVoState::default();
+        state.register_coordinator_input(pending_input("req-old", 4, "awk-old"));
+        state.register_coordinator_input(pending_input("req-new", 6, "awk-new"));
+        state.upsert_pending_user_reply_target(PendingUserReplyTarget::CoordinatorInput {
+            turn_id: "turn-1".to_string(),
+            generation: 4,
+            input_request_id: "req-old".to_string(),
+        });
+
+        let cleared = state.clear_coordinator_inputs_before(6);
+
+        assert_eq!(cleared, vec!["awk-old".to_string()]);
+        assert_eq!(state.pending_coordinator_inputs.len(), 1);
+        assert_eq!(
+            state.pending_coordinator_inputs[0].input_request_id, "req-new",
+            "the live generation's request must survive"
+        );
+        assert!(
+            state.pending_user_reply_targets.is_empty(),
+            "clearing must also retract the advertised reply target, or the next \
+             plain user message is swallowed as a reply to dead work"
+        );
+    }
+
+    #[test]
+    fn clearing_by_waiting_workflow_spares_a_retry_of_the_same_turn() {
+        // Pins: a retried invocation of one logical turn registers its own
+        // awakeable. Clearing by turn id would take the live retry down with the
+        // dead original, stranding the retry on an awakeable no reply can resolve.
+        let mut state = SessionVoState::default();
+        let mut original = pending_input("req-a", 4, "awk-original");
+        original.waiting_workflow_id = "workflow-original".to_string();
+        let mut retry = pending_input("req-b", 4, "awk-retry");
+        retry.waiting_workflow_id = "workflow-retry".to_string();
+        state.register_coordinator_input(original);
+        state.register_coordinator_input(retry);
+
+        let cleared = state.clear_coordinator_inputs_for_workflow("workflow-original");
+
+        assert_eq!(cleared, vec!["awk-original".to_string()]);
+        assert_eq!(state.pending_coordinator_inputs.len(), 1);
+        assert_eq!(
+            state.pending_coordinator_inputs[0].waiting_workflow_id, "workflow-retry",
+            "the live retry's registration must survive"
+        );
+    }
+
+    /// Advertises one worker input target and its paired unread `NeedsInput` signal.
+    fn advertise_worker_input(
+        state: &mut SessionVoState,
+        worker_id: &str,
+        turn_id: &str,
+        generation: u64,
+        input_request_id: &str,
+    ) {
+        state.upsert_pending_user_reply_target(PendingUserReplyTarget::WorkerInput {
+            worker_id: worker_id.to_string(),
+            turn_id: turn_id.to_string(),
+            generation,
+            input_request_id: input_request_id.to_string(),
+        });
+        state.push_unread_child_signal(UnreadChildSignal {
+            signal_id: AgentSignalId::new(),
+            worker_id: worker_id.to_string(),
+            kind: ChildSignalKind::NeedsInput,
+            summary: "which cluster?".to_string(),
+            input_request: Some(moa_core::types::worker::state::WorkerInputRequest {
+                turn_id: turn_id.to_string(),
+                generation,
+                input_request_id: input_request_id.to_string(),
+                audience: moa_core::types::worker::state::InputAudience::User,
+            }),
+        });
+    }
+
+    #[test]
+    fn clearing_a_worker_input_retracts_exactly_the_target_the_child_cleared() {
+        // Pins: a child clearing one dead round-trip retracts that advertised target and
+        // its unread question, and nothing else. Clearing by request id alone (or by
+        // worker alone) here would silently un-advertise a live sibling round-trip, and
+        // the user's answer to it would then start an ordinary turn instead.
+        let mut state = SessionVoState::default();
+        advertise_worker_input(&mut state, "worker-1", "worker-turn-1", 3, "req-1");
+        advertise_worker_input(&mut state, "worker-1", "worker-turn-2", 4, "req-2");
+        advertise_worker_input(&mut state, "worker-2", "worker-turn-1", 3, "req-1");
+        assert_eq!(state.pending_user_reply_targets.len(), 3);
+
+        let cleared = WorkerInputTarget {
+            turn_id: "worker-turn-1".to_string(),
+            generation: 3,
+            input_request_id: "req-1".to_string(),
+        };
+        // A clear naming coordinates this session never advertised retracts nothing.
+        assert!(!state.clear_worker_input_target(
+            "worker-1",
+            &WorkerInputTarget {
+                generation: 9,
+                ..cleared.clone()
+            }
+        ));
+        assert_eq!(state.pending_user_reply_targets.len(), 3);
+
+        assert!(state.clear_worker_input_target("worker-1", &cleared));
+
+        assert_eq!(
+            state.pending_user_reply_targets,
+            vec![
+                PendingUserReplyTarget::WorkerInput {
+                    worker_id: "worker-1".to_string(),
+                    turn_id: "worker-turn-2".to_string(),
+                    generation: 4,
+                    input_request_id: "req-2".to_string(),
+                },
+                PendingUserReplyTarget::WorkerInput {
+                    worker_id: "worker-2".to_string(),
+                    turn_id: "worker-turn-1".to_string(),
+                    generation: 3,
+                    input_request_id: "req-1".to_string(),
+                },
+            ],
+            "only the cleared child's exact round-trip may be retracted"
+        );
+        assert_eq!(
+            state.unread_child_signals.len(),
+            2,
+            "the answered child's question is dropped with its target"
+        );
+        // Retracting the same target again is an idempotent no-op.
+        assert!(!state.clear_worker_input_target("worker-1", &cleared));
+    }
+
+    #[test]
+    fn removing_a_child_retracts_every_worker_input_target_it_advertised() {
+        // Pins: a child that left the fan-out can answer nothing. Leaving its targets
+        // advertised would make the next plain user message a reply to a worker that no
+        // longer exists — and with two advertised, every later reply ambiguous.
+        let mut state = SessionVoState::default();
+        state.register_child(WorkerChildRef {
+            id: "worker-1".to_string(),
+            task_hash: "hash".to_string(),
+            budget_tokens: 0,
+            terminal: None,
+        });
+        advertise_worker_input(&mut state, "worker-1", "worker-turn-1", 3, "req-1");
+        advertise_worker_input(&mut state, "worker-1", "worker-turn-1", 3, "req-2");
+        advertise_worker_input(&mut state, "worker-2", "worker-turn-1", 3, "req-3");
+
+        assert!(state.remove_child("worker-1"));
+
+        assert_eq!(
+            state.pending_user_reply_targets,
+            vec![PendingUserReplyTarget::WorkerInput {
+                worker_id: "worker-2".to_string(),
+                turn_id: "worker-turn-1".to_string(),
+                generation: 3,
+                input_request_id: "req-3".to_string(),
+            }],
+            "a removed child's targets go with it; a sibling's stays"
+        );
+        assert_eq!(
+            state
+                .unread_child_signals
+                .iter()
+                .map(|signal| signal.worker_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["worker-2"]
+        );
+    }
+
+    #[test]
+    fn re_registering_a_coordinator_input_at_a_new_generation_replaces_its_target() {
+        // Pins: advertise-dedup identity for a coordinator request excludes the
+        // generation. A turn that re-raises one request under a newer generation must
+        // supersede its advertised target; two targets for the same question would make
+        // the user's next unaddressed reply ambiguous and reject it instead of
+        // delivering it.
+        let mut state = SessionVoState::default();
+        state.upsert_pending_user_reply_target(PendingUserReplyTarget::CoordinatorInput {
+            turn_id: "turn-1".to_string(),
+            generation: 4,
+            input_request_id: "req-1".to_string(),
+        });
+        state.upsert_pending_user_reply_target(PendingUserReplyTarget::CoordinatorInput {
+            turn_id: "turn-1".to_string(),
+            generation: 5,
+            input_request_id: "req-1".to_string(),
+        });
+
+        assert_eq!(
+            state.pending_user_reply_targets,
+            vec![PendingUserReplyTarget::CoordinatorInput {
+                turn_id: "turn-1".to_string(),
+                generation: 5,
+                input_request_id: "req-1".to_string(),
+            }],
+            "the newer generation replaces the advertised target instead of adding one"
+        );
+
+        // A genuinely different request still accumulates: dedup is identity, not a cap.
+        state.upsert_pending_user_reply_target(PendingUserReplyTarget::CoordinatorInput {
+            turn_id: "turn-1".to_string(),
+            generation: 5,
+            input_request_id: "req-2".to_string(),
+        });
+        assert_eq!(state.pending_user_reply_targets.len(), 2);
+    }
+
+    #[test]
+    fn re_registering_a_worker_input_at_a_new_generation_replaces_its_target() {
+        // Pins: pending-target identity excludes the generation. If a re-registration
+        // accumulated a second target for the same request, an unaddressed reply would
+        // be rejected as ambiguous between two coordinates of one question.
+        let mut state = SessionVoState::default();
+        advertise_worker_input(&mut state, "worker-1", "worker-turn-1", 3, "req-1");
+        advertise_worker_input(&mut state, "worker-1", "worker-turn-1", 4, "req-1");
+
+        assert_eq!(
+            state.pending_user_reply_targets,
+            vec![PendingUserReplyTarget::WorkerInput {
+                worker_id: "worker-1".to_string(),
+                turn_id: "worker-turn-1".to_string(),
+                generation: 4,
+                input_request_id: "req-1".to_string(),
+            }],
+            "the newer generation replaces the advertised target instead of adding one"
+        );
+    }
+
+    #[test]
+    fn coordinator_input_reply_target_matches_only_its_exact_coordinates() {
+        // Pins: the reply matrix treats a coordinator input as exactly addressed.
+        // Matching loosely on request id alone would deliver a reply across turns
+        // or across generations.
+        use moa_core::types::contact::MessageReplyTarget;
+
+        let pending: PendingUserReplyTarget = PendingUserReplyTarget::CoordinatorInput {
+            turn_id: "turn-1".to_string(),
+            generation: 4,
+            input_request_id: "req-1".to_string(),
+        };
+
+        assert!(
+            pending.matches_reply_target(&MessageReplyTarget::CoordinatorInput {
+                turn_id: "turn-1".to_string(),
+                generation: 4,
+                input_request_id: "req-1".to_string(),
+            })
+        );
+        for mismatch in [
+            MessageReplyTarget::CoordinatorInput {
+                turn_id: "turn-2".to_string(),
+                generation: 4,
+                input_request_id: "req-1".to_string(),
+            },
+            MessageReplyTarget::CoordinatorInput {
+                turn_id: "turn-1".to_string(),
+                generation: 5,
+                input_request_id: "req-1".to_string(),
+            },
+            MessageReplyTarget::CoordinatorInput {
+                turn_id: "turn-1".to_string(),
+                generation: 4,
+                input_request_id: "req-2".to_string(),
+            },
+            MessageReplyTarget::WorkerInput {
+                worker_id: "turn-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                generation: 4,
+                input_request_id: "req-1".to_string(),
+            },
+        ] {
+            assert!(
+                !pending.matches_reply_target(&mismatch),
+                "every coordinate must be load bearing: {mismatch:?}"
+            );
+        }
     }
 }

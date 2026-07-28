@@ -113,20 +113,29 @@ async fn handle_delegation_tool(
     .await?;
     record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
 
+    // Delegation output is workflow-authored, but it renders worker-supplied
+    // task text, so it is classified rather than trusted.
+    let secured = moa_security::classify_tool_output(
+        &output,
+        moa_security::OutputClassification {
+            capability: &moa_core::types::security::ToolCapabilityId::builtin(&invocation.name),
+            active_canary: None,
+        },
+    );
     append_tool_result_event(
         workflow.event_appender(),
         ctx,
         session_id,
         tool_id,
         &invocation,
-        &output,
+        &secured,
     )
     .await?;
-    turn_evidence.record_tool_result(&invocation, &output);
-    if !output.is_error {
+    turn_evidence.record_tool_result(&invocation, &secured.safe_output);
+    if !secured.is_error() {
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;
     }
-    Ok(is_spawn && !output.is_error)
+    Ok(is_spawn && !secured.is_error())
 }
 
 #[derive(Clone, Debug)]
@@ -136,6 +145,8 @@ pub(super) enum ToolDispatchOutcome {
     DurableUpgradeUnsupported(String),
     Cancelled,
     ToolBudgetExceeded(ToolBudgetExhausted),
+    /// The prompt-injection circuit reached its halt threshold for this owner.
+    SecurityHalt,
 }
 
 #[derive(Debug, Deserialize)]
@@ -379,6 +390,10 @@ pub(super) struct RootToolContext<'a> {
     pub(super) meta: &'a SessionMeta,
     pub(super) identity: &'a moa_core::traits::Identity,
     pub(super) session_id: SessionId,
+    /// Session-facing workflow turn key recorded as the action-review owner turn.
+    pub(super) turn_id: &'a str,
+    /// Session turn generation that admitted this turn.
+    pub(super) generation: u64,
     pub(super) active_canary: Option<&'a str>,
     pub(super) trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
     /// Skills injected into this turn's manifest, used to detect which the model engaged.
@@ -388,6 +403,8 @@ pub(super) struct RootToolContext<'a> {
     pub(super) turn_evidence: &'a mut TurnEvidence,
     /// Per-turn `file_read` result memory shared across this turn's model-loop iterations.
     pub(super) file_read_cache: &'a mut FileReadTurnCache,
+    /// Tools the security circuit disabled for the rest of this turn.
+    pub(super) disabled_tools: &'a mut std::collections::BTreeSet<String>,
     /// Latched on when this turn successfully spawns a worker, so the model loop can
     /// escalate its turn cap for the remaining delegation, wait, and synthesis work.
     pub(super) delegated_worker: &'a mut bool,
@@ -440,7 +457,7 @@ pub(super) async fn dispatch_response_tool_calls(
         {
             return Ok(ToolDispatchOutcome::ToolBudgetExceeded(exhaustion));
         }
-        handle_tool_call(
+        match handle_tool_call(
             workflow,
             ctx,
             &mut tool_context,
@@ -448,7 +465,17 @@ pub(super) async fn dispatch_response_tool_calls(
             index,
             tool_call,
         )
-        .await?;
+        .await?
+        {
+            ToolCallDisposition::Continue => {}
+            ToolCallDisposition::SecurityHalt => {
+                return Ok(ToolDispatchOutcome::SecurityHalt);
+            }
+            // `handle_tool_call` already parked on the user's reply before
+            // returning, so by the time control reaches here the suspend has been
+            // answered and the loop may continue with the capability disabled.
+            ToolCallDisposition::SecurityNeedsInput => {}
+        }
     }
     Ok(ToolDispatchOutcome::Completed)
 }
@@ -485,13 +512,25 @@ async fn handle_tool_call(
     allowed_tools: &std::collections::BTreeSet<String>,
     index: usize,
     tool_call: &ToolCallContent,
-) -> Result<(), HandlerError> {
+) -> Result<ToolCallDisposition, HandlerError> {
     driver_progress::set_phase(ctx, TurnPhase::Tooling);
     let meta = tool_context.meta;
     let session_id = tool_context.session_id;
     let active_canary = tool_context.active_canary;
     let selected_skills = tool_context.selected_skills;
     let tool_id = stable_tool_call_id(session_id, index, tool_call);
+
+    // A capability the circuit disabled cannot dispatch again under this owner.
+    // Refusing here, before policy evaluation and before the executor round-trip,
+    // is what makes "disabled" mean the tool does not run — not that it runs and
+    // its output is discarded.
+    if tool_context
+        .disabled_tools
+        .contains(&tool_call.invocation.name)
+    {
+        refuse_disabled_capability(workflow, ctx, tool_context, tool_id, tool_call).await?;
+        return Ok(ToolCallDisposition::Continue);
+    }
 
     // Serve a repeated identical successful file_read from the per-turn cache with a
     // (possibly escalated) notice, so the model learns the content is already in context
@@ -510,14 +549,17 @@ async fn handle_tool_call(
             allowed_tools,
             active_canary,
             trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
-            origin: GovernedInvocationOrigin::RootTurn,
+            origin: GovernedInvocationOrigin::RootTurn {
+                turn_id: tool_context.turn_id,
+                generation: tool_context.generation,
+            },
             capability_provenance: None,
         };
         append_cached_tool_result(ctx, &request, &cached_output).await?;
         tool_context
             .turn_evidence
             .record_tool_result(&tool_call.invocation, &cached_output);
-        return Ok(());
+        return Ok(ToolCallDisposition::Continue);
     }
 
     let turn_evidence = &mut *tool_context.turn_evidence;
@@ -532,7 +574,10 @@ async fn handle_tool_call(
             allowed_tools,
             active_canary,
             trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
-            origin: GovernedInvocationOrigin::RootTurn,
+            origin: GovernedInvocationOrigin::RootTurn {
+                turn_id: tool_context.turn_id,
+                generation: tool_context.generation,
+            },
             capability_provenance: None,
         },
         workflow.session_limits(),
@@ -541,12 +586,25 @@ async fn handle_tool_call(
     )
     .await?;
 
+    let mut disposition = ToolCallDisposition::Continue;
+    let suspend_context = (session_id, tool_id);
     match outcome {
         GovernedInvocationOutcome::Completed(result) => {
-            turn_evidence.record_tool_result(&result.invocation, &result.output);
+            disposition = apply_coordinator_security_assessment(
+                workflow,
+                ctx,
+                session_id,
+                meta.tenant_id,
+                tool_context.turn_id,
+                tool_context.generation,
+                &result,
+                tool_context.disabled_tools,
+            )
+            .await?;
+            turn_evidence.record_tool_result(&result.invocation, &result.output.safe_output);
             tool_context
                 .file_read_cache
-                .remember(&result.invocation, &result.output);
+                .remember(&result.invocation, &result.output.safe_output);
             if result.should_record_segment_tool_use() {
                 record_governed_segment_tool_use(ctx, session_id, &result.invocation.name).await?;
             }
@@ -579,7 +637,227 @@ async fn handle_tool_call(
             }
         }
     }
+    if disposition == ToolCallDisposition::SecurityNeedsInput {
+        // Idle until the user answers. Until then this turn makes no further tool
+        // calls, which is the point of a score-3 suspend.
+        let (suspend_session_id, suspend_tool_id) = suspend_context;
+        await_coordinator_security_input(
+            ctx,
+            suspend_session_id,
+            tool_context.turn_id,
+            tool_context.generation,
+            suspend_tool_id,
+        )
+        .await?;
+    }
+    Ok(disposition)
+}
+
+/// Whether one dispatched tool call left the turn able to continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolCallDisposition {
+    /// The turn may keep running.
+    Continue,
+    /// The circuit halted this owner; the turn must terminate.
+    SecurityHalt,
+    /// The circuit suspended this owner pending the user's answer.
+    SecurityNeedsInput,
+}
+
+/// Records the refusal of a tool whose capability the circuit already disabled.
+///
+/// The model still needs a tool result for the call it made, so this writes the
+/// call/result pair with a fixed safe notice and never reaches the executor.
+async fn refuse_disabled_capability(
+    workflow: &TurnExecutionImpl,
+    ctx: &WorkflowContext<'_>,
+    tool_context: &RootToolContext<'_>,
+    tool_id: ToolCallId,
+    tool_call: &ToolCallContent,
+) -> Result<(), HandlerError> {
+    let notice = moa_core::types::tools::ToolOutput::error(
+        format!(
+            "Tool {} is disabled for this turn: its output tripped the prompt-injection \
+             security circuit. Do not retry it; continue without this capability.",
+            tool_call.invocation.name
+        ),
+        std::time::Duration::ZERO,
+    );
+    let secured = moa_security::classify_tool_output(
+        &notice,
+        moa_security::OutputClassification {
+            capability: &moa_core::types::security::ToolCapabilityId::builtin(
+                &tool_call.invocation.name,
+            ),
+            active_canary: None,
+        },
+    );
+    crate::workflows::turn_events::append_tool_call_event(
+        workflow.event_appender(),
+        ctx,
+        tool_context.session_id,
+        tool_id,
+        tool_call,
+    )
+    .await?;
+    crate::workflows::turn_events::append_tool_result_event(
+        workflow.event_appender(),
+        ctx,
+        tool_context.session_id,
+        tool_id,
+        &tool_call.invocation,
+        &secured,
+    )
+    .await
+}
+
+/// Registers a coordinator input request and parks the turn until it is answered.
+///
+/// The awakeable is created here because only this invocation can park on it; the
+/// Session VO stores the mapping and advertises the matching pending reply target
+/// so an unaddressed plain reply routes here instead of queuing behind the turn.
+/// The question is fixed — the output that triggered this is exactly what MOA has
+/// decided it cannot trust, so quoting it to the user would forward the attack.
+async fn await_coordinator_security_input(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    turn_id: &str,
+    generation: u64,
+    tool_id: ToolCallId,
+) -> Result<(), HandlerError> {
+    let input_request_id = format!("security:{turn_id}:{generation}:{tool_id}");
+    let awakeable = ctx.awakeable::<String>();
+    let (awakeable_id, reply) = awakeable;
+
+    crate::restate_identity::replay_safe_request(
+        ctx.object_client::<crate::objects::session::SessionClient>(session_id.to_string())
+            .register_coordinator_input(Json::from(
+                moa_wire::turn::RegisterCoordinatorInputRequest {
+                    turn_id: turn_id.to_string(),
+                    generation,
+                    input_request_id,
+                    awakeable_id,
+                    waiting_workflow_id: turn_id.to_string(),
+                    question: COORDINATOR_SECURITY_INPUT_QUESTION.to_string(),
+                },
+            )),
+    )
+    .call()
+    .await?;
+
+    reply.await?;
     Ok(())
+}
+
+/// Fixed question asked when the circuit suspends a coordinator turn.
+const COORDINATOR_SECURITY_INPUT_QUESTION: &str = "A tool returned output that MOA classified as a possible prompt-injection attempt, \
+     and that capability has been disabled for this turn. Reply to say how you would \
+     like to proceed.";
+
+/// Scores one classified coordinator tool output against the session's circuit.
+///
+/// The Session virtual object owns the read-score-write step, so two tool results
+/// landing in the same turn cannot interleave into a lost update. When the step
+/// crosses a stage boundary the workflow journals exactly one neutral transition
+/// fact; the fact carries no output, only closed vocabulary.
+#[allow(clippy::too_many_arguments)]
+async fn apply_coordinator_security_assessment(
+    workflow: &TurnExecutionImpl,
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    tenant_id: moa_core::types::identifiers::TenantId,
+    turn_id: &str,
+    generation: u64,
+    result: &crate::tool_invocation::governed::GovernedInvocationResult,
+    disabled_tools: &mut std::collections::BTreeSet<String>,
+) -> Result<ToolCallDisposition, HandlerError> {
+    if result.output.assessment.is_safe() {
+        return Ok(ToolCallDisposition::Continue);
+    }
+    let owner = moa_core::types::security::SecurityCircuitOwner::Coordinator {
+        turn_id: turn_id.to_string(),
+        generation,
+    };
+    // Journaled BEFORE the circuit moves, not after. Both the Session fact and
+    // the signed finding are stamped from this one value, so a replay reproduces
+    // byte-identical audit output. Taking it after the apply returned would also
+    // be deterministic, but a crash in that window would record an occurrence
+    // time later than the moment the circuit actually advanced.
+    let occurred_at = ctx
+        .run(|| async move { Ok(Json::from(chrono::Utc::now())) })
+        .name("prompt_injection_transition_timestamp")
+        .await?
+        .into_inner();
+    let applied = crate::restate_identity::replay_safe_request(
+        ctx.object_client::<crate::objects::session::SessionClient>(session_id.to_string())
+            .apply_security_assessment(Json::from(
+                moa_wire::turn::ApplySecurityAssessmentRequest {
+                    owner,
+                    capability: result.output.capability.clone(),
+                    tool_call_id: result.tool_id,
+                    assessment: result.output.assessment.clone(),
+                },
+            )),
+    )
+    .call()
+    .await?
+    .into_inner();
+
+    if !applied.stage.permits_dispatch() {
+        disabled_tools.insert(result.invocation.name.clone());
+    }
+    // Halting is the owner outcome, decided from the stage the circuit reached
+    // rather than from whether this particular assessment moved it. A capability
+    // that was already halted must not let a later tool call continue the turn.
+    let disposition = match applied.stage {
+        moa_core::types::security::SecurityCircuitStage::Halted => {
+            ToolCallDisposition::SecurityHalt
+        }
+        moa_core::types::security::SecurityCircuitStage::SuspendedForInput => {
+            ToolCallDisposition::SecurityNeedsInput
+        }
+        _ => ToolCallDisposition::Continue,
+    };
+
+    let Some(transition) = applied.transition else {
+        return Ok(disposition);
+    };
+    // The transition key IS the dedupe key. It is a digest over the logical
+    // transition coordinates, so a replayed or retried owner collapses onto the
+    // one Session fact instead of appending a second copy of the same transition.
+    let dedupe_key = transition.key.clone();
+    crate::workflows::turn_events::append_session_event_with_dedupe_key(
+        workflow.event_appender(),
+        ctx,
+        session_id,
+        moa_core::events::Event::PromptInjectionCircuitTransition {
+            transition: transition.clone(),
+            signals: result.output.assessment.signals.clone(),
+            redacted_spans: result.output.assessment.redacted_spans,
+            deduplicated_carriers: result.output.assessment.deduplicated_carriers,
+        },
+        dedupe_key,
+    )
+    .await?;
+
+    // Synchronous, and before the owner outcome: a halt must never take effect
+    // with no audit record explaining why it happened.
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<crate::services::security_events::SecurityEventsClient>()
+            .record_circuit_transition(Json::from(
+                crate::services::security_events::RecordCircuitTransitionRequest {
+                    tenant_id,
+                    session_id,
+                    transition,
+                    signals: result.output.assessment.signals.clone(),
+                    occurred_at,
+                },
+            )),
+    )
+    .call()
+    .await?;
+
+    Ok(disposition)
 }
 
 #[cfg(test)]

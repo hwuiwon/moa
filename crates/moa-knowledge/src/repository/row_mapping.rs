@@ -58,6 +58,7 @@ pub(super) fn connection_from_row(row: &sqlx::postgres::PgRow) -> Result<Knowled
             .map_err(map_sqlx_error)?,
         credential_ref: row.try_get("credential_ref").map_err(map_sqlx_error)?,
         status: connection_status(row.try_get("status").map_err(map_sqlx_error)?)?,
+        acl_mode: ConnectionAclMode::parse(row.try_get("acl_mode").map_err(map_sqlx_error)?)?,
         metadata: row.try_get("metadata").map_err(map_sqlx_error)?,
         source_selection: row.try_get("source_selection").map_err(map_sqlx_error)?,
         information_barrier: row
@@ -194,6 +195,13 @@ pub(super) fn object_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeOb
         change_token: row.try_get("change_token").map_err(map_sqlx_error)?,
         metadata: row.try_get("metadata").map_err(map_sqlx_error)?,
         status: object_status(row.try_get("status").map_err(map_sqlx_error)?)?,
+        acl: ObjectAcl {
+            state: SourceAclState::parse(row.try_get("acl_state").map_err(map_sqlx_error)?)?,
+            revision: row.try_get("acl_revision").map_err(map_sqlx_error)?,
+            current_snapshot_uid: row
+                .try_get("current_acl_snapshot_id")
+                .map_err(map_sqlx_error)?,
+        },
         source_updated_at: row.try_get("last_modified_at").map_err(map_sqlx_error)?,
         deleted_at: row.try_get("deleted_at").map_err(map_sqlx_error)?,
     })

@@ -183,6 +183,7 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
     let connection_uid = Uuid::now_v7();
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -273,6 +274,7 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
                 IngestionStepStatus::Completed,
                 None,
             ),
+            ("source_acl_captured", IngestionStepStatus::Completed, None),
             (
                 "object_change_checked",
                 IngestionStepStatus::Completed,
@@ -309,6 +311,7 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
                 IngestionStepStatus::Completed,
                 None,
             ),
+            ("source_acl_captured", IngestionStepStatus::Completed, None),
             (
                 "object_change_checked",
                 IngestionStepStatus::Completed,
@@ -347,6 +350,7 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
                 IngestionStepStatus::Completed,
                 None,
             ),
+            ("source_acl_captured", IngestionStepStatus::Completed, None),
             (
                 "object_change_checked",
                 IngestionStepStatus::Completed,
@@ -394,6 +398,7 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
                 IngestionStepStatus::Completed,
                 None,
             ),
+            ("source_acl_captured", IngestionStepStatus::Completed, None),
             (
                 "object_change_checked",
                 IngestionStepStatus::Completed,
@@ -525,6 +530,9 @@ async fn run_failure_case(case: FailureCase) -> Uuid {
             provider: format!("test_provider_{label}"),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
     let error = pipeline
         .ingest_record_page(
@@ -642,6 +650,7 @@ async fn assert_counter_projection(
 
 fn provider_failure_record() -> ProviderRecord {
     ProviderRecord {
+        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
         source_id: format!("provider-missing-text-{}", Uuid::now_v7()),
         object_type: "page".to_string(),
         title: None,
@@ -656,6 +665,7 @@ fn provider_failure_record() -> ProviderRecord {
 
 fn content_record(label: &str) -> ProviderRecord {
     ProviderRecord {
+        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
         source_id: format!("{label}-{}", Uuid::now_v7()),
         object_type: "page".to_string(),
         title: Some(format!("Fixture {label}")),

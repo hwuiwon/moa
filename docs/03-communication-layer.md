@@ -87,16 +87,25 @@ admin surface to render. Tenant-level action policies determine whether actions
 are allowed, denied, or queued for review:
 
 - review ID and tenant
-- durable `ActionEnvelope`
+- durable `ActionEnvelope`, including its one typed `ActionReviewOwner`
 - `ActionReviewPreview` with summary fields and diffs
 - status and decision metadata
 
 Admin actions are:
 
-- Clear, which executes the stored request with a fresh tool-call ID.
+- Clear, which executes the stored request as a new MOA-owned invocation with a
+  fresh tool-call ID and no provider tool-use ID.
 - Deny, which records the decision and does not execute the action.
 
 Conversation clients do not resolve blocking tool gates. Admin review returns a pending-review tool result to the model and the root or worker workflow continues.
+
+Once the review resolves, its conversational owner receives a typed receipt and
+runs one continuation turn, recorded as the deduped
+`ActionReviewContinuationRequested` session event and rendered to the model as a
+system directive (never a fabricated user message). The Session SSE stream
+retargets its terminal turn to that continuation only for a `Coordinator` owner,
+because only that continuation produces the visible answer the stream is waiting
+for; `Worker` and `ExecutionTask` continuations never retarget a contact stream.
 
 ## Observation
 

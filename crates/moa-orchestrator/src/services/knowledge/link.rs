@@ -216,6 +216,7 @@ impl KnowledgeService {
         let now = Utc::now();
         let connection = repository
             .upsert_connection(KnowledgeConnection {
+                acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
                 connection_uid: claim.connection_uid,
                 tenant_id,
                 provider: account.provider.clone(),
