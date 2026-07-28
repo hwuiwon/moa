@@ -10,8 +10,10 @@ use crate::services::{
     authz_admin::{Authz, AuthzImpl},
     authz_challenges::{AuthzChallenges, AuthzChallengesImpl},
     neon_maint::{NeonMaint, NeonMaintImpl},
+    security_events::{SecurityEvents, SecurityEventsImpl},
     tenants::{Tenants, TenantsImpl},
 };
+use crate::workflows::knowledge_index_rebuild::{KnowledgeIndexRebuild, KnowledgeIndexRebuildImpl};
 use crate::workflows::knowledge_sync_ingestion::{
     KnowledgeSyncIngestion, KnowledgeSyncIngestionImpl,
 };
@@ -101,8 +103,10 @@ const CORE_BODY_SERVICE_NAMES: &[&str] = &[
     "ExecutionRun",
     "ExecutionTask",
     "KnowledgeSyncIngestion",
+    "KnowledgeIndexRebuild",
     "Consolidate",
     "TenantPurge",
+    "SecurityEvents",
 ];
 
 const CORE_TAIL_SERVICE_NAMES: &[&str] = &["WorkerTurnExecution", "TurnExecution"];
@@ -206,7 +210,8 @@ pub fn build_endpoint(
             )
             .serve(),
         )
-        .bind(GraphMemoryMaintImpl::new(pool.clone(), config.clone()).serve())
+        .bind(GraphMemoryMaintImpl::new(pool.clone(), config.clone(), fga_client.clone()).serve())
+        .bind(SecurityEventsImpl::new(pool.clone()).serve())
         .bind(
             KnowledgeImpl::new(KnowledgeService::from_config(
                 pool.clone(),
@@ -296,6 +301,7 @@ pub fn build_endpoint(
             )
             .serve(),
         )
+        .bind(KnowledgeIndexRebuildImpl::new(pool.clone(), embedding_provider.clone()).serve())
         .bind(
             ConsolidateImpl::new(
                 pool.clone(),

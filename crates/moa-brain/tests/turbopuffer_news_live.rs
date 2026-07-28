@@ -184,6 +184,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         .with_turbopuffer(Some(turbopuffer.clone()))
         .with_assume_app_role(true);
     let req = RetrievalRequest {
+        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: query_text.to_string(),

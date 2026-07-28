@@ -182,6 +182,16 @@ pub async fn run_ocsf_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     run_schema_migrations(pool, schema_name, OCSF_SCHEMA_MIGRATIONS).await
 }
 
+const HANDS_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {
+    name: "V000349__tenant_mcp_connection_bindings.sql",
+    sql: include_str!("../migrations/postgres/V000349__tenant_mcp_connection_bindings.sql"),
+}];
+
+/// Runs the tool-routing tables inside an isolated schema.
+pub async fn run_hands_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
+    run_schema_migrations(pool, schema_name, HANDS_SCHEMA_MIGRATIONS).await
+}
+
 /// Ensures the standalone lineage schema exists.
 pub async fn ensure_lineage_schema(pool: &PgPool) -> Result<()> {
     pool.execute(LINEAGE_SCHEMA_DDL)

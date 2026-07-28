@@ -6,9 +6,10 @@ pub mod mcp_proxy;
 pub mod policies;
 
 pub use injection::{
-    InputClassification, InputInspection, ToolInputCanaryLeak, ToolInputCanaryScreening,
-    canary_system_message, inject_canary, inspect_input, new_canary_token,
-    screen_tool_input_for_canary, wrap_untrusted_tool_output,
+    AssessmentApplication, CircuitTarget, OutputClassification, ToolInputCanaryLeak,
+    ToolInputCanaryScreening, apply_assessment, apply_owner_assessment, canary_system_message,
+    classify_tool_output, inject_canary, new_canary_token, screen_tool_input_for_canary,
+    wrap_untrusted_tool_output,
 };
 pub use mcp_egress::{McpEgressError, McpEgressGuard, McpEgressPolicy};
 pub use mcp_proxy::{MCPCredentialProxy, McpDeploymentCredentials};

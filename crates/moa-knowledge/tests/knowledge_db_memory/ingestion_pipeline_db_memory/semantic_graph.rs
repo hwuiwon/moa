@@ -123,9 +123,13 @@ async fn semantic_graph_extraction_is_cached_reported_and_written_db_memory() {
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -246,9 +250,13 @@ async fn generic_entity_fallback_writes_graph_entities_on_general_corpus_db_memo
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -338,10 +346,14 @@ async fn ingestion_preserves_chunk_structure_for_bounded_neighbor_context_db_mem
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
 
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -509,6 +521,9 @@ async fn semantic_graph_model_extraction_stamps_model_identity_db_memory() {
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+                moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+            ),
     )
     .with_semantic_model_extractor(Some(model_extractor(
         r#"{
@@ -523,6 +538,7 @@ async fn semantic_graph_model_extraction_stamps_model_identity_db_memory() {
     )));
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -603,10 +619,14 @@ async fn semantic_graph_model_parse_failure_falls_back_to_deterministic_db_memor
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     )
     .with_semantic_model_extractor(Some(model_extractor("this is not valid json")));
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -679,6 +699,7 @@ async fn semantic_graph_cache_identity_distinguishes_extractors_db_memory() {
     ));
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -714,6 +735,9 @@ async fn semantic_graph_cache_identity_distinguishes_extractors_db_memory() {
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+                moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+            ),
     )
     .with_semantic_model_extractor(Some(model_extractor(
         r#"{
@@ -747,6 +771,9 @@ async fn semantic_graph_cache_identity_distinguishes_extractors_db_memory() {
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
     let deterministic_run = create_run(&repository, tenant_id, connection_uid).await;
     deterministic_pipeline

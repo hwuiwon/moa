@@ -3,6 +3,7 @@
 pub mod admission;
 pub mod cache;
 pub mod enrichment;
+pub mod generation;
 mod graph_seed;
 pub mod hybrid;
 mod hydration;
@@ -15,6 +16,7 @@ pub mod types;
 
 pub use admission::{MemoryAdmissionPolicy, RetrievalScopePlan, dedupe_and_rank_hits};
 pub use cache::{CacheKey, CachedEntry, CachedHybridRetriever, PlannedRetriever, RetrievalBackend};
+pub use generation::{GenerationRoute, resolve_active_generation};
 pub use hybrid::HybridRetriever;
 pub use legs::{GRAPH_WEIGHT, LEXICAL_WEIGHT, RRF_K, VECTOR_WEIGHT, rrf_fuse};
 pub use policy::GraphRetrievalPolicy;

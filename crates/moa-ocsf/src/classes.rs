@@ -262,6 +262,90 @@ pub struct DataAccess {
     pub acting_on_behalf_of_uid: Option<String>,
 }
 
+/// OCSF Detection Finding (class 2004).
+///
+/// MOA emits exactly one of these per prompt-injection circuit transition. It is
+/// deliberately content-free: `finding_info` carries the replay-stable transition
+/// key, a fixed title and description, and closed-vocabulary identifiers, so a
+/// finding is safe to ship to an external SIEM without leaking the attacker's
+/// bytes or the tool output that carried them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectionFindingEvent {
+    /// OCSF class UID.
+    pub class_uid: i32,
+    /// OCSF class name.
+    pub class_name: String,
+    /// OCSF category UID.
+    pub category_uid: i32,
+    /// OCSF category name.
+    pub category_name: String,
+    /// OCSF type UID.
+    pub type_uid: i64,
+    /// Activity ID.
+    pub activity_id: i32,
+    /// Activity name.
+    pub activity_name: String,
+    /// Severity ID derived deterministically from the stage reached.
+    pub severity_id: i32,
+    /// Severity label.
+    pub severity: String,
+    /// Event occurrence time, supplied by the owner rather than read here.
+    pub time: DateTime<Utc>,
+    /// OCSF metadata.
+    pub metadata: Metadata,
+    /// Session the transition belongs to.
+    pub session: Session,
+    /// Capability whose circuit advanced, as the finding's target resource.
+    pub resource: Resource,
+    /// Finding identity and fixed description.
+    pub finding_info: FindingInfo,
+    /// MOA circuit detail, entirely closed vocabulary.
+    pub circuit: PromptInjectionCircuit,
+}
+
+/// OCSF `finding_info` object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindingInfo {
+    /// Replay-stable transition key; the finding's stable identity.
+    pub uid: String,
+    /// Fixed safe title.
+    pub title: String,
+    /// Fixed safe description.
+    pub desc: String,
+    /// Analytic that produced the finding (the detector policy revision).
+    pub analytic: String,
+}
+
+/// MOA prompt-injection circuit detail attached to a [`DetectionFindingEvent`].
+///
+/// Every field is drawn from a closed vocabulary or is an identifier MOA minted,
+/// so no attacker-controlled byte can reach a shipped finding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptInjectionCircuit {
+    /// Owner kind: `coordinator`, `worker`, or `execution_task`.
+    pub owner_kind: String,
+    /// Owner generation fence.
+    pub owner_generation: u64,
+    /// Canonical capability identity, e.g. `mcp:search:query`.
+    pub capability: String,
+    /// Tool call that produced the triggering assessment.
+    pub tool_call_uid: String,
+    /// Typed assessment class that caused the transition.
+    pub assessment_class: String,
+    /// Detector policy revision.
+    pub detector_revision: String,
+    /// Stage before the transition.
+    pub prior_stage: String,
+    /// Stage reached by the transition.
+    pub reached_stage: String,
+    /// Accumulated score before the transition.
+    pub prior_score: u32,
+    /// Accumulated score after the transition.
+    pub reached_score: u32,
+    /// Stable detector signals behind the assessment.
+    pub signals: Vec<String>,
+}
+
 /// OCSF Entity Management event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityManagementEvent {

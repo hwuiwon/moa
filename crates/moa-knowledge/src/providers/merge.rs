@@ -8,11 +8,13 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::Sha256;
 
+use crate::acl_key::SourceAclKey;
 use crate::{
     domain::{
         CreateLinkTokenRequest, ExchangePublicTokenRequest, InitialSyncStarted, LinkToken,
-        LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord, RecordPage,
-        StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync, WebhookEvent,
+        LinkedAccount, ListChangedRecordsRequest, ProviderAclCapability, ProviderIntegration,
+        ProviderRecord, RecordPage, StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync,
+        WebhookEvent,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
@@ -95,6 +97,14 @@ const MERGE_KNOWLEDGE_CATEGORIES: &[(&str, &str)] = &[
 
 #[async_trait::async_trait]
 impl LinkedIntegrationProvider for MergeProvider {
+    /// Every Merge category MOA syncs (knowledge bases, file storage, ticketing)
+    /// is permission-bearing at the source, so Merge always returns native ACLs.
+    /// A record whose category does not expose a permission listing normalizes to
+    /// an INCOMPLETE ACL and stays hidden rather than becoming tenant-readable.
+    fn acl_capability(&self) -> ProviderAclCapability {
+        ProviderAclCapability::NativeSnapshots
+    }
+
     async fn list_integrations(&self) -> Result<Vec<ProviderIntegration>> {
         // Static category list: Merge exposes integrations as unified-API product
         // categories, and the category id is what the link flow passes as
@@ -281,13 +291,22 @@ impl LinkedIntegrationProvider for MergeProvider {
             .await
             .map_err(|error| Error::provider("merge", format!("record listing failed: {error}")))?;
         let value: Value = http::json_response(response).await?;
+        // Principals are scoped to the linked category, so a person in a Merge
+        // knowledge base and the same person in a ticketing account are distinct
+        // principals unless a verified binding says otherwise.
+        let namespace = format!("merge:{}", req.connection.connector);
         Ok(RecordPage {
             next_cursor: string_field(&value, &["next", "next_cursor", "cursor"]),
             records: value
                 .get("results")
                 .or_else(|| value.get("records"))
                 .and_then(Value::as_array)
-                .map(|records| records.iter().map(value_to_provider_record).collect())
+                .map(|records| {
+                    records
+                        .iter()
+                        .map(|record| value_to_provider_record(&namespace, &req.acl_key, record))
+                        .collect()
+                })
                 .unwrap_or_default(),
         })
     }
@@ -420,8 +439,18 @@ fn initial_sync_completed(value: &Value) -> Result<bool> {
     Ok(completed)
 }
 
-fn value_to_provider_record(value: &Value) -> ProviderRecord {
+fn value_to_provider_record(
+    namespace: &str,
+    acl_key: &SourceAclKey,
+    value: &Value,
+) -> ProviderRecord {
     let payload = redact_provider_metadata(value.clone());
+    let acl = crate::providers::acl_normalize::record_acl_from_payload(
+        namespace,
+        &payload,
+        crate::domain::ProviderAclProvenance::ProviderListing,
+        acl_key,
+    );
     ProviderRecord {
         source_id: string_field(&payload, &["id", "remote_id"])
             .unwrap_or_else(|| stable_id(&payload.to_string())),
@@ -443,6 +472,7 @@ fn value_to_provider_record(value: &Value) -> ProviderRecord {
             .map(|value| value.with_timezone(&chrono::Utc)),
         metadata: Value::Null,
         payload,
+        acl,
     }
 }
 

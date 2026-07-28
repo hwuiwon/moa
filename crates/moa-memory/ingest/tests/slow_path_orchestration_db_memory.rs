@@ -842,7 +842,13 @@ async fn slow_path_multi_hop_facts_expand_through_shared_object_entity() {
     let owner_uid = fact_uid_with_subject(&facts, "lib-audit-wire-test");
 
     let expanded = graph
-        .expand_seeds(&[dependency_uid], 3, None, &GraphWalkScoring::default())
+        .expand_seeds(
+            &[dependency_uid],
+            3,
+            None,
+            &GraphWalkScoring::default(),
+            &moa_core::types::memory::SourceAclContext::empty(0),
+        )
         .await
         .expect("expand dependency fact");
     let entities = active_tenant_entity_rows(test_db.store().pool(), storage_partition_id).await;

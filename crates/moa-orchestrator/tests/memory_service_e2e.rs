@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use moa_authz::fga_subject;
+use moa_core::types::memory::RebuildOperationId;
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
     traits::{Identity, IdentityType, SessionStore as _},
@@ -486,6 +487,198 @@ async fn document_ingest_applies_barrier_to_persisted_contact_memory_service_e2e
     drop(session_store);
     let cleanup = testing::cleanup_test_schema(&database_url, &schema_name).await;
     result.and(cleanup.map_err(anyhow::Error::from))
+}
+
+#[tokio::test]
+#[ignore = "requires local Restate, OpenFGA, and superuser-capable Postgres"]
+async fn index_rebuild_control_requires_tenant_admin_service_e2e() -> Result<()> {
+    // Pins: every rebuild control handler is authorized before it touches
+    // durable state. A rebuild rewrites every vector the tenant retrieves and
+    // activation changes what all of its members see, so tenant membership is
+    // not enough and the caller cannot name another tenant. Status is checked
+    // too: an unauthorized caller must not even learn that a rebuild exists.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .context("create isolated rebuild service database")?;
+    let fixture = OrchestratorTestFixture::with_script_and_env(
+        json!({
+            "default": {
+                "content": "ok",
+                "stop_reason": "end_turn"
+            }
+        }),
+        vec![("MOA_DATABASE_URL".to_string(), database_url.clone())],
+    )
+    .await
+    .context("start shared orchestrator fixture for rebuild service e2e")?;
+
+    let result = async {
+        let tenant_id = TenantId::new();
+        let other_tenant_id = TenantId::new();
+        let admin = Identity {
+            identity_type: IdentityType::Operator,
+            id: Uuid::now_v7(),
+            tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        };
+        let member = Identity {
+            identity_type: IdentityType::Operator,
+            id: Uuid::now_v7(),
+            tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        };
+        grant_tenant_relation(&fixture, &admin, tenant_id, "admin").await?;
+        // The tenant type has no plain `member` relation (admin/operator/
+        // workspace only), so the unauthorized caller carries `operator` — the
+        // strongest non-admin grant. That makes the pin stricter, not weaker:
+        // even a tenant operator must not control or observe rebuilds.
+        grant_tenant_relation(&fixture, &member, tenant_id, "operator").await?;
+
+        let operation_uid = RebuildOperationId::new();
+
+        // A tenant member without admin cannot start a rebuild.
+        let member_start = send_graph_memory_maint(
+            &fixture,
+            "start_index_rebuild",
+            &member,
+            &json!({ "tenant_id": tenant_id, "kind": "reembed" }),
+        )
+        .await?;
+        if member_start.status().is_success() {
+            bail!("a tenant member without admin must not start an index rebuild");
+        }
+
+        // Nor read a rebuild's status, which would disclose that one exists.
+        let member_status = send_graph_memory_maint(
+            &fixture,
+            "index_rebuild_status",
+            &member,
+            &json!({ "tenant_id": tenant_id, "operation_uid": operation_uid }),
+        )
+        .await?;
+        if member_status.status().is_success() {
+            bail!("a tenant member without admin must not read rebuild status");
+        }
+
+        // An admin of one tenant cannot act on another tenant's partition even
+        // by naming it in the body; the handler compares it to the caller's own
+        // tenant before consulting the authorization engine.
+        for handler in [
+            "start_index_rebuild",
+            "index_rebuild_status",
+            "cancel_index_rebuild",
+            "rollback_index_rebuild",
+            "finalize_index_rebuild",
+        ] {
+            let cross_tenant = send_graph_memory_maint(
+                &fixture,
+                handler,
+                &admin,
+                &json!({
+                    "tenant_id": other_tenant_id,
+                    "kind": "reembed",
+                    "operation_uid": operation_uid
+                }),
+            )
+            .await?;
+            if cross_tenant.status().is_success() {
+                bail!("{handler} accepted a foreign tenant id from an authenticated admin");
+            }
+        }
+
+        // The tenant admin's own start is accepted and reports a planning
+        // operation without having rebuilt anything yet.
+        let started: Value = call_graph_memory_maint(
+            &fixture,
+            "start_index_rebuild",
+            &admin,
+            &json!({ "tenant_id": tenant_id, "kind": "reembed" }),
+        )
+        .await?;
+        if started.get("lifecycle").and_then(Value::as_str) != Some("planning") {
+            bail!("a freshly started rebuild must report `planning`, got {started}");
+        }
+        if started.get("vectors_rebuilt").and_then(Value::as_i64) != Some(0) {
+            bail!("a freshly started rebuild must have rebuilt nothing, got {started}");
+        }
+
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+
+    drop(fixture);
+    drop(session_store);
+    let cleanup = testing::cleanup_test_schema(&database_url, &schema_name).await;
+    result.and(cleanup.map_err(anyhow::Error::from))
+}
+
+/// Grants one tenant-level relation to a fixture identity.
+async fn grant_tenant_relation(
+    fixture: &OrchestratorTestFixture,
+    identity: &Identity,
+    tenant_id: TenantId,
+    relation: &str,
+) -> Result<()> {
+    let fga = fixture
+        .fga_client
+        .as_ref()
+        .context("shared orchestrator fixture must provide OpenFGA")?;
+    fga.apply_raw(json!({
+        "authorization_model_id": fga.model_id(),
+        "writes": {
+            "tuple_keys": [{
+                "user": fga_subject(identity),
+                "relation": relation,
+                "object": format!("tenant:{tenant_id}"),
+            }]
+        },
+    }))
+    .await
+    .with_context(|| format!("grant fixture tenant {relation}"))?;
+    Ok(())
+}
+
+async fn call_graph_memory_maint<Resp>(
+    fixture: &OrchestratorTestFixture,
+    handler: &str,
+    identity: &Identity,
+    request: &Value,
+) -> Result<Resp>
+where
+    Resp: serde::de::DeserializeOwned,
+{
+    let response = send_graph_memory_maint(fixture, handler, identity, request).await?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!(
+            "GraphMemoryMaint/{handler} failed with {status}: {}",
+            response.text().await.unwrap_or_default()
+        );
+    }
+    response
+        .json()
+        .await
+        .context("decode graph memory maint response")
+}
+
+async fn send_graph_memory_maint(
+    fixture: &OrchestratorTestFixture,
+    handler: &str,
+    identity: &Identity,
+    request: &Value,
+) -> Result<reqwest::Response> {
+    let builder = reqwest::Client::new()
+        .post(format!(
+            "{}/restate/call/GraphMemoryMaint/{handler}",
+            fixture.ingress_url.trim_end_matches('/')
+        ))
+        .json(request);
+    with_exact_identity(builder, identity)
+        .send()
+        .await
+        .context("call graph memory maint service")
 }
 
 async fn grant_session_participant(

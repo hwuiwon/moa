@@ -3,10 +3,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use moa_config::{McpCredentialConfig, McpServerConfig};
+use moa_config::{McpCredentialConfig, McpServerConfig, McpServerCredentialScope};
 use moa_core::{
     error::MoaError, error::Result, traits::CredentialVault, types::credentials::CredentialContext,
-    types::credentials::CredentialError, types::credentials::CredentialSource,
+    types::credentials::CredentialError, types::credentials::CredentialIdentity,
+    types::credentials::CredentialRef, types::credentials::CredentialSource,
     types::credentials::RedactedSecret, types::identifiers::SessionId,
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -29,14 +30,55 @@ pub struct McpDeploymentCredentials {
 }
 
 impl McpDeploymentCredentials {
-    /// Reads the configured credential for every server that declares one.
+    /// Validates every server's credential ownership and reads the deployment
+    /// credential for each explicitly deployment-owned server that declares one.
+    ///
+    /// This is the one place the two ownership branches are separated, and it
+    /// fails closed on every incoherent combination:
+    ///
+    /// - a deployment-owned server whose configuration carries only a header
+    ///   shape has no material to read;
+    /// - a tenant-owned server that names a deployment environment variable is
+    ///   rejected outright, so environment material can never be reachable from a
+    ///   tenant-owned connector;
+    /// - a tenant-owned server that declares no credential has no header to
+    ///   present its tenant's resolved secret in.
     pub fn from_mcp_servers(servers: &[McpServerConfig]) -> Result<Self> {
         let mut by_server = HashMap::new();
         for server in servers {
-            let Some(config) = &server.credentials else {
-                continue;
-            };
-            by_server.insert(server.name.clone(), credential_from_env(config)?);
+            match (server.credential_scope, server.credentials.as_ref()) {
+                // A deployment-owned server may legitimately need no credential
+                // at all (an unauthenticated internal MCP endpoint).
+                (McpServerCredentialScope::DeploymentOwned, None) => {}
+                (McpServerCredentialScope::DeploymentOwned, Some(config))
+                    if config.is_deployment_selector() =>
+                {
+                    by_server.insert(server.name.clone(), credential_from_env(config)?);
+                }
+                (McpServerCredentialScope::DeploymentOwned, Some(_)) => {
+                    return Err(MoaError::ConfigError(format!(
+                        "deployment-owned MCP server '{}' must name a deployment environment \
+                         variable; tenant header shapes have no deployment material",
+                        server.name
+                    )));
+                }
+                (McpServerCredentialScope::TenantOwned, Some(config))
+                    if config.is_tenant_header_shape() => {}
+                (McpServerCredentialScope::TenantOwned, Some(_)) => {
+                    return Err(MoaError::ConfigError(format!(
+                        "tenant-owned MCP server '{}' must not name a deployment environment \
+                         variable; its credential is resolved per tenant from the credential vault",
+                        server.name
+                    )));
+                }
+                (McpServerCredentialScope::TenantOwned, None) => {
+                    return Err(MoaError::ConfigError(format!(
+                        "tenant-owned MCP server '{}' must declare the header shape its tenant \
+                         credential is presented in",
+                        server.name
+                    )));
+                }
+            }
         }
         Ok(Self { by_server })
     }
@@ -60,13 +102,36 @@ impl McpDeploymentCredentials {
     }
 }
 
+impl std::fmt::Debug for McpDeploymentCredentials {
+    /// Renders only which servers have a deployment credential, never any value.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut configured: Vec<&str> = self.by_server.keys().map(String::as_str).collect();
+        configured.sort_unstable();
+        formatter
+            .debug_struct("McpDeploymentCredentials")
+            .field("configured", &configured)
+            .finish()
+    }
+}
+
 /// Reads one MCP credential's configured environment variable.
+///
+/// Only a deployment selector names one. A tenant header shape reaching here is
+/// a configuration error rather than a silent empty credential, which keeps
+/// environment material unreachable from a tenant-owned connector even if a
+/// future caller skips the ownership validation above.
 fn credential_from_env(config: &McpCredentialConfig) -> Result<SecretString> {
     let name = match config {
         McpCredentialConfig::Bearer { token_env } | McpCredentialConfig::OAuth { token_env } => {
             token_env
         }
         McpCredentialConfig::ApiKey { value_env, .. } => value_env,
+        McpCredentialConfig::TenantBearer | McpCredentialConfig::TenantApiKey { .. } => {
+            return Err(MoaError::ConfigError(
+                "tenant-owned MCP credentials are never read from deployment environment"
+                    .to_string(),
+            ));
+        }
     };
     std::env::var(name)
         .ok()
@@ -118,6 +183,16 @@ impl MCPCredentialProxy {
         self
     }
 
+    /// Returns whether this resolver can serve tenant-owned MCP servers.
+    ///
+    /// Runtime composition uses this to refuse to build a router that configures
+    /// a tenant-owned server without the durable credential owner, instead of
+    /// discovering it on the first tenant dispatch.
+    #[must_use]
+    pub fn serves_tenant_owned(&self) -> bool {
+        self.vault.is_some()
+    }
+
     /// Resolves credential headers for one deployment-owned MCP server.
     ///
     /// The server name selects operator-authored deployment configuration, so no
@@ -127,7 +202,7 @@ impl MCPCredentialProxy {
         &self,
         session_id: &SessionId,
         server: &str,
-        config: Option<&McpCredentialConfig>,
+        config: &McpCredentialConfig,
     ) -> Result<HashMap<String, String>> {
         let secret = self.deployment.resolve(server)?;
         tracing::debug!(
@@ -138,13 +213,20 @@ impl MCPCredentialProxy {
         Ok(headers_from_secret(config, &secret))
     }
 
-    /// Resolves credential headers for one MCP call from the durable vault.
+    /// Resolves credential headers for one tenant-owned MCP call from the vault.
     ///
-    /// The caller supplies the typed [`CredentialSource`] selecting which stored
-    /// credential to use and the [`CredentialContext`] carrying the acting
-    /// principal, requested operation, and replay-stable operation identity. The
-    /// plaintext exists only inside this call: it is resolved as a
-    /// [`RedactedSecret`], shaped into headers, and dropped.
+    /// `expected` is the identity the caller's binding says the reference belongs
+    /// to. It is verified against the stored version — without opening any
+    /// material — before the audited resolve, so a reference that has drifted
+    /// onto another tenant's connection or another material kind is refused
+    /// before plaintext exists. The vault re-checks tenant ownership, revocation,
+    /// and active status on the resolve itself, so this check narrows the
+    /// selector rather than replacing the owner's own gates.
+    ///
+    /// The plaintext exists only inside this call: it is resolved as a
+    /// [`RedactedSecret`], shaped into headers, and dropped. Nothing here can
+    /// reach the deployment branch — a tenant-owned failure is a failure, never a
+    /// silent downgrade to the operator's credential.
     ///
     /// No proxy token is minted here. The previous design minted an opaque token
     /// and consumed it inside this same host function, so the token added cache,
@@ -153,11 +235,12 @@ impl MCPCredentialProxy {
     /// `session_id`, the source, an expiry, and one use — only when a real remote
     /// proxy boundary sits between this resolver and the MCP transport that
     /// consumes the credential.
-    pub async fn enrich_headers(
+    pub async fn tenant_headers(
         &self,
         session_id: &SessionId,
-        source: &CredentialSource,
-        config: Option<&McpCredentialConfig>,
+        expected: CredentialIdentity,
+        reference: CredentialRef,
+        config: &McpCredentialConfig,
         ctx: &CredentialContext,
     ) -> Result<HashMap<String, String>> {
         let vault = self.vault.as_ref().ok_or_else(|| {
@@ -165,10 +248,31 @@ impl MCPCredentialProxy {
                 "tenant-owned MCP resolution requires an attached credential vault".to_string(),
             )
         })?;
-        let secret = vault.resolve(source, ctx).await.map_err(vault_error)?;
+        if expected.tenant_id != ctx.tenant_id {
+            return Err(MoaError::PermissionDenied(
+                "MCP credential binding does not belong to the resolving tenant".to_string(),
+            ));
+        }
+        let stored = vault.describe(reference, ctx).await.map_err(vault_error)?;
+        if stored.identity != expected {
+            return Err(vault_error(
+                if stored.identity.tenant_id != expected.tenant_id {
+                    CredentialError::WrongTenant
+                } else if stored.identity.connection_uid != expected.connection_uid {
+                    CredentialError::WrongConnection
+                } else {
+                    CredentialError::WrongKind
+                },
+            ));
+        }
+        let secret = vault
+            .resolve(&CredentialSource::TenantConnection { reference }, ctx)
+            .await
+            .map_err(vault_error)?;
         tracing::debug!(
             %session_id,
             operation = ctx.operation.as_str(),
+            connection_uid = %expected.connection_uid,
             "resolved MCP credential headers from the tenant credential vault"
         );
         Ok(headers_from_secret(config, &secret))
@@ -201,28 +305,31 @@ fn vault_error(error: CredentialError) -> MoaError {
 
 /// Shapes one resolved secret into outbound headers.
 ///
-/// The header shape comes from the server's configured credential mode, so the
-/// secret stays an opaque string and is exposed exactly once, at the point it is
-/// written into the header value.
+/// The header shape comes from the server's configured credential mode and is
+/// independent of which owner supplied the material, so the secret stays an
+/// opaque string and is exposed exactly once, at the point it is written into
+/// the header value.
 fn headers_from_secret(
-    config: Option<&McpCredentialConfig>,
+    config: &McpCredentialConfig,
     secret: &RedactedSecret,
 ) -> HashMap<String, String> {
     let mut headers = HashMap::new();
     match config {
-        Some(McpCredentialConfig::ApiKey { header, .. }) => {
+        McpCredentialConfig::ApiKey { header, .. }
+        | McpCredentialConfig::TenantApiKey { header } => {
             headers.insert(
                 header.clone(),
                 secret.expose_for_outbound_request().to_string(),
             );
         }
-        Some(McpCredentialConfig::Bearer { .. } | McpCredentialConfig::OAuth { .. }) => {
+        McpCredentialConfig::Bearer { .. }
+        | McpCredentialConfig::OAuth { .. }
+        | McpCredentialConfig::TenantBearer => {
             headers.insert(
                 "Authorization".to_string(),
                 format!("Bearer {}", secret.expose_for_outbound_request()),
             );
         }
-        None => {}
     }
     headers
 }

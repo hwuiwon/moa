@@ -228,18 +228,61 @@ pub(crate) async fn sign_tx(
     Ok((active.key_id, signature_hex, event_jcs))
 }
 
-/// Verify an existing signed event.
+/// Verify an existing signed event using the key it was signed with.
+///
+/// The key is resolved by the *event's own* `signing_key_id`, not by whichever
+/// key is currently active for the tenant, so verification keeps working across
+/// rotations.
 pub async fn verify(
     pool: &PgPool,
     signing_key_id: Uuid,
     event_jcs: &[u8],
     signature_hex: &str,
 ) -> Result<bool, SigningError> {
-    let row: Option<(String,)> =
+    let row = fetch_signing_key_row(pool, signing_key_id).await?;
+    verify_with_key_row(row, event_jcs, signature_hex)
+}
+
+/// Verify an existing signed event on a connection the caller already holds.
+///
+/// Same contract as [`verify`], but it borrows the caller's transaction instead
+/// of acquiring a second pool connection. Callers that verify while something is
+/// blocked on them — the synchronous audit path a security-circuit owner waits on
+/// — must use this: taking a second connection there doubles the pool footprint
+/// of one logical operation and, under saturation, can deadlock against the very
+/// transaction it is nested inside.
+pub(crate) async fn verify_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    signing_key_id: Uuid,
+    event_jcs: &[u8],
+    signature_hex: &str,
+) -> Result<bool, SigningError> {
+    let row = fetch_signing_key_row(&mut **tx, signing_key_id).await?;
+    verify_with_key_row(row, event_jcs, signature_hex)
+}
+
+/// Reads one signing key's material by id from any executor.
+async fn fetch_signing_key_row<'e, E>(
+    exec: E,
+    signing_key_id: Uuid,
+) -> Result<Option<(String,)>, SigningError>
+where
+    E: PgExecutor<'e>,
+{
+    Ok(
         sqlx::query_as("SELECT key_b64 FROM tenant_signing_keys WHERE id = $1")
             .bind(signing_key_id)
-            .fetch_optional(pool)
-            .await?;
+            .fetch_optional(exec)
+            .await?,
+    )
+}
+
+/// Constant-time HMAC comparison against a fetched key row.
+fn verify_with_key_row(
+    row: Option<(String,)>,
+    event_jcs: &[u8],
+    signature_hex: &str,
+) -> Result<bool, SigningError> {
     let Some((key_b64,)) = row else {
         return Ok(false);
     };

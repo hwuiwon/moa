@@ -215,6 +215,14 @@ other contact's memory. Sessions without an admitted contact retrieve tenant
 knowledge only. Tenant admin/operator memory inspection uses explicit tenant
 admin paths rather than the default contact-session retrieval path.
 
+Knowledge from a permission-bearing connector is filtered further by the source
+system's own ACL, so two contacts in one tenant can receive different knowledge
+blocks for the same query. The memory processor resolves the caller's principal
+set once per turn and attaches it to every scoped retrieval request; the
+retrieval result cache is keyed by the aggregate principal fingerprint and the
+tenant ACL epoch, so a permission change invalidates warm entries and a request
+with no resolved ACL context is not cached at all.
+
 The assembled context keeps source tiers visible:
 
 ```text

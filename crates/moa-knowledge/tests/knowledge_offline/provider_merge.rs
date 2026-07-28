@@ -30,6 +30,7 @@ fn tenant_id() -> TenantId {
 fn connection() -> KnowledgeConnection {
     let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
+        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid: Uuid::from_u128(201),
         tenant_id: tenant_id(),
         provider: "merge".to_string(),
@@ -307,6 +308,7 @@ async fn initial_link_sync_fails_closed_on_paused_and_unknown_provider_states() 
 /// Builds a linked Merge connection bound to one product category.
 fn merge_connection(category: &str) -> KnowledgeConnection {
     KnowledgeConnection {
+        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid: Uuid::from_u128(0x2358_0001),
         tenant_id: tenant_id(),
         provider: "merge".to_string(),
@@ -366,6 +368,7 @@ async fn changed_records_request_includes_modified_after_and_maps_results() {
         MergeProvider::with_client(reqwest::Client::new(), server.uri(), "merge-test-key");
     let page = provider
         .list_changed_records(ListChangedRecordsRequest {
+            acl_key: std::sync::Arc::new(moa_knowledge::acl_key::SourceAclKey::new(1, vec![7; 32])),
             credential: test_credential(),
             connection: connection(),
             cursor: Some("cursor-1".to_string()),

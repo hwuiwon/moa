@@ -212,15 +212,15 @@ const LOC_BUDGETS: &[LocBudget] = &[
         label: "turn execution workflow",
         path: "crates/moa-orchestrator/src/workflows/turn_execution/mod.rs",
         scope: LocScope::File,
-        max_lines: 1_535,
-        reason: "Unified Execute routing adds one bounded classifier, normalized route audits, the Inline loop, one workflow-owned root Durable-upgrade control with exact evidence handoff, replay-safe Durable admission, amendment handling, and compact terminal synthesis within the workflow shell",
+        max_lines: 1_589,
+        reason: "Unified Execute routing adds one bounded classifier, normalized route audits, the Inline loop, one workflow-owned root Durable-upgrade control with exact evidence handoff, replay-safe Durable admission, amendment handling, and compact terminal synthesis within the workflow shell; the prompt-injection security circuit adds the coordinator owner outcomes (halt into the existing TurnFailed writer, suspend idling on the CoordinatorInput awakeable) at the tool-dispatch seam; further growth requires a new decision record",
     },
     LocBudget {
         label: "worker state types",
         path: "crates/moa-core/src/types/worker/state.rs",
         scope: LocScope::File,
-        max_lines: 344,
-        reason: "worker state and lifecycle DTOs stay isolated from command and tool-schema concerns, and `WorkerInitialTask` now also owns the authenticated identity a child inherits from its parent; further growth requires a new decision record",
+        max_lines: 417,
+        reason: "worker state and lifecycle DTOs stay isolated from command and tool-schema concerns; `WorkerInitialTask` owns the authenticated identity a child inherits from its parent, and the `request_input` round-trip now carries its exact owner (`WorkerInputTarget`/`WorkerInputRequest` plus the fenced `WorkerPendingInput`) so a clear or reply names one turn generation instead of a bare request id; further growth requires a new decision record",
     },
     LocBudget {
         label: "worker command types",
@@ -1538,6 +1538,7 @@ fn handler_authz_safety_findings(
         .iter()
         .position(|line| line.trim_start().starts_with("#[cfg(test)]"))
         .unwrap_or(lines.len());
+    let authz_wrappers = local_authz_wrapper_names(&lines, scan_limit);
     let mut findings = Vec::new();
     let mut index = 0;
 
@@ -1555,7 +1556,10 @@ fn handler_authz_safety_findings(
                 .copied()
                 .unwrap_or(impl_end);
             let body = lines[method_start..method_end].join("\n");
-            if has_immediate_safety_comment(&lines, method_start) || has_authz_boundary(&body) {
+            if has_immediate_safety_comment(&lines, method_start)
+                || has_authz_boundary(&body)
+                || calls_local_authz_wrapper(&body, &authz_wrappers)
+            {
                 continue;
             }
             let method_name = handler_method_name(lines[method_start]).unwrap_or("<unknown>");
@@ -1670,6 +1674,65 @@ fn has_immediate_safety_comment(lines: &[&str], method_start: usize) -> bool {
     false
 }
 
+/// Returns the file-local free functions whose own body performs an authz check.
+///
+/// A handler may delegate its check to a wrapper that adds domain conditions on top of
+/// `require_authz*` (scoping the request to the caller's own tenant before demanding an
+/// admin relation, say). Those wrappers are *resolved and read* rather than trusted by
+/// name: the allowlist below never has to grow for a same-file helper, and a helper that
+/// stops checking authz stops satisfying its callers on the next run.
+fn local_authz_wrapper_names(lines: &[&str], scan_limit: usize) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut index = 0;
+    while index < scan_limit {
+        let Some(name) = top_level_fn_name(lines[index]) else {
+            index += 1;
+            continue;
+        };
+        // Rustfmt closes a top-level item with a lone `}` in column zero.
+        let mut end = index + 1;
+        while end < scan_limit && lines[end] != "}" {
+            end += 1;
+        }
+        if has_authz_boundary(&lines[index..end.min(scan_limit)].join("\n")) {
+            names.insert(name.to_string());
+        }
+        index = end + 1;
+    }
+    names
+}
+
+/// Returns the name of the free function declared at column zero on `line`.
+fn top_level_fn_name(line: &str) -> Option<&str> {
+    if line.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let declaration = line
+        .strip_prefix("pub(crate) ")
+        .or_else(|| line.strip_prefix("pub(super) "))
+        .or_else(|| line.strip_prefix("pub "))
+        .unwrap_or(line);
+    let declaration = declaration.strip_prefix("async ").unwrap_or(declaration);
+    declaration
+        .strip_prefix("fn ")
+        .and_then(|rest| rest.split(['(', '<']).next())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+}
+
+/// Returns whether a handler body calls one of the resolved authz wrappers.
+fn calls_local_authz_wrapper(body: &str, authz_wrappers: &BTreeSet<String>) -> bool {
+    authz_wrappers
+        .iter()
+        .any(|wrapper| body.contains(&format!("{wrapper}(")))
+}
+
+/// Returns whether a body performs an authz check itself.
+///
+/// These names are trusted without being read, so the list stays short and covers only
+/// helpers defined outside the file being scanned. A wrapper that lives beside its
+/// callers is resolved by [`local_authz_wrapper_names`] instead — adding such a name here
+/// would let the handler keep passing after the wrapper stopped checking anything.
 fn has_authz_boundary(body: &str) -> bool {
     [
         "require_authz",
@@ -2431,6 +2494,55 @@ impl Example for ExampleImpl {
         );
 
         assert!(findings.is_empty(), "visible authz helper should pass");
+    }
+
+    #[test]
+    fn same_file_wrapper_is_resolved_and_read_rather_than_trusted_by_name() {
+        // Pins: a handler delegating to a wrapper defined in the same file passes only
+        // when that wrapper's own body checks authz. Accepting any helper whose name
+        // merely looks authoritative would turn this rule into a rubber stamp — the
+        // second half of this test is the one that matters.
+        let checked = r#"#[restate_sdk::service]
+pub trait Example {
+    async fn read() -> Result<(), HandlerError>;
+}
+pub struct ExampleImpl;
+impl Example for ExampleImpl {
+    async fn read(&self, ctx: Context<'_>) -> Result<(), HandlerError> {
+        require_rebuild_authority(&ctx).await?;
+        Ok(())
+    }
+}
+
+async fn require_rebuild_authority(ctx: &Context<'_>) -> Result<(), HandlerError> {
+    require_authz_with_delegation(ctx, ObjectType::Tenant, Relation::Admin).await
+}
+"#;
+        let findings = handler_authz_safety_findings(
+            "crates/moa-orchestrator/src/services/example.rs",
+            checked,
+            &restate_service_traits_from_source(checked),
+        );
+        assert!(
+            findings.is_empty(),
+            "a wrapper that really checks authz satisfies its callers; got {findings:?}"
+        );
+
+        let unchecked = checked.replace(
+            "    require_authz_with_delegation(ctx, ObjectType::Tenant, Relation::Admin).await",
+            "    Ok(())",
+        );
+        let findings = handler_authz_safety_findings(
+            "crates/moa-orchestrator/src/services/example.rs",
+            &unchecked,
+            &restate_service_traits_from_source(&unchecked),
+        );
+        assert_eq!(
+            findings.len(),
+            1,
+            "an authoritative-sounding wrapper that checks nothing must not clear its \
+             callers; got {findings:?}"
+        );
     }
 
     #[test]

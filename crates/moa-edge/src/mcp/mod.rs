@@ -13,6 +13,7 @@ mod evals;
 mod execution_runs;
 mod experiments;
 mod http;
+mod index_rebuild;
 mod result;
 
 use axum::http::HeaderMap;
@@ -261,7 +262,8 @@ fn all_tools() -> ToolRouter<Server> {
         + agents::router()
         + execution_runs::router()
         + evals::router()
-        + experiments::router();
+        + experiments::router()
+        + index_rebuild::router();
     contract::enrich(&mut router);
     router
 }
@@ -465,6 +467,11 @@ mod tests {
             "experiment_trial_status",
             "experiment_trials_list",
             "experiments_list",
+            "index_rebuild_cancel",
+            "index_rebuild_finalize",
+            "index_rebuild_rollback",
+            "index_rebuild_start",
+            "index_rebuild_status",
             "learning_candidate_accept_skill",
             "learning_candidate_get",
             "learning_candidate_reject",
@@ -487,8 +494,8 @@ mod tests {
         assert_eq!(actual, expected, "MCP tool discovery allowlist drifted");
         assert_eq!(
             actual.len(),
-            54,
-            "expected exactly 54 tenant-operation tools"
+            59,
+            "expected exactly 59 tenant-operation tools"
         );
         assert!(!actual.contains("execute_run"));
         assert!(!actual.contains("replay"));

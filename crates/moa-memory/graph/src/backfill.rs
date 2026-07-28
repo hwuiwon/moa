@@ -9,9 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     Error, Result,
-    write::{
-        REDACTED_NAME_PLACEHOLDER, SEALED_CONTENT_VERSION, SealedNodeContent, is_sealed_class,
-    },
+    write::{REDACTED_NAME_PLACEHOLDER, SEALED_CONTENT_VERSION, SealedNodeContent},
 };
 
 /// Process-wide advisory lock that serializes backfill finalization.
@@ -107,14 +105,14 @@ pub async fn backfill_memory_sealed_content(
             });
             let node_needs_update = candidate.data_subject_id.is_none()
                 || candidate.properties.get("base_confidence").is_some()
-                || if is_sealed_class(candidate.pii_class) {
+                || if candidate.pii_class.is_sealed() {
                     candidate.name != REDACTED_NAME_PLACEHOLDER
                         || candidate.properties != serde_json::json!({ "redacted": true })
                         || candidate.content_sealed.is_none()
                 } else {
                     candidate.content_sealed.is_some()
                 };
-            let (name, properties, content_sealed) = if is_sealed_class(candidate.pii_class) {
+            let (name, properties, content_sealed) = if candidate.pii_class.is_sealed() {
                 (
                     REDACTED_NAME_PLACEHOLDER.to_string(),
                     serde_json::json!({ "redacted": true }),
@@ -161,7 +159,7 @@ pub async fn backfill_memory_sealed_content(
             if node_needs_update && candidate.data_subject_id.is_none() {
                 report.subjects_set += 1;
             }
-            if is_sealed_class(candidate.pii_class) {
+            if candidate.pii_class.is_sealed() {
                 let deleted = sqlx::query("DELETE FROM moa.embeddings WHERE uid = $1")
                     .bind(candidate.uid)
                     .execute(tx.as_mut())
@@ -250,7 +248,7 @@ async fn prepare_candidates(
     let mut prepared = vec![None; candidates.len()];
     let mut groups: BTreeMap<(Uuid, Uuid), Vec<(usize, EncryptionRequest)>> = BTreeMap::new();
     for (index, candidate) in candidates.iter().enumerate() {
-        if !is_sealed_class(candidate.pii_class) || candidate.content_sealed.is_some() {
+        if !candidate.pii_class.is_sealed() || candidate.content_sealed.is_some() {
             prepared[index] = candidate.content_sealed.clone();
             continue;
         }

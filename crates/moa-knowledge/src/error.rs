@@ -11,6 +11,14 @@ pub enum Error {
     /// A required configuration value is missing or invalid.
     #[error("knowledge configuration error: {0}")]
     Config(String),
+    /// A rechunk was asked to activate before every staged member was present.
+    #[error("rechunk staging for document version {document_version_uid} is missing: {missing}")]
+    RechunkStagingIncomplete {
+        /// Document version whose staging set is short.
+        document_version_uid: uuid::Uuid,
+        /// Members that are absent.
+        missing: String,
+    },
     /// A linked-account provider failed.
     #[error("knowledge provider `{provider}` failed: {message}")]
     Provider {

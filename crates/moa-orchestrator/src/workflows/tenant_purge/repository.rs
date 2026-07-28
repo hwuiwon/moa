@@ -453,6 +453,60 @@ async fn delete_tenant_rows(
         "DELETE FROM moa.knowledge_contact_groups WHERE tenant_id = $1",
         "DELETE FROM moa.knowledge_chunks WHERE tenant_id = $1",
         "DELETE FROM moa.knowledge_blocks WHERE tenant_id = $1",
+        // Source-ACL state, deleted before the objects and connections it
+        // references, and every step here is load-bearing.
+        //
+        // This previously read that snapshots and entries "would cascade from
+        // those anyway" while the bindings, epoch, and key rows had "no cascade
+        // at all". Half of that was wrong: the principal and group bindings
+        // cascaded from `knowledge_connections` too, so four of these six
+        // deletes were unfalsifiable — neutering one changed nothing observable
+        // because the cascade removed the same rows later in the same
+        // transaction. Only the epoch and key steps were ever provable.
+        //
+        // V000348 now declares those four foreign keys without `ON DELETE
+        // CASCADE`, so removing any line below fails its parent's delete on a
+        // foreign-key violation instead of silently leaving a purged tenant's
+        // keyed principal material behind. Nothing in production deletes a
+        // connection or an object — disconnect disables and ingestion
+        // tombstones — so no production path lost a deletion it depended on.
+        //
+        // Ordering is now enforced rather than assumed: entries before
+        // snapshots, bindings before connections, and snapshots before the
+        // object rows whose `current_acl_snapshot_id` points at them (that one
+        // is `ON DELETE SET NULL`, so it tolerates either order).
+        "DELETE FROM moa.knowledge_source_acl_entries WHERE tenant_id = $1",
+        "DELETE FROM moa.knowledge_source_acl_snapshots WHERE tenant_id = $1",
+        "DELETE FROM moa.knowledge_source_principal_group_bindings WHERE tenant_id = $1",
+        "DELETE FROM moa.knowledge_source_principal_bindings WHERE tenant_id = $1",
+        "DELETE FROM moa.knowledge_source_acl_epochs WHERE tenant_id = $1",
+        // The fingerprint key goes last and must go at all: leaving it behind
+        // would keep a purged tenant's keyed principal material recoverable from
+        // any surviving copy of an entry or binding row.
+        "DELETE FROM moa.knowledge_source_acl_keys WHERE tenant_id = $1",
+        // Index-rebuild state, deleted innermost-first, and every one of these
+        // steps is load-bearing rather than belt-and-braces: V000351
+        // deliberately gives the candidate-vector and staging foreign keys no
+        // `ON DELETE CASCADE`, so removing one of these lines fails the
+        // generation delete on a foreign-key violation instead of quietly
+        // leaving a purged tenant's embedding material behind. The
+        // active-generation pointer references generations, so it goes before
+        // them, and the operation's `candidate_generation_uid` is
+        // `ON DELETE SET NULL`, so generations can precede operations.
+        //
+        // These plain DELETEs reach the rows despite `FORCE ROW LEVEL
+        // SECURITY`: the purge transaction inherits the pool's login role
+        // (`moa_owner` in Compose and in the test fixture), which is a
+        // superuser with `rolbypassrls`, so no policy filters it. That is a
+        // property of the deployment's role, not of the policies, so it is
+        // asserted rather than assumed -- `seed_index_rebuild_families` seeds
+        // all five tables and the exact-residue check proves the rows are gone
+        // rather than merely invisible.
+        "DELETE FROM moa.knowledge_rechunk_staging WHERE tenant_id = $1",
+        "DELETE FROM moa.knowledge_rebuild_candidate_vector WHERE tenant_id = $1",
+        "DELETE FROM moa.knowledge_active_generation WHERE tenant_id = $1",
+        "DELETE FROM moa.knowledge_rebuild_generation WHERE tenant_id = $1",
+        "DELETE FROM moa.knowledge_rebuild_operation WHERE tenant_id = $1",
         "DELETE FROM moa.knowledge_document_versions WHERE tenant_id = $1",
         "DELETE FROM moa.knowledge_provider_events WHERE tenant_id = $1",
         "DELETE FROM moa.knowledge_ingestion_steps WHERE tenant_id = $1",
@@ -748,6 +802,10 @@ async fn assert_catalog_coverage(
             // references only, and its strict forced-RLS policy admits `moa_app`
             // alone, so this transaction's role cannot see or delete its rows.
             "moa.knowledge_link_claims",
+            // Same lifecycle and same reasoning: MCP connection bindings hold
+            // credential references only and are swept beside the credential
+            // owner under a scoped `moa_app` transaction.
+            "public.tenant_mcp_connection_bindings",
         ]
         .into_iter()
         .map(str::to_string),

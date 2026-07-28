@@ -47,7 +47,7 @@ async fn session_search_finds_prior_events() {
         .await
         .unwrap();
 
-    let (_, output) = router
+    let secured = router
         .execute_authorized(
             &session,
             &identity(),
@@ -56,9 +56,13 @@ async fn session_search_finds_prior_events() {
                 name: "session_search".to_string(),
                 input: json!({ "query": "port binding", "last_n": 3 }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured.safe_output;
 
     assert!(output.to_text().contains("deploy failed on port binding"));
     assert!(
@@ -112,7 +116,7 @@ async fn session_search_filters_error_events() {
         .await
         .unwrap();
 
-    let (_, output) = router
+    let secured_2 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -121,9 +125,13 @@ async fn session_search_filters_error_events() {
                 name: "session_search".to_string(),
                 input: json!({ "query": "deploy", "event_type": "error" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_2.safe_output;
 
     let rendered = output.to_text();
     assert!(rendered.contains("deploy error"));

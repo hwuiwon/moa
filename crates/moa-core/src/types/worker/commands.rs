@@ -6,12 +6,12 @@ use super::super::{
     completion::{CompletionRequest, CompletionResponse, ToolInvocation},
     identifiers::{ModelId, SessionId, TenantId, ToolCallId, UserId},
     session::{SessionMeta, TurnOutcome},
-    tools::ToolOutput,
+    tools::SecuredToolOutput,
 };
 use super::state::{
     AgentPath, InputAudience, WorkerChildRef, WorkerChildRequest, WorkerId, WorkerInitialTask,
-    WorkerMessage, WorkerProgressSummary, WorkerResult, WorkerState, WorkerTerminalResult,
-    default_worker_budget_tokens,
+    WorkerInputTarget, WorkerMessage, WorkerProgressSummary, WorkerResult, WorkerState,
+    WorkerTerminalResult, default_worker_budget_tokens,
 };
 
 /// Spawn-tool input.
@@ -211,6 +211,20 @@ pub struct ConsumeWorkerChildResultInput {
     pub worker_id: WorkerId,
 }
 
+/// Input retracting the coordinator-advertised reply targets a child no longer owns.
+///
+/// Sent by the child whenever it clears in-flight `request_input` registrations —
+/// on wait timeout, cancellation, or a terminal turn outcome — so the owning
+/// Session stops routing plain user replies to a round-trip nothing will resolve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClearWorkerInputTargetsInput {
+    /// Child worker whose advertised targets are being retracted.
+    pub worker_id: WorkerId,
+    /// Exact coordinates the child cleared; each is retracted on its own.
+    pub cleared: Vec<WorkerInputTarget>,
+}
+
 /// Output returned when consuming a cached child result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsumeWorkerChildResultOutput {
@@ -260,8 +274,8 @@ pub struct WorkerToolRecord {
     pub tool_id: ToolCallId,
     /// Provider-emitted invocation payload.
     pub invocation: ToolInvocation,
-    /// Tool output visible to the child model on the next turn.
-    pub output: ToolOutput,
+    /// Classified tool output visible to the child model on the next turn.
+    pub output: SecuredToolOutput,
 }
 
 /// Turn-scoped core outcome applied to a worker lifecycle.

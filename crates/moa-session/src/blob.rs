@@ -580,8 +580,11 @@ mod tests {
                 requested_by: moa_core::types::contact::SessionActorRef::Identity {
                     id: uuid::Uuid::from_u128(2),
                 },
-                session_id: Some(session_id),
-                worker_id: None,
+                owner: moa_core::types::action_policy::ActionReviewOwner::Coordinator {
+                    session_id,
+                    turn_id: "turn-blob-fixture".to_string(),
+                    generation: 1,
+                },
                 tool_call_id: moa_core::types::identifiers::ToolCallId(review_id),
                 tool_name: "file_write".to_string(),
                 normalized_input: "src/lib.rs".to_string(),
@@ -591,7 +594,6 @@ mod tests {
                 origin_kind: None,
                 origin_id: None,
                 origin_step_id: None,
-                execution_origin: None,
                 idempotency_key: None,
                 created_at: chrono::Utc::now(),
             },

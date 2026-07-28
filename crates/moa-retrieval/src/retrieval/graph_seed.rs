@@ -115,6 +115,7 @@ pub(crate) async fn hydrate_graph_seed_rows(
         pool,
         &req.scope,
         &req.cleared_barriers,
+        &req.source_acl,
         &uids,
         assume_app_role,
         req.as_of,
@@ -144,7 +145,14 @@ pub(crate) async fn semantic_entity_seed_uids(
         return Ok(Vec::new());
     }
 
-    let mut conn = begin_scoped(pool, &req.scope, &req.cleared_barriers, assume_app_role).await?;
+    let mut conn = begin_scoped(
+        pool,
+        &req.scope,
+        &req.cleared_barriers,
+        &req.source_acl,
+        assume_app_role,
+    )
+    .await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid

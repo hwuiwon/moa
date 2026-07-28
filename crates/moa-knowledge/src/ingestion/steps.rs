@@ -23,6 +23,7 @@ where
         // pass revisits). `delete_object` writes the terminal status last, only
         // after invalidation and tombstoning succeed.
         let pre_cleanup_object = KnowledgeObject {
+            acl: crate::domain::ObjectAcl::incomplete(),
             status: crate::domain::ObjectStatus::Active,
             deleted_at: None,
             ..object.clone()

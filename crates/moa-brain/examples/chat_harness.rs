@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     let store = Arc::new(store);
     let provider = build_provider_from_config(&config)?;
     let tool_router = Arc::new(
-        ToolRouter::from_config(&config, None, None)
+        ToolRouter::from_config(&config, None, None, None)
             .await?
             .with_session_store(store.clone()),
     );

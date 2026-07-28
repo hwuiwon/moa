@@ -57,6 +57,7 @@ impl Respond for QueuedThenCompletedJobResponder {
 fn input(result_url: Option<String>) -> ParseInput {
     ParseInput {
         object: KnowledgeObject {
+            acl: moa_knowledge::domain::ObjectAcl::incomplete(),
             object_uid: Uuid::from_u128(41),
             tenant_id: TenantId::from(Uuid::from_u128(42)),
             connection_uid: Uuid::from_u128(43),

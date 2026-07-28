@@ -4,6 +4,7 @@ mod construction;
 mod dispatch;
 pub mod leases;
 mod lifecycle;
+pub mod mcp_connections;
 mod normalization;
 mod output_budget;
 mod policy;
@@ -31,6 +32,11 @@ use crate::adapters::local::LocalHandProvider;
 use crate::adapters::mcp::MCPClient;
 
 use leases::HandLeaseStore;
+pub use mcp_connections::{
+    PostgresTenantMcpConnectionBindings, TenantMcpAuthorizer, TenantMcpBindingStatus,
+    TenantMcpConnectionBinding, TenantMcpConnectionBindingStore, TenantMcpCredentialOwners,
+    ToolCredentialScope,
+};
 pub use policy::{ActionOrigin, PreparedActionInvocation};
 pub use registration::{HandRoute, ToolExecution, ToolRegistry};
 
@@ -45,6 +51,13 @@ pub struct ToolRouter {
     mcp_clients: RwLock<HashMap<String, Arc<MCPClient>>>,
     mcp_servers: HashMap<String, McpServerConfig>,
     mcp_proxy: Option<Arc<MCPCredentialProxy>>,
+    /// Owners required to serve tenant-owned MCP servers: the durable credential
+    /// vault behind [`MCPCredentialProxy`], the connection binding owner, and the
+    /// delegated tenant-operator authorizer. `None` is valid only for a
+    /// deployment that configures no tenant-owned MCP server — construction
+    /// rejects the combination, and dispatch fails closed rather than falling
+    /// back to the deployment credential.
+    tenant_mcp: Option<Arc<TenantMcpCredentialOwners>>,
     /// Optional data-class egress guard for outbound MCP tool calls. When
     /// present, each call's serialized arguments are classified against the
     /// destination server's `allowed_data_classes` allowlist and blocked (fail

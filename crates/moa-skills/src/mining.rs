@@ -621,10 +621,10 @@ mod extraction_tests {
     use moa_core::{
         events::Event, types::action_policy::ActionClass, types::action_policy::ActionEnvelope,
         types::action_policy::ActionReviewDecision, types::action_policy::ActionReviewField,
-        types::action_policy::ActionReviewPreview, types::action_policy::RiskLevel,
-        types::contact::SessionActorRef, types::events_stream::EventRecord,
-        types::identifiers::SessionId, types::identifiers::TenantId,
-        types::identifiers::ToolCallId,
+        types::action_policy::ActionReviewOwner, types::action_policy::ActionReviewPreview,
+        types::action_policy::RiskLevel, types::contact::SessionActorRef,
+        types::events_stream::EventRecord, types::identifiers::SessionId,
+        types::identifiers::TenantId, types::identifiers::ToolCallId,
     };
     use uuid::Uuid;
 
@@ -723,8 +723,11 @@ mod extraction_tests {
             requested_by: SessionActorRef::Identity {
                 id: Uuid::from_u128(2),
             },
-            session_id: Some(SessionId::new()),
-            worker_id: None,
+            owner: ActionReviewOwner::Coordinator {
+                session_id: SessionId::new(),
+                turn_id: format!("turn-{review_id}"),
+                generation: 1,
+            },
             tool_call_id: ToolCallId::from(review_id),
             tool_name: tool_name.to_string(),
             normalized_input: "input".to_string(),
@@ -734,7 +737,6 @@ mod extraction_tests {
             origin_kind: None,
             origin_id: None,
             origin_step_id: None,
-            execution_origin: None,
             idempotency_key: None,
             created_at: Utc::now(),
         }

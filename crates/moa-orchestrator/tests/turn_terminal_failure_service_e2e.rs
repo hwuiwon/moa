@@ -64,6 +64,39 @@ fn turn_failures(events: &[EventRecord]) -> Vec<&Event> {
         .collect()
 }
 
+/// Re-fetches the session log until `predicate` holds, returning the final set.
+///
+/// The child's terminal lifecycle delivery (`WorkerStatusChanged` +
+/// `WorkerNotificationDelivered`) and its failed-attention resume are two
+/// independent detached chains off the same worker failure; the conversation can
+/// settle on the resume before delivery lands. Asserting delivery without this
+/// bounded wait races that ordering.
+async fn wait_for_session_events(
+    client: &TestApiClient,
+    session_id: SessionId,
+    initial: Vec<EventRecord>,
+    predicate: impl Fn(&[EventRecord]) -> bool,
+) -> Vec<EventRecord> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut events = initial;
+    while !predicate(&events) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for expected session events; got {} events",
+            events.len()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        events = client
+            .get_events(
+                session_id,
+                moa_core::types::events_stream::EventRange::all(),
+            )
+            .await
+            .expect("re-fetch session events");
+    }
+    events
+}
+
 /// Reads the session's current durable lifecycle status.
 ///
 /// Status lives on the session row and the VO, not in the event log, so it is
@@ -322,6 +355,19 @@ async fn worker_turn_catch_all_records_a_neutral_failure_service_e2e() {
     )
     .await
     .expect("drive the delegating turn and its failing child to a settled session");
+
+    // The failed child's terminal lifecycle delivery is a detached chain that can
+    // land after the failed-attention resume settles the conversation; wait for it
+    // before asserting anything about the final log.
+    let events = wait_for_session_events(test.client(), session_id, events, |events| {
+        events
+            .iter()
+            .any(|record| matches!(record.event, Event::WorkerStatusChanged { .. }))
+            && events
+                .iter()
+                .any(|record| matches!(record.event, Event::WorkerNotificationDelivered { .. }))
+    })
+    .await;
 
     let failures = turn_failures(&events);
     assert_eq!(

@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use moa_core::{
     events::Event, types::action_policy::ActionClass, types::action_policy::ActionReviewDecision,
-    types::action_policy::ActionReviewStatus, types::action_policy::ExecutionTaskOrigin,
+    types::action_policy::ActionReviewOwner, types::action_policy::ActionReviewStatus,
     types::identifiers::StoragePartitionId, types::identifiers::ToolCallId,
     types::tools::ToolCallRequest,
 };
@@ -36,8 +36,14 @@ pub(crate) struct DecidedReview {
     pub(crate) review_id: Uuid,
     /// Storage partition that owns the review.
     pub(crate) storage_partition_id: StoragePartitionId,
-    /// Owning session, when present.
-    pub(crate) session_id: Option<moa_core::types::identifiers::SessionId>,
+    /// Exact owner resumed when this review resolves.
+    pub(crate) owner: ActionReviewOwner,
+    /// Reviewed tool name, carried into the typed resolution receipt.
+    pub(crate) tool_name: String,
+    /// Model-visible tool call id from the original reviewed request.
+    pub(crate) requested_tool_call_id: ToolCallId,
+    /// Denial reason recorded for a denied review, when the admin supplied one.
+    pub(crate) deny_reason: Option<String>,
     /// Admin decision.
     pub(crate) decision: ActionReviewDecision,
     /// Terminal review status.
@@ -56,9 +62,8 @@ pub(crate) struct DecidedReview {
     pub(crate) newly_decided: bool,
     /// Stored tool request to invoke after a clear decision.
     pub(crate) tool_request: Option<ToolCallRequest>,
-    /// Execution task that owns a cleared dispatch, when present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) execution_origin: Option<ExecutionTaskOrigin>,
+    /// Fresh MOA tool call id assigned to a cleared execution, when one exists.
+    pub(crate) executed_tool_call_id: Option<ToolCallId>,
 }
 
 /// Screen and normalize a request before it is persisted.
@@ -138,10 +143,11 @@ pub(crate) async fn decide_review(
     let decided_at = row.decided_at.unwrap_or_else(Utc::now);
     let decided_by = row.decided_by.clone().unwrap_or(requested_decider);
     let deny_reason = deny_reason_for_decision(&decision, row.deny_reason.clone());
+    let stored_deny_reason = deny_reason.clone();
     let execution_tool_call_id = execution_tool_call_id_for_decision(&decision, &row);
 
     if matches!(decision, ActionReviewDecision::Cleared)
-        && row.execution_origin.is_some()
+        && row.owner.execution_origin().is_some()
         && row.status == ActionReviewStatus::Pending
     {
         let execution_tool_call_id = execution_tool_call_id.ok_or_else(|| {
@@ -170,7 +176,10 @@ pub(crate) async fn decide_review(
         return Ok(DecidedReview {
             review_id: request.review_id,
             storage_partition_id,
-            session_id: row.session_id,
+            owner: row.owner.clone(),
+            tool_name: row.tool_name.clone(),
+            requested_tool_call_id: row.tool_request.tool_call_id,
+            deny_reason: stored_deny_reason,
             decision,
             status: ActionReviewStatus::Pending,
             action_class: row.action_class,
@@ -180,7 +189,7 @@ pub(crate) async fn decide_review(
             record_decision_event: false,
             newly_decided: false,
             tool_request,
-            execution_origin: row.execution_origin,
+            executed_tool_call_id: Some(ToolCallId(execution_tool_call_id)),
         });
     }
 
@@ -198,7 +207,7 @@ pub(crate) async fn decide_review(
             },
         )
         .await?;
-        if let Some(origin) = row.execution_origin
+        if let Some(origin) = row.owner.execution_origin()
             && matches!(decision, ActionReviewDecision::Denied { .. })
         {
             store::insert_execution_review_resolution(
@@ -224,7 +233,10 @@ pub(crate) async fn decide_review(
     Ok(DecidedReview {
         review_id: request.review_id,
         storage_partition_id,
-        session_id: row.session_id,
+        owner: row.owner.clone(),
+        tool_name: row.tool_name.clone(),
+        requested_tool_call_id: row.tool_request.tool_call_id,
+        deny_reason: stored_deny_reason,
         decision,
         status: desired_status,
         action_class: row.action_class,
@@ -234,7 +246,7 @@ pub(crate) async fn decide_review(
         record_decision_event: row.decision_event_recorded_at.is_none(),
         newly_decided,
         tool_request,
-        execution_origin: row.execution_origin,
+        executed_tool_call_id: execution_tool_call_id.map(ToolCallId),
     })
 }
 
@@ -252,7 +264,7 @@ pub(crate) async fn finalize_execution_review(
         .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
     let storage_partition_id = storage_partition_id(tenant_id);
     let row = store::load_review_for_update(&mut tx, &storage_partition_id, review_id).await?;
-    let origin = row.execution_origin.ok_or_else(|| {
+    let origin = row.owner.execution_origin().ok_or_else(|| {
         TerminalError::new("cleared execution finalization requires execution origin")
     })?;
     if row.status != ActionReviewStatus::Pending && row.status != ActionReviewStatus::Cleared {
@@ -306,7 +318,10 @@ pub(crate) async fn finalize_execution_review(
     Ok(DecidedReview {
         review_id,
         storage_partition_id,
-        session_id: row.session_id,
+        owner: row.owner.clone(),
+        tool_name: row.tool_name.clone(),
+        requested_tool_call_id: row.tool_request.tool_call_id,
+        deny_reason: None,
         decision: ActionReviewDecision::Cleared,
         status: ActionReviewStatus::Cleared,
         action_class: row.action_class,
@@ -316,7 +331,7 @@ pub(crate) async fn finalize_execution_review(
         record_decision_event: row.decision_event_recorded_at.is_none(),
         newly_decided,
         tool_request: None,
-        execution_origin: Some(origin),
+        executed_tool_call_id: row.execution_tool_call_id.map(ToolCallId),
     })
 }
 
@@ -425,12 +440,21 @@ fn execution_tool_request_for_decision(
     Ok(Some(execution_tool_request(row, execution_tool_call_id)))
 }
 
+/// Builds the reviewed execution request from the stored call.
+///
+/// The reviewed execution is a new MOA-owned invocation, not a replay of the
+/// model's original call: it gets a fresh internal tool-call id and drops the
+/// provider tool-use id. Keeping the provider id would let the reviewed result be
+/// stitched back onto the original provider tool block, which the model already
+/// saw answered with the pending-review notice, so the same provider call would
+/// carry two conflicting results.
 fn execution_tool_request(
     row: &ReviewDecisionRow,
     execution_tool_call_id: Uuid,
 ) -> ToolCallRequest {
     let mut tool_request = row.tool_request.clone();
     tool_request.tool_call_id = ToolCallId(execution_tool_call_id);
+    tool_request.provider_tool_use_id = None;
     tool_request.active_canary = None;
     tool_request
 }
@@ -499,13 +523,16 @@ mod tests {
     }
 
     #[test]
-    fn execution_tool_request_refreshes_internal_id_and_preserves_provider_identity() {
-        // Pins: clearing a tenant action review refreshes MOA's internal execution id while
-        // preserving the provider invocation id that must reach the eventual MCP request.
+    fn execution_tool_request_mints_fresh_moa_id_and_clears_provider_tool_use_id() {
+        // Pins: the reviewed execution is a new MOA-owned invocation. It gets a fresh
+        // internal tool-call id AND drops the provider tool-use id, because the model's
+        // original provider tool block was already answered with the pending-review
+        // notice; reusing that id would attach a second, conflicting result to it.
         let original_tool_id = ToolCallId::new();
         let execution_tool_id = Uuid::now_v7();
         let row = ReviewDecisionRow {
-            session_id: None,
+            owner: coordinator_owner(),
+            tool_name: "bash".to_string(),
             action_class: ActionClass::CommandExecution,
             created_at: Utc::now(),
             status: ActionReviewStatus::Pending,
@@ -520,7 +547,6 @@ mod tests {
                 trusted_sandbox_manifest: None,
                 worker_id: None,
             },
-            execution_origin: None,
             execution_task_trace_context: None,
             decided_by: None,
             deny_reason: None,
@@ -540,10 +566,7 @@ mod tests {
 
         assert_eq!(tool_request.tool_call_id, ToolCallId(execution_tool_id));
         assert_ne!(tool_request.tool_call_id, original_tool_id);
-        assert_eq!(
-            tool_request.provider_tool_use_id.as_deref(),
-            Some("provider-tool-use")
-        );
+        assert_eq!(tool_request.provider_tool_use_id, None);
         assert_eq!(tool_request.active_canary, None);
         assert_eq!(tool_request.tool_name, "bash");
         assert_eq!(tool_request.input, json!({"cmd": "printf ok"}));
@@ -553,7 +576,8 @@ mod tests {
     fn execution_tool_request_is_idempotent_after_execution_was_requested() {
         // Pins: retrying a cleared review after execution was requested does not invoke the tool again.
         let row = ReviewDecisionRow {
-            session_id: None,
+            owner: coordinator_owner(),
+            tool_name: "bash".to_string(),
             action_class: ActionClass::CommandExecution,
             created_at: Utc::now(),
             status: ActionReviewStatus::Cleared,
@@ -568,7 +592,6 @@ mod tests {
                 trusted_sandbox_manifest: None,
                 worker_id: None,
             },
-            execution_origin: None,
             execution_task_trace_context: None,
             decided_by: Some("admin".to_string()),
             deny_reason: None,
@@ -612,6 +635,14 @@ mod tests {
                 .contains("blocked because it leaked a protected canary token"),
             "error should explain the canary screening failure: {error}"
         );
+    }
+
+    fn coordinator_owner() -> ActionReviewOwner {
+        ActionReviewOwner::Coordinator {
+            session_id: SessionId::new(),
+            turn_id: "turn-app-fixture".to_string(),
+            generation: 1,
+        }
     }
 
     fn test_identity() -> Identity {

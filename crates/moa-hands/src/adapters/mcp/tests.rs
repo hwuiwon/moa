@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use moa_config::McpServerConfig;
+use moa_config::McpServerCredentialScope;
 use moa_config::McpTransportConfig;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -95,8 +96,10 @@ async fn http_client_sends_headers_and_parses_jsonrpc() {
         name: "remote".to_string(),
         transport: McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),
+        credential_scope: McpServerCredentialScope::DeploymentOwned,
+        credentials: None,
         trust_tool_annotations: false,
-        ..McpServerConfig::default()
+        allowed_data_classes: Vec::new(),
     })
     .await
     .unwrap();
@@ -153,8 +156,10 @@ async fn http_client_parses_sse_tool_response() {
         name: "remote".to_string(),
         transport: McpTransportConfig::Http,
         url: Some(format!("http://{addr}")),
+        credential_scope: McpServerCredentialScope::DeploymentOwned,
+        credentials: None,
         trust_tool_annotations: false,
-        ..McpServerConfig::default()
+        allowed_data_classes: Vec::new(),
     })
     .await
     .unwrap();

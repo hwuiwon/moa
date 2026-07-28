@@ -541,6 +541,8 @@ mod tests {
         // becoming an ordinary turn, and an upload must never be swallowed as a reply.
         let worker_input = PendingUserReplyTarget::WorkerInput {
             worker_id: "worker-1".to_string(),
+            turn_id: "worker-turn-1".to_string(),
+            generation: 3,
             input_request_id: "request-1".to_string(),
         };
         let execution_input = PendingUserReplyTarget::ExecutionInput {
@@ -550,6 +552,8 @@ mod tests {
         };
         let addressed_worker = MessageReplyTarget::WorkerInput {
             worker_id: "worker-1".to_string(),
+            turn_id: "worker-turn-1".to_string(),
+            generation: 3,
             input_request_id: "request-1".to_string(),
         };
 

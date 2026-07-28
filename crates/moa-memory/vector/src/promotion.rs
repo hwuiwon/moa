@@ -293,7 +293,14 @@ async fn fetch_validation_sample(
     rows.into_iter().map(EmbeddingRow::from_row).collect()
 }
 
-fn top_k_overlap(
+/// Mean-free top-K overlap between two ranked neighbor lists.
+///
+/// The one piece of this engine that generation rebuilds reuse. It is a pure
+/// comparison over two uid lists: no state, no serving, no backend selection.
+/// The rest of this module must not be reused by a rebuild, because its
+/// dual-read window can serve target-backend hits to production and a candidate
+/// generation may never answer a production query.
+pub(crate) fn top_k_overlap(
     source_hits: &[crate::VectorMatch],
     target_hits: &[crate::VectorMatch],
     k: usize,

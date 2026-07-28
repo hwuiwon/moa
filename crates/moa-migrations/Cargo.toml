@@ -18,3 +18,9 @@ workspace-hack = { workspace = true }
 # test build needs sqlx's UUID mapping on top of the runtime feature set.
 sqlx = { workspace = true, features = ["postgres", "uuid"] }
 uuid = { workspace = true }
+# The source-ACL upgrade proof runs the PRODUCTION admission predicate against the
+# migrated schema as the non-BYPASSRLS app role. Re-typing the predicate here would
+# let the migration and the runtime drift apart silently, which is the one failure
+# this coverage exists to make impossible.
+moa-core = { workspace = true }
+moa-db = { workspace = true }

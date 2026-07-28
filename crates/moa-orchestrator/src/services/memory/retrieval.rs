@@ -314,6 +314,7 @@ async fn retrieve_hits_with_embedding(
 ) -> Result<Vec<RetrievalHit>, HandlerError> {
     retriever
         .retrieve(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: inputs.clearances,
             seeds: inputs.seeds,
             query_text: inputs.query,

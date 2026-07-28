@@ -10,7 +10,9 @@ use axum::{
     routing::post,
 };
 use moa_core::types::{
-    action_policy::{ActionClass, ActionEnvelope, ExecutionTaskOrigin, RiskLevel},
+    action_policy::{
+        ActionClass, ActionEnvelope, ActionReviewOwner, ExecutionTaskOrigin, RiskLevel,
+    },
     contact::SessionActorRef,
     identifiers::{TenantId, ToolCallId},
 };
@@ -636,12 +638,19 @@ fn action_envelope(
     tenant_id: TenantId,
     execution_origin: Option<ExecutionTaskOrigin>,
 ) -> ActionEnvelope {
+    let session_id = moa_core::types::identifiers::SessionId::new();
     ActionEnvelope {
         review_id: Uuid::new_v4(),
         tenant_id,
         requested_by: SessionActorRef::Anonymous,
-        session_id: None,
-        worker_id: None,
+        owner: match execution_origin {
+            Some(origin) => ActionReviewOwner::ExecutionTask { session_id, origin },
+            None => ActionReviewOwner::Coordinator {
+                session_id,
+                turn_id: "turn-reaper-fixture".to_string(),
+                generation: 1,
+            },
+        },
         tool_call_id: ToolCallId::new(),
         tool_name: "bash".to_string(),
         normalized_input: "printf ok".to_string(),
@@ -651,7 +660,6 @@ fn action_envelope(
         origin_kind: None,
         origin_id: None,
         origin_step_id: None,
-        execution_origin,
         idempotency_key: None,
         created_at: moa_test_support::fixtures::pg_now(),
     }

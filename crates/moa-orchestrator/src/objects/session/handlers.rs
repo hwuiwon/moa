@@ -39,7 +39,7 @@ impl Session for SessionImpl {
         let session_id = parse_session_key(ctx.key())?;
         let identity = require_session_participant(&ctx, session_id).await?;
         let scope = scope.into_inner();
-        let state = Tracked::<SessionVoState>::load(&ctx).await?;
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
         let meta = state
             .ensure_initialized()
             .map_err(moa_error_to_handler_error)?
@@ -50,6 +50,15 @@ impl Session for SessionImpl {
             .iter()
             .map(|run| run.run_uid)
             .collect::<Vec<_>>();
+        // A cancelled task tree can answer nothing, so every reply target its children
+        // advertised is retracted here rather than waiting on each child's own clear:
+        // the cascade below is detached, and until it lands the next plain user message
+        // would be delivered to a round-trip that is already being torn down.
+        if scope.cancels_task_tree() {
+            for child in &children {
+                state.clear_worker_input_targets_for_worker(&child.id);
+            }
+        }
         state.persist(&ctx);
 
         let mut pending_state = load_pending_state(&ctx).await?;
@@ -255,6 +264,59 @@ impl Session for SessionImpl {
                 "cleared pending parent resume and drained dispatch-time signal snapshot"
             );
         }
+        // A failed or cancelled origin turn ends the work the review belonged to, so
+        // its continuation is stale: resuming into a turn that just died would answer
+        // for work the session already gave up on.
+        let continuation_eligible = matches!(
+            outcome.kind,
+            ExecutionTurnOutcomeKind::Completed | ExecutionTurnOutcomeKind::Accepted { .. }
+        );
+        if !continuation_eligible {
+            let discarded = pending_state.action_reviews.discard_all();
+            if discarded > 0 {
+                tracing::info!(
+                    key = %ctx.key(),
+                    turn_id = %outcome.turn_id,
+                    discarded,
+                    "released action reviews held by a turn that did not complete"
+                );
+            }
+        }
+
+        // A resolved same-generation continuation runs before ordinary FIFO: it is
+        // the tail of work the session already told the user it was doing. It is only
+        // eligible while it is still current — a newer admission advanced the
+        // generation and already discarded it.
+        if continuation_eligible
+            && let Some(queued) = pending_state
+                .action_reviews
+                .take_next(pending_state.turn_generation)
+        {
+            pending_state.active_turn_id = Some(queued.turn_id.clone());
+            let now = durable_utc_now(&ctx).await?;
+            state.set_status(SessionStatus::Running, now);
+            let identity = state.owning_identity.clone().ok_or_else(|| {
+                TerminalError::new("session has no owning identity for an action review resume")
+            })?;
+            let contact = state.meta.as_ref().and_then(|meta| meta.contact.clone());
+            state.persist(&ctx);
+            persist_pending_state(&ctx, &pending_state);
+            sync_status(&ctx, session_id, &state).await?;
+            resolve_turn_waiters(&ctx, turn_waiters, &outcome)?;
+            dispatch_turn_execution(
+                &ctx,
+                action_review_run_request(
+                    ctx.key().to_string(),
+                    queued.turn_id,
+                    identity,
+                    contact,
+                    queued.generation,
+                    queued.continuation,
+                ),
+            );
+            return Ok(());
+        }
+
         if dispatch_next && let Some(next) = pending_state.pending_messages.pop_front() {
             let next_turn_id = generate_turn_id(&mut ctx);
             pending_state.active_turn_id = Some(next_turn_id.clone());
@@ -285,6 +347,7 @@ impl Session for SessionImpl {
                     turn_id: next_turn_id,
                     identity: next.identity,
                     contact: next.contact,
+                    generation: next.generation,
                     user_message: next.user_message,
                     attachments: next.attachments,
                     model: next.model,
@@ -292,6 +355,7 @@ impl Session for SessionImpl {
                     trigger: TurnTrigger::UserMessage,
                     child_signal_id: None,
                     execution_template: next.execution_template,
+                    action_review: None,
                 },
             );
             return Ok(());
@@ -350,6 +414,176 @@ impl Session for SessionImpl {
         }
         persist_pending_state(&ctx, &pending_state);
         resolve_turn_waiters(&ctx, turn_waiters, &outcome)?;
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, registration))]
+    // SAFETY: internal control-plane write from `ActionReviews/request`, which runs
+    // only after this session admitted the caller and its own coordinator turn issued
+    // the reviewed tool call. It records the review id on this session's own VO state
+    // and returns no caller-owned data.
+    async fn register_action_review(
+        &self,
+        ctx: ObjectContext<'_>,
+        registration: Json<moa_core::types::action_policy::ActionReviewRegistration>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Session", "register_action_review");
+        let registration = registration.into_inner();
+        let turn_id = registration
+            .owner
+            .turn_id()
+            .ok_or_else(|| {
+                TerminalError::new("session action review registration requires an owning turn")
+            })?
+            .to_string();
+        // The generation comes from the owner that issued the tool call, not from
+        // whatever the session happens to be on now. Reading "now" would let a user
+        // message admitted between the tool call and this registration re-stamp a stale
+        // review as current, and the fence would then resume superseded work.
+        let generation = registration.owner.generation().ok_or_else(|| {
+            TerminalError::new("session action review registration requires an owner generation")
+        })?;
+        let mut pending_state = load_pending_state(&ctx).await?;
+        if generation < pending_state.turn_generation {
+            tracing::info!(
+                key = %ctx.key(),
+                review_id = %registration.review_id,
+                generation,
+                current_generation = pending_state.turn_generation,
+                "skipped registering an already-superseded session action review"
+            );
+            return Ok(());
+        }
+        if pending_state
+            .action_reviews
+            .register(registration.review_id, turn_id, generation)
+        {
+            persist_pending_state(&ctx, &pending_state);
+            tracing::info!(
+                key = %ctx.key(),
+                review_id = %registration.review_id,
+                generation,
+                "registered pending action review on session"
+            );
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, receipt))]
+    // SAFETY: internal control-plane write from `ActionReviews/decide`, which
+    // authorizes the deciding tenant admin before resolving. It writes only this
+    // session's own VO state and event log.
+    async fn action_review_resolved(
+        &self,
+        mut ctx: ObjectContext<'_>,
+        receipt: Json<moa_core::types::action_policy::ActionReviewReceipt>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Session", "action_review_resolved");
+        let receipt = receipt.into_inner();
+        let session_id = parse_session_key(ctx.key())?;
+        let mut pending_state = load_pending_state(&ctx).await?;
+        // Unknown or already-resolved review: a duplicated callback changes nothing.
+        let Some(registered) = pending_state.action_reviews.resolve(receipt.review_id) else {
+            tracing::debug!(
+                key = %ctx.key(),
+                review_id = %receipt.review_id,
+                "ignored resolution for an unknown or already-resolved session action review"
+            );
+            return Ok(());
+        };
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        let cancelling = pending_state.task_tree_cancellation_fenced();
+        let terminal_session = matches!(
+            state.status,
+            Some(SessionStatus::Cancelled) | Some(SessionStatus::Failed)
+        );
+        if registered.generation != pending_state.turn_generation || cancelling || terminal_session
+        {
+            persist_pending_state(&ctx, &pending_state);
+            tracing::info!(
+                key = %ctx.key(),
+                review_id = %receipt.review_id,
+                registered_generation = registered.generation,
+                current_generation = pending_state.turn_generation,
+                cancelling,
+                terminal_session,
+                "dropped superseded or cancelled session action review continuation"
+            );
+            return Ok(());
+        }
+
+        let Some(identity) = state.owning_identity.clone() else {
+            persist_pending_state(&ctx, &pending_state);
+            tracing::warn!(
+                key = %ctx.key(),
+                review_id = %receipt.review_id,
+                "session action review resolved but no owning identity is recorded"
+            );
+            return Ok(());
+        };
+        let contact = state.meta.as_ref().and_then(|meta| meta.contact.clone());
+        // Minted before any scheduling decision so the durable continuation fact names
+        // the exact turn that will run it, even when it has to wait behind the origin.
+        let continuation_turn_id = generate_turn_id(&mut ctx);
+        let entry = QueuedActionReviewContinuation {
+            continuation: moa_core::types::action_policy::ActionReviewContinuation {
+                review_id: receipt.review_id,
+                receipt,
+            },
+            turn_id: continuation_turn_id,
+            generation: registered.generation,
+            ordinal: registered.ordinal,
+        };
+        let fact = entry.clone();
+        if !pending_state.action_reviews.enqueue(entry) {
+            persist_pending_state(&ctx, &pending_state);
+            return Ok(());
+        }
+        let dispatch = if pending_state.active_turn_id.is_some() {
+            None
+        } else {
+            pending_state
+                .action_reviews
+                .take_next(pending_state.turn_generation)
+        };
+        if let Some(dispatch) = dispatch.as_ref() {
+            pending_state.active_turn_id = Some(dispatch.turn_id.clone());
+            let now = durable_utc_now(&ctx).await?;
+            state.set_status(SessionStatus::Running, now);
+        }
+        state.persist(&ctx);
+        persist_pending_state(&ctx, &pending_state);
+        sync_status(&ctx, session_id, &state).await?;
+
+        append_session_event_deduped(
+            &ctx,
+            session_id,
+            Event::ActionReviewContinuationRequested {
+                review_id: fact.continuation.review_id,
+                turn_id: fact.turn_id.clone(),
+                receipt: fact.continuation.receipt.clone(),
+            },
+            moa_core::types::action_policy::action_review_continuation_dedupe_key(
+                fact.continuation.review_id,
+            ),
+        )
+        .await?;
+
+        if let Some(dispatch) = dispatch {
+            dispatch_turn_execution(
+                &ctx,
+                action_review_run_request(
+                    ctx.key().to_string(),
+                    dispatch.turn_id,
+                    identity,
+                    contact,
+                    dispatch.generation,
+                    dispatch.continuation,
+                ),
+            );
+        }
         Ok(())
     }
 
@@ -438,6 +672,80 @@ impl Session for SessionImpl {
         .await?;
         state.persist(&ctx);
         Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal registration by this session's own running turn; it stores an
+    // awakeable id and a pending reply target and reads no caller-owned data back.
+    async fn register_coordinator_input(
+        &self,
+        ctx: ObjectContext<'_>,
+        request: Json<RegisterCoordinatorInputRequest>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Session", "register_coordinator_input");
+        let request = request.into_inner();
+        let session_id = parse_session_key(ctx.key())?;
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+
+        state.register_coordinator_input(CoordinatorPendingInput {
+            turn_id: request.turn_id.clone(),
+            generation: request.generation,
+            input_request_id: request.input_request_id.clone(),
+            awakeable_id: request.awakeable_id,
+            waiting_workflow_id: request.waiting_workflow_id,
+        });
+        // Advertising the pending target is what lets an unaddressed plain reply be
+        // routed here instead of starting an ordinary turn behind the blocked one.
+        state.upsert_pending_user_reply_target(PendingUserReplyTarget::CoordinatorInput {
+            turn_id: request.turn_id,
+            generation: request.generation,
+            input_request_id: request.input_request_id.clone(),
+        });
+        append_session_event_deduped(
+            &ctx,
+            session_id,
+            Event::Warning {
+                message: request.question,
+            },
+            format!("coordinator_input_request:{}", request.input_request_id),
+        )
+        .await?;
+        state.persist(&ctx);
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal workflow delivery of an assessment the router already produced;
+    // it reads no caller-owned data back and returns only closed-vocabulary state.
+    async fn apply_security_assessment(
+        &self,
+        ctx: ObjectContext<'_>,
+        request: Json<ApplySecurityAssessmentRequest>,
+    ) -> Result<Json<ApplySecurityAssessmentResponse>, HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Session", "apply_security_assessment");
+        let request = request.into_inner();
+        let session_id = parse_session_key(ctx.key())?;
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        let transition = moa_security::apply_owner_assessment(
+            &mut state.security_circuit,
+            moa_security::CircuitTarget {
+                session_id,
+                owner: &request.owner,
+                capability: &request.capability,
+                tool_call_id: request.tool_call_id,
+            },
+            &request.assessment,
+        );
+        let stage = state
+            .security_circuit
+            .stage(&request.owner, &request.capability);
+        state.persist(&ctx);
+        Ok(Json::from(ApplySecurityAssessmentResponse {
+            transition,
+            stage,
+        }))
     }
 
     #[tracing::instrument(skip(self, ctx, input))]
@@ -541,6 +849,9 @@ impl Session for SessionImpl {
                 turn_id: requested.turn_id.clone(),
                 identity,
                 contact: meta.contact,
+                // A system-triggered resume continues the work the current
+                // generation already admitted; it is not a new user admission.
+                generation: pending_state.turn_generation,
                 user_message: instruction,
                 attachments: Vec::new(),
                 model: None,
@@ -548,6 +859,7 @@ impl Session for SessionImpl {
                 trigger: TurnTrigger::ExecutionSynthesis,
                 child_signal_id: None,
                 execution_template: None,
+                action_review: None,
             },
         );
         let marker = ExecutionSynthesisDedupe {
@@ -792,6 +1104,38 @@ impl Session for SessionImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, input))]
+    // SAFETY: internal retraction from this session's own child; it only removes reply
+    // targets this session advertised for that child and reads no caller-owned data.
+    async fn clear_worker_input_targets(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<ClearWorkerInputTargetsInput>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Session", "clear_worker_input_targets");
+        let input = input.into_inner();
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        let mut retracted = 0usize;
+        for target in &input.cleared {
+            if state.clear_worker_input_target(&input.worker_id, target) {
+                retracted += 1;
+            }
+        }
+        if retracted > 0 {
+            tracing::debug!(
+                key = %ctx.key(),
+                worker_id = %input.worker_id,
+                retracted,
+                "retracted worker input reply targets the child cleared"
+            );
+        }
+        // Always persist: retracting a target also drops the paired unread signal, and
+        // that removal must survive even when no advertised target remained.
+        state.persist(&ctx);
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, input))]
     // SAFETY: called only from Worker terminal delivery after parent dispatch authz has already checked.
     async fn mark_child_terminal(
         &self,
@@ -917,8 +1261,14 @@ impl Session for SessionImpl {
                 // Carry the awakeable id and audience onto the durable event so any later
                 // coordinator turn rendered from history (not only the guarded resume turn)
                 // can answer a `NeedsInput` request via `provide_worker_input`.
-                input_request_id: signal.input_request_id.clone(),
-                input_audience: signal.input_audience,
+                input_request_id: signal
+                    .input_request
+                    .as_ref()
+                    .map(|request| request.input_request_id.clone()),
+                input_audience: signal
+                    .input_request
+                    .as_ref()
+                    .map(|request| request.audience),
             },
             format!("worker_signal:{}", signal.signal_id),
         )
@@ -933,16 +1283,19 @@ impl Session for SessionImpl {
             worker_id: signal.worker_id.clone(),
             kind: signal.kind,
             summary: signal.summary.clone(),
-            input_request_id: signal.input_request_id.clone(),
-            input_audience: signal.input_audience,
+            input_request: signal.input_request.clone(),
         });
         if signal.kind == ChildSignalKind::NeedsInput
-            && signal.input_audience == Some(InputAudience::User)
-            && let Some(input_request_id) = signal.input_request_id.clone()
+            && let Some(request) = signal.input_request.as_ref()
+            && request.audience == InputAudience::User
         {
+            // Advertised with the raising turn and generation, so the reply the user
+            // sends can only ever resolve that exact round-trip.
             state.upsert_pending_user_reply_target(PendingUserReplyTarget::WorkerInput {
                 worker_id: signal.worker_id.clone(),
-                input_request_id,
+                turn_id: request.turn_id.clone(),
+                generation: request.generation,
+                input_request_id: request.input_request_id.clone(),
             });
         }
 
@@ -1007,6 +1360,7 @@ impl Session for SessionImpl {
                         turn_id: turn_id.clone(),
                         identity,
                         contact,
+                        generation: pending_state.turn_generation,
                         user_message: instruction,
                         attachments: Vec::new(),
                         model: None,
@@ -1014,6 +1368,7 @@ impl Session for SessionImpl {
                         trigger: TurnTrigger::ChildSignal,
                         child_signal_id: Some(signal.signal_id),
                         execution_template: None,
+                        action_review: None,
                     },
                 );
                 tracing::info!(
@@ -1331,13 +1686,19 @@ async fn forward_user_input_reply(
         }
         PendingUserReplyTarget::WorkerInput {
             worker_id,
+            turn_id,
+            generation,
             input_request_id,
         } => {
             let call = ctx
                 .object_client::<WorkerClient>(worker_id.clone())
                 .provide_input(Json::from(worker_provide_input_request(
                     session_id,
-                    input_request_id,
+                    WorkerInputTarget {
+                        turn_id: turn_id.clone(),
+                        generation: *generation,
+                        input_request_id: input_request_id.clone(),
+                    },
                     text,
                 )));
             let acknowledgement = with_identity_headers(call, identity)
@@ -1363,6 +1724,29 @@ async fn forward_user_input_reply(
             }
             acknowledgement
         }
+        PendingUserReplyTarget::CoordinatorInput {
+            turn_id,
+            generation,
+            input_request_id,
+        } => {
+            // Delivery is a VO-local awakeable resolve, not a cross-object call:
+            // the blocked turn is parked on an awakeable this same object
+            // registered. The fence is checked inside `take_*`, so a reply naming
+            // a superseded generation resolves nothing.
+            match state.take_coordinator_input_awakeable(turn_id, *generation, input_request_id) {
+                Some(awakeable_id) => {
+                    ctx.resolve_awakeable(&awakeable_id, text.to_string());
+                    UserReplyDeliveryAck::Applied
+                }
+                None if state.coordinator_input_already_delivered(input_request_id) => {
+                    // A late duplicate is a replay, never a second resolve: the
+                    // awakeable is gone, and a newer request could otherwise be
+                    // unblocked by an answer meant for the previous one.
+                    UserReplyDeliveryAck::Replayed
+                }
+                None => UserReplyDeliveryAck::Conflict,
+            }
+        }
     };
     state.apply_pending_user_reply_ack(target, acknowledgement);
     Ok(())
@@ -1370,12 +1754,12 @@ async fn forward_user_input_reply(
 
 fn worker_provide_input_request(
     parent_session: SessionId,
-    input_request_id: &str,
+    target: WorkerInputTarget,
     text: &str,
 ) -> WorkerProvideInputRequest {
     WorkerProvideInputRequest {
         parent_session,
-        input_request_id: input_request_id.to_string(),
+        target,
         input: serde_json::Value::String(text.to_string()),
     }
 }
@@ -1586,6 +1970,7 @@ async fn dispatch_queued_parent_resume_if_idle(
             turn_id: turn_id.clone(),
             identity,
             contact,
+            generation: pending_state.turn_generation,
             user_message: instruction,
             attachments: Vec::new(),
             model: None,
@@ -1593,6 +1978,7 @@ async fn dispatch_queued_parent_resume_if_idle(
             trigger: TurnTrigger::ChildSignal,
             child_signal_id: Some(signal.signal_id),
             execution_template: None,
+            action_review: None,
         },
     );
     tracing::info!(
@@ -1626,8 +2012,7 @@ fn unread_to_resume_signal(
         payload: serde_json::Value::Null,
         created_at: now,
         resume_policy: ParentResumePolicy::IfIdle,
-        input_request_id: unread.input_request_id.clone(),
-        input_audience: unread.input_audience,
+        input_request: unread.input_request.clone(),
     }
 }
 
@@ -1819,7 +2204,7 @@ async fn start_turn_inner(
         MessageRouting::OrdinaryTurn => {}
     }
 
-    if let Some(active_turn_id) = pending_state.active_turn_id.as_deref() {
+    if let Some(active_turn_id) = pending_state.active_turn_id.clone() {
         if pending_message_queue_is_full(
             pending_state.pending_messages.len(),
             session_limits.max_pending_messages,
@@ -1834,6 +2219,7 @@ async fn start_turn_inner(
             )
             .into());
         }
+        let generation = pending_state.advance_turn_generation();
         let queue_index = pending_state.pending_messages.len();
         append_session_event_deduped(
             ctx,
@@ -1848,6 +2234,7 @@ async fn start_turn_inner(
         .await?;
         pending_state.pending_messages.push_back(PendingMessage {
             client_message_id: client_message_id.clone(),
+            generation,
             queued_at: now,
             identity,
             contact,
@@ -1878,6 +2265,7 @@ async fn start_turn_inner(
     turn_admission
         .acquire(ctx, session_id, tenant_id, "turn_admission_start")
         .await?;
+    let generation = pending_state.advance_turn_generation();
     let turn_id = generate_turn_id(ctx);
     pending_state.active_turn_id = Some(turn_id.clone());
     arm_turn_admission_heartbeat(ctx, &mut pending_state, turn_admission);
@@ -1916,6 +2304,7 @@ async fn start_turn_inner(
             turn_id: turn_id.clone(),
             identity,
             contact,
+            generation,
             user_message: request.user_message,
             attachments: request.attachments,
             model: request.model,
@@ -1923,6 +2312,7 @@ async fn start_turn_inner(
             trigger: TurnTrigger::UserMessage,
             child_signal_id: None,
             execution_template: request.execution_template,
+            action_review: None,
         },
     );
     if drained > 0 {
@@ -1940,6 +2330,39 @@ async fn start_turn_inner(
 
 fn pending_message_queue_is_full(pending: usize, limit: u32) -> bool {
     pending >= limit as usize
+}
+
+/// Builds the coordinator continuation turn request for one resolved review.
+///
+/// The turn carries the typed receipt and the origin generation — never a fake
+/// user message, an execution template, or an attachment — so it can only run the
+/// bounded no-tools `Respond` path the continuation matrix allows.
+fn action_review_run_request(
+    session_id: String,
+    turn_id: String,
+    identity: moa_core::traits::Identity,
+    contact: Option<ContactRef>,
+    generation: u64,
+    continuation: moa_core::types::action_policy::ActionReviewContinuation,
+) -> RunTurnRequest {
+    let user_message = continuation.receipt.system_directive();
+    RunTurnRequest {
+        session_id,
+        turn_id,
+        identity,
+        contact,
+        generation,
+        user_message,
+        attachments: Vec::new(),
+        model: None,
+        // Exactly one bounded model call: the continuation reports a settled result,
+        // it does not reopen the task.
+        max_turns: Some(1),
+        trigger: TurnTrigger::ActionReview,
+        child_signal_id: None,
+        execution_template: None,
+        action_review: Some(continuation),
+    }
 }
 
 fn admitted_contact_for_turn(
@@ -1984,8 +2407,8 @@ mod tests {
     use restate_sdk::prelude::TerminalError;
 
     use super::{
-        active_turn_progress_or_none, admitted_contact_for_turn, pending_message_queue_is_full,
-        worker_provide_input_request,
+        WorkerInputTarget, active_turn_progress_or_none, admitted_contact_for_turn,
+        pending_message_queue_is_full, worker_provide_input_request,
     };
 
     #[test]
@@ -1999,13 +2422,20 @@ mod tests {
 
     #[test]
     fn session_worker_reply_payload_carries_exact_parent_session_and_string() {
-        // Pins: Session plain-reply routing sends the exact owning Session scope and keeps the
-        // canonical Value::String payload expected by Worker replay hashing.
+        // Pins: Session plain-reply routing sends the exact owning Session scope, the full
+        // owner fence of the advertised target, and keeps the canonical Value::String
+        // payload expected by Worker replay hashing.
         let parent_session = SessionId::new();
-        let request = worker_provide_input_request(parent_session, "request-9", "the exact answer");
+        let target = WorkerInputTarget {
+            turn_id: "worker-turn-9".to_string(),
+            generation: 5,
+            input_request_id: "request-9".to_string(),
+        };
+        let request =
+            worker_provide_input_request(parent_session, target.clone(), "the exact answer");
 
         assert_eq!(request.parent_session, parent_session);
-        assert_eq!(request.input_request_id, "request-9");
+        assert_eq!(request.target, target);
         assert_eq!(
             request.input,
             serde_json::Value::String("the exact answer".to_string())

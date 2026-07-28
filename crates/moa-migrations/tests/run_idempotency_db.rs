@@ -328,6 +328,167 @@ async fn assert_route_audit_insert_rejected(
 
 #[tokio::test]
 #[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn rebuild_state_enforces_single_operation_and_generation_on_a_fresh_database_db() {
+    // Pins the V000351 guarantees that are the database's job, not the
+    // application's, verified against a database built from the full migration
+    // set rather than the long-running Compose one: forced row-level security
+    // on every rebuild table, one nonterminal operation per storage partition,
+    // and one active generation per storage partition. An application that
+    // "checked first" would pass a unit test and still admit two concurrent
+    // rebuilds; these indexes are what actually refuse the second.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create throwaway migration database");
+    let target_url = with_database(&admin_url, &db_name);
+
+    let outcome = async {
+        clean_apply_then_reapply(&target_url).await?;
+        let target = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+
+        let unforced: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT relation.relname
+              FROM pg_catalog.pg_class AS relation
+              JOIN pg_catalog.pg_namespace AS namespace
+                ON namespace.oid = relation.relnamespace
+             WHERE namespace.nspname = 'moa'
+               AND relation.relname IN (
+                   'knowledge_rebuild_operation',
+                   'knowledge_rebuild_generation',
+                   'knowledge_active_generation',
+                   'knowledge_rebuild_candidate_vector',
+                   'knowledge_rechunk_staging'
+               )
+               AND NOT (relation.relrowsecurity AND relation.relforcerowsecurity)
+             ORDER BY relation.relname
+            "#,
+        )
+        .fetch_all(&target)
+        .await?;
+
+        let tenant_id = uuid::Uuid::now_v7();
+        let partition = tenant_id.to_string();
+        sqlx::query(
+            "INSERT INTO moa.knowledge_rebuild_operation \
+             (operation_uid, tenant_id, storage_partition_id, kind, lifecycle, owner_token) \
+             VALUES ($1, $2, $3, 'reembed', 'building', $4)",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(tenant_id)
+        .bind(&partition)
+        .bind(uuid::Uuid::now_v7())
+        .execute(&target)
+        .await?;
+        let second_operation = sqlx::query(
+            "INSERT INTO moa.knowledge_rebuild_operation \
+             (operation_uid, tenant_id, storage_partition_id, kind, lifecycle, owner_token) \
+             VALUES ($1, $2, $3, 'rechunk', 'planning', $4)",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(tenant_id)
+        .bind(&partition)
+        .bind(uuid::Uuid::now_v7())
+        .execute(&target)
+        .await
+        .is_err();
+
+        // A terminal operation releases the partition for the next rebuild.
+        sqlx::query(
+            "UPDATE moa.knowledge_rebuild_operation SET lifecycle = 'finalized' \
+             WHERE storage_partition_id = $1",
+        )
+        .bind(&partition)
+        .execute(&target)
+        .await?;
+        let after_terminal = sqlx::query(
+            "INSERT INTO moa.knowledge_rebuild_operation \
+             (operation_uid, tenant_id, storage_partition_id, kind, lifecycle, owner_token) \
+             VALUES ($1, $2, $3, 'rechunk', 'planning', $4)",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(tenant_id)
+        .bind(&partition)
+        .bind(uuid::Uuid::now_v7())
+        .execute(&target)
+        .await
+        .is_ok();
+
+        for sequence in [1_i64, 2] {
+            sqlx::query(
+                "INSERT INTO moa.knowledge_rebuild_generation \
+                 (generation_uid, tenant_id, storage_partition_id, generation_seq, \
+                  embedding_model, embedding_model_version, embedding_dimension, \
+                  turbopuffer_namespace, state) \
+                 VALUES ($1, $2, $3, $4, 'embed-v4.0', 1, 1024, $5, \
+                         CASE WHEN $4 = 1 THEN 'active' ELSE 'candidate' END)",
+            )
+            .bind(uuid::Uuid::now_v7())
+            .bind(tenant_id)
+            .bind(&partition)
+            .bind(sequence)
+            .bind(format!("{partition}__g{sequence}"))
+            .execute(&target)
+            .await?;
+        }
+        let second_active = sqlx::query(
+            "UPDATE moa.knowledge_rebuild_generation SET state = 'active' \
+             WHERE storage_partition_id = $1 AND generation_seq = 2",
+        )
+        .bind(&partition)
+        .execute(&target)
+        .await
+        .is_err();
+
+        target.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            unforced,
+            second_operation,
+            after_terminal,
+            second_active,
+        ))
+    }
+    .await;
+
+    let _ = admin
+        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
+        .await;
+    admin.close().await;
+
+    let (unforced, second_operation_refused, after_terminal_allowed, second_active_refused) =
+        outcome.expect("rebuild-state assertions should complete on a fresh database");
+
+    assert!(
+        unforced.is_empty(),
+        "every rebuild table must force row-level security, missing on: {unforced:?}"
+    );
+    assert!(
+        second_operation_refused,
+        "a second nonterminal rebuild for one partition must be refused by the index"
+    );
+    assert!(
+        after_terminal_allowed,
+        "a terminal rebuild must release the partition for the next one"
+    );
+    assert!(
+        second_active_refused,
+        "a second active generation for one partition must be refused by the index"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
 async fn refinery_clean_apply_then_second_apply_reports_no_new_migrations_db() {
     // Pins clean-apply + idempotency of the central migration runner on a pristine
     // database: the first run applies the full embedded set, and a second run reports
@@ -2737,4 +2898,746 @@ async fn knowledge_graph_occurrence_backfill_v346_to_v347_db() {
             .any(|migration| migration.contains("knowledge_graph_occurrences")),
         "V000347 must not re-apply once recorded, got {remainder:?}"
     );
+}
+
+/// Collects the schema facts the source-ACL admission boundary depends on.
+///
+/// Returns `(forced_rls, snapshot_policies, entry_policies, snapshot_update_granted,
+/// entry_update_granted, epoch_trigger_tables, acl_mode_not_null, acl_state_not_null,
+/// current_acl_complete_constraint, document_node_unique_index)`.
+#[allow(clippy::type_complexity)]
+async fn source_acl_schema_facts(
+    pool: &PgPool,
+) -> Result<
+    (
+        Vec<(String, bool)>,
+        Vec<String>,
+        Vec<String>,
+        bool,
+        bool,
+        Vec<String>,
+        bool,
+        bool,
+        bool,
+        bool,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let forced_rls = sqlx::query_as::<_, (String, bool)>(
+        "SELECT relname::TEXT, relforcerowsecurity FROM pg_class AS class \
+           JOIN pg_namespace AS namespace ON namespace.oid = class.relnamespace \
+          WHERE namespace.nspname = 'moa' \
+            AND relname IN ( \
+                'knowledge_source_acl_keys', \
+                'knowledge_source_acl_epochs', \
+                'knowledge_source_acl_snapshots', \
+                'knowledge_source_acl_entries', \
+                'knowledge_source_principal_bindings', \
+                'knowledge_source_principal_group_bindings') \
+          ORDER BY relname",
+    )
+    .fetch_all(pool)
+    .await?;
+    let snapshot_policies: Vec<String> = sqlx::query_scalar(
+        "SELECT policyname::TEXT FROM pg_policies \
+          WHERE schemaname = 'moa' AND tablename = 'knowledge_source_acl_snapshots' \
+          ORDER BY policyname",
+    )
+    .fetch_all(pool)
+    .await?;
+    let entry_policies: Vec<String> = sqlx::query_scalar(
+        "SELECT policyname::TEXT FROM pg_policies \
+          WHERE schemaname = 'moa' AND tablename = 'knowledge_source_acl_entries' \
+          ORDER BY policyname",
+    )
+    .fetch_all(pool)
+    .await?;
+    let snapshot_update_granted: bool = sqlx::query_scalar(
+        "SELECT has_table_privilege('moa_app', 'moa.knowledge_source_acl_snapshots', 'UPDATE')",
+    )
+    .fetch_one(pool)
+    .await?;
+    let entry_update_granted: bool = sqlx::query_scalar(
+        "SELECT has_table_privilege('moa_app', 'moa.knowledge_source_acl_entries', 'UPDATE')",
+    )
+    .fetch_one(pool)
+    .await?;
+    let epoch_trigger_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT class.relname::TEXT FROM pg_trigger AS trigger_row \
+           JOIN pg_class AS class ON class.oid = trigger_row.tgrelid \
+           JOIN pg_proc AS proc ON proc.oid = trigger_row.tgfoid \
+          WHERE proc.proname = 'source_acl_epoch_trigger' \
+          ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await?;
+    let acl_mode_not_null: bool = sqlx::query_scalar(
+        "SELECT attnotnull FROM pg_attribute \
+          WHERE attrelid = 'moa.knowledge_connections'::REGCLASS AND attname = 'acl_mode'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let acl_state_not_null: bool = sqlx::query_scalar(
+        "SELECT attnotnull FROM pg_attribute \
+          WHERE attrelid = 'moa.knowledge_objects'::REGCLASS AND attname = 'acl_state'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let current_acl_complete: bool = sqlx::query_scalar(
+        "SELECT count(*) = 1 FROM pg_constraint \
+          WHERE conname = 'knowledge_objects_current_acl_complete'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let document_node_unique: bool = sqlx::query_scalar(
+        "SELECT count(*) = 1 FROM pg_indexes \
+          WHERE indexname = 'knowledge_document_versions_graph_node_uniq' \
+            AND indexdef LIKE '%UNIQUE%'",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok((
+        forced_rls,
+        snapshot_policies,
+        entry_policies,
+        snapshot_update_granted,
+        entry_update_granted,
+        epoch_trigger_tables,
+        acl_mode_not_null,
+        acl_state_not_null,
+        current_acl_complete,
+        document_node_unique,
+    ))
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn knowledge_source_acl_v000348_fresh_and_idempotent_db() {
+    // Pins: V000348 installs the source-ACL boundary on a pristine database and
+    // re-applies as a no-op. The properties asserted here are the ones admission
+    // cannot be trusted without — forced RLS on every new table, snapshots and
+    // their entries immutable (no UPDATE policy AND no UPDATE grant, so a
+    // permission set cannot be edited under an unchanged revision), an epoch
+    // trigger on every ACL-affecting table, and database-owned totality of
+    // `acl_mode` / `acl_state`.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create throwaway migration database");
+
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = async {
+        let (first, second) = clean_apply_then_reapply(&target_url).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&target_url)
+            .await?;
+        let facts = source_acl_schema_facts(&pool).await?;
+        pool.close().await;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((first, second, facts))
+    }
+    .await;
+
+    // Always force-drop the throwaway database, even if an assertion below fails.
+    let _ = admin
+        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
+        .await;
+    admin.close().await;
+
+    let (first, second, facts) =
+        outcome.expect("source ACL migration should apply on a fresh database");
+    let (
+        forced_rls,
+        snapshot_policies,
+        entry_policies,
+        snapshot_update_granted,
+        entry_update_granted,
+        epoch_trigger_tables,
+        acl_mode_not_null,
+        acl_state_not_null,
+        current_acl_complete,
+        document_node_unique,
+    ) = facts;
+
+    assert!(
+        first
+            .iter()
+            .any(|applied| applied.contains("knowledge_source_acl")),
+        "a pristine database must apply V000348, got {first:?}"
+    );
+    assert!(
+        second.is_empty(),
+        "re-applying must report no newly applied migrations, got {second:?}"
+    );
+    assert_eq!(
+        forced_rls,
+        vec![
+            ("knowledge_source_acl_entries".to_string(), true),
+            ("knowledge_source_acl_epochs".to_string(), true),
+            ("knowledge_source_acl_keys".to_string(), true),
+            ("knowledge_source_acl_snapshots".to_string(), true),
+            ("knowledge_source_principal_bindings".to_string(), true),
+            (
+                "knowledge_source_principal_group_bindings".to_string(),
+                true
+            ),
+        ],
+        "every source-ACL table must exist with FORCE ROW LEVEL SECURITY"
+    );
+    assert_eq!(
+        snapshot_policies,
+        vec![
+            "rd_tenant".to_string(),
+            "rm_tenant".to_string(),
+            "wr_tenant".to_string()
+        ],
+        "snapshots must expose read/insert/delete policies and no update policy"
+    );
+    assert_eq!(
+        entry_policies,
+        vec![
+            "rd_tenant".to_string(),
+            "rm_tenant".to_string(),
+            "wr_tenant".to_string()
+        ],
+        "entries must expose read/insert/delete policies and no update policy"
+    );
+    assert!(
+        !snapshot_update_granted,
+        "the app role must not be able to edit a stored snapshot"
+    );
+    assert!(
+        !entry_update_granted,
+        "the app role must not be able to edit a stored ACL entry"
+    );
+    assert_eq!(
+        epoch_trigger_tables,
+        vec![
+            "knowledge_connections".to_string(),
+            "knowledge_objects".to_string(),
+            "knowledge_source_acl_entries".to_string(),
+            "knowledge_source_acl_snapshots".to_string(),
+            "knowledge_source_principal_bindings".to_string(),
+            "knowledge_source_principal_group_bindings".to_string(),
+        ],
+        "every ACL-affecting write must bump the tenant source-ACL epoch"
+    );
+    assert!(
+        acl_mode_not_null,
+        "a connection without an ACL mode must be impossible"
+    );
+    assert!(
+        acl_state_not_null,
+        "an object without an ACL state must be impossible"
+    );
+    assert!(
+        current_acl_complete,
+        "a `current` object must name its snapshot and revision"
+    );
+    assert!(
+        document_node_unique,
+        "one document graph node must belong to exactly one document version"
+    );
+}
+
+/// A tenant knowledge world seeded at V000347, before source ACLs existed.
+struct LegacySourceAclWorld {
+    tenant_id: uuid::Uuid,
+    other_tenant_id: uuid::Uuid,
+    connection_uid: uuid::Uuid,
+    object_uid: uuid::Uuid,
+    version_uid: uuid::Uuid,
+    chunk_uid: uuid::Uuid,
+    document_node: uuid::Uuid,
+}
+
+impl LegacySourceAclWorld {
+    fn new() -> Self {
+        Self {
+            tenant_id: uuid::Uuid::now_v7(),
+            other_tenant_id: uuid::Uuid::now_v7(),
+            connection_uid: uuid::Uuid::now_v7(),
+            object_uid: uuid::Uuid::now_v7(),
+            version_uid: uuid::Uuid::now_v7(),
+            chunk_uid: uuid::Uuid::now_v7(),
+            document_node: uuid::Uuid::now_v7(),
+        }
+    }
+}
+
+/// Seeds one permission-bearing connection with one document, one version, one
+/// chunk occurrence, and the graph nodes ingestion would have written — all at
+/// the V000347 schema, where nothing records who may read it.
+async fn seed_pre_source_acl_world(
+    pool: &PgPool,
+) -> Result<LegacySourceAclWorld, Box<dyn std::error::Error + Send + Sync>> {
+    let world = LegacySourceAclWorld::new();
+    let tenant_text = world.tenant_id.to_string();
+    let mut tx = begin_as_app(pool, Some(world.tenant_id)).await?;
+
+    sqlx::query(
+        "INSERT INTO moa.knowledge_connections ( \
+             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key, \
+             provider_connection_id, connector, credential_ref, status, metadata) \
+         VALUES ($1, $2, $3, 'nango', 'acl-config', 'acl-account', 'google-drive', \
+                 'acl-credential', 'active', '{}'::JSONB)",
+    )
+    .bind(world.connection_uid)
+    .bind(world.tenant_id)
+    .bind(&tenant_text)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO moa.knowledge_objects ( \
+             object_uid, tenant_id, storage_partition_id, connection_id, object_type, \
+             external_object_id, title, change_token, source_uri, status, metadata) \
+         VALUES ($1, $2, $3, $4, 'document', 'acl-doc', 'Board compensation memo', 'etag-1', \
+                 'https://drive.example.test/acl-doc', 'active', '{}'::JSONB)",
+    )
+    .bind(world.object_uid)
+    .bind(world.tenant_id)
+    .bind(&tenant_text)
+    .bind(world.connection_uid)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO moa.knowledge_document_versions ( \
+             document_version_uid, tenant_id, storage_partition_id, object_id, \
+             parser_provider, content_hash, metadata) \
+         VALUES ($1, $2, $3, $4, 'native', 'acl-hash-v1', '{}'::JSONB)",
+    )
+    .bind(world.version_uid)
+    .bind(world.tenant_id)
+    .bind(&tenant_text)
+    .bind(world.object_uid)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO moa.knowledge_chunks ( \
+             chunk_uid, tenant_id, storage_partition_id, document_version_id, \
+             graph_node_uid, chunk_hash, block_hashes, heading_path, text, ordinal, \
+             token_count, metadata) \
+         VALUES ($1, $2, $3, $4, $1, 'acl-chunk-hash', ARRAY['block-1']::TEXT[], \
+                 ARRAY['Compensation']::TEXT[], 'Executive bonuses are approved quarterly.', \
+                 0, 6, '{}'::JSONB)",
+    )
+    .bind(world.chunk_uid)
+    .bind(world.tenant_id)
+    .bind(&tenant_text)
+    .bind(world.version_uid)
+    .execute(&mut *tx)
+    .await?;
+
+    // The chunk occurrence node and the document node ingestion writes. The
+    // document node carries `version_uid` in its properties, which is the only
+    // link back to its governing object before V000348 stores it as a column.
+    sqlx::query(
+        "INSERT INTO moa.node_index ( \
+             uid, label, storage_partition_id, tenant_id, name, pii_class, confidence, \
+             properties_summary, data_subject_id) \
+         VALUES ($1, 'Chunk', $2, $3, 'acl-chunk-hash', 'none', 0.95, \
+                 jsonb_build_object('chunk_hash', 'acl-chunk-hash'), $3)",
+    )
+    .bind(world.chunk_uid)
+    .bind(&tenant_text)
+    .bind(world.tenant_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO moa.node_index ( \
+             uid, label, storage_partition_id, tenant_id, name, pii_class, confidence, \
+             properties_summary, data_subject_id) \
+         VALUES ($1, 'Document', $2, $3, 'Board compensation memo', 'none', 0.95, \
+                 jsonb_build_object('version_uid', $4::TEXT), $3)",
+    )
+    .bind(world.document_node)
+    .bind(&tenant_text)
+    .bind(world.tenant_id)
+    .bind(world.version_uid)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(world)
+}
+
+/// Runs the PRODUCTION source-ACL admission predicate over `candidates` through
+/// the app role at the given tenant scope, returning the admitted uids.
+async fn admitted_uids(
+    pool: &PgPool,
+    tenant_id: Option<uuid::Uuid>,
+    acl: &moa_core::types::memory::SourceAclContext,
+    candidates: &[uuid::Uuid],
+) -> Result<Vec<uuid::Uuid>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut tx = begin_as_app(pool, tenant_id).await?;
+    let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT node.uid FROM moa.node_index AS node WHERE node.uid = ANY(",
+    );
+    builder.push_bind(candidates.to_vec());
+    builder.push(") AND ");
+    moa_db::push_source_acl_predicate(&mut builder, "node.uid", acl);
+    builder.push(" ORDER BY node.uid");
+    let admitted = builder
+        .build_query_scalar::<uuid::Uuid>()
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(admitted)
+}
+
+/// Reads one tenant's source-ACL epoch through the app role.
+async fn source_acl_epoch(
+    pool: &PgPool,
+    tenant_id: uuid::Uuid,
+) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    let mut tx = begin_as_app(pool, Some(tenant_id)).await?;
+    let epoch: i64 = sqlx::query_scalar(
+        "SELECT COALESCE( \
+             (SELECT epoch FROM moa.knowledge_source_acl_epochs WHERE tenant_id = $1), 0)",
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(epoch)
+}
+
+#[tokio::test]
+#[ignore = "requires a superuser-capable local Postgres via MOA_DATABASE_URL"]
+async fn knowledge_source_acl_v347_to_v348_hides_legacy_content_until_resync_db() {
+    // Pins the whole upgrade contract through the PRODUCTION admission predicate,
+    // executed as the non-BYPASSRLS app role:
+    //
+    //   * every pre-existing connection lands on `provider_managed` and every
+    //     object on `incomplete`, so content ingested before ACLs existed is
+    //     invisible to everyone — including a caller who later turns out to be
+    //     authorized — until a resync captures real permissions;
+    //   * the document node's governing object is recovered, so a denied
+    //     document's title is not still retrievable through its graph node;
+    //   * once a complete, revision-matched snapshot exists, an allowed principal
+    //     is admitted, a wrong principal and an empty principal set are not, an
+    //     explicit deny beats the allow, and a revision drift denies again;
+    //   * the tenant epoch moves on every ACL write, and tenant scope stays a
+    //     boundary: a missing or wrong `moa.tenant_id` sees nothing at all.
+    let admin_url = test_database_url();
+    let db_name = unique_db_name();
+
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await
+        .expect("connect maintenance database");
+    admin
+        .execute(format!("CREATE DATABASE \"{db_name}\"").as_str())
+        .await
+        .expect("create throwaway migration database");
+
+    let target_url = with_database(&admin_url, &db_name);
+    let outcome = source_acl_upgrade_probe(&target_url).await;
+
+    // Always force-drop the throwaway database, even if an assertion below fails.
+    let _ = admin
+        .execute(format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)").as_str())
+        .await;
+    admin.close().await;
+
+    outcome.expect("source ACL upgrade probe should succeed");
+}
+
+#[allow(clippy::too_many_lines)]
+async fn source_acl_upgrade_probe(
+    target_url: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use moa_core::types::memory::{SourceAclContext, SourcePrincipalFingerprint};
+
+    {
+        let bootstrap = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(target_url)
+            .await?;
+        bootstrap
+            .execute(
+                "CREATE EXTENSION IF NOT EXISTS vector; \
+                 CREATE EXTENSION IF NOT EXISTS pgaudit;",
+            )
+            .await?;
+        bootstrap.close().await;
+    }
+
+    apply_through_version(target_url, 347).await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(target_url)
+        .await?;
+    let world = seed_pre_source_acl_world(&pool).await?;
+    pool.close().await;
+
+    let remainder = moa_migrations::run_reporting_applied(target_url).await?;
+    assert!(
+        remainder
+            .iter()
+            .any(|applied| applied.contains("knowledge_source_acl")),
+        "the upgrade must apply V000348, got {remainder:?}"
+    );
+
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(target_url)
+        .await?;
+    let tenant_text = world.tenant_id.to_string();
+
+    // --- Backfill determinism -------------------------------------------------
+    let mut tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
+    let acl_mode: String = sqlx::query_scalar(
+        "SELECT acl_mode FROM moa.knowledge_connections WHERE connection_uid = $1",
+    )
+    .bind(world.connection_uid)
+    .fetch_one(&mut *tx)
+    .await?;
+    let acl_state: String =
+        sqlx::query_scalar("SELECT acl_state FROM moa.knowledge_objects WHERE object_uid = $1")
+            .bind(world.object_uid)
+            .fetch_one(&mut *tx)
+            .await?;
+    let backfilled_document_node: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT graph_node_uid FROM moa.knowledge_document_versions WHERE document_version_uid = $1",
+    )
+    .bind(world.version_uid)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    assert_eq!(
+        acl_mode, "provider_managed",
+        "a permission-bearing connection must not be promoted to tenant-public"
+    );
+    assert_eq!(
+        acl_state, "incomplete",
+        "an object whose permissions were never captured must be incomplete"
+    );
+    assert_eq!(
+        backfilled_document_node,
+        Some(world.document_node),
+        "the document node must be tied back to its governing object"
+    );
+
+    // --- Nothing is visible before a resync ----------------------------------
+    let candidates = vec![world.chunk_uid, world.document_node];
+    let allowed_principal = SourcePrincipalFingerprint::from_digest(1, [0xA1; 32]);
+    let denied_principal = SourcePrincipalFingerprint::from_digest(1, [0xD1; 32]);
+    let stranger_principal = SourcePrincipalFingerprint::from_digest(1, [0x5E; 32]);
+
+    let holder = SourceAclContext::new([allowed_principal.clone()], 0);
+    assert!(
+        admitted_uids(&pool, Some(world.tenant_id), &holder, &candidates)
+            .await?
+            .is_empty(),
+        "legacy content must stay hidden even from a principal who will later be allowed"
+    );
+
+    // --- A complete, revision-matched snapshot admits the allowed principal ---
+    let epoch_before = source_acl_epoch(&pool, world.tenant_id).await?;
+    let snapshot_uid = uuid::Uuid::now_v7();
+    let mut tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
+    sqlx::query(
+        "INSERT INTO moa.knowledge_source_acl_snapshots ( \
+             snapshot_uid, tenant_id, storage_partition_id, connection_id, object_id, \
+             provider_revision, snapshot_hash, provenance, complete, entry_count, captured_at) \
+         VALUES ($1, $2, $3, $4, $5, 'rev-1', 'hash-1', 'provider_listing', TRUE, 2, now())",
+    )
+    .bind(snapshot_uid)
+    .bind(world.tenant_id)
+    .bind(&tenant_text)
+    .bind(world.connection_uid)
+    .bind(world.object_uid)
+    .execute(&mut *tx)
+    .await?;
+    for (kind, principal) in [
+        ("allow", &allowed_principal),
+        ("allow", &denied_principal),
+        ("deny", &denied_principal),
+    ] {
+        sqlx::query(
+            "INSERT INTO moa.knowledge_source_acl_entries ( \
+                 entry_uid, tenant_id, storage_partition_id, snapshot_id, entry_kind, \
+                 principal_kind, principal_fingerprint, fingerprint_key_version) \
+             VALUES ($1, $2, $3, $4, $5, 'user', $6, 1)",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(world.tenant_id)
+        .bind(&tenant_text)
+        .bind(snapshot_uid)
+        .bind(kind)
+        .bind(principal.as_bytes())
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE moa.knowledge_objects \
+            SET acl_state = 'current', acl_revision = 'rev-1', current_acl_snapshot_id = $2 \
+          WHERE object_uid = $1",
+    )
+    .bind(world.object_uid)
+    .bind(snapshot_uid)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let epoch_after = source_acl_epoch(&pool, world.tenant_id).await?;
+    assert!(
+        epoch_after > epoch_before,
+        "capturing an ACL must move the tenant epoch: {epoch_before} -> {epoch_after}"
+    );
+
+    assert_eq!(
+        admitted_uids(&pool, Some(world.tenant_id), &holder, &candidates).await?,
+        sorted(vec![world.chunk_uid, world.document_node]),
+        "an allowed principal must see both the chunk occurrence and its document node"
+    );
+    assert!(
+        admitted_uids(
+            &pool,
+            Some(world.tenant_id),
+            &SourceAclContext::new([denied_principal.clone()], epoch_after),
+            &candidates
+        )
+        .await?
+        .is_empty(),
+        "an explicit deny must beat the same principal's allow"
+    );
+    assert!(
+        admitted_uids(
+            &pool,
+            Some(world.tenant_id),
+            &SourceAclContext::new([allowed_principal.clone(), denied_principal], epoch_after),
+            &candidates
+        )
+        .await?
+        .is_empty(),
+        "a deny anywhere in the caller's principal set must deny"
+    );
+    assert!(
+        admitted_uids(
+            &pool,
+            Some(world.tenant_id),
+            &SourceAclContext::new([stranger_principal], epoch_after),
+            &candidates
+        )
+        .await?
+        .is_empty(),
+        "a principal absent from the snapshot must not be admitted"
+    );
+    assert!(
+        admitted_uids(
+            &pool,
+            Some(world.tenant_id),
+            &SourceAclContext::empty(epoch_after),
+            &candidates
+        )
+        .await?
+        .is_empty(),
+        "an empty principal set must never be admitted"
+    );
+
+    // --- Tenant scope stays a boundary ---------------------------------------
+    assert!(
+        admitted_uids(&pool, Some(world.other_tenant_id), &holder, &candidates)
+            .await?
+            .is_empty(),
+        "another tenant must not see this tenant's admitted content"
+    );
+    assert!(
+        admitted_uids(&pool, None, &holder, &candidates)
+            .await?
+            .is_empty(),
+        "a missing tenant scope must fail closed"
+    );
+
+    // --- A stale announcement hides content before the resync lands ----------
+    // The snapshot is still complete and still revision-matched; only the
+    // object's state changed. This is the window between "the provider told us
+    // permissions moved" and "we captured what they moved to", and content must
+    // be invisible for its whole duration.
+    let mut tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
+    sqlx::query("UPDATE moa.knowledge_objects SET acl_state = 'stale' WHERE object_uid = $1")
+        .bind(world.object_uid)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    assert!(
+        admitted_uids(&pool, Some(world.tenant_id), &holder, &candidates)
+            .await?
+            .is_empty(),
+        "a stale ACL must hide content even though its snapshot still matches"
+    );
+    let mut tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
+    sqlx::query("UPDATE moa.knowledge_objects SET acl_state = 'current' WHERE object_uid = $1")
+        .bind(world.object_uid)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    assert_eq!(
+        admitted_uids(&pool, Some(world.tenant_id), &holder, &candidates).await?,
+        sorted(vec![world.chunk_uid, world.document_node]),
+        "returning to `current` restores exactly what the snapshot allows"
+    );
+
+    // --- Revision drift denies without touching content ----------------------
+    let mut tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
+    sqlx::query("UPDATE moa.knowledge_objects SET acl_revision = 'rev-2' WHERE object_uid = $1")
+        .bind(world.object_uid)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    assert!(
+        admitted_uids(&pool, Some(world.tenant_id), &holder, &candidates)
+            .await?
+            .is_empty(),
+        "a snapshot for an older revision must not admit the current object"
+    );
+    let epoch_after_drift = source_acl_epoch(&pool, world.tenant_id).await?;
+    assert!(
+        epoch_after_drift > epoch_after,
+        "an object ACL change must move the epoch so warm caches cannot survive it"
+    );
+
+    // --- Stored snapshots are immutable --------------------------------------
+    let mut tx = begin_as_app(&pool, Some(world.tenant_id)).await?;
+    let update_error = sqlx::query(
+        "UPDATE moa.knowledge_source_acl_entries SET entry_kind = 'allow' WHERE snapshot_id = $1",
+    )
+    .bind(snapshot_uid)
+    .execute(&mut *tx)
+    .await
+    .expect_err("editing a stored ACL entry must be refused");
+    let sql_state = update_error
+        .as_database_error()
+        .and_then(|database_error| database_error.code())
+        .map(|code| code.into_owned());
+    assert_eq!(
+        sql_state.as_deref(),
+        Some("42501"),
+        "a stored ACL entry must be un-editable by the app role: {update_error}"
+    );
+    drop(tx);
+
+    pool.close().await;
+    Ok(())
+}
+
+/// Returns a sorted copy so admitted-uid comparisons are order-independent.
+fn sorted(mut uids: Vec<uuid::Uuid>) -> Vec<uuid::Uuid> {
+    uids.sort();
+    uids
 }

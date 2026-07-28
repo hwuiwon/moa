@@ -17,6 +17,7 @@ use wiremock::{
 fn input() -> ParseInput {
     ParseInput {
         object: KnowledgeObject {
+            acl: moa_knowledge::domain::ObjectAcl::incomplete(),
             object_uid: Uuid::from_u128(31),
             tenant_id: TenantId::from(Uuid::from_u128(32)),
             connection_uid: Uuid::from_u128(33),

@@ -1,7 +1,12 @@
 use std::collections::BTreeMap;
 
 use moa_authz::{FgaClient, FgaConfig};
+use moa_core::types::credentials::CredentialRef;
 use moa_core::types::identifiers::{StoragePartitionId, TenantId};
+use moa_hands::core::{
+    PostgresTenantMcpConnectionBindings, TenantMcpBindingStatus, TenantMcpConnectionBinding,
+    TenantMcpConnectionBindingStore,
+};
 use moa_memory_pii::legal_hold::{
     LegalHoldError, begin_destruction_stage_guard, complete_destruction, place_hold, release_hold,
     start_destruction,
@@ -74,6 +79,51 @@ async fn tenant_purge_removes_registered_families_in_dependency_order_and_leaves
             ("moa.tenant_purge_operations".to_string(), 1),
             ("public.authz_outbox".to_string(), 1),
         ])
+    );
+
+    // The neighbour tenant's rebuild state is untouched. This is the failure the
+    // purged-tenant residue map structurally cannot catch: a step that dropped
+    // its `WHERE tenant_id = $1` would leave that map empty and still have
+    // destroyed every other tenant's rebuild.
+    let neighbour_acl: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM moa.knowledge_source_acl_keys WHERE tenant_id = $1),
+            (SELECT count(*) FROM moa.knowledge_source_acl_epochs WHERE tenant_id = $1),
+            (SELECT count(*) FROM moa.knowledge_source_acl_snapshots WHERE tenant_id = $1),
+            (SELECT count(*) FROM moa.knowledge_source_acl_entries WHERE tenant_id = $1),
+            (SELECT count(*) FROM moa.knowledge_source_principal_bindings WHERE tenant_id = $1),
+            (SELECT count(*) FROM moa.knowledge_source_principal_group_bindings WHERE tenant_id = $1)
+        "#,
+    )
+    .bind(NEIGHBOUR_TENANT)
+    .fetch_one(pool)
+    .await
+    .expect("load neighbour tenant source-ACL state");
+    assert_eq!(
+        neighbour_acl,
+        (1, 1, 1, 1, 1, 1),
+        "another tenant's source-ACL state must survive this tenant's purge"
+    );
+
+    let neighbour_rebuild: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT count(*) FROM moa.knowledge_rebuild_operation WHERE tenant_id = $1),
+            (SELECT count(*) FROM moa.knowledge_rebuild_generation WHERE tenant_id = $1),
+            (SELECT count(*) FROM moa.knowledge_active_generation WHERE tenant_id = $1),
+            (SELECT count(*) FROM moa.knowledge_rebuild_candidate_vector WHERE tenant_id = $1),
+            (SELECT count(*) FROM moa.knowledge_rechunk_staging WHERE tenant_id = $1)
+        "#,
+    )
+    .bind(NEIGHBOUR_TENANT)
+    .fetch_one(pool)
+    .await
+    .expect("load neighbour tenant rebuild state");
+    assert_eq!(
+        neighbour_rebuild,
+        (1, 1, 1, 1, 1),
+        "another tenant's index-rebuild state must survive this tenant's purge"
     );
 
     let hold_tombstone: (Option<Uuid>, String, String, Option<String>, bool) = sqlx::query_as(
@@ -183,6 +233,92 @@ async fn tenant_purge_rejects_an_unregistered_tenant_table_and_rolls_back_db_mem
     .await
     .expect("inspect rollback state");
     assert_eq!(rows_after_failure, (1, 1, 0));
+}
+
+#[tokio::test]
+async fn tenant_purge_admits_mcp_bindings_and_drains_them_in_the_credential_stage_db_memory() {
+    // Pins the two halves of the MCP connection binding's purge contract. The
+    // binding table is tenant-owned, so the catalog guard would abort every
+    // purge if it were unregistered; it is registered, so the relational stage
+    // completes. It is also forced-RLS, so that stage's role cannot see the row
+    // and deliberately leaves it behind — the bounded `moa_app`-scoped sweep the
+    // credential stage runs is what actually removes it, and only for the
+    // purged tenant.
+    let test_db = bootstrap_test_db()
+        .await
+        .expect("bootstrap mcp-binding purge db");
+    let pool = test_db.store().pool();
+    let purged = Uuid::new_v4();
+    let retained = Uuid::new_v4();
+    let operation_id = format!("tenant-purge-{purged}");
+    seed_tenant(pool, purged).await;
+    seed_tenant(pool, retained).await;
+
+    let bindings = PostgresTenantMcpConnectionBindings::new(pool.clone());
+    for tenant_id in [purged, retained] {
+        bindings
+            .upsert_binding(&TenantMcpConnectionBinding {
+                tenant_id: TenantId::from(tenant_id),
+                connection_uid: Uuid::new_v4(),
+                server_name: "tenant-search".to_string(),
+                credential_ref: CredentialRef::from_uuid(Uuid::new_v4()),
+                status: TenantMcpBindingStatus::Active,
+                allowed_operations: vec!["search_documents".to_string()],
+            })
+            .await
+            .expect("seed tenant MCP binding");
+    }
+    start_destruction(
+        pool,
+        TenantId::from(purged),
+        &[],
+        &operation_id,
+        "tenant.purge",
+    )
+    .await
+    .expect("start mcp-binding destruction fence");
+
+    purge_relational(pool, &offline_fga(), purged, &operation_id)
+        .await
+        .expect("the registered binding table must not abort the relational stage");
+
+    assert!(
+        bindings
+            .binding_for_server(TenantId::from(purged), "tenant-search")
+            .await
+            .expect("read the binding after the relational stage")
+            .is_some(),
+        "the relational transaction's role cannot see the forced-RLS row, so it must survive that stage"
+    );
+
+    let mut removed_total = 0_u64;
+    loop {
+        let removed = bindings
+            .purge_tenant_bindings(TenantId::from(purged), 2)
+            .await
+            .expect("bounded credential-stage sweep");
+        if removed == 0 {
+            break;
+        }
+        removed_total += removed;
+    }
+
+    assert_eq!(removed_total, 1);
+    assert!(
+        bindings
+            .binding_for_server(TenantId::from(purged), "tenant-search")
+            .await
+            .expect("read the purged tenant's binding")
+            .is_none()
+    );
+    assert!(
+        bindings
+            .binding_for_server(TenantId::from(retained), "tenant-search")
+            .await
+            .expect("read the retained tenant's binding")
+            .is_some(),
+        "another tenant's binding must survive the purge"
+    );
 }
 
 #[tokio::test]
@@ -654,10 +790,306 @@ async fn seed_purge_families(
     .await
     .expect("seed tenant KEK");
 
+    seed_source_acl_families(pool, tenant_id, storage_partition_id).await;
+    seed_index_rebuild_families(pool, tenant_id, storage_partition_id).await;
+    // The same two families for a tenant the purge must not touch. Both are
+    // seeded for the neighbour because both now depend on explicit deletes
+    // rather than cascades, which is exactly the shape where a lost
+    // `WHERE tenant_id = $1` destroys every tenant at once.
+    let neighbour_partition = StoragePartitionId::for_tenant(TenantId::from(NEIGHBOUR_TENANT));
+    seed_source_acl_families(pool, NEIGHBOUR_TENANT, &neighbour_partition).await;
+    // A neighbour tenant's rebuild state, seeded so the purge has something it
+    // must NOT touch. Every step is `WHERE tenant_id = $1`; a step that lost
+    // that predicate would destroy every tenant's rebuild state at once, and
+    // the purged-tenant residue check cannot see that because it only counts
+    // rows belonging to the tenant being purged.
+    seed_index_rebuild_families(pool, NEIGHBOUR_TENANT, &neighbour_partition).await;
+
     GlobalFixtureIds {
         oauth_client_id,
         root_generation,
     }
+}
+
+/// Tenant whose rows must outlive a different tenant's purge.
+///
+/// Fixed rather than random so a leaked row is identifiable in a failure dump,
+/// and distinct from every generated fixture tenant.
+const NEIGHBOUR_TENANT: Uuid = Uuid::from_u128(0x5EED_0000_0000_0000_0000_0000_0000_0001);
+
+/// Seeds every V000351 index-rebuild table so the exact-residue assertion proves
+/// they are purged rather than merely registered.
+///
+/// Registration alone only satisfies `assert_catalog_coverage`. A `DELETE`
+/// against a forced-RLS table the purge role has no policy for removes zero
+/// rows and raises no error, and the residue `SELECT count(*)` that follows it
+/// is filtered by the same policy — so both read zero and the step looks
+/// covered while the rows survive. Seeding is the only thing that distinguishes
+/// "deleted" from "invisible".
+///
+/// Ordered innermost-first, matching the purge steps: staging and candidate
+/// vectors cascade from their generation, the active-generation pointer
+/// references generations, and the operation's `candidate_generation_uid` is
+/// `ON DELETE SET NULL`.
+async fn seed_index_rebuild_families(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    storage_partition_id: &StoragePartitionId,
+) {
+    let partition = storage_partition_id.to_string();
+    let operation_uid = Uuid::new_v4();
+    let generation_uid = Uuid::new_v4();
+    let node_uid = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_rebuild_operation
+            (operation_uid, tenant_id, storage_partition_id, kind, lifecycle, owner_token,
+             vectors_total, vectors_rebuilt, estimated_input_tokens, estimated_cost_micros)
+        VALUES ($1, $2, $3, 'reembed', 'activated', $4, 1, 1, 128, 12)
+        "#,
+    )
+    .bind(operation_uid)
+    .bind(tenant_id)
+    .bind(&partition)
+    .bind(Uuid::new_v4())
+    .execute(pool)
+    .await
+    .expect("seed index-rebuild operation");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_rebuild_generation
+            (generation_uid, tenant_id, storage_partition_id, generation_seq, operation_uid,
+             embedding_model, embedding_model_version, embedding_dimension,
+             turbopuffer_namespace, state, complete, vector_count)
+        VALUES ($1, $2, $3, 1, $4, 'embed-v4.0', 1, 1024, $5, 'active', TRUE, 1)
+        "#,
+    )
+    .bind(generation_uid)
+    .bind(tenant_id)
+    .bind(&partition)
+    .bind(operation_uid)
+    .bind(format!("moa-purge-{partition}__g1"))
+    .execute(pool)
+    .await
+    .expect("seed index-rebuild generation");
+
+    sqlx::query(
+        r#"
+        UPDATE moa.knowledge_rebuild_operation
+           SET candidate_generation_uid = $2
+         WHERE operation_uid = $1
+        "#,
+    )
+    .bind(operation_uid)
+    .bind(generation_uid)
+    .execute(pool)
+    .await
+    .expect("point the seeded operation at its generation");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_active_generation
+            (storage_partition_id, tenant_id, generation_uid)
+        VALUES ($1, $2, $3)
+        "#,
+    )
+    .bind(&partition)
+    .bind(tenant_id)
+    .bind(generation_uid)
+    .execute(pool)
+    .await
+    .expect("seed active-generation pointer");
+
+    // A candidate vector is real tenant embedding material. Leaving one behind
+    // would keep a purged tenant's content recoverable from a table nothing
+    // else references.
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_rebuild_candidate_vector
+            (generation_uid, uid, tenant_id, storage_partition_id, label, pii_class,
+             embedding, input_digest, input_token_estimate)
+        VALUES ($1, $2, $3, $4, 'Fact', 'none', $5::public.halfvec(1024), $6, 32)
+        "#,
+    )
+    .bind(generation_uid)
+    .bind(node_uid)
+    .bind(tenant_id)
+    .bind(&partition)
+    .bind(format!("[{}]", vec!["0.01"; 1024].join(",")))
+    .bind(vec![0x5A_u8; 32])
+    .execute(pool)
+    .await
+    .expect("seed index-rebuild candidate vector");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_rechunk_staging
+            (staging_uid, generation_uid, tenant_id, storage_partition_id,
+             document_version_uid, member, payload)
+        VALUES ($1, $2, $3, $4, $5, 'chunk', '{"chunks": []}'::JSONB)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(generation_uid)
+    .bind(tenant_id)
+    .bind(&partition)
+    .bind(Uuid::new_v4())
+    .execute(pool)
+    .await
+    .expect("seed rechunk staging row");
+}
+
+/// Seeds every source-ACL table so the exact-residue assertion proves they are
+/// purged rather than merely registered.
+///
+/// Registration alone only satisfies `assert_catalog_coverage`; it says nothing
+/// about whether the DELETE actually reached any rows. Snapshots and entries
+/// would cascade from the connection and object, but the bindings, the tenant
+/// epoch, and the fingerprint key have no cascade at all — leaving them behind
+/// would keep a purged tenant's keyed principal material recoverable.
+async fn seed_source_acl_families(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    storage_partition_id: &StoragePartitionId,
+) {
+    let partition = storage_partition_id.to_string();
+    let connection_uid = Uuid::new_v4();
+    let object_uid = Uuid::new_v4();
+    let snapshot_uid = Uuid::new_v4();
+    // Two opaque fingerprints in the stored 34-byte shape: two key-version bytes
+    // followed by a 32-byte digest.
+    let member = [vec![0_u8, 1_u8], vec![0xA1_u8; 32]].concat();
+    let group = [vec![0_u8, 1_u8], vec![0xB2_u8; 32]].concat();
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_connections
+            (connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
+             provider_connection_id, connector, credential_ref, status, acl_mode)
+        VALUES ($1, $2, $3, 'nango', 'purge-config', 'purge-account', 'google-drive',
+                'vault://purge', 'active', 'provider_managed')
+        "#,
+    )
+    .bind(connection_uid)
+    .bind(tenant_id)
+    .bind(&partition)
+    .execute(pool)
+    .await
+    .expect("seed source-ACL connection");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_objects
+            (object_uid, tenant_id, storage_partition_id, connection_id, object_type,
+             external_object_id, status, acl_state)
+        VALUES ($1, $2, $3, $4, 'document', 'purge-doc', 'active', 'incomplete')
+        "#,
+    )
+    .bind(object_uid)
+    .bind(tenant_id)
+    .bind(&partition)
+    .bind(connection_uid)
+    .execute(pool)
+    .await
+    .expect("seed source-ACL object");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_source_acl_snapshots
+            (snapshot_uid, tenant_id, storage_partition_id, connection_id, object_id,
+             provider_revision, snapshot_hash, provenance, complete, entry_count, captured_at)
+        VALUES ($1, $2, $3, $4, $5, 'rev-1', 'hash-1', 'provider_listing', TRUE, 1, now())
+        "#,
+    )
+    .bind(snapshot_uid)
+    .bind(tenant_id)
+    .bind(&partition)
+    .bind(connection_uid)
+    .bind(object_uid)
+    .execute(pool)
+    .await
+    .expect("seed source-ACL snapshot");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_source_acl_entries
+            (entry_uid, tenant_id, storage_partition_id, snapshot_id, entry_kind,
+             principal_kind, principal_fingerprint, fingerprint_key_version)
+        VALUES ($1, $2, $3, $4, 'allow', 'user', $5, 1)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(tenant_id)
+    .bind(&partition)
+    .bind(snapshot_uid)
+    .bind(member.as_slice())
+    .execute(pool)
+    .await
+    .expect("seed source-ACL entry");
+
+    // Deliberately connection-less: these are the rows the connection cascade
+    // does NOT reach, so only an explicit purge step removes them.
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_source_principal_bindings
+            (binding_uid, tenant_id, storage_partition_id, contact_id, principal_kind,
+             principal_fingerprint, fingerprint_key_version, verified_at)
+        VALUES ($1, $2, $3, $4, 'user', $5, 1, now())
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(tenant_id)
+    .bind(&partition)
+    .bind(Uuid::new_v4())
+    .bind(member.as_slice())
+    .execute(pool)
+    .await
+    .expect("seed source-ACL principal binding");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_source_principal_group_bindings
+            (binding_uid, tenant_id, storage_partition_id, member_fingerprint, group_kind,
+             group_fingerprint, fingerprint_key_version, verified_at)
+        VALUES ($1, $2, $3, $4, 'group', $5, 1, now())
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(tenant_id)
+    .bind(&partition)
+    .bind(member.as_slice())
+    .bind(group.as_slice())
+    .execute(pool)
+    .await
+    .expect("seed source-ACL group binding");
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_source_acl_keys
+            (tenant_id, key_version, key_handle, wrapped_key)
+        VALUES ($1, 1, 'purge-key-handle', $2)
+        ON CONFLICT (tenant_id, key_version) DO NOTHING
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(vec![4_u8, 5, 6])
+    .execute(pool)
+    .await
+    .expect("seed source-ACL fingerprint key");
+
+    // The epoch row is written by the triggers above, not by hand: if a trigger
+    // stopped firing, this assertion catches it here rather than letting the
+    // purge test pass on a table that was silently always empty.
+    let epoch: i64 = sqlx::query_scalar(
+        "SELECT epoch FROM moa.knowledge_source_acl_epochs WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await
+    .expect("ACL writes must have created a tenant epoch row");
+    assert!(epoch > 0, "ACL writes must have bumped the tenant epoch");
 }
 
 async fn tenant_residue(

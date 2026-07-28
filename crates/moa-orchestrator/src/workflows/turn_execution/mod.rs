@@ -128,6 +128,10 @@ struct BodyOutcome {
 struct RunOnceContext<'a> {
     session_id: SessionId,
     turn_id: TurnId,
+    /// Session-facing workflow turn key, the identity an action review owner records.
+    workflow_turn_id: &'a str,
+    /// Session turn generation that admitted this turn.
+    generation: u64,
     loop_class: ModelLoopClass,
     objective: &'a str,
     durable_upgrade_allowed: bool,
@@ -172,6 +176,8 @@ enum TurnIterationOutcome {
     DurableUpgrade(DurableUpgradeSignal),
     DurableUpgradeUnsupported(String),
     ToolBudgetExceeded(ToolBudgetExhausted),
+    /// The prompt-injection circuit halted this coordinator turn.
+    SecurityHalt,
 }
 
 struct DurableUpgradeGuard {
@@ -242,6 +248,14 @@ async fn execute_turn_inside_workflow(
         });
     }
 
+    // The trigger and the typed continuation context must agree exactly. A mismatch
+    // is a wiring defect, not something to infer around: an `ActionReview` turn with
+    // no receipt has nothing to continue, and a receipt on any other trigger would
+    // smuggle review state into an ordinary turn.
+    request
+        .action_review_continuation()
+        .map_err(|error| TerminalError::new_with_code(409, error.to_string()))?;
+
     turn_progress::initialize(ctx).await?;
     turn_progress::enable_live_delivery(ctx);
     let appender = workflow.event_appender();
@@ -273,7 +287,10 @@ async fn execute_turn_inside_workflow(
             );
             user_sequence_num
         }
-        TurnTrigger::ChildSignal | TurnTrigger::WorkerResults | TurnTrigger::ExecutionSynthesis => {
+        TurnTrigger::ChildSignal
+        | TurnTrigger::WorkerResults
+        | TurnTrigger::ExecutionSynthesis
+        | TurnTrigger::ActionReview => {
             // System-triggered coordinator resume: the instruction was already recorded
             // as a durable control event and the history pipeline renders that event into
             // the prompt. So we deliberately do NOT append a fake `Event::UserMessage`,
@@ -306,6 +323,11 @@ async fn execute_turn_inside_workflow(
         load_recent_target_events(ctx, workflow.session_store.clone(), session_id).await?;
     let recent_target_digest = recent_target_digest(&recent_target_events, user_sequence_num);
     let execution_synthesis_turn = is_execution_synthesis_turn(request);
+    // A review continuation answers work the session already routed. Re-running the
+    // classifier would spend a model call to re-decide a settled question and could
+    // route the continuation into planning or durable execution, which the exact
+    // continuation matrix forbids.
+    let action_review_turn = is_action_review_turn(request);
     let classifier_model = ModelId::new(
         workflow
             .config
@@ -315,7 +337,7 @@ async fn execute_turn_inside_workflow(
             .unwrap_or_else(|| workflow.config.models.main.clone()),
     );
     let route_provider = RestateExecutionModelProvider { ctx };
-    let route_result = if execution_synthesis_turn {
+    let route_result = if execution_synthesis_turn || action_review_turn {
         None
     } else {
         let available_skill_names =
@@ -339,6 +361,10 @@ async fn execute_turn_inside_workflow(
     let route = if execution_synthesis_turn {
         ExecutionRouteDecision::Respond {
             rationale: "This turn synthesizes the completed durable execution.".to_string(),
+        }
+    } else if action_review_turn {
+        ExecutionRouteDecision::Respond {
+            rationale: "This turn continues the owner after an action review resolved.".to_string(),
         }
     } else {
         route_result
@@ -438,6 +464,10 @@ async fn execute_turn_inside_workflow(
     let mut turn_evidence = TurnEvidence::default();
     // Per-turn file_read memory serves repeated identical reads from context with a notice.
     let mut file_read_cache = FileReadTurnCache::default();
+    // Tools whose capability the security circuit disabled for this turn. Rebuilt
+    // deterministically from journaled apply-assessment responses, so a replay
+    // reconstructs the same refusals.
+    let mut disabled_tools = std::collections::BTreeSet::<String>::new();
 
     let mut turn_number: usize = 0;
     let final_max_turns = loop {
@@ -482,6 +512,8 @@ async fn execute_turn_inside_workflow(
                             RunOnceContext {
                                 session_id,
                                 turn_id,
+                                workflow_turn_id: request.turn_id.as_str(),
+                                generation: request.generation,
                                 loop_class,
                                 objective: &request.user_message,
                                 durable_upgrade_allowed: durable_upgrade_guard.allows_tool_signal(),
@@ -493,6 +525,7 @@ async fn execute_turn_inside_workflow(
                             &mut turn_evidence,
                             &mut tool_budget,
                             &mut file_read_cache,
+                            &mut disabled_tools,
                             &mut delegated_this_turn,
                         )
                         .instrument(turn_root_span.clone())
@@ -611,6 +644,27 @@ async fn execute_turn_inside_workflow(
                 return Ok(BodyOutcome {
                     kind: TurnOutcomeKind::Completed,
                     message: last_summary.unwrap_or_else(|| "idle".to_string()),
+                    post_outcome_assessment,
+                });
+            }
+            // A halted turn is a failure, not a completion: the coordinator's
+            // catch-all boundary turns `Failed` into the canonical
+            // `Event::TurnFailed { actor: Coordinator, .. }`, so the halt gets one
+            // attributed failed-turn fact without a second writer for it here.
+            // The message is fixed and carries nothing from the tool output.
+            TurnIterationOutcome::SecurityHalt => {
+                let post_outcome_assessment = capture_current_active_segment_assessment(
+                    workflow,
+                    ctx,
+                    session_id,
+                    AssessmentPhase::Final,
+                    &[],
+                    last_response_cutoff_before_seq(ctx).await?,
+                )
+                .await?;
+                return Ok(BodyOutcome {
+                    kind: TurnOutcomeKind::Failed,
+                    message: SECURITY_CIRCUIT_HALT_MESSAGE.to_string(),
                     post_outcome_assessment,
                 });
             }
@@ -853,6 +907,14 @@ fn execution_audit_error(error: moa_execution::Error) -> HandlerError {
 ///
 /// Deliberately opaque: the raw provider detail is recorded only in the durable
 /// error event and never surfaced to the user.
+/// Fixed user-facing message for a turn the security circuit halted.
+///
+/// Deliberately says nothing about what the output contained: the whole point of
+/// the halt is that the output was untrustworthy, so quoting it into the reply
+/// would hand the attacker the channel the circuit just closed.
+const SECURITY_CIRCUIT_HALT_MESSAGE: &str = "This turn was stopped because a tool returned output that MOA classified as a \
+     prompt-injection or restricted-material result. No further tool calls were made.";
+
 const PLANNING_PROVIDER_FAILURE_USER_MESSAGE: &str =
     "I hit an internal error while planning this work. Please try again.";
 
@@ -1030,6 +1092,10 @@ fn is_execution_synthesis_turn(request: &RunTurnRequest) -> bool {
     request.trigger == TurnTrigger::ExecutionSynthesis
 }
 
+fn is_action_review_turn(request: &RunTurnRequest) -> bool {
+    request.trigger == TurnTrigger::ActionReview
+}
+
 async fn append_clarification_response(
     appender: &TurnEventAppender,
     ctx: &WorkflowContext<'_>,
@@ -1130,6 +1196,7 @@ async fn run_once_inside_workflow(
     turn_evidence: &mut TurnEvidence,
     tool_budget: &mut ToolBudgetState,
     file_read_cache: &mut FileReadTurnCache,
+    disabled_tools: &mut std::collections::BTreeSet<String>,
     delegated_this_turn: &mut bool,
 ) -> Result<TurnIterationOutcome, HandlerError> {
     let session_id = turn_context.session_id;
@@ -1286,6 +1353,8 @@ async fn run_once_inside_workflow(
             meta: &meta,
             identity: turn_context.identity,
             session_id,
+            turn_id: turn_context.workflow_turn_id,
+            generation: turn_context.generation,
             active_canary: active_canary.as_deref(),
             trusted_sandbox_manifest: trusted_sandbox_manifest.as_ref(),
             selected_skills: &selected_skills,
@@ -1293,6 +1362,7 @@ async fn run_once_inside_workflow(
             durable_upgrade_allowed: turn_context.durable_upgrade_allowed,
             turn_evidence,
             file_read_cache,
+            disabled_tools,
             delegated_worker: delegated_this_turn,
         },
         &allowed_tools,
@@ -1314,6 +1384,9 @@ async fn run_once_inside_workflow(
         }
         ToolDispatchOutcome::ToolBudgetExceeded(exhaustion) => {
             return Ok(TurnIterationOutcome::ToolBudgetExceeded(exhaustion));
+        }
+        ToolDispatchOutcome::SecurityHalt => {
+            return Ok(TurnIterationOutcome::SecurityHalt);
         }
     }
 

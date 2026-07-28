@@ -6,6 +6,7 @@ mod deletion;
 mod idempotency;
 mod occurrence_identity;
 mod semantic_graph;
+mod source_acl;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -437,6 +438,7 @@ impl KnowledgeGraphWriter for FakeGraphWriter {
 
 fn drive_connection(connection_uid: Uuid, tenant_id: TenantId) -> KnowledgeConnection {
     KnowledgeConnection {
+        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid,
         tenant_id,
         provider: "test_provider".to_string(),
@@ -455,6 +457,7 @@ fn drive_connection(connection_uid: Uuid, tenant_id: TenantId) -> KnowledgeConne
 
 fn metadata_only_record(source_id: &str, change_token: &str, title: &str) -> ProviderRecord {
     ProviderRecord {
+        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
         source_id: source_id.to_string(),
         object_type: "drive_file".to_string(),
         title: Some(title.to_string()),
@@ -513,6 +516,7 @@ fn record_with_source(
     text: &str,
 ) -> ProviderRecord {
     ProviderRecord {
+        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
         source_id: source_id.to_string(),
         object_type: "page".to_string(),
         title: Some(if source_id == "doc-1" {
@@ -1024,7 +1028,7 @@ async fn stored_identities(pool: &sqlx::PgPool, object_uid: Uuid) -> StoredIdent
     .expect("read document version identities");
     let chunks = sqlx::query_as::<_, (Uuid, Uuid, String)>(
         r#"
-        SELECT chunk_uid, graph_node_uid, chunk_hash
+        SELECT c.chunk_uid, c.graph_node_uid, c.chunk_hash
         FROM moa.knowledge_chunks c
         JOIN moa.knowledge_document_versions v
           ON v.document_version_uid = c.document_version_id

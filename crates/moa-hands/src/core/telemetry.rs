@@ -5,7 +5,8 @@ use std::time::Duration;
 use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionPolicyEffect,
     types::completion::ToolInvocation, types::hands::SandboxTier,
-    types::observability::TraceContext, types::session::SessionMeta, types::tools::ToolOutput,
+    types::observability::TraceContext, types::session::SessionMeta,
+    types::tools::SecuredToolOutput,
 };
 use moa_observability::{apply_trace_context_to_span, current_turn_root_span, record_tool_call};
 use opentelemetry::trace::Status;
@@ -72,18 +73,27 @@ pub(super) fn record_tool_invocation_metadata(
     );
 }
 
+/// Records the span outcome for one executed tool call.
+///
+/// It takes the [`SecuredToolOutput`], not a bare output, so the text that can
+/// reach a trace exporter is by construction the post-classification text. The
+/// assessment class and capability are recorded as closed-vocabulary attributes;
+/// neither can carry attacker-controlled bytes or unbounded cardinality.
 pub(super) fn record_tool_execution_result(
     span: &tracing::Span,
     tool_name: &str,
     duration: Duration,
-    result: &Result<(Option<String>, ToolOutput)>,
+    result: &Result<SecuredToolOutput>,
 ) {
     span.set_attribute("moa.tool.duration_ms", duration.as_millis() as i64);
 
     match result {
-        Ok((_, output)) => {
+        Ok(secured) => {
+            let output = &secured.safe_output;
             let succeeded = !output.is_error;
             span.set_attribute("moa.tool.success", succeeded);
+            span.set_attribute("moa.tool.security.class", secured.assessment.class.as_str());
+            span.set_attribute("moa.tool.security.capability", secured.capability.render());
             record_tool_output_fields(span, &output.to_text(), trace_tool_output_enabled());
             record_tool_call(
                 tool_name,

@@ -82,7 +82,7 @@ pub use providers::{
 pub use runtime_cache::{RuntimeCacheBackend, RuntimeCacheConfig};
 pub use sandbox::{
     CloudConfig, CloudHandsConfig, LocalConfig, McpCredentialConfig, McpServerConfig,
-    McpTransportConfig,
+    McpServerCredentialScope, McpTransportConfig,
 };
 pub use security::{PermissionsConfig, SecurityProfile};
 pub use session::{

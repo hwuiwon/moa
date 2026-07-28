@@ -3,6 +3,7 @@
 use std::{collections::HashMap, time::Instant};
 
 use super::*;
+use moa_core::types::security::{ToolCapabilityId, ToolOutputAssessment};
 
 /// One event prepared for insertion: blobs already offloaded, metadata computed.
 struct PreparedAppend {
@@ -258,6 +259,67 @@ impl PostgresSessionStore {
         .fetch_one(&self.pool)
         .await
         .map_err(map_sqlx_error)
+    }
+
+    /// Loads the security metadata recorded on one durable `ToolResult` payload.
+    ///
+    /// Reads only the two closed-vocabulary security fields, never the output
+    /// body, so a recovery path can rebuild an honest receipt without pulling
+    /// tool bytes back out of storage.
+    pub async fn tool_result_security_metadata(
+        &self,
+        storage_partition_id: &StoragePartitionId,
+        session_id: moa_core::types::identifiers::SessionId,
+        tool_call_id: ToolCallId,
+    ) -> Result<Option<(ToolOutputAssessment, ToolCapabilityId)>> {
+        let events = self.table_name("events");
+        let row = sqlx::query_scalar::<_, serde_json::Value>(&format!(
+            "SELECT jsonb_build_object(\
+                 'assessment', payload -> 'data' -> 'assessment', \
+                 'capability', payload -> 'data' -> 'capability'\
+             ) \
+             FROM {events} \
+             WHERE storage_partition_id = $1 \
+               AND event_type = $2 \
+               AND payload -> 'data' ->> 'tool_id' = $3 \
+               AND session_id = $4 \
+             ORDER BY sequence_num DESC \
+             LIMIT 1"
+        ))
+        .bind(storage_partition_id.as_str())
+        .bind(EventType::ToolResult.as_str())
+        .bind(tool_call_id.to_string())
+        .bind(session_id.0)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let assessment = row
+            .get("assessment")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let capability = row
+            .get("capability")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        if assessment.is_null() || capability.is_null() {
+            return Ok(None);
+        }
+        let assessment: ToolOutputAssessment =
+            serde_json::from_value(assessment).map_err(|error| {
+                MoaError::ValidationError(format!(
+                    "durable tool result carries an undecodable assessment: {error}"
+                ))
+            })?;
+        let capability: ToolCapabilityId = serde_json::from_value(capability).map_err(|error| {
+            MoaError::ValidationError(format!(
+                "durable tool result carries an undecodable capability: {error}"
+            ))
+        })?;
+        Ok(Some((assessment, capability)))
     }
 
     /// Returns whether a persisted action-review event exists without decoding matching payloads.
@@ -660,6 +722,21 @@ impl SessionEventLookupStore for PostgresSessionStore {
             storage_partition_id,
             session_id,
             event_type,
+            tool_call_id,
+        )
+        .await
+    }
+
+    async fn tool_result_security_metadata(
+        &self,
+        storage_partition_id: &StoragePartitionId,
+        session_id: moa_core::types::identifiers::SessionId,
+        tool_call_id: ToolCallId,
+    ) -> Result<Option<(ToolOutputAssessment, ToolCapabilityId)>> {
+        PostgresSessionStore::tool_result_security_metadata(
+            self,
+            storage_partition_id,
+            session_id,
             tool_call_id,
         )
         .await

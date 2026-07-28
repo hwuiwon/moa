@@ -67,7 +67,7 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
-| `MOA_MCP_SERVERS_JSON` | `mcp_servers` | [] | JSON array of complete MCP server objects; replaces file-backed server configuration. `trust_tool_annotations` defaults to `false` and must be enabled per server before a negotiated standard `idempotentHint` can permit retries. |
+| `MOA_MCP_SERVERS_JSON` | `mcp_servers` | [] | JSON array of complete MCP server objects; replaces file-backed server configuration. Each object must carry `credential_scope` (`deployment_owned` or `tenant_owned`) — it has no default, and omitting it is a typed config error. A `deployment_owned` server's `credentials` must name an environment variable (`bearer`, `oauth`, `api_key`) or be absent; a `tenant_owned` server's `credentials` must be a header shape only (`tenant_bearer`, `tenant_api_key`) and its material is resolved per tenant from the credential vault. `trust_tool_annotations` defaults to `false` and must be enabled per server before a negotiated standard `idempotentHint` can permit retries. |
 
 ### `execution`
 

@@ -555,14 +555,18 @@ fn mcp_servers_json_replaces_configured_servers() {
     // rather than appends to, file-backed server configuration.
     let overlay = EnvOverlay::from_iter(env_pairs([(
         "MOA_MCP_SERVERS_JSON",
-        r#"[{"name":"fixture","transport":"http","url":"http://127.0.0.1:4321","trust_tool_annotations":true}]"#,
+        r#"[{"name":"fixture","transport":"http","url":"http://127.0.0.1:4321","credential_scope":"deployment_owned","trust_tool_annotations":true}]"#,
     )]))
     .expect("MCP JSON overlay should deserialize");
     let mut config = MoaConfig::default();
     config.mcp_servers.push(crate::McpServerConfig {
         name: "file-backed".to_string(),
+        transport: crate::McpTransportConfig::Http,
+        url: None,
+        credential_scope: crate::McpServerCredentialScope::DeploymentOwned,
+        credentials: None,
         trust_tool_annotations: false,
-        ..crate::McpServerConfig::default()
+        allowed_data_classes: Vec::new(),
     });
 
     overlay
@@ -583,6 +587,20 @@ fn mcp_servers_json_rejects_malformed_json_through_config_error() {
     // Pins: malformed production MCP JSON fails startup through the ordinary typed config path.
     assert_config_error_contains(
         EnvOverlay::from_iter(env_pairs([("MOA_MCP_SERVERS_JSON", "[{not-json]")])),
+        "MOA_MCP_SERVERS_JSON",
+    );
+}
+
+#[test]
+fn mcp_server_without_a_credential_scope_is_a_typed_config_error() {
+    // Pins: which owner's credential an MCP server is invoked with has no default
+    // and no inferred value — a server configuration that omits it fails startup
+    // instead of silently picking an ownership model.
+    assert_config_error_contains(
+        EnvOverlay::from_iter(env_pairs([(
+            "MOA_MCP_SERVERS_JSON",
+            r#"[{"name":"fixture","transport":"http","url":"http://127.0.0.1:4321"}]"#,
+        )])),
         "MOA_MCP_SERVERS_JSON",
     );
 }

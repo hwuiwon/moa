@@ -34,6 +34,7 @@ fn repository(db: &postgres::TestDb, tenant_id: TenantId) -> PostgresKnowledgeRe
 
 fn object(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeObject {
     KnowledgeObject {
+        acl: moa_knowledge::domain::ObjectAcl::incomplete(),
         object_uid: Uuid::now_v7(),
         tenant_id,
         connection_uid,
@@ -72,6 +73,7 @@ fn object_with_member(
     member_email: &str,
 ) -> KnowledgeObject {
     KnowledgeObject {
+        acl: moa_knowledge::domain::ObjectAcl::incomplete(),
         object_uid: Uuid::now_v7(),
         tenant_id,
         connection_uid,

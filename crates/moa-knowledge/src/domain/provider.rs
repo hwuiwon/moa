@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::KnowledgeConnection;
+use super::{KnowledgeConnection, RecordAcl};
 
 /// Linked-account provider identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -243,6 +243,12 @@ pub struct ListChangedRecordsRequest {
     pub connection: KnowledgeConnection,
     /// Resolved credential for this connection's provider account.
     pub credential: RedactedSecret,
+    /// The tenant's current ACL fingerprint key.
+    ///
+    /// Adapters key each provider principal as they normalize a record, inside
+    /// the same call that reads it, so a raw identity never survives the listing
+    /// step — which is what lets the resulting page be journaled durably.
+    pub acl_key: std::sync::Arc<crate::acl_key::SourceAclKey>,
     /// Provider cursor.
     pub cursor: Option<String>,
     /// Lower bound for provider-side modified timestamps.
@@ -265,6 +271,12 @@ pub struct RecordPage {
 }
 
 /// Provider record before normalization into a knowledge object.
+///
+/// Serializable — and safely so. [`ProviderRecord::acl`] holds principals that
+/// the adapter already keyed during normalization, so the durable Restate
+/// journal entry for a listed page contains opaque fingerprints and never a
+/// readable provider identity. That is the reason the keying happens at the
+/// adapter boundary rather than later in the pipeline.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderRecord {
     /// Provider source identifier.
@@ -292,6 +304,12 @@ pub struct ProviderRecord {
     /// Raw record payload kept in memory for normalization only.
     #[serde(default)]
     pub payload: Value,
+    /// The source permissions governing this record.
+    ///
+    /// Required with no default: a record whose ACL was never stated cannot be
+    /// distinguished from one the provider said was public, and the ingestion
+    /// pipeline refuses to guess.
+    pub acl: RecordAcl,
 }
 
 /// Request to fetch the byte content of one provider record.

@@ -13,9 +13,9 @@ pub(super) async fn upsert_object(
         INSERT INTO moa.knowledge_objects (
             object_uid, tenant_id, storage_partition_id, connection_id, object_type,
             external_object_id, parent_external_object_id, title, change_token,
-            last_modified_at, deleted_at, source_uri, status, metadata
+            last_modified_at, deleted_at, source_uri, status, metadata, acl_state
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         ON CONFLICT (tenant_id, connection_id, external_object_id)
         DO UPDATE SET
             parent_external_object_id = EXCLUDED.parent_external_object_id,
@@ -27,6 +27,11 @@ pub(super) async fn upsert_object(
             status = EXCLUDED.status,
             metadata = EXCLUDED.metadata,
             updated_at = now()
+            -- `acl_state`, `acl_revision`, and `current_acl_snapshot_id` are
+            -- deliberately absent: a content upsert must never move an object's
+            -- ACL position. Only `replace_object_acl_snapshot` and
+            -- `mark_object_acl_stale` do, and an insert of a brand-new object
+            -- lands on `incomplete` so it is hidden until its ACL is captured.
         "#,
     )
     .bind(object.object_uid)
@@ -43,6 +48,7 @@ pub(super) async fn upsert_object(
     .bind(object.source_uri)
     .bind(object.status.as_str())
     .bind(redact_provider_metadata(object.metadata))
+    .bind(object.acl.state.as_str())
     .execute(conn.as_mut())
     .await
     .map_err(map_sqlx_error)?;
@@ -58,7 +64,8 @@ pub(super) async fn get_object(
         r#"
         SELECT object_uid, tenant_id, connection_id, object_type, external_object_id,
                parent_external_object_id, source_uri, title, change_token, metadata,
-               status, last_modified_at, deleted_at
+               status, acl_state, acl_revision, current_acl_snapshot_id,
+               last_modified_at, deleted_at
         FROM moa.knowledge_objects
         WHERE object_uid = $1
         "#,
@@ -83,7 +90,8 @@ pub(super) async fn list_objects(
         r#"
         SELECT o.object_uid, o.tenant_id, o.connection_id, o.object_type,
                o.external_object_id, o.parent_external_object_id, o.source_uri,
-               o.title, o.change_token, o.metadata, o.status, o.last_modified_at,
+               o.title, o.change_token, o.metadata, o.status, o.acl_state,
+               o.acl_revision, o.current_acl_snapshot_id, o.last_modified_at,
                o.deleted_at, latest.parser_provider,
                CASE WHEN latest.document_version_uid IS NULL THEN 'pending' ELSE 'parsed' END AS parser_status,
                COALESCE(chunk_counts.chunk_count, 0) AS chunk_count
@@ -128,7 +136,8 @@ pub(super) async fn get_object_by_source(
         r#"
         SELECT object_uid, tenant_id, connection_id, object_type, external_object_id,
                parent_external_object_id, source_uri, title, change_token, metadata,
-               status, last_modified_at, deleted_at
+               status, acl_state, acl_revision, current_acl_snapshot_id,
+               last_modified_at, deleted_at
         FROM moa.knowledge_objects
         WHERE connection_id = $1 AND external_object_id = $2
         "#,
@@ -159,7 +168,8 @@ pub(super) async fn unseen_active_objects_for_connection(
         r#"
         SELECT object_uid, tenant_id, connection_id, object_type, external_object_id,
                parent_external_object_id, source_uri, title, change_token, metadata,
-               status, last_modified_at, deleted_at
+               status, acl_state, acl_revision, current_acl_snapshot_id,
+               last_modified_at, deleted_at
         FROM moa.knowledge_objects
         WHERE connection_id = $1
           AND tenant_id = $2
@@ -311,9 +321,10 @@ pub(super) async fn insert_document_version(
         r#"
         INSERT INTO moa.knowledge_document_versions (
             document_version_uid, tenant_id, storage_partition_id, object_id,
-            parser_provider, parser_job_id, content_hash, metadata, created_at
+            parser_provider, parser_job_id, content_hash, metadata, created_at,
+            graph_node_uid
         )
-        SELECT $1, tenant_id, storage_partition_id, object_uid, $3, $4, $5, $6, $7
+        SELECT $1, tenant_id, storage_partition_id, object_uid, $3, $4, $5, $6, $7, $8
         FROM moa.knowledge_objects
         WHERE object_uid = $2
         ON CONFLICT DO NOTHING
@@ -326,6 +337,10 @@ pub(super) async fn insert_document_version(
     .bind(version.content_hash)
     .bind(version.metadata)
     .bind(version.created_at)
+    // The graph node this version materializes, stored so the source-ACL
+    // admission predicate can resolve a `Document` node back to its governing
+    // object without re-deriving the uid in SQL.
+    .bind(DocumentVersion::graph_node_uid_for(version.version_uid))
     .execute(conn.as_mut())
     .await
     .map_err(map_sqlx_error)?;
@@ -343,9 +358,10 @@ pub(super) async fn claim_document_version_ingestion(
         r#"
         INSERT INTO moa.knowledge_document_versions (
             document_version_uid, tenant_id, storage_partition_id, object_id,
-            parser_provider, parser_job_id, content_hash, metadata, created_at
+            parser_provider, parser_job_id, content_hash, metadata, created_at,
+            graph_node_uid
         )
-        SELECT $1, tenant_id, storage_partition_id, object_uid, $3, $4, $5, $6, $7
+        SELECT $1, tenant_id, storage_partition_id, object_uid, $3, $4, $5, $6, $7, $8
         FROM moa.knowledge_objects
         WHERE object_uid = $2
         ON CONFLICT DO NOTHING
@@ -358,6 +374,7 @@ pub(super) async fn claim_document_version_ingestion(
     .bind(&version.content_hash)
     .bind(&version.metadata)
     .bind(version.created_at)
+    .bind(DocumentVersion::graph_node_uid_for(version.version_uid))
     .execute(conn.as_mut())
     .await
     .map_err(map_sqlx_error)?;

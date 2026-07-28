@@ -45,10 +45,24 @@ where
         object: KnowledgeObject,
         record: ProviderRecord,
     ) -> Result<RecordIngestionOutcome> {
-        if let Some(existing) = self
+        let existing = self
             .repository
             .get_object_by_source(object.connection_uid, &object.source_id)
-            .await?
+            .await?;
+
+        // The object row must exist before its ACL snapshot can reference it. A
+        // brand-new object lands `incomplete` — invisible — and only the capture
+        // below can make it readable.
+        if existing.is_none() {
+            self.repository.upsert_object(object.clone()).await?;
+        }
+        // Ahead of BOTH content fences: an unshared folder must stop being
+        // retrievable on the next sync pass even though not one byte changed,
+        // and re-parsing a document to learn that is pure waste.
+        self.capture_record_acl(sync_run_uid, &object, &record)
+            .await?;
+
+        if let Some(existing) = existing
             && existing.status == crate::domain::ObjectStatus::Active
             && existing.change_token.is_some()
             && existing.change_token == object.change_token
@@ -180,6 +194,10 @@ where
             } else {
                 crate::domain::ObjectStatus::Active
             },
+            // A newly materialized object has no captured permissions yet. The
+            // ACL step replaces this before any content write, so an object that
+            // reaches the graph without one stays hidden rather than public.
+            acl: crate::domain::ObjectAcl::incomplete(),
             source_updated_at: record.source_updated_at,
             deleted_at: record.deleted.then(Utc::now),
         }
@@ -516,6 +534,7 @@ mod tests {
 
     fn object() -> KnowledgeObject {
         KnowledgeObject {
+            acl: crate::domain::ObjectAcl::incomplete(),
             object_uid: Uuid::from_u128(1),
             tenant_id: TenantId::from(Uuid::from_u128(2)),
             connection_uid: Uuid::from_u128(3),
@@ -534,6 +553,7 @@ mod tests {
 
     fn record(title: Option<&str>, source_uri: Option<&str>, payload: Value) -> ProviderRecord {
         ProviderRecord {
+            acl: crate::domain::RecordAcl::UniformlyPublic,
             source_id: "src-1".to_string(),
             object_type: "document".to_string(),
             title: title.map(ToString::to_string),

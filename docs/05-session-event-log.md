@@ -180,16 +180,47 @@ updates the session to the verified contact and records the prior contact in
 | User input | `UserMessage`, `QueuedMessage`, `QueuedMessageRejected` |
 | Brain output | `BrainThinking`, `BrainResponse`, `CacheReport` |
 | Tools | `ToolCall`, `ToolResult`, `ToolError` |
-| Action review | `ActionReviewRequested`, `ActionReviewDecided` |
+| Action review | `ActionReviewRequested`, `ActionReviewDecided`, `ActionReviewContinuationRequested` |
 | Memory | `MemoryRead`, `MemoryWrite`, `MemoryIngest` |
 | Worker coordination | `WorkerSpawned`, `WorkerMessageSent`, `WorkerStatusChanged`, `WorkerNotificationDelivered`, `WorkerSignalReceived`, `WorkerParentResumeRequested`, `WorkerHeartbeatStale`, `ProgressNarrated` |
 | Execution runs | `ExecutionRunStarted`, `ExecutionProgress`, `ExecutionInputRequired`, `ExecutionCompleted`, `ExecutionFailed`, `ExecutionCancelled`, `ExecutionSynthesisRequested` |
 | Turn disposition | `TurnFailed` |
+| Security | `PromptInjectionCircuitTransition` |
 | Compaction | `Checkpoint` |
 | Diagnostics | `Error`, `Warning` |
 
 The serialized enum is `Event` (not `SessionEvent`); each variant uses
 `#[serde(tag = "type", content = "data")]` with snake_case field names.
+
+### Prompt-injection circuit transitions
+
+`PromptInjectionCircuitTransition` is the one fact recorded when a classified
+tool output moves a capability's security circuit to a new stage. It carries no
+output: only the typed assessment class, the detector revision, the
+generation-fenced owner and canonical capability identifiers, the prior and
+reached stage and score, the closed-vocabulary detector signals, and the
+redacted-span and deduplicated-carrier counts. Matched spans, raw carriers, and
+provider text never appear here, so the event is safe in model-visible history.
+
+`ToolResult` additionally carries the required `assessment` and `capability` of
+the output it wraps. Security metadata is never optional on that variant: an
+output reaching the log without an assessment would be an unclassified output,
+which is indistinguishable from a safe one after the fact.
+
+The append is keyed by the transition digest itself —
+`prompt_injection_circuit:v1:<64 lowercase blake3 hex>` over domain-separated
+canonical JSON of the schema version, session, owner, capability, tool-call id,
+prior stage, and reached stage — through the same custom-key path `TurnFailed`
+uses. A replayed or retried owner therefore re-derives the identical key and
+collapses onto one fact instead of appending a second copy. That same key is the
+`finding_info.uid` of the matching OCSF Detection Finding, so the session log
+and the signed audit trail join on it directly.
+
+`ProcessingEffect` is `Neutral` for every owner. Warning and disable stages are
+informational, and for worker and execution-task owners even a suspend or halt
+is neutral in the shared session log: their own signals and task outcomes own
+the suspension or termination, so a child's circuit tripping must not read as
+terminal root work.
 
 ### Terminal turn failure
 

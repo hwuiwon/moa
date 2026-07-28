@@ -10,7 +10,7 @@ use moa_core::{
     types::identifiers::SessionId, types::identifiers::ToolCallId, types::session::SessionMeta,
 };
 use moa_hands::ToolRouter;
-use moa_security::{InputClassification, ToolInputCanaryScreening, inspect_input};
+use moa_security::ToolInputCanaryScreening;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -305,6 +305,8 @@ pub(super) async fn execute_tool(
             session,
             caller_identity,
             &execution_call,
+            tool_id,
+            active_canary,
             cancel_token,
             hard_cancel_token,
         )
@@ -314,30 +316,18 @@ pub(super) async fn execute_tool(
     tool_span.record("moa.tool.duration_ms", duration_ms);
 
     match execution_result {
-        Ok((_resolved_hand_id, output)) => {
+        Ok(secured) => {
             tool_span.record("moa.tool.success", true);
-            let secured_output = secure_tool_output(&output, active_canary);
-            emit_tool_output_warning(
-                session_id,
-                &session_store,
-                event_tx,
-                tool_id,
-                &call.name,
-                &secured_output,
-            )
-            .await?;
+            // The router already classified this output at its source. The
+            // harness consumes the envelope and never reclassifies: a second
+            // classification here would double-count signals and could disagree
+            // with the assessment the durable event carries.
+            let output = secured.safe_output.clone();
             append_event(
                 &session_store,
                 event_tx,
                 session_id,
-                Event::ToolResult {
-                    tool_id,
-                    provider_tool_use_id: call.id.clone(),
-                    output: output.clone(),
-                    original_output_tokens: output.original_output_tokens,
-                    success: !output.is_error,
-                    duration_ms: output.duration.as_millis() as u64,
-                },
+                Event::tool_result(tool_id, call.id.clone(), secured),
             )
             .await?;
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
@@ -453,10 +443,6 @@ async fn append_tool_call_event(
     .await
 }
 
-fn format_tool_output(output: &moa_core::types::tools::ToolOutput) -> String {
-    output.to_text()
-}
-
 fn summarize_tool_completion(
     call: &ToolInvocation,
     output: &moa_core::types::tools::ToolOutput,
@@ -488,52 +474,6 @@ fn provider_thought_signature(call: &ToolCallContent) -> Option<String> {
         .as_ref()
         .and_then(|metadata| metadata.thought_signature())
         .map(ToOwned::to_owned)
-}
-
-struct SecuredToolOutput {
-    inspection: moa_security::InputInspection,
-}
-
-fn secure_tool_output(
-    output: &moa_core::types::tools::ToolOutput,
-    active_canary: Option<&str>,
-) -> SecuredToolOutput {
-    let formatted = format_tool_output(output);
-    let canaries = active_canary
-        .map(|canary| vec![canary.to_string()])
-        .unwrap_or_default();
-    let inspection = inspect_input(&formatted, &canaries);
-    SecuredToolOutput { inspection }
-}
-
-async fn emit_tool_output_warning(
-    session_id: SessionId,
-    session_store: &Arc<dyn SessionStore>,
-    event_tx: Option<&broadcast::Sender<EventRecord>>,
-    tool_id: ToolCallId,
-    tool_name: &str,
-    secured_output: &SecuredToolOutput,
-) -> Result<()> {
-    if matches!(
-        secured_output.inspection.classification,
-        InputClassification::MediumRisk | InputClassification::HighRisk
-    ) {
-        append_event(
-            session_store,
-            event_tx,
-            session_id,
-            Event::Warning {
-                message: format!(
-                    "tool output for {tool_name} ({tool_id}) classified as {:?} with signals: {}",
-                    secured_output.inspection.classification,
-                    secured_output.inspection.signals.join(", ")
-                ),
-            },
-        )
-        .await?;
-    }
-
-    Ok(())
 }
 
 fn record_denied_tool_span(call: &ToolInvocation, tool_dispatch_span: Option<&tracing::Span>) {

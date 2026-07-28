@@ -174,6 +174,7 @@ impl TenantRetriever {
             temporal_filter: None,
         };
         let request = RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: query.text.clone(),

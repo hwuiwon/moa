@@ -25,6 +25,7 @@ pub mod narration;
 pub mod neon_maint;
 pub mod privacy;
 pub mod scim;
+pub mod security_events;
 pub mod session_store;
 pub mod skill_regression;
 pub mod skills;

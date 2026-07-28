@@ -66,6 +66,18 @@ impl PgvectorStore {
         }
     }
 
+    /// Returns a clone of this store carrying one request's source-ACL context.
+    ///
+    /// The store itself is shared and long-lived while the admission context is
+    /// per request, so the caller rebinds it here rather than the store holding
+    /// a stale one. Cloning is cheap: a pool handle plus a small scope value.
+    #[must_use]
+    pub fn with_source_acl(&self, source_acl: moa_core::types::memory::SourceAclContext) -> Self {
+        let mut cloned = self.clone();
+        cloned.scope = cloned.scope.with_source_acl(source_acl);
+        cloned
+    }
+
     /// Forces exact KNN scans instead of the approximate HNSW index.
     #[must_use]
     pub fn with_exact_search(mut self, exact_search: bool) -> Self {
@@ -188,6 +200,11 @@ impl PgvectorStore {
             builder.push_bind(labels.as_slice());
             builder.push(")");
         }
+        // Inside the shortlist's WHERE clause: a denied vector must not consume
+        // one of the shortlist slots, or an admitted neighbour is lost to a row
+        // that would have been filtered afterwards anyway.
+        builder.push(" AND ");
+        moa_db::push_source_acl_predicate(&mut builder, "embedding.uid", self.scope.source_acl());
         // `shortlist_dims` is a validated `usize` (0 < dims < VECTOR_DIMENSION), so it is
         // inlined safely: pgvector type modifiers (`halfvec(<n>)`) cannot be bound parameters.
         builder.push(format!(
@@ -358,6 +375,15 @@ impl VectorStore for PgvectorStore {
                     builder.push_bind(labels.as_slice());
                     builder.push(")");
                 }
+                // Applied inside the ranked subquery's WHERE, before `LIMIT k`:
+                // a denied vector must never consume one of the k slots, which
+                // is what post-filtering would silently do.
+                builder.push(" AND ");
+                moa_db::push_source_acl_predicate(
+                    &mut builder,
+                    "embedding.uid",
+                    self.scope.source_acl(),
+                );
                 builder.push(" ORDER BY dist, embedding.uid ASC LIMIT ");
                 builder.push_bind(limit);
                 builder.push(") AS ranked ORDER BY ranked.dist, ranked.uid ASC");
@@ -419,6 +445,18 @@ async fn guard_storage_partition_embedder_for_write(
     }
 
     let state = load_storage_partition_embedder_state(conn, storage_partition_id).await?;
+    // The re-embed fence covers ordinary writes, not only KNN reads. A rebuild
+    // takes a partition-wide census, reconstructs every input, and activates a
+    // complete generation; a write that lands mid-build either misses the
+    // census (the generation activates without it and the row disappears from
+    // search) or lands in the old model's space and survives activation as a
+    // stray vector nothing can detect. Both are silent, so ordinary writes stop
+    // for the duration and their callers retry after the rebuild finishes.
+    if state.reembed_state == "in_progress" {
+        return Err(Error::ReembedInProgress {
+            storage_partition_id: storage_partition_id.to_string(),
+        });
+    }
     guard_storage_partition_dimension(storage_partition_id, &state)?;
     for item in items {
         if state.embedding_model != item.embedding_model {

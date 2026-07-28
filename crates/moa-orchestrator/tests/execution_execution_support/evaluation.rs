@@ -155,8 +155,10 @@ fn summarize_session_events(
             | Event::ToolCall { .. }
             | Event::ToolResult { .. }
             | Event::ToolError { .. }
+            | Event::PromptInjectionCircuitTransition { .. }
             | Event::ActionReviewRequested { .. }
             | Event::ActionReviewDecided { .. }
+            | Event::ActionReviewContinuationRequested { .. }
             | Event::WorkerSpawned { .. }
             | Event::WorkerMessageSent { .. }
             | Event::WorkerStatusChanged { .. }

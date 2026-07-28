@@ -9,6 +9,13 @@ use moa_core::{
 };
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
+pub mod source_acl;
+
+pub use source_acl::{
+    MAX_SOURCE_ACL_PRINCIPALS, TENANT_WIDE_PRINCIPAL_HOLDER, current_source_acl_epoch,
+    push_source_acl_predicate, resolve_source_acl_context,
+};
+
 struct DbScopeGucs {
     tenant_id: Option<String>,
     storage_partition_id: Option<String>,
@@ -168,6 +175,6 @@ impl AsMut<PgConnection> for ScopedConn<'_> {
     }
 }
 
-fn map_sqlx_error(error: sqlx::Error) -> MoaError {
+pub(crate) fn map_sqlx_error(error: sqlx::Error) -> MoaError {
     MoaError::StorageError(error.to_string())
 }

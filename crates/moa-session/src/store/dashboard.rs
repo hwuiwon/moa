@@ -471,11 +471,28 @@ fn redacted_event_summary(event: &Event) -> String {
             retryable,
             ..
         } => format!("tool error from {tool_name} retryable={retryable}"),
+        // Safe by construction: the transition carries only closed vocabulary —
+        // a class, a capability identity, and two stages — never output bytes.
+        Event::PromptInjectionCircuitTransition { transition, .. } => format!(
+            "prompt-injection circuit {} -> {} for {} ({})",
+            transition.prior_stage.as_str(),
+            transition.reached_stage.as_str(),
+            transition.capability.render(),
+            transition.class.as_str()
+        ),
         Event::ActionReviewRequested { review_id, .. } => {
             format!("action review requested: {review_id}")
         }
         Event::ActionReviewDecided { review_id, .. } => {
             format!("action review decided: {review_id}")
+        }
+        // Redacted by construction: only the review and continuation turn identifiers
+        // reach the dashboard summary. The receipt's outcome summary can quote tool
+        // output, so it stays out of this operator-facing projection.
+        Event::ActionReviewContinuationRequested {
+            review_id, turn_id, ..
+        } => {
+            format!("action review continuation requested: {review_id} turn={turn_id}")
         }
         Event::WorkerSpawned {
             worker_id,

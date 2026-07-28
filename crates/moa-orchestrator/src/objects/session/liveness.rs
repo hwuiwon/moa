@@ -301,8 +301,7 @@ async fn raise_child_stale(
                 payload: serde_json::Value::Null,
                 created_at,
                 resume_policy: ParentResumePolicy::IfIdle,
-                input_request_id: None,
-                input_audience: None,
+                input_request: None,
             })),
     )
     .send();

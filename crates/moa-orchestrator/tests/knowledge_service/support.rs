@@ -360,6 +360,7 @@ fn fake_prepared_sync_run(
             provider_trigger_completed_at: None,
         },
         connection: KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: PROVIDER.to_string(),
@@ -386,6 +387,7 @@ fn fake_record_page(source_ids: &[&str], next_cursor: Option<&str>) -> RecordPag
         records: source_ids
             .iter()
             .map(|source_id| ProviderRecord {
+                acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
                 source_id: (*source_id).to_string(),
                 object_type: "document".to_string(),
                 title: Some((*source_id).to_string()),
@@ -485,6 +487,10 @@ impl KnowledgeSyncIngestionSteps for DbKnowledgeAutoSyncSteps {
         let page = self
             .provider
             .list_changed_records(ListChangedRecordsRequest {
+                acl_key: std::sync::Arc::new(moa_knowledge::acl_key::SourceAclKey::new(
+                    1,
+                    vec![7; 32],
+                )),
                 connection: prepared.connection.clone(),
                 // The workflow body under test owns paging, not resolution; the
                 // durable steps resolve through the shared owner instead.
@@ -678,6 +684,9 @@ fn task14_ingestion_pipeline(
             provider: provider.to_string(),
             parser_label: "task14".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     ))
 }
 
@@ -761,6 +770,7 @@ impl KnowledgeIngestionRunner for FakeKnowledgeIngestionRunner {
 
 fn fixture_connection(tenant_id: TenantId) -> KnowledgeConnection {
     KnowledgeConnection {
+        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid: Uuid::now_v7(),
         tenant_id,
         provider: PROVIDER.to_string(),
@@ -792,6 +802,7 @@ fn fixture_connection_for_provider(
 
 fn fixture_object(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeObject {
     KnowledgeObject {
+        acl: moa_knowledge::domain::ObjectAcl::incomplete(),
         object_uid: Uuid::now_v7(),
         tenant_id,
         connection_uid,
@@ -1054,6 +1065,10 @@ fn assert_sync_status_counters(
 
 fn object_ingestion_steps() -> Vec<&'static str> {
     vec![
+        // The ACL is captured ahead of both content fences, so it is the first
+        // per-record step of every ingestion — including one whose content
+        // turns out to be unchanged.
+        "source_acl_captured",
         "object_change_checked",
         "content_fetched",
         "parse_submitted",
@@ -1194,6 +1209,12 @@ impl Task14LinkedIntegrationProvider {
 
 #[async_trait]
 impl LinkedIntegrationProvider for Task14LinkedIntegrationProvider {
+    /// The fake connector has no per-record permissions of its own, so it is
+    /// honestly uniformly public inside the tenant.
+    fn acl_capability(&self) -> moa_knowledge::domain::ProviderAclCapability {
+        moa_knowledge::domain::ProviderAclCapability::UniformlyPublic
+    }
+
     async fn create_link_token(
         &self,
         _req: CreateLinkTokenRequest,
@@ -1644,6 +1665,7 @@ fn provider_record(
     metadata: Value,
 ) -> ProviderRecord {
     ProviderRecord {
+        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
         source_id: source_id.to_string(),
         object_type: object_type.to_string(),
         title: Some(title.to_string()),
@@ -1826,6 +1848,12 @@ impl KnowledgeWebhookVerifier for FixedWebhookVerifier {
 
 #[async_trait]
 impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
+    /// The fake connector has no per-record permissions of its own, so it is
+    /// honestly uniformly public inside the tenant.
+    fn acl_capability(&self) -> moa_knowledge::domain::ProviderAclCapability {
+        moa_knowledge::domain::ProviderAclCapability::UniformlyPublic
+    }
+
     async fn list_integrations(&self) -> moa_knowledge::Result<Vec<ProviderIntegration>> {
         if let Some(message) = &self.integrations_error {
             return Err(KnowledgeError::Provider {
@@ -2364,6 +2392,11 @@ struct RepositoryState {
     chunks: HashMap<Uuid, Vec<KnowledgeChunk>>,
     provider_events: HashMap<(TenantId, String, String), KnowledgeProviderEventRecord>,
     link_claims: HashMap<(TenantId, String), LinkClaim>,
+    /// Stored snapshots keyed by uid, mirroring the immutable SQL table: an
+    /// entry set is inserted once and never edited in place.
+    acl_snapshots: HashMap<Uuid, moa_knowledge::domain::ProviderAclSnapshot>,
+    acl_bindings: Vec<moa_knowledge::domain::SourcePrincipalBinding>,
+    acl_group_bindings: Vec<moa_knowledge::domain::SourcePrincipalGroupBinding>,
     op_counts: HashMap<&'static str, usize>,
 }
 
@@ -2848,6 +2881,126 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
     async fn get_object(&self, object_uid: Uuid) -> moa_knowledge::Result<Option<KnowledgeObject>> {
         self.record_op("get_object")?;
         self.with_state(|state| state.objects.get(&object_uid).cloned())
+    }
+
+    async fn replace_object_acl_snapshot(
+        &self,
+        snapshot: moa_knowledge::domain::ProviderAclSnapshot,
+    ) -> moa_knowledge::Result<moa_knowledge::domain::ProviderAclSnapshot> {
+        self.record_op("replace_object_acl_snapshot")?;
+        // Mirrors the SQL writer exactly: an identical (revision, hash) capture
+        // is idempotent, an incomplete capture is recorded but never becomes
+        // current, and the object's pointer moves in the same operation.
+        self.with_state(|state| {
+            let existing = state.acl_snapshots.values().find(|stored| {
+                stored.object_uid == snapshot.object_uid
+                    && stored.provider_revision == snapshot.provider_revision
+                    && stored.snapshot_hash == snapshot.snapshot_hash
+            });
+            let snapshot_uid = existing.map_or(snapshot.snapshot_uid, |stored| stored.snapshot_uid);
+            let stored = moa_knowledge::domain::ProviderAclSnapshot {
+                snapshot_uid,
+                ..snapshot.clone()
+            };
+            state.acl_snapshots.insert(snapshot_uid, stored.clone());
+            if let Some(object) = state.objects.get_mut(&snapshot.object_uid) {
+                object.acl = if snapshot.complete {
+                    moa_knowledge::domain::ObjectAcl::current(
+                        snapshot.provider_revision.clone(),
+                        snapshot_uid,
+                    )
+                } else {
+                    moa_knowledge::domain::ObjectAcl::incomplete()
+                };
+            }
+            stored
+        })
+    }
+
+    async fn mark_object_acl_stale(
+        &self,
+        object_uid: Uuid,
+        announced_revision: Option<&str>,
+    ) -> moa_knowledge::Result<()> {
+        self.record_op("mark_object_acl_stale")?;
+        let announced = announced_revision.map(ToString::to_string);
+        self.with_state(|state| {
+            if let Some(object) = state.objects.get_mut(&object_uid) {
+                object.acl.state = moa_knowledge::domain::SourceAclState::Stale;
+                object.acl.revision = announced.or_else(|| object.acl.revision.clone());
+                object.acl.current_snapshot_uid = None;
+            }
+        })
+    }
+
+    async fn object_acl(
+        &self,
+        object_uid: Uuid,
+    ) -> moa_knowledge::Result<Option<moa_knowledge::domain::ObjectAcl>> {
+        self.record_op("object_acl")?;
+        self.with_state(|state| {
+            state
+                .objects
+                .get(&object_uid)
+                .map(|object| object.acl.clone())
+        })
+    }
+
+    async fn snapshot_entries(
+        &self,
+        snapshot_uid: Uuid,
+    ) -> moa_knowledge::Result<Vec<moa_knowledge::domain::ProviderAclEntry>> {
+        self.record_op("snapshot_entries")?;
+        self.with_state(|state| {
+            state
+                .acl_snapshots
+                .get(&snapshot_uid)
+                .map(|snapshot| snapshot.entries.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    async fn upsert_principal_binding(
+        &self,
+        binding: moa_knowledge::domain::SourcePrincipalBinding,
+    ) -> moa_knowledge::Result<()> {
+        self.record_op("upsert_principal_binding")?;
+        self.with_state(|state| {
+            state.acl_bindings.retain(|stored| {
+                !(stored.tenant_id == binding.tenant_id
+                    && stored.contact_id == binding.contact_id
+                    && stored.principal == binding.principal
+                    && stored.connection_uid == binding.connection_uid)
+            });
+            state.acl_bindings.push(binding);
+        })
+    }
+
+    async fn upsert_group_binding(
+        &self,
+        binding: moa_knowledge::domain::SourcePrincipalGroupBinding,
+    ) -> moa_knowledge::Result<()> {
+        self.record_op("upsert_group_binding")?;
+        self.with_state(|state| {
+            state.acl_group_bindings.retain(|stored| {
+                !(stored.tenant_id == binding.tenant_id
+                    && stored.member == binding.member
+                    && stored.group == binding.group
+                    && stored.connection_uid == binding.connection_uid)
+            });
+            state.acl_group_bindings.push(binding);
+        })
+    }
+
+    async fn revoke_contact_principals(&self, contact_id: Uuid) -> moa_knowledge::Result<u64> {
+        self.record_op("revoke_contact_principals")?;
+        self.with_state(|state| {
+            let before = state.acl_bindings.len();
+            state
+                .acl_bindings
+                .retain(|binding| binding.contact_id != contact_id);
+            (before - state.acl_bindings.len()) as u64
+        })
     }
 
     async fn list_objects(

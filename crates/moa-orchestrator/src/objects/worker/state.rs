@@ -1,6 +1,7 @@
 //! Durable Worker VO state projection.
 
 use super::*;
+use moa_core::types::security::SecurityCircuitState;
 
 pub(super) const K_STATUS: &str = "status";
 pub(super) const K_PENDING: &str = "pending";
@@ -22,6 +23,7 @@ pub(super) const K_HISTORY: &str = "history";
 pub(super) const K_TOOLS_INVOKED: &str = "tools_invoked";
 pub(super) const K_CANCEL_REASON: &str = "cancel_reason";
 pub(super) const K_ACTIVE_TURN_ID: &str = "active_turn_id";
+pub(super) const K_SECURITY_CIRCUIT: &str = "security_circuit";
 pub(super) const K_LAST_OUTCOME: &str = "last_outcome";
 pub(super) const K_NOTIFICATION_DELIVERED: &str = "notification_delivered";
 pub(super) const K_RESULT_WAITERS: &str = "result_waiters";
@@ -30,6 +32,8 @@ pub(super) const K_CLEANUP_GENERATION: &str = "cleanup_generation";
 pub(super) const K_CLEANUP_RELEASE_ATTEMPTS: &str = "cleanup_release_attempts";
 pub(super) const K_PENDING_INPUT_REQUESTS: &str = "pending_input_requests";
 pub(super) const K_INPUT_DELIVERY_HISTORY: &str = "input_delivery_history";
+pub(super) const K_GENERATION: &str = "generation";
+pub(super) const K_ACTION_REVIEWS: &str = "action_reviews";
 pub(super) const INPUT_DELIVERY_HISTORY_LIMIT: usize = 128;
 pub(super) const MAX_TURNS_PER_POST: usize = 50;
 /// Maximum consecutive failed hand-release attempts before self-clean force-clears the VO.
@@ -166,6 +170,8 @@ pub struct WorkerVoState {
     pub cancel_reason: Option<String>,
     /// Active workflow-backed worker turn id, when one is running.
     pub active_turn_id: Option<String>,
+    /// Prompt-injection circuit for this worker's current turn generation.
+    pub security_circuit: SecurityCircuitState,
     /// Last workflow terminal outcome recorded for this child.
     pub last_outcome: Option<moa_wire::turn::TurnOutcome>,
     /// Whether the terminal parent-session notification has been appended.
@@ -200,6 +206,14 @@ pub struct WorkerVoState {
     pub pending_input_requests: Vec<WorkerPendingInput>,
     /// Ordered bounded replay history for applied input replies.
     pub input_delivery_history: Vec<WorkerInputDeliveryRecord>,
+    /// Monotonic admission generation for this worker.
+    ///
+    /// Advanced by every accepted `post_message` (initial task or follow-up). An
+    /// action review registered under an older generation has been superseded by
+    /// newer parent instructions and never continues this worker.
+    pub generation: u64,
+    /// Derived scheduling index for this worker's conversational action reviews.
+    pub(super) action_reviews: ActionReviewSchedule,
 }
 
 impl WorkerVoState {
@@ -610,6 +624,10 @@ impl VoState for WorkerVoState {
             tools_invoked: reader.get_json(K_TOOLS_INVOKED).await?.unwrap_or_default(),
             cancel_reason: reader.get_json(K_CANCEL_REASON).await?,
             active_turn_id: reader.get_json(K_ACTIVE_TURN_ID).await?,
+            security_circuit: reader
+                .get_json(K_SECURITY_CIRCUIT)
+                .await?
+                .unwrap_or_default(),
             last_outcome: reader.get_json(K_LAST_OUTCOME).await?,
             notification_delivered: reader
                 .get_json(K_NOTIFICATION_DELIVERED)
@@ -633,6 +651,8 @@ impl VoState for WorkerVoState {
                 .get_json(K_INPUT_DELIVERY_HISTORY)
                 .await?
                 .unwrap_or_default(),
+            generation: reader.get_json(K_GENERATION).await?.unwrap_or_default(),
+            action_reviews: reader.get_json(K_ACTION_REVIEWS).await?.unwrap_or_default(),
         })
     }
 
@@ -661,6 +681,12 @@ impl VoState for WorkerVoState {
         set_or_clear_scalar(ctx, K_TOOLS_INVOKED, self.tools_invoked, 0);
         set_or_clear_opt(ctx, K_CANCEL_REASON, self.cancel_reason.as_ref());
         set_or_clear_opt(ctx, K_ACTIVE_TURN_ID, self.active_turn_id.as_ref());
+        set_or_clear_opt(
+            ctx,
+            K_SECURITY_CIRCUIT,
+            (self.security_circuit != SecurityCircuitState::default())
+                .then_some(&self.security_circuit),
+        );
         set_or_clear_opt(ctx, K_LAST_OUTCOME, self.last_outcome.as_ref());
         set_or_clear_scalar(
             ctx,
@@ -679,6 +705,13 @@ impl VoState for WorkerVoState {
         );
         set_or_clear_vec(ctx, K_PENDING_INPUT_REQUESTS, &self.pending_input_requests);
         set_or_clear_vec(ctx, K_INPUT_DELIVERY_HISTORY, &self.input_delivery_history);
+        set_or_clear_scalar(ctx, K_GENERATION, self.generation, 0);
+        set_or_clear_scalar(
+            ctx,
+            K_ACTION_REVIEWS,
+            self.action_reviews.clone(),
+            ActionReviewSchedule::default(),
+        );
     }
 
     fn persist_changes(&self, ctx: &ObjectContext<'_>, baseline: &Self) {
@@ -770,6 +803,14 @@ impl VoState for WorkerVoState {
             self.active_turn_id.as_ref(),
             baseline.active_turn_id.as_ref(),
         );
+        if self.security_circuit != baseline.security_circuit {
+            set_or_clear_opt(
+                ctx,
+                K_SECURITY_CIRCUIT,
+                (self.security_circuit != SecurityCircuitState::default())
+                    .then_some(&self.security_circuit),
+            );
+        }
         set_changed_opt(
             ctx,
             K_LAST_OUTCOME,
@@ -821,6 +862,14 @@ impl VoState for WorkerVoState {
             &self.input_delivery_history,
             &baseline.input_delivery_history,
         );
+        set_changed_scalar(ctx, K_GENERATION, self.generation, &baseline.generation, 0);
+        set_changed_scalar(
+            ctx,
+            K_ACTION_REVIEWS,
+            self.action_reviews.clone(),
+            &baseline.action_reviews,
+            ActionReviewSchedule::default(),
+        );
     }
 }
 
@@ -850,6 +899,72 @@ fn latest_assistant_text(history: &[WorkerHistoryEntry]) -> Option<String> {
 }
 
 impl WorkerVoState {
+    /// Advances the admission generation for one accepted parent message.
+    ///
+    /// Every accepted `post_message` supersedes any action review this worker
+    /// raised under an older generation, because the parent has since given it new
+    /// instructions that the stale review's continuation must not preempt.
+    pub(super) fn advance_generation(&mut self) -> u64 {
+        self.generation = self.generation.saturating_add(1);
+        let discarded = self.action_reviews.discard_below(self.generation);
+        if discarded > 0 {
+            tracing::debug!(
+                generation = self.generation,
+                discarded,
+                "discarded superseded worker action reviews on new admission"
+            );
+        }
+        self.generation
+    }
+
+    /// Registers one pending action review under the generation that raised it.
+    pub(super) fn register_action_review(
+        &mut self,
+        review_id: uuid::Uuid,
+        turn_id: String,
+        generation: u64,
+    ) -> bool {
+        self.action_reviews.register(review_id, turn_id, generation)
+    }
+
+    /// Resolves one registered review, returning its scheduling entry.
+    pub(super) fn resolve_action_review(
+        &mut self,
+        review_id: uuid::Uuid,
+    ) -> Option<crate::action_reviews::scheduling::RegisteredActionReview> {
+        self.action_reviews.resolve(review_id)
+    }
+
+    /// Queues one resolved continuation for this worker's next turn slot.
+    pub(super) fn queue_action_review_continuation(
+        &mut self,
+        entry: crate::action_reviews::scheduling::QueuedActionReviewContinuation,
+    ) -> bool {
+        self.action_reviews.enqueue(entry)
+    }
+
+    /// Pops the next continuation this worker may run right now.
+    pub(super) fn take_action_review_continuation(
+        &mut self,
+    ) -> Option<crate::action_reviews::scheduling::QueuedActionReviewContinuation> {
+        self.action_reviews.take_next(self.generation)
+    }
+
+    /// Returns whether an unfinished current-generation review holds this worker open.
+    ///
+    /// While this is true the worker is not terminal for delivery purposes: it must
+    /// not resolve parent waiters, emit its terminal report, schedule cleanup, or
+    /// discard its local history, because the approved action's answer has not been
+    /// folded into its result yet.
+    pub(super) fn action_review_holds_lifecycle(&self) -> bool {
+        self.action_reviews.holds_generation(self.generation)
+    }
+
+    /// Drops every registered and queued review, returning how many were discarded.
+    pub(super) fn discard_action_reviews(&mut self) -> usize {
+        self.action_reviews.discard_all()
+    }
+
     /// Returns the duplicate-detection hash for this worker's own task.
     pub(super) fn task_hash(&self) -> String {
         crate::worker_dispatch::task_hash(
@@ -895,25 +1010,83 @@ impl WorkerVoState {
         true
     }
 
-    /// Removes and returns the awakeable id for one `input_request_id`, if pending.
+    /// Removes the registration one waiting invocation owns for an exact request.
     ///
-    /// Used by a `ProvideInput` message to resolve exactly the matching awakeable and by
-    /// a wait timeout to clear it. A missing entry returns `None` so both paths stay
-    /// idempotent.
-    pub(super) fn take_input_awakeable(&mut self, input_request_id: &str) -> Option<String> {
-        let index = self
-            .pending_input_requests
-            .iter()
-            .position(|entry| entry.input_request_id == input_request_id)?;
-        Some(self.pending_input_requests.remove(index).awakeable_id)
+    /// Keyed on the waiting workflow as well as the full owner coordinates: a timing-out
+    /// invocation must retract only the awakeable it is parked on, never a replacement a
+    /// retry of the same logical turn registered under the same request id. A missing
+    /// entry returns `None` so the timeout stays idempotent.
+    pub(super) fn clear_input_request_for_workflow(
+        &mut self,
+        target: &WorkerInputTarget,
+        waiting_workflow_id: &str,
+    ) -> Option<WorkerPendingInput> {
+        let index = self.pending_input_requests.iter().position(|entry| {
+            entry.target() == *target && entry.waiting_workflow_id == waiting_workflow_id
+        })?;
+        Some(self.pending_input_requests.remove(index))
     }
 
-    /// Applies one canonical user reply or returns its exact replay/conflict result.
+    /// Removes and returns every registration one worker turn owns.
+    ///
+    /// A turn that reported its outcome is no longer parked on anything it registered,
+    /// so its awakeables are dead and their advertised reply targets must be retracted.
+    pub(super) fn clear_input_requests_for_turn(
+        &mut self,
+        turn_id: &str,
+    ) -> Vec<WorkerPendingInput> {
+        let (owned, live): (Vec<_>, Vec<_>) = self
+            .pending_input_requests
+            .drain(..)
+            .partition(|entry| entry.turn_id == turn_id);
+        self.pending_input_requests = live;
+        owned
+    }
+
+    /// Removes and returns every in-flight registration this worker holds.
+    ///
+    /// Used when the whole worker stops (cancellation or a terminal outcome): nothing
+    /// will ever resolve these awakeables, so every advertised target must be retracted.
+    pub(super) fn clear_all_input_requests(&mut self) -> Vec<WorkerPendingInput> {
+        std::mem::take(&mut self.pending_input_requests)
+    }
+
+    /// Applies one coordinator-delivered reply keyed by request id alone.
+    ///
+    /// The parent→child `ProvideInput` path is answered by the owning coordinator, which
+    /// only ever learns the request id from the `NeedsInput` signal it received; the
+    /// owner fence for that path is the Session's ownership of the child.
     pub(super) fn apply_input_reply(
         &mut self,
         input_request_id: &str,
         reply: &serde_json::Value,
-    ) -> Result<(UserReplyDeliveryAck, Option<String>), HandlerError> {
+    ) -> Result<(UserReplyDeliveryAck, Option<WorkerPendingInput>), HandlerError> {
+        self.apply_reply_to_pending(input_request_id, None, reply)
+    }
+
+    /// Applies one user-addressed reply that must match its owner exactly.
+    ///
+    /// A reply naming a superseded turn or generation resolves nothing: the answer was
+    /// written for work that has already moved on.
+    pub(super) fn apply_user_input_reply(
+        &mut self,
+        target: &WorkerInputTarget,
+        reply: &serde_json::Value,
+    ) -> Result<(UserReplyDeliveryAck, Option<WorkerPendingInput>), HandlerError> {
+        self.apply_reply_to_pending(&target.input_request_id, Some(target), reply)
+    }
+
+    /// Applies one canonical reply or returns its exact replay/conflict result.
+    ///
+    /// Delivery history is consulted before the pending registrations so a late
+    /// duplicate is recognized as a replay rather than resolving a *replacement*
+    /// awakeable that a re-registration installed under the same request id.
+    fn apply_reply_to_pending(
+        &mut self,
+        input_request_id: &str,
+        owner: Option<&WorkerInputTarget>,
+        reply: &serde_json::Value,
+    ) -> Result<(UserReplyDeliveryAck, Option<WorkerPendingInput>), HandlerError> {
         let canonical_reply_hash = canonical_worker_reply_hash(reply)?;
         if let Some(existing) = self
             .input_delivery_history
@@ -928,14 +1101,13 @@ impl WorkerVoState {
             return Ok((acknowledgement, None));
         }
 
-        let Some(index) = self
-            .pending_input_requests
-            .iter()
-            .position(|entry| entry.input_request_id == input_request_id)
-        else {
+        let Some(index) = self.pending_input_requests.iter().position(|entry| {
+            entry.input_request_id == input_request_id
+                && owner.is_none_or(|target| entry.target() == *target)
+        }) else {
             return Ok((UserReplyDeliveryAck::Conflict, None));
         };
-        let awakeable_id = self.pending_input_requests.remove(index).awakeable_id;
+        let applied = self.pending_input_requests.remove(index);
         self.input_delivery_history.push(WorkerInputDeliveryRecord {
             input_request_id: input_request_id.to_string(),
             canonical_reply_hash,
@@ -944,7 +1116,7 @@ impl WorkerVoState {
         if self.input_delivery_history.len() > INPUT_DELIVERY_HISTORY_LIMIT {
             self.input_delivery_history.remove(0);
         }
-        Ok((UserReplyDeliveryAck::Applied, Some(awakeable_id)))
+        Ok((UserReplyDeliveryAck::Applied, Some(applied)))
     }
 
     /// Requires the loaded Worker to belong to the exact caller-authorized Session scope.
@@ -991,8 +1163,25 @@ mod tests {
     use crate::objects::worker::UserReplyDeliveryAck;
     use moa_core::{
         types::context::ContextMessage, types::context::MessageRole,
-        types::events_stream::ClaimCheck, types::worker::state::WorkerState,
+        types::events_stream::ClaimCheck, types::worker::state::WorkerInputTarget,
+        types::worker::state::WorkerPendingInput, types::worker::state::WorkerState,
     };
+
+    /// Builds one registration owned by an exact worker turn and generation.
+    fn pending_input(
+        input_request_id: &str,
+        turn_id: &str,
+        generation: u64,
+        awakeable_id: &str,
+    ) -> WorkerPendingInput {
+        WorkerPendingInput {
+            turn_id: turn_id.to_string(),
+            generation,
+            input_request_id: input_request_id.to_string(),
+            awakeable_id: awakeable_id.to_string(),
+            waiting_workflow_id: turn_id.to_string(),
+        }
+    }
 
     fn initial_task() -> WorkerMessage {
         let tenant_id = TenantId::new();
@@ -1240,10 +1429,7 @@ mod tests {
 
         // A pending request_input round-trip surfaces awaiting_input so the watchdog can
         // exempt the child even with an aged (or absent) heartbeat.
-        state.register_input_request(moa_core::types::worker::state::WorkerPendingInput {
-            input_request_id: "req-1".to_string(),
-            awakeable_id: "awk-1".to_string(),
-        });
+        state.register_input_request(pending_input("req-1", "worker-turn-1", 1, "awk-1"));
         let awaiting = state.progress_summary("child-1".to_string(), now, 1);
         assert!(
             awaiting.awaiting_input,
@@ -1308,61 +1494,119 @@ mod tests {
     }
 
     #[test]
-    fn pending_input_request_resolves_matching_awakeable_and_clears_it() {
-        // Pins: register stores one awakeable per input_request_id (idempotent), take
-        // returns the matching awakeable id and removes only that entry, and a missing or
-        // already-taken id yields None so ProvideInput/timeout stay idempotent.
-        use moa_core::types::worker::state::WorkerPendingInput;
-
+    fn pending_input_request_clear_removes_only_the_registering_invocations_entry() {
+        // Pins: register stores one awakeable per input_request_id (idempotent); a timing-out
+        // invocation clears only the registration IT owns, so a different owner's live
+        // round-trip and a replacement registered by a retry both survive its clear.
         let mut state = WorkerVoState::default();
-        assert!(state.register_input_request(WorkerPendingInput {
-            input_request_id: "req-1".to_string(),
-            awakeable_id: "awk-1".to_string(),
-        }));
+        assert!(state.register_input_request(pending_input("req-1", "worker-turn-1", 3, "awk-1")));
         // Duplicate registration of the same request id is a no-op.
-        assert!(!state.register_input_request(WorkerPendingInput {
-            input_request_id: "req-1".to_string(),
-            awakeable_id: "awk-1b".to_string(),
-        }));
-        assert!(state.register_input_request(WorkerPendingInput {
-            input_request_id: "req-2".to_string(),
-            awakeable_id: "awk-2".to_string(),
-        }));
+        assert!(!state.register_input_request(pending_input(
+            "req-1",
+            "worker-turn-1",
+            3,
+            "awk-1b"
+        )));
+        assert!(state.register_input_request(pending_input("req-2", "worker-turn-2", 4, "awk-2")));
 
-        // Resolving req-1 returns its awakeable and leaves req-2 intact.
-        assert_eq!(
-            state.take_input_awakeable("req-1"),
-            Some("awk-1".to_string())
+        let owned = WorkerInputTarget {
+            turn_id: "worker-turn-1".to_string(),
+            generation: 3,
+            input_request_id: "req-1".to_string(),
+        };
+        // A clear naming another owner's coordinates removes nothing.
+        for foreign in [
+            WorkerInputTarget {
+                input_request_id: "req-2".to_string(),
+                ..owned.clone()
+            },
+            WorkerInputTarget {
+                generation: 4,
+                ..owned.clone()
+            },
+            WorkerInputTarget {
+                turn_id: "worker-turn-2".to_string(),
+                ..owned.clone()
+            },
+        ] {
+            assert!(
+                state
+                    .clear_input_request_for_workflow(&foreign, "worker-turn-1")
+                    .is_none(),
+                "a clear must not remove a target it does not own: {foreign:?}"
+            );
+        }
+        // Nor does the right target cleared by the wrong waiting invocation.
+        assert!(
+            state
+                .clear_input_request_for_workflow(&owned, "worker-turn-1-retry")
+                .is_none(),
+            "only the invocation parked on the awakeable may retract it"
         );
+        assert_eq!(state.pending_input_requests.len(), 2);
+
+        let cleared = state
+            .clear_input_request_for_workflow(&owned, "worker-turn-1")
+            .expect("the registering invocation clears its own target");
+        assert_eq!(cleared.awakeable_id, "awk-1");
+        assert_eq!(cleared.target(), owned);
         assert_eq!(state.pending_input_requests.len(), 1);
         assert_eq!(state.pending_input_requests[0].input_request_id, "req-2");
-        // A second resolve of the same id is a no-op.
-        assert_eq!(state.take_input_awakeable("req-1"), None);
-        assert_eq!(state.take_input_awakeable("unknown"), None);
-        assert_eq!(
-            state.take_input_awakeable("req-2"),
-            Some("awk-2".to_string())
+        // A second clear of the same target is an idempotent no-op.
+        assert!(
+            state
+                .clear_input_request_for_workflow(&owned, "worker-turn-1")
+                .is_none()
         );
+    }
+
+    #[test]
+    fn worker_input_clear_by_turn_and_by_worker_retract_exactly_their_scope() {
+        // Pins: a turn that reported its outcome takes only its own registrations down,
+        // and the whole-worker clear (cancellation, terminal outcome) returns every
+        // remaining one so each advertised reply target can be retracted.
+        let mut state = WorkerVoState::default();
+        state.register_input_request(pending_input("req-1", "worker-turn-1", 3, "awk-1"));
+        state.register_input_request(pending_input("req-2", "worker-turn-1", 3, "awk-2"));
+        state.register_input_request(pending_input("req-3", "worker-turn-2", 4, "awk-3"));
+
+        let dead_turn = state.clear_input_requests_for_turn("worker-turn-1");
+        assert_eq!(
+            dead_turn
+                .iter()
+                .map(|entry| entry.input_request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["req-1", "req-2"]
+        );
+        assert_eq!(state.pending_input_requests.len(), 1);
+        assert_eq!(state.pending_input_requests[0].input_request_id, "req-3");
+
+        let remaining = state.clear_all_input_requests();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].target().turn_id, "worker-turn-2");
         assert!(state.pending_input_requests.is_empty());
+        assert!(state.clear_all_input_requests().is_empty());
     }
 
     #[test]
     fn worker_input_delivery_distinguishes_apply_replay_conflict_and_unknown() {
         // Pins: only the first exact pending reply applies; identical retries replay while a
         // changed duplicate or unknown request conflicts without resolving another awakeable.
-        use moa_core::types::worker::state::WorkerPendingInput;
-
         let mut state = WorkerVoState::default();
-        assert!(state.register_input_request(WorkerPendingInput {
-            input_request_id: "req-1".to_string(),
-            awakeable_id: "awake-1".to_string(),
-        }));
+        assert!(state.register_input_request(pending_input(
+            "req-1",
+            "worker-turn-1",
+            3,
+            "awake-1"
+        )));
         let reply = serde_json::Value::String("answer".to_string());
+        let (acknowledgement, applied) = state
+            .apply_input_reply("req-1", &reply)
+            .expect("first exact reply should apply");
+        assert_eq!(acknowledgement, UserReplyDeliveryAck::Applied);
         assert_eq!(
-            state
-                .apply_input_reply("req-1", &reply)
-                .expect("first exact reply should apply"),
-            (UserReplyDeliveryAck::Applied, Some("awake-1".to_string()))
+            applied.map(|entry| entry.awakeable_id),
+            Some("awake-1".to_string())
         );
         assert_eq!(state.input_delivery_history.len(), 1);
         assert_eq!(
@@ -1388,6 +1632,108 @@ mod tests {
             (UserReplyDeliveryAck::Conflict, None)
         );
         assert_eq!(state.input_delivery_history.len(), 1);
+    }
+
+    #[test]
+    fn worker_user_input_reply_requires_the_exact_owner() {
+        // Pins: a user-addressed reply resolves only the round-trip whose turn AND
+        // generation it names; an answer written for superseded work must conflict
+        // rather than unblock whatever currently holds that request id.
+        let mut state = WorkerVoState::default();
+        state.register_input_request(pending_input("req-1", "worker-turn-1", 3, "awake-first"));
+        let reply = serde_json::Value::String("answer".to_string());
+
+        for stale in [
+            WorkerInputTarget {
+                turn_id: "worker-turn-1".to_string(),
+                generation: 2,
+                input_request_id: "req-1".to_string(),
+            },
+            WorkerInputTarget {
+                turn_id: "worker-turn-0".to_string(),
+                generation: 3,
+                input_request_id: "req-1".to_string(),
+            },
+        ] {
+            assert_eq!(
+                state
+                    .apply_user_input_reply(&stale, &reply)
+                    .expect("a superseded owner is a typed conflict"),
+                (UserReplyDeliveryAck::Conflict, None),
+                "reply matching must fence on the exact owner: {stale:?}"
+            );
+        }
+        assert_eq!(
+            state.pending_input_requests.len(),
+            1,
+            "a conflicting reply must leave the live registration untouched"
+        );
+
+        let owner = WorkerInputTarget {
+            turn_id: "worker-turn-1".to_string(),
+            generation: 3,
+            input_request_id: "req-1".to_string(),
+        };
+        let (acknowledgement, applied) = state
+            .apply_user_input_reply(&owner, &reply)
+            .expect("the exact owner applies");
+        assert_eq!(acknowledgement, UserReplyDeliveryAck::Applied);
+        assert_eq!(
+            applied.map(|entry| entry.awakeable_id),
+            Some("awake-first".to_string())
+        );
+
+        let (late, resolved) = state
+            .apply_user_input_reply(&owner, &reply)
+            .expect("a late duplicate of a delivered reply is a replay");
+        assert_eq!(late, UserReplyDeliveryAck::Replayed);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn a_late_worker_input_duplicate_cannot_resolve_a_replacement_awakeable() {
+        // Pins: delivery history outlives the awakeable it retired. The coordinator
+        // path matches on the request id alone, so history is the ONLY thing between a
+        // late duplicate and the *replacement* round-trip a newer turn registered under
+        // that id — consulting the pending registrations first would unblock the newer
+        // turn with an answer written for the one it replaced.
+        let mut state = WorkerVoState::default();
+        state.register_input_request(pending_input("req-1", "worker-turn-1", 3, "awake-first"));
+        let reply = serde_json::Value::String("answer".to_string());
+        let (acknowledgement, applied) = state
+            .apply_input_reply("req-1", &reply)
+            .expect("the pending reply applies");
+        assert_eq!(acknowledgement, UserReplyDeliveryAck::Applied);
+        assert_eq!(
+            applied.map(|entry| entry.awakeable_id),
+            Some("awake-first".to_string())
+        );
+
+        // A newer worker turn re-registers the same request id on a fresh awakeable.
+        state.register_input_request(pending_input(
+            "req-1",
+            "worker-turn-2",
+            4,
+            "awake-replacement",
+        ));
+
+        let (late, resolved) = state
+            .apply_input_reply("req-1", &reply)
+            .expect("a late duplicate replays against delivery history");
+        assert_eq!(late, UserReplyDeliveryAck::Replayed);
+        assert_eq!(
+            resolved, None,
+            "a replayed duplicate must resolve no awakeable at all"
+        );
+        assert_eq!(
+            state.pending_input_requests.len(),
+            1,
+            "the replacement awakeable must still be waiting for its own answer"
+        );
+        assert_eq!(
+            state.pending_input_requests[0].awakeable_id,
+            "awake-replacement"
+        );
     }
 
     #[test]
@@ -1428,15 +1774,15 @@ mod tests {
     fn worker_input_delivery_history_evicts_oldest_after_128_entries() {
         // Pins: replay state is bounded and ordered; the 129th applied reply evicts only the
         // oldest request while the newest 128 remain exact-replayable.
-        use moa_core::types::worker::state::WorkerPendingInput;
-
         let mut state = WorkerVoState::default();
         for index in 0..=INPUT_DELIVERY_HISTORY_LIMIT {
             let input_request_id = format!("req-{index:03}");
-            assert!(state.register_input_request(WorkerPendingInput {
-                input_request_id: input_request_id.clone(),
-                awakeable_id: format!("awake-{index:03}"),
-            }));
+            assert!(state.register_input_request(pending_input(
+                &input_request_id,
+                "worker-turn-1",
+                1,
+                &format!("awake-{index:03}"),
+            )));
             assert_eq!(
                 state
                     .apply_input_reply(

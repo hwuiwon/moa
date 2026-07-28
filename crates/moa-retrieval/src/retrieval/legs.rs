@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use moa_core::types::memory::RlsContext;
-use moa_db::ScopedConn;
+use moa_core::types::memory::SourceAclContext;
+use moa_db::{ScopedConn, push_source_acl_predicate};
 use moa_memory_graph::{
     EdgeLabel, GraphExpansionHit, GraphStore, GraphTraversalDirection, GraphWalkScoring,
     NodeIndexRow, NodeLabel, push_validity_filter,
@@ -108,6 +109,7 @@ pub(crate) async fn graph_expansion_leg_with_diagnostics(
             graph_hops_for_policy(policy, req),
             req.as_of,
             scoring,
+            &req.source_acl,
         )
         .await?;
     let diagnostics = graph_path_diagnostics(&hits, seed_sources);
@@ -599,7 +601,14 @@ pub async fn lexical_leg(
         return Ok(Vec::new());
     }
 
-    let mut conn = begin_scoped(pool, &req.scope, &req.cleared_barriers, assume_app_role).await?;
+    let mut conn = begin_scoped(
+        pool,
+        &req.scope,
+        &req.cleared_barriers,
+        &req.source_acl,
+        assume_app_role,
+    )
+    .await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid
@@ -626,6 +635,11 @@ pub async fn lexical_leg(
     builder.push(" AND label = ANY(");
     builder.push_bind(effective_label_filter_values(req.label_filter.as_deref()));
     builder.push(")");
+    // Inside the WHERE clause, so a denied chunk never reaches `ts_rank` and
+    // never occupies one of the LIMIT slots an admitted chunk needed. Filtering
+    // after ranking would both leak the row and silently shrink recall.
+    builder.push(" AND ");
+    push_source_acl_predicate(&mut builder, "moa.node_index.uid", &req.source_acl);
     builder.push(
         r#"
         ORDER BY ts_rank(name_tsv, to_tsquery('simple', "#,
@@ -721,7 +735,14 @@ async fn lexical_fallback_leg(
         return Ok(Vec::new());
     }
 
-    let mut conn = begin_scoped(pool, &req.scope, &req.cleared_barriers, assume_app_role).await?;
+    let mut conn = begin_scoped(
+        pool,
+        &req.scope,
+        &req.cleared_barriers,
+        &req.source_acl,
+        assume_app_role,
+    )
+    .await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid
@@ -750,6 +771,8 @@ async fn lexical_fallback_leg(
     builder.push(" AND label = ANY(");
     builder.push_bind(effective_label_filter_values(req.label_filter.as_deref()));
     builder.push(")");
+    builder.push(" AND ");
+    push_source_acl_predicate(&mut builder, "moa.node_index.uid", &req.source_acl);
     builder.push(
         r#"
         ORDER BY (ts_rank(name_tsv, to_tsquery('simple', "#,
@@ -849,11 +872,78 @@ fn push_accessed_ordering(
     builder.push("uid ASC");
 }
 
+/// Admits candidates returned by an external vector backend in one batched
+/// Postgres check.
+///
+/// Turbopuffer answers outside Postgres and knows nothing about source ACLs, so
+/// its candidates are the one class that cannot be filtered inside the query
+/// that produced them. They are checked here — once, in bulk — BEFORE reciprocal
+/// rank fusion and before they can be promoted into graph seeds, so a denied
+/// document neither scores, nor displaces an admitted candidate, nor opens a
+/// traversal path.
+///
+/// Candidate order (and therefore each candidate's RRF contribution) is
+/// preserved for the survivors; nothing is re-ranked to fill the gaps, because
+/// a denied document was never a legitimate candidate in the first place.
+pub async fn admit_external_candidates(
+    pool: &PgPool,
+    req: &RetrievalRequest,
+    assume_app_role: bool,
+    candidates: Vec<LegCandidate>,
+) -> Result<Vec<LegCandidate>> {
+    if candidates.is_empty() {
+        return Ok(candidates);
+    }
+    let uids = candidates
+        .iter()
+        .map(|candidate| candidate.uid)
+        .collect::<Vec<_>>();
+
+    let mut conn = begin_scoped(
+        pool,
+        &req.scope,
+        &req.cleared_barriers,
+        &req.source_acl,
+        assume_app_role,
+    )
+    .await?;
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        SELECT candidate.uid
+        FROM unnest("#,
+    );
+    builder.push_bind(uids);
+    builder.push(
+        r#"::uuid[]) AS candidate(uid)
+        WHERE EXISTS (
+            SELECT 1 FROM moa.node_index AS node WHERE node.uid = candidate.uid
+        ) AND "#,
+    );
+    push_source_acl_predicate(&mut builder, "candidate.uid", &req.source_acl);
+    let admitted = builder
+        .build_query_scalar::<Uuid>()
+        .fetch_all(conn.as_mut())
+        .await?
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    conn.commit().await?;
+
+    Ok(candidates
+        .into_iter()
+        .filter(|candidate| admitted.contains(&candidate.uid))
+        .collect())
+}
+
 /// Hydrates fused candidate uids through the sidecar, preserving RLS.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "hydration needs the full scope, clearance, ACL, and validity context to fail closed"
+)]
 pub async fn hydrate_nodes(
     pool: &PgPool,
     scope: &MemoryScope,
     cleared_barriers: &moa_core::types::memory::InformationBarrierClearances,
+    source_acl: &SourceAclContext,
     uids: &[Uuid],
     assume_app_role: bool,
     as_of: Option<DateTime<Utc>>,
@@ -862,7 +952,7 @@ pub async fn hydrate_nodes(
         return Ok(Vec::new());
     }
 
-    let mut conn = begin_scoped(pool, scope, cleared_barriers, assume_app_role).await?;
+    let mut conn = begin_scoped(pool, scope, cleared_barriers, source_acl, assume_app_role).await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
@@ -874,6 +964,10 @@ pub async fn hydrate_nodes(
     builder.push_bind(uids);
     builder.push(") AND ");
     push_validity_filter(&mut builder, None, as_of);
+    // Hydration is the last chance to drop a denied node before its name and
+    // properties reach ranking, tracing, lineage, and citation construction.
+    builder.push(" AND ");
+    push_source_acl_predicate(&mut builder, "moa.node_index.uid", source_acl);
     let rows = builder
         .build_query_as::<NodeIndexRow>()
         .fetch_all(conn.as_mut())
@@ -894,7 +988,14 @@ pub async fn bump_last_accessed(
     }
 
     let empty_clearances = moa_core::types::memory::InformationBarrierClearances::new();
-    let mut conn = begin_scoped(&pool, &scope, &empty_clearances, assume_app_role).await?;
+    let mut conn = begin_scoped(
+        &pool,
+        &scope,
+        &empty_clearances,
+        &SourceAclContext::empty(moa_core::types::memory::SOURCE_ACL_EPOCH_UNRESOLVED),
+        assume_app_role,
+    )
+    .await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         "UPDATE moa.node_index SET last_accessed_at = now() WHERE uid = ANY(",
     );
@@ -940,7 +1041,14 @@ pub async fn write_retrieval_lineage(
     let tenant_id = scope.tenant_id();
     let contact_id = scope.contact_id();
     let empty_clearances = moa_core::types::memory::InformationBarrierClearances::new();
-    let mut conn = begin_scoped(&pool, &scope, &empty_clearances, assume_app_role).await?;
+    let mut conn = begin_scoped(
+        &pool,
+        &scope,
+        &empty_clearances,
+        &SourceAclContext::empty(moa_core::types::memory::SOURCE_ACL_EPOCH_UNRESOLVED),
+        assume_app_role,
+    )
+    .await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         "INSERT INTO moa.retrieval_lineage \
          (tenant_id, contact_id, storage_partition_id, user_id, session_id, turn_seq, turn_id, uid, chunk_uid, document_version_uid, rank, retrieved_at) ",
@@ -1012,10 +1120,12 @@ pub async fn begin_scoped<'a>(
     pool: &'a PgPool,
     scope: &MemoryScope,
     cleared_barriers: &moa_core::types::memory::InformationBarrierClearances,
+    source_acl: &SourceAclContext,
     assume_app_role: bool,
 ) -> Result<ScopedConn<'a>> {
-    let scope_context =
-        RlsContext::from(scope.clone()).with_cleared_barriers(cleared_barriers.clone());
+    let scope_context = RlsContext::from(scope.clone())
+        .with_cleared_barriers(cleared_barriers.clone())
+        .with_source_acl(source_acl.clone());
     let mut conn = ScopedConn::begin(pool, &scope_context).await?;
     if assume_app_role {
         sqlx::query("SET LOCAL ROLE moa_app")
@@ -1877,6 +1987,7 @@ mod tests {
 
     fn retrieval_request() -> RetrievalRequest {
         RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "who owns the dependency".to_string(),

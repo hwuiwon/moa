@@ -327,7 +327,7 @@ where
     Ok(lookup_seed_candidates(executor, name, limit, as_of)
         .await?
         .into_iter()
-        .filter(|sealed| !crate::write::is_sealed_class(sealed.row.pii_class))
+        .filter(|sealed| !sealed.row.pii_class.is_sealed())
         .map(|sealed| sealed.row)
         .collect())
 }
@@ -415,7 +415,7 @@ where
         .map(|bucket| {
             bucket
                 .into_iter()
-                .filter(|sealed| !crate::write::is_sealed_class(sealed.row.pii_class))
+                .filter(|sealed| !sealed.row.pii_class.is_sealed())
                 .map(|sealed| sealed.row)
                 .collect()
         })

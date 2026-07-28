@@ -28,7 +28,8 @@ use moa_core::{
     types::worker::commands::WorkerTurnPreparation,
     types::worker::commands::WorkerTurnResponseRecord, types::worker::state::ChildSignalKind,
     types::worker::state::InputAudience, types::worker::state::ParentResumePolicy,
-    types::worker::state::SignalSeverity, types::worker::state::WorkerPendingInput,
+    types::worker::state::SignalSeverity, types::worker::state::WorkerInputRequest,
+    types::worker::state::WorkerInputTarget, types::worker::state::WorkerPendingInput,
     types::worker::state::WorkerSignal, types::worker::tool_schema::ChildReportTool,
 };
 use moa_observability::restate_observability::{
@@ -44,7 +45,9 @@ use restate_sdk::prelude::*;
 use tracing::Instrument;
 
 use crate::objects::session::SessionClient;
-use crate::objects::worker::{MAX_WORKER_TURNS_PER_WORKFLOW, WorkerClient};
+use crate::objects::worker::{
+    MAX_WORKER_TURNS_PER_WORKFLOW, WorkerClearInputRequest, WorkerClient,
+};
 use crate::services::{llm_gateway::LLMGatewayClient, session_store::RestateSessionStoreClient};
 use crate::tool_invocation::governed::{
     GovernedInvocationOrigin, GovernedInvocationOutcome, GovernedInvocationRequest,
@@ -60,8 +63,9 @@ use crate::turn_driver::{
 };
 use crate::workflows::durable_utc_now;
 use crate::workflows::turn_events::{
-    TurnEventAppender, append_session_event, append_tool_call_event, append_tool_result_event,
-    append_turn_failed, append_zero_cost_assistant_response, emit_tool_budget_exceeded,
+    TurnEventAppender, append_session_event, append_session_event_with_dedupe_key,
+    append_tool_call_event, append_tool_result_event, append_turn_failed,
+    append_zero_cost_assistant_response, emit_tool_budget_exceeded,
     record_segment_skill_use_for_tool_call, record_segment_tool_use, turn_outcome_kind_label,
 };
 use crate::workflows::turn_progress::{self, SUMMARY_CALLING_MODEL};
@@ -75,6 +79,8 @@ enum WorkerIterationOutcome {
     Core(CoreTurnOutcome),
     Cancelled(String),
     ToolBudgetExceeded(String),
+    /// The prompt-injection circuit halted this worker turn.
+    SecurityHalt,
 }
 
 struct WorkerIterationInput<'a> {
@@ -257,9 +263,17 @@ async fn run_worker_inside_workflow(
     request: &RunWorkerTurnRequest,
 ) -> Result<TurnOutcome, HandlerError> {
     let session_limits = &workflow.session_limits;
+    // A review continuation reports one settled result back into the worker's own
+    // history; it does not reopen the delegated task. So it runs exactly one
+    // iteration with no tools, no matter what the worker's normal cap allows.
+    let continuing_action_review = request.action_review.is_some();
     let loop_plan = driver_model_loop::worker_loop_plan(
         driver_model_loop::WorkerLoopPlanRequest {
-            request_max_turns: request.max_turns,
+            request_max_turns: if continuing_action_review {
+                Some(1)
+            } else {
+                request.max_turns
+            },
             default_max_turns: MAX_WORKER_TURNS_PER_WORKFLOW,
         },
         session_limits,
@@ -313,7 +327,20 @@ async fn run_worker_inside_workflow(
             } => {
                 last_request_meta = Some((*session_meta).clone());
                 last_parent_session = Some(parent_session);
-                (*request, active_canary, *session_meta, parent_session)
+                let mut completion_request = *request;
+                let mut active_canary = active_canary;
+                if continuing_action_review {
+                    // No tools on a continuation, so there is nothing for a canary to
+                    // protect and nothing that could raise a second review from here.
+                    completion_request.tools.clear();
+                    active_canary = None;
+                }
+                (
+                    completion_request,
+                    active_canary,
+                    *session_meta,
+                    parent_session,
+                )
             }
         };
         let turn_span = worker_turn_span(
@@ -357,6 +384,16 @@ async fn run_worker_inside_workflow(
                     turn_id: request.turn_id.clone(),
                     kind: TurnOutcomeKind::Completed,
                     message,
+                });
+            }
+            // A halted worker turn is a failure. Reporting `Failed` is what makes
+            // the existing terminal path emit exactly one `Failed` control-plane
+            // signal and end this worker turn — no second signal writer here.
+            WorkerIterationOutcome::SecurityHalt => {
+                return Ok(TurnOutcome {
+                    turn_id: request.turn_id.clone(),
+                    kind: TurnOutcomeKind::Failed,
+                    message: WORKER_SECURITY_CIRCUIT_HALT_MESSAGE.to_string(),
                 });
             }
             WorkerIterationOutcome::Core(CoreTurnOutcome::Continue) => continue,
@@ -513,6 +550,7 @@ async fn run_worker_iteration(
         }
         let tool_context = WorkerToolContext {
             turn_id: &input.request.turn_id,
+            generation: input.request.generation,
             worker_id: &input.request.worker_id,
             meta: &input.meta,
             identity: &input.request.identity,
@@ -521,7 +559,7 @@ async fn run_worker_iteration(
             trusted_sandbox_manifest: input.request.trusted_sandbox_manifest.as_ref(),
             selected_skills: &selected_skills,
         };
-        handle_tool_call(
+        if handle_tool_call(
             workflow,
             ctx,
             tool_context,
@@ -530,7 +568,11 @@ async fn run_worker_iteration(
             tool_call,
             &mut *input.turn_evidence,
         )
-        .await?;
+        .await?
+            == WorkerToolCallDisposition::SecurityHalt
+        {
+            return Ok(WorkerIterationOutcome::SecurityHalt);
+        }
     }
 
     let outcome = turn_outcome_for_response(&response);
@@ -596,6 +638,8 @@ async fn attach_active_segment_metadata(
 
 struct WorkerToolContext<'a> {
     turn_id: &'a str,
+    /// Worker generation that admitted this turn, recorded on any action review it queues.
+    generation: u64,
     worker_id: &'a str,
     meta: &'a SessionMeta,
     identity: &'a moa_core::traits::Identity,
@@ -615,7 +659,7 @@ async fn handle_tool_call(
     index: usize,
     tool_call: &ToolCallContent,
     turn_evidence: &mut TurnEvidence,
-) -> Result<(), HandlerError> {
+) -> Result<WorkerToolCallDisposition, HandlerError> {
     driver_progress::set_phase(ctx, TurnPhase::Tooling);
     let worker_id = tool_context.worker_id;
     let meta = tool_context.meta;
@@ -630,11 +674,12 @@ async fn handle_tool_call(
     if let Some(report_tool) = ChildReportTool::from_invocation(&tool_call.invocation)
         .map_err(|error| TerminalError::new(error.to_string()))?
     {
-        return handle_child_report_tool(
+        handle_child_report_tool(
             workflow,
             ctx,
             ChildReportToolRequest {
                 turn_id: tool_context.turn_id,
+                generation: tool_context.generation,
                 worker_id,
                 parent_session: session_id,
                 tool_id,
@@ -643,9 +688,11 @@ async fn handle_tool_call(
             },
             turn_evidence,
         )
-        .await;
+        .await?;
+        return Ok(WorkerToolCallDisposition::Continue);
     }
 
+    let mut disposition = WorkerToolCallDisposition::Continue;
     let outcome = invoke_governed_tool(
         ctx,
         GovernedInvocationRequest {
@@ -660,6 +707,7 @@ async fn handle_tool_call(
             origin: GovernedInvocationOrigin::Worker {
                 worker_id,
                 turn_id: tool_context.turn_id,
+                generation: tool_context.generation,
             },
             capability_provenance: None,
         },
@@ -692,7 +740,18 @@ async fn handle_tool_call(
                 )
                 .await?;
             }
-            turn_evidence.record_tool_result(&result.invocation, &result.output);
+            disposition = apply_worker_security_assessment(
+                workflow,
+                ctx,
+                tool_context.meta.tenant_id,
+                session_id,
+                worker_id,
+                tool_context.turn_id,
+                tool_context.generation,
+                &result,
+            )
+            .await?;
+            turn_evidence.record_tool_result(&result.invocation, &result.output.safe_output);
             if result.should_record_segment_tool_use() {
                 record_governed_segment_tool_use(ctx, session_id, &result.invocation.name).await?;
             }
@@ -725,8 +784,38 @@ async fn handle_tool_call(
             .await?;
         }
     }
-    Ok(())
+    if disposition == WorkerToolCallDisposition::SecurityNeedsInput {
+        // Reuse the existing request_input round-trip rather than inventing a
+        // second suspension mechanism: it already emits one `NeedsInput` signal,
+        // registers the awakeable on the Worker VO before emitting so a reply can
+        // never race ahead of it, and clears the mapping on timeout.
+        request_input_from_parent(
+            workflow,
+            ctx,
+            ChildInputRequestOwner {
+                worker_id,
+                turn_id: tool_context.turn_id,
+                generation: tool_context.generation,
+                parent_session: session_id,
+            },
+            &moa_core::types::worker::commands::RequestInputInput {
+                question: WORKER_SECURITY_INPUT_QUESTION.to_string(),
+                audience: moa_core::types::worker::state::InputAudience::User,
+            },
+        )
+        .await?;
+    }
+    Ok(disposition)
 }
+
+/// Fixed question asked when the circuit suspends a worker turn.
+///
+/// Fixed, not derived: the output that triggered this is precisely what MOA has
+/// decided it cannot trust, so quoting it into a user-facing question would
+/// forward the attack to the human.
+const WORKER_SECURITY_INPUT_QUESTION: &str = "A tool this worker used returned output that MOA classified as a possible \
+     prompt-injection attempt, and that capability is now disabled for this turn. \
+     How would you like the worker to proceed?";
 
 struct WorkerDelegationToolRequest<'a> {
     turn_id: &'a str,
@@ -785,18 +874,21 @@ async fn handle_delegation_tool(
     .await?;
     record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
 
+    // Worker-authored control-plane refusals are classified on the same path as
+    // provider output: the refusal text embeds model-authored tool arguments.
+    let secured = secured_worker_output(&invocation, output);
     append_tool_result_event(
         workflow.event_appender(),
         ctx,
         session_id,
         tool_id,
         &invocation,
-        &output,
+        &secured,
     )
     .await?;
-    record_denied_tool(ctx, turn_id, worker_id, tool_id, &invocation, &output).await?;
-    turn_evidence.record_tool_result(&invocation, &output);
-    if !output.is_error {
+    record_denied_tool(ctx, turn_id, worker_id, tool_id, &invocation, &secured).await?;
+    turn_evidence.record_tool_result(&invocation, &secured.safe_output);
+    if !secured.is_error() {
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;
     }
     Ok(())
@@ -805,6 +897,9 @@ async fn handle_delegation_tool(
 /// One child-only report tool invocation routed inside the child's own turn loop.
 struct ChildReportToolRequest<'a> {
     turn_id: &'a str,
+    /// Worker admission generation that owns this turn, recorded on any input request
+    /// it raises so a reply or clear can name exactly this owner.
+    generation: u64,
     worker_id: &'a str,
     parent_session: SessionId,
     tool_id: ToolCallId,
@@ -828,6 +923,7 @@ async fn handle_child_report_tool(
 ) -> Result<(), HandlerError> {
     let ChildReportToolRequest {
         turn_id,
+        generation,
         worker_id,
         parent_session,
         tool_id,
@@ -849,20 +945,32 @@ async fn handle_child_report_tool(
             report_to_parent(ctx, worker_id, parent_session, &input).await?
         }
         ChildReportTool::RequestInput(input) => {
-            request_input_from_parent(workflow, ctx, worker_id, parent_session, &input).await?
+            request_input_from_parent(
+                workflow,
+                ctx,
+                ChildInputRequestOwner {
+                    worker_id,
+                    turn_id,
+                    generation,
+                    parent_session,
+                },
+                &input,
+            )
+            .await?
         }
     };
+    let secured = secured_worker_output(&invocation, output);
     append_tool_result_event(
         workflow.event_appender(),
         ctx,
         parent_session,
         tool_id,
         &invocation,
-        &output,
+        &secured,
     )
     .await?;
-    record_tool_result(ctx, turn_id, worker_id, tool_id, &invocation, &output).await?;
-    turn_evidence.record_tool_result(&invocation, &output);
+    record_tool_result(ctx, turn_id, worker_id, tool_id, &invocation, &secured).await?;
+    turn_evidence.record_tool_result(&invocation, &secured.safe_output);
     Ok(())
 }
 
@@ -918,10 +1026,15 @@ async fn report_to_parent(
 async fn request_input_from_parent(
     workflow: &WorkerTurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
-    worker_id: &str,
-    parent_session: SessionId,
+    owner: ChildInputRequestOwner<'_>,
     input: &RequestInputInput,
 ) -> Result<ToolOutput, HandlerError> {
+    let ChildInputRequestOwner {
+        worker_id,
+        turn_id,
+        generation,
+        parent_session,
+    } = owner;
     let input_request_id = ctx
         .run(|| async { Ok::<_, HandlerError>(Json::from(uuid::Uuid::now_v7().to_string())) })
         .name("child_input_request_id")
@@ -938,12 +1051,23 @@ async fn request_input_from_parent(
     // Persist the awakeable mapping on the child VO BEFORE emitting the signal so any
     // `ProvideInput` the coordinator sends in response always finds it (this `.call()`
     // awaits durable storage). Mirrors `attach_result_waiter` in the wait path.
+    // The waiting workflow is this turn's own invocation (the workflow key is the turn
+    // id), recorded so a clear retracts exactly this registration and not one a retry
+    // of the same logical turn installed.
+    let target = WorkerInputTarget {
+        turn_id: turn_id.to_string(),
+        generation,
+        input_request_id: input_request_id.clone(),
+    };
     moa_core::coordination_counters::record_worker_vo_call();
     crate::restate_identity::replay_safe_request(
         ctx.object_client::<WorkerClient>(worker_id.to_string())
             .register_input_request(Json::from(WorkerPendingInput {
+                turn_id: target.turn_id.clone(),
+                generation,
                 input_request_id: input_request_id.clone(),
                 awakeable_id,
+                waiting_workflow_id: turn_id.to_string(),
             })),
     )
     .call()
@@ -964,7 +1088,7 @@ async fn request_input_from_parent(
         parent_session,
         signal_id,
         created_at,
-        &input_request_id,
+        &target,
         input.audience,
         &input.question,
     );
@@ -982,10 +1106,16 @@ async fn request_input_from_parent(
         },
         _ = ctx.sleep(Duration::from_millis(timeout_ms)) => {
             // Clear the now-dead mapping so a late ProvideInput is an idempotent no-op.
+            // Keyed on this exact registration: a replacement installed by a retry of
+            // this turn must survive the original invocation giving up. The Worker VO
+            // retracts the coordinator-advertised reply target on the same path.
             moa_core::coordination_counters::record_worker_vo_call();
             crate::restate_identity::replay_safe_request(
                 ctx.object_client::<WorkerClient>(worker_id.to_string())
-                    .clear_input_request(Json::from(input_request_id.clone())),
+                    .clear_input_request(Json::from(WorkerClearInputRequest {
+                        target: target.clone(),
+                        waiting_workflow_id: turn_id.to_string(),
+                    })),
             )
             .call()
             .await?;
@@ -1033,23 +1163,33 @@ fn build_child_report_signal(
         payload: serde_json::Value::Null,
         created_at,
         resume_policy,
-        input_request_id: None,
-        input_audience: None,
+        input_request: None,
     }
+}
+
+/// Exact owner of one child `request_input` round-trip.
+///
+/// The turn and its admission generation travel with the request so the Worker VO
+/// mapping, the coordinator-advertised reply target, and every clear all name the
+/// same owner instead of a bare request id.
+struct ChildInputRequestOwner<'a> {
+    worker_id: &'a str,
+    turn_id: &'a str,
+    generation: u64,
+    parent_session: SessionId,
 }
 
 /// Builds the `NeedsInput` control-plane signal for a child `request_input` round-trip.
 ///
-/// Kept pure so the carried `input_request_id`/`input_audience` and the resume-eligible
+/// Kept pure so the carried owner coordinates, audience, and the resume-eligible
 /// `IfIdle` policy are unit-testable. The caller journals `signal_id`/`created_at` and owns
 /// the awakeable lifecycle.
-#[allow(clippy::too_many_arguments)]
 fn build_needs_input_signal(
     worker_id: &str,
     parent_session: SessionId,
     signal_id: AgentSignalId,
     created_at: DateTime<Utc>,
-    input_request_id: &str,
+    target: &WorkerInputTarget,
     audience: InputAudience,
     question: &str,
 ) -> WorkerSignal {
@@ -1063,8 +1203,12 @@ fn build_needs_input_signal(
         payload: serde_json::Value::Null,
         created_at,
         resume_policy: ParentResumePolicy::IfIdle,
-        input_request_id: Some(input_request_id.to_string()),
-        input_audience: Some(audience),
+        input_request: Some(WorkerInputRequest {
+            turn_id: target.turn_id.clone(),
+            generation: target.generation,
+            input_request_id: target.input_request_id.clone(),
+            audience,
+        }),
     }
 }
 
@@ -1168,13 +1312,139 @@ async fn record_worker_turn_cap_stop(
     Ok(message)
 }
 
+/// Scores one classified worker tool output against that worker's own circuit.
+///
+/// The Worker virtual object owns the read-score-write step, so it is atomic
+/// against concurrent results in the same worker turn. A worker's circuit facts
+/// are deliberately neutral in the shared Session history: the worker's own
+/// signals and turn outcome are what suspend or terminate it, so a child's
+/// transition must not look like pending root work to the session scheduler.
+#[allow(clippy::too_many_arguments)]
+async fn apply_worker_security_assessment(
+    workflow: &WorkerTurnExecutionImpl,
+    ctx: &WorkflowContext<'_>,
+    tenant_id: moa_core::types::identifiers::TenantId,
+    session_id: SessionId,
+    worker_id: &str,
+    turn_id: &str,
+    generation: u64,
+    result: &crate::tool_invocation::governed::GovernedInvocationResult,
+) -> Result<WorkerToolCallDisposition, HandlerError> {
+    if result.output.assessment.is_safe() {
+        return Ok(WorkerToolCallDisposition::Continue);
+    }
+    let owner = moa_core::types::security::SecurityCircuitOwner::Worker {
+        worker_id: worker_id.to_string(),
+        turn_id: turn_id.to_string(),
+        generation,
+    };
+    // Journaled BEFORE the circuit moves; see the coordinator path for why the
+    // ordering matters on a crash between apply and journal.
+    let occurred_at = ctx
+        .run(|| async move { Ok(Json::from(chrono::Utc::now())) })
+        .name("worker_prompt_injection_transition_timestamp")
+        .await?
+        .into_inner();
+    moa_core::coordination_counters::record_worker_vo_call();
+    let applied = crate::restate_identity::replay_safe_request(
+        ctx.object_client::<WorkerClient>(worker_id.to_string())
+            .apply_security_assessment(Json::from(
+                moa_wire::turn::ApplySecurityAssessmentRequest {
+                    owner,
+                    capability: result.output.capability.clone(),
+                    tool_call_id: result.tool_id,
+                    assessment: result.output.assessment.clone(),
+                },
+            )),
+    )
+    .call()
+    .await?
+    .into_inner();
+
+    let disposition = match applied.stage {
+        moa_core::types::security::SecurityCircuitStage::Halted => {
+            WorkerToolCallDisposition::SecurityHalt
+        }
+        moa_core::types::security::SecurityCircuitStage::SuspendedForInput => {
+            WorkerToolCallDisposition::SecurityNeedsInput
+        }
+        _ => WorkerToolCallDisposition::Continue,
+    };
+    let Some(transition) = applied.transition else {
+        return Ok(disposition);
+    };
+    let dedupe_key = transition.key.clone();
+    append_session_event_with_dedupe_key(
+        workflow.event_appender(),
+        ctx,
+        session_id,
+        moa_core::events::Event::PromptInjectionCircuitTransition {
+            transition: transition.clone(),
+            signals: result.output.assessment.signals.clone(),
+            redacted_spans: result.output.assessment.redacted_spans,
+            deduplicated_carriers: result.output.assessment.deduplicated_carriers,
+        },
+        dedupe_key,
+    )
+    .await?;
+
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<crate::services::security_events::SecurityEventsClient>()
+            .record_circuit_transition(Json::from(
+                crate::services::security_events::RecordCircuitTransitionRequest {
+                    tenant_id,
+                    session_id,
+                    transition,
+                    signals: result.output.assessment.signals.clone(),
+                    occurred_at,
+                },
+            )),
+    )
+    .call()
+    .await?;
+    Ok(disposition)
+}
+
+/// Whether one dispatched worker tool call left the worker turn able to continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerToolCallDisposition {
+    /// The worker turn may keep running.
+    Continue,
+    /// The circuit halted this worker; the turn must terminate.
+    SecurityHalt,
+    /// The circuit suspended this worker pending the user's answer.
+    SecurityNeedsInput,
+}
+
+/// Fixed message for a worker turn the security circuit halted.
+const WORKER_SECURITY_CIRCUIT_HALT_MESSAGE: &str = "worker turn stopped: a tool returned output classified as a prompt-injection or \
+     restricted-material result";
+
+/// Classifies one worker control-plane tool output.
+///
+/// These are MOA-authored refusals and report acknowledgements, but they embed
+/// model-authored invocation text, so they run through the same detector rather
+/// than being trusted for being ours.
+fn secured_worker_output(
+    invocation: &ToolInvocation,
+    raw: moa_core::types::tools::ToolOutput,
+) -> moa_core::types::tools::SecuredToolOutput {
+    moa_security::classify_tool_output(
+        &raw,
+        moa_security::OutputClassification {
+            capability: &moa_core::types::security::ToolCapabilityId::builtin(&invocation.name),
+            active_canary: None,
+        },
+    )
+}
+
 async fn record_tool_result(
     ctx: &WorkflowContext<'_>,
     turn_id: &str,
     worker_id: &str,
     tool_id: ToolCallId,
     invocation: &ToolInvocation,
-    output: &ToolOutput,
+    output: &moa_core::types::tools::SecuredToolOutput,
 ) -> Result<(), HandlerError> {
     moa_core::coordination_counters::record_worker_vo_call();
     crate::restate_identity::replay_safe_request(
@@ -1197,7 +1467,7 @@ async fn record_denied_tool(
     worker_id: &str,
     tool_id: ToolCallId,
     invocation: &ToolInvocation,
-    output: &ToolOutput,
+    output: &moa_core::types::tools::SecuredToolOutput,
 ) -> Result<(), HandlerError> {
     moa_core::coordination_counters::record_worker_vo_call();
     crate::restate_identity::replay_safe_request(
@@ -1297,8 +1567,7 @@ fn build_failed_child_signal(
         payload: serde_json::Value::Null,
         created_at,
         resume_policy: ParentResumePolicy::IfIdle,
-        input_request_id: None,
-        input_audience: None,
+        input_request: None,
     }
 }
 
@@ -1362,6 +1631,7 @@ mod tests {
         types::worker::commands::ChildReportKind, types::worker::commands::ReportToParentInput,
         types::worker::state::ChildSignalKind, types::worker::state::InputAudience,
         types::worker::state::ParentResumePolicy, types::worker::state::SignalSeverity,
+        types::worker::state::WorkerInputRequest, types::worker::state::WorkerInputTarget,
     };
     use moa_wire::turn::{TurnOutcome, TurnOutcomeKind};
 
@@ -1411,7 +1681,7 @@ mod tests {
             "a finding must not arm a coordinator resume"
         );
         assert_eq!(signal.summary, "found 2 of 3 plan tiers");
-        assert!(signal.input_request_id.is_none());
+        assert!(signal.input_request.is_none());
     }
 
     #[test]
@@ -1434,22 +1704,34 @@ mod tests {
     }
 
     #[test]
-    fn request_input_builds_needs_input_signal_with_request_id_and_audience() {
-        // Pins: request_input builds a NeedsInput/IfIdle signal that carries the
-        // input_request_id and audience so the coordinator can answer the right request.
+    fn request_input_builds_needs_input_signal_with_exact_owner_and_audience() {
+        // Pins: request_input builds a NeedsInput/IfIdle signal carrying the raising
+        // turn, its generation, the request id, and the audience — the exact coordinates
+        // the coordinator session advertises as a user-addressable reply target.
         let signal = build_needs_input_signal(
             "parent-1-child-1",
             SessionId::new(),
             AgentSignalId::new(),
             Utc::now(),
-            "req-42",
+            &WorkerInputTarget {
+                turn_id: "worker-turn-4".to_string(),
+                generation: 6,
+                input_request_id: "req-42".to_string(),
+            },
             InputAudience::User,
             "Which staging cluster should I deploy to?",
         );
         assert_eq!(signal.kind, ChildSignalKind::NeedsInput);
         assert_eq!(signal.resume_policy, ParentResumePolicy::IfIdle);
-        assert_eq!(signal.input_request_id.as_deref(), Some("req-42"));
-        assert_eq!(signal.input_audience, Some(InputAudience::User));
+        assert_eq!(
+            signal.input_request,
+            Some(WorkerInputRequest {
+                turn_id: "worker-turn-4".to_string(),
+                generation: 6,
+                input_request_id: "req-42".to_string(),
+                audience: InputAudience::User,
+            })
+        );
         assert_eq!(signal.summary, "Which staging cluster should I deploy to?");
     }
 
@@ -1463,7 +1745,11 @@ mod tests {
             SessionId::new(),
             AgentSignalId::new(),
             Utc::now(),
-            "req-1",
+            &WorkerInputTarget {
+                turn_id: "worker-turn-1".to_string(),
+                generation: 1,
+                input_request_id: "req-1".to_string(),
+            },
             InputAudience::Coordinator,
             &question,
         );

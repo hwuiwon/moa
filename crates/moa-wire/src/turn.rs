@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use moa_core::traits::Identity;
 use moa_core::{
+    types::action_policy::ActionReviewContinuation,
     types::channel::Attachment,
     types::contact::ClientMessageId,
     types::contact::ContactRef,
@@ -43,6 +44,12 @@ pub enum TurnTrigger {
     /// The request's `user_message` carries an internally authorized synthesis
     /// instruction, not a human message, and no `Event::UserMessage` is appended.
     ExecutionSynthesis,
+    /// A resolved action review initiated its owner's continuation turn. The
+    /// request's `action_review` context carries the typed resolution receipt, the
+    /// `user_message` carries the derived system directive, and no
+    /// `Event::UserMessage` is appended. The turn runs one bounded `Respond` call
+    /// with no classifier, planner, tools, or durable upgrade.
+    ActionReview,
 }
 
 /// Input accepted by one `TurnExecution` workflow run.
@@ -57,6 +64,12 @@ pub struct RunTurnRequest {
     /// Agent-facing contact admitted by the Session VO for this turn.
     #[serde(default)]
     pub contact: Option<ContactRef>,
+    /// Session turn generation that admitted this turn.
+    ///
+    /// Required. The Session advances it on every new user-message admission, and a
+    /// review continuation retains the generation of the turn it continues, so an
+    /// action review resolving after a newer admission is detectably stale.
+    pub generation: u64,
     /// User message that initiated the turn, or — for non-user triggers — the
     /// system-generated coordinator instruction text.
     pub user_message: String,
@@ -79,6 +92,44 @@ pub struct RunTurnRequest {
     /// Exact structured pinned-template invocation for a root user message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_template: Option<ExecutionTemplateInvocation>,
+    /// Resolved action review this turn continues; `Some` exactly when
+    /// `trigger == ActionReview`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_review: Option<ActionReviewContinuation>,
+}
+
+impl RunTurnRequest {
+    /// Returns the continuation context, or a typed error when the pairing is wrong.
+    ///
+    /// The trigger and the typed context must agree exactly: an `ActionReview`
+    /// trigger without a receipt has nothing to render, and a receipt on any other
+    /// trigger would silently smuggle review state into an ordinary turn. Both are
+    /// rejected instead of inferred.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TurnTriggerContextError`] when the trigger and context disagree.
+    pub fn action_review_continuation(
+        &self,
+    ) -> Result<Option<&ActionReviewContinuation>, TurnTriggerContextError> {
+        match (self.trigger, self.action_review.as_ref()) {
+            (TurnTrigger::ActionReview, Some(continuation)) => Ok(Some(continuation)),
+            (TurnTrigger::ActionReview, None) => Err(TurnTriggerContextError::MissingContinuation),
+            (_, Some(_)) => Err(TurnTriggerContextError::UnexpectedContinuation),
+            (_, None) => Ok(None),
+        }
+    }
+}
+
+/// Mismatch between a turn's trigger and its typed continuation context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TurnTriggerContextError {
+    /// An `ActionReview` turn carried no resolution receipt.
+    #[error("action_review_trigger_requires_continuation_context")]
+    MissingContinuation,
+    /// A non-`ActionReview` turn carried a resolution receipt.
+    #[error("continuation_context_requires_action_review_trigger")]
+    UnexpectedContinuation,
 }
 
 /// Input accepted by one `WorkerTurnExecution` workflow run.
@@ -96,12 +147,23 @@ pub struct RunWorkerTurnRequest {
     /// iteration can still append its parent-session facts. The workflow never
     /// infers this value; a request without it is a typed decode error.
     pub parent_session: SessionId,
+    /// Worker generation that admitted this turn.
+    ///
+    /// Required. The Worker advances it on every accepted follow-up admission, so an
+    /// action review resolving after a newer follow-up is detectably stale.
+    pub generation: u64,
     /// Optional turn-iteration cap for this child turn workflow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
     /// Trusted sandbox file manifest inherited from the root turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
+    /// Resolved action review this worker turn continues, when it is a continuation.
+    ///
+    /// When present the worker runs exactly one no-tools synthesis iteration that
+    /// renders the receipt, then resumes normal parent-result and cleanup ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_review: Option<ActionReviewContinuation>,
 }
 
 /// Durable lifecycle phase for one turn workflow.
@@ -493,6 +555,11 @@ pub struct PendingMessage {
     /// recorded admission from queued to running when the queue dispatches it,
     /// without ever changing the response the caller already received.
     pub client_message_id: ClientMessageId,
+    /// Session turn generation assigned when this message was admitted.
+    ///
+    /// Assigned at admission, not at dispatch, so an action review raised by an
+    /// earlier turn is already superseded the moment this message is accepted.
+    pub generation: u64,
     /// Durable time the message was accepted by the Session VO.
     pub queued_at: DateTime<Utc>,
     /// Trusted identity admitted by the Session VO for this queued turn.
@@ -546,7 +613,20 @@ pub enum PendingUserReplyTarget<ExecutionBudgetLimit> {
     WorkerInput {
         /// Durable worker identifier.
         worker_id: moa_core::types::worker::state::WorkerId,
+        /// Worker turn that raised the request.
+        turn_id: String,
+        /// Worker admission generation that owns the raising turn.
+        generation: u64,
         /// Exact worker input request identifier.
+        input_request_id: String,
+    },
+    /// One root coordinator input request awaits the owning user's reply.
+    CoordinatorInput {
+        /// Coordinator turn that raised the request.
+        turn_id: String,
+        /// Session turn generation that admitted the owning turn.
+        generation: u64,
+        /// Exact coordinator input request identifier.
         input_request_id: String,
     },
 }
@@ -555,7 +635,7 @@ impl<ExecutionBudgetLimit> PendingUserReplyTarget<ExecutionBudgetLimit> {
     /// Returns whether this pending target is the one a caller explicitly addressed.
     ///
     /// Matching is exact on every coordinate the caller supplied, including the
-    /// execution-task generation fence: a reply that names a superseded generation
+    /// execution-task and worker generation fences: a reply that names a superseded generation
     /// addresses work that has already moved on and must conflict rather than be
     /// delivered. The approved budget and plan hash are deliberately not part of the
     /// comparison because a caller never restates them.
@@ -587,16 +667,94 @@ impl<ExecutionBudgetLimit> PendingUserReplyTarget<ExecutionBudgetLimit> {
             (
                 Self::WorkerInput {
                     worker_id,
+                    turn_id,
+                    generation,
                     input_request_id,
                 },
                 MessageReplyTarget::WorkerInput {
                     worker_id: requested_worker_id,
+                    turn_id: requested_turn_id,
+                    generation: requested_generation,
                     input_request_id: requested_input_request_id,
                 },
-            ) => worker_id == requested_worker_id && input_request_id == requested_input_request_id,
+            ) => {
+                worker_id == requested_worker_id
+                    && turn_id == requested_turn_id
+                    && generation == requested_generation
+                    && input_request_id == requested_input_request_id
+            }
+            (
+                Self::CoordinatorInput {
+                    turn_id,
+                    generation,
+                    input_request_id,
+                },
+                MessageReplyTarget::CoordinatorInput {
+                    turn_id: requested_turn_id,
+                    generation: requested_generation,
+                    input_request_id: requested_input_request_id,
+                },
+            ) => {
+                turn_id == requested_turn_id
+                    && generation == requested_generation
+                    && input_request_id == requested_input_request_id
+            }
             _ => false,
         }
     }
+}
+
+/// Request applying one classified tool output to an owner's security circuit.
+///
+/// Sent by the workflow that received the classified output to the virtual object
+/// that owns the circuit. The owner and capability come from the request rather
+/// than being inferred, because a delayed action-review continuation runs under a
+/// new workflow id while still belonging to the original logical owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplySecurityAssessmentRequest {
+    /// Exact generation-fenced circuit owner.
+    pub owner: moa_core::types::security::SecurityCircuitOwner,
+    /// Canonical capability identity resolved by the router.
+    pub capability: moa_core::types::security::ToolCapabilityId,
+    /// Tool call whose output produced the assessment.
+    pub tool_call_id: moa_core::types::identifiers::ToolCallId,
+    /// Required assessment carried by the classified output.
+    pub assessment: moa_core::types::security::ToolOutputAssessment,
+}
+
+/// Exact result of applying one assessment to an owner's circuit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplySecurityAssessmentResponse {
+    /// The single transition to act on, when a stage boundary was crossed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<moa_core::types::security::SecurityCircuitTransition>,
+    /// Stage this capability now sits at, whether or not it moved.
+    pub stage: moa_core::types::security::SecurityCircuitStage,
+}
+
+/// Request registering one coordinator input request and its awakeable.
+///
+/// The awakeable is created by the *waiting* workflow and its id passed here,
+/// because only the waiting invocation can park on it. The Session VO owns the
+/// mapping so a plain user reply can find and resolve exactly that awakeable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterCoordinatorInputRequest {
+    /// Coordinator turn raising the request.
+    pub turn_id: String,
+    /// Session turn generation that admitted the owning turn.
+    pub generation: u64,
+    /// Exact request identifier.
+    pub input_request_id: String,
+    /// Awakeable the blocked coordinator turn will park on.
+    pub awakeable_id: String,
+    /// Workflow invocation waiting on that awakeable, so cancellation and
+    /// terminal outcomes can clear this exact target rather than the turn's.
+    pub waiting_workflow_id: String,
+    /// Safe question surfaced to the user.
+    pub question: String,
 }
 
 /// Read-only projection of the additive `TurnExecution` session state.
@@ -976,6 +1134,8 @@ mod tests {
             MessageReplyTarget::ExecutionConfirmation { run_uid },
             MessageReplyTarget::WorkerInput {
                 worker_id: "worker-1".to_string(),
+                turn_id: "worker-turn-1".to_string(),
+                generation: 5,
                 input_request_id: "request-1".to_string(),
             },
         ] {
@@ -999,20 +1159,50 @@ mod tests {
 
         let worker: PendingUserReplyTarget<u64> = PendingUserReplyTarget::WorkerInput {
             worker_id: "worker-1".to_string(),
+            turn_id: "worker-turn-1".to_string(),
+            generation: 7,
             input_request_id: "request-1".to_string(),
         };
         assert!(
             worker.matches_reply_target(&MessageReplyTarget::WorkerInput {
                 worker_id: "worker-1".to_string(),
+                turn_id: "worker-turn-1".to_string(),
+                generation: 7,
                 input_request_id: "request-1".to_string(),
             })
         );
-        assert!(
-            !worker.matches_reply_target(&MessageReplyTarget::WorkerInput {
+        for stale in [
+            MessageReplyTarget::WorkerInput {
                 worker_id: "worker-1".to_string(),
+                turn_id: "worker-turn-1".to_string(),
+                generation: 7,
                 input_request_id: "request-2".to_string(),
-            })
-        );
+            },
+            // A superseded worker generation addresses work that has moved on.
+            MessageReplyTarget::WorkerInput {
+                worker_id: "worker-1".to_string(),
+                turn_id: "worker-turn-1".to_string(),
+                generation: 6,
+                input_request_id: "request-1".to_string(),
+            },
+            MessageReplyTarget::WorkerInput {
+                worker_id: "worker-1".to_string(),
+                turn_id: "worker-turn-2".to_string(),
+                generation: 7,
+                input_request_id: "request-1".to_string(),
+            },
+            MessageReplyTarget::WorkerInput {
+                worker_id: "worker-2".to_string(),
+                turn_id: "worker-turn-1".to_string(),
+                generation: 7,
+                input_request_id: "request-1".to_string(),
+            },
+        ] {
+            assert!(
+                !worker.matches_reply_target(&stale),
+                "a worker reply must match on every coordinate: {stale:?}"
+            );
+        }
     }
 
     #[test]
@@ -1041,6 +1231,8 @@ mod tests {
             },
             PendingUserReplyTarget::WorkerInput {
                 worker_id: "worker-9".to_string(),
+                turn_id: "worker-turn-9".to_string(),
+                generation: 3,
                 input_request_id: "request-3".to_string(),
             },
         ];

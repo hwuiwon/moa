@@ -37,17 +37,6 @@ fn redacted_properties() -> Value {
     json!({ "redacted": true })
 }
 
-/// Whether a node's classification requires its content to be sealed at rest.
-///
-/// Restricted and PHI content is stored as envelope ciphertext with only a
-/// placeholder in the indexed plaintext columns; `none`/`pii` rows are unchanged.
-pub(crate) fn is_sealed_class(pii_class: SensitivityClass) -> bool {
-    matches!(
-        pii_class,
-        SensitivityClass::Restricted | SensitivityClass::Phi
-    )
-}
-
 /// Version of the plaintext document stored inside `content_sealed`.
 pub(crate) const SEALED_CONTENT_VERSION: u8 = 1;
 
@@ -114,7 +103,7 @@ async fn prepare_node_fields_batch(
     let mut prepared = intents
         .iter()
         .map(|intent| {
-            if is_sealed_class(intent.pii_class) {
+            if intent.pii_class.is_sealed() {
                 None
             } else {
                 Some(PreparedNodeFields {
@@ -128,7 +117,7 @@ async fn prepare_node_fields_batch(
     let mut groups: BTreeMap<(Uuid, Uuid), Vec<(usize, EncryptionRequest)>> = BTreeMap::new();
 
     for (index, (intent, tenant_id)) in intents.iter().zip(tenant_ids).enumerate() {
-        if !is_sealed_class(intent.pii_class) {
+        if !intent.pii_class.is_sealed() {
             continue;
         }
         if intent.embedding.is_some() {
@@ -997,7 +986,7 @@ pub(crate) async fn upsert_node_embedding(
     if node.valid_to.is_some() {
         return Err(Error::BiTemporal(format!("{} is not active", intent.uid)));
     }
-    if is_sealed_class(node.pii_class) {
+    if node.pii_class.is_sealed() {
         return Err(Error::SealedEmbedding);
     }
     let vector = require_vector_store(store)?;
@@ -1564,7 +1553,7 @@ fn vector_item_from_intent(intent: &NodeWriteIntent) -> Result<Option<VectorItem
     let Some(embedding) = intent.embedding.clone() else {
         return Ok(None);
     };
-    if is_sealed_class(intent.pii_class) {
+    if intent.pii_class.is_sealed() {
         return Err(Error::SealedEmbedding);
     }
     let Some(embedding_model) = intent.embedding_model.clone() else {

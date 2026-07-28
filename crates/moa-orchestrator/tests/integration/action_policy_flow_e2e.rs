@@ -7,6 +7,7 @@ use moa_core::traits::{Identity, IdentityType};
 use moa_core::{
     events::Event,
     types::action_policy::ActionReviewDecision,
+    types::action_policy::ActionReviewOwner,
     types::action_policy::ActionReviewStatus,
     types::action_policy::ExecutionTaskOrigin,
     types::action_policy::{ActionClass, ActionEnvelope, ActionPolicyEffect, RiskLevel},
@@ -18,8 +19,8 @@ use moa_core::{
     types::identifiers::TenantId,
     types::identifiers::ToolCallId,
     types::session::SessionStatus,
+    types::tools::SecuredToolOutput,
     types::tools::ToolCallRequest,
-    types::tools::ToolOutput,
 };
 use moa_orchestrator::objects::tenant::TenantConfig;
 use moa_orchestrator::services::action_policy::{PrepareActionReviewRequest, PreparedActionReview};
@@ -45,8 +46,378 @@ async fn action_policy_flow_covers_auto_review_decision_and_member_authz() -> Re
     tenant_admin_clear_executes_stored_review_action(&fixture).await?;
     tenant_admin_deny_does_not_execute_stored_review_action(&fixture).await?;
     tenant_member_cannot_decide_action_review(&fixture).await?;
+    coordinator_review_clear_resumes_its_owner_exactly_once(&fixture).await?;
+    coordinator_review_deny_resumes_without_executing_the_action(&fixture).await?;
+    superseded_coordinator_review_produces_no_continuation(&fixture).await?;
+    pending_worker_review_holds_its_report_until_the_clear_continues_it(&fixture).await?;
     execution_task_tool_executor_emits_zero_root_tool_events(&fixture).await?;
     claimed_execution_review_exact_replay_resumes_and_conflict_rejects(&fixture).await?;
+    Ok(())
+}
+
+async fn pending_worker_review_holds_its_report_until_the_clear_continues_it(
+    fixture: &OrchestratorTestFixture,
+) -> Result<()> {
+    // Pins: a worker whose own action is awaiting a tenant-admin decision is not
+    // finished. Its model loop returns, but it must not deliver its terminal report to
+    // the parent while the review is open — otherwise the approved action's answer is
+    // never folded into the result the coordinator already consumed. Clearing the
+    // review runs exactly one worker continuation and only then releases the report.
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("worker-review-continuation").await?;
+    let meta = test.client().get_session(session_id).await?;
+    initialize_tenant(test.client(), meta.tenant_id).await?;
+    fixture
+        .grant_default_tenant_admin(meta.tenant_id)
+        .await
+        .context("grant admin before deciding the worker review")?;
+    add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
+
+    run_scripted_turn(
+        &test,
+        session_id,
+        "Run the worker-continuation bash command.",
+    )
+    .await?;
+    let events = wait_for_events(&test, session_id, |events| {
+        worker_owned_review(events).is_some()
+    })
+    .await
+    .context("the delegated worker's bash should request an admin review")?;
+    let (review_id, worker_id) =
+        worker_owned_review(&events).context("expected a worker-owned action review")?;
+
+    assert!(
+        events.iter().all(|record| !matches!(
+            &record.event,
+            Event::WorkerNotificationDelivered { worker_id: delivered, .. }
+                if *delivered == worker_id
+        )),
+        "a worker holding an unresolved review must not report as terminal: {}",
+        event_summary(&events)
+    );
+
+    decide_review(
+        test.client(),
+        meta.tenant_id,
+        review_id,
+        ActionReviewDecisionKind::Cleared,
+        None,
+    )
+    .await?;
+
+    let resolved = wait_for_events(&test, session_id, |events| {
+        events.iter().any(|record| {
+            matches!(
+                &record.event,
+                Event::WorkerNotificationDelivered { worker_id: delivered, .. }
+                    if *delivered == worker_id
+            )
+        })
+    })
+    .await
+    .context("clearing the review should release the worker's held report")?;
+
+    let facts = continuation_facts(&resolved, review_id);
+    assert_eq!(
+        facts.len(),
+        1,
+        "exactly one worker continuation per review: {}",
+        event_summary(&resolved)
+    );
+    let (_continuation_turn_id, receipt) = facts[0];
+    assert_eq!(
+        receipt.owner.worker_id().map(String::as_str),
+        Some(worker_id.as_str()),
+        "the receipt resumes the worker that raised the review"
+    );
+    assert!(
+        matches!(
+            receipt.outcome,
+            moa_core::types::action_policy::ActionReviewOutcome::ClearedSuccess { .. }
+        ),
+        "unexpected worker receipt outcome: {:?}",
+        receipt.outcome
+    );
+    assert!(
+        resolved.iter().any(|record| matches!(
+            &record.event,
+            Event::ToolResult { output, success: true, provider_tool_use_id: None, .. }
+                if output.to_text().contains("worker-continuation-ok")
+        )),
+        "the cleared worker action should execute with no reused provider id: {}",
+        event_summary(&resolved)
+    );
+    Ok(())
+}
+
+/// Returns the first worker-owned review id and its worker key.
+fn worker_owned_review(events: &[EventRecord]) -> Option<(Uuid, String)> {
+    events.iter().find_map(|record| match &record.event {
+        Event::ActionReviewRequested {
+            review_id,
+            envelope,
+            ..
+        } => envelope
+            .owner
+            .worker_id()
+            .map(|worker_id| (*review_id, worker_id.clone())),
+        _ => None,
+    })
+}
+
+async fn coordinator_review_clear_resumes_its_owner_exactly_once(
+    fixture: &OrchestratorTestFixture,
+) -> Result<()> {
+    // Pins: an approved action that lands after the nonblocking model loop already
+    // ended still reaches the user. Clearing the review resumes the exact coordinator
+    // that raised it, exactly once: one continuation fact naming a NEW turn, a typed
+    // receipt whose executed tool id is fresh and whose ordered terminal facts prove
+    // the callback waited for both the decision and the tool's terminal event, and a
+    // visible assistant answer on that continuation turn.
+    let test = fixture.isolated().await;
+    let session_id = test
+        .create_session("coordinator-review-continuation")
+        .await?;
+    let meta = test.client().get_session(session_id).await?;
+    initialize_tenant(test.client(), meta.tenant_id).await?;
+    fixture
+        .grant_default_tenant_admin(meta.tenant_id)
+        .await
+        .context("grant admin before deciding the coordinator review")?;
+    add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
+
+    let (origin_turn_id, _events) =
+        run_scripted_turn_with_id(&test, session_id, "Start the reviewed work.").await?;
+    let (review_id, requested_tool_id) = create_pending_bash_review(
+        &test,
+        session_id,
+        "printf coordinator-continuation-ok",
+        coordinator_owner_for_turn(session_id, &origin_turn_id),
+    )
+    .await?;
+
+    decide_review(
+        test.client(),
+        meta.tenant_id,
+        review_id,
+        ActionReviewDecisionKind::Cleared,
+        None,
+    )
+    .await?;
+
+    let events = wait_for_events(&test, session_id, |events| {
+        !continuation_facts(events, review_id).is_empty()
+    })
+    .await
+    .context("a cleared coordinator review should request its continuation")?;
+    let facts = continuation_facts(&events, review_id);
+    assert_eq!(
+        facts.len(),
+        1,
+        "exactly one continuation per review: {}",
+        event_summary(&events)
+    );
+    let (continuation_turn_id, receipt) = facts[0];
+    assert_ne!(
+        continuation_turn_id, &origin_turn_id,
+        "the continuation runs as a new turn, not a revival of the origin turn"
+    );
+    assert_eq!(receipt.review_id, review_id);
+    assert_eq!(receipt.tool_name, "bash");
+    assert_eq!(receipt.requested_tool_call_id, requested_tool_id);
+    let executed = receipt
+        .executed_tool_call_id
+        .context("a cleared receipt names the tool call that actually ran")?;
+    assert_ne!(
+        executed, requested_tool_id,
+        "the reviewed execution is a new MOA-owned invocation with a fresh id"
+    );
+    assert_eq!(
+        receipt.terminal_events,
+        vec![
+            moa_core::types::action_policy::ActionReviewTerminalEvent::Decided,
+            moa_core::types::action_policy::ActionReviewTerminalEvent::ToolResult,
+        ],
+        "the callback waits for the decision AND the tool's terminal event"
+    );
+    assert!(
+        matches!(
+            receipt.outcome,
+            moa_core::types::action_policy::ActionReviewOutcome::ClearedSuccess { .. }
+        ),
+        "unexpected receipt outcome: {:?}",
+        receipt.outcome
+    );
+    assert_eq!(
+        receipt.owner,
+        coordinator_owner_for_turn(session_id, &origin_turn_id),
+        "the receipt carries the exact owner that raised the review"
+    );
+    assert!(
+        events.iter().any(|record| matches!(
+            &record.event,
+            Event::ToolResult { tool_id, provider_tool_use_id: None, success: true, .. }
+                if *tool_id == executed
+        )),
+        "the executed tool must have a durable successful result with no provider id: {}",
+        event_summary(&events)
+    );
+
+    let outcome = test
+        .client()
+        .session(session_id.to_string())
+        .await_turn_outcome(
+            continuation_turn_id,
+            Duration::from_secs(90),
+            Duration::from_millis(250),
+        )
+        .await
+        .context("the dispatched continuation turn should reach a terminal outcome")?;
+    assert_eq!(outcome.kind, TurnOutcomeKind::Completed);
+
+    let final_events = test
+        .client()
+        .get_events(session_id, EventRange::all())
+        .await?;
+    assert_eq!(
+        continuation_facts(&final_events, review_id).len(),
+        1,
+        "replayed or repeated resolution must not append a second continuation: {}",
+        event_summary(&final_events)
+    );
+    assert!(
+        final_events.iter().all(|record| !matches!(
+            &record.event,
+            Event::UserMessage { text, .. } if text.contains("action_review_continuation")
+        )),
+        "the continuation is a system directive, never a fabricated user message: {}",
+        event_summary(&final_events)
+    );
+    Ok(())
+}
+
+async fn coordinator_review_deny_resumes_without_executing_the_action(
+    fixture: &OrchestratorTestFixture,
+) -> Result<()> {
+    // Pins: a denial is a real answer the user is owed. It resumes the coordinator with
+    // a Denied receipt built from the decision alone — no executed tool id, no tool
+    // terminal event — and the gated command still never runs.
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("coordinator-review-denied").await?;
+    let meta = test.client().get_session(session_id).await?;
+    initialize_tenant(test.client(), meta.tenant_id).await?;
+    fixture
+        .grant_default_tenant_admin(meta.tenant_id)
+        .await
+        .context("grant admin before denying the coordinator review")?;
+    add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
+
+    let (origin_turn_id, _events) =
+        run_scripted_turn_with_id(&test, session_id, "Start the denied work.").await?;
+    let (review_id, _requested_tool_id) = create_pending_bash_review(
+        &test,
+        session_id,
+        "printf denied-continuation-should-not-run",
+        coordinator_owner_for_turn(session_id, &origin_turn_id),
+    )
+    .await?;
+
+    decide_review(
+        test.client(),
+        meta.tenant_id,
+        review_id,
+        ActionReviewDecisionKind::Denied,
+        Some("not approved for production"),
+    )
+    .await?;
+
+    let events = wait_for_events(&test, session_id, |events| {
+        !continuation_facts(events, review_id).is_empty()
+    })
+    .await
+    .context("a denied coordinator review should still resume its owner")?;
+    let facts = continuation_facts(&events, review_id);
+    assert_eq!(facts.len(), 1);
+    let (_turn_id, receipt) = facts[0];
+    assert_eq!(receipt.executed_tool_call_id, None);
+    assert_eq!(
+        receipt.terminal_events,
+        vec![moa_core::types::action_policy::ActionReviewTerminalEvent::Decided],
+        "a denial resolves on the decision alone"
+    );
+    match &receipt.outcome {
+        moa_core::types::action_policy::ActionReviewOutcome::Denied { reason } => {
+            assert_eq!(reason.as_deref(), Some("not approved for production"));
+        }
+        other => anyhow::bail!("expected a denied receipt, got {other:?}"),
+    }
+    assert!(
+        events.iter().all(|record| !matches!(
+            &record.event,
+            Event::ToolResult { output, success: true, .. }
+                if output.to_text().contains("denied-continuation-should-not-run")
+        )),
+        "a denied action must never execute: {}",
+        event_summary(&events)
+    );
+    Ok(())
+}
+
+async fn superseded_coordinator_review_produces_no_continuation(
+    fixture: &OrchestratorTestFixture,
+) -> Result<()> {
+    // Pins: an unresolved review never blocks a later user message, and once that newer
+    // message is admitted the older review is stale. Its approval still executes the
+    // approved action and records the decision, but it must NOT preempt the newer work
+    // with a continuation turn.
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("coordinator-review-superseded").await?;
+    let meta = test.client().get_session(session_id).await?;
+    initialize_tenant(test.client(), meta.tenant_id).await?;
+    fixture
+        .grant_default_tenant_admin(meta.tenant_id)
+        .await
+        .context("grant admin before deciding the superseded review")?;
+    add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
+
+    let (origin_turn_id, _events) =
+        run_scripted_turn_with_id(&test, session_id, "Start the superseded work.").await?;
+    let (review_id, _requested_tool_id) = create_pending_bash_review(
+        &test,
+        session_id,
+        "printf superseded-continuation-ok",
+        coordinator_owner_for_turn(session_id, &origin_turn_id),
+    )
+    .await?;
+
+    // A later user message advances the session generation, stranding the review.
+    run_scripted_turn(&test, session_id, "Actually, do this newer thing instead.").await?;
+
+    decide_review(
+        test.client(),
+        meta.tenant_id,
+        review_id,
+        ActionReviewDecisionKind::Cleared,
+        None,
+    )
+    .await?;
+
+    let events = wait_for_events(&test, session_id, |events| {
+        events.iter().any(|record| {
+            matches!(
+                &record.event,
+                Event::ActionReviewDecided { review_id: id, .. } if *id == review_id
+            )
+        })
+    })
+    .await
+    .context("the decision itself is still recorded for a superseded review")?;
+    assert!(
+        continuation_facts(&events, review_id).is_empty(),
+        "a superseded review must not preempt the newer user turn: {}",
+        event_summary(&events)
+    );
     Ok(())
 }
 
@@ -110,8 +481,7 @@ async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
         review_id,
         tenant_id: session.tenant_id,
         requested_by: SessionActorRef::Anonymous,
-        session_id: Some(session_id),
-        worker_id: None,
+        owner: ActionReviewOwner::ExecutionTask { session_id, origin },
         tool_call_id,
         tool_name: "bash".to_string(),
         normalized_input: command.clone(),
@@ -121,7 +491,6 @@ async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
         origin_kind: None,
         origin_id: None,
         origin_step_id: None,
-        execution_origin: Some(origin),
         idempotency_key: None,
         created_at: moa_test_support::fixtures::pg_now(),
     };
@@ -297,7 +666,7 @@ async fn execution_task_tool_executor_emits_zero_root_tool_events(
     let test = fixture.isolated().await;
     let session_id = test.create_session("execution-task-no-root-events").await?;
     let tool_call_id = ToolCallId::new();
-    let output: ToolOutput = test
+    let output: SecuredToolOutput = test
         .client()
         .post_call(
             "/ToolExecutor/execute_execution_task",
@@ -326,7 +695,7 @@ async fn execution_task_tool_executor_emits_zero_root_tool_events(
         )
         .await
         .context("execute isolated execution-task tool call")?;
-    assert_eq!(output.to_text(), "execution-task-ok");
+    assert_eq!(output.safe_output.to_text(), "execution-task-ok");
 
     let events = test
         .client()
@@ -527,8 +896,13 @@ async fn tenant_admin_clear_executes_stored_review_action(
         .context("grant admin before adding and deciding review")?;
     add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
 
-    let (review_id, stored_tool_id) =
-        create_pending_bash_review(&test, session_id, "printf clear-review-ok").await?;
+    let (review_id, stored_tool_id) = create_pending_bash_review(
+        &test,
+        session_id,
+        "printf clear-review-ok",
+        unowned_coordinator(session_id),
+    )
+    .await?;
     let events = test
         .client()
         .get_events(session_id, EventRange::all())
@@ -612,8 +986,13 @@ async fn tenant_admin_deny_does_not_execute_stored_review_action(
         .context("grant admin before adding and denying review")?;
     add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
 
-    let (review_id, _stored_tool_id) =
-        create_pending_bash_review(&test, session_id, "printf deny-review-should-not-run").await?;
+    let (review_id, _stored_tool_id) = create_pending_bash_review(
+        &test,
+        session_id,
+        "printf deny-review-should-not-run",
+        unowned_coordinator(session_id),
+    )
+    .await?;
     decide_review(
         test.client(),
         meta.tenant_id,
@@ -660,9 +1039,13 @@ async fn tenant_member_cannot_decide_action_review(
         .context("grant admin before adding review rule")?;
     add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
 
-    let (review_id, _stored_tool_id) =
-        create_pending_bash_review(&test, session_id, "printf member-denied-should-not-run")
-            .await?;
+    let (review_id, _stored_tool_id) = create_pending_bash_review(
+        &test,
+        session_id,
+        "printf member-denied-should-not-run",
+        unowned_coordinator(session_id),
+    )
+    .await?;
 
     let mut member_identity = test_identity();
     member_identity.tenant_id = meta.tenant_id;
@@ -710,11 +1093,71 @@ async fn tenant_member_cannot_decide_action_review(
     Ok(())
 }
 
+/// A coordinator owner for a session that has not run a turn in this scenario.
+///
+/// The Session VO has no owning identity yet, so a resolution releases the review
+/// without dispatching a continuation. Scenarios that assert on the continuation
+/// itself run a real turn first and use [`coordinator_owner_for_turn`].
+fn unowned_coordinator(session_id: SessionId) -> ActionReviewOwner {
+    ActionReviewOwner::Coordinator {
+        session_id,
+        turn_id: "unowned-coordinator-turn".to_string(),
+        generation: 1,
+    }
+}
+
+/// The coordinator owner for a session whose first admitted turn is `turn_id`.
+///
+/// The Session advances its generation once per admitted user message, so the
+/// first admitted turn always runs under generation 1.
+fn coordinator_owner_for_turn(session_id: SessionId, turn_id: &str) -> ActionReviewOwner {
+    ActionReviewOwner::Coordinator {
+        session_id,
+        turn_id: turn_id.to_string(),
+        generation: 1,
+    }
+}
+
+/// Returns every continuation fact recorded for one review.
+fn continuation_facts(
+    events: &[EventRecord],
+    review_id: Uuid,
+) -> Vec<(
+    &String,
+    &moa_core::types::action_policy::ActionReviewReceipt,
+)> {
+    events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ActionReviewContinuationRequested {
+                review_id: id,
+                turn_id,
+                receipt,
+            } if *id == review_id => Some((turn_id, receipt)),
+            _ => None,
+        })
+        .collect()
+}
+
 async fn run_scripted_turn(
     test: &IsolatedTest<'_>,
     session_id: SessionId,
     message: &str,
 ) -> Result<Vec<EventRecord>> {
+    Ok(run_scripted_turn_with_id(test, session_id, message)
+        .await?
+        .1)
+}
+
+/// Runs one scripted coordinator turn to completion and returns its turn id.
+///
+/// The turn id is what an action review raised by that turn records as its owner,
+/// so scenarios that assert on the continuation need it.
+async fn run_scripted_turn_with_id(
+    test: &IsolatedTest<'_>,
+    session_id: SessionId,
+    message: &str,
+) -> Result<(String, Vec<EventRecord>)> {
     let started = test
         .client()
         .session(session_id.to_string())
@@ -750,9 +1193,11 @@ async fn run_scripted_turn(
         TurnOutcomeKind::Completed,
         "scripted turn should complete: {outcome:?}"
     );
-    test.client()
+    let events = test
+        .client()
         .get_events(session_id, EventRange::all())
-        .await
+        .await?;
+    Ok((turn_id, events))
 }
 
 /// Creates a pending admin review for a worker-scoped bash invocation by
@@ -763,6 +1208,7 @@ async fn create_pending_bash_review(
     test: &IsolatedTest<'_>,
     session_id: SessionId,
     cmd: &str,
+    owner: ActionReviewOwner,
 ) -> Result<(Uuid, ToolCallId)> {
     let meta = test.client().get_session(session_id).await?;
     let review_id = Uuid::new_v4();
@@ -780,9 +1226,8 @@ async fn create_pending_bash_review(
                 },
                 review_id,
                 tool_call_id,
-                worker_id: None,
+                owner,
                 capability_provenance: Default::default(),
-                execution_origin: None,
                 idempotency_key: None,
             },
         )
@@ -924,6 +1369,8 @@ const REVIEW_WORKER_TASK: &str = "execute the review-mode bash probe";
 /// Worker final texts; the coordinator's post-completion resume keys on them.
 const AUTO_WORKER_DONE: &str = "Auto-mode worker finished its delegated task.";
 const REVIEW_WORKER_DONE: &str = "Admin-review worker finished its delegated task.";
+const CONTINUATION_WORKER_TASK: &str = "execute the worker-continuation bash probe";
+const CONTINUATION_DONE: &str = "Reported the resolved action review.";
 
 /// Fully keyed script for the delegation-based action-policy scenarios.
 ///
@@ -941,6 +1388,21 @@ fn action_policy_script() -> serde_json::Value {
             }
         },
         "keyed": [
+            // An action-review continuation turn (root or worker) renders the typed
+            // receipt as a system directive; it is keyed first because the rest of the
+            // continuing owner's replayed history also matches later entries.
+            // Ordering contract, most-derived context first: continuation
+            // receipts, then tool-result markers, then worker task texts, then
+            // user messages. Entries resolve first-match-wins against the whole
+            // rendered prompt, and a later iteration's prompt still contains
+            // every earlier marker — a user-message spawn key registered before
+            // the "Spawned worker" marker makes every post-spawn coordinator
+            // iteration re-issue the spawn, which the session's loop-prevention
+            // guard then terminally refuses against the still-active child.
+            {
+                "match": "action_review_continuation",
+                "completion": { "content": CONTINUATION_DONE }
+            },
             // Coordinator iterations after a spawn (and post-completion
             // resumes, whose compiled context replays the spawn result): the
             // spawn tool output summary is the only pre-worker marker.
@@ -958,6 +1420,17 @@ fn action_policy_script() -> serde_json::Value {
                 "completion": { "content": REVIEW_WORKER_DONE }
             },
             // …worker first iterations on the delegated task text…
+            {
+                "match": CONTINUATION_WORKER_TASK,
+                "completion": {
+                    "content": "Running the worker-continuation probe.",
+                    "tool_calls": [{
+                        "name": "bash",
+                        "input": { "cmd": "printf worker-continuation-ok" },
+                        "id": "worker-continuation-bash"
+                    }]
+                }
+            },
             {
                 "match": AUTO_WORKER_TASK,
                 "completion": {
@@ -981,6 +1454,21 @@ fn action_policy_script() -> serde_json::Value {
                 }
             },
             // …and coordinator first iterations on the user message.
+            {
+                "match": "Run the worker-continuation bash command.",
+                "completion": {
+                    "content": "Delegating to the worker-continuation worker.",
+                    "tool_calls": [{
+                        "name": "spawn_worker",
+                        "input": {
+                            "task": CONTINUATION_WORKER_TASK,
+                            "tool_subset": ["bash"],
+                            "max_turns": 3
+                        },
+                        "id": "spawn-worker-continuation"
+                    }]
+                }
+            },
             {
                 "match": "Run the auto-mode bash command.",
                 "completion": {

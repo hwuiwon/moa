@@ -125,6 +125,7 @@ async fn future_edge_is_invisible_to_as_of_walks_in_the_past() {
             2,
             Some(edge_valid_from - Duration::days(30)),
             &GraphWalkScoring::default(),
+            &moa_core::types::memory::SourceAclContext::empty(0),
         )
         .await
         .expect("expand before the edge existed");
@@ -139,6 +140,7 @@ async fn future_edge_is_invisible_to_as_of_walks_in_the_past() {
             2,
             Some(edge_valid_from + Duration::minutes(5)),
             &GraphWalkScoring::default(),
+            &moa_core::types::memory::SourceAclContext::empty(0),
         )
         .await
         .expect("expand after the edge became valid");

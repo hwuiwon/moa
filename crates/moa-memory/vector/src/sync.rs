@@ -97,7 +97,7 @@ impl VectorSyncRemoteGuard {
 }
 
 /// Enqueues external vector sync rows for a committed pgvector operation.
-pub(crate) async fn enqueue_external_vector_sync(
+pub async fn enqueue_external_vector_sync(
     conn: &mut PgConnection,
     storage_partition_id: &str,
     operation: VectorSyncOperation,

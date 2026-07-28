@@ -16,10 +16,12 @@ async fn file_read_reads_written_content() {
                 name: "file_write".to_string(),
                 input: json!({ "path": "notes.txt", "content": "hello" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
-    let (_, output) = router
+    let secured = router
         .execute_authorized(
             &session,
             &identity(),
@@ -28,9 +30,12 @@ async fn file_read_reads_written_content() {
                 name: "file_read".to_string(),
                 input: json!({ "path": "notes.txt" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+    let output = secured.safe_output;
 
     assert_eq!(output.to_text(), "hello");
 }
@@ -53,11 +58,13 @@ async fn str_replace_updates_only_the_target_region() {
                     "content": "fn demo() {\n    alpha();\n    beta();\n}\n",
                 }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
 
-    let (_, replace_output) = router
+    let secured_2 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -70,16 +77,20 @@ async fn str_replace_updates_only_the_target_region() {
                     "new_str": "    gamma();\n",
                 }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let replace_output = secured_2.safe_output;
     let rendered = replace_output.to_text();
     assert!(rendered.starts_with("--- a/src/lib.rs\n+++ b/src/lib.rs\n"));
     assert!(rendered.contains("-    alpha();"));
     assert!(rendered.contains("+    gamma();"));
     assert!(!rendered.contains("replaced 1 lines with 1 lines"));
 
-    let (_, output) = router
+    let secured_3 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -88,9 +99,13 @@ async fn str_replace_updates_only_the_target_region() {
                 name: "file_read".to_string(),
                 input: json!({ "path": "src/lib.rs" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_3.safe_output;
 
     assert_eq!(
         output.to_text(),
@@ -119,6 +134,8 @@ async fn file_write_overwrite_returns_compact_diff() {
                         .join("\n"),
                 }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
@@ -133,7 +150,7 @@ async fn file_write_overwrite_returns_compact_diff() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let (_, output) = router
+    let secured_4 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -142,9 +159,13 @@ async fn file_write_overwrite_returns_compact_diff() {
                 name: "file_write".to_string(),
                 input: json!({ "path": "src/demo.rs", "content": updated.clone() }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_4.safe_output;
 
     let rendered = output.to_text();
     assert!(rendered.starts_with("--- a/src/demo.rs\n+++ b/src/demo.rs\n"));
@@ -169,6 +190,8 @@ async fn file_search_finds_files_by_glob() {
                 name: "file_write".to_string(),
                 input: json!({ "path": "src/lib.rs", "content": "pub fn demo() {}" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
@@ -181,11 +204,13 @@ async fn file_search_finds_files_by_glob() {
                 name: "file_write".to_string(),
                 input: json!({ "path": "notes.txt", "content": "ignore me" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
 
-    let (_, output) = router
+    let secured_5 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -194,9 +219,13 @@ async fn file_search_finds_files_by_glob() {
                 name: "file_search".to_string(),
                 input: json!({ "pattern": "**/*.rs" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_5.safe_output;
 
     let rendered = output.to_text();
     assert!(rendered.contains("src/lib.rs"));
@@ -223,11 +252,13 @@ async fn file_search_skips_git_directory_contents() {
                 name: "file_write".to_string(),
                 input: json!({ "path": "src/lib.rs", "content": "pub fn demo() {}" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
 
-    let (_, output) = router
+    let secured_6 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -236,9 +267,13 @@ async fn file_search_skips_git_directory_contents() {
                 name: "file_search".to_string(),
                 input: json!({ "pattern": "**/*" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_6.safe_output;
 
     let rendered = output.to_text();
     assert!(rendered.contains("src/lib.rs"));
@@ -273,7 +308,7 @@ async fn file_search_skips_python_virtualenvs_in_remembered_workspace() {
         .remember_workspace_root(session.tenant_id, workspace_root)
         .await;
 
-    let (_, output) = router
+    let secured_7 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -282,9 +317,13 @@ async fn file_search_skips_python_virtualenvs_in_remembered_workspace() {
                 name: "file_search".to_string(),
                 input: json!({ "pattern": "**/*.py" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_7.safe_output;
 
     let rendered = output.to_text();
     assert!(rendered.contains("server/core/views.py"));
@@ -319,7 +358,7 @@ async fn file_search_respects_moaignore_in_remembered_workspace() {
         .remember_workspace_root(session.tenant_id, workspace_root)
         .await;
 
-    let (_, output) = router
+    let secured_8 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -328,9 +367,13 @@ async fn file_search_respects_moaignore_in_remembered_workspace() {
                 name: "file_search".to_string(),
                 input: json!({ "pattern": "**/*" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_8.safe_output;
 
     let rendered = output.to_text();
     assert!(rendered.contains("src/lib.rs"));
@@ -356,12 +399,14 @@ async fn file_search_truncates_pathological_match_sets() {
                         "content": "pub fn demo() {}",
                     }),
                 },
+                ToolCallId::new(),
+                None,
             )
             .await
             .unwrap();
     }
 
-    let (_, output) = router
+    let secured_9 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -370,9 +415,13 @@ async fn file_search_truncates_pathological_match_sets() {
                 name: "file_search".to_string(),
                 input: json!({ "pattern": "**/*.rs" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_9.safe_output;
 
     let rendered = output.to_text();
     assert!(rendered.contains("[search truncated at 1000 matches"));
@@ -414,6 +463,8 @@ async fn file_operations_reject_path_traversal() {
                 name: "file_read".to_string(),
                 input: json!({ "path": "../secret.txt" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap_err();
@@ -521,7 +572,7 @@ async fn bash_captures_stdout_and_stderr() {
     let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
-    let (_, output) = router
+    let secured_10 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -530,9 +581,13 @@ async fn bash_captures_stdout_and_stderr() {
                 name: "bash".to_string(),
                 input: json!({ "cmd": "printf 'out'; printf 'err' 1>&2" }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_10.safe_output;
 
     assert_eq!(output.process_stdout(), Some("out"));
     assert_eq!(output.process_stderr(), Some("err"));
@@ -545,7 +600,7 @@ async fn bash_success_output_is_truncated_to_router_budget() {
     let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
-    let (_, output) = router
+    let secured_11 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -556,9 +611,13 @@ async fn bash_success_output_is_truncated_to_router_budget() {
                     "cmd": "python3 -c \"print('x' * 120000)\""
                 }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_11.safe_output;
 
     let text = output.to_text();
     assert!(output.truncated);
@@ -573,7 +632,7 @@ async fn bash_error_output_is_not_truncated() {
     let router = ToolRouter::new_local(dir.path()).await.unwrap();
     let session = session();
 
-    let (_, output) = router
+    let secured_12 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -584,9 +643,13 @@ async fn bash_error_output_is_not_truncated() {
                     "cmd": "python3 -c \"import sys; sys.stderr.write('e' * 20000); sys.exit(7)\""
                 }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_12.safe_output;
 
     let text = output.to_text();
     assert!(output.is_error);
@@ -615,11 +678,13 @@ async fn file_read_within_budget_is_not_router_truncated() {
                 name: "file_write".to_string(),
                 input: json!({ "path": "notes.txt", "content": content }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
 
-    let (_, output) = router
+    let secured_13 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -628,9 +693,13 @@ async fn file_read_within_budget_is_not_router_truncated() {
                 name: "file_read".to_string(),
                 input: json!({ "path": "notes.txt", "start_line": 1, "end_line": 100 }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_13.safe_output;
 
     assert!(!output.truncated);
     assert_eq!(output.original_output_tokens, None);
@@ -662,11 +731,13 @@ async fn file_read_budget_override_truncates_large_results() {
                 name: "file_write".to_string(),
                 input: json!({ "path": "large.txt", "content": content }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
 
-    let (_, output) = router
+    let secured_14 = router
         .execute_authorized(
             &session,
             &identity(),
@@ -675,9 +746,13 @@ async fn file_read_budget_override_truncates_large_results() {
                 name: "file_read".to_string(),
                 input: json!({ "path": "large.txt", "start_line": 1, "end_line": 200 }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap();
+
+    let output = secured_14.safe_output;
 
     let text = output.to_text();
     assert!(output.truncated);
@@ -702,6 +777,8 @@ async fn bash_respects_timeout() {
                 name: "bash".to_string(),
                 input: json!({ "cmd": "sleep 10", "timeout_secs": 1 }),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap_err();
@@ -733,6 +810,8 @@ async fn local_bash_hard_cancel_kills_running_process() {
                     &session,
                     &identity(),
                     &invocation,
+                    ToolCallId::new(),
+                    None,
                     None,
                     Some(&cancel_token),
                 )
@@ -895,6 +974,8 @@ async fn execute_authorized_rejects_unregistered_tool_name() {
                 name: "does_not_exist".to_string(),
                 input: json!({}),
             },
+            ToolCallId::new(),
+            None,
         )
         .await
         .unwrap_err();

@@ -7,15 +7,17 @@ use uuid::Uuid;
 
 use crate::types::{
     action_policy::ActionEnvelope, action_policy::ActionReviewDecision,
-    action_policy::ActionReviewPreview, channel::Attachment, channel::Channel,
-    channel::SessionChannelBindingId, contact::ContactId, contact::SessionActorRef,
-    execution_planning::ExecutionRunStarted, guardrails::GuardrailDirection,
-    guardrails::GuardrailMode, identifiers::AgentSignalId, identifiers::ModelId,
-    identifiers::SegmentId, identifiers::TenantId, identifiers::ToolCallId,
-    observability::CacheReport, provider::ModelTier, session::SessionStatus, tools::ToolOutput,
-    worker::state::ChildSignalKind, worker::state::InputAudience, worker::state::NarrationSegment,
-    worker::state::NarrationSource, worker::state::SignalSeverity, worker::state::WorkerId,
-    worker::state::WorkerState,
+    action_policy::ActionReviewPreview, action_policy::ActionReviewReceipt, channel::Attachment,
+    channel::Channel, channel::SessionChannelBindingId, contact::ContactId,
+    contact::SessionActorRef, execution_planning::ExecutionRunStarted,
+    guardrails::GuardrailDirection, guardrails::GuardrailMode, identifiers::AgentSignalId,
+    identifiers::ModelId, identifiers::SegmentId, identifiers::TenantId, identifiers::ToolCallId,
+    observability::CacheReport, provider::ModelTier, security::InjectionSignal,
+    security::SecurityCircuitTransition, security::ToolCapabilityId,
+    security::ToolOutputAssessment, session::SessionStatus, tools::SecuredToolOutput,
+    tools::ToolOutput, worker::state::ChildSignalKind, worker::state::InputAudience,
+    worker::state::NarrationSegment, worker::state::NarrationSource, worker::state::SignalSeverity,
+    worker::state::WorkerId, worker::state::WorkerState,
 };
 
 /// Durable reference to the complete task-result source for one execution run.
@@ -472,8 +474,12 @@ pub enum Event {
         /// Provider-specific tool-use identifier, when available.
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_tool_use_id: Option<String>,
-        /// Full tool output.
+        /// Post-classification tool output. Raw provider bytes never reach here.
         output: ToolOutput,
+        /// Required security assessment that produced `output`.
+        assessment: ToolOutputAssessment,
+        /// Canonical capability identity resolved by the router.
+        capability: ToolCapabilityId,
         /// Approximate token count before router-level truncation, when truncation occurred.
         #[serde(skip_serializing_if = "Option::is_none")]
         original_output_tokens: Option<u32>,
@@ -496,6 +502,22 @@ pub enum Event {
         /// Whether the failure is retryable.
         retryable: bool,
     },
+    /// One prompt-injection circuit crossed a stage boundary.
+    ///
+    /// Deliberately carries no output: only the safe class, the detector revision,
+    /// the owner and capability identifiers, the transition itself, and counts.
+    /// This is the typed replacement for the generic prompt-injection
+    /// [`Event::Warning`], which could not be queried, correlated, or audited.
+    PromptInjectionCircuitTransition {
+        /// Exact replay-stable transition the owner applied.
+        transition: SecurityCircuitTransition,
+        /// Stable detector signals behind the triggering assessment.
+        signals: Vec<InjectionSignal>,
+        /// Number of suspicious spans replaced in the classified output.
+        redacted_spans: u32,
+        /// Number of duplicate carrier bodies collapsed before scoring.
+        deduplicated_carriers: u32,
+    },
     /// A tool call was queued for tenant-admin action review.
     ActionReviewRequested {
         /// Tenant-admin review identifier.
@@ -515,6 +537,22 @@ pub enum Event {
         decided_by: String,
         /// Decision timestamp.
         decided_at: DateTime<Utc>,
+    },
+    /// A resolved action review dispatched its owner's continuation turn.
+    ///
+    /// Appended with the durable dedupe key
+    /// [`crate::types::action_policy::action_review_continuation_dedupe_key`], so one
+    /// review produces exactly one continuation fact no matter how often the
+    /// resolution callback is replayed. The payload is the bounded, safe receipt —
+    /// never raw tool output — because it is rendered into the continuation turn's
+    /// prompt as a system directive.
+    ActionReviewContinuationRequested {
+        /// Tenant-admin review identifier.
+        review_id: Uuid,
+        /// Continuation turn dispatched for the owner.
+        turn_id: String,
+        /// Typed resolution receipt the continuation turn renders.
+        receipt: ActionReviewReceipt,
     },
     /// A child worker was spawned by the root session coordinator.
     WorkerSpawned {
@@ -867,12 +905,52 @@ impl Event {
             | Self::WorkerSignalReceived { .. }
             | Self::WorkerHeartbeatStale { .. }
             | Self::ProgressNarrated { .. }
+            // The continuation turn is dispatched durably by the owning Session or
+            // Worker VO at the moment this fact is appended, so the tail scan must not
+            // treat the fact itself as unaddressed work. Classifying it transparent also
+            // stops a late append from masking the reviewed tool's own pending events.
+            | Self::ActionReviewContinuationRequested { .. }
             | Self::MemoryRead { .. }
             | Self::MemoryWrite { .. }
             | Self::MemoryIngest { .. }
             | Self::Checkpoint { .. }
             | Self::CacheReport { .. }
-            | Self::Warning { .. } => ProcessingEffect::Neutral,
+            | Self::Warning { .. }
+            // A circuit transition is a security fact, never turn work. The owner
+            // that journals it applies its own outcome (warn, disable, suspend, or
+            // halt) in the same step, so treating it as a trigger would re-drive a
+            // loop the circuit just stopped.
+            | Self::PromptInjectionCircuitTransition { .. } => ProcessingEffect::Neutral,
+        }
+    }
+
+    /// Builds the durable tool-result fact from one classified tool output.
+    ///
+    /// This is the only way a `ToolResult` is assembled in production: taking the
+    /// whole [`SecuredToolOutput`] keeps the safe output, its assessment, and the
+    /// canonical capability inseparable, so no caller can persist output that was
+    /// never classified or pair output with somebody else's assessment.
+    #[must_use]
+    pub fn tool_result(
+        tool_id: ToolCallId,
+        provider_tool_use_id: Option<String>,
+        secured: SecuredToolOutput,
+    ) -> Self {
+        let SecuredToolOutput {
+            safe_output,
+            assessment,
+            capability,
+            hand_id: _,
+        } = secured;
+        Self::ToolResult {
+            tool_id,
+            provider_tool_use_id,
+            original_output_tokens: safe_output.original_output_tokens,
+            success: !safe_output.is_error,
+            duration_ms: safe_output.duration.as_millis() as u64,
+            output: safe_output,
+            assessment,
+            capability,
         }
     }
 
@@ -1087,8 +1165,11 @@ mod tests {
             requested_by: SessionActorRef::Identity {
                 id: Uuid::from_u128(2),
             },
-            session_id: Some(crate::types::identifiers::SessionId::new()),
-            worker_id: None,
+            owner: crate::types::action_policy::ActionReviewOwner::Coordinator {
+                session_id: crate::types::identifiers::SessionId::new(),
+                turn_id: format!("turn-{review_id}"),
+                generation: 1,
+            },
             tool_call_id: ToolCallId::from(review_id),
             tool_name: tool_name.to_string(),
             normalized_input: input_summary.to_string(),
@@ -1098,7 +1179,6 @@ mod tests {
             origin_kind: None,
             origin_id: None,
             origin_step_id: None,
-            execution_origin: None,
             idempotency_key: None,
             created_at: Utc::now(),
         }
@@ -1147,8 +1227,13 @@ mod tests {
 
     #[test]
     fn action_policy_review_event_round_trips_separate_execution_origin() {
-        // Pins: review persistence never conflates capability provenance with run/task/generation.
+        // Pins: review persistence never conflates capability provenance with the typed
+        // owner. Capability provenance says which artifact surface produced the call;
+        // the owner says who is resumed when the review resolves, and an execution-task
+        // owner carries the run/task/generation fence that keeps it off the
+        // conversational callback path.
         let review_id = Uuid::from_u128(30);
+        let session_id = crate::types::identifiers::SessionId::new();
         let mut envelope = sample_action_envelope(
             review_id,
             "bash",
@@ -1158,11 +1243,14 @@ mod tests {
         envelope.origin_kind = Some("skill_action".to_string());
         envelope.origin_id = Some("skill://research#fetch".to_string());
         envelope.origin_step_id = Some("fetch".to_string());
-        envelope.execution_origin = Some(crate::types::action_policy::ExecutionTaskOrigin {
-            run_uid: Uuid::from_u128(40),
-            task_uid: Uuid::from_u128(41),
-            generation: 2,
-        });
+        envelope.owner = crate::types::action_policy::ActionReviewOwner::ExecutionTask {
+            session_id,
+            origin: crate::types::action_policy::ExecutionTaskOrigin {
+                run_uid: Uuid::from_u128(40),
+                task_uid: Uuid::from_u128(41),
+                generation: 2,
+            },
+        };
         let event = Event::ActionReviewRequested {
             review_id,
             envelope,
@@ -1173,6 +1261,75 @@ mod tests {
         let decoded: Event = serde_json::from_value(encoded).expect("deserialize review event");
 
         assert_eq!(decoded, event);
+        let Event::ActionReviewRequested { envelope, .. } = &decoded else {
+            panic!("decoded event changed variant");
+        };
+        assert_eq!(envelope.owner.session_id(), session_id);
+        assert!(!envelope.owner.is_conversational());
+        assert_eq!(envelope.owner.generation(), None);
+        assert_eq!(envelope.origin_kind.as_deref(), Some("skill_action"));
+    }
+
+    #[test]
+    fn action_review_continuation_event_round_trips_its_typed_receipt() {
+        // Pins: the continuation fact carries the exact typed receipt — owner, both tool
+        // ids, and the ordered terminal facts the callback waited on — so a replay can
+        // reconstruct the continuation without re-reading the review row.
+        use crate::types::action_policy::{
+            ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt, ActionReviewTerminalEvent,
+        };
+
+        let review_id = Uuid::from_u128(31);
+        let requested_tool_call_id = ToolCallId::from(review_id);
+        let executed_tool_call_id = ToolCallId::from(Uuid::from_u128(32));
+        let receipt = ActionReviewReceipt {
+            review_id,
+            owner: ActionReviewOwner::Worker {
+                session_id: crate::types::identifiers::SessionId::new(),
+                worker_id: "worker-continuation-1".to_string(),
+                turn_id: "worker-continuation-1-turn-9".to_string(),
+                generation: 4,
+            },
+            tool_name: "bash".to_string(),
+            requested_tool_call_id,
+            executed_tool_call_id: Some(executed_tool_call_id),
+            outcome: ActionReviewOutcome::ClearedSuccess {
+                summary: "reviewed".to_string(),
+                assessment: crate::types::security::ToolOutputAssessment::safe(),
+                capability: crate::types::security::ToolCapabilityId::builtin("bash"),
+            },
+            terminal_events: vec![
+                ActionReviewTerminalEvent::Decided,
+                ActionReviewTerminalEvent::ToolResult,
+            ],
+        };
+        let event = Event::ActionReviewContinuationRequested {
+            review_id,
+            turn_id: "worker-continuation-1-turn-10".to_string(),
+            receipt: receipt.clone(),
+        };
+
+        let json = serde_json::to_string(&event).expect("serialize continuation event");
+        assert!(
+            json.contains("\"type\":\"ActionReviewContinuationRequested\""),
+            "continuation fact must keep its stable storage discriminator: {json}"
+        );
+        let decoded: Event = serde_json::from_str(&json).expect("deserialize continuation event");
+        assert_eq!(decoded, event);
+        assert_eq!(
+            event.processing_effect(),
+            ProcessingEffect::Neutral,
+            "the continuation turn is dispatched durably by its owner, so the fact itself \
+             is not unaddressed work the tail scan should re-trigger"
+        );
+        assert_eq!(
+            receipt.terminal_events,
+            vec![
+                ActionReviewTerminalEvent::Decided,
+                ActionReviewTerminalEvent::ToolResult
+            ]
+        );
+        assert_ne!(receipt.requested_tool_call_id, executed_tool_call_id);
     }
 
     #[test]
@@ -1468,17 +1625,19 @@ mod tests {
                 text: "hi".to_string(),
                 attachments: Vec::new(),
             },
-            Event::ToolResult {
-                tool_id: ToolCallId::new(),
-                provider_tool_use_id: None,
-                output: crate::types::tools::ToolOutput::text(
-                    "ok",
-                    std::time::Duration::from_millis(1),
+            Event::tool_result(
+                ToolCallId::new(),
+                None,
+                SecuredToolOutput::assessed_safe(
+                    crate::types::tools::ToolOutput::text(
+                        "ok",
+                        std::time::Duration::from_millis(1),
+                    ),
+                    crate::types::security::ToolCapabilityId::BuiltIn {
+                        tool: "noop".to_string(),
+                    },
                 ),
-                original_output_tokens: None,
-                success: true,
-                duration_ms: 1,
-            },
+            ),
         ];
         for event in triggers {
             assert_eq!(

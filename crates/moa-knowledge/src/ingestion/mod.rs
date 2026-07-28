@@ -4,10 +4,12 @@ mod graph_writer;
 mod materialization;
 mod page;
 mod record;
+mod source_acl;
 mod steps;
 
 pub use graph_writer::{GraphWriteReport, KnowledgeGraphWriter, MemoryKnowledgeGraphWriter};
 pub use record::parse_input_from_record;
+pub use source_acl::KnowledgeSourceAclContext;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -86,6 +88,7 @@ pub struct KnowledgeIngestionPipeline<R, P, E, G> {
     semantic_generic_entities: bool,
     semantic_model_extractor: Option<Arc<ModelSemanticGraphExtractor>>,
     content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
+    source_acl: KnowledgeSourceAclContext,
 }
 
 /// Static pipeline settings used for chunking and observability labels.

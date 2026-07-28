@@ -207,7 +207,7 @@ impl CachedHybridRetriever {
         req: RetrievalRequest,
     ) -> Result<RetrievalOutput> {
         let started = std::time::Instant::now();
-        if !self.cacheable_scope(&req.scope) {
+        if !self.cacheable(&req) {
             metrics::counter!("moa_retrieval_cache_total", "outcome" => "bypass").increment(1);
             return self.inner.retrieve(req).await;
         }
@@ -264,7 +264,7 @@ impl CachedHybridRetriever {
         planned: &PlannedQuery,
         req: &RetrievalRequest,
     ) -> Result<Option<Vec<RetrievalHit>>> {
-        if !self.cacheable_scope(&req.scope) {
+        if !self.cacheable(req) {
             return Ok(None);
         }
 
@@ -303,6 +303,18 @@ impl CachedHybridRetriever {
 
     fn cacheable_scope(&self, scope: &MemoryScope) -> bool {
         !matches!(scope.tier(), ScopeTier::Contact)
+    }
+
+    /// Returns whether one request may participate in the cache at all.
+    ///
+    /// A request whose source-ACL context was never resolved has no epoch that a
+    /// permission change could advance, so a stored entry for it would be
+    /// unfalsifiable — it would keep serving after a revocation forever. Such a
+    /// request bypasses the cache in both directions rather than being stored
+    /// under a placeholder epoch.
+    fn cacheable(&self, req: &RetrievalRequest) -> bool {
+        self.cacheable_scope(&req.scope)
+            && req.source_acl.acl_epoch() != moa_core::types::memory::SOURCE_ACL_EPOCH_UNRESOLVED
     }
 }
 
@@ -412,6 +424,15 @@ fn canonicalize(
         out.push_str(barrier.as_str());
         out.push(',');
     }
+    // Two dimensions, both required. The principal-set fingerprint separates
+    // callers who may see different documents; the epoch separates the SAME
+    // caller before and after a permission change. Dropping either one serves a
+    // warm result across a boundary it must never cross — and only the already
+    // opaque aggregate fingerprint appears here, never a principal.
+    out.push_str("|source_acl_principals=");
+    out.push_str(&req.source_acl.principal_set_fingerprint());
+    out.push_str("|source_acl_epoch=");
+    out.push_str(&req.source_acl.acl_epoch().to_string());
     out.push_str("|k=");
     out.push_str(&req.k_final.to_string());
     out.push_str("|rerank=");
@@ -734,6 +755,50 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_separates_principal_sets_and_acl_epochs() {
+        // Pins BOTH source-ACL cache dimensions. The principal-set fingerprint
+        // separates two colleagues who may see different documents; the epoch
+        // separates the SAME colleague before and after a permission change.
+        // Dropping either one serves a warm result across a boundary it must
+        // never cross, and the epoch is the only one that can catch a revocation
+        // for an unchanged caller.
+        let planned = planned_query(tenant_scope(), "auth service");
+        let ranking = ranking_fingerprint(&RankingConfig::default());
+        let alice = moa_core::types::memory::SourcePrincipalFingerprint::from_digest(1, [0xA1; 32]);
+        let bob = moa_core::types::memory::SourcePrincipalFingerprint::from_digest(1, [0xB2; 32]);
+
+        let mut alice_request = request(&planned, "what owns auth?");
+        alice_request.source_acl =
+            moa_core::types::memory::SourceAclContext::new([alice.clone()], 4);
+        let mut bob_request = alice_request.clone();
+        bob_request.source_acl = moa_core::types::memory::SourceAclContext::new([bob], 4);
+        assert_ne!(
+            fingerprint(&planned, &alice_request, ranking),
+            fingerprint(&planned, &bob_request, ranking),
+            "two callers with different principals must not share a cache entry"
+        );
+
+        let mut alice_after_revocation = alice_request.clone();
+        alice_after_revocation.source_acl =
+            moa_core::types::memory::SourceAclContext::new([alice], 5);
+        assert_ne!(
+            fingerprint(&planned, &alice_request, ranking),
+            fingerprint(&planned, &alice_after_revocation, ranking),
+            "the same caller must not be served a result computed before an ACL change"
+        );
+
+        // The aggregate fingerprint is the only ACL value that may appear, and it
+        // is a digest of already-opaque values.
+        let canonical = canonicalize(&planned, &alice_request, ranking);
+        assert!(canonical.contains("source_acl_principals="));
+        assert!(canonical.contains("source_acl_epoch=4"));
+        assert!(
+            !canonical.contains("a1a1a1"),
+            "a raw principal fingerprint must not appear in the cache key: {canonical}"
+        );
+    }
+
+    #[test]
     fn cache_key_changes_with_ranking_fingerprint() {
         // Pins: final ranked hits cannot be reused across ranking-weight changes.
         let planned = planned_query(tenant_scope(), "auth service");
@@ -890,6 +955,7 @@ mod tests {
 
     fn request(planned: &PlannedQuery, query: &str) -> RetrievalRequest {
         RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: planned.seeds.clone(),
             query_text: query.to_string(),

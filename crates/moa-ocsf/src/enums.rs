@@ -12,6 +12,8 @@ pub mod class_uid {
     pub const ENTITY_MANAGEMENT: i32 = 3004;
     /// Datastore Activity (memory data-access transparency).
     pub const DATASTORE_ACTIVITY: i32 = 6005;
+    /// Detection Finding (prompt-injection circuit transitions).
+    pub const DETECTION_FINDING: i32 = 2004;
 }
 
 /// OCSF category UIDs.
@@ -20,6 +22,8 @@ pub mod category_uid {
     pub const IAM: i32 = 3;
     /// Application Activity.
     pub const APPLICATION_ACTIVITY: i32 = 6;
+    /// Findings.
+    pub const FINDINGS: i32 = 2;
 }
 
 /// OCSF severity IDs.
@@ -84,6 +88,12 @@ pub mod entity_activity {
     pub const DELETE: i32 = 4;
     /// Other entity activity.
     pub const OTHER: i32 = 99;
+}
+
+/// Detection Finding activity IDs.
+pub mod detection_activity {
+    /// Create (a new finding is being reported).
+    pub const CREATE: i32 = 1;
 }
 
 /// Datastore Activity activity IDs.

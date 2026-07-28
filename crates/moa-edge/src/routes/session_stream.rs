@@ -343,10 +343,23 @@ fn active_child_summary(
 /// Execution synthesis and guarded child-signal resume each dispatch a new coordinator turn.
 /// The SSE stream re-targets its terminal turn to this id so it closes on the follow-on turn's
 /// completion rather than the original turn's.
+///
+/// An action-review continuation retargets only when a Coordinator owns it: that
+/// continuation is the visible answer the origin stream is still waiting for. A
+/// Worker or ExecutionTask continuation runs inside the tree and produces no visible
+/// coordinator reply, so retargeting to it would leave the contact's stream waiting
+/// on a turn whose completion it must not report as the answer.
 fn follow_on_terminal_turn(event: &Event) -> Option<&str> {
     match event {
         Event::WorkerParentResumeRequested { turn_id, .. } => Some(turn_id),
         Event::ExecutionSynthesisRequested(requested) => Some(&requested.turn_id),
+        Event::ActionReviewContinuationRequested {
+            turn_id, receipt, ..
+        } => matches!(
+            receipt.owner,
+            moa_core::types::action_policy::ActionReviewOwner::Coordinator { .. }
+        )
+        .then_some(turn_id.as_str()),
         _ => None,
     }
 }
@@ -923,6 +936,78 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn action_review_continuation_retargets_only_a_coordinator_owner() {
+        // Pins: only a Coordinator continuation produces the visible answer the contact's
+        // stream is still waiting for, so only it may move the terminal turn. A Worker or
+        // ExecutionTask continuation runs inside the tree; retargeting to it would leave
+        // the stream waiting on a turn whose completion is not the user's answer, and
+        // would report an internal turn as the reply.
+        use moa_core::types::action_policy::{
+            ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt, ActionReviewTerminalEvent,
+        };
+        use moa_core::types::identifiers::{SessionId, ToolCallId};
+
+        let session_id = SessionId::new();
+        let review_id = Uuid::from_u128(0x13_3001);
+        let receipt_with = |owner: ActionReviewOwner| ActionReviewReceipt {
+            review_id,
+            owner,
+            tool_name: "bash".to_string(),
+            requested_tool_call_id: ToolCallId::new(),
+            executed_tool_call_id: Some(ToolCallId::new()),
+            outcome: ActionReviewOutcome::ClearedSuccess {
+                summary: "ok".to_string(),
+                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
+            },
+            terminal_events: vec![
+                ActionReviewTerminalEvent::Decided,
+                ActionReviewTerminalEvent::ToolResult,
+            ],
+        };
+
+        let coordinator = Event::ActionReviewContinuationRequested {
+            review_id,
+            turn_id: "coordinator-continuation-turn".to_string(),
+            receipt: receipt_with(ActionReviewOwner::Coordinator {
+                session_id,
+                turn_id: "origin-turn".to_string(),
+                generation: 2,
+            }),
+        };
+        assert_eq!(
+            follow_on_terminal_turn(&coordinator),
+            Some("coordinator-continuation-turn")
+        );
+
+        let worker = Event::ActionReviewContinuationRequested {
+            review_id,
+            turn_id: "worker-continuation-turn".to_string(),
+            receipt: receipt_with(ActionReviewOwner::Worker {
+                session_id,
+                worker_id: "worker-1".to_string(),
+                turn_id: "worker-1-turn-1".to_string(),
+                generation: 2,
+            }),
+        };
+        assert_eq!(follow_on_terminal_turn(&worker), None);
+
+        let execution_task = Event::ActionReviewContinuationRequested {
+            review_id,
+            turn_id: "execution-continuation-turn".to_string(),
+            receipt: receipt_with(ActionReviewOwner::ExecutionTask {
+                session_id,
+                origin: moa_core::types::action_policy::ExecutionTaskOrigin {
+                    run_uid: Uuid::from_u128(90),
+                    task_uid: Uuid::from_u128(91),
+                    generation: 1,
+                },
+            }),
+        };
+        assert_eq!(follow_on_terminal_turn(&execution_task), None);
     }
 
     #[test]

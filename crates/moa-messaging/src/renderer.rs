@@ -249,10 +249,11 @@ mod tests {
     #[cfg(feature = "slack")]
     use moa_core::{
         types::action_policy::ActionClass, types::action_policy::ActionEnvelope,
-        types::action_policy::ActionReviewField, types::action_policy::ActionReviewPreview,
-        types::action_policy::RiskLevel, types::contact::SessionActorRef,
-        types::identifiers::SessionId, types::identifiers::TenantId,
-        types::identifiers::ToolCallId, types::session::SessionStatus,
+        types::action_policy::ActionReviewField, types::action_policy::ActionReviewOwner,
+        types::action_policy::ActionReviewPreview, types::action_policy::RiskLevel,
+        types::contact::SessionActorRef, types::identifiers::SessionId,
+        types::identifiers::TenantId, types::identifiers::ToolCallId,
+        types::session::SessionStatus,
     };
 
     #[cfg(feature = "slack")]
@@ -322,8 +323,11 @@ mod tests {
                         id: uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222")
                             .expect("fixture identity id parses"),
                     },
-                    session_id: None,
-                    worker_id: None,
+                    owner: ActionReviewOwner::Coordinator {
+                        session_id: SessionId::new(),
+                        turn_id: "turn-renderer-fixture".to_string(),
+                        generation: 1,
+                    },
                     tool_call_id: ToolCallId::new(),
                     tool_name: "bash".to_string(),
                     normalized_input: "npm test".to_string(),
@@ -333,7 +337,6 @@ mod tests {
                     origin_kind: None,
                     origin_id: None,
                     origin_step_id: None,
-                    execution_origin: None,
                     idempotency_key: None,
                     created_at: chrono::Utc::now(),
                 }),

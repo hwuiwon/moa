@@ -133,6 +133,7 @@ impl GraphStore for SeedGraph {
         _max_hops: u8,
         _as_of: Option<DateTime<Utc>>,
         _scoring: &moa_memory_graph::GraphWalkScoring,
+        _source_acl: &moa_core::types::memory::SourceAclContext,
     ) -> Result<Vec<moa_memory_graph::GraphExpansionHit>, Error> {
         Ok(Vec::new())
     }
@@ -205,6 +206,7 @@ impl GraphStore for TemporalSeedGraph {
         _max_hops: u8,
         _as_of: Option<DateTime<Utc>>,
         _scoring: &moa_memory_graph::GraphWalkScoring,
+        _source_acl: &moa_core::types::memory::SourceAclContext,
     ) -> Result<Vec<moa_memory_graph::GraphExpansionHit>, Error> {
         Ok(Vec::new())
     }

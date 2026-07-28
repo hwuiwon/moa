@@ -551,6 +551,7 @@ async fn ingest_articles(
     let now = Utc::now();
     repository
         .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: WIXQA_PROVIDER.to_string(),
@@ -627,6 +628,9 @@ async fn ingest_articles(
             provider: WIXQA_PROVIDER.to_string(),
             parser_label: "native".to_string(),
         },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
     );
 
     let started = Instant::now();
@@ -878,6 +882,7 @@ async fn retrieve_wixqa_output(
 ) -> Result<RetrievalOutput> {
     retriever
         .retrieve_with_diagnostics(RetrievalRequest {
+            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: question.question.clone(),
@@ -1465,6 +1470,7 @@ fn estimate_tokens(text: &str) -> u64 {
 
 fn article_to_record(article: &WixArticle) -> ProviderRecord {
     ProviderRecord {
+        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
         source_id: article.id.clone(),
         object_type: article.article_type.clone(),
         title: Some(article.title.clone()),

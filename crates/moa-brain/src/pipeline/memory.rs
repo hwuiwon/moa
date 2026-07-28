@@ -455,6 +455,19 @@ impl GraphMemoryRetriever {
             return Ok((strategy, Vec::new()));
         }
 
+        // Resolve the caller's provider-source principals ONCE per turn, from
+        // durable bindings keyed by the authenticated session identity. No leg
+        // re-reads them, and nothing in the request payload can influence them.
+        let policy = &policy.clone().with_source_acl(
+            moa_db::resolve_source_acl_context(
+                &self.pool,
+                ctx.tenant_id,
+                ctx.contact.as_ref().map(|contact| contact.contact_id),
+                self.assume_app_role,
+            )
+            .await?,
+        );
+
         let retrieval_started = Instant::now();
         let (hits, provenance) = match strategy {
             RetrievalStrategy::Deep => {
@@ -520,7 +533,14 @@ impl GraphMemoryRetriever {
         // paying for a query embedding. The embedding is not part of the cache
         // key, so a probe can hit without one.
         let probes = try_join_all(retrieval_plan.iter().map(|scope_plan| {
-            self.probe_scope(ctx, query_str, scope_plan, max_pii_class, result_limit)
+            self.probe_scope(
+                ctx,
+                query_str,
+                scope_plan,
+                policy,
+                max_pii_class,
+                result_limit,
+            )
         }))
         .await?;
 
@@ -565,6 +585,7 @@ impl GraphMemoryRetriever {
                             ctx,
                             query_str,
                             probe,
+                            policy,
                             query_embedding,
                             max_pii_class,
                             result_limit,
@@ -638,11 +659,16 @@ impl GraphMemoryRetriever {
     }
 
     /// Plans one scope and probes its read-time cache without an embedding.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the probe needs the full admission policy alongside scope and limits"
+    )]
     async fn probe_scope<'a>(
         &self,
         ctx: &WorkingContext,
         query: &str,
         scope_plan: &'a RetrievalScopePlan,
+        policy: &MemoryAdmissionPolicy,
         max_pii_class: SensitivityClass,
         result_limit: usize,
     ) -> Result<ScopeProbe<'a>> {
@@ -661,6 +687,7 @@ impl GraphMemoryRetriever {
             query,
             Vec::new(),
             scope_plan,
+            policy,
             &planned,
             max_pii_class,
             result_limit,
@@ -682,11 +709,16 @@ impl GraphMemoryRetriever {
     }
 
     /// Runs the backend retrieval for a scope that missed the read-time cache.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the backend run needs the full admission policy alongside scope and limits"
+    )]
     async fn retrieve_scope_backend(
         &self,
         ctx: &WorkingContext,
         query: &str,
         probe: &ScopeProbe<'_>,
+        policy: &MemoryAdmissionPolicy,
         query_embedding: &[f32],
         max_pii_class: SensitivityClass,
         result_limit: usize,
@@ -696,6 +728,7 @@ impl GraphMemoryRetriever {
             query,
             query_embedding.to_vec(),
             probe.scope_plan,
+            policy,
             &probe.planned,
             max_pii_class,
             result_limit,
@@ -719,6 +752,7 @@ impl GraphMemoryRetriever {
         query: &str,
         query_embedding: Vec<f32>,
         scope_plan: &RetrievalScopePlan,
+        policy: &MemoryAdmissionPolicy,
         planned: &PlannedQuery,
         max_pii_class: SensitivityClass,
         result_limit: usize,
@@ -740,6 +774,11 @@ impl GraphMemoryRetriever {
             rerank_window: ranking.rerank_window,
             abstain_below_window_evidence: ranking.abstain_below_window_evidence,
         };
+        // The caller's resolved provider-source admission context rides the
+        // request rather than the shared per-scope runtime, so one runtime can
+        // never serve a principal set it was not built for — every leg reads it
+        // from the request it is executing.
+        request.source_acl = policy.source_acl().clone();
         // Source the running agent's complete information-barrier policy. This
         // is the single point that populates request clearances; every scoped
         // leg installs them as the `moa.cleared_barriers` GUC.
@@ -1360,6 +1399,7 @@ mod tests {
             _max_hops: u8,
             _as_of: Option<DateTime<Utc>>,
             _scoring: &moa_memory_graph::GraphWalkScoring,
+            _source_acl: &moa_core::types::memory::SourceAclContext,
         ) -> moa_memory_graph::Result<Vec<GraphExpansionHit>> {
             panic!("NoopGraphStore should not be called by runtime factory tests")
         }

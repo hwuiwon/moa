@@ -10,6 +10,7 @@ use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::RlsContext;
 use moa_crypto::KeyManagementProvider;
 use moa_knowledge::{
+    acl_key::{KmsSourceAclKeyOwner, SourceAclKeyOwner as _},
     domain::{
         KnowledgeConnection, KnowledgeSyncRun, ListChangedRecordsRequest, RecordPage, SyncRunStatus,
     },
@@ -410,6 +411,8 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
         let provider_label = prepared.provider.clone();
         let connection = prepared.connection.clone();
         let credentials = self.credentials.clone();
+        let pool = self.pool.clone();
+        let kms = self.kms.clone();
         let caller = KnowledgeCaller::service(
             CredentialServiceActor::KnowledgeSyncListing,
             sync_listing_operation_id(prepared.run.sync_run_uid, page_index),
@@ -427,8 +430,16 @@ impl KnowledgeSyncIngestionSteps for RestateKnowledgeSyncIngestionSteps<'_, '_> 
                 let provider = ConfigKnowledgeProviders::new(config.knowledge.clone())
                     .provider(&provider_label)
                     .map_err(knowledge_service_handler_error)?;
+                // The adapter keys every provider principal as it normalizes,
+                // so the page this step journals holds opaque fingerprints and
+                // never a readable identity.
+                let acl_key = KmsSourceAclKeyOwner::new(pool, kms)
+                    .current_key(tenant_id)
+                    .await
+                    .map_err(knowledge_ingestion_error)?;
                 let page = provider
                     .list_changed_records(ListChangedRecordsRequest {
+                        acl_key,
                         connection,
                         credential,
                         cursor,

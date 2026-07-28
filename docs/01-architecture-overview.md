@@ -290,7 +290,10 @@ Contact memory is contact-local. A contact session never inherits another
 contact's memory or tenant admin/operator memory. When graph memory is enabled,
 the default answer-time retrieval path combines tenant knowledge-base chunks
 with admitted memory for the current contact, then keeps those source tiers
-separate in prompt context and query trace records. Tenant learning is
+separate in prompt context and query trace records. Knowledge-base chunks from a
+permission-bearing connector are admitted only under the source system's own
+ACL, so tenant membership alone does not grant access to synced content; see
+[Tenant Knowledge Base](21-tenant-knowledge-base.md). Tenant learning is
 tenant-local and never globally promoted. Skills and policies are tenant-owned.
 
 ## Core Traits
@@ -340,15 +343,17 @@ binding without changing handler contracts.
 
 Core production bindings:
 
-- Virtual objects: `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO`
+- Virtual objects: `Session`, `Worker`, `Tenant`, `CronJob`, `IngestionVO`.
+  `Session` and `Worker` additionally own the generation fence and the derived
+  scheduling index for the action reviews their own turns raise.
 - Services: `ActionReviews`, `AgentDefinitions`, `Agents`,
   `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`,
   `Contacts`, `Eval`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`,
   `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`,
   `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy`
-- Workflows: `ExecutionRun`, `ExecutionTask`, `KnowledgeSyncIngestion`,
-  `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `SkillLearning`,
-  `TenantPurge`, `TurnExecution`, `WorkerTurnExecution`
+- Workflows: `ExecutionRun`, `ExecutionTask`, `KnowledgeIndexRebuild`,
+  `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`,
+  `SkillLearning`, `TenantPurge`, `TurnExecution`, `WorkerTurnExecution`
 
 
 Internal application boundaries are in-process modules or domain crates behind
@@ -440,6 +445,8 @@ User message
   -> SegmentTracker opens or rolls a task segment
   -> LLM response is streamed/collected
   -> Tool calls route through ToolExecutor and ToolRouter
+  -> Every tool output is classified at its raw source and travels only as a
+     SecuredToolOutput; a non-safe class scores the owner's security circuit
   -> Output guardrail evaluates buffered visible text
   -> BrainResponse and tool events are persisted
   -> Detached runs emit compact progress and request one guarded terminal synthesis
@@ -548,8 +555,10 @@ behavior boundary; there are no procedural macros or implicit handler guards.
 ### Audit
 
 OCSF v1.3 security events are signed per tenant and written to the Postgres
-`security_events` table by a bounded, non-blocking background sink. Operational
-setup is documented in
+`security_events` table by a bounded, non-blocking background sink. Detection
+Findings for prompt-injection circuit transitions are the exception: they are
+written synchronously and fail closed, because an agent must never be halted
+without a durable record of why. Operational setup is documented in
 [`docs/operations/ocsf-audit.md`](operations/ocsf-audit.md).
 
 ## Eval, Experiments, And Insights

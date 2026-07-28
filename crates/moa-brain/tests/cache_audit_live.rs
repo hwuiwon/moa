@@ -426,7 +426,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);
     let tool_router = Arc::new(
-        ToolRouter::from_config(&sonnet_config, None, Some(store.clone()))
+        ToolRouter::from_config(&sonnet_config, None, Some(store.clone()), None)
             .await?
             .with_session_store(store.clone()),
     );

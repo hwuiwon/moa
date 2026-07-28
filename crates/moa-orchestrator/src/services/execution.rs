@@ -2928,7 +2928,7 @@ fn registered_tool_capability(
             "moa.execution.capability.hand",
             json!({"kind": "hand"}),
         ),
-        ToolExecution::Mcp { server_name } => (
+        ToolExecution::Mcp { server_name, .. } => (
             CapabilitySource::McpTool {
                 server: server_name.clone(),
                 name: definition.name.clone(),
@@ -3882,6 +3882,7 @@ mod tests {
         registry
             .register_mcp_tool(
                 "github",
+                moa_config::McpServerCredentialScope::DeploymentOwned,
                 McpDiscoveredTool {
                     name: "github_issue_create".to_string(),
                     description: "create an issue".to_string(),

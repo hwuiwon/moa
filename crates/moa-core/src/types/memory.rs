@@ -160,11 +160,193 @@ impl<'de> Deserialize<'de> for InformationBarrierClearances {
     }
 }
 
+/// Byte length of the keyed digest inside a [`SourcePrincipalFingerprint`].
+pub const SOURCE_PRINCIPAL_DIGEST_BYTES: usize = 32;
+
+/// Byte length of the opaque encoded form of a [`SourcePrincipalFingerprint`].
+///
+/// Two big-endian key-version bytes followed by the keyed digest. The version is
+/// part of the opaque value so a single `bytea` comparison decides both "same
+/// principal" and "same ACL key generation": a fingerprint minted under a
+/// retired key never matches an entry minted under the current one.
+pub const SOURCE_PRINCIPAL_FINGERPRINT_BYTES: usize = 2 + SOURCE_PRINCIPAL_DIGEST_BYTES;
+
+/// One provider ACL principal, reduced to a keyed opaque fingerprint.
+///
+/// A principal is a provider-native identity (a user, a group, a domain, or the
+/// provider's "anyone with the link" pseudo-principal). MOA never persists the
+/// underlying email, phone number, or provider label: the canonical
+/// `namespace/kind/subject` triple is HMAC'd with the tenant's versioned ACL key
+/// and only this fingerprint is stored, compared, logged, or placed in a cache
+/// key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SourcePrincipalFingerprint(
+    #[serde(with = "source_principal_fingerprint_hex")] [u8; SOURCE_PRINCIPAL_FINGERPRINT_BYTES],
+);
+
+impl SourcePrincipalFingerprint {
+    /// Builds a fingerprint from an ACL key version and its keyed digest.
+    #[must_use]
+    pub fn from_digest(key_version: u16, digest: [u8; SOURCE_PRINCIPAL_DIGEST_BYTES]) -> Self {
+        let mut bytes = [0_u8; SOURCE_PRINCIPAL_FINGERPRINT_BYTES];
+        bytes[..2].copy_from_slice(&key_version.to_be_bytes());
+        bytes[2..].copy_from_slice(&digest);
+        Self(bytes)
+    }
+
+    /// Parses the opaque encoded form read back from storage.
+    pub fn from_bytes(bytes: &[u8]) -> crate::error::Result<Self> {
+        <[u8; SOURCE_PRINCIPAL_FINGERPRINT_BYTES]>::try_from(bytes)
+            .map(Self)
+            .map_err(|_| {
+                crate::error::MoaError::ValidationError(format!(
+                    "source principal fingerprint must be {SOURCE_PRINCIPAL_FINGERPRINT_BYTES} bytes"
+                ))
+            })
+    }
+
+    /// Returns the opaque encoded form used as a database bind parameter.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Returns the ACL key version this fingerprint was minted under.
+    #[must_use]
+    pub fn key_version(&self) -> u16 {
+        u16::from_be_bytes([self.0[0], self.0[1]])
+    }
+}
+
+mod source_principal_fingerprint_hex {
+    //! Hex codec for the opaque fingerprint so serialized forms stay printable
+    //! without ever exposing a decodable principal label.
+
+    use super::SOURCE_PRINCIPAL_FINGERPRINT_BYTES;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S>(
+        bytes: &[u8; SOURCE_PRINCIPAL_FINGERPRINT_BYTES],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub(super) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<[u8; SOURCE_PRINCIPAL_FINGERPRINT_BYTES], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        let decoded = hex::decode(&encoded).map_err(serde::de::Error::custom)?;
+        <[u8; SOURCE_PRINCIPAL_FINGERPRINT_BYTES]>::try_from(decoded.as_slice()).map_err(|_| {
+            serde::de::Error::custom(format!(
+                "source principal fingerprint must be {SOURCE_PRINCIPAL_FINGERPRINT_BYTES} bytes"
+            ))
+        })
+    }
+}
+
+/// The caller's resolved provider-source admission context for one request.
+///
+/// Built once, durably, from authenticated session/contact identity plus
+/// verified provider bindings — never from request JSON and never refreshed
+/// inside a retrieval leg. It carries the bounded canonical principal-set and
+/// the tenant's current source-ACL epoch; the epoch is what makes a warm
+/// retrieval cache entry stale the moment a snapshot or binding changes.
+///
+/// The default is the empty set, which denies every provider-managed source.
+/// Tenant role or operator status does not widen it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SourceAclContext {
+    principals: BTreeSet<SourcePrincipalFingerprint>,
+    acl_epoch: i64,
+}
+
+impl SourceAclContext {
+    /// Creates the deny-everything context at the given tenant ACL epoch.
+    #[must_use]
+    pub fn empty(acl_epoch: i64) -> Self {
+        Self {
+            principals: BTreeSet::new(),
+            acl_epoch,
+        }
+    }
+
+    /// Creates a context from resolved principal fingerprints and the tenant epoch.
+    #[must_use]
+    pub fn new(
+        principals: impl IntoIterator<Item = SourcePrincipalFingerprint>,
+        acl_epoch: i64,
+    ) -> Self {
+        Self {
+            principals: principals.into_iter().collect(),
+            acl_epoch,
+        }
+    }
+
+    /// Returns the tenant's source-ACL epoch pinned into this context.
+    #[must_use]
+    pub fn acl_epoch(&self) -> i64 {
+        self.acl_epoch
+    }
+
+    /// Returns the canonical sorted principal fingerprints.
+    #[must_use]
+    pub fn principals(&self) -> &BTreeSet<SourcePrincipalFingerprint> {
+        &self.principals
+    }
+
+    /// Returns whether the caller resolved to no provider principals at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.principals.is_empty()
+    }
+
+    /// Returns the opaque fingerprints as database bind values, canonically sorted.
+    #[must_use]
+    pub fn bind_values(&self) -> Vec<Vec<u8>> {
+        self.principals
+            .iter()
+            .map(|principal| principal.as_bytes().to_vec())
+            .collect()
+    }
+
+    /// Returns the aggregate fingerprint of the whole principal set.
+    ///
+    /// This is the only ACL value permitted in a cache key: it is a digest over
+    /// the already-opaque per-principal fingerprints, so two callers collide
+    /// only when their admitted principal sets are byte-identical.
+    #[must_use]
+    pub fn principal_set_fingerprint(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"moa/source-acl/principal-set/v1");
+        for principal in &self.principals {
+            hasher.update(&(principal.as_bytes().len() as u32).to_be_bytes());
+            hasher.update(principal.as_bytes());
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+}
+
 /// Request-local tenant/contact values used to install Postgres RLS GUCs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RlsContext {
     tenant_id: TenantId,
     contact_id: Option<ContactId>,
+    /// Provider-source ACL admission context for this caller.
+    ///
+    /// Every constructor starts at [`SourceAclContext::empty`], which admits only
+    /// `TenantPublic` sources; callers attach a resolved set with
+    /// [`RlsContext::with_source_acl`]. There is no serde default: a serialized
+    /// context without this field is a typed decode error rather than a silently
+    /// widened one.
+    source_acl: SourceAclContext,
     /// Information-barrier / need-to-know tags this caller is cleared to retrieve.
     ///
     /// Empty means no clearance: barriered graph-memory nodes
@@ -178,6 +360,14 @@ pub struct RlsContext {
     cleared_barriers: InformationBarrierClearances,
 }
 
+/// Epoch value marking a source-ACL context that was never resolved.
+///
+/// Negative by construction so it can never equal a real tenant epoch (which
+/// starts at zero and only increases). Retrieval caching treats it as
+/// non-cacheable: a result computed without a resolved ACL epoch has nothing
+/// that could later invalidate it.
+pub const SOURCE_ACL_EPOCH_UNRESOLVED: i64 = -1;
+
 impl RlsContext {
     /// Creates a tenant-local RLS context.
     #[must_use]
@@ -186,6 +376,7 @@ impl RlsContext {
             tenant_id,
             contact_id: None,
             cleared_barriers: InformationBarrierClearances::new(),
+            source_acl: SourceAclContext::empty(SOURCE_ACL_EPOCH_UNRESOLVED),
         }
     }
 
@@ -196,7 +387,26 @@ impl RlsContext {
             tenant_id,
             contact_id: Some(contact_id),
             cleared_barriers: InformationBarrierClearances::new(),
+            source_acl: SourceAclContext::empty(SOURCE_ACL_EPOCH_UNRESOLVED),
         }
+    }
+
+    /// Returns this context extended with the caller's resolved provider-source
+    /// admission context.
+    ///
+    /// The unattached default admits only `TenantPublic` sources, so forgetting
+    /// to attach a resolved set hides provider-managed content instead of
+    /// exposing it.
+    #[must_use]
+    pub fn with_source_acl(mut self, source_acl: SourceAclContext) -> Self {
+        self.source_acl = source_acl;
+        self
+    }
+
+    /// Returns the caller's provider-source admission context.
+    #[must_use]
+    pub fn source_acl(&self) -> &SourceAclContext {
+        &self.source_acl
     }
 
     /// Returns this context extended with the caller's cleared information-barrier
@@ -311,4 +521,386 @@ pub struct SkillMetadata {
     pub has_execution_plan: bool,
     /// Estimated token cost for the full skill body.
     pub estimated_tokens: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Storage-partition index rebuilds
+// ---------------------------------------------------------------------------
+
+uuid_id!(
+    /// Identifier for one durable storage-partition index rebuild operation.
+    pub struct RebuildOperationId
+);
+
+uuid_id!(
+    /// Identifier for one embedding generation of a storage partition.
+    pub struct EmbeddingGenerationId
+);
+
+/// Which rebuild an operation performs.
+///
+/// Both kinds share one generation state machine: they differ in what they
+/// stage and what activation replaces, not in how progress, validation,
+/// activation, or rollback are sequenced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebuildKind {
+    /// Recompute every vector in the partition under a new embedding identity.
+    Reembed,
+    /// Recompute chunk boundaries and everything derived from them.
+    Rechunk,
+}
+
+impl RebuildKind {
+    /// Returns the persisted SQL discriminator.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reembed => "reembed",
+            Self::Rechunk => "rechunk",
+        }
+    }
+
+    /// Parses a persisted SQL discriminator.
+    pub fn parse(value: &str) -> crate::error::Result<Self> {
+        match value {
+            "reembed" => Ok(Self::Reembed),
+            "rechunk" => Ok(Self::Rechunk),
+            other => Err(crate::error::MoaError::ValidationError(format!(
+                "unknown rebuild kind `{other}`"
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for RebuildKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Lifecycle position of one rebuild operation.
+///
+/// Transitions are compare-and-swap against the operation's fence token, so a
+/// replayed workflow step observes a lost swap rather than reapplying a
+/// transition that already happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebuildLifecycle {
+    /// Census taken, candidate generation not yet created.
+    Planning,
+    /// Candidate vectors are being built in bounded batches.
+    Building,
+    /// Bounded shadow queries are scoring the candidate generation.
+    Validating,
+    /// Validation passed; the candidate is complete and awaiting activation.
+    AwaitingActivation,
+    /// The candidate generation is the production read generation; the prior
+    /// generation is retained for rollback.
+    Activated,
+    /// Retired generation data has been removed; the operation is closed.
+    Finalized,
+    /// The prior generation was restored as the production read generation.
+    RolledBack,
+    /// An operator cancelled the operation before activation.
+    Cancelled,
+    /// The operation stopped on an error and did not activate.
+    Failed,
+}
+
+impl RebuildLifecycle {
+    /// Returns the persisted SQL discriminator.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planning => "planning",
+            Self::Building => "building",
+            Self::Validating => "validating",
+            Self::AwaitingActivation => "awaiting_activation",
+            Self::Activated => "activated",
+            Self::Finalized => "finalized",
+            Self::RolledBack => "rolled_back",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Parses a persisted SQL discriminator.
+    pub fn parse(value: &str) -> crate::error::Result<Self> {
+        match value {
+            "planning" => Ok(Self::Planning),
+            "building" => Ok(Self::Building),
+            "validating" => Ok(Self::Validating),
+            "awaiting_activation" => Ok(Self::AwaitingActivation),
+            "activated" => Ok(Self::Activated),
+            "finalized" => Ok(Self::Finalized),
+            "rolled_back" => Ok(Self::RolledBack),
+            "cancelled" => Ok(Self::Cancelled),
+            "failed" => Ok(Self::Failed),
+            other => Err(crate::error::MoaError::ValidationError(format!(
+                "unknown rebuild lifecycle `{other}`"
+            ))),
+        }
+    }
+
+    /// Whether no further transition is possible.
+    ///
+    /// The partial unique index that admits one rebuild per storage partition
+    /// uses exactly this set, so the Rust and SQL definitions cannot drift
+    /// without the index rejecting a start that this predicate allowed.
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Finalized | Self::RolledBack | Self::Cancelled | Self::Failed
+        )
+    }
+}
+
+impl fmt::Display for RebuildLifecycle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Serving state of one embedding generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationState {
+    /// Built but never served. Candidate vectors live in their own table and no
+    /// production reader joins it.
+    Candidate,
+    /// The production read generation named by the active-generation pointer.
+    Active,
+    /// Superseded by a later activation, retained until finalization.
+    Retired,
+}
+
+impl GenerationState {
+    /// Returns the persisted SQL discriminator.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Candidate => "candidate",
+            Self::Active => "active",
+            Self::Retired => "retired",
+        }
+    }
+
+    /// Parses a persisted SQL discriminator.
+    pub fn parse(value: &str) -> crate::error::Result<Self> {
+        match value {
+            "candidate" => Ok(Self::Candidate),
+            "active" => Ok(Self::Active),
+            "retired" => Ok(Self::Retired),
+            other => Err(crate::error::MoaError::ValidationError(format!(
+                "unknown generation state `{other}`"
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for GenerationState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// One member of the state a rechunk must stage before it can activate.
+///
+/// Activation replaces all of these in one scoped transaction. A rechunk that
+/// staged only some of them is refused, because applying a subset would leave
+/// chunks whose graph, ACL, or occurrence identity described the old text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RechunkStagingMember {
+    /// Replacement chunk rows for the document version.
+    Chunk,
+    /// Graph node and edge deltas derived from the new chunks.
+    GraphDelta,
+    /// Candidate embeddings for the new chunks.
+    Embedding,
+    /// Source-ACL snapshot fingerprints carried forward onto the new chunks.
+    AclSnapshot,
+    /// Per-occurrence identity for the new chunks.
+    OccurrenceIdentity,
+    /// Provenance linking each new chunk to the parsed source it came from.
+    Provenance,
+}
+
+impl RechunkStagingMember {
+    /// Every member a complete rechunk staging set must contain.
+    pub const ALL: [Self; 6] = [
+        Self::Chunk,
+        Self::GraphDelta,
+        Self::Embedding,
+        Self::AclSnapshot,
+        Self::OccurrenceIdentity,
+        Self::Provenance,
+    ];
+
+    /// Returns the persisted SQL discriminator.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chunk => "chunk",
+            Self::GraphDelta => "graph_delta",
+            Self::Embedding => "embedding",
+            Self::AclSnapshot => "acl_snapshot",
+            Self::OccurrenceIdentity => "occurrence_identity",
+            Self::Provenance => "provenance",
+        }
+    }
+
+    /// Parses a persisted SQL discriminator.
+    pub fn parse(value: &str) -> crate::error::Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|member| member.as_str() == value)
+            .ok_or_else(|| {
+                crate::error::MoaError::ValidationError(format!(
+                    "unknown rechunk staging member `{value}`"
+                ))
+            })
+    }
+}
+
+impl fmt::Display for RechunkStagingMember {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Builds the contextual embedding input for one knowledge chunk.
+///
+/// This is the authoritative embedding input for a `Chunk` vector, and it is
+/// not the chunk text. The same sentence under a different document title or
+/// heading path is a different point in the embedding space, so ingestion
+/// prefixes the chunk with its context and a rebuild must reproduce the prefix
+/// byte for byte. Re-embedding from bare `knowledge_chunks.text` would produce
+/// vectors that look valid, index cleanly, and quietly answer from a different
+/// space than the queries they are compared against.
+///
+/// Both the ingestion pipeline and the rebuild call this one function so the
+/// format cannot drift between the writer and the rebuilder.
+#[must_use]
+pub fn contextual_chunk_embedding_input(
+    document_title: Option<&str>,
+    heading_path: &[String],
+    text: &str,
+) -> String {
+    let mut context: Vec<&str> = Vec::new();
+    if let Some(title) = document_title {
+        let title = title.trim();
+        if !title.is_empty() {
+            context.push(title);
+        }
+    }
+    for heading in heading_path {
+        let heading = heading.trim();
+        if !heading.is_empty() && context.last().copied() != Some(heading) {
+            context.push(heading);
+        }
+    }
+    if context.is_empty() {
+        return text.to_string();
+    }
+    format!("{}\n\n{}", context.join(" > "), text)
+}
+
+#[cfg(test)]
+mod rebuild_tests {
+    use super::*;
+
+    #[test]
+    fn rebuild_lifecycle_terminal_set_matches_the_single_operation_index() {
+        // Pins: the Rust terminal set and the V000351 partial unique index
+        // predicate name the same four lifecycles. If they diverge, a second
+        // rebuild either starts against a live one or is refused after a
+        // finished one.
+        let terminal = [
+            RebuildLifecycle::Finalized,
+            RebuildLifecycle::RolledBack,
+            RebuildLifecycle::Cancelled,
+            RebuildLifecycle::Failed,
+        ];
+        for lifecycle in terminal {
+            assert!(
+                lifecycle.is_terminal(),
+                "{lifecycle} must be terminal to leave the partition free"
+            );
+        }
+        for lifecycle in [
+            RebuildLifecycle::Planning,
+            RebuildLifecycle::Building,
+            RebuildLifecycle::Validating,
+            RebuildLifecycle::AwaitingActivation,
+            RebuildLifecycle::Activated,
+        ] {
+            assert!(
+                !lifecycle.is_terminal(),
+                "{lifecycle} must hold the partition against a concurrent rebuild"
+            );
+        }
+    }
+
+    #[test]
+    fn contextual_chunk_input_prefixes_title_and_heading_path() {
+        // Pins: the authoritative Chunk embedding input is the contextual form,
+        // not the bare chunk text. A rebuild that dropped the prefix would emit
+        // vectors in a different space than the ones it replaces.
+        let input = contextual_chunk_embedding_input(
+            Some("  Security Handbook  "),
+            &["Access Control".to_string(), "  ".to_string()],
+            "Rotate keys quarterly.",
+        );
+
+        assert_eq!(
+            input,
+            "Security Handbook > Access Control\n\nRotate keys quarterly."
+        );
+    }
+
+    #[test]
+    fn contextual_chunk_input_collapses_a_heading_that_repeats_its_parent() {
+        // Pins: the deduplication rule ingestion applies, so a rebuild of a
+        // document whose first heading equals its title reproduces the exact
+        // same string.
+        let input = contextual_chunk_embedding_input(
+            Some("Runbook"),
+            &["Runbook".to_string(), "Rollback".to_string()],
+            "Flip the pointer.",
+        );
+
+        assert_eq!(input, "Runbook > Rollback\n\nFlip the pointer.");
+    }
+
+    #[test]
+    fn contextual_chunk_input_without_context_is_the_bare_text() {
+        // Pins: an untitled, unheaded chunk embeds its text with no separator,
+        // matching ingestion rather than emitting a leading "\n\n".
+        assert_eq!(
+            contextual_chunk_embedding_input(None, &[], "Bare chunk."),
+            "Bare chunk."
+        );
+        assert_eq!(
+            contextual_chunk_embedding_input(Some("   "), &["".to_string()], "Bare chunk."),
+            "Bare chunk."
+        );
+    }
+
+    #[test]
+    fn rechunk_staging_members_round_trip_their_sql_discriminators() {
+        // Pins: the six-member completeness rule shares one vocabulary with
+        // `moa.knowledge_rechunk_staged_members()`; a member that failed to
+        // round-trip would be silently absent from the completeness check.
+        for member in RechunkStagingMember::ALL {
+            assert_eq!(
+                RechunkStagingMember::parse(member.as_str()).expect("member round-trips"),
+                member
+            );
+        }
+        assert_eq!(RechunkStagingMember::ALL.len(), 6);
+        assert!(RechunkStagingMember::parse("citations").is_err());
+    }
 }

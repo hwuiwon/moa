@@ -5,12 +5,14 @@ use std::sync::Arc;
 
 use crate::adapters::mcp::McpDiscoveredToolRegistration;
 use crate::tools::{memory, session_search, tool_result};
+use moa_config::McpServerCredentialScope;
 use moa_config::ToolBudgetConfig;
 use moa_core::{
     error::Result, traits::BuiltInTool, types::action_policy::ActionClass,
     types::action_policy::ActionPolicyEffect, types::hands::SandboxTier,
-    types::tools::IdempotencyClass, types::tools::ToolDefinition, types::tools::ToolDiffStrategy,
-    types::tools::ToolInputShape, types::tools::ToolPolicySpec,
+    types::security::ToolCapabilityId, types::tools::IdempotencyClass,
+    types::tools::ToolDefinition, types::tools::ToolDiffStrategy, types::tools::ToolInputShape,
+    types::tools::ToolPolicySpec,
 };
 use serde_json::Value;
 
@@ -18,6 +20,7 @@ use crate::tools::sandbox_descriptor::{
     SandboxToolDescriptor, default_sandbox_tool_descriptors, sandbox_tool_descriptors,
 };
 
+use super::mcp_connections::ToolCredentialScope;
 use super::{DEFAULT_PROVIDER_NAME, ToolRouter};
 
 /// One provider route for a hand-routed tool.
@@ -45,8 +48,46 @@ pub enum ToolExecution {
     BuiltIn(Arc<dyn BuiltInTool>),
     /// Routed to a provisioned hand.
     Hand { routes: Vec<HandRoute> },
-    /// Reserved for MCP-backed tools.
-    Mcp { server_name: String },
+    /// Routed to a configured MCP server.
+    Mcp {
+        /// Configured MCP server that owns the remote tool.
+        server_name: String,
+        /// Credential owner the server is invoked with, copied from that
+        /// server's configuration when the tool was discovered. Dispatch requires
+        /// it to still agree with the live server configuration, so a server that
+        /// changes ownership cannot serve a tool registered under the other
+        /// owner's scope.
+        credential_scope: McpServerCredentialScope,
+    },
+}
+
+impl ToolExecution {
+    /// Returns the canonical capability identity the security circuit keys on.
+    ///
+    /// Resolved from the registry rather than from the caller, and — for hand
+    /// tools — from the logical tool alone rather than from the route that ends
+    /// up serving it. Falling back from one sandbox provider to another therefore
+    /// keeps one capability identity, so a tripped circuit cannot be reset by
+    /// provoking a fallback.
+    #[must_use]
+    pub fn capability_id(&self, tool_name: &str) -> ToolCapabilityId {
+        match self {
+            Self::BuiltIn(_) => ToolCapabilityId::builtin(tool_name),
+            Self::Hand { .. } => ToolCapabilityId::hand(tool_name),
+            Self::Mcp { server_name, .. } => ToolCapabilityId::mcp(server_name, tool_name),
+        }
+    }
+
+    /// Returns the credential scope every invocation of this tool carries.
+    #[must_use]
+    pub fn credential_scope(&self) -> ToolCredentialScope {
+        match self {
+            Self::BuiltIn(_) | Self::Hand { .. } => ToolCredentialScope::NonMcp,
+            Self::Mcp {
+                credential_scope, ..
+            } => ToolCredentialScope::for_server(*credential_scope),
+        }
+    }
 }
 
 pub(super) struct RegisteredTool {
@@ -93,7 +134,11 @@ impl RegisteredTool {
         }
     }
 
-    fn mcp(server_name: &str, registration: McpDiscoveredToolRegistration) -> Self {
+    fn mcp(
+        server_name: &str,
+        credential_scope: McpServerCredentialScope,
+        registration: McpDiscoveredToolRegistration,
+    ) -> Self {
         let idempotency_class = if registration.allows_idempotent_retry() {
             IdempotencyClass::Idempotent
         } else {
@@ -130,6 +175,7 @@ impl RegisteredTool {
             },
             execution: ToolExecution::Mcp {
                 server_name: server_name.to_string(),
+                credential_scope,
             },
         }
     }
@@ -214,9 +260,15 @@ impl ToolRegistry {
     }
 
     /// Registers a discovered MCP tool and adds it to the default loadout.
+    ///
+    /// `credential_scope` is the owning server's configured credential scope. It
+    /// is recorded on the registration so every invocation of this tool carries a
+    /// credential scope derived from operator configuration rather than from the
+    /// call.
     pub fn register_mcp_tool(
         &mut self,
         server_name: &str,
+        credential_scope: McpServerCredentialScope,
         tool: impl Into<McpDiscoveredToolRegistration>,
     ) -> Result<()> {
         let registration = tool.into();
@@ -226,8 +278,10 @@ impl ToolRegistry {
                 "MCP server {server_name} discovered tool {name}, which conflicts with an existing local tool name"
             )));
         }
-        self.tools
-            .insert(name.clone(), RegisteredTool::mcp(server_name, registration));
+        self.tools.insert(
+            name.clone(),
+            RegisteredTool::mcp(server_name, credential_scope, registration),
+        );
         if !self
             .default_loadout
             .iter()

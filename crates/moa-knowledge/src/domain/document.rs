@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::KnowledgeIngestionStep;
+use super::{KnowledgeIngestionStep, ObjectAcl};
 
 /// Source-side object such as a file, page, ticket, message, or CRM record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,6 +38,13 @@ pub struct KnowledgeObject {
     pub metadata: Value,
     /// Current ingestion status.
     pub status: ObjectStatus,
+    /// Provider ACL position of this object.
+    ///
+    /// Required, with no serde default: an object that reaches retrieval without
+    /// a recorded ACL position would be indistinguishable from one whose
+    /// permissions were never captured, and the safe reading of that is not a
+    /// reading anyone should have to infer.
+    pub acl: ObjectAcl,
     /// Source update time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_updated_at: Option<DateTime<Utc>>,
@@ -92,6 +99,26 @@ pub struct DocumentVersion {
     pub metadata: Value,
     /// Version creation timestamp.
     pub created_at: DateTime<Utc>,
+}
+
+impl DocumentVersion {
+    /// Returns the graph node uid this version materializes.
+    ///
+    /// A knowledge `Document` node carries the object's title and source id, so
+    /// it is source-governed content in its own right and needs the same ACL
+    /// admission as the version's chunks. The uid is a pure function of the
+    /// version id — the same derivation the graph delta uses — so the stored
+    /// column is a lookup index for admission, never a second source of truth.
+    #[must_use]
+    pub fn graph_node_uid(&self) -> Uuid {
+        Self::graph_node_uid_for(self.version_uid)
+    }
+
+    /// Returns the graph node uid for one document version id.
+    #[must_use]
+    pub fn graph_node_uid_for(version_uid: Uuid) -> Uuid {
+        crate::graph_delta::stable_uid(&format!("document:{version_uid}"))
+    }
 }
 
 /// Input accepted by a document parser.

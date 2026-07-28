@@ -136,10 +136,10 @@ async fn insert_knowledge_chunk(
         INSERT INTO moa.knowledge_connections (
             connection_uid, tenant_id, storage_partition_id, provider,
             provider_config_key, provider_connection_id, connector,
-            credential_ref, status
+            credential_ref, status, acl_mode
         )
         VALUES ($1, $2, $3, 'test-provider', 'default', $4, 'test-connector',
-                'test-credential', 'active')
+                'test-credential', 'active', 'tenant_public')
         "#,
     )
     .bind(connection_uid)
@@ -153,9 +153,9 @@ async fn insert_knowledge_chunk(
         r#"
         INSERT INTO moa.knowledge_objects (
             object_uid, tenant_id, storage_partition_id, connection_id,
-            object_type, external_object_id, title, status, metadata
+            object_type, external_object_id, title, status, acl_state, metadata
         )
-        VALUES ($1, $2, $3, $4, 'article', 'article-1', 'Article 1', 'active', '{}')
+        VALUES ($1, $2, $3, $4, 'article', 'article-1', 'Article 1', 'active', 'incomplete', '{}')
         "#,
     )
     .bind(object_uid)

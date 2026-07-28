@@ -9,18 +9,19 @@
 
 use crate::classes::{
     AccountChangeEvent, Actor, AuthenticationEvent, AuthorizationEvent, DataAccess,
-    DataAccessEvent, EntityManagementEvent, Metadata, NetworkEndpoint, Product, Resource,
-    SCHEMA_VERSION, Session, User,
+    DataAccessEvent, DetectionFindingEvent, EntityManagementEvent, FindingInfo, Metadata,
+    NetworkEndpoint, Product, PromptInjectionCircuit, Resource, SCHEMA_VERSION, Session, User,
 };
 use crate::enums::{
     account_activity, authn_activity, authn_status, authz_activity, authz_status, category_uid,
-    class_uid, datastore_activity, entity_activity, severity_id,
+    class_uid, datastore_activity, detection_activity, entity_activity, severity_id,
 };
 use crate::signing;
 use chrono::{DateTime, Utc};
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::context::WorkingContext;
 use moa_core::types::identifiers::TenantId;
+use moa_core::types::security::{InjectionSignal, SecurityCircuitStage, SecurityCircuitTransition};
 use moa_core::types::session::SessionMeta;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -42,6 +43,9 @@ pub enum EmitError {
     /// Database insertion failed.
     #[error("database: {0}")]
     Database(#[from] sqlx::Error),
+    /// A stored event with the same deterministic identity does not match this one.
+    #[error("replay conflict: {0}")]
+    ReplayConflict(String),
 }
 
 /// Actor information for audit sites that do not already have an `Identity`.
@@ -1099,5 +1103,206 @@ fn severity_label(severity_id: i32) -> &'static str {
         severity_id::CRITICAL => "Critical",
         severity_id::FATAL => "Fatal",
         _ => "Informational",
+    }
+}
+
+/// Inputs for one prompt-injection circuit finding.
+///
+/// The owner supplies both the identity and the occurrence time. Neither is
+/// generated here: a replayed owner must reproduce a byte-identical event, and
+/// anything read from the clock or a fresh UUID inside this function would make
+/// the second attempt look like a different finding.
+#[derive(Debug, Clone)]
+pub struct PromptInjectionFinding {
+    /// Session that owns the transition.
+    pub session_id: Uuid,
+    /// Exact transition the owner applied.
+    pub transition: SecurityCircuitTransition,
+    /// Stable detector signals behind the triggering assessment.
+    pub signals: Vec<InjectionSignal>,
+    /// Timestamp the owner journaled before applying the transition.
+    pub occurred_at: DateTime<Utc>,
+}
+
+/// Outcome of persisting one prompt-injection finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingWrite {
+    /// This call inserted the finding.
+    Inserted,
+    /// The finding already existed and matched byte for byte.
+    ReplayMatched,
+}
+
+/// Emits one signed OCSF Detection Finding for a circuit transition.
+///
+/// Identity is UUIDv5 over the transition key, so a crash-and-replay writes the
+/// same primary key rather than a second row. On a primary-key conflict this
+/// does not silently succeed: it loads the existing row and requires the same
+/// tenant, occurrence timestamp, and canonical JCS payload, and verifies the
+/// stored signature using **the key the row was signed with** — looked up by the
+/// row's own `signing_key_id`, not the tenant's currently active key — so a
+/// rotation between the original write and the replay cannot turn a genuine
+/// match into a spurious drift error. Any real difference is a replay conflict,
+/// which means two different transitions collided on one identity and must be
+/// surfaced rather than absorbed.
+pub async fn emit_prompt_injection_finding(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    finding: PromptInjectionFinding,
+) -> Result<(Uuid, FindingWrite), EmitError> {
+    let event_id = finding.transition.event_uuid();
+    let event = detection_finding_event(&finding);
+    let value = serde_json::to_value(&event)?;
+    let columns = EventColumns::from_value(&value);
+
+    let mut tx = pool.begin().await?;
+    let (signing_key_id, signature_hex, event_jcs) =
+        signing::sign_tx(&mut tx, tenant_id.0, &value).await?;
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO security_events
+            (id, tenant_id, class_uid, activity_id, category_uid, severity_id,
+             type_uid, actor_user_uid, actor_session_uid, target_resource_uid,
+             event_jcs, signature_hex, signing_key_id, occurred_at,
+             retrieval_operation_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL)
+        ON CONFLICT (id) DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(event_id)
+    .bind(tenant_id.0)
+    .bind(columns.class_uid)
+    .bind(columns.activity_id)
+    .bind(columns.category_uid)
+    .bind(columns.severity_id)
+    .bind(columns.type_uid)
+    .bind(Option::<String>::None)
+    .bind(Some(finding.session_id.to_string()))
+    .bind(finding.transition.capability.render())
+    .bind(&event_jcs)
+    .bind(&signature_hex)
+    .bind(signing_key_id)
+    .bind(finding.occurred_at)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if inserted.is_some() {
+        tx.commit().await?;
+        return Ok((event_id, FindingWrite::Inserted));
+    }
+
+    let existing: (Uuid, DateTime<Utc>, Vec<u8>, String, Uuid) = sqlx::query_as(
+        "SELECT tenant_id, occurred_at, event_jcs, signature_hex, signing_key_id \
+         FROM security_events WHERE id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let (stored_tenant, stored_occurred_at, stored_jcs, stored_signature, stored_key_id) = existing;
+    // Verified on the transaction we already hold. The owner is blocked
+    // synchronously on this call, so acquiring a second pool connection here
+    // would double the pool footprint of one logical write and, under
+    // saturation, could deadlock against this very transaction.
+    let signature_matches =
+        signing::verify_tx(&mut tx, stored_key_id, &stored_jcs, &stored_signature).await?;
+    tx.commit().await?;
+
+    if stored_tenant != tenant_id.0 {
+        return Err(EmitError::ReplayConflict(
+            "an existing finding with this identity belongs to another tenant".to_string(),
+        ));
+    }
+    if stored_occurred_at != finding.occurred_at {
+        return Err(EmitError::ReplayConflict(
+            "an existing finding with this identity has a different occurrence time".to_string(),
+        ));
+    }
+    if stored_jcs != event_jcs {
+        return Err(EmitError::ReplayConflict(
+            "an existing finding with this identity has a different canonical payload".to_string(),
+        ));
+    }
+    // Resolved by the row's own `signing_key_id`. Using the tenant's currently
+    // active key would report drift for every finding written before the most
+    // recent rotation.
+    if !signature_matches {
+        return Err(EmitError::ReplayConflict(
+            "an existing finding with this identity failed signature verification".to_string(),
+        ));
+    }
+    Ok((event_id, FindingWrite::ReplayMatched))
+}
+
+/// Builds the Detection Finding for one circuit transition.
+fn detection_finding_event(finding: &PromptInjectionFinding) -> DetectionFindingEvent {
+    let transition = &finding.transition;
+    let severity_id = finding_severity_id(transition.reached_stage);
+    DetectionFindingEvent {
+        class_uid: class_uid::DETECTION_FINDING,
+        class_name: "Detection Finding".to_string(),
+        category_uid: category_uid::FINDINGS,
+        category_name: "Findings".to_string(),
+        type_uid: type_uid(class_uid::DETECTION_FINDING, detection_activity::CREATE),
+        activity_id: detection_activity::CREATE,
+        activity_name: "Create".to_string(),
+        severity_id,
+        severity: severity_label(severity_id).to_string(),
+        time: finding.occurred_at,
+        metadata: metadata(),
+        session: Session {
+            uid: finding.session_id.to_string(),
+            created_time: None,
+        },
+        resource: Resource {
+            uid: transition.capability.render(),
+            name: None,
+            resource_type: "tool_capability".to_string(),
+        },
+        finding_info: FindingInfo {
+            uid: transition.key.clone(),
+            title: PROMPT_INJECTION_FINDING_TITLE.to_string(),
+            desc: PROMPT_INJECTION_FINDING_DESC.to_string(),
+            analytic: transition.detector_revision.clone(),
+        },
+        circuit: PromptInjectionCircuit {
+            owner_kind: transition.owner.kind().to_string(),
+            owner_generation: transition.owner.generation(),
+            capability: transition.capability.render(),
+            tool_call_uid: transition.tool_call_id.0.to_string(),
+            assessment_class: transition.class.as_str().to_string(),
+            detector_revision: transition.detector_revision.clone(),
+            prior_stage: transition.prior_stage.as_str().to_string(),
+            reached_stage: transition.reached_stage.as_str().to_string(),
+            prior_score: transition.prior_score,
+            reached_score: transition.reached_score,
+            signals: finding
+                .signals
+                .iter()
+                .map(|signal| signal.as_str().to_string())
+                .collect(),
+        },
+    }
+}
+
+/// Fixed safe finding title. Never derived from output.
+const PROMPT_INJECTION_FINDING_TITLE: &str = "Prompt-injection security circuit transition";
+
+/// Fixed safe finding description. Never derived from output.
+const PROMPT_INJECTION_FINDING_DESC: &str = "A tool output was classified as a prompt-injection or restricted-material result and \
+     advanced the owning agent's security circuit to a new stage.";
+
+/// Maps a reached stage to its deterministic OCSF severity.
+///
+/// Deterministic rather than configurable so the same transition always produces
+/// the same signed bytes on replay.
+const fn finding_severity_id(stage: SecurityCircuitStage) -> i32 {
+    match stage {
+        SecurityCircuitStage::Clear => severity_id::INFORMATIONAL,
+        SecurityCircuitStage::Warned => severity_id::LOW,
+        SecurityCircuitStage::Disabled => severity_id::MEDIUM,
+        SecurityCircuitStage::SuspendedForInput => severity_id::HIGH,
+        SecurityCircuitStage::Halted => severity_id::CRITICAL,
     }
 }

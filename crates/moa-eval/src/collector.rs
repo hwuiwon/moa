@@ -241,6 +241,8 @@ mod tests {
             original_output_tokens: None,
             success: true,
             duration_ms: 5,
+            assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+            capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
         });
         collector.process_event(&Event::BrainResponse {
             text: "done".to_string(),

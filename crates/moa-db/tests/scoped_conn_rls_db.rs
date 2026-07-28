@@ -254,3 +254,64 @@ async fn scoped_conn_tenant_guc_filters_policy_protected_rows_for_app_role_db() 
         .expect("rollback scoped transaction");
     drop_schema(&pool, &schema_name).await;
 }
+
+#[tokio::test]
+async fn source_acl_principals_never_reach_session_state_db() {
+    // Pins: the caller's source-ACL principals ride the `RlsContext` so stores
+    // that already hold one inherit them, but they are NEVER installed as a
+    // Postgres GUC. A GUC is session state: it survives into `pg_settings`,
+    // shows up in `current_setting` from any later statement, and would put
+    // keyed identity material somewhere a query plan or an error could echo it.
+    // Principals reach SQL only as bind parameters.
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&test_database_url())
+        .await
+        .expect("connect Postgres");
+
+    let tenant_id = TenantId::new();
+    let principal = moa_core::types::memory::SourcePrincipalFingerprint::from_digest(1, [0x7E; 32]);
+    let context = RlsContext::tenant(tenant_id).with_source_acl(
+        moa_core::types::memory::SourceAclContext::new([principal.clone()], 11),
+    );
+    assert_eq!(context.source_acl().acl_epoch(), 11);
+    assert_eq!(context.source_acl().principals().len(), 1);
+
+    let mut conn = ScopedConn::begin(&pool, &context)
+        .await
+        .expect("begin scoped transaction");
+
+    // Every GUC ScopedConn is allowed to install, read back in one statement.
+    let installed = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT string_agg(setting, '|' ORDER BY name) FROM pg_settings \
+          WHERE name LIKE 'moa.%'",
+    )
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("read moa GUCs")
+    .unwrap_or_default();
+    let encoded = hex::encode(principal.as_bytes());
+    assert!(
+        !installed.contains(&encoded),
+        "a principal fingerprint must not appear in session state: {installed}"
+    );
+    for name in [
+        "moa.source_acl",
+        "moa.source_acl_principals",
+        "moa.source_acl_epoch",
+    ] {
+        assert_eq!(
+            read_guc(conn.as_mut(), name).await,
+            None,
+            "there must be no `{name}` GUC at all"
+        );
+    }
+    // The GUCs that DO exist are unchanged by attaching an ACL context.
+    assert_eq!(
+        read_guc(conn.as_mut(), "moa.tenant_id").await,
+        Some(tenant_id.to_string())
+    );
+
+    conn.commit().await.expect("commit scoped transaction");
+    pool.close().await;
+}

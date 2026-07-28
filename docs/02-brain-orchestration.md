@@ -236,14 +236,112 @@ Tool calls are checked at the tool boundary. Auto mode defaults to `Allow`, whil
 
 ```text
 Tool call
-  -> build ActionEnvelope
+  -> refuse if the security circuit disabled this capability for the owner
+  -> build ActionEnvelope (carrying exactly one typed ActionReviewOwner)
   -> evaluate ActionPolicies
   -> Allow: execute ToolExecutor
   -> Deny: record ToolError and continue
-  -> AdminReview: persist tenant action review, return pending-review tool result, continue
+  -> AdminReview: register the review on its owner, persist the tenant action
+     review, return pending-review tool result, continue
 ```
 
+The circuit check precedes policy evaluation: a capability the circuit already
+disabled never reaches the policy engine or the executor, and the model receives
+a fixed safe notice for the call it made.
+
 Tenant action reviews are decided by tenant admins through `ActionReviews`; conversation clients do not unblock turns.
+
+### Action-review owners and continuations
+
+Every `ActionEnvelope` carries exactly one `ActionReviewOwner`: `Coordinator`
+(session, turn, generation), `Worker` (session, worker, turn, generation), or
+`ExecutionTask` (session, run/task/generation). Ownership is decided by the
+runtime that issued the tool call and is never inferred later.
+
+`ActionReviews/request` registers a conversational review on its owner
+synchronously, before the pending-review tool result reaches the model. A worker
+with an unresolved current-generation review is not terminal: it does not resolve
+parent waiters, emit its terminal report, schedule cleanup, or discard local
+history until the review resolves or is superseded.
+
+When a review resolves, the owner receives one typed receipt
+(`ClearedSuccess`, `ClearedToolError`, or `Denied`) carrying the review, both tool
+ids, the owner, a bounded safe summary, and the exact ordered terminal facts the
+callback waited on. The callback is sent only after `ActionReviewDecided` and, for
+a cleared action, the executed tool's terminal `ToolResult`/`ToolError` are
+durable. The reviewed execution is a new MOA-owned invocation: it gets a fresh
+tool-call id and drops the provider tool-use id.
+
+The owner then runs one continuation turn:
+
+- Coordinator: `TurnTrigger::ActionReview` — no classifier, no planner, no tools,
+  no durable upgrade, one bounded `Respond` call, at most one visible answer.
+- Worker: one no-tools synthesis turn that updates local history and result, then
+  normal parent-result and cleanup ownership resumes.
+- `ExecutionTask`: no conversational callback at all; it stays on the durable
+  run/task outbox and ack path. Review timeout remains fail-closed and produces no
+  conversational resume.
+
+Continuations are generation-fenced. A callback arriving while the origin or
+another continuation is active queues once and runs before ordinary FIFO, unless a
+newer user message (or worker follow-up) advanced the generation, which strands it.
+An unresolved review never blocks a later user message. Multiple reviews continue
+in durable registration order, one follow-up per review.
+
+## Prompt-Injection Security Circuit
+
+`docs/08-security.md` owns the detection policy — the classifier, the typed
+classes, and the additive score. What belongs here is where the circuit sits in
+the durable machinery.
+
+**Classification is inside the journal.** The `ToolExecutor` classifies within
+its own `ctx.run` closure, so Restate journals the safe output and its
+assessment together. Classifying after the closure returned would journal raw
+bytes and re-derive the assessment on every replay.
+
+**Scoring is owned by whoever can make it atomic.** The Session VO owns the
+coordinator's circuit and the Worker VO owns each worker turn's; both expose an
+internal atomic apply handler that performs the whole read-score-write and
+returns the exact transition, so two tool results landing in the same turn
+cannot interleave into a lost update.
+
+An execution task instead scores against a circuit held by its own task
+workflow. Do not "simplify" this into the Session VO alongside the other two.
+A single shared circuit alternates owners as work moves between the coordinator
+and detached tasks, and adopting a new owner generation clears the capability
+map — so an attacker who has tripped the coordinator's circuit could reset it
+just by causing any detached task to run. Per-task circuits under per-task
+owners remove that move entirely. The cheaper arguments point the same way: a
+task turn is a single sequential writer, so there is no interleaving to defend
+against, and the journal replays its state deterministically without a VO
+round-trip per scored output. The owner is
+generation-fenced — `Coordinator { turn_id, generation }`,
+`Worker { worker_id, turn_id, generation }`, or
+`ExecutionTask { run_uid, task_uid, generation }` — and state resets only for a
+genuinely new owner generation, never for a new input fingerprint, new tool
+arguments, a fallback Hand provider, or a workflow replay. A delayed
+action-review continuation runs under a new workflow id but keeps the original
+logical owner, which is why the owner travels in the request rather than being
+inferred from the caller.
+
+**Audit precedes effect.** When a stage boundary is crossed the owner journals
+one timestamp, appends the neutral `PromptInjectionCircuitTransition` keyed by
+the transition digest, then makes a *synchronous* call to the internal
+`SecurityEvents` service before applying its outcome. A halt must never take
+effect with no audit record explaining why. The service is separate from the VO
+so the single-writer object never blocks its queue on a Postgres write, while
+the caller still awaits durability.
+
+**Owner outcomes are exact.** A coordinator suspend registers a
+generation-fenced coordinator-input reply target on the Session and idles until
+that reply arrives; a coordinator halt records the canonical actor+turn
+`TurnFailed`. A worker suspend emits one `NeedsInput` signal with
+`input_audience: User` and awaits its awakeable on the existing worker-input
+machinery; a worker halt emits one `Failed` signal and terminates that worker
+turn. An execution task returns `ExecutionTaskResult::NeedsInput { audience:
+User }` or `ExecutionTaskResult::Failed { class: Terminal }`. Worker and task
+circuit facts stay neutral in the shared session log; their own signals and task
+outcomes own the suspension or termination.
 
 ## Workers
 

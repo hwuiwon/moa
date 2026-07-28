@@ -18,7 +18,7 @@ use moa_core::{
     types::completion::ToolCallContent, types::completion::ToolInvocation,
     types::events_stream::EventRecord, types::identifiers::SessionId,
     types::identifiers::ToolCallId, types::provider::ModelTier, types::session::SessionMeta,
-    types::tools::ToolOutput,
+    types::tools::SecuredToolOutput,
 };
 use moa_observability::restate_observability::event_persist_span;
 use moa_observability::{record_session_error, record_turn_event_persist_duration};
@@ -258,20 +258,13 @@ pub(super) async fn append_tool_result_event(
     session_id: SessionId,
     tool_id: ToolCallId,
     invocation: &ToolInvocation,
-    output: &ToolOutput,
+    secured: &SecuredToolOutput,
 ) -> Result<(), HandlerError> {
     append_session_event(
         appender,
         ctx,
         session_id,
-        Event::ToolResult {
-            tool_id,
-            provider_tool_use_id: invocation.id.clone(),
-            output: output.clone(),
-            original_output_tokens: output.original_output_tokens,
-            success: !output.is_error,
-            duration_ms: 0,
-        },
+        Event::tool_result(tool_id, invocation.id.clone(), secured.clone()),
     )
     .await
     .map(|_| ())

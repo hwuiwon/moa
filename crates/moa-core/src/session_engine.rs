@@ -83,14 +83,16 @@ mod tests {
     }
 
     fn tool_result_event() -> Event {
-        Event::ToolResult {
-            tool_id: ToolCallId::new(),
-            provider_tool_use_id: None,
-            output: ToolOutput::text("done", Duration::from_millis(5)),
-            original_output_tokens: None,
-            success: true,
-            duration_ms: 5,
-        }
+        Event::tool_result(
+            ToolCallId::new(),
+            None,
+            crate::types::tools::SecuredToolOutput::assessed_safe(
+                ToolOutput::text("done", Duration::from_millis(5)),
+                crate::types::security::ToolCapabilityId::BuiltIn {
+                    tool: "noop".to_string(),
+                },
+            ),
+        )
     }
 
     fn brain_response_event() -> Event {

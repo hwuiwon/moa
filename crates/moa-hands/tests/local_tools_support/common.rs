@@ -4,7 +4,7 @@ use moa_core::{
     traits::{Identity, IdentityType},
     types::{
         contact::SessionActorRef,
-        identifiers::{ModelId, TenantId},
+        identifiers::{ModelId, TenantId, ToolCallId},
         session::SessionMeta,
     },
 };

@@ -8,7 +8,10 @@ license.workspace = true
 metrics.workspace = true
 moa-core = { workspace = true }
 sqlx = { workspace = true, features = ["chrono", "uuid"] }
+tracing.workspace = true
+uuid = { workspace = true }
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+hex.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
