@@ -95,6 +95,20 @@ impl SessionStore for PostgresSessionStore {
         if matches!(range.event_types, Some(ref types) if types.is_empty()) {
             return Ok(Vec::new());
         }
+        // Which store holds this session's history is a fact recorded on the
+        // session row, not something inferred from the live table coming back
+        // empty. An empty result is also what a range past the last sequence
+        // returns for a perfectly live session, and a stray row written after
+        // archival would hide the archive entirely -- so the branch reads
+        // `events_archived_at` and believes it.
+        if let Some(archived_at) = self.session_events_archived_at(session_id).await? {
+            let Some(hydrated) = self.hydrate_archived_events(session_id, &range).await? else {
+                return Err(MoaError::StorageError(format!(
+                    "session {session_id} is marked archived at {archived_at} but has no archive row"
+                )));
+            };
+            return Ok(hydrated);
+        }
         let started_at = std::time::Instant::now();
         let events = self.table_name("events");
 
@@ -748,10 +762,12 @@ impl LearningCandidateStore for PostgresSessionStore {
         PostgresSessionStore::list_learning_candidates(self, tenant_id, status, limit).await
     }
 
-    async fn update_learning_candidate_status(
+    async fn update_learning_candidate_status_from(
         &self,
         update: &LearningCandidateStatusUpdate,
-    ) -> Result<()> {
-        PostgresSessionStore::update_learning_candidate_status(self, update).await
+        expected_status: LearningCandidateStatus,
+    ) -> Result<bool> {
+        PostgresSessionStore::update_learning_candidate_status_from(self, update, expected_status)
+            .await
     }
 }

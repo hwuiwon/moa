@@ -8,6 +8,10 @@ use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{
     authorize_tenant, require_fga_client, require_identity, translate_authz_error,
 };
+use crate::workflows::session_retention::{
+    SessionRetentionClient, SessionRetentionDispatch, SessionRetentionRequest,
+    session_retention_workflow_id,
+};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 
@@ -676,26 +680,53 @@ impl RestateSessionStore for SessionStoreImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: Internal review workflow write after LearningReview authorizes candidate access.
-    async fn update_learning_candidate_status(
+    async fn start_session_retention(
         &self,
         ctx: Context<'_>,
-        request: Json<UpdateLearningCandidateStatusRequest>,
-    ) -> Result<(), HandlerError> {
+        request: Json<SessionRetentionRequest>,
+    ) -> Result<Json<SessionRetentionDispatch>, HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
-        annotate_restate_handler_span("SessionStore", "update_learning_candidate_status");
-        let request = request.into_inner();
-        let store = self.store.clone();
+        annotate_restate_handler_span("SessionStore", "start_session_retention");
+        let mut request = request.into_inner();
+        let identity = require_identity(&ctx)?;
+        let fga = require_fga_client()?;
+        // Retention deletes a tenant's live conversation history. Tenant
+        // operator is not enough: this is the same class of irreversible act as
+        // a purge, so it requires tenant admin on the tenant being retained.
+        require_authz_with_delegation(
+            &fga,
+            &identity,
+            ObjectType::Tenant,
+            request.tenant_id,
+            Relation::Admin,
+        )
+        .await
+        .map_err(translate_authz_error)?;
 
-        Ok(ctx
-            .run(|| async move {
-                store
-                    .update_learning_candidate_status(&request.update)
-                    .await
-                    .map_err(HandlerError::from)
-            })
-            .name("update_learning_candidate_status")
-            .await?)
+        let target_date = match request.target_date {
+            Some(target_date) => target_date,
+            None => ctx
+                .run(|| async move {
+                    Ok::<_, HandlerError>(Json::from(chrono::Utc::now().date_naive()))
+                })
+                .name("session-retention-date")
+                .await?
+                .into_inner(),
+        };
+        request.target_date = Some(target_date);
+        // One pass per tenant per logical day: a retried dispatch lands on the
+        // same durable workflow instead of starting a second concurrent pass
+        // over the same candidates.
+        let workflow_id = session_retention_workflow_id(&request.tenant_id, target_date);
+        crate::restate_identity::replay_safe_request(
+            ctx.workflow_client::<SessionRetentionClient>(workflow_id.clone())
+                .run(Json::from(request)),
+        )
+        .send();
+        Ok(Json::from(SessionRetentionDispatch {
+            workflow_id,
+            target_date,
+        }))
     }
 
     #[tracing::instrument(skip(self, ctx, _request))]
@@ -800,9 +831,15 @@ impl RestateSessionStore for SessionStoreImpl {
         Ok(ctx
             .run(|| async move {
                 let embedder_ref = embedder.as_ref();
+                // Task summaries are transcript-derived, and this is an automatic
+                // provider call over stored rows, so each one is sanitized before
+                // it is embedded. The deterministic heuristic keeps the durable
+                // step free of network IO, and matches what the filing-time probe
+                // sanitizes with so both land in one vector space.
                 moa_skills::embeddings::backfill_experience_embeddings(
                     &store,
                     embedder_ref,
+                    &moa_memory_pii::HeuristicPiiClassifier,
                     &config.learning.embeddings,
                     chrono::Utc::now(),
                 )

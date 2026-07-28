@@ -43,6 +43,36 @@ const GENERIC_ENTITY_STOP_WORDS: &[&str] = &[
 /// Stable model identifier for deterministic semantic graph extraction.
 pub const SEMANTIC_GRAPH_MODEL: &str = "moa-deterministic-support-v1";
 
+/// Identity that keys one extractor's rows in the semantic graph cache.
+///
+/// The cache is unique on `(tenant, chunk_hash, schema_version, model,
+/// prompt_version)`. Only the deterministic ruleset produces rows: the
+/// model-backed extractor was removed on 2026-07-28 after measurement showed no
+/// retrieval path consumes semantic output, so a better extractor could not
+/// improve retrieval. Keeping the identity explicit means a future ruleset
+/// revision re-extracts instead of serving stale rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticExtractionCacheIdentity<'a> {
+    /// Schema version constraining entity and relation types.
+    pub schema_version: &'a str,
+    /// Extractor ruleset identifier.
+    pub model: &'a str,
+    /// Ruleset version.
+    pub prompt_version: &'a str,
+}
+
+impl SemanticExtractionCacheIdentity<'static> {
+    /// Returns the identity stamped by the deterministic keyword extractor.
+    #[must_use]
+    pub const fn deterministic() -> Self {
+        Self {
+            schema_version: SEMANTIC_GRAPH_SCHEMA_VERSION,
+            model: SEMANTIC_GRAPH_MODEL,
+            prompt_version: SEMANTIC_GRAPH_PROMPT_VERSION,
+        }
+    }
+}
+
 /// One cached semantic graph extraction for a chunk.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SemanticGraphExtraction {

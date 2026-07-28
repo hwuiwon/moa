@@ -99,6 +99,26 @@ fn record_append_phase(phase: SessionEventAppendPhase, started: Instant) {
     record_session_event_append_phase_duration(phase, started.elapsed());
 }
 
+/// Refuses an append whose session has already had its history archived.
+///
+/// Read from the `sessions` row the append path already holds under
+/// `FOR UPDATE`, so the check costs no extra round trip. It is not an
+/// optimization: an append accepted after archival would write rows for a
+/// session whose live history is empty, and the read path — which falls back to
+/// the archive only when the live tables return nothing — would then serve the
+/// stray rows and never surface the archived history again.
+fn reject_append_to_archived_session(
+    session_id: moa_core::types::identifiers::SessionId,
+    locked_session: &sqlx::postgres::PgRow,
+) -> Result<()> {
+    match locked_session.col::<Option<DateTime<Utc>>>("events_archived_at")? {
+        Some(archived_at) => Err(MoaError::ValidationError(format!(
+            "session {session_id} history was archived at {archived_at}; appends are refused"
+        ))),
+        None => Ok(()),
+    }
+}
+
 impl PostgresSessionStore {
     /// Appends one event within a caller-owned transaction, returning its sequence.
     ///
@@ -135,7 +155,8 @@ impl PostgresSessionStore {
         let dedupe = self.table_name("session_event_dedupe");
 
         let locked = sqlx::query(&format!(
-            "SELECT event_count, tenant_id, storage_partition_id, user_id, contact_id \
+            "SELECT event_count, tenant_id, storage_partition_id, user_id, contact_id, \
+                    events_archived_at \
              FROM {sessions} WHERE id = $1 FOR UPDATE"
         ))
         .bind(session_id.0)
@@ -143,6 +164,7 @@ impl PostgresSessionStore {
         .await
         .map_err(map_sqlx_error)?
         .ok_or(MoaError::SessionNotFound(session_id))?;
+        reject_append_to_archived_session(session_id, &locked)?;
         let sequence_num = locked.col::<i64>("event_count")? as u64;
         let tenant_id = locked.col::<Uuid>("tenant_id")?;
         let storage_partition_id = locked.col::<String>("storage_partition_id")?;
@@ -438,7 +460,8 @@ impl PostgresSessionStore {
 
         let phase_started = Instant::now();
         let locked_session = sqlx::query(&format!(
-            "SELECT event_count, tenant_id, storage_partition_id, user_id, contact_id \
+            "SELECT event_count, tenant_id, storage_partition_id, user_id, contact_id, \
+                    events_archived_at \
              FROM {sessions} WHERE id = $1 FOR UPDATE"
         ))
         .bind(session_id.0)
@@ -448,6 +471,7 @@ impl PostgresSessionStore {
         let locked_session = locked_session
             .map_err(map_sqlx_error)?
             .ok_or(MoaError::SessionNotFound(session_id))?;
+        reject_append_to_archived_session(session_id, &locked_session)?;
         let base_sequence = locked_session.col::<i64>("event_count")? as u64;
         let tenant_id = locked_session.col::<Uuid>("tenant_id")?;
         let storage_partition_id = locked_session.col::<String>("storage_partition_id")?;

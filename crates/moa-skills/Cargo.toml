@@ -13,6 +13,7 @@ moa-config = { workspace = true }
 moa-db = { workspace = true }
 moa-eval-core = { workspace = true }
 moa-memory-graph = { workspace = true }
+moa-memory-pii = { workspace = true }
 moa-memory-types = { workspace = true }
 moa-providers = { workspace = true }
 moa-session = { workspace = true }

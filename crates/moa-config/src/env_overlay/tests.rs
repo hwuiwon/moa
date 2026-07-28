@@ -307,8 +307,8 @@ fn from_iter_applies_flat_single_underscore_env() {
             "MOA_OBSERVABILITY_OTLP_HEADERS",
             "tenant=moa,token=redacted",
         ),
-        ("MOA_METRICS_ENABLED", "true"),
-        ("MOA_METRICS_LISTEN", "127.0.0.1:9091"),
+        ("MOA_METRICS_EXPORTER", "prometheus"),
+        ("MOA_METRICS_PROMETHEUS_LISTEN", "127.0.0.1:9091"),
         ("MOA_PERMISSIONS_ADMIN_REVIEW", "bash,file_write"),
         ("MOA_PERMISSIONS_DEFAULT_EFFECT", "admin_review"),
     ]))
@@ -466,8 +466,14 @@ fn from_iter_applies_flat_single_underscore_env() {
             .map(String::as_str),
         Some("redacted")
     );
-    assert!(config.metrics.enabled);
-    assert_eq!(config.metrics.listen, "127.0.0.1:9091");
+    assert_eq!(
+        config.metrics.exporter,
+        moa_core_metrics_exporter_prometheus()
+    );
+    assert_eq!(
+        config.metrics.prometheus_listen.as_deref(),
+        Some("127.0.0.1:9091")
+    );
     assert_eq!(config.permissions.admin_review, ["bash", "file_write"]);
     assert_eq!(
         config.permissions.default_effect,
@@ -560,6 +566,8 @@ fn mcp_servers_json_replaces_configured_servers() {
     .expect("MCP JSON overlay should deserialize");
     let mut config = MoaConfig::default();
     config.mcp_servers.push(crate::McpServerConfig {
+        required: false,
+        discovery: crate::McpDiscoveryMode::Eager,
         name: "file-backed".to_string(),
         transport: crate::McpTransportConfig::Http,
         url: None,
@@ -603,4 +611,50 @@ fn mcp_server_without_a_credential_scope_is_a_typed_config_error() {
         )])),
         "MOA_MCP_SERVERS_JSON",
     );
+}
+
+#[test]
+fn provider_coordination_env_overlay_reaches_every_pacing_knob() {
+    // Pins: the fleet-coordination knobs are settable the way a deployment
+    // actually sets them (flat MOA_* environment variables), and each one lands
+    // on its own config field. A wrong path array here is silent in production:
+    // the variable is accepted and then ignored.
+    let mut config = MoaConfig::default();
+    EnvOverlay::from_iter(env_pairs([
+        (
+            "MOA_PROVIDERS_CONCURRENCY_ON_COORDINATION_FAILURE",
+            "fail_closed",
+        ),
+        ("MOA_PROVIDERS_PACING_SCOPE", "global"),
+        ("MOA_PROVIDERS_PACING_STATE_TTL_MS", "120000"),
+        ("MOA_PROVIDERS_PACING_MAX_PACING_WAIT_MS", "15000"),
+        ("MOA_PROVIDERS_PACING_DEFAULT_COOLDOWN_MS", "7000"),
+        ("MOA_PROVIDERS_PACING_MAX_COOLDOWN_MS", "90000"),
+        ("MOA_PROVIDERS_PACING_RETRY_BUDGET_WINDOW_MS", "30000"),
+        ("MOA_PROVIDERS_PACING_RETRY_BUDGET_PERCENT", "35"),
+        ("MOA_PROVIDERS_PACING_RETRY_BUDGET_FLOOR", "3"),
+    ]))
+    .expect("provider coordination overlay should parse")
+    .apply_to(&mut config)
+    .expect("provider coordination overlay should apply");
+
+    assert_eq!(
+        config.providers.concurrency.on_coordination_failure,
+        crate::CoordinationFailurePolicy::FailClosed
+    );
+    let pacing = &config.providers.pacing;
+    assert!(pacing.is_global());
+    assert_eq!(pacing.state_ttl_ms, 120_000);
+    assert_eq!(pacing.max_pacing_wait_ms, 15_000);
+    assert_eq!(pacing.default_cooldown_ms, 7_000);
+    assert_eq!(pacing.max_cooldown_ms, 90_000);
+    assert_eq!(pacing.retry_budget_window_ms, 30_000);
+    assert_eq!(pacing.retry_budget_percent, 35);
+    assert_eq!(pacing.retry_budget_floor, 3);
+}
+
+/// The Prometheus exporter discriminant, named once so the assertion above reads
+/// as a value comparison rather than a path.
+fn moa_core_metrics_exporter_prometheus() -> crate::MetricsExporter {
+    crate::MetricsExporter::Prometheus
 }

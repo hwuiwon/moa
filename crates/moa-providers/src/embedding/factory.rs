@@ -29,7 +29,7 @@ use super::{
     ZeroEntropyEmbedding,
 };
 use crate::core::concurrency::ConcurrencyLimiter;
-use crate::core::concurrency_factory::{CallKind, ProviderConcurrency};
+use crate::core::concurrency_factory::{CallKind, ProviderCoordination};
 use crate::core::pacer::PacerConfig;
 use crate::model_selection::{normalize_provider_name, split_explicit_provider_model};
 
@@ -101,7 +101,7 @@ impl EmbeddingProviderKind {
                     &api_key,
                     config.providers.openai.max_inputs_per_min,
                     config.providers.openai.max_concurrent_requests,
-                )))
+                )?))
             }
             Self::Cohere => {
                 let api_key = read_api_key("MOA_COHERE_API_KEY", &config.providers.cohere.api_key)?;
@@ -117,7 +117,7 @@ impl EmbeddingProviderKind {
                     &api_key,
                     config.providers.cohere.max_inputs_per_min,
                     config.providers.cohere.max_concurrent_requests,
-                )))
+                )?))
             }
             Self::Gemini => {
                 if model != GEMINI_V2_MODEL {
@@ -143,7 +143,7 @@ impl EmbeddingProviderKind {
                     &api_key,
                     config.providers.zeroentropy.max_inputs_per_min,
                     config.providers.zeroentropy.max_concurrent_requests,
-                )))
+                )?))
             }
         }
     }
@@ -161,6 +161,13 @@ trait EmbeddingOverrides: Sized {
     fn with_rate_limits(self, config: PacerConfig) -> Self;
 
     fn with_limiter(self, limiter: ConcurrencyLimiter) -> Self;
+
+    fn with_shared_pacing(
+        self,
+        coordination: &ProviderCoordination,
+        provider: &str,
+        credential: &str,
+    ) -> Self;
 }
 
 impl EmbeddingOverrides for OpenAIEmbedding {
@@ -170,6 +177,15 @@ impl EmbeddingOverrides for OpenAIEmbedding {
 
     fn with_limiter(self, limiter: ConcurrencyLimiter) -> Self {
         Self::with_limiter(self, limiter)
+    }
+
+    fn with_shared_pacing(
+        self,
+        coordination: &ProviderCoordination,
+        provider: &str,
+        credential: &str,
+    ) -> Self {
+        Self::with_shared_pacing(self, coordination, provider, credential)
     }
 }
 
@@ -181,6 +197,15 @@ impl EmbeddingOverrides for CohereEmbedding {
     fn with_limiter(self, limiter: ConcurrencyLimiter) -> Self {
         Self::with_limiter(self, limiter)
     }
+
+    fn with_shared_pacing(
+        self,
+        coordination: &ProviderCoordination,
+        provider: &str,
+        credential: &str,
+    ) -> Self {
+        Self::with_shared_pacing(self, coordination, provider, credential)
+    }
 }
 
 impl EmbeddingOverrides for GeminiEmbeddingEmbedder {
@@ -191,6 +216,15 @@ impl EmbeddingOverrides for GeminiEmbeddingEmbedder {
     fn with_limiter(self, limiter: ConcurrencyLimiter) -> Self {
         Self::with_limiter(self, limiter)
     }
+
+    fn with_shared_pacing(
+        self,
+        coordination: &ProviderCoordination,
+        provider: &str,
+        credential: &str,
+    ) -> Self {
+        Self::with_shared_pacing(self, coordination, provider, credential)
+    }
 }
 
 impl EmbeddingOverrides for ZeroEntropyEmbedding {
@@ -200,6 +234,15 @@ impl EmbeddingOverrides for ZeroEntropyEmbedding {
 
     fn with_limiter(self, limiter: ConcurrencyLimiter) -> Self {
         Self::with_limiter(self, limiter)
+    }
+
+    fn with_shared_pacing(
+        self,
+        coordination: &ProviderCoordination,
+        provider: &str,
+        credential: &str,
+    ) -> Self {
+        Self::with_shared_pacing(self, coordination, provider, credential)
     }
 }
 
@@ -212,17 +255,21 @@ fn apply_overrides<T: EmbeddingOverrides>(
     credential: &str,
     max_inputs_per_min: Option<u32>,
     max_concurrent_requests: Option<u32>,
-) -> T {
+) -> Result<T> {
+    let coordination = ProviderCoordination::from_config(config)?;
     if let Some(pacer) = embed_pacer_override(max_inputs_per_min) {
         provider = provider.with_rate_limits(pacer);
     }
-    let limiter = ProviderConcurrency::from_config(config).limiter(
+    // Shared pacing is attached after any override so the coordinated limits are
+    // the effective ones.
+    provider = provider.with_shared_pacing(&coordination, provider_name, credential);
+    let limiter = coordination.limiter(
         CallKind::Embedding,
         provider_name,
         credential,
         max_concurrent_requests,
     );
-    provider.with_limiter(limiter)
+    Ok(provider.with_limiter(limiter))
 }
 
 /// Builds a vector-space embedder from the tenant memory embedder configuration.
@@ -268,14 +315,14 @@ fn build_gemini_embedder(
 ) -> Result<GeminiEmbeddingEmbedder> {
     let cfg = &config.memory.vector.embedder;
     let api_key = read_api_key("MOA_GOOGLE_API_KEY", &config.providers.google.api_key)?;
-    Ok(apply_overrides(
+    apply_overrides(
         GeminiEmbeddingEmbedder::new(api_key.clone(), cfg.output_dim, role)?,
         config,
         GEMINI_PROVIDER_NAME,
         &api_key,
         config.providers.google.max_inputs_per_min,
         config.providers.google.max_concurrent_requests,
-    ))
+    )
 }
 
 fn read_api_key(env_name: &'static str, value: &str) -> Result<String> {

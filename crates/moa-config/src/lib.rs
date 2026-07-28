@@ -57,9 +57,8 @@ pub use kms::{KmsConfig, KmsProviderKind};
 pub use knowledge::{
     KnowledgeChunkingConfig, KnowledgeConfig, KnowledgeObservabilityConfig,
     KnowledgeParserDefaultsConfig, KnowledgeParsersConfig, KnowledgeProvidersConfig,
-    KnowledgeSemanticConfig, KnowledgeSemanticModelConfig, KnowledgeSyncConfig,
-    LlamaParseKnowledgeParserConfig, MergeKnowledgeProviderConfig, NangoKnowledgeProviderConfig,
-    ReductoKnowledgeParserConfig, UnstructuredKnowledgeParserConfig,
+    KnowledgeSyncConfig, LlamaParseKnowledgeParserConfig, MergeKnowledgeProviderConfig,
+    NangoKnowledgeProviderConfig, ReductoKnowledgeParserConfig, UnstructuredKnowledgeParserConfig,
 };
 pub use learning::{
     EmbeddingBackfillConfig, LearningConfig, RecurrenceConfig, RegressionMonitorConfig,
@@ -75,25 +74,32 @@ pub use memory::{
 pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;
 pub use providers::{
-    ConcurrencyScope, DeploymentProviderPolicyConfig, GeneralConfig, ModelsConfig,
-    ProviderCapabilitiesConfig, ProviderConcurrencyConfig, ProviderCredentialConfig,
-    ProviderStreamTimeoutConfig, ProvidersConfig,
+    ConcurrencyScope, CoordinationFailurePolicy, DeploymentProviderPolicyConfig, GeneralConfig,
+    ModelsConfig, ProviderCapabilitiesConfig, ProviderConcurrencyConfig, ProviderCredentialConfig,
+    ProviderPacingConfig, ProviderStreamTimeoutConfig, ProvidersConfig,
 };
 pub use runtime_cache::{RuntimeCacheBackend, RuntimeCacheConfig};
 pub use sandbox::{
-    CloudConfig, CloudHandsConfig, LocalConfig, McpCredentialConfig, McpServerConfig,
-    McpServerCredentialScope, McpTransportConfig,
+    CloudConfig, CloudHandsConfig, LOCAL_DEVELOPMENT_SANDBOX_REVISION, LocalConfig,
+    McpCredentialConfig, McpDiscoveryMode, McpServerConfig, McpServerCredentialScope,
+    McpTransportConfig, SandboxPolicyConfig, SandboxProfileConfig,
 };
 pub use security::{PermissionsConfig, SecurityProfile};
 pub use session::{
     SessionAttachmentBackend, SessionAttachmentStorageConfig, SessionBlobBackend, SessionConfig,
 };
-pub use telemetry::{MetricsConfig, ObservabilityConfig, OtlpProtocol};
+pub use telemetry::{
+    MetricsConfig, MetricsExporter, ObservabilityConfig, OtlpProtocol, OtlpSignal,
+    otlp_signal_endpoint,
+};
 pub use token_vault::{OAuthRefreshConfig, TokenVaultConfig, TokenVaultKind};
+
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use moa_core::error::{MoaError, Result};
+use moa_core::traits::RuntimeCacheStore;
 
 /// Top-level MOA configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -128,6 +134,9 @@ pub struct MoaConfig {
     pub llm_dlp: LlmDlpConfig,
     /// Local runtime settings.
     pub local: LocalConfig,
+    /// Deployment-level sandbox resource and egress policy, the outermost of
+    /// the four layers intersected into every sandbox's effective profile.
+    pub sandbox_policy: SandboxPolicyConfig,
     /// Memory bootstrap and maintenance settings.
     pub memory: MemoryConfig,
     /// Tenant knowledge-base ingestion settings.
@@ -177,6 +186,88 @@ pub struct MoaConfig {
     pub context_snapshot: ContextSnapshotConfig,
     /// External MCP server connections.
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Runtime coordination store injected by the composition root.
+    ///
+    /// Not configuration data and never serialized: it is the live handle the
+    /// distributed provider controls coordinate through. It rides on the config
+    /// tree because the config tree is what the runtime already threads to every
+    /// provider construction site, so injecting it once at startup replaces the
+    /// process-global handle those sites used to read — with no install-ordering
+    /// hazard, since a config value that carries the handle cannot be observed
+    /// before the handle exists.
+    #[serde(skip)]
+    pub runtime_coordination: RuntimeCoordinationHandle,
+}
+
+/// Live runtime coordination store handle carried on [`MoaConfig`].
+///
+/// Absent by default, which is the correct and silent state for a process-local
+/// deployment. When a distributed scope is configured and this handle is absent,
+/// provider construction treats it as a coordination failure and applies the
+/// configured [`CoordinationFailurePolicy`] rather than quietly enforcing a
+/// per-process ceiling.
+///
+/// # Injection is composition-root-only
+///
+/// The only supported way to install one is
+/// [`MoaConfig::with_runtime_coordination`], called once by the process's
+/// composition root before any component receives the config. Nothing else
+/// should construct or replace it: a second injection point would reintroduce
+/// the ordering hazard this replaced, where a component built earlier silently
+/// holds a config with no store.
+///
+/// A handle is runtime wiring, not configuration data. It is never serialized,
+/// it does not participate in configuration equality (see the `PartialEq` impl),
+/// and `Debug` reveals only whether one is present.
+#[derive(Clone, Default)]
+pub struct RuntimeCoordinationHandle(Option<Arc<dyn RuntimeCacheStore>>);
+
+impl RuntimeCoordinationHandle {
+    /// Wraps an injected coordination store.
+    #[must_use]
+    pub fn installed(store: Arc<dyn RuntimeCacheStore>) -> Self {
+        Self(Some(store))
+    }
+
+    /// Returns the injected store, or `None` when nothing was injected.
+    #[must_use]
+    pub fn store(&self) -> Option<Arc<dyn RuntimeCacheStore>> {
+        self.0.clone()
+    }
+
+    /// Returns whether a coordination store was injected.
+    #[must_use]
+    pub fn is_installed(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+/// All handles compare equal, because a handle is runtime wiring rather than
+/// configuration.
+///
+/// `MoaConfig` equality answers "is this the same configuration", and the answer
+/// must not change because one copy has been wired to a live store. In
+/// particular this keeps a serde round-trip — which drops the handle — equal to
+/// the config it came from, so every existing config test keeps its meaning.
+/// Code that needs to know whether a store is present asks
+/// [`is_installed`](RuntimeCoordinationHandle::is_installed).
+impl PartialEq for RuntimeCoordinationHandle {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for RuntimeCoordinationHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("RuntimeCoordinationHandle")
+            .field(&if self.is_installed() {
+                "installed"
+            } else {
+                "absent"
+            })
+            .finish()
+    }
 }
 
 /// Returns a trimmed required secret value loaded from direct runtime config.
@@ -199,6 +290,16 @@ pub fn optional_config_secret(value: &str) -> Option<String> {
 }
 
 impl MoaConfig {
+    /// Injects the runtime coordination store the distributed provider controls
+    /// use, returning the config the runtime should thread from then on.
+    ///
+    /// Call this once at the composition root, before any provider is built.
+    #[must_use]
+    pub fn with_runtime_coordination(mut self, store: Arc<dyn RuntimeCacheStore>) -> Self {
+        self.runtime_coordination = RuntimeCoordinationHandle::installed(store);
+        self
+    }
+
     fn validate(&self) -> Result<()> {
         if self.database.url.trim().is_empty() {
             return Err(MoaError::ConfigError(

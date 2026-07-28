@@ -6,3 +6,5 @@ mod classify_smoke;
 mod heuristic;
 #[path = "memory_pii_offline/openai_filter_offline.rs"]
 mod openai_filter_offline;
+#[path = "memory_pii_offline/sanitized_offline.rs"]
+mod sanitized_offline;

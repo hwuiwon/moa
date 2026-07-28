@@ -1,5 +1,6 @@
 //! Behavior-lab experiment plan and embedded simulation definitions.
 
+use moa_core::types::experiments::ExperimentScorecard;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -219,9 +220,13 @@ pub struct ExperimentPlanDefinition {
     /// Cost and token budget guardrails.
     #[serde(default)]
     pub budget: ExperimentBudget,
-    /// Scorecard or judge configuration.
-    #[serde(default = "empty_object")]
-    pub scorecard: Value,
+    /// Typed scorecard every trial expanded from this plan must satisfy.
+    ///
+    /// `None` is the state of a draft that has not declared its evidence
+    /// requirements yet; validation reports it as an error, and plan expansion
+    /// refuses it. There is no untyped scorecard form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scorecard: Option<ExperimentScorecard>,
     /// Learning proposal behavior for completed runs.
     #[serde(default)]
     pub learning_proposals: ExperimentLearningProposalSettings,
@@ -394,7 +399,8 @@ pub fn experiment_plan_response_schema() -> Value {
                             "simulator_model",
                             "parallelism",
                             "trials_per_combination",
-                            "budget"
+                            "budget",
+                            "scorecard"
                         ],
                         "properties": {
                             "simulation": {
@@ -550,7 +556,38 @@ pub fn experiment_plan_response_schema() -> Value {
                                     }
                                 }
                             },
-                            "scorecard": { "type": "object" },
+                            "scorecard": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": ["requirements"],
+                                "properties": {
+                                    "requirements": {
+                                        "type": "array",
+                                        "minItems": 1,
+                                        "items": {
+                                            "type": "object",
+                                            "additionalProperties": false,
+                                            "required": [
+                                                "evaluator_id",
+                                                "evaluator_version",
+                                                "score_name",
+                                                "value_type",
+                                                "effect"
+                                            ],
+                                            "properties": {
+                                                "evaluator_id": { "type": "string", "minLength": 1 },
+                                                "evaluator_version": { "type": "string", "minLength": 1 },
+                                                "score_name": { "type": "string", "minLength": 1 },
+                                                "value_type": {
+                                                    "enum": ["numeric", "boolean", "categorical"]
+                                                },
+                                                "config": { "type": "object" },
+                                                "effect": { "enum": ["blocking", "informational"] }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
                             "learning_proposals": { "type": "object" },
                             "ui": { "type": "object" }
                         }

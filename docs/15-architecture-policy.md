@@ -134,22 +134,18 @@ explicit dev-only exceptions remain counted. It also constrains raw
 workflows. That scoped rule does not assert repository-wide elimination of the
 context type.
 
-Zero raw `OrchestratorCtx::current()` reads remain under those roots, and no
-allowance may reintroduce one: a bare `current()` hands a caller the whole
-dependency graph, which is exactly the coupling the rule exists to prevent.
-Eight counted `current_*` reads remain as temporary, per-accessor exceptions:
+Zero `OrchestratorCtx` dependency reads of any kind remain under those roots —
+neither a bare `current()`, which hands a caller the whole dependency graph, nor
+a per-accessor `current_*`. The eight counted `current_*` exceptions that used to
+live here are gone: `SessionImpl` now takes its admission pool and configuration
+as constructor parameters, and `ExperimentRunImpl` and `ExperimentTrialRunImpl`
+take their configuration the same way, so the dependency is stated at the
+composition root instead of reached for at the call site.
 
-| File | Accessor | Count | Why it is still there |
-|---|---|---:|---|
-| `objects/session/execution_runs.rs` | `current_graph_pool()` | 3 | Keyed Session admission runs three control-plane replay transactions; removing them needs constructor-injected admission persistence in `SessionImpl` |
-| `objects/session/execution_runs.rs` | `current_config()` | 1 | Session-owned template planning reads model and execution configuration; same injection prerequisite |
-| `workflows/experiment_run/target_execution.rs` | `current_config()` | 2 | Experiment-run targets select the internal model and compile against execution limits; needs constructor injection into `ExperimentRunImpl` |
-| `workflows/experiment_trial_run/target_execution.rs` | `current_config()` | 2 | Same selection and compilation for trial targets; needs constructor injection into `ExperimentTrialRunImpl` |
-
-Each entry is counted, not wildcarded: adding a ninth read fails the checker
-even in an already-allowed file. Task 6.6 removes all eight by injecting the
-dependencies through their implementation constructors, after which the
-allowance list is empty.
+There is no `RuntimeContext` allowance left, and the rule is now absolute under
+those roots: a new `OrchestratorCtx::current*` read fails the checker outright
+rather than consuming a budget. Re-adding one requires a new decision record
+here, not an allowance entry.
 
 Postgres DDL has one declared owner per logical top-level table family in the
 `moa-migrations` manifest. New or removed tables must update that manifest in
@@ -286,3 +282,54 @@ Revisit when a new crate is genuinely required by a category boundary, when
 `moa-core` fan-in changes because a type moved to its domain owner, or when a
 production file exceeds its cap for a reason other than accumulated inline
 tests.
+
+### ADR 0004 - Learning-Privacy Dependency Edges
+
+Status: Accepted.
+Date: 2026-07-28.
+
+Making raw transcript evidence unrepresentable at the automatic learning
+boundaries required one type — `moa_skills::evidence::SanitizedLearningEvidence`
+— to appear in the signatures of the brain's experience/attribution extraction
+and of the eval transcript runner. That moved two dependency edges.
+
+Decisions:
+
+1. **`moa-brain` depends on `moa-skills`** (production). The experience record,
+   its attributions, and the candidates derived from them are all built from
+   transcript content, so their constructors take sanitized evidence. The
+   opposite direction stays forbidden: `moa-skills` must not depend on
+   `moa-brain`, because the sanitization walk has to be reachable from crates
+   that have no reason to pull in the context pipeline.
+2. **`moa-eval`'s `moa-skills` edge is promoted from dev-only to production.**
+   `long_conversation/transcript_runner.rs` lives in `src/`, and it materializes
+   learning rows through the same call sites production uses. The alternative —
+   handing the runner only the `moa-memory-pii` primitive, which is already a
+   production dependency — does not work: the runner calls
+   `experience_from_assessment` and `attributions_for_experience`, which require
+   the full provenance-bearing evidence, and sanitized *text* alone cannot
+   satisfy them.
+3. The promotion in (2) does not change what is reachable from `moa-eval`'s
+   production tree. `moa-eval` already depends on `moa-brain` in
+   `[dependencies]`, and (1) puts `moa-skills` under `moa-brain`, so
+   `moa-skills` was already a transitive production dependency of `moa-eval`
+   before the direct edge existed. Making it direct records the real coupling
+   instead of hiding it behind one hop.
+
+Consequences:
+
+- The eval harness cannot exercise a raw-evidence path, because no such path
+  exists to exercise. A fixture that tried would fail to compile.
+- The architecture checker's two forbidden-direction rules (`moa-core` must not
+  reach `moa-memory-*`; nothing outside the allowlist may reach
+  `moa-orchestrator`) are untouched by both edges. The checker's "dev-only
+  workspace dependency edges" line is derived from the manifests and reports
+  current state; it is not an asserted allowlist, so the promotion in (2)
+  removes an entry rather than violating one.
+- `moa-skills` gained a `moa-memory-pii` dependency for the sanitization
+  primitive. That is the memory namespace's own crate and the direction is
+  consistent with the other consumers of PII classification.
+
+Revisit if the sanitized-evidence type outgrows `moa-skills` — if a crate that
+should not depend on skill distillation needs to construct learning evidence,
+the type belongs in a smaller owner and these edges shrink accordingly.

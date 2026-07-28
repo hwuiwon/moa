@@ -16,9 +16,14 @@ use crate::canonical::canonical_hash;
 use crate::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use crate::validation::ValidationReport;
 
+mod contributions;
 mod revisions;
 mod skill_embeddings;
 
+pub use contributions::{
+    NewRevisionContribution, NewSuiteContribution, RevisionContributionKind,
+    StoredSuiteContribution, SuiteContributionKind,
+};
 pub use revisions::{RollbackApplication, insert_published_revision};
 pub use skill_embeddings::{
     MissingSkillEmbedding, NamedSkillEmbeddingNeighbor, NewSkillEmbedding, SkillEmbeddingNeighbor,

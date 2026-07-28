@@ -9,10 +9,14 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::error::{Error, Result};
 
 /// Opening delimiter reserved for MOA DLP tokens.
-pub const TOKEN_OPEN: char = '⟦';
+///
+/// Defined in `moa-memory-pii` so the irreversible learning sanitizer, which
+/// must refuse text carrying a reversible token, can name the same delimiter
+/// without the dependency edge running backwards.
+pub const TOKEN_OPEN: char = moa_memory_pii::sanitized::RESERVED_DLP_TOKEN_OPEN;
 
 /// Closing delimiter reserved for MOA DLP tokens.
-pub const TOKEN_CLOSE: char = '⟧';
+pub const TOKEN_CLOSE: char = moa_memory_pii::sanitized::RESERVED_DLP_TOKEN_CLOSE;
 
 /// Visibility of the source that introduced a protected value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -48,9 +48,11 @@ use crate::{
     parser::DocumentParser,
     providers::RecordContentFetcher,
     repository::{DocumentVersionIngestionClaim, KnowledgeRepository},
-    semantic_graph::{SemanticGraphExtraction, extract_chunk_semantics},
-    semantic_graph_model::{ModelSemanticGraphExtractor, SemanticExtractionCacheIdentity},
+    semantic_graph::{
+        SemanticExtractionCacheIdentity, SemanticGraphExtraction, extract_chunk_semantics,
+    },
 };
+use moa_core::types::memory::SemanticGraphPolicy;
 
 /// Maximum objects fetched and tombstoned per source-selection prune page.
 const PRUNE_BATCH_SIZE: i64 = 500;
@@ -85,8 +87,7 @@ pub struct KnowledgeIngestionPipeline<R, P, E, G> {
     chunking: ChunkingConfig,
     provider: String,
     parser_label: String,
-    semantic_generic_entities: bool,
-    semantic_model_extractor: Option<Arc<ModelSemanticGraphExtractor>>,
+    semantic_policy: SemanticGraphPolicy,
     content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
     source_acl: KnowledgeSourceAclContext,
 }
@@ -124,7 +125,7 @@ struct PersistedIngestion {
     ingested: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct SemanticGraphExtractionReport {
     extractions: Vec<SemanticGraphExtraction>,
     cache_hits: u64,

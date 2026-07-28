@@ -2,12 +2,10 @@
 
 use std::path::PathBuf;
 
-use moa_core::{
-    error::MoaError, error::Result, events::Event, types::events_stream::EventRecord,
-    types::identifiers::TenantId,
-};
+use moa_core::{error::MoaError, error::Result, types::identifiers::TenantId};
 use moa_eval_core::{ExpectedOutput, SuiteOracle, TestCase, TestSuite};
 
+use crate::evidence::{EvidenceSource, SanitizedLearningEvidence};
 use crate::format::{SkillDocument, slugify_skill_name};
 
 const DEFAULT_SUITE_TIMEOUT_SECONDS: u64 = 120;
@@ -47,25 +45,31 @@ pub struct SkillRegressionSummary {
 }
 
 /// Generates regression suite TOML for a newly proposed skill without writing files.
+///
+/// The generated case's input, expectations, and trajectory are all lifted from
+/// the transcript, so a suite built from raw events would persist unredacted
+/// caller content into a durable draft artifact. Only sanitized evidence is
+/// accepted.
 pub fn generate_skill_test_suite_source(
     tenant_id: TenantId,
     skill: &SkillDocument,
-    events: &[EventRecord],
+    evidence: &SanitizedLearningEvidence,
 ) -> Result<GeneratedSkillSuite> {
-    generate_skill_test_suite_source_for_name(tenant_id, &skill.frontmatter.name, events)
+    generate_skill_test_suite_source_for_name(tenant_id, &skill.frontmatter.name, evidence)
 }
 
 /// Generates regression suite TOML for a skill known only by name.
 ///
 /// Sibling-suite accumulation uses this when a recurring task dedupes onto an
-/// open proposal: the new session's events become held-out material for the
-/// open candidate without regenerating (or even parsing) its skill document.
+/// open proposal: the new session's sanitized evidence becomes held-out material
+/// for the open candidate without regenerating (or even parsing) its skill
+/// document.
 pub fn generate_skill_test_suite_source_for_name(
     tenant_id: TenantId,
     skill_name: &str,
-    events: &[EventRecord],
+    evidence: &SanitizedLearningEvidence,
 ) -> Result<GeneratedSkillSuite> {
-    let suite = build_generated_suite(skill_name, events);
+    let suite = build_generated_suite(skill_name, evidence);
     let source_toml = toml::to_string_pretty(&suite)
         .map_err(|error| MoaError::StorageError(error.to_string()))?;
     Ok(GeneratedSkillSuite {
@@ -87,9 +91,9 @@ pub fn compare_scores(
     candidate.average_score + f64::EPSILON >= previous.average_score
 }
 
-fn build_generated_suite(skill_name: &str, events: &[EventRecord]) -> TestSuite {
-    let case_name = slugify_case_name(&extract_task_input(events));
-    let (contains, oracle) = extract_expected_output(events);
+fn build_generated_suite(skill_name: &str, evidence: &SanitizedLearningEvidence) -> TestSuite {
+    let case_name = slugify_case_name(&extract_task_input(evidence));
+    let (contains, oracle) = extract_expected_output(evidence);
     TestSuite {
         name: format!("{skill_name}-regression"),
         description: Some(format!("Auto-generated regression suite for {skill_name}")),
@@ -99,12 +103,12 @@ fn build_generated_suite(skill_name: &str, events: &[EventRecord]) -> TestSuite 
             } else {
                 case_name
             },
-            input: extract_task_input(events),
+            input: extract_task_input(evidence),
             expected_output: Some(ExpectedOutput {
                 contains,
                 ..ExpectedOutput::default()
             }),
-            expected_trajectory: Some(extract_tool_trajectory(events)),
+            expected_trajectory: Some(evidence.tool_trajectory()),
             oracle: Some(oracle),
             timeout_seconds: Some(DEFAULT_SUITE_TIMEOUT_SECONDS),
             tags: vec!["skill".to_string(), "auto-generated".to_string()],
@@ -126,12 +130,12 @@ fn build_generated_suite(skill_name: &str, events: &[EventRecord]) -> TestSuite 
 /// longest words. When a segment yields no grounded facts (no tool results, or
 /// none of the response's facts trace back to one), the extractor falls back to
 /// the response-keyword heuristic so every case still has an oracle.
-fn extract_expected_output(events: &[EventRecord]) -> (Vec<String>, SuiteOracle) {
-    let response = final_response_text(events);
-    let tool_results = tool_result_texts(events);
+fn extract_expected_output(evidence: &SanitizedLearningEvidence) -> (Vec<String>, SuiteOracle) {
+    let response = final_response_text(evidence);
+    let tool_results = tool_result_texts(evidence);
     let facts = grounded_facts(&response, &tool_results);
     if facts.is_empty() {
-        (extract_response_keywords(events), SuiteOracle::Keywords)
+        (extract_response_keywords(evidence), SuiteOracle::Keywords)
     } else {
         (facts, SuiteOracle::GroundedFacts)
     }
@@ -148,41 +152,30 @@ fn skill_suite_relative_path(tenant_id: TenantId, skill_name: &str) -> String {
         .into_owned()
 }
 
-fn extract_task_input(events: &[EventRecord]) -> String {
-    events
+fn extract_task_input(evidence: &SanitizedLearningEvidence) -> String {
+    evidence
+        .entries()
         .iter()
-        .find_map(|record| match &record.event {
-            Event::UserMessage { text, .. } | Event::QueuedMessage { text, .. } => {
-                Some(text.clone())
-            }
-            _ => None,
+        .find(|entry| {
+            matches!(
+                entry.source(),
+                EvidenceSource::UserMessage | EvidenceSource::QueuedMessage
+            )
         })
+        .map(|entry| entry.text().to_string())
         .unwrap_or_else(|| "Run the learned workflow".to_string())
 }
 
-fn extract_response_keywords(events: &[EventRecord]) -> Vec<String> {
-    let mut keywords = events
-        .iter()
-        .rev()
-        .find_map(|record| match &record.event {
-            Event::BrainResponse { text, .. } => Some(keywords_from_text(text)),
-            _ => None,
-        })
+fn extract_response_keywords(evidence: &SanitizedLearningEvidence) -> Vec<String> {
+    let mut keywords = evidence
+        .entries_from(EvidenceSource::AssistantMessage)
+        .next_back()
+        .map(|entry| keywords_from_text(entry.text()))
         .unwrap_or_default();
     if keywords.is_empty() {
         keywords.push("completed".to_string());
     }
     keywords
-}
-
-fn extract_tool_trajectory(events: &[EventRecord]) -> Vec<String> {
-    events
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::ToolCall { tool_name, .. } => Some(tool_name.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 fn keywords_from_text(text: &str) -> Vec<String> {
@@ -197,15 +190,12 @@ fn keywords_from_text(text: &str) -> Vec<String> {
     keywords
 }
 
-/// Returns the last brain response text in the segment, or empty when none.
-fn final_response_text(events: &[EventRecord]) -> String {
-    events
-        .iter()
-        .rev()
-        .find_map(|record| match &record.event {
-            Event::BrainResponse { text, .. } => Some(text.clone()),
-            _ => None,
-        })
+/// Returns the last assistant response text in the segment, or empty when none.
+fn final_response_text(evidence: &SanitizedLearningEvidence) -> String {
+    evidence
+        .entries_from(EvidenceSource::AssistantMessage)
+        .next_back()
+        .map(|entry| entry.text().to_string())
         .unwrap_or_default()
 }
 
@@ -213,22 +203,17 @@ fn final_response_text(events: &[EventRecord]) -> String {
 /// segment. This is the grounding corpus: a response token counts as a fact
 /// only if it also appears here.
 ///
-/// A result is included only when the event's `success` flag is set AND its
-/// output is not an error envelope (`output.is_error`). Denied/disallowed calls
-/// carry `success: false`, and a process tool that ran but exited nonzero
-/// carries `is_error: true`; both render error messages, exit codes, or failure
-/// identifiers through [`ToolOutput::to_text`], which must never become required
-/// regression expectations. `Event::ToolError` is a distinct variant and is
-/// never a `ToolResult`, so it is excluded here as well.
-fn tool_result_texts(events: &[EventRecord]) -> String {
-    events
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::ToolResult {
-                output, success, ..
-            } if *success && !output.is_error => Some(output.to_text()),
-            _ => None,
-        })
+/// A result is included only when the source event's `success` flag was set AND
+/// its output was not an error envelope. Denied/disallowed calls carry
+/// `success: false`, and a process tool that ran but exited nonzero carries
+/// `is_error: true`; both render error messages, exit codes, or failure
+/// identifiers, which must never become required regression expectations. Tool
+/// errors arrive under a distinct carrier and are excluded here as well.
+fn tool_result_texts(evidence: &SanitizedLearningEvidence) -> String {
+    evidence
+        .entries_from(EvidenceSource::ToolResult)
+        .filter(|entry| entry.success() == Some(true) && !entry.is_error())
+        .map(|entry| entry.text().to_string())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -570,9 +555,19 @@ mod tests {
         }
     }
 
-    /// Builds a one-segment event log: a user prompt, one tool call/result per
-    /// `tool_outputs`, and a final brain response.
-    fn segment(prompt: &str, tool_outputs: &[&str], response: &str) -> Vec<EventRecord> {
+    /// Builds a one-segment event log, then sanitizes it into learning evidence.
+    ///
+    /// Suite generation only ever sees sanitized evidence, so the fixtures go
+    /// through the real gate rather than around it.
+    async fn segment(
+        prompt: &str,
+        tool_outputs: &[&str],
+        response: &str,
+    ) -> crate::evidence::SanitizedLearningEvidence {
+        crate::evidence::sanitize_for_tests(&segment_events(prompt, tool_outputs, response)).await
+    }
+
+    fn segment_events(prompt: &str, tool_outputs: &[&str], response: &str) -> Vec<EventRecord> {
         let session = SessionId(Uuid::now_v7());
         let mut events = Vec::new();
         let mut sequence = 1u64;
@@ -636,12 +631,12 @@ mod tests {
         events
     }
 
-    #[test]
-    fn grounded_number_and_identifier_become_expectations() {
+    #[tokio::test]
+    async fn grounded_number_and_identifier_become_expectations() {
         // Pins: a number and a code identifier present in BOTH a tool result and
         // the final response are lifted into the case `contains` gate, and the
         // case is marked as fact-grounded.
-        let events = segment(
+        let evidence = segment(
             "fix the refresh regression",
             &[
                 "refresh_token found in auth handler",
@@ -649,9 +644,10 @@ mod tests {
                 "closed ticket #482",
             ],
             "Patched refresh_token; the run took 45ms and closed #482.",
-        );
+        )
+        .await;
 
-        let (contains, oracle) = extract_expected_output(&events);
+        let (contains, oracle) = extract_expected_output(&evidence);
 
         assert_eq!(oracle, SuiteOracle::GroundedFacts);
         assert!(
@@ -662,17 +658,18 @@ mod tests {
         assert!(contains.contains(&"#482".to_string()), "{contains:?}");
     }
 
-    #[test]
-    fn response_only_keyword_is_not_selected_when_grounded_facts_exist() {
+    #[tokio::test]
+    async fn response_only_keyword_is_not_selected_when_grounded_facts_exist() {
         // Pins: a long response word that never appears in a tool result is not
         // treated as a fact; only the grounded token is asserted.
-        let events = segment(
+        let evidence = segment(
             "measure latency",
             &["measured 45ms latency"],
             "The regression analysis measured 45ms of latency.",
-        );
+        )
+        .await;
 
-        let (contains, oracle) = extract_expected_output(&events);
+        let (contains, oracle) = extract_expected_output(&evidence);
 
         assert_eq!(oracle, SuiteOracle::GroundedFacts);
         assert_eq!(contains, vec!["45ms".to_string()]);
@@ -682,17 +679,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn keyword_fallback_when_no_tool_results() {
+    #[tokio::test]
+    async fn keyword_fallback_when_no_tool_results() {
         // Pins: a segment with no tool results has no grounding corpus, so the
         // oracle falls back to response keywords and records the fallback mode.
-        let events = segment(
+        let evidence = segment(
             "summarize",
             &[],
             "Completed the lengthy analysis workflow successfully.",
-        );
+        )
+        .await;
 
-        let (contains, oracle) = extract_expected_output(&events);
+        let (contains, oracle) = extract_expected_output(&evidence);
 
         assert_eq!(oracle, SuiteOracle::Keywords);
         assert!(!contains.is_empty());
@@ -741,7 +739,24 @@ mod tests {
 
     /// Builds a one-segment log whose single tool result is marked failed and
     /// carries an error output, then a final response echoing the failure token.
-    fn failed_tool_segment(prompt: &str, error_output: &str, response: &str) -> Vec<EventRecord> {
+    async fn failed_tool_segment(
+        prompt: &str,
+        error_output: &str,
+        response: &str,
+    ) -> crate::evidence::SanitizedLearningEvidence {
+        crate::evidence::sanitize_for_tests(&failed_tool_segment_events(
+            prompt,
+            error_output,
+            response,
+        ))
+        .await
+    }
+
+    fn failed_tool_segment_events(
+        prompt: &str,
+        error_output: &str,
+        response: &str,
+    ) -> Vec<EventRecord> {
         let session = SessionId(Uuid::now_v7());
         let tool_id = ToolCallId::new();
         vec![
@@ -799,18 +814,19 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn failed_tool_result_identifier_is_not_grounded() {
+    #[tokio::test]
+    async fn failed_tool_result_identifier_is_not_grounded() {
         // Pins: an identifier that appears only in a FAILED tool result (success
         // false, error output) is not lifted as a grounded fact; with no other
         // grounding the oracle falls back to response keywords.
-        let events = failed_tool_segment(
+        let evidence = failed_tool_segment(
             "deploy the service",
             "error E1234: connection refused to node_7",
             "Deployment failed with error E1234 on node_7.",
-        );
+        )
+        .await;
 
-        let (contains, oracle) = extract_expected_output(&events);
+        let (contains, oracle) = extract_expected_output(&evidence);
 
         assert_eq!(
             oracle,
@@ -841,19 +857,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn generated_toml_round_trips_with_grounded_oracle() {
+    #[tokio::test]
+    async fn generated_toml_round_trips_with_grounded_oracle() {
         // Pins: the generated suite TOML parses back through the suite type with
         // the grounded facts and oracle marker preserved.
-        let events = segment(
+        let evidence = segment(
             "close the ticket",
             &["closed ticket #77 in 12ms"],
             "Done: closed #77 after a 12ms verification.",
-        );
+        )
+        .await;
 
-        let generated =
-            generate_skill_test_suite_source_for_name(TenantId::new(), "round-trip-skill", &events)
-                .expect("generate suite source");
+        let generated = generate_skill_test_suite_source_for_name(
+            TenantId::new(),
+            "round-trip-skill",
+            &evidence,
+        )
+        .expect("generate suite source");
 
         let suite: TestSuite =
             toml::from_str(&generated.source_toml).expect("generated suite is valid TOML");

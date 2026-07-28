@@ -24,14 +24,3 @@ spec:
     - ports:
         - protocol: TCP
           port: 9081
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: observability
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: alloy
-              app.kubernetes.io/part-of: moa
-      ports:
-        - protocol: TCP
-          port: 9090

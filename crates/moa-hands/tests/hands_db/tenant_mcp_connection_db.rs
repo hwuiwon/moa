@@ -357,10 +357,18 @@ fn operator_of(tenant_id: TenantId) -> Identity {
     }
 }
 
+/// The server-qualified reference the discovered operation registers under.
+///
+/// The tenant binding's `allowed_operations` stays keyed on [`OPERATION`] — the
+/// connector's own name — while the model and the registry see this reference.
+fn qualified_operation() -> String {
+    moa_hands::mcp_tool_reference(SERVER, OPERATION)
+}
+
 fn invocation() -> ToolInvocation {
     ToolInvocation {
         id: None,
-        name: OPERATION.to_string(),
+        name: qualified_operation(),
         input: json!({}),
     }
 }
@@ -383,6 +391,8 @@ async fn router_for(schema: &TestSchema, sandbox_dir: &std::path::Path, url: &st
     config.security_profile = SecurityProfile::Local;
     config.local.sandbox_dir = sandbox_dir.join("sandbox").display().to_string();
     config.mcp_servers = vec![McpServerConfig {
+        required: false,
+        discovery: moa_config::McpDiscoveryMode::Eager,
         name: SERVER.to_string(),
         transport: McpTransportConfig::Http,
         url: Some(url.to_string()),

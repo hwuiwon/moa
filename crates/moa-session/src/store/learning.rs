@@ -3,35 +3,18 @@
 use super::*;
 
 impl PostgresSessionStore {
-    /// Appends one learning-log entry.
+    /// Appends one learning-log entry and its normalized sources.
     pub async fn append_learning(&self, entry: &LearningEntry) -> Result<()> {
-        let learning_log = self.table_name("learning_log");
-        sqlx::query(&format!(
-            "INSERT INTO {learning_log} \
-             (id, tenant_id, storage_partition_id, learning_type, target_id, target_label, payload, confidence, \
-              source_refs, actor, valid_from, valid_to, batch_id, version) \
-             VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
-        ))
-        .bind(entry.id)
-        .bind(entry.tenant_id.to_string())
-        .bind(&entry.learning_type)
-        .bind(&entry.target_id)
-        .bind(entry.target_label.as_deref())
-        .bind(Json(entry.payload.clone()))
-        .bind(entry.confidence)
-        .bind(&entry.source_refs)
-        .bind(&entry.actor)
-        .bind(entry.valid_from)
-        .bind(entry.valid_to)
-        .bind(entry.batch_id)
-        .bind(entry.version)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        self.append_learning_in_tx(tx.as_mut(), entry).await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
     }
 
     /// Appends one learning-log entry using the caller's open transaction.
+    ///
+    /// The entry and its sources commit together, so no learning entry can
+    /// exist without a traceable derivation.
     pub async fn append_learning_in_tx(
         &self,
         conn: &mut sqlx::PgConnection,
@@ -41,8 +24,8 @@ impl PostgresSessionStore {
         sqlx::query(&format!(
             "INSERT INTO {learning_log} \
              (id, tenant_id, storage_partition_id, learning_type, target_id, target_label, payload, confidence, \
-              source_refs, actor, valid_from, valid_to, batch_id, version) \
-             VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
+              actor, valid_from, valid_to, batch_id, version) \
+             VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
         ))
         .bind(entry.id)
         .bind(entry.tenant_id.to_string())
@@ -51,7 +34,6 @@ impl PostgresSessionStore {
         .bind(entry.target_label.as_deref())
         .bind(Json(entry.payload.clone()))
         .bind(entry.confidence)
-        .bind(&entry.source_refs)
         .bind(&entry.actor)
         .bind(entry.valid_from)
         .bind(entry.valid_to)
@@ -60,7 +42,8 @@ impl PostgresSessionStore {
         .execute(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
-        Ok(())
+        self.append_learning_log_sources_in_tx(conn, entry.id, &entry.sources)
+            .await
     }
 
     /// Lists current learning-log entries for a tenant.
@@ -90,7 +73,12 @@ impl PostgresSessionStore {
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
-        rows.iter().map(learning_entry_from_row).collect()
+        let mut entries = rows
+            .iter()
+            .map(learning_entry_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        self.hydrate_learning_entry_sources(&mut entries).await?;
+        Ok(entries)
     }
 }
 

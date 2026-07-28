@@ -4,13 +4,14 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    events::Event, types::events_stream::EventRecord, types::experience::AttributionEffect,
-    types::experience::AttributionKind, types::experience::AttributionSubjectType,
-    types::experience::ExperienceAttribution, types::experience::ExperienceRecord,
-    types::identifiers::UserId, types::segment_assessment::SegmentEvidenceKind,
+    types::experience::AttributionEffect, types::experience::AttributionKind,
+    types::experience::AttributionSubjectType, types::experience::ExperienceAttribution,
+    types::experience::ExperienceRecord, types::identifiers::UserId,
+    types::segment_assessment::SegmentEvidenceKind,
     types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
     types::skill_use::skills_used_in_tool_call,
 };
+use moa_skills::evidence::{EvidenceSource, SanitizedLearningEvidence};
 use uuid::Uuid;
 
 /// Generates deterministic attributions for the subjects visible in an experience.
@@ -30,11 +31,11 @@ use uuid::Uuid;
 #[must_use]
 pub fn attributions_for_experience(
     experience: &ExperienceRecord,
-    events: &[EventRecord],
+    evidence: &SanitizedLearningEvidence,
     now: DateTime<Utc>,
 ) -> Vec<ExperienceAttribution> {
     let mut attributions = Vec::new();
-    let failed_skills = skills_with_failed_engagement(&experience.skills_used, events);
+    let failed_skills = skills_with_failed_engagement(&experience.skills_used, evidence);
     for skill in &experience.skills_activated {
         if experience.skills_used.iter().any(|used| used == skill) {
             let base_effect = outcome_effect(experience.outcome);
@@ -82,16 +83,17 @@ pub fn attributions_for_experience(
             experience,
             AttributionSubjectType::Tool,
             tool,
-            tool_effect(tool, experience.outcome, events),
+            tool_effect(tool, experience.outcome, evidence),
             AttributionKind::Standard,
-            tool_confidence(tool, experience.confidence, events),
+            tool_confidence(tool, experience.confidence, evidence),
             vec![format!("tool `{tool}` was used during assessed segment")],
             now,
         ));
     }
-    for record in events {
-        match &record.event {
-            Event::MemoryRead { path, .. } | Event::MemoryWrite { path, .. } => {
+    for entry in evidence.entries() {
+        let path = entry.text();
+        match entry.source() {
+            EvidenceSource::MemoryPath => {
                 attributions.push(attribution(
                     experience,
                     AttributionSubjectType::Memory,
@@ -103,16 +105,16 @@ pub fn attributions_for_experience(
                     now,
                 ));
             }
-            Event::MemoryIngest { source_path, .. } => {
+            EvidenceSource::MemoryIngestSource => {
                 attributions.push(attribution(
                     experience,
                     AttributionSubjectType::Memory,
-                    source_path,
+                    path,
                     outcome_effect(experience.outcome),
                     AttributionKind::Standard,
                     (experience.confidence * 0.8).clamp(0.0, 1.0),
                     vec![format!(
-                        "memory source `{source_path}` was ingested during the segment"
+                        "memory source `{path}` was ingested during the segment"
                     )],
                     now,
                 ));
@@ -195,39 +197,39 @@ fn downgrade_effect(effect: AttributionEffect) -> AttributionEffect {
 /// Returns the used skills whose engaging tool call ended in a durable error.
 ///
 /// This is the one place a per-skill signal enters skill attribution. For every
-/// durable [`Event::ToolError`] in the segment, the matching [`Event::ToolCall`]
-/// is resolved by `tool_id` and its input is run through the same
+/// durable tool error in the segment, the matching tool call is resolved by
+/// `tool_id` and its redacted arguments are run through the same
 /// [`skills_used_in_tool_call`] detection that produced `skills_used`; any used
 /// skill that the failing call engaged is returned. The rule is deterministic
 /// and replay-stable: no proximity heuristic or scoring, only exact tool-id
-/// matching. A `ToolError` whose originating call is not present in `events`
+/// matching. A tool error whose originating call is not present in the evidence
 /// (for example a truncated event range) attributes to no skill, so the rule
 /// never blames a skill it cannot tie to a concrete failed call.
+///
+/// Skill engagement is detected from `skill://` refs and `.moa/skills/` paths,
+/// which redaction leaves intact, so running the detection over the sanitized
+/// arguments finds the same engagements the raw ones would.
 fn skills_with_failed_engagement(
     skills_used: &[String],
-    events: &[EventRecord],
+    evidence: &SanitizedLearningEvidence,
 ) -> HashSet<String> {
     if skills_used.is_empty() {
         return HashSet::new();
     }
 
     let mut call_inputs = HashMap::new();
-    for record in events {
-        if let Event::ToolCall {
-            tool_id,
-            tool_name,
-            input,
-            ..
-        } = &record.event
+    for entry in evidence.entries_from(EvidenceSource::ToolInput) {
+        if let (Some(tool_id), Some(tool_name), Some(input)) =
+            (entry.tool_id(), entry.tool_name(), entry.structured())
         {
-            call_inputs.insert(*tool_id, (tool_name.as_str(), input));
+            call_inputs.insert(tool_id, (tool_name, input));
         }
     }
 
     let mut failed = HashSet::new();
-    for record in events {
-        if let Event::ToolError { tool_id, .. } = &record.event
-            && let Some((tool_name, input)) = call_inputs.get(tool_id)
+    for entry in evidence.entries_from(EvidenceSource::ToolError) {
+        if let Some(tool_id) = entry.tool_id()
+            && let Some((tool_name, input)) = call_inputs.get(&tool_id)
         {
             for skill in skills_used_in_tool_call(tool_name, input, skills_used) {
                 failed.insert(skill);
@@ -237,20 +239,26 @@ fn skills_with_failed_engagement(
     failed
 }
 
-fn tool_effect(tool: &str, outcome: SegmentOutcome, events: &[EventRecord]) -> AttributionEffect {
-    let had_error = events.iter().any(
-        |record| matches!(&record.event, Event::ToolError { tool_name, .. } if tool_name == tool),
-    );
+fn tool_effect(
+    tool: &str,
+    outcome: SegmentOutcome,
+    evidence: &SanitizedLearningEvidence,
+) -> AttributionEffect {
+    let had_error = evidence
+        .entries_from(EvidenceSource::ToolError)
+        .any(|entry| entry.tool_name() == Some(tool));
     if had_error {
         return AttributionEffect::Harmful;
     }
     outcome_effect(outcome)
 }
 
-fn tool_confidence(tool: &str, base: f64, events: &[EventRecord]) -> f64 {
-    let observed_result = events.iter().any(|record| match &record.event {
-        Event::ToolCall { tool_name, .. } | Event::ToolError { tool_name, .. } => tool_name == tool,
-        _ => false,
+fn tool_confidence(tool: &str, base: f64, evidence: &SanitizedLearningEvidence) -> f64 {
+    let observed_result = evidence.entries().iter().any(|entry| {
+        matches!(
+            entry.source(),
+            EvidenceSource::ToolInput | EvidenceSource::ToolError
+        ) && entry.tool_name() == Some(tool)
     });
     if observed_result { base } else { base * 0.7 }
 }
@@ -275,16 +283,39 @@ fn verification_evidence(experience: &ExperienceRecord) -> Option<String> {
 mod tests {
     use chrono::TimeZone;
     use moa_core::{
-        types::experience::TaskFacetSet, types::experience::TaskFingerprint,
-        types::identifiers::SegmentId, types::identifiers::SessionId, types::identifiers::TenantId,
+        events::Event, types::events_stream::EventRecord, types::experience::TaskFacetSet,
+        types::experience::TaskFingerprint, types::identifiers::SegmentId,
+        types::identifiers::SessionId, types::identifiers::TenantId,
         types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentEvidenceKind,
         types::segment_assessment::SegmentEvidencePolarity,
     };
+    use moa_skills::evidence::{EvidenceScope, SegmentNarrative, sanitize_segment_evidence};
+
+    /// Sanitizes raw fixture events into the evidence attribution consumes.
+    ///
+    /// Attribution reads only sanitized evidence now, so the unit tests run their
+    /// fixtures through the same production gate rather than a permissive stub.
+    async fn evidence(events: &[EventRecord]) -> SanitizedLearningEvidence {
+        sanitize_segment_evidence(
+            &moa_memory_pii::HeuristicPiiClassifier,
+            EvidenceScope {
+                tenant_id: TenantId::new(),
+                contact_id: None,
+                session_id: SessionId::new(),
+                segment_id: SegmentId::new(),
+                experience_id: Uuid::now_v7(),
+            },
+            events,
+            SegmentNarrative::default(),
+        )
+        .await
+        .expect("unit-test fixtures sanitize cleanly")
+    }
 
     use super::*;
 
-    #[test]
-    fn attribution_separates_skill_tool_memory_and_verification() {
+    #[tokio::test]
+    async fn attribution_separates_skill_tool_memory_and_verification() {
         // Pins: attribution is separate from assessment and emits deterministic subject rows.
         let now = Utc
             .with_ymd_and_hms(2026, 6, 15, 12, 0, 0)
@@ -338,7 +369,7 @@ mod tests {
             token_count: None,
         }];
 
-        let attributions = attributions_for_experience(&experience, &events, now);
+        let attributions = attributions_for_experience(&experience, &evidence(&events).await, now);
         let subjects = attributions
             .iter()
             .map(|row| {
@@ -367,8 +398,8 @@ mod tests {
         assert_eq!(skill_row.kind, AttributionKind::Standard);
     }
 
-    #[test]
-    fn injected_but_unused_skill_is_neutral_unused_injection() {
+    #[tokio::test]
+    async fn injected_but_unused_skill_is_neutral_unused_injection() {
         // Pins: a skill injected into the manifest but never engaged is a weak
         // negative-relevance marker (Neutral + UnusedInjection), not credited by outcome.
         let now = Utc
@@ -405,7 +436,7 @@ mod tests {
             created_at: now,
         };
 
-        let attributions = attributions_for_experience(&experience, &[], now);
+        let attributions = attributions_for_experience(&experience, &evidence(&[]).await, now);
         let used = attributions
             .iter()
             .find(|row| row.subject_id == "used-skill")
@@ -503,8 +534,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn used_skill_effect_is_downgraded_when_its_own_tool_call_failed() {
+    #[tokio::test]
+    async fn used_skill_effect_is_downgraded_when_its_own_tool_call_failed() {
         // Pins: a used skill whose engaging tool call ends in a durable ToolError is
         // downgraded one step (Resolved would credit Helpful; the failed engagement
         // makes it Mixed), giving skill effects signal independent of the outcome.
@@ -524,7 +555,7 @@ mod tests {
             tool_error_event(experience.session_id, tool_id, now),
         ];
 
-        let attributions = attributions_for_experience(&experience, &events, now);
+        let attributions = attributions_for_experience(&experience, &evidence(&events).await, now);
         let skill_row = attributions
             .iter()
             .find(|row| row.subject_type == AttributionSubjectType::Skill)
@@ -533,8 +564,8 @@ mod tests {
         assert_eq!(skill_row.kind, AttributionKind::Standard);
     }
 
-    #[test]
-    fn used_skill_effect_is_not_downgraded_by_an_unrelated_tool_error() {
+    #[tokio::test]
+    async fn used_skill_effect_is_not_downgraded_by_an_unrelated_tool_error() {
         // Pins: a ToolError on a call that did not engage the skill leaves the skill's
         // outcome-derived effect intact (per-skill matching, not any-error-in-segment).
         let now = Utc
@@ -553,7 +584,7 @@ mod tests {
             tool_error_event(experience.session_id, tool_id, now),
         ];
 
-        let attributions = attributions_for_experience(&experience, &events, now);
+        let attributions = attributions_for_experience(&experience, &evidence(&events).await, now);
         let skill_row = attributions
             .iter()
             .find(|row| row.subject_type == AttributionSubjectType::Skill)

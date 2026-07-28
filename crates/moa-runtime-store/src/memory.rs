@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::error::{MoaError, Result};
-use moa_core::traits::{BoundedLeaseDecision, RuntimeCacheStore};
+use moa_core::traits::{
+    BoundedLeaseDecision, RateTokenDecision, RetryBudgetDecision, RuntimeCacheStore,
+};
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 
@@ -14,6 +16,9 @@ use tokio::time::Instant;
 /// Keeping this coarse means a sweep costs at most one `HashMap::retain` per interval on the
 /// write path, so steady-state writes do not pay an O(n) scan on every call.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Seconds a per-minute rate bucket refills over.
+const SECONDS_PER_MINUTE: f64 = 60.0;
 
 /// Process-local runtime cache backed by a Tokio `RwLock`.
 #[derive(Debug, Default)]
@@ -25,6 +30,9 @@ pub struct MemoryRuntimeCacheStore {
 struct State {
     entries: HashMap<String, Entry>,
     lease_sets: HashMap<String, HashMap<String, Instant>>,
+    buckets: HashMap<String, TokenBucket>,
+    cooldowns: HashMap<String, Instant>,
+    retry_windows: HashMap<String, RetryWindow>,
     last_sweep: Instant,
 }
 
@@ -33,6 +41,9 @@ impl Default for State {
         Self {
             entries: HashMap::new(),
             lease_sets: HashMap::new(),
+            buckets: HashMap::new(),
+            cooldowns: HashMap::new(),
+            retry_windows: HashMap::new(),
             last_sweep: Instant::now(),
         }
     }
@@ -41,6 +52,32 @@ impl Default for State {
 #[derive(Debug, Clone)]
 struct Entry {
     value: Vec<u8>,
+    expires_at: Instant,
+}
+
+/// One shared per-minute token bucket.
+#[derive(Debug, Clone)]
+struct TokenBucket {
+    /// Bucket size, equal to the configured per-minute limit.
+    capacity: f64,
+    /// Tokens available at [`last_refill`](Self::last_refill).
+    tokens: f64,
+    /// When the bucket was last refilled.
+    last_refill: Instant,
+    /// When an idle bucket may be reclaimed.
+    expires_at: Instant,
+}
+
+/// One shared sliding retry-budget window.
+#[derive(Debug, Clone)]
+struct RetryWindow {
+    /// When the current window opened.
+    started_at: Instant,
+    /// Requests counted in the current window.
+    requests: u64,
+    /// Retries consumed in the current window.
+    retries: u64,
+    /// When an idle window may be reclaimed.
     expires_at: Instant,
 }
 
@@ -71,6 +108,11 @@ impl MemoryRuntimeCacheStore {
                 leases.retain(|_, expires_at| *expires_at > now);
                 !leases.is_empty()
             });
+            state.buckets.retain(|_, bucket| bucket.expires_at > now);
+            state.cooldowns.retain(|_, deadline| *deadline > now);
+            state
+                .retry_windows
+                .retain(|_, window| window.expires_at > now);
             state.last_sweep = now;
         }
     }
@@ -220,4 +262,160 @@ impl RuntimeCacheStore for MemoryRuntimeCacheStore {
         }
         Ok(live)
     }
+
+    async fn try_consume_rate_tokens(
+        &self,
+        key: &str,
+        limit_per_min: u32,
+        permits: u32,
+        ttl: Duration,
+    ) -> Result<RateTokenDecision> {
+        if limit_per_min == 0 {
+            return Err(MoaError::ValidationError(
+                "rate token limit must be greater than zero".to_string(),
+            ));
+        }
+        let capacity = f64::from(limit_per_min);
+        let refill_per_sec = capacity / SECONDS_PER_MINUTE;
+        let now = Instant::now();
+        let expires_at = Self::expires_at(ttl)?;
+        let mut state = self.state.write().await;
+        Self::sweep_expired(&mut state);
+        let bucket = state
+            .buckets
+            .entry(key.to_string())
+            .or_insert_with(|| TokenBucket {
+                capacity,
+                tokens: capacity,
+                last_refill: now,
+                expires_at,
+            });
+        // A reconfigured limit rebuilds the bucket rather than refilling an old
+        // capacity, so a lowered ceiling takes effect on the next call.
+        if bucket.capacity != capacity {
+            *bucket = TokenBucket {
+                capacity,
+                tokens: capacity,
+                last_refill: now,
+                expires_at,
+            };
+        }
+        let elapsed = now
+            .saturating_duration_since(bucket.last_refill)
+            .as_secs_f64();
+        if elapsed > 0.0 {
+            bucket.tokens = (bucket.tokens + elapsed * refill_per_sec).min(capacity);
+            bucket.last_refill = now;
+        }
+        bucket.expires_at = expires_at;
+        // A single demand larger than the whole bucket drains it instead of
+        // waiting for a refill that can never arrive.
+        let needed = f64::from(permits).min(capacity);
+        if bucket.tokens >= needed {
+            bucket.tokens -= needed;
+            return Ok(RateTokenDecision {
+                admitted: true,
+                retry_after: Duration::ZERO,
+            });
+        }
+        Ok(RateTokenDecision {
+            admitted: false,
+            retry_after: Duration::from_secs_f64((needed - bucket.tokens) / refill_per_sec),
+        })
+    }
+
+    async fn extend_cooldown(&self, key: &str, cooldown: Duration) -> Result<Duration> {
+        let now = Instant::now();
+        let deadline = now.checked_add(cooldown).ok_or_else(|| {
+            MoaError::ValidationError("runtime cache cooldown is too large".to_string())
+        })?;
+        let mut state = self.state.write().await;
+        Self::sweep_expired(&mut state);
+        let current = state.cooldowns.entry(key.to_string()).or_insert(deadline);
+        if *current < deadline {
+            *current = deadline;
+        }
+        Ok(current.saturating_duration_since(now))
+    }
+
+    async fn cooldown_remaining(&self, key: &str) -> Result<Duration> {
+        let now = Instant::now();
+        let state = self.state.read().await;
+        Ok(state
+            .cooldowns
+            .get(key)
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .unwrap_or(Duration::ZERO))
+    }
+
+    async fn note_windowed_request(&self, key: &str, window: Duration) -> Result<u64> {
+        let now = Instant::now();
+        let mut state = self.state.write().await;
+        Self::sweep_expired(&mut state);
+        let entry = rotated_window(&mut state.retry_windows, key, now, window)?;
+        entry.requests = entry.requests.saturating_add(1);
+        Ok(entry.requests)
+    }
+
+    async fn try_consume_retry_budget(
+        &self,
+        key: &str,
+        window: Duration,
+        budget_percent: u32,
+        budget_floor: u64,
+    ) -> Result<RetryBudgetDecision> {
+        let now = Instant::now();
+        let mut state = self.state.write().await;
+        Self::sweep_expired(&mut state);
+        let entry = rotated_window(&mut state.retry_windows, key, now, window)?;
+        let budget = retry_budget(entry.requests, budget_percent, budget_floor);
+        let allowed = entry.retries < budget;
+        if allowed {
+            entry.retries = entry.retries.saturating_add(1);
+        }
+        Ok(RetryBudgetDecision {
+            allowed,
+            requests: entry.requests,
+            retries: entry.retries,
+        })
+    }
+}
+
+/// Returns the retry-budget window for `key`, opening a fresh one when the
+/// current window has elapsed.
+fn rotated_window<'a>(
+    windows: &'a mut HashMap<String, RetryWindow>,
+    key: &str,
+    now: Instant,
+    window: Duration,
+) -> Result<&'a mut RetryWindow> {
+    // Twice the window keeps a rotated-but-unread entry reclaimable without
+    // discarding the window that is still being counted.
+    let expires_at = now
+        .checked_add(window.saturating_mul(2))
+        .ok_or_else(|| MoaError::ValidationError("retry budget window is too large".to_string()))?;
+    let fresh = RetryWindow {
+        started_at: now,
+        requests: 0,
+        retries: 0,
+        expires_at,
+    };
+    let entry = windows
+        .entry(key.to_string())
+        .or_insert_with(|| fresh.clone());
+    if now.saturating_duration_since(entry.started_at) >= window {
+        *entry = fresh;
+    } else {
+        entry.expires_at = expires_at;
+    }
+    Ok(entry)
+}
+
+/// Returns the retry allowance for one window: a percentage of observed request
+/// volume, never below the floor that keeps low-volume callers retrying normally.
+fn retry_budget(requests: u64, budget_percent: u32, budget_floor: u64) -> u64 {
+    requests
+        .saturating_mul(u64::from(budget_percent))
+        .saturating_div(100)
+        .max(budget_floor)
 }

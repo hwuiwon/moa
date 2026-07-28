@@ -11,9 +11,13 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use moa_core::{
     error::MoaError, error::Result, error::ToolFailureClass, error::classify_tool_error,
-    traits::HandProvider, types::hands::HandHandle, types::hands::HandSpec,
-    types::hands::HandStatus, types::hands::SandboxFile, types::hands::SandboxTier,
-    types::hands::validate_sandbox_file_path, types::tools::ToolOutput,
+    traits::HandProvider, types::hands::CpuLimit, types::hands::DeadlineEnforcement,
+    types::hands::DiskLimit, types::hands::EgressMode, types::hands::EgressPolicy,
+    types::hands::HandHandle, types::hands::HandProviderCapabilities, types::hands::HandSpec,
+    types::hands::HandStatus, types::hands::MemoryLimit, types::hands::ResourceSupport,
+    types::hands::SandboxFile, types::hands::SandboxProfile, types::hands::SandboxTier,
+    types::hands::SandboxTierCapabilities, types::hands::validate_sandbox_file_path,
+    types::tools::ToolOutput,
 };
 use moa_observability::current_turn_root_span;
 use opentelemetry::trace::Status;
@@ -41,6 +45,92 @@ const TOOL_EXECUTION_FAILED_STATUS: &str = "tool execution failed";
 /// Optional Docker seccomp profile path, resolved from the environment once.
 static DOCKER_SECCOMP_PROFILE: LazyLock<Option<String>> =
     LazyLock::new(|| std::env::var("MOA_DOCKER_SECCOMP_PROFILE").ok());
+
+/// Revision of the local provider's capability declaration.
+///
+/// Bump this whenever what the local provider can enforce changes. It is
+/// hash-significant, so a bump makes every sandbox provisioned under the old
+/// declaration unreusable rather than silently reinterpreted.
+pub const LOCAL_CAPABILITIES_REVISION: &str = "local-hands-v1";
+
+/// What the local provider can enforce, per tier.
+///
+/// The two tiers differ sharply and are declared separately. A bare host
+/// process has no CPU, memory, disk, or network enforcement at all, so it
+/// admits only explicit `Unbounded` dimensions and `Unrestricted` egress —
+/// stating that plainly is what keeps a bounded cloud policy from silently
+/// degrading into an unrestricted host process. A Docker container maps CPU,
+/// memory, and the deny-all/unrestricted network postures, which are the ones
+/// `docker run` actually enforces, and refuses ephemeral-disk bounds and egress
+/// allowlists, which it does not: `--storage-opt size=` is unsupported on the
+/// default overlay2 driver, and `docker run` has no per-destination filter.
+/// Neither tier has any deadline of its own, so both name the durable reaper.
+pub static LOCAL_HAND_CAPABILITIES: LazyLock<HandProviderCapabilities> =
+    LazyLock::new(|| HandProviderCapabilities {
+        revision: LOCAL_CAPABILITIES_REVISION.to_string(),
+        tiers: vec![
+            host_tier_capabilities(SandboxTier::Local),
+            host_tier_capabilities(SandboxTier::None),
+            SandboxTierCapabilities {
+                tier: SandboxTier::Container,
+                cpu: docker_cpu_support(),
+                memory: docker_memory_support(),
+                ephemeral_disk: ResourceSupport {
+                    allows_unbounded: true,
+                    bounded: None,
+                },
+                egress_modes: vec![EgressMode::DenyAll, EgressMode::Unrestricted],
+                idle_enforcement: DeadlineEnforcement::DurableReaper,
+                max_lifetime_enforcement: DeadlineEnforcement::DurableReaper,
+            },
+        ],
+    });
+
+/// Capabilities for a tier executed directly on the host.
+fn host_tier_capabilities(tier: SandboxTier) -> SandboxTierCapabilities {
+    SandboxTierCapabilities {
+        tier,
+        cpu: ResourceSupport::unbounded_only(),
+        memory: ResourceSupport::unbounded_only(),
+        ephemeral_disk: ResourceSupport::unbounded_only(),
+        egress_modes: vec![EgressMode::Unrestricted],
+        idle_enforcement: DeadlineEnforcement::DurableReaper,
+        max_lifetime_enforcement: DeadlineEnforcement::DurableReaper,
+    }
+}
+
+/// Builds a bounded resource range from compile-time constants.
+///
+/// The bounds below are literals chosen to satisfy `bounded_range`'s nonzero
+/// and min-at-or-below-max contract, so a failure here would be a bug in this
+/// file rather than a runtime condition. Falling back to "cannot bound this
+/// dimension" keeps that bug fail-closed: the provider would refuse bounded
+/// requests instead of accepting ones it might mistranslate.
+fn docker_range(min: u32, max: u32, granularity: u32) -> ResourceSupport {
+    match ResourceSupport::bounded_range(min, max, granularity) {
+        Ok(support) => support,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "local Docker capability range is misconfigured; refusing bounded requests"
+            );
+            ResourceSupport {
+                allows_unbounded: true,
+                bounded: None,
+            }
+        }
+    }
+}
+
+/// Docker's `--cpus` range, in millicores.
+fn docker_cpu_support() -> ResourceSupport {
+    docker_range(10, 64_000, 10)
+}
+
+/// Docker's `--memory` range, in mebibytes. Docker's own floor is 6 MiB.
+fn docker_memory_support() -> ResourceSupport {
+    docker_range(16, 1_048_576, 1)
+}
 
 #[derive(Debug, Clone)]
 struct LocalSandbox {
@@ -141,13 +231,12 @@ impl LocalHandProvider {
             "ALL".to_string(),
             "--security-opt".to_string(),
             "no-new-privileges:true".to_string(),
-            "--network".to_string(),
-            "none".to_string(),
             "--pids-limit".to_string(),
             "256".to_string(),
             "-v".to_string(),
             mount,
         ];
+        args.extend(docker_profile_args(spec.effective_profile.profile())?);
         if let Some(profile) = DOCKER_SECCOMP_PROFILE.as_ref() {
             args.push("--security-opt".to_string());
             args.push(format!("seccomp={profile}"));
@@ -179,6 +268,7 @@ impl LocalHandProvider {
     }
 
     async fn provision_local(&self, spec: &HandSpec, sandbox_dir: PathBuf) -> Result<HandHandle> {
+        reject_unenforceable_host_profile(spec.effective_profile.profile())?;
         let execution_root = spec
             .workspace_mount
             .clone()
@@ -565,10 +655,81 @@ fn hand_execute_provider_label(handle: &HandHandle) -> &'static str {
     }
 }
 
+/// Translates the enforceable dimensions of a profile into `docker run` flags,
+/// and refuses the ones Docker cannot actually enforce.
+///
+/// The refusals are the point. `--storage-opt size=` is silently ignored on the
+/// default overlay2 storage driver, and `docker run` has no per-destination
+/// egress filter at all, so accepting either would produce a container that
+/// reports a bounded disk or a restricted allowlist while enforcing neither.
+fn docker_profile_args(profile: &SandboxProfile) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    if let CpuLimit::Bounded { millicores } = profile.cpu {
+        args.push("--cpus".to_string());
+        args.push(format!("{:.3}", f64::from(millicores.get()) / 1000.0));
+    }
+    if let MemoryLimit::Bounded { mebibytes } = profile.memory {
+        args.push("--memory".to_string());
+        args.push(format!("{mebibytes}m"));
+    }
+    if let DiskLimit::Bounded { mebibytes } = profile.ephemeral_disk {
+        return Err(MoaError::Unsupported(format!(
+            "local Docker sandboxes cannot enforce a {mebibytes} MiB ephemeral disk limit"
+        )));
+    }
+    match &profile.egress {
+        EgressPolicy::DenyAll => {
+            args.push("--network".to_string());
+            args.push("none".to_string());
+        }
+        EgressPolicy::Unrestricted => {
+            args.push("--network".to_string());
+            args.push("bridge".to_string());
+        }
+        EgressPolicy::AllowList { .. } => {
+            return Err(MoaError::Unsupported(
+                "local Docker sandboxes cannot enforce a per-destination egress allowlist"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(args)
+}
+
+/// Refuses any bounded dimension a bare host process cannot enforce.
+fn reject_unenforceable_host_profile(profile: &SandboxProfile) -> Result<()> {
+    if profile.cpu.bounded_millicores().is_some() {
+        return Err(MoaError::Unsupported(
+            "local host sandboxes cannot enforce a bounded CPU limit".to_string(),
+        ));
+    }
+    if profile.memory.bounded_mebibytes().is_some() {
+        return Err(MoaError::Unsupported(
+            "local host sandboxes cannot enforce a bounded memory limit".to_string(),
+        ));
+    }
+    if profile.ephemeral_disk.bounded_mebibytes().is_some() {
+        return Err(MoaError::Unsupported(
+            "local host sandboxes cannot enforce a bounded ephemeral disk limit".to_string(),
+        ));
+    }
+    if profile.egress.mode() != EgressMode::Unrestricted {
+        return Err(MoaError::Unsupported(format!(
+            "local host sandboxes share the host network and cannot enforce {} egress",
+            profile.egress.mode().as_str()
+        )));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl HandProvider for LocalHandProvider {
     fn provider_name(&self) -> &str {
         "local"
+    }
+
+    fn capabilities(&self) -> HandProviderCapabilities {
+        LOCAL_HAND_CAPABILITIES.clone()
     }
 
     async fn provision(&self, spec: HandSpec) -> Result<HandHandle> {
@@ -886,27 +1047,17 @@ pub fn classify_error(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::time::Duration;
 
     use moa_core::{
-        error::MoaError, traits::HandProvider, types::hands::HandResources, types::hands::HandSpec,
-        types::hands::SandboxTier,
+        error::MoaError, traits::HandProvider, types::hands::HandSpec,
+        types::hands::SandboxProfile, types::hands::SandboxTier,
     };
     use tempfile::tempdir;
 
     use super::LocalHandProvider;
 
     fn hand_spec(tier: SandboxTier) -> HandSpec {
-        HandSpec {
-            sandbox_tier: tier,
-            image: None,
-            resources: HandResources::default(),
-            env: HashMap::new(),
-            workspace_mount: None,
-            idle_timeout: Duration::from_secs(300),
-            max_lifetime: Duration::from_secs(300),
-        }
+        crate::core::profile::test_support::hand_spec(tier, SandboxProfile::unrestricted())
     }
 
     #[tokio::test]

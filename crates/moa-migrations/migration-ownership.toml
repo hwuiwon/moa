@@ -412,6 +412,11 @@ schema = "moa"
 owner = "moa-hands"
 
 [[table]]
+name = "tenant_sandbox_policy"
+schema = "moa"
+owner = "moa-hands"
+
+[[table]]
 name = "knowledge_blocks"
 schema = "moa"
 owner = "moa-knowledge"
@@ -706,3 +711,66 @@ schema = "moa"
 owner = "moa-knowledge"
 readers = ["moa-orchestrator"]
 notes = "Staged rechunk members awaiting one atomic activation boundary."
+
+[[table]]
+name = "learning_candidate_source"
+schema = "public"
+owner = "moa-session"
+readers = ["moa-skills", "moa-orchestrator", "moa-experiments"]
+notes = "Typed one-of provenance for one learning candidate. Replaces the unvalidated learning_candidates.source_experience_ids array; privacy erasure walks it in reverse."
+
+[[table]]
+name = "learning_log_source"
+schema = "public"
+owner = "moa-session"
+readers = ["moa-orchestrator"]
+notes = "Typed one-of provenance for one learning-log entry. Replaces the unvalidated learning_log.source_refs array."
+
+[[table]]
+name = "learning_candidate_decision"
+schema = "public"
+owner = "moa-session"
+readers = ["moa-orchestrator"]
+notes = "Historical review disposition per candidate. One durable audit per (candidate, decision), so a replayed dismiss appends nothing."
+
+[[table]]
+name = "artifact_revision_contribution"
+schema = "moa"
+owner = "moa-artifacts"
+readers = ["moa-orchestrator"]
+notes = "Which learning candidate contributed which revision bytes. generated_definition is declared non-subtractable, so shared-source erasure invalidates the serving revision rather than rewriting it."
+
+[[table]]
+name = "artifact_suite_contribution"
+schema = "moa"
+owner = "moa-artifacts"
+readers = ["moa-orchestrator", "moa-skills"]
+notes = "Generated and accumulated regression-suite bytes, moved out of learning candidate payload JSON so they can be enumerated, joined, and erased."
+
+[[table]]
+name = "privacy_erasure_record_decision"
+schema = "moa"
+owner = "moa-memory/pii"
+readers = ["moa-orchestrator"]
+notes = "One idempotent disposition per enumerated record per erasure operation. applied=false separates a dry-run plan from an act; retained_legal_hold can never be applied."
+
+[[table]]
+name = "experiment_score_provenance"
+schema = "moa"
+owner = "moa-experiments"
+readers = ["moa-scoring", "moa-lineage-sink", "moa-orchestrator"]
+notes = "Typed provenance for one Behavior Lab score row. Written only by the lineage sink drain; read by the exact-row scorecard query. Immutable: an UPDATE trigger refuses every rewrite, so replay is accept-or-refuse."
+
+[[table]]
+name = "lineage_journal"
+schema = "analytics"
+owner = "moa-lineage-sink"
+readers = ["moa-orchestrator"]
+notes = "Durable acceptance queue for lineage and score rows, replacing the pod-local fjall journal that lost accepted records on every rollout. A row exists from the moment its caller is told the batch was accepted until the transaction that stores or dead-letters its content removes it, so acceptance can never outlive one pod. Claimed under an expiring lease with FOR UPDATE SKIP LOCKED; claim eligibility is a GENERATED column derived from the lease pair so it cannot drift into permanently unclaimable."
+
+[[table]]
+name = "session_event_archives"
+schema = "public"
+owner = "moa-session"
+readers = ["moa-orchestrator"]
+notes = "One immutable, digest-verified copy of a terminal session's full event history. Written in the same transaction that deletes those rows from the append-only events table, so an archive never exists without matching the history it replaced, and events are never deleted without a read-back of the stored bytes re-deriving the digest and decoding back to the exact rows being removed. The sessions foreign key is deliberately non-cascading so the tenant-purge step for this table stays falsifiable."

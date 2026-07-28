@@ -19,7 +19,7 @@ use moa_core::{
     types::channel::Channel,
 };
 use moa_hands::{
-    ToolRouter,
+    PostgresTenantSandboxPolicyStore, ToolRouter,
     core::leases::PostgresHandLeaseStore,
     core::mcp_connections::{
         PostgresTenantMcpConnectionBindings, TenantMcpAuthorizer, TenantMcpCredentialOwners,
@@ -32,7 +32,6 @@ use moa_providers::{
 };
 use moa_security::McpEgressGuard;
 use moa_session::PostgresSessionStore;
-use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::services::{authz_challenges_reaper::HttpAwakeableResolver, scim::ScimState};
@@ -78,8 +77,6 @@ pub struct RuntimeDeps {
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     /// Tool router used by ToolExecutor and runtime services.
     pub tool_router: Arc<ToolRouter>,
-    /// Precompiled tool schemas.
-    pub tool_schemas: Arc<Vec<Value>>,
     /// Graph-memory retriever used by the context pipeline.
     pub graph_memory_retriever: Arc<GraphMemoryRetriever>,
     /// Skill injector used by the context pipeline.
@@ -90,6 +87,12 @@ pub struct RuntimeDeps {
     pub awakeable_resolver: Arc<dyn AwakeableResolver>,
     /// Optional OpenFGA outbox poller handle.
     pub authz_outbox_poller: Option<moa_authz::PollerHandle>,
+    /// Owned security-audit writer.
+    ///
+    /// Held so shutdown can drain it. Dropping these deps instead aborts it,
+    /// which is the correct outcome for a process that is going away without a
+    /// graceful path — and is visible, unlike a detached global task.
+    pub audit: Arc<moa_ocsf::AuditRuntime>,
     /// Configured live outbound channel adapters.
     pub channel_adapters: HashMap<Channel, Arc<dyn ChannelAdapter>>,
 }
@@ -104,13 +107,36 @@ impl RuntimeDeps {
         providers_override: ProvidersOverride,
         skip_fga: bool,
     ) -> Result<Self> {
-        moa_authz::configure_security_audit(pool.clone(), config.audit_security.emit_authz_allows);
+        // The audit writer is instance-owned and started before anything that can
+        // produce an event. Startup fails outright if it cannot start: the
+        // previous global initializer logged a warning and left every audit event
+        // for the process lifetime as a silent counted drop.
+        let audit = moa_ocsf::AuditRuntime::start(pool.clone())
+            .context("start orchestrator security audit writer")?;
+        let runtime_cache = build_runtime_cache_store(config.as_ref()).await?;
+        // Inject the coordination store into the config that every downstream
+        // provider construction site already receives. Doing it before anything
+        // else is built means no component can hold a config without the store,
+        // which is what makes the distributed provider controls coordinate
+        // without a process-global handle.
+        let config = Arc::new(
+            Arc::unwrap_or_clone(config).with_runtime_coordination(Arc::clone(&runtime_cache)),
+        );
         let kms = KmsRuntime::build_serving(config.as_ref(), pool.clone()).await?;
         let fga_client = if skip_fga {
             tracing::warn!("MOA_SKIP_FGA set; authz outbox poller disabled");
             None
         } else {
-            Some(build_fga_client(config.as_ref())?)
+            // Every `require_authz*` call already takes this client, so hanging
+            // the audit here makes the audit writer an explicit dependency of
+            // every authorization check without touching a call site.
+            Some(
+                build_fga_client(config.as_ref())?.with_security_audit(moa_authz::SecurityAudit {
+                    pool: pool.clone(),
+                    emitter: audit.emitter(),
+                    emit_allows: config.audit_security.emit_authz_allows,
+                }),
+            )
         };
         let authz_outbox_poller = fga_client
             .clone()
@@ -140,11 +166,6 @@ impl RuntimeDeps {
             )
             .with_deployment_secrets(moa_messaging::delivery_deployment_secrets_from_env()),
         );
-        let runtime_cache = build_runtime_cache_store(config.as_ref()).await?;
-        // Give provider concurrency limiters the shared coordination store before
-        // any provider is built, so `global` scope can coordinate across replicas.
-        moa_providers::install_coordination_store(Arc::clone(&runtime_cache));
-
         let egress_classifier = (!config.mcp_servers.is_empty() || config.llm_dlp.tokenize_enabled)
             .then(|| build_egress_pii_classifier(config.as_ref()));
         let providers = Arc::new(build_provider_registry(
@@ -173,6 +194,15 @@ impl RuntimeDeps {
         )
         .await?
         .with_hand_lease_store(Arc::new(PostgresHandLeaseStore::new(pool.clone())))
+        // The reaper is started unconditionally by `runtime::jobs` for this
+        // process, so the router may admit deadlines whose destruction owner is
+        // that reaper. Declaring it here rather than inferring it keeps the
+        // admission check honest: a deployment that stops starting the reaper
+        // has to change this line and will fail admission until it does.
+        .with_hand_lease_reaper()
+        .with_tenant_sandbox_policy_store(Arc::new(PostgresTenantSandboxPolicyStore::new(
+            pool.clone(),
+        )))
         .with_session_store(session_store.clone())
         .with_memory_retrieval_executor(Arc::new(
             crate::services::memory::OrchestratorMemoryRetrievalExecutor::new(
@@ -182,8 +212,10 @@ impl RuntimeDeps {
             ),
         ))
         .with_memory_tool_executor(Arc::new(moa_memory_ingest::FastMemoryToolExecutor));
+        // Both sandbox owners are attached by the builder chain above, so the
+        // cloud requirement can only be checked once the router is complete.
+        tool_router.validate_cloud_startup(config.as_ref())?;
         let tool_router = Arc::new(tool_router);
-        validate_lineage_journal_startup(config.as_ref())?;
         let lineage = build_lineage_sink(config.as_ref(), background_pool.clone()).await?;
         let retrieval_embedder = build_retrieval_embedder(config.as_ref());
         // Reused for skill-manifest ranking; the retriever moves the original.
@@ -203,7 +235,6 @@ impl RuntimeDeps {
             skill_injector = skill_injector.with_embedder(embedder);
         }
         let skill_injector = Arc::new(skill_injector);
-        let tool_schemas = Arc::new(tool_router.tool_schemas());
         let channel_adapters = build_channel_adapters(config.as_ref(), runtime_cache.clone())?;
         moa_memory_ingest::install_runtime_with_config(
             background_pool.clone(),
@@ -226,13 +257,13 @@ impl RuntimeDeps {
             providers,
             embedding_provider,
             tool_router,
-            tool_schemas,
             graph_memory_retriever,
             skill_injector,
             lineage,
             awakeable_resolver,
             authz_outbox_poller,
             channel_adapters,
+            audit: Arc::new(audit),
         })
     }
 
@@ -265,7 +296,7 @@ impl RuntimeDeps {
                     self.providers.clone(),
                     self.embedding_provider.clone(),
                 ),
-                tools: ToolDeps::new(self.tool_router.clone(), self.tool_schemas.clone()),
+                tools: ToolDeps::new(self.tool_router.clone()),
                 memory: MemoryDeps::new(
                     self.kms.provider(),
                     self.graph_memory_retriever.clone(),
@@ -275,21 +306,6 @@ impl RuntimeDeps {
             },
         )
     }
-}
-
-fn validate_lineage_journal_startup(config: &MoaConfig) -> Result<()> {
-    if config.observability.lineage.enabled || lineage_sink_env_uses_journal() {
-        config.observability.lineage.validate_journal_path()?;
-    }
-    Ok(())
-}
-
-fn lineage_sink_env_uses_journal() -> bool {
-    std::env::var("MOA_LINEAGE_SINK")
-        .ok()
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|value| value.eq_ignore_ascii_case("postgres"))
 }
 
 async fn build_runtime_cache_store(config: &MoaConfig) -> Result<Arc<dyn RuntimeCacheStore>> {
@@ -552,6 +568,8 @@ mod tests {
         let mut config = MoaConfig::default();
         assert!(!config.llm_dlp.tokenize_enabled);
         config.mcp_servers.push(McpServerConfig {
+            required: false,
+            discovery: moa_config::McpDiscoveryMode::Eager,
             name: "external".to_string(),
             transport: McpTransportConfig::Http,
             url: Some("http://127.0.0.1:1".to_string()),

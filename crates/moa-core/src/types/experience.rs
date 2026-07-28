@@ -287,6 +287,12 @@ impl LearningCandidateType {
 }
 
 /// Durable status for a proposed learning mutation.
+///
+/// Which statuses a candidate may hold is decided by its
+/// [`LearningProposalKind`], not by its [`LearningCandidateType`]. A reviewable
+/// proposal moves through the promotion lifecycle; an informational item lives
+/// on the terminal-only advisory or authoring lifecycle and can never be
+/// promoted, because no code exists that could materialize it.
 #[derive(
     Debug,
     Clone,
@@ -311,6 +317,12 @@ pub enum LearningCandidateStatus {
     Rejected,
     /// Candidate was rolled back after promotion.
     RolledBack,
+    /// Informational memory observation offered for reading, never promotion.
+    Advisory,
+    /// Informational item that describes work a human would have to author.
+    NeedsAuthoring,
+    /// Informational item a reviewer closed without acting on it.
+    Dismissed,
 }
 
 impl LearningCandidateStatus {
@@ -319,6 +331,319 @@ impl LearningCandidateStatus {
     pub fn as_str(self) -> &'static str {
         self.into()
     }
+}
+
+/// Review contract a learning candidate offers, independent of its target domain.
+///
+/// [`LearningCandidateType`] answers "what does this candidate want to change";
+/// this answers "what can a reviewer actually do with it". Those were previously
+/// the same field, which is how memory, policy, prompt, and eval suggestions
+/// came to be written as `Proposed` and displayed beside skill drafts even
+/// though nothing in the system could promote them. A reviewer could press
+/// accept on a policy suggestion and get a success response for a change that
+/// never happened.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum LearningProposalKind {
+    /// A generated skill draft with a real draft revision and an accept path.
+    SkillDraft,
+    /// A proposal to archive a regressed published revision.
+    SkillRollback,
+    /// A memory observation surfaced for reading only.
+    MemoryAdvisory,
+    /// A skill suggestion with no draft behind it; authoring work, not a proposal.
+    SkillAuthoring,
+    /// An observed policy pattern a human would have to author.
+    PolicyAuthoring,
+    /// An observed prompt change a human would have to author.
+    PromptAuthoring,
+    /// An observed eval gap a human would have to author.
+    EvalAuthoring,
+}
+
+impl LearningProposalKind {
+    /// Returns the stable database representation.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+
+    /// Returns true when a reviewer can accept this kind into serving state.
+    ///
+    /// Only the two kinds with a transactional materializer qualify. Everything
+    /// else can be read and dismissed, and nothing more.
+    #[must_use]
+    pub fn is_reviewable(self) -> bool {
+        matches!(self, Self::SkillDraft | Self::SkillRollback)
+    }
+
+    /// Returns the only status a freshly written candidate of this kind may hold.
+    #[must_use]
+    pub fn initial_status(self) -> LearningCandidateStatus {
+        match self {
+            Self::SkillDraft | Self::SkillRollback => LearningCandidateStatus::Proposed,
+            Self::MemoryAdvisory => LearningCandidateStatus::Advisory,
+            Self::SkillAuthoring
+            | Self::PolicyAuthoring
+            | Self::PromptAuthoring
+            | Self::EvalAuthoring => LearningCandidateStatus::NeedsAuthoring,
+        }
+    }
+
+    /// Returns true when this kind admits `status` at all.
+    #[must_use]
+    pub fn permits_status(self, status: LearningCandidateStatus) -> bool {
+        use LearningCandidateStatus as Status;
+        match self {
+            Self::SkillDraft => matches!(
+                status,
+                Status::Proposed
+                    | Status::Evaluating
+                    | Status::Promoted
+                    | Status::Rejected
+                    | Status::RolledBack
+            ),
+            Self::SkillRollback => matches!(
+                status,
+                Status::Proposed | Status::Evaluating | Status::Promoted | Status::Rejected
+            ),
+            Self::MemoryAdvisory => matches!(status, Status::Advisory | Status::Dismissed),
+            Self::SkillAuthoring
+            | Self::PolicyAuthoring
+            | Self::PromptAuthoring
+            | Self::EvalAuthoring => {
+                matches!(status, Status::NeedsAuthoring | Status::Dismissed)
+            }
+        }
+    }
+
+    /// Returns true when this kind admits the exact `from -> to` transition.
+    ///
+    /// The database enforces the same table through a trigger; this exists so a
+    /// caller can refuse before issuing a write it knows will be rejected, and
+    /// so the rule is testable without a database.
+    #[must_use]
+    pub fn permits_transition(
+        self,
+        from: LearningCandidateStatus,
+        to: LearningCandidateStatus,
+    ) -> bool {
+        use LearningCandidateStatus as Status;
+        if from == to {
+            return self.permits_status(from);
+        }
+        match self {
+            Self::SkillDraft => matches!(
+                (from, to),
+                (Status::Proposed, Status::Evaluating)
+                    | (Status::Evaluating, Status::Promoted)
+                    | (Status::Evaluating, Status::Rejected)
+                    | (Status::Evaluating, Status::Proposed)
+                    | (Status::Promoted, Status::RolledBack)
+            ),
+            Self::SkillRollback => matches!(
+                (from, to),
+                (Status::Proposed, Status::Evaluating)
+                    | (Status::Evaluating, Status::Promoted)
+                    | (Status::Evaluating, Status::Rejected)
+                    | (Status::Evaluating, Status::Proposed)
+            ),
+            Self::MemoryAdvisory => matches!((from, to), (Status::Advisory, Status::Dismissed)),
+            Self::SkillAuthoring
+            | Self::PolicyAuthoring
+            | Self::PromptAuthoring
+            | Self::EvalAuthoring => {
+                matches!((from, to), (Status::NeedsAuthoring, Status::Dismissed))
+            }
+        }
+    }
+}
+
+/// One typed provenance reference standing behind a learning candidate.
+///
+/// Deliberately an enum rather than a `(kind, uuid)` pair: a pair is the
+/// `UUID[]` column this type replaces with an extra field, since neither the
+/// database nor the compiler can tell which table the uuid belongs to. Each
+/// variant maps to exactly one nullable column with a real composite foreign key
+/// that carries the partition, so a cross-tenant source is rejected by the
+/// constraint rather than by a check somebody has to remember to write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LearningCandidateSourceRef {
+    /// An experience record derived from an assessed task segment.
+    Experience {
+        /// Experience the candidate was derived from.
+        experience_id: Uuid,
+    },
+    /// One attribution explaining why a subject helped or hurt an experience.
+    Attribution {
+        /// Attribution the candidate was derived from.
+        attribution_id: Uuid,
+    },
+    /// A whole session.
+    Session {
+        /// Session the candidate was derived from.
+        session_id: SessionId,
+    },
+    /// One event inside a session. Events are partitioned by session, so both
+    /// halves of the key are required to name one.
+    Event {
+        /// Event the candidate was derived from.
+        event_id: Uuid,
+        /// Session that owns the event.
+        session_id: SessionId,
+    },
+    /// One assessed task segment.
+    TaskSegment {
+        /// Segment the candidate was derived from.
+        segment_id: SegmentId,
+    },
+    /// The contact whose data the candidate is derived from.
+    Contact {
+        /// Contact the candidate is attributable to.
+        contact_id: ContactId,
+    },
+    /// The promotion a rollback proposal reverses.
+    PromotionCandidate {
+        /// Candidate whose promotion this proposal would undo.
+        candidate_id: Uuid,
+    },
+    /// An artifact revision the candidate was derived from or targets.
+    ArtifactRevision {
+        /// Revision the candidate references.
+        revision_uid: Uuid,
+    },
+    /// An experiment run that produced the evidence.
+    ExperimentRun {
+        /// Run the candidate was derived from.
+        run_uid: Uuid,
+    },
+    /// One trial inside an experiment run.
+    ExperimentTrial {
+        /// Trial the candidate was derived from.
+        trial_uid: Uuid,
+    },
+    /// The score run that graded the evidence.
+    ScoreRun {
+        /// Score run the candidate was derived from.
+        run_id: Uuid,
+    },
+}
+
+impl LearningCandidateSourceRef {
+    /// Returns the stable `source_kind` discriminator persisted alongside the reference.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Experience { .. } => "experience",
+            Self::Attribution { .. } => "attribution",
+            Self::Session { .. } => "session",
+            Self::Event { .. } => "event",
+            Self::TaskSegment { .. } => "task_segment",
+            Self::Contact { .. } => "contact",
+            Self::PromotionCandidate { .. } => "promotion_candidate",
+            Self::ArtifactRevision { .. } => "artifact_revision",
+            Self::ExperimentRun { .. } => "experiment_run",
+            Self::ExperimentTrial { .. } => "experiment_trial",
+            Self::ScoreRun { .. } => "score_run",
+        }
+    }
+}
+
+/// One normalized provenance row linking a learning candidate to one source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearningCandidateSource {
+    /// Stable source-row identifier.
+    pub id: Uuid,
+    /// Candidate this source stands behind.
+    pub candidate_id: Uuid,
+    /// The typed reference itself.
+    pub reference: LearningCandidateSourceRef,
+}
+
+impl LearningCandidateSource {
+    /// Builds one source row with a fresh identifier.
+    #[must_use]
+    pub fn new(candidate_id: Uuid, reference: LearningCandidateSourceRef) -> Self {
+        Self {
+            id: Uuid::now_v7(),
+            candidate_id,
+            reference,
+        }
+    }
+}
+
+/// Review action recorded against one learning candidate.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum LearningReviewDecision {
+    /// A skill draft was accepted and its artifact published.
+    AcceptedSkill,
+    /// A rollback proposal was accepted and its revision archived.
+    AcceptedRollback,
+    /// A reviewable proposal was rejected.
+    Rejected,
+    /// An informational item was closed without action.
+    Dismissed,
+}
+
+impl LearningReviewDecision {
+    /// Returns the stable database representation.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+}
+
+/// Durable historical disposition of one learning-candidate review.
+///
+/// The candidate's `status` column says where it is now; this says what was
+/// decided and by whom. Export needs the second question answered, and a
+/// mutable column cannot answer it after the fact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LearningCandidateDecisionRecord {
+    /// Stable decision identifier.
+    pub id: Uuid,
+    /// Candidate the decision applies to.
+    pub candidate_id: Uuid,
+    /// Tenant scope for the decision.
+    pub tenant_id: TenantId,
+    /// Action the reviewer took.
+    pub decision: LearningReviewDecision,
+    /// Status the candidate held before the decision.
+    pub from_status: LearningCandidateStatus,
+    /// Status the candidate holds after the decision.
+    pub to_status: LearningCandidateStatus,
+    /// Reviewer identity when one was supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_subject: Option<String>,
+    /// Free-text reason recorded with the decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Time the decision was recorded.
+    pub decided_at: DateTime<Utc>,
 }
 
 /// Risk assigned to a candidate promotion.
@@ -364,6 +689,8 @@ pub struct LearningCandidate {
     pub user_id: Option<UserId>,
     /// Candidate target type.
     pub candidate_type: LearningCandidateType,
+    /// Review contract this candidate offers.
+    pub proposal_kind: LearningProposalKind,
     /// Current promotion status.
     pub status: LearningCandidateStatus,
     /// Optional target identifier when mutating existing learned state.
@@ -383,9 +710,15 @@ pub struct LearningCandidate {
     /// Evaluation output attached during promotion review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evaluation_payload: Option<Value>,
-    /// Source experiences that motivated this candidate.
+    /// Typed sources this candidate was derived from.
+    ///
+    /// Carried on the candidate itself rather than filed afterwards so a
+    /// producer cannot write a candidate and forget its provenance: the store
+    /// commits both in one transaction, and a deferred database constraint
+    /// refuses the commit if this is empty. That closes the
+    /// insert-then-forget shape a separate "add sources" call would leave open.
     #[serde(default)]
-    pub source_experience_ids: Vec<Uuid>,
+    pub sources: Vec<LearningCandidateSourceRef>,
     /// Confidence in the candidate proposal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f64>,
@@ -464,6 +797,8 @@ pub struct LearningCandidateSummary {
     pub contact_id: Option<ContactId>,
     /// Candidate target type.
     pub candidate_type: LearningCandidateType,
+    /// Review contract this candidate offers.
+    pub proposal_kind: LearningProposalKind,
     /// Current promotion status.
     pub status: LearningCandidateStatus,
     /// Optional target identifier when mutating existing learned state.

@@ -8,8 +8,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    error::MoaError, error::Result, types::hands::HandHandle, types::hands::SandboxTier,
-    types::identifiers::SessionId, types::identifiers::TenantId,
+    error::MoaError, error::Result, types::hands::EffectiveSandboxProfile,
+    types::hands::HandHandle, types::hands::LifetimeLimit, types::hands::SandboxPolicySources,
+    types::hands::SandboxProfile, types::hands::SandboxTier, types::identifiers::SessionId,
+    types::identifiers::TenantId,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row, types::Json};
@@ -60,16 +62,25 @@ pub enum HandLeaseStatus {
     Destroyed,
     /// Provisioning failed for the current generation.
     Failed,
+    /// The durable reaper owns this generation and is destroying it.
+    ///
+    /// Deliberately unreachable from provisioning: a claimed generation is
+    /// finalized as [`HandLeaseStatus::Destroyed`] or released back to
+    /// [`HandLeaseStatus::Stale`] for a later retry, never reactivated.
+    Reaping,
 }
 
 impl HandLeaseStatus {
-    fn as_str(self) -> &'static str {
+    /// Returns the persisted label for this status.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Provisioning => "provisioning",
             Self::Active => "active",
             Self::Stale => "stale",
             Self::Destroyed => "destroyed",
             Self::Failed => "failed",
+            Self::Reaping => "reaping",
         }
     }
 
@@ -80,11 +91,66 @@ impl HandLeaseStatus {
             "stale" => Ok(Self::Stale),
             "destroyed" => Ok(Self::Destroyed),
             "failed" => Ok(Self::Failed),
+            "reaping" => Ok(Self::Reaping),
             other => Err(MoaError::StorageError(format!(
                 "unknown hand lease status: {other}"
             ))),
         }
     }
+}
+
+/// The exact sandbox policy identity one lease was provisioned under.
+///
+/// Persisted alongside the handle so recovery can recompute today's policy and
+/// compare hashes. Any change to the profile, to any of the four source
+/// revisions, or to the provider's capability revision changes `profile_hash`,
+/// which is what prevents a sandbox from being reused under a policy it was
+/// never admitted for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandLeasePolicy {
+    /// The resolved six-dimension profile.
+    pub profile: SandboxProfile,
+    /// The `sha256:`-prefixed policy identity hash.
+    pub profile_hash: String,
+    /// The four contributing policy-layer revisions.
+    pub sources: SandboxPolicySources,
+    /// The serving provider's capability revision.
+    pub capability_revision: String,
+}
+
+impl HandLeasePolicy {
+    /// Captures the policy identity of one resolved effective profile.
+    #[must_use]
+    pub fn from_effective(effective: &EffectiveSandboxProfile) -> Self {
+        Self {
+            profile: effective.profile().clone(),
+            profile_hash: effective.profile_hash().to_string(),
+            sources: effective.sources().clone(),
+            capability_revision: effective.capability_revision().to_string(),
+        }
+    }
+
+    /// Returns the idle deadline this policy implies, measured from `now`.
+    ///
+    /// An explicitly `Unbounded` idle timeout has no deadline, which is `None`.
+    #[must_use]
+    pub fn idle_deadline(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        deadline_from(now, self.profile.idle_timeout)
+    }
+
+    /// Returns the immutable hard deadline this policy implies, measured from `now`.
+    #[must_use]
+    pub fn hard_deadline(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        deadline_from(now, self.profile.max_lifetime)
+    }
+}
+
+/// Converts a lifetime limit into an absolute deadline, or `None` when unbounded.
+fn deadline_from(now: DateTime<Utc>, limit: LifetimeLimit) -> Option<DateTime<Utc>> {
+    limit
+        .bounded_seconds()
+        .and_then(|seconds| i64::try_from(seconds.get()).ok())
+        .map(|seconds| now + chrono::Duration::seconds(seconds))
 }
 
 /// One durable hand lease row.
@@ -114,8 +180,18 @@ pub struct HandLease {
     pub created_at: DateTime<Utc>,
     /// Row update timestamp.
     pub updated_at: DateTime<Utc>,
-    /// Lease expiry timestamp.
-    pub expires_at: DateTime<Utc>,
+    /// Renewable idle deadline; `None` when the profile's idle timeout is
+    /// explicitly `Unbounded`.
+    pub idle_expires_at: Option<DateTime<Utc>>,
+    /// Immutable hard deadline; `None` when the profile's maximum lifetime is
+    /// explicitly `Unbounded`. Never advanced after the provisioning claim.
+    pub hard_expires_at: Option<DateTime<Utc>>,
+    /// Policy identity this generation was provisioned under.
+    ///
+    /// `None` only for rows written before the policy contract existed, which
+    /// V000359 marked stale and immediately destroyable. A database constraint
+    /// keeps active and provisioning rows from ever reaching that state.
+    pub policy: Option<HandLeasePolicy>,
 }
 
 /// Store contract for durable hand lease coordination.
@@ -127,6 +203,10 @@ pub struct HandLease {
 #[async_trait]
 pub trait HandLeaseStore: Send + Sync {
     /// Atomically claims provisioning for a session/worker/provider when no valid active lease exists.
+    ///
+    /// The claim writes the policy identity and both deadlines, so a generation
+    /// carries its policy from the moment it exists rather than acquiring one
+    /// at activation.
     async fn claim_for_provisioning(
         &self,
         session_id: SessionId,
@@ -134,7 +214,7 @@ pub trait HandLeaseStore: Send + Sync {
         tenant_id: TenantId,
         provider: &str,
         tier: SandboxTier,
-        expires_at: DateTime<Utc>,
+        policy: &HandLeasePolicy,
     ) -> Result<Option<HandLease>>;
 
     /// Loads the current lease for a session/worker/provider.
@@ -149,6 +229,9 @@ pub trait HandLeaseStore: Send + Sync {
     async fn list_session(&self, session_id: SessionId) -> Result<Vec<HandLease>>;
 
     /// Marks a claimed generation active with its durable handle payload.
+    ///
+    /// Activation carries no policy or hard deadline: both were fixed by the
+    /// provisioning claim and are immutable for the life of the generation.
     async fn activate(
         &self,
         session_id: SessionId,
@@ -156,17 +239,21 @@ pub trait HandLeaseStore: Send + Sync {
         provider: &str,
         generation: i64,
         handle: LeaseHandle,
-        expires_at: DateTime<Utc>,
     ) -> Result<()>;
 
-    /// Renews a current active lease if the generation fence still matches.
+    /// Renews the idle deadline of a current active lease if the generation
+    /// fence still matches.
+    ///
+    /// Renewal can only move the idle deadline, never past the hard deadline,
+    /// and a lease whose hard deadline has already passed cannot be renewed at
+    /// all. That is what keeps a busy sandbox from living forever.
     async fn renew_active(
         &self,
         session_id: SessionId,
         worker_id: &str,
         provider: &str,
         generation: i64,
-        expires_at: DateTime<Utc>,
+        idle_expires_at: DateTime<Utc>,
     ) -> Result<bool>;
 
     /// Marks a claimed generation with a terminal or replaceable status.
@@ -203,33 +290,57 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         tenant_id: TenantId,
         provider: &str,
         tier: SandboxTier,
-        expires_at: DateTime<Utc>,
+        policy: &HandLeasePolicy,
     ) -> Result<Option<HandLease>> {
-        let row = sqlx::query(
+        let now = Utc::now();
+        let row = sqlx::query(&format!(
             r#"
             INSERT INTO moa.hand_leases (
-                session_id, worker_id, tenant_id, provider, tier, status, generation, expires_at
+                session_id, worker_id, tenant_id, provider, tier, status, generation,
+                idle_expires_at, hard_expires_at, profile, profile_hash,
+                source_deployment_revision, source_tenant_revision,
+                source_agent_revision, source_route_revision, capability_revision,
+                reap_attempts, reap_not_before
             )
-            VALUES ($1, $2, $3, $4, $5, 'provisioning', 1, $6)
+            VALUES ($1, $2, $3, $4, $5, 'provisioning', 1, $6, $7, $8, $9,
+                    $10, $11, $12, $13, $14, 0, NULL)
             ON CONFLICT (session_id, worker_id, provider) DO UPDATE
             SET tenant_id = EXCLUDED.tenant_id,
                 tier = EXCLUDED.tier,
                 status = 'provisioning',
                 generation = moa.hand_leases.generation + 1,
                 updated_at = now(),
-                expires_at = EXCLUDED.expires_at
+                idle_expires_at = EXCLUDED.idle_expires_at,
+                hard_expires_at = EXCLUDED.hard_expires_at,
+                profile = EXCLUDED.profile,
+                profile_hash = EXCLUDED.profile_hash,
+                source_deployment_revision = EXCLUDED.source_deployment_revision,
+                source_tenant_revision = EXCLUDED.source_tenant_revision,
+                source_agent_revision = EXCLUDED.source_agent_revision,
+                source_route_revision = EXCLUDED.source_route_revision,
+                capability_revision = EXCLUDED.capability_revision,
+                reap_attempts = 0,
+                reap_not_before = NULL
             WHERE moa.hand_leases.status IN ('stale', 'destroyed', 'failed')
-               OR moa.hand_leases.expires_at <= now()
-            RETURNING session_id, worker_id, tenant_id, provider, tier, handle, status,
-                      generation, created_at, updated_at, expires_at
-            "#,
-        )
+               OR moa.hand_leases.idle_expires_at <= now()
+               OR moa.hand_leases.hard_expires_at <= now()
+            RETURNING {LEASE_COLUMNS}
+            "#
+        ))
         .bind(session_id)
         .bind(worker_id)
         .bind(tenant_id)
         .bind(provider)
-        .bind(tier_label(&tier))
-        .bind(expires_at)
+        .bind(tier.as_str())
+        .bind(policy.idle_deadline(now))
+        .bind(policy.hard_deadline(now))
+        .bind(Json(&policy.profile))
+        .bind(&policy.profile_hash)
+        .bind(&policy.sources.deployment)
+        .bind(&policy.sources.tenant)
+        .bind(&policy.sources.agent)
+        .bind(&policy.sources.route)
+        .bind(&policy.capability_revision)
         .fetch_optional(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
@@ -243,14 +354,13 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         worker_id: &str,
         provider: &str,
     ) -> Result<Option<HandLease>> {
-        let row = sqlx::query(
+        let row = sqlx::query(&format!(
             r#"
-            SELECT session_id, worker_id, tenant_id, provider, tier, handle, status,
-                   generation, created_at, updated_at, expires_at
+            SELECT {LEASE_COLUMNS}
             FROM moa.hand_leases
             WHERE session_id = $1 AND worker_id = $2 AND provider = $3
-            "#,
-        )
+            "#
+        ))
         .bind(session_id)
         .bind(worker_id)
         .bind(provider)
@@ -262,15 +372,14 @@ impl HandLeaseStore for PostgresHandLeaseStore {
     }
 
     async fn list_session(&self, session_id: SessionId) -> Result<Vec<HandLease>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query(&format!(
             r#"
-            SELECT session_id, worker_id, tenant_id, provider, tier, handle, status,
-                   generation, created_at, updated_at, expires_at
+            SELECT {LEASE_COLUMNS}
             FROM moa.hand_leases
             WHERE session_id = $1
             ORDER BY worker_id, provider
-            "#,
-        )
+            "#
+        ))
         .bind(session_id)
         .fetch_all(&self.pool)
         .await
@@ -286,15 +395,13 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         provider: &str,
         generation: i64,
         handle: LeaseHandle,
-        expires_at: DateTime<Utc>,
     ) -> Result<()> {
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
             SET handle = $5,
                 status = 'active',
-                updated_at = now(),
-                expires_at = $6
+                updated_at = now()
             WHERE session_id = $1
               AND worker_id = $2
               AND provider = $3
@@ -307,7 +414,6 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         .bind(provider)
         .bind(generation)
         .bind(Json(handle))
-        .bind(expires_at)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?
@@ -328,26 +434,34 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         worker_id: &str,
         provider: &str,
         generation: i64,
-        expires_at: DateTime<Utc>,
+        idle_expires_at: DateTime<Utc>,
     ) -> Result<bool> {
+        // `LEAST` is what pins the idle deadline under the hard one: a renewal
+        // asking for more than the sandbox's remaining lifetime gets the
+        // remaining lifetime, and a lease already past its hard deadline is not
+        // matched at all. `hard_expires_at` never appears in `SET`.
         let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
             SET updated_at = now(),
-                expires_at = $5
+                idle_expires_at = CASE
+                    WHEN hard_expires_at IS NULL THEN $5
+                    ELSE LEAST($5, hard_expires_at)
+                END
             WHERE session_id = $1
               AND worker_id = $2
               AND provider = $3
               AND generation = $4
               AND status = 'active'
-              AND expires_at > now()
+              AND (idle_expires_at IS NULL OR idle_expires_at > now())
+              AND (hard_expires_at IS NULL OR hard_expires_at > now())
             "#,
         )
         .bind(session_id)
         .bind(worker_id)
         .bind(provider)
         .bind(generation)
-        .bind(expires_at)
+        .bind(idle_expires_at)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?
@@ -387,13 +501,20 @@ impl HandLeaseStore for PostgresHandLeaseStore {
     }
 }
 
-fn hand_lease_from_row(row: &sqlx::postgres::PgRow) -> Result<HandLease> {
+/// Column list every lease read projects, kept in one place so the row decoder
+/// and every query stay in agreement.
+pub(super) const LEASE_COLUMNS: &str = "session_id, worker_id, tenant_id, provider, tier, handle, \
+     status, generation, created_at, updated_at, idle_expires_at, hard_expires_at, profile, \
+     profile_hash, source_deployment_revision, source_tenant_revision, source_agent_revision, \
+     source_route_revision, capability_revision";
+
+pub(super) fn hand_lease_from_row(row: &sqlx::postgres::PgRow) -> Result<HandLease> {
     Ok(HandLease {
         session_id: row.try_get("session_id").map_err(map_sqlx_error)?,
         worker_id: row.try_get("worker_id").map_err(map_sqlx_error)?,
         tenant_id: row.try_get("tenant_id").map_err(map_sqlx_error)?,
         provider: row.try_get("provider").map_err(map_sqlx_error)?,
-        tier: tier_from_label(
+        tier: SandboxTier::from_label(
             row.try_get::<String, _>("tier")
                 .map_err(map_sqlx_error)?
                 .as_str(),
@@ -410,34 +531,119 @@ fn hand_lease_from_row(row: &sqlx::postgres::PgRow) -> Result<HandLease> {
         generation: row.try_get("generation").map_err(map_sqlx_error)?,
         created_at: row.try_get("created_at").map_err(map_sqlx_error)?,
         updated_at: row.try_get("updated_at").map_err(map_sqlx_error)?,
-        expires_at: row.try_get("expires_at").map_err(map_sqlx_error)?,
+        idle_expires_at: row.try_get("idle_expires_at").map_err(map_sqlx_error)?,
+        hard_expires_at: row.try_get("hard_expires_at").map_err(map_sqlx_error)?,
+        policy: hand_lease_policy_from_row(row)?,
     })
 }
 
-/// Returns the persisted label for a sandbox tier.
-pub fn tier_label(tier: &SandboxTier) -> &'static str {
-    match tier {
-        SandboxTier::None => "none",
-        SandboxTier::Container => "container",
-        SandboxTier::MicroVM => "microvm",
-        SandboxTier::Local => "local",
-    }
+/// Decodes the policy identity columns, which are absent only on the legacy
+/// rows V000359 marked stale.
+fn hand_lease_policy_from_row(row: &sqlx::postgres::PgRow) -> Result<Option<HandLeasePolicy>> {
+    let profile = row
+        .try_get::<Option<Json<SandboxProfile>>, _>("profile")
+        .map_err(map_sqlx_error)?;
+    let profile_hash = row
+        .try_get::<Option<String>, _>("profile_hash")
+        .map_err(map_sqlx_error)?;
+    let deployment = row
+        .try_get::<Option<String>, _>("source_deployment_revision")
+        .map_err(map_sqlx_error)?;
+    let tenant = row
+        .try_get::<Option<String>, _>("source_tenant_revision")
+        .map_err(map_sqlx_error)?;
+    let agent = row
+        .try_get::<Option<String>, _>("source_agent_revision")
+        .map_err(map_sqlx_error)?;
+    let route = row
+        .try_get::<Option<String>, _>("source_route_revision")
+        .map_err(map_sqlx_error)?;
+    let capability_revision = row
+        .try_get::<Option<String>, _>("capability_revision")
+        .map_err(map_sqlx_error)?;
+
+    let (
+        Some(profile),
+        Some(profile_hash),
+        Some(deployment),
+        Some(tenant),
+        Some(agent),
+        Some(route),
+        Some(capability_revision),
+    ) = (
+        profile,
+        profile_hash,
+        deployment,
+        tenant,
+        agent,
+        route,
+        capability_revision,
+    )
+    else {
+        return Ok(None);
+    };
+    Ok(Some(HandLeasePolicy {
+        profile: profile.0,
+        profile_hash,
+        sources: SandboxPolicySources {
+            deployment,
+            tenant,
+            agent,
+            route,
+        },
+        capability_revision,
+    }))
 }
 
-fn tier_from_label(value: &str) -> Result<SandboxTier> {
-    match value {
-        "none" => Ok(SandboxTier::None),
-        "container" => Ok(SandboxTier::Container),
-        "microvm" => Ok(SandboxTier::MicroVM),
-        "local" => Ok(SandboxTier::Local),
-        other => Err(MoaError::StorageError(format!(
-            "unknown hand lease tier: {other}"
-        ))),
-    }
-}
-
-fn map_sqlx_error(error: sqlx::Error) -> MoaError {
+pub(super) fn map_sqlx_error(error: sqlx::Error) -> MoaError {
     MoaError::StorageError(error.to_string())
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::num::NonZeroU64;
+
+    use moa_core::types::hands::{
+        BuiltinPolicyRevision, CpuLimit, DiskLimit, EgressPolicy, LifetimeLimit, MemoryLimit,
+        SandboxPolicySnapshot, SandboxProfile, resolve_effective_sandbox_profile,
+    };
+
+    use super::HandLeasePolicy;
+
+    /// Builds a lease policy whose deadlines are the given whole seconds, with
+    /// `None` meaning an explicitly unbounded dimension.
+    pub(crate) fn lease_policy(
+        idle_secs: Option<u64>,
+        hard_secs: Option<u64>,
+        capability_revision: &str,
+    ) -> HandLeasePolicy {
+        let limit = |secs: Option<u64>| match secs {
+            Some(secs) => LifetimeLimit::Bounded {
+                seconds: NonZeroU64::new(secs).expect("nonzero seconds"),
+            },
+            None => LifetimeLimit::Unbounded,
+        };
+        let profile = SandboxProfile::new(
+            CpuLimit::Unbounded,
+            MemoryLimit::Unbounded,
+            DiskLimit::Unbounded,
+            EgressPolicy::DenyAll,
+            limit(idle_secs),
+            limit(hard_secs),
+        )
+        .expect("test profile should validate");
+        let snapshot = SandboxPolicySnapshot::new("test-deployment", profile)
+            .expect("test snapshot should validate");
+        let effective = resolve_effective_sandbox_profile(
+            &snapshot,
+            &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::TenantUnset),
+            &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::AgentUnset),
+            &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
+            capability_revision,
+        )
+        .expect("test resolution should succeed");
+        HandLeasePolicy::from_effective(&effective)
+    }
 }
 
 #[cfg(test)]
@@ -463,16 +669,18 @@ impl HandLeaseStore for MemoryHandLeaseStore {
         tenant_id: TenantId,
         provider: &str,
         tier: SandboxTier,
-        expires_at: DateTime<Utc>,
+        policy: &HandLeasePolicy,
     ) -> Result<Option<HandLease>> {
         let mut leases = self.leases.lock().await;
         let key = (session_id, worker_id.to_string(), provider.to_string());
         let now = Utc::now();
         if let Some(existing) = leases.get(&key)
-            && existing.status != HandLeaseStatus::Stale
-            && existing.status != HandLeaseStatus::Destroyed
-            && existing.status != HandLeaseStatus::Failed
-            && existing.expires_at > now
+            && !matches!(
+                existing.status,
+                HandLeaseStatus::Stale | HandLeaseStatus::Destroyed | HandLeaseStatus::Failed
+            )
+            && existing.idle_expires_at.is_none_or(|idle| idle > now)
+            && existing.hard_expires_at.is_none_or(|hard| hard > now)
         {
             return Ok(None);
         }
@@ -492,7 +700,9 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             generation,
             created_at: leases.get(&key).map_or(now, |existing| existing.created_at),
             updated_at: now,
-            expires_at,
+            idle_expires_at: policy.idle_deadline(now),
+            hard_expires_at: policy.hard_deadline(now),
+            policy: Some(policy.clone()),
         };
         leases.insert(key, lease.clone());
         Ok(Some(lease))
@@ -532,7 +742,6 @@ impl HandLeaseStore for MemoryHandLeaseStore {
         provider: &str,
         generation: i64,
         handle: LeaseHandle,
-        expires_at: DateTime<Utc>,
     ) -> Result<()> {
         let mut leases = self.leases.lock().await;
         let Some(lease) =
@@ -548,7 +757,6 @@ impl HandLeaseStore for MemoryHandLeaseStore {
         lease.handle = Some(handle);
         lease.status = HandLeaseStatus::Active;
         lease.updated_at = Utc::now();
-        lease.expires_at = expires_at;
         Ok(())
     }
 
@@ -558,7 +766,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
         worker_id: &str,
         provider: &str,
         generation: i64,
-        expires_at: DateTime<Utc>,
+        idle_expires_at: DateTime<Utc>,
     ) -> Result<bool> {
         let mut leases = self.leases.lock().await;
         let Some(lease) =
@@ -566,15 +774,22 @@ impl HandLeaseStore for MemoryHandLeaseStore {
         else {
             return Ok(false);
         };
+        let now = Utc::now();
         if lease.generation != generation
             || lease.status != HandLeaseStatus::Active
-            || lease.expires_at <= Utc::now()
+            || lease.idle_expires_at.is_some_and(|idle| idle <= now)
+            || lease.hard_expires_at.is_some_and(|hard| hard <= now)
         {
             return Ok(false);
         }
 
-        lease.updated_at = Utc::now();
-        lease.expires_at = expires_at;
+        lease.updated_at = now;
+        // Mirrors the store's `LEAST(...)`: renewal moves the idle deadline and
+        // is capped by the immutable hard deadline.
+        lease.idle_expires_at = Some(match lease.hard_expires_at {
+            Some(hard) => idle_expires_at.min(hard),
+            None => idle_expires_at,
+        });
         Ok(true)
     }
 
@@ -603,6 +818,7 @@ impl HandLeaseStore for MemoryHandLeaseStore {
 mod tests {
     use std::path::PathBuf;
 
+    use super::test_support::lease_policy;
     use super::*;
 
     #[tokio::test]
@@ -611,7 +827,7 @@ mod tests {
         let store = MemoryHandLeaseStore::shared();
         let session_id = SessionId::new();
         let tenant_id = TenantId::new();
-        let expires_at = Utc::now() + chrono::Duration::minutes(5);
+        let policy = lease_policy(Some(300), Some(3600), "cap-1");
 
         let (left, right) = tokio::join!(
             store.claim_for_provisioning(
@@ -620,7 +836,7 @@ mod tests {
                 tenant_id,
                 "local",
                 SandboxTier::Local,
-                expires_at
+                &policy
             ),
             store.claim_for_provisioning(
                 session_id,
@@ -628,7 +844,7 @@ mod tests {
                 tenant_id,
                 "local",
                 SandboxTier::Local,
-                expires_at
+                &policy
             )
         );
 
@@ -645,7 +861,7 @@ mod tests {
         let store = MemoryHandLeaseStore::shared();
         let session_id = SessionId::new();
         let tenant_id = TenantId::new();
-        let expires_at = Utc::now() + chrono::Duration::minutes(5);
+        let policy = lease_policy(Some(300), Some(3600), "cap-1");
 
         let session_claim = store
             .claim_for_provisioning(
@@ -654,7 +870,7 @@ mod tests {
                 tenant_id,
                 "local",
                 SandboxTier::Local,
-                expires_at,
+                &policy,
             )
             .await
             .expect("session claim succeeds")
@@ -667,7 +883,7 @@ mod tests {
                 tenant_id,
                 "local",
                 SandboxTier::Local,
-                expires_at,
+                &policy,
             )
             .await
             .expect("worker claim succeeds")
@@ -700,7 +916,7 @@ mod tests {
         let store = MemoryHandLeaseStore::shared();
         let session_id = SessionId::new();
         let tenant_id = TenantId::new();
-        let expires_at = Utc::now() + chrono::Duration::minutes(5);
+        let policy = lease_policy(Some(300), Some(3600), "cap-1");
         let claimed = store
             .claim_for_provisioning(
                 session_id,
@@ -708,7 +924,7 @@ mod tests {
                 tenant_id,
                 "local",
                 SandboxTier::Local,
-                expires_at,
+                &policy,
             )
             .await
             .expect("claim should succeed")
@@ -720,7 +936,6 @@ mod tests {
                 "local",
                 claimed.generation,
                 LeaseHandle::new(HandHandle::local(PathBuf::from("/tmp/moa-hand"))),
-                expires_at,
             )
             .await
             .expect("activate lease");
@@ -733,7 +948,7 @@ mod tests {
                     tenant_id,
                     "local",
                     SandboxTier::Local,
-                    expires_at
+                    &policy
                 )
                 .await
                 .expect("active claim check")
@@ -757,7 +972,7 @@ mod tests {
                 tenant_id,
                 "local",
                 SandboxTier::Local,
-                expires_at,
+                &policy,
             )
             .await
             .expect("replacement claim")
@@ -774,9 +989,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_store_provisioning_claim_has_no_placeholder_handle() {
-        // Pins: provisioning claims do not write an empty fake handle over durable state.
+    async fn memory_store_provisioning_claim_records_policy_identity() {
+        // Pins: a provisioning claim writes no fake handle and carries the exact
+        // policy identity and both deadlines from the moment the generation exists.
         let store = MemoryHandLeaseStore::shared();
+        let policy = lease_policy(Some(300), Some(3600), "cap-1");
         let claim = store
             .claim_for_provisioning(
                 SessionId::new(),
@@ -784,13 +1001,23 @@ mod tests {
                 TenantId::new(),
                 "local",
                 SandboxTier::Local,
-                Utc::now() + chrono::Duration::minutes(5),
+                &policy,
             )
             .await
             .expect("claim should succeed")
             .expect("claim should be owned");
 
         assert_eq!(claim.handle, None);
+        assert_eq!(
+            claim
+                .policy
+                .as_ref()
+                .map(|policy| policy.profile_hash.clone()),
+            Some(policy.profile_hash.clone())
+        );
+        assert!(claim.idle_expires_at.is_some());
+        assert!(claim.hard_expires_at.is_some());
+        assert!(claim.idle_expires_at <= claim.hard_expires_at);
     }
 
     #[tokio::test]
@@ -799,8 +1026,8 @@ mod tests {
         let store = MemoryHandLeaseStore::shared();
         let session_id = SessionId::new();
         let tenant_id = TenantId::new();
-        let first_expiry = Utc::now() + chrono::Duration::minutes(5);
-        let renewed_expiry = Utc::now() + chrono::Duration::minutes(10);
+        let policy = lease_policy(Some(300), Some(3600), "cap-1");
+        let renewed_expiry = Utc::now() + chrono::Duration::seconds(600);
         let claim = store
             .claim_for_provisioning(
                 session_id,
@@ -808,7 +1035,7 @@ mod tests {
                 tenant_id,
                 "local",
                 SandboxTier::Local,
-                first_expiry,
+                &policy,
             )
             .await
             .expect("claim should succeed")
@@ -820,7 +1047,6 @@ mod tests {
                 "local",
                 claim.generation,
                 LeaseHandle::new(HandHandle::local(PathBuf::from("/tmp/moa-hand"))),
-                first_expiry,
             )
             .await
             .expect("activate lease");
@@ -848,6 +1074,72 @@ mod tests {
             .await
             .expect("load renewed lease")
             .expect("lease should exist");
-        assert_eq!(renewed.expires_at, renewed_expiry);
+        assert_eq!(renewed.idle_expires_at, Some(renewed_expiry));
+    }
+
+    #[tokio::test]
+    async fn renewal_cannot_push_idle_past_the_hard_deadline() {
+        // Pins: an idle renewal asking for more than the sandbox's remaining
+        // lifetime is capped at the hard deadline, and the hard deadline itself
+        // never moves — a continuously busy sandbox still dies on schedule.
+        let store = MemoryHandLeaseStore::shared();
+        let session_id = SessionId::new();
+        let tenant_id = TenantId::new();
+        let policy = lease_policy(Some(60), Some(120), "cap-1");
+        let claim = store
+            .claim_for_provisioning(
+                session_id,
+                "",
+                tenant_id,
+                "local",
+                SandboxTier::Local,
+                &policy,
+            )
+            .await
+            .expect("claim")
+            .expect("claim is owned");
+        let hard_deadline = claim.hard_expires_at.expect("bounded hard deadline");
+        store
+            .activate(
+                session_id,
+                "",
+                "local",
+                claim.generation,
+                LeaseHandle::new(HandHandle::local(PathBuf::from("/tmp/moa-hand"))),
+            )
+            .await
+            .expect("activate lease");
+
+        let greedy = Utc::now() + chrono::Duration::hours(24);
+        assert!(
+            store
+                .renew_active(session_id, "", "local", claim.generation, greedy)
+                .await
+                .expect("renewal within the hard lifetime succeeds")
+        );
+
+        let renewed = store
+            .get(session_id, "", "local")
+            .await
+            .expect("load renewed lease")
+            .expect("lease should exist");
+        assert_eq!(
+            renewed.idle_expires_at,
+            Some(hard_deadline),
+            "idle renewal is capped at the hard deadline"
+        );
+        assert_eq!(
+            renewed.hard_expires_at,
+            Some(hard_deadline),
+            "renewal must never move the hard deadline"
+        );
+        assert_eq!(
+            renewed
+                .policy
+                .as_ref()
+                .map(|policy| policy.profile_hash.clone()),
+            Some(policy.profile_hash),
+            "renewal must never change the policy identity"
+        );
     }
 }

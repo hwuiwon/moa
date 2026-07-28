@@ -8,6 +8,7 @@ use chrono::Utc;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, StoredArtifactRevision};
 use moa_artifacts::simulation::ExperimentTargetKind;
+use moa_config::MoaConfig;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::{
     traits::SessionStore, types::action_policy::ActionRuleScope,
@@ -112,15 +113,26 @@ pub trait ExperimentRun {
 pub struct ExperimentRunImpl {
     pool: sqlx::PgPool,
     session_store: Arc<PostgresSessionStore>,
+    config: Arc<MoaConfig>,
 }
 
 impl ExperimentRunImpl {
     /// Creates an experiment workflow with its durable product stores.
+    ///
+    /// `config` is injected rather than read from the installed process
+    /// context: the run's execution targets select the internal model and
+    /// compile against execution limits, and a constructor parameter states
+    /// that dependency where the workflow is bound.
     #[must_use]
-    pub fn new(pool: sqlx::PgPool, session_store: Arc<PostgresSessionStore>) -> Self {
+    pub fn new(
+        pool: sqlx::PgPool,
+        session_store: Arc<PostgresSessionStore>,
+        config: Arc<MoaConfig>,
+    ) -> Self {
         Self {
             pool,
             session_store,
+            config,
         }
     }
 }
@@ -152,6 +164,7 @@ impl ExperimentRun for ExperimentRunImpl {
             &ctx,
             request.clone(),
             scope,
+            self.config.as_ref(),
             &self.pool,
             &self.session_store,
         )
@@ -304,6 +317,7 @@ async fn run_experiment_target(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
     scope: ActionRuleScope,
+    config: &MoaConfig,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
@@ -352,6 +366,7 @@ async fn run_experiment_target(
                 input,
                 session_id,
                 idempotency_key,
+                config,
                 pool,
                 session_store,
             )

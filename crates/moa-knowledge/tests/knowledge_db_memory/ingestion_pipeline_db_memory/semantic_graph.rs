@@ -1,75 +1,9 @@
 //! Semantic graph ingestion scenarios.
 
-use moa_core::traits::LLMProvider;
-use moa_core::types::completion::{
-    CompletionRequest, CompletionResponse, CompletionStream, StopReason, TokenUsage,
-};
-use moa_core::types::identifiers::ModelId;
-use moa_core::types::model::{ModelCapabilities, TokenPricing, ToolCallFormat};
+use moa_core::types::memory::SemanticGraphPolicy;
 use moa_knowledge::semantic_graph::{SEMANTIC_GRAPH_MODEL, SEMANTIC_GRAPH_PROMPT_VERSION};
-use moa_knowledge::semantic_graph_model::{
-    ModelSemanticGraphExtractor, SEMANTIC_GRAPH_MODEL_PROMPT_VERSION,
-};
 
 use super::*;
-
-/// Scripted LLM provider returning one fixed completion string, standing in for
-/// a structured-output model in the model-backed semantic graph extractor.
-struct ScriptedGraphProvider {
-    response: String,
-}
-
-#[async_trait]
-impl LLMProvider for ScriptedGraphProvider {
-    fn name(&self) -> &str {
-        "scripted-graph"
-    }
-
-    fn capabilities(&self) -> ModelCapabilities {
-        ModelCapabilities {
-            model_id: ModelId::new("test-graph-model"),
-            context_window: 400_000,
-            max_output: 128_000,
-            supports_tools: true,
-            supports_vision: false,
-            supports_prefix_caching: true,
-            cache_ttl: None,
-            tool_call_format: ToolCallFormat::OpenAiCompatible,
-            pricing: TokenPricing {
-                input_per_mtok: 0.0,
-                output_per_mtok: 0.0,
-                cached_input_per_mtok: None,
-                cache_write_5m_per_mtok: None,
-                cache_write_1h_per_mtok: None,
-            },
-            native_tools: Vec::new(),
-        }
-    }
-
-    async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> moa_core::error::Result<CompletionStream> {
-        Ok(CompletionStream::from_response(CompletionResponse {
-            text: self.response.clone(),
-            content: Vec::new(),
-            stop_reason: StopReason::EndTurn,
-            model: ModelId::new("test-graph-model"),
-            usage: TokenUsage::default(),
-            duration_ms: 1,
-            thought_signature: None,
-        }))
-    }
-}
-
-fn model_extractor(response: &str) -> Arc<ModelSemanticGraphExtractor> {
-    Arc::new(ModelSemanticGraphExtractor::new(
-        Arc::new(ScriptedGraphProvider {
-            response: response.to_string(),
-        }),
-        ModelId::new("test-graph-model"),
-    ))
-}
 
 /// Reads the `(model, prompt_version)` identity of every cached extraction row
 /// for a tenant, ordered for stable assertions.
@@ -89,6 +23,121 @@ async fn semantic_graph_cache_identities(
     .fetch_all(pool)
     .await
     .expect("read semantic graph cache identities")
+}
+
+#[tokio::test]
+async fn disabled_semantic_policy_writes_no_semantic_rows_nodes_or_edges_db_memory() {
+    // Pins: the whole point of Task 5.5. Under the default (off) policy, ingestion
+    // pays NO semantic extraction cost and leaves NO semantic residue — no cache
+    // rows, no semantic entity/relation edge properties — while the structural
+    // document graph is still written. A regression that quietly resumes semantic
+    // writes recreates exactly the write-only path this task removed, and no
+    // count-based check on chunks or embeddings would notice.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let scope = RlsContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    let graph = Arc::new(FakeGraphWriter::default());
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        Arc::new(ParagraphParser),
+        Arc::new(CountingEmbedder::default()),
+        graph.clone(),
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 1,
+                max_tokens: 16,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+        ),
+    )
+    .with_semantic_policy(SemanticGraphPolicy::Off);
+    repository
+        .upsert_connection(KnowledgeConnection {
+            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
+            connection_uid,
+            tenant_id,
+            provider: "test_provider".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "acct_semantic_off".to_string(),
+            credential_ref: "7bf8acf9-754e-7a67-b773-1ae68be8d3b8".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: json!({}),
+            source_selection: json!({}),
+            information_barrier: None,
+            created_at: moa_test_support::fixtures::pg_now(),
+            updated_at: moa_test_support::fixtures::pg_now(),
+            last_synced_at: None,
+        })
+        .await
+        .expect("upsert connection");
+    let text = "Connecting a custom domain requires a premium plan and DNS records.\n\nTroubleshoot domain not working by checking DNS.";
+    let sync_run_uid = create_run(&repository, tenant_id, connection_uid).await;
+
+    let result = pipeline
+        .ingest_record_page(
+            sync_run_uid,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record_with_source("semantic-off", "v1", false, text)],
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("ingest record with semantic graph disabled");
+
+    assert_eq!(result.records_ingested, 1);
+    let object_uid = object_uid_for_source(connection_uid, "semantic-off");
+    let counters = semantic_graph_step_counters(&pool, sync_run_uid, object_uid).await;
+    // The document was chunked, so the step still runs and reports its work; what
+    // must be zero is every semantic quantity.
+    assert!(
+        counters["chunks_total"].as_u64().unwrap_or(0) > 0,
+        "the document is still chunked and ingested: {counters}"
+    );
+    for zeroed in [
+        "cache_hits",
+        "cache_misses",
+        "entities_extracted",
+        "relations_extracted",
+        "semantic_chunk_links",
+    ] {
+        assert_eq!(
+            counters[zeroed].as_u64().unwrap_or(0),
+            0,
+            "{zeroed} must be zero under a disabled semantic policy: {counters}"
+        );
+    }
+    assert!(
+        semantic_graph_cache_identities(&pool, tenant_id)
+            .await
+            .is_empty(),
+        "a disabled policy writes no extraction cache rows"
+    );
+    let edge_json = graph.edge_properties_json();
+    assert!(
+        !edge_json.contains("semantic_graph"),
+        "no semantic graph edge metadata may be written: {edge_json}"
+    );
+    // The structural document graph is unaffected: this task removed semantic
+    // writes, not knowledge ingestion.
+    assert!(
+        edge_json.contains("HAS_CHUNK"),
+        "structural document/chunk edges are still written: {edge_json}"
+    );
 }
 
 #[tokio::test]
@@ -126,7 +175,8 @@ async fn semantic_graph_extraction_is_cached_reported_and_written_db_memory() {
         moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
             moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
         ),
-    );
+    )
+    .with_semantic_policy(SemanticGraphPolicy::Deterministic);
     repository
         .upsert_connection(KnowledgeConnection {
             acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
@@ -205,6 +255,16 @@ async fn semantic_graph_extraction_is_cached_reported_and_written_db_memory() {
         "same-document semantic chunk links are created"
     );
     assert_eq!(semantic_graph_cache_row_count(&pool, tenant_id).await, 2);
+    // Cache rows carry the deterministic ruleset's own identity rather than a
+    // generic label, so revising the ruleset re-extracts instead of serving rows
+    // produced by the previous one.
+    let identities = semantic_graph_cache_identities(&pool, tenant_id).await;
+    assert!(
+        identities.iter().all(|(model, prompt_version)| {
+            model == SEMANTIC_GRAPH_MODEL && prompt_version == SEMANTIC_GRAPH_PROMPT_VERSION
+        }),
+        "every cached row carries the deterministic ruleset identity: {identities:?}"
+    );
 
     let edge_json = graph.edge_properties_json();
     assert!(
@@ -253,7 +313,8 @@ async fn generic_entity_fallback_writes_graph_entities_on_general_corpus_db_memo
         moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
             moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
         ),
-    );
+    )
+    .with_semantic_policy(SemanticGraphPolicy::Deterministic);
     repository
         .upsert_connection(KnowledgeConnection {
             acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
@@ -349,7 +410,8 @@ async fn ingestion_preserves_chunk_structure_for_bounded_neighbor_context_db_mem
         moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
             moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
         ),
-    );
+    )
+    .with_semantic_policy(SemanticGraphPolicy::Deterministic);
 
     repository
         .upsert_connection(KnowledgeConnection {
@@ -487,326 +549,5 @@ async fn ingestion_preserves_chunk_structure_for_bounded_neighbor_context_db_mem
             .iter()
             .all(|row| row.active == "true"),
         "{active_after_tombstone:?}"
-    );
-}
-
-#[tokio::test]
-async fn semantic_graph_model_extraction_stamps_model_identity_db_memory() {
-    // Pins: with a model extractor configured, valid model output is the
-    // production extraction and its cache row is stamped with the model identity
-    // (resolved model id + model prompt version), not the deterministic ruleset.
-    let db = postgres::bootstrap_test_db()
-        .await
-        .expect("bootstrap isolated Postgres");
-    let pool = db.store().pool().clone();
-    let tenant_id = TenantId::from(Uuid::now_v7());
-    let connection_uid = Uuid::now_v7();
-    let scope = RlsContext::tenant(tenant_id);
-    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
-        pool.clone(),
-        scope,
-    ));
-    let graph = Arc::new(FakeGraphWriter::default());
-    let pipeline = KnowledgeIngestionPipeline::new(
-        repository.clone(),
-        Arc::new(ParagraphParser),
-        Arc::new(CountingEmbedder::default()),
-        graph.clone(),
-        KnowledgeIngestionPipelineConfig {
-            chunking: ChunkingConfig {
-                target_tokens: 64,
-                max_tokens: 256,
-                min_tokens: 1,
-            },
-            provider: "test_provider".to_string(),
-            parser_label: "test_parser".to_string(),
-        },
-        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
-                moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
-            ),
-    )
-    .with_semantic_model_extractor(Some(model_extractor(
-        r#"{
-          "entities": [
-            {"name": "Custom domain", "kind": "feature", "confidence": 0.9, "evidence": "connect a custom domain"},
-            {"name": "Premium plan", "kind": "plan", "confidence": 0.8, "evidence": "requires a premium plan"}
-          ],
-          "relations": [
-            {"from": "Custom domain", "to": "Premium plan", "kind": "requires", "confidence": 0.85, "evidence": "custom domain requires a premium plan"}
-          ]
-        }"#,
-    )));
-    repository
-        .upsert_connection(KnowledgeConnection {
-            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
-            connection_uid,
-            tenant_id,
-            provider: "test_provider".to_string(),
-            connector: "docs".to_string(),
-            provider_account_id: "acct_model_identity".to_string(),
-            credential_ref: "09cacda2-c906-6bb3-ad7d-417cb2d66f6d".to_string(),
-            status: ConnectionStatus::Active,
-            metadata: json!({}),
-            source_selection: json!({}),
-            information_barrier: None,
-            created_at: moa_test_support::fixtures::pg_now(),
-            updated_at: moa_test_support::fixtures::pg_now(),
-            last_synced_at: None,
-        })
-        .await
-        .expect("upsert connection");
-    let text = "Connecting a custom domain requires a premium plan.";
-    let sync_run_uid = create_run(&repository, tenant_id, connection_uid).await;
-
-    let result = pipeline
-        .ingest_record_page(
-            sync_run_uid,
-            connection_uid,
-            tenant_id,
-            RecordPage {
-                records: vec![record_with_source("model-a", "v1", false, text)],
-                next_cursor: None,
-            },
-        )
-        .await
-        .expect("ingest model-extracted record");
-
-    assert_eq!(result.records_ingested, 1);
-    let identities = semantic_graph_cache_identities(&pool, tenant_id).await;
-    assert_eq!(
-        identities,
-        vec![(
-            "test-graph-model".to_string(),
-            SEMANTIC_GRAPH_MODEL_PROMPT_VERSION.to_string()
-        )],
-        "cache row is stamped with the model identity, not the deterministic ruleset"
-    );
-    let node_json = graph.properties_json();
-    assert!(
-        node_json.contains("Premium plan"),
-        "model-extracted entities reach the graph: {node_json}"
-    );
-}
-
-#[tokio::test]
-async fn semantic_graph_model_parse_failure_falls_back_to_deterministic_db_memory() {
-    // Pins: an unparseable model response never fails ingestion; the chunk falls
-    // back to the deterministic extractor and its cache row is honestly stamped
-    // with the deterministic identity so the model is re-attempted next time.
-    let db = postgres::bootstrap_test_db()
-        .await
-        .expect("bootstrap isolated Postgres");
-    let pool = db.store().pool().clone();
-    let tenant_id = TenantId::from(Uuid::now_v7());
-    let connection_uid = Uuid::now_v7();
-    let scope = RlsContext::tenant(tenant_id);
-    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
-        pool.clone(),
-        scope,
-    ));
-    let graph = Arc::new(FakeGraphWriter::default());
-    let pipeline = KnowledgeIngestionPipeline::new(
-        repository.clone(),
-        Arc::new(ParagraphParser),
-        Arc::new(CountingEmbedder::default()),
-        graph.clone(),
-        KnowledgeIngestionPipelineConfig {
-            chunking: ChunkingConfig {
-                target_tokens: 64,
-                max_tokens: 256,
-                min_tokens: 1,
-            },
-            provider: "test_provider".to_string(),
-            parser_label: "test_parser".to_string(),
-        },
-        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
-            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
-        ),
-    )
-    .with_semantic_model_extractor(Some(model_extractor("this is not valid json")));
-    repository
-        .upsert_connection(KnowledgeConnection {
-            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
-            connection_uid,
-            tenant_id,
-            provider: "test_provider".to_string(),
-            connector: "docs".to_string(),
-            provider_account_id: "acct_model_fallback".to_string(),
-            credential_ref: "653a5843-5972-d5d5-ec41-bc43e59384ad".to_string(),
-            status: ConnectionStatus::Active,
-            metadata: json!({}),
-            source_selection: json!({}),
-            information_barrier: None,
-            created_at: moa_test_support::fixtures::pg_now(),
-            updated_at: moa_test_support::fixtures::pg_now(),
-            last_synced_at: None,
-        })
-        .await
-        .expect("upsert connection");
-    let text = "Connecting a custom domain requires a premium plan and DNS records.";
-    let sync_run_uid = create_run(&repository, tenant_id, connection_uid).await;
-
-    let result = pipeline
-        .ingest_record_page(
-            sync_run_uid,
-            connection_uid,
-            tenant_id,
-            RecordPage {
-                records: vec![record_with_source("fallback-a", "v1", false, text)],
-                next_cursor: None,
-            },
-        )
-        .await
-        .expect("ingest despite unparseable model output");
-
-    assert_eq!(
-        result.records_ingested, 1,
-        "model failure never fails ingestion"
-    );
-    let identities = semantic_graph_cache_identities(&pool, tenant_id).await;
-    assert_eq!(
-        identities,
-        vec![(
-            SEMANTIC_GRAPH_MODEL.to_string(),
-            SEMANTIC_GRAPH_PROMPT_VERSION.to_string()
-        )],
-        "the deterministic fallback is honestly stamped with the deterministic identity"
-    );
-    let object_uid = object_uid_for_source(connection_uid, "fallback-a");
-    let counters = semantic_graph_step_counters(&pool, sync_run_uid, object_uid).await;
-    assert!(
-        counters["entities_extracted"].as_u64().unwrap_or(0) > 0,
-        "the deterministic fallback still produces entities: {counters}"
-    );
-}
-
-#[tokio::test]
-async fn semantic_graph_cache_identity_distinguishes_extractors_db_memory() {
-    // Pins: the extraction cache is version-aware. The same chunk text extracted
-    // by the model extractor and then by the deterministic extractor produces two
-    // distinct cache rows -- the deterministic pass does not serve the model's
-    // cached row, and vice versa.
-    let db = postgres::bootstrap_test_db()
-        .await
-        .expect("bootstrap isolated Postgres");
-    let pool = db.store().pool().clone();
-    let tenant_id = TenantId::from(Uuid::now_v7());
-    let connection_uid = Uuid::now_v7();
-    let scope = RlsContext::tenant(tenant_id);
-    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
-        pool.clone(),
-        scope,
-    ));
-    repository
-        .upsert_connection(KnowledgeConnection {
-            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
-            connection_uid,
-            tenant_id,
-            provider: "test_provider".to_string(),
-            connector: "docs".to_string(),
-            provider_account_id: "acct_cache_identity".to_string(),
-            credential_ref: "5e6e91f9-98a7-e0e2-149b-3b8cfe5adeb8".to_string(),
-            status: ConnectionStatus::Active,
-            metadata: json!({}),
-            source_selection: json!({}),
-            information_barrier: None,
-            created_at: moa_test_support::fixtures::pg_now(),
-            updated_at: moa_test_support::fixtures::pg_now(),
-            last_synced_at: None,
-        })
-        .await
-        .expect("upsert connection");
-    // Both objects carry the identical chunk text, so they share a chunk hash;
-    // any cache reuse across extractors would show up as a single row.
-    let text = "Connecting a custom domain requires a premium plan.";
-
-    let chunking = ChunkingConfig {
-        target_tokens: 64,
-        max_tokens: 256,
-        min_tokens: 1,
-    };
-    let model_pipeline = KnowledgeIngestionPipeline::new(
-        repository.clone(),
-        Arc::new(ParagraphParser),
-        Arc::new(CountingEmbedder::default()),
-        Arc::new(FakeGraphWriter::default()),
-        KnowledgeIngestionPipelineConfig {
-            chunking,
-            provider: "test_provider".to_string(),
-            parser_label: "test_parser".to_string(),
-        },
-        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
-                moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
-            ),
-    )
-    .with_semantic_model_extractor(Some(model_extractor(
-        r#"{
-          "entities": [
-            {"name": "Custom domain", "kind": "feature", "confidence": 0.9, "evidence": "custom domain"}
-          ],
-          "relations": []
-        }"#,
-    )));
-    let model_run = create_run(&repository, tenant_id, connection_uid).await;
-    model_pipeline
-        .ingest_record_page(
-            model_run,
-            connection_uid,
-            tenant_id,
-            RecordPage {
-                records: vec![record_with_source("identity-model", "v1", false, text)],
-                next_cursor: None,
-            },
-        )
-        .await
-        .expect("ingest with model extractor");
-
-    let deterministic_pipeline = KnowledgeIngestionPipeline::new(
-        repository.clone(),
-        Arc::new(ParagraphParser),
-        Arc::new(CountingEmbedder::default()),
-        Arc::new(FakeGraphWriter::default()),
-        KnowledgeIngestionPipelineConfig {
-            chunking,
-            provider: "test_provider".to_string(),
-            parser_label: "test_parser".to_string(),
-        },
-        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
-            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
-        ),
-    );
-    let deterministic_run = create_run(&repository, tenant_id, connection_uid).await;
-    deterministic_pipeline
-        .ingest_record_page(
-            deterministic_run,
-            connection_uid,
-            tenant_id,
-            RecordPage {
-                records: vec![record_with_source(
-                    "identity-deterministic",
-                    "v1",
-                    false,
-                    text,
-                )],
-                next_cursor: None,
-            },
-        )
-        .await
-        .expect("ingest with deterministic extractor");
-
-    let identities = semantic_graph_cache_identities(&pool, tenant_id).await;
-    assert_eq!(
-        identities,
-        vec![
-            (
-                SEMANTIC_GRAPH_MODEL.to_string(),
-                SEMANTIC_GRAPH_PROMPT_VERSION.to_string()
-            ),
-            (
-                "test-graph-model".to_string(),
-                SEMANTIC_GRAPH_MODEL_PROMPT_VERSION.to_string()
-            ),
-        ],
-        "each extractor writes its own version-keyed cache row for the shared chunk hash"
     );
 }

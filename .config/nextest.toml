@@ -148,6 +148,29 @@ test-threads = 1
 junit.path = "target/nextest/execution-eval-nightly/junit.xml"
 default-filter = 'binary(/^execution_run_service_e2e$/)'
 
+# The ClickHouse analytics arm. It is a supported-but-undeployed backend: fully
+# wired from `[clickhouse]` config presence, exercised in the db lanes against a
+# mock server, but its cross-backend parity and real-server schema contracts can
+# only be checked against an actual ClickHouse. Those tests are `#[ignore]`d and
+# match no other lane's filter, so without this profile nothing schedules them
+# and they decay silently against schema changes made elsewhere. Run via
+# `make test-clickhouse`; triggered in CI by the `clickhouse-analytics` job in
+# .github/workflows/integration-tests.yml.
+#
+# `analytics_export_load_db` is deliberately NOT here. It is orphaned by the same
+# mechanism and belongs in this lane, but it is already red independently of this
+# profile: its mock answers every request with a DDL handler, which the bootstrap's
+# `system.databases` lookup cannot decode. Adding it would land this job red.
+# Reworking that mock needs an owner for `tests/analytics_export_load_db.rs`.
+[profile.clickhouse-docker]
+inherits = "default"
+test-threads = 1
+junit.path = "target/nextest/clickhouse-docker/junit.xml"
+default-filter = '''
+binary(/^(schema_drift_docker|clickhouse_docker|analytics_parity_docker|analytics_clickhouse_e2e)$/)
+  | (package(moa-analytics-export) & kind(lib) & test(/_docker$/))
+'''
+
 [test-groups]
 db-session = { max-threads = 4 }
 # db-memory tests use per-test databases cloned from the migration template

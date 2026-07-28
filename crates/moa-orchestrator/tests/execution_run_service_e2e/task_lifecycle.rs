@@ -1128,7 +1128,14 @@ async fn prepare_capability_run(
             &UpsertActionPolicyRuleRequest {
                 tenant_id: session.tenant_id,
                 contact_id: None,
-                tool_name: tool_name.to_string(),
+                // The rule must key on the REGISTERED name. Every lifecycle probe
+                // is a connector tool, so that is its server-qualified reference.
+                // Keyed on the connector's published name the rule matches
+                // nothing, the tool falls back to the MCP intrinsic
+                // `AdminReview` default, and the task then waits forever on an
+                // approval nobody will give — a silent suspension with no error,
+                // which is far harder to read than a refusal.
+                tool_name: moa_hands::mcp_tool_reference("fixture-capability", tool_name),
                 pattern: "*".to_string(),
                 effect: policy_effect,
                 reason: Some(format!("Task 10 lifecycle fixture: {label}")),
@@ -1166,7 +1173,10 @@ async fn prepare_capability_run(
         .catalog
         .capabilities
         .iter()
-        .find(|capability| capability.reference.name == tool_name)
+        .find(|capability| {
+            capability.reference.name
+                == moa_hands::mcp_tool_reference("fixture-capability", tool_name)
+        })
         .cloned()
         .with_context(|| format!("planning catalog omitted fixture capability `{tool_name}`"))?;
     let compiled = compile(CompileExecutionRequest {

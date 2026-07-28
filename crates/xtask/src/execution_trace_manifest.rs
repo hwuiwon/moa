@@ -720,6 +720,13 @@ const SENDERS: &[SenderManifestEntry] = &[
         "run"
     ),
     sender!(
+        "crates/moa-orchestrator/src/services/session_store/handlers.rs",
+        "start_session_retention",
+        TRACE_HELPER,
+        "SessionRetentionClient",
+        "run"
+    ),
+    sender!(
         "crates/moa-orchestrator/src/tool_invocation/governed.rs",
         "append_session_event",
         TRACE_HELPER,
@@ -1502,6 +1509,14 @@ const RECEIVERS: &[ReceiverManifestEntry] = &[
         client: "SessionClient",
         receiver: ReceiverKind::MoaHandler {
             path: "crates/moa-orchestrator/src/objects/session/handlers.rs",
+            symbol: "*",
+            adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
+        },
+    },
+    ReceiverManifestEntry {
+        client: "SessionRetentionClient",
+        receiver: ReceiverKind::MoaHandler {
+            path: "crates/moa-orchestrator/src/workflows/session_retention.rs",
             symbol: "*",
             adoption_symbol: "crate::ctx::adopt_incoming_trace_parent",
         },

@@ -50,7 +50,16 @@ use crate::execution_execution_support::fixtures::{
 const RESPOND_OBJECTIVE: &str = "What is a DAG?";
 const RESPOND_FINAL: &str = "A DAG is a directed acyclic graph.";
 const INLINE_OBJECTIVE: &str = "Investigate the unusual failure and explain it";
+/// Name the loopback capability fixture publishes the tool under.
 const INLINE_TOOL_NAME: &str = "inspect_fixture_failure";
+/// Server-qualified reference the model calls and policy rules key on.
+///
+/// The fixture server sees [`INLINE_TOOL_NAME`]; everything on MOA's side of the
+/// connector boundary — the registry, the model-visible schema, action-policy
+/// rules, and the persisted `ToolCall` event — uses this qualified reference.
+fn inline_tool_reference() -> String {
+    moa_hands::mcp_tool_reference("fixture-capability", INLINE_TOOL_NAME)
+}
 const INLINE_TOOL_RESULT: &str = "fixture-analysis-complete";
 const INLINE_FINAL: &str = "The fixture analysis found the bounded cause.";
 const SYNTHESIS_MATCH: &str = "Synthesize the final user response for execution run";
@@ -146,7 +155,7 @@ async fn execute_inline_runs_bounded_tool_loop_without_durable_run_service_e2e()
                     json!({
                         "content": "",
                         "tool_calls": [{
-                            "name": INLINE_TOOL_NAME,
+                            "name": inline_tool_reference(),
                             "id": "inline-fixture-tool-call",
                             "input": {"query": "unusual failure"}
                         }]
@@ -176,7 +185,13 @@ async fn execute_inline_runs_bounded_tool_loop_without_durable_run_service_e2e()
     let test = fixture.isolated().await;
     let session_id = test.create_session("execute-inline-tool-loop").await?;
     let session = test.client().get_session(session_id).await?;
-    seed_allow_policy(&fixture, test.client(), session.tenant_id, INLINE_TOOL_NAME).await?;
+    seed_allow_policy(
+        &fixture,
+        test.client(),
+        session.tenant_id,
+        &inline_tool_reference(),
+    )
+    .await?;
     let started = start_turn_in_session(&test, session_id, INLINE_OBJECTIVE, None).await?;
 
     let controller = fixture
@@ -227,7 +242,7 @@ async fn execute_inline_runs_bounded_tool_loop_without_durable_run_service_e2e()
     assert!(events.iter().any(|record| matches!(
         &record.event,
         Event::ToolCall { tool_name, input, .. }
-            if tool_name == INLINE_TOOL_NAME && input == &json!({"query": "unusual failure"})
+            if tool_name == &inline_tool_reference() && input == &json!({"query": "unusual failure"})
     )));
     assert_no_execution_lifecycle_events(&events);
     assert_non_durable_eval(

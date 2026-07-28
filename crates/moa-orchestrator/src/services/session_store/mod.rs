@@ -26,12 +26,13 @@ use moa_wire::session_store::{
     ListSessionsRequest, ListSkillResolutionRatesRequest, ListTaskStrategySuccessRatesRequest,
     RecordSegmentSkillActivationRequest, RecordSegmentSkillUseRequest, RecordSegmentToolUseRequest,
     RecordSegmentTurnUsageRequest, SearchEventsRequest, TenantCostSinceRequest,
-    UpdateLearningCandidateStatusRequest, UpdateSegmentAssessmentRequest, UpdateStatusRequest,
+    UpdateSegmentAssessmentRequest, UpdateStatusRequest,
 };
 use restate_sdk::prelude::*;
 use sqlx::PgPool;
 
 use crate::objects::session::SessionClient;
+use crate::workflows::session_retention::{SessionRetentionDispatch, SessionRetentionRequest};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 
 mod handlers;
@@ -154,10 +155,10 @@ pub trait RestateSessionStore {
         request: Json<ListLearningCandidatesRequest>,
     ) -> Result<Json<Vec<LearningCandidate>>, HandlerError>;
 
-    /// Applies a learning-candidate status transition.
-    async fn update_learning_candidate_status(
-        request: Json<UpdateLearningCandidateStatusRequest>,
-    ) -> Result<(), HandlerError>;
+    /// Starts a durable terminal-session retention pass for one tenant.
+    async fn start_session_retention(
+        request: Json<SessionRetentionRequest>,
+    ) -> Result<Json<SessionRetentionDispatch>, HandlerError>;
 
     /// Refreshes materialized views derived from task segments.
     async fn refresh_segment_materialized_views(

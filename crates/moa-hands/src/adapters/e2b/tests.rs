@@ -1,9 +1,4 @@
-use std::time::Duration;
-
-use moa_core::{
-    traits::HandProvider, types::hands::HandResources, types::hands::HandSpec,
-    types::hands::SandboxTier,
-};
+use moa_core::{traits::HandProvider, types::hands::EgressPolicy, types::hands::SandboxTier};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -88,26 +83,28 @@ async fn provisions_executes_and_destroys_sandbox() {
     .unwrap()
     .with_sandbox_base_url(format!("http://{addr}"));
     let handle = provider
-        .provision(HandSpec {
-            sandbox_tier: SandboxTier::MicroVM,
-            image: None,
-            resources: HandResources::default(),
-            env: std::collections::HashMap::new(),
-            workspace_mount: None,
-            idle_timeout: Duration::from_secs(300),
-            max_lifetime: Duration::from_secs(300),
-        })
+        .provision(crate::core::profile::test_support::hand_spec(
+            SandboxTier::MicroVM,
+            e2b_test_profile(EgressPolicy::DenyAll),
+        ))
         .await
         .unwrap();
     let create_request = create_request_rx
         .recv()
         .await
         .expect("mock server should receive create sandbox request");
+    // Pins: the effective profile's egress mode — not a provider-level flag —
+    // decides E2B's internet switch, and the profile's maximum lifetime becomes
+    // E2B's `timeout`.
     assert_eq!(
         create_request
             .get("allow_internet_access")
             .and_then(Value::as_bool),
         Some(false)
+    );
+    assert_eq!(
+        create_request.get("timeout").and_then(Value::as_u64),
+        Some(300)
     );
 
     let output = provider
@@ -120,7 +117,7 @@ async fn provisions_executes_and_destroys_sandbox() {
 }
 
 #[tokio::test]
-async fn explicit_e2b_internet_opt_in_sets_create_payload() {
+async fn e2b_egress_posture_comes_from_the_effective_profile() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (create_request_tx, mut create_request_rx) = mpsc::unbounded_channel::<Value>();
@@ -150,19 +147,32 @@ async fn explicit_e2b_internet_opt_in_sets_create_payload() {
         "example.e2b.test",
         "base",
     )
-    .unwrap()
-    .with_allow_internet_access(true);
+    .unwrap();
+
+    // An egress allowlist has no E2B field that enforces it, so it is refused
+    // before any sandbox is created rather than degraded into unrestricted.
+    let allow_list = provider
+        .provision(crate::core::profile::test_support::hand_spec(
+            SandboxTier::MicroVM,
+            e2b_test_profile(
+                EgressPolicy::allow_list("rev-a", ["a.example.com"]).expect("allowlist"),
+            ),
+        ))
+        .await;
+    assert!(
+        matches!(allow_list, Err(moa_core::error::MoaError::Unsupported(_))),
+        "E2B must refuse an egress allowlist instead of serializing it away"
+    );
+    assert!(
+        create_request_rx.try_recv().is_err(),
+        "a refused profile must not reach the E2B create call"
+    );
 
     let _handle = provider
-        .provision(HandSpec {
-            sandbox_tier: SandboxTier::MicroVM,
-            image: None,
-            resources: HandResources::default(),
-            env: std::collections::HashMap::new(),
-            workspace_mount: None,
-            idle_timeout: Duration::from_secs(300),
-            max_lifetime: Duration::from_secs(300),
-        })
+        .provision(crate::core::profile::test_support::hand_spec(
+            SandboxTier::MicroVM,
+            e2b_test_profile(EgressPolicy::Unrestricted),
+        ))
         .await
         .unwrap();
 
@@ -192,4 +202,24 @@ fn encode_test_envelopes(messages: &[Value]) -> String {
         bytes.extend_from_slice(&payload);
     }
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The profile E2B can actually serve: a bounded maximum lifetime, which is the
+/// only deadline E2B's create call carries, plus whatever egress posture the
+/// caller wants to exercise.
+fn e2b_test_profile(egress: EgressPolicy) -> moa_core::types::hands::SandboxProfile {
+    use moa_core::types::hands::{CpuLimit, DiskLimit, LifetimeLimit, MemoryLimit, SandboxProfile};
+    SandboxProfile::new(
+        CpuLimit::Unbounded,
+        MemoryLimit::Unbounded,
+        DiskLimit::Unbounded,
+        egress,
+        LifetimeLimit::Bounded {
+            seconds: std::num::NonZeroU64::new(120).expect("nonzero seconds"),
+        },
+        LifetimeLimit::Bounded {
+            seconds: std::num::NonZeroU64::new(300).expect("nonzero seconds"),
+        },
+    )
+    .expect("E2B test profile should validate")
 }

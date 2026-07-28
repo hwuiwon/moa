@@ -20,14 +20,11 @@ use moa_knowledge::{
     },
     providers::RecordContentFetcher,
     repository::PostgresKnowledgeRepository,
-    semantic_graph_model::ModelSemanticGraphExtractor,
 };
 use moa_memory_graph::PostgresGraphStore;
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::VectorStoreFactory;
-use moa_providers::{
-    EmbedderConstructionRole, build_embedder_from_config, build_provider_from_model,
-};
+use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 
 use super::KnowledgeServiceError;
 
@@ -209,38 +206,8 @@ async fn build_ingestion_pipeline(
         },
         source_acl,
     )
-    .with_semantic_generic_entities(config.knowledge.semantic.generic_entities)
-    .with_semantic_model_extractor(build_semantic_model_extractor(config))
+    .with_semantic_policy(config.knowledge.semantic)
     .with_content_fetcher(content_fetcher))
-}
-
-/// Builds the model-backed semantic graph extractor when it is enabled and a
-/// provider resolves.
-///
-/// A disabled config, an unresolvable provider, or an invalid extractor setting
-/// each returns `None`, leaving the deterministic keyword extractor in place. A
-/// misconfiguration is logged rather than failing pipeline construction, so
-/// enabling extraction can never break an otherwise-healthy sync run.
-fn build_semantic_model_extractor(config: &MoaConfig) -> Option<Arc<ModelSemanticGraphExtractor>> {
-    let settings = &config.knowledge.semantic.model_extraction;
-    if !settings.enabled {
-        return None;
-    }
-    let model = settings.model.trim();
-    let model_override = (!model.is_empty()).then_some(model);
-    match build_provider_from_model(config, model_override) {
-        Ok((provider, model_id)) => Some(Arc::new(ModelSemanticGraphExtractor::new(
-            provider, model_id,
-        ))),
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "knowledge semantic model extraction enabled but provider did not resolve; \
-                 using deterministic extractor"
-            );
-            None
-        }
-    }
 }
 
 fn build_document_parser(

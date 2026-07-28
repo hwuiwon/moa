@@ -37,11 +37,11 @@ use crate::types::{
     events_stream::EventRange, events_stream::EventRecord, events_stream::SequenceNum,
     experience::ExperienceAttribution, experience::ExperienceRecord, experience::LearningCandidate,
     experience::LearningCandidateStatus, experience::LearningCandidateStatusUpdate,
-    experience::TaskStrategySuccessRate, hands::HandHandle, hands::HandSpec, hands::HandStatus,
-    hands::SandboxFile, identifiers::SegmentId, identifiers::SessionAttachmentId,
-    identifiers::SessionId, identifiers::StoragePartitionId, identifiers::TenantId,
-    identifiers::ToolCallId, learning::LearningEntry, model::ModelCapabilities,
-    security::ToolCapabilityId, security::ToolOutputAssessment,
+    experience::TaskStrategySuccessRate, hands::HandHandle, hands::HandProviderCapabilities,
+    hands::HandSpec, hands::HandStatus, hands::SandboxFile, identifiers::SegmentId,
+    identifiers::SessionAttachmentId, identifiers::SessionId, identifiers::StoragePartitionId,
+    identifiers::TenantId, identifiers::ToolCallId, learning::LearningEntry,
+    model::ModelCapabilities, security::ToolCapabilityId, security::ToolOutputAssessment,
     segment_assessment::SegmentAssessment, segment_assessment::SegmentBaseline,
     segment_assessment::SkillResolutionRate, segments::SegmentCompletion, segments::TaskSegment,
     session::Checkpoint, session::CheckpointHandle, session::SessionFilter, session::SessionMeta,
@@ -50,7 +50,9 @@ use crate::types::{
 
 pub use auth::*;
 pub use embedding::EmbeddingProvider;
-pub use runtime_cache::{BoundedLeaseDecision, RuntimeCacheStore};
+pub use runtime_cache::{
+    BoundedLeaseDecision, RateTokenDecision, RetryBudgetDecision, RuntimeCacheStore,
+};
 
 /// Durable append-only session store.
 #[async_trait]
@@ -462,36 +464,20 @@ pub trait LearningCandidateStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<LearningCandidate>>;
 
-    /// Applies an explicit candidate status transition.
-    async fn update_learning_candidate_status(
+    /// Applies a compare-and-set candidate status transition, returning whether it applied.
+    ///
+    /// There is deliberately no unconditional status setter. The generic one
+    /// that used to live here accepted any `(candidate, status)` pair from any
+    /// caller, which meant an advisory item could be written straight to
+    /// `Promoted` without passing a materializer, and two concurrent reviewers
+    /// could both "succeed" at contradictory transitions. Every transition now
+    /// states the status it believes the candidate holds, and the store applies
+    /// it only if that is still true.
+    async fn update_learning_candidate_status_from(
         &self,
         update: &LearningCandidateStatusUpdate,
-    ) -> Result<()>;
-}
-
-/// Aggregate repository contract used by the orchestrator runtime seam.
-pub trait SessionRepository:
-    SessionStore
-    + SessionChannelStore
-    + SessionEventLookupStore
-    + SessionAnalyticsStore
-    + SessionLearningLogStore
-    + SegmentStore
-    + ExperienceStore
-    + LearningCandidateStore
-{
-}
-
-impl<T> SessionRepository for T where
-    T: SessionStore
-        + SessionChannelStore
-        + SessionEventLookupStore
-        + SessionAnalyticsStore
-        + SessionLearningLogStore
-        + SegmentStore
-        + ExperienceStore
-        + LearningCandidateStore
-{
+        expected_status: crate::types::experience::LearningCandidateStatus,
+    ) -> Result<bool>;
 }
 
 /// Durable blob store used by the claim-check session event pattern.
@@ -612,6 +598,15 @@ pub trait BranchManager: Send + Sync {
 pub trait HandProvider: Send + Sync {
     /// Returns the provider name.
     fn provider_name(&self) -> &str;
+
+    /// Returns what this provider can actually enforce.
+    ///
+    /// There is deliberately no default body. A provider that accepted a
+    /// sandbox profile dimension and silently dropped it would turn policy into
+    /// decoration, so every implementor must state its supported tiers,
+    /// resource ranges, egress modes, and deadline-enforcement owners, and
+    /// admission refuses anything outside them before provisioning.
+    fn capabilities(&self) -> HandProviderCapabilities;
 
     /// Provisions a new hand from a spec.
     async fn provision(&self, spec: HandSpec) -> Result<HandHandle>;

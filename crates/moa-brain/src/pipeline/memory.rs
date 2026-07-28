@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures_util::future::try_join_all;
-use moa_core::types::memory::RlsContext;
+use moa_core::types::memory::{RlsContext, SemanticGraphPolicy};
 use moa_core::types::security::SensitivityClass;
 use moa_core::{
     error::MoaError, error::Result, traits::ContextProcessor, traits::EmbeddingProvider,
@@ -803,7 +803,8 @@ impl GraphMemoryRetriever {
         if let Some(label_filter) = scope_plan.label_filter() {
             request.label_filter = Some(label_filter.to_vec());
         }
-        request.disable_graph_expansion = should_disable_graph_expansion(scope_plan);
+        request.disable_graph_expansion =
+            should_disable_graph_expansion(scope_plan, self.config.knowledge.semantic);
         if matches!(
             scope_plan.source_tier(),
             moa_retrieval::retrieval::SourceTier::TenantKnowledge
@@ -1193,11 +1194,20 @@ fn extract_search_query(ctx: &WorkingContext) -> Option<String> {
     extract_search_query_from_messages(&ctx.messages)
 }
 
-fn should_disable_graph_expansion(scope_plan: &RetrievalScopePlan) -> bool {
+/// Returns whether graph expansion is disabled for one retrieval scope plan.
+///
+/// Only the tenant-knowledge tier consults the semantic-graph policy: that tier
+/// is the sole reader of the graph knowledge ingestion writes, so its expansion
+/// and those writes are governed by one value. The contact/user-memory tier is a
+/// separate subsystem fed by `moa-memory-ingest` and always keeps expansion.
+fn should_disable_graph_expansion(
+    scope_plan: &RetrievalScopePlan,
+    semantic_policy: SemanticGraphPolicy,
+) -> bool {
     matches!(
         scope_plan.source_tier(),
         moa_retrieval::retrieval::SourceTier::TenantKnowledge
-    )
+    ) && !semantic_policy.enables_tenant_graph_expansion()
 }
 
 fn query_from_rewrite_metadata(value: &serde_json::Value) -> Option<String> {
@@ -1258,6 +1268,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
+    use moa_core::types::memory::SemanticGraphPolicy;
     use moa_core::types::security::SensitivityClass;
     use moa_core::{
         traits::{ContextProcessor, Identity, IdentityType},
@@ -2011,8 +2022,27 @@ mod tests {
             })
             .expect("contact memory plan should exist");
 
-        assert!(should_disable_graph_expansion(tenant_plan));
-        assert!(!should_disable_graph_expansion(contact_plan));
+        // Under the default (off) semantic policy the tenant-knowledge tier runs no
+        // graph expansion, because nothing writes the graph it would read.
+        assert!(should_disable_graph_expansion(
+            tenant_plan,
+            SemanticGraphPolicy::Off
+        ));
+        // Enabling the policy enables expansion on that same tier — the single value
+        // governs both the writes and this read, so they cannot drift apart.
+        assert!(!should_disable_graph_expansion(
+            tenant_plan,
+            SemanticGraphPolicy::Deterministic
+        ));
+        // The contact/user-memory tier is a different subsystem and is never gated by
+        // the tenant-knowledge semantic policy.
+        for policy in [SemanticGraphPolicy::Off, SemanticGraphPolicy::Deterministic] {
+            assert!(
+                !should_disable_graph_expansion(contact_plan, policy),
+                "user memory expansion must not depend on the knowledge semantic policy ({})",
+                policy.as_str()
+            );
+        }
     }
 
     #[test]

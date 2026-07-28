@@ -631,7 +631,15 @@ async fn ingest_articles(
         moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
             moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
         ),
-    );
+    )
+    // The harness must ingest under the configured policy, not the built-in
+    // default. `entity-local-search` is the one arm that seeds on semantic
+    // entities, so a corpus ingested under `off` gives it nothing to seed on and
+    // the arm reports "no rescues" because the graph is empty rather than because
+    // expansion did not help. That reads as a confirmation of the 2026-07-28
+    // measurement while measuring nothing; honoring `knowledge.semantic` keeps
+    // both arms of that measurement reproducible.
+    .with_semantic_policy(config.knowledge.semantic);
 
     let started = Instant::now();
     let mut page_report = PageIngestionReport::default();

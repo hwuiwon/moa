@@ -47,6 +47,76 @@ FULL OUTER JOIN new USING (name)
 ORDER BY name
 "#;
 
+/// Raw exact-row SQL for one experiment score run.
+///
+/// This deliberately aggregates nothing. Scorecard completeness is decided by
+/// counting and matching individual rows in `moa-experiments`, and an `AVG` or
+/// `COUNT` here would hide exactly the duplicate and mislinked rows that gate is
+/// supposed to catch.
+pub(crate) const EXACT_EXPERIMENT_SCORE_ROWS_SQL: &str = r#"
+SELECT score.score_id,
+       score.run_id,
+       score.name,
+       score.value_type,
+       score.value_numeric,
+       score.value_boolean,
+       score.value_categorical,
+       score.model_or_evaluator,
+       provenance.evaluator_id,
+       provenance.evaluator_version,
+       provenance.score_name AS provenance_score_name,
+       provenance.value_type AS provenance_value_type,
+       provenance.experiment_run_uid,
+       provenance.plan_revision_uid,
+       provenance.trial_uid,
+       provenance.target_session_id,
+       provenance.target_execution_run_uid,
+       provenance.evidence_ref,
+       provenance.evidence_hash
+FROM analytics.scores AS score
+JOIN moa.experiment_score_provenance AS provenance
+  ON provenance.score_id = score.score_id
+ AND provenance.storage_partition_id = score.storage_partition_id
+WHERE score.run_id = $1
+  AND score.storage_partition_id = $2
+  AND provenance.score_run_id = $1
+ORDER BY score.name, score.score_id, score.ts
+"#;
+
+/// Raw exact-row SQL for every trial score in one experiment run.
+///
+/// Selected through `experiment_run_uid` on the provenance side so one query
+/// covers a whole run's trials instead of one query per trial score run.
+pub(crate) const EXACT_EXPERIMENT_RUN_SCORE_ROWS_SQL: &str = r#"
+SELECT score.score_id,
+       score.run_id,
+       score.name,
+       score.value_type,
+       score.value_numeric,
+       score.value_boolean,
+       score.value_categorical,
+       score.model_or_evaluator,
+       provenance.evaluator_id,
+       provenance.evaluator_version,
+       provenance.score_name AS provenance_score_name,
+       provenance.value_type AS provenance_value_type,
+       provenance.experiment_run_uid,
+       provenance.plan_revision_uid,
+       provenance.trial_uid,
+       provenance.target_session_id,
+       provenance.target_execution_run_uid,
+       provenance.evidence_ref,
+       provenance.evidence_hash
+FROM analytics.scores AS score
+JOIN moa.experiment_score_provenance AS provenance
+  ON provenance.score_id = score.score_id
+ AND provenance.storage_partition_id = score.storage_partition_id
+ AND provenance.score_run_id = score.run_id
+WHERE provenance.experiment_run_uid = $1
+  AND provenance.storage_partition_id = $2
+ORDER BY provenance.trial_uid, score.name, score.score_id, score.ts
+"#;
+
 /// Error type for score storage and query helpers.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -141,6 +211,131 @@ pub struct ScoreCompare {
     /// Comparison rows ordered for API display.
     #[serde(default)]
     pub rows: Vec<ScoreCompareRow>,
+}
+
+/// One exact experiment score row joined with the provenance that explains it.
+///
+/// A score row with no provenance row is structurally absent from this result:
+/// the join is inner, so a seeded or hand-written score can never appear here
+/// and can never satisfy a scorecard requirement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentScoreRow {
+    /// Stable score identity derived by the trial finalizer.
+    pub score_id: Uuid,
+    /// Score run the row belongs to.
+    pub score_run_id: Option<Uuid>,
+    /// Score name as written into `analytics.scores`.
+    pub name: String,
+    /// Score value type as written into `analytics.scores`.
+    pub value_type: String,
+    /// Numeric value when the row is numeric.
+    pub value_numeric: Option<f64>,
+    /// Boolean value when the row is boolean.
+    pub value_boolean: Option<bool>,
+    /// Categorical value when the row is categorical.
+    pub value_categorical: Option<String>,
+    /// Free-text evaluator label carried by the score row.
+    pub model_or_evaluator: String,
+    /// Evaluator that produced the row, from provenance.
+    pub evaluator_id: String,
+    /// Exact evaluator version that produced the row, from provenance.
+    pub evaluator_version: String,
+    /// Score name recorded in provenance.
+    pub provenance_score_name: String,
+    /// Score value type recorded in provenance.
+    pub provenance_value_type: String,
+    /// Experiment run the score belongs to.
+    pub experiment_run_uid: Uuid,
+    /// Pinned plan revision the score belongs to.
+    pub plan_revision_uid: Uuid,
+    /// Trial the score belongs to.
+    pub trial_uid: Uuid,
+    /// Exact target session, when the trial drove one.
+    pub target_session_id: Option<Uuid>,
+    /// Exact target execution run, when the trial drove one.
+    pub target_execution_run_uid: Option<Uuid>,
+    /// Bounded reference to the evidence the score was derived from.
+    pub evidence_ref: String,
+    /// BLAKE3 digest of the evidence the score was derived from.
+    pub evidence_hash: Vec<u8>,
+}
+
+/// Request for reading every exact experiment score row in one run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentRunScoreRowsRef {
+    /// Tenant scope used for score filtering.
+    pub tenant_id: TenantId,
+    /// Experiment run whose trial score rows should be read.
+    pub experiment_run_uid: Uuid,
+}
+
+/// Request for reading exact experiment score rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentScoreRowsRef {
+    /// Tenant scope used for score filtering.
+    pub tenant_id: TenantId,
+    /// Score run whose exact rows should be read.
+    pub score_run_id: Uuid,
+}
+
+/// Reads every exact provenance-backed score row for one experiment score run.
+///
+/// # Errors
+///
+/// Returns [`Error::Sql`] when the query or a column decode fails.
+pub async fn exact_experiment_score_rows_for_tenant(
+    pool: &PgPool,
+    request: ExperimentScoreRowsRef,
+) -> Result<Vec<ExperimentScoreRow>, Error> {
+    let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
+    let rows = sqlx::query(EXACT_EXPERIMENT_SCORE_ROWS_SQL)
+        .bind(request.score_run_id)
+        .bind(&storage_partition_id)
+        .fetch_all(pool)
+        .await?;
+    rows.iter().map(experiment_score_row_from_row).collect()
+}
+
+/// Reads every exact provenance-backed score row for one experiment run.
+///
+/// # Errors
+///
+/// Returns [`Error::Sql`] when the query or a column decode fails.
+pub async fn exact_experiment_run_score_rows_for_tenant(
+    pool: &PgPool,
+    request: ExperimentRunScoreRowsRef,
+) -> Result<Vec<ExperimentScoreRow>, Error> {
+    let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
+    let rows = sqlx::query(EXACT_EXPERIMENT_RUN_SCORE_ROWS_SQL)
+        .bind(request.experiment_run_uid)
+        .bind(&storage_partition_id)
+        .fetch_all(pool)
+        .await?;
+    rows.iter().map(experiment_score_row_from_row).collect()
+}
+
+fn experiment_score_row_from_row(row: &PgRow) -> Result<ExperimentScoreRow, Error> {
+    Ok(ExperimentScoreRow {
+        score_id: row.try_get("score_id")?,
+        score_run_id: row.try_get("run_id")?,
+        name: row.try_get("name")?,
+        value_type: row.try_get("value_type")?,
+        value_numeric: row.try_get("value_numeric")?,
+        value_boolean: row.try_get("value_boolean")?,
+        value_categorical: row.try_get("value_categorical")?,
+        model_or_evaluator: row.try_get("model_or_evaluator")?,
+        evaluator_id: row.try_get("evaluator_id")?,
+        evaluator_version: row.try_get("evaluator_version")?,
+        provenance_score_name: row.try_get("provenance_score_name")?,
+        provenance_value_type: row.try_get("provenance_value_type")?,
+        experiment_run_uid: row.try_get("experiment_run_uid")?,
+        plan_revision_uid: row.try_get("plan_revision_uid")?,
+        trial_uid: row.try_get("trial_uid")?,
+        target_session_id: row.try_get("target_session_id")?,
+        target_execution_run_uid: row.try_get("target_execution_run_uid")?,
+        evidence_ref: row.try_get("evidence_ref")?,
+        evidence_hash: row.try_get("evidence_hash")?,
+    })
 }
 
 /// Reads tenant-scoped score summaries for one score run.

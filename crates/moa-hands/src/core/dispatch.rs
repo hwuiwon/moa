@@ -7,8 +7,8 @@ use std::time::Instant;
 use moa_config::McpServerConfig;
 use moa_core::{
     error::MoaError, error::Result, traits::Identity, types::completion::ToolInvocation,
-    types::hands::HandHandle, types::hands::HandStatus, types::hands::SandboxTier,
-    types::identifiers::ToolCallId, types::security::ToolCapabilityId, types::session::SessionMeta,
+    types::hands::HandHandle, types::hands::HandStatus, types::identifiers::ToolCallId,
+    types::security::ToolCapabilityId, types::session::SessionMeta,
     types::tools::SecuredToolOutput, types::tools::ToolDefinition, types::tools::ToolOutput,
 };
 use moa_observability::current_turn_root_span;
@@ -38,6 +38,13 @@ pub(super) struct McpDispatch<'a> {
     pub(super) caller_identity: &'a Identity,
     /// Configured MCP server that owns the remote tool.
     pub(super) server_name: &'a str,
+    /// Tool name as the owning server knows it.
+    ///
+    /// Registered tool names are server-qualified, so the qualified name would
+    /// be rejected by the server. Carrying the remote name explicitly is what
+    /// keeps qualification a local concern instead of something every connector
+    /// has to be taught about.
+    pub(super) remote_tool_name: &'a str,
     /// Credential owner this invocation must be served from.
     pub(super) credential_scope: ToolCredentialScope,
     /// Replay-stable durable tool-call identity.
@@ -148,10 +155,11 @@ impl ToolRouter {
         async move {
             let started_at = Instant::now();
             let prepared = self.prepare_invocation(session, invocation).await?;
-            let registered_tool =
-                self.registry.tools.get(&invocation.name).ok_or_else(|| {
-                    MoaError::ToolError(format!("unknown tool: {}", invocation.name))
-                })?;
+            let registry = self.registry();
+            let registered_tool = registry
+                .tools
+                .get(&invocation.name)
+                .ok_or_else(|| registry.unknown_tool_error(&invocation.name))?;
             record_tool_invocation_metadata(
                 &tool_span,
                 session,
@@ -201,10 +209,11 @@ impl ToolRouter {
         let instrument_tool_span = tool_span.clone();
         async move {
             let started_at = Instant::now();
-            let registered_tool =
-                self.registry.tools.get(&invocation.name).ok_or_else(|| {
-                    MoaError::ToolError(format!("unknown tool: {}", invocation.name))
-                })?;
+            let registry = self.registry();
+            let registered_tool = registry
+                .tools
+                .get(&invocation.name)
+                .ok_or_else(|| registry.unknown_tool_error(&invocation.name))?;
             validate_tool_invocation(&registered_tool.definition, invocation)?;
             record_tool_invocation_metadata(
                 &tool_span,
@@ -245,11 +254,11 @@ impl ToolRouter {
         cancel_token: Option<&CancellationToken>,
         hard_cancel_token: Option<&CancellationToken>,
     ) -> Result<SecuredToolOutput> {
-        let registered_tool = self
-            .registry
+        let registry = self.registry();
+        let registered_tool = registry
             .tools
             .get(&invocation.name)
-            .ok_or_else(|| MoaError::ToolError(format!("unknown tool: {}", invocation.name)))?;
+            .ok_or_else(|| registry.unknown_tool_error(&invocation.name))?;
         let credential_scope = registered_tool.execution.credential_scope();
 
         match &registered_tool.execution {
@@ -273,14 +282,17 @@ impl ToolRouter {
                     None,
                     invocation,
                     &registered_tool.definition,
-                    &route.provider,
-                    &route.tier,
+                    route,
                     active_canary,
                     hard_cancel_token,
                 )
                 .await
             }
-            ToolExecution::Mcp { server_name, .. } => {
+            ToolExecution::Mcp {
+                server_name,
+                remote_tool_name,
+                ..
+            } => {
                 self.execute_mcp_once(
                     session,
                     invocation,
@@ -288,6 +300,7 @@ impl ToolRouter {
                     McpDispatch {
                         caller_identity,
                         server_name,
+                        remote_tool_name,
                         credential_scope,
                         tool_call_id,
                     },
@@ -308,11 +321,11 @@ impl ToolRouter {
         active_canary: Option<&str>,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<SecuredToolOutput> {
-        let registered_tool = self
-            .registry
+        let registry = self.registry();
+        let registered_tool = registry
             .tools
             .get(&invocation.name)
-            .ok_or_else(|| MoaError::ToolError(format!("unknown tool: {}", invocation.name)))?;
+            .ok_or_else(|| registry.unknown_tool_error(&invocation.name))?;
         let ToolExecution::BuiltIn(tool) = &registered_tool.execution else {
             return Err(MoaError::ToolError(format!(
                 "tool {} is not registered as a built-in tool",
@@ -353,20 +366,19 @@ impl ToolRouter {
         worker_id: Option<&str>,
         invocation: &ToolInvocation,
         tool_definition: &ToolDefinition,
-        provider: &str,
-        tier: &SandboxTier,
+        route: &HandRoute,
         active_canary: Option<&str>,
         hard_cancel_token: Option<&CancellationToken>,
     ) -> Result<SecuredToolOutput> {
         let hand = self
-            .get_or_provision_hand(provider, tier.clone(), session, worker_id)
+            .get_or_provision_hand(route, session, worker_id)
             .await?;
         self.execute_hand_on_handle(
             session,
             worker_id,
             invocation,
             tool_definition,
-            provider,
+            &route.provider,
             &hand,
             active_canary,
             hard_cancel_token,
@@ -500,7 +512,7 @@ impl ToolRouter {
                 .await?;
             let output = client
                 .call_tool(
-                    &invocation.name,
+                    dispatch.remote_tool_name,
                     invocation.input.clone(),
                     invocation.id.as_deref(),
                     extra_headers,
@@ -510,7 +522,7 @@ impl ToolRouter {
                 "moa.mcp.latency_ms",
                 started_at.elapsed().as_millis() as i64,
             );
-            let capability = ToolCapabilityId::mcp(server_name, &invocation.name);
+            let capability = ToolCapabilityId::mcp(server_name, dispatch.remote_tool_name);
             Ok(self
                 .secure_and_budget(
                     session,
@@ -558,7 +570,7 @@ impl ToolRouter {
                 proxy.deployment_headers(&session.id, &server.name, credentials)
             }
             ToolCredentialScope::TenantOwnedMcp => {
-                self.tenant_owned_mcp_headers(session, invocation, server, dispatch)
+                self.tenant_owned_mcp_headers(session, server, dispatch)
                     .await
             }
         }
@@ -574,7 +586,6 @@ impl ToolRouter {
     async fn tenant_owned_mcp_headers(
         &self,
         session: &SessionMeta,
-        invocation: &ToolInvocation,
         server: &McpServerConfig,
         dispatch: &McpDispatch<'_>,
     ) -> Result<HashMap<String, String>> {
@@ -622,8 +633,13 @@ impl ToolRouter {
         }
         // The canonical operation is the exact remote tool name this dispatch
         // sends in `tools/call`, so the allowlist governs what the tenant's
-        // credential can actually be used to do.
-        let operation = invocation.name.as_str();
+        // credential can actually be used to do. It is deliberately the remote
+        // name and not `invocation.name`: the registered name is
+        // server-qualified, and checking that instead would compare the
+        // operator's allowlist against a string this deployment invented while
+        // sending the server a different one — an allowlist that no longer
+        // describes what the credential can do.
+        let operation = dispatch.remote_tool_name;
         if !binding.permits(operation) {
             return Err(MoaError::PermissionDenied(format!(
                 "tenant MCP connection binding for server '{server_name}' does not permit \
@@ -660,17 +676,30 @@ impl ToolRouter {
         })
     }
 
+    /// Returns this server's transport client, connecting on first use.
+    ///
+    /// Connections are opened lazily rather than held from startup, so a
+    /// configured connector that is never invoked never costs a socket or a
+    /// handshake, and a connector whose transport died between refreshes is
+    /// reconnected by the call that needs it instead of failing until the next
+    /// catalog refresh.
     pub(super) async fn mcp_client(&self, server_name: &str) -> Result<Arc<MCPClient>> {
-        self.mcp_clients
-            .read()
-            .await
+        if let Some(client) = self.mcp_clients.read().await.get(server_name).cloned() {
+            return Ok(client);
+        }
+        let server = self
+            .mcp_servers
             .get(server_name)
-            .cloned()
-            .ok_or_else(|| {
-                MoaError::ProviderError(format!(
-                    "missing MCP client for configured server: {server_name}"
-                ))
-            })
+            .ok_or_else(|| MoaError::ProviderError(format!("unknown MCP server: {server_name}")))?;
+        let client = Arc::new(MCPClient::connect(server).await?);
+        let mut clients = self.mcp_clients.write().await;
+        // Another dispatch may have connected while this one was handshaking;
+        // keep whichever landed first so both callers share one connection.
+        Ok(Arc::clone(
+            clients
+                .entry(server_name.to_string())
+                .or_insert_with(|| Arc::clone(&client)),
+        ))
     }
 
     pub(super) async fn reconnect_mcp_client(&self, server_name: &str) -> Result<()> {
@@ -835,7 +864,11 @@ mod egress_dispatch_tests {
                 .await
                 .expect("fake MCP server handshake should succeed"),
         );
-        let mut router = ToolRouter::new(ToolRegistry::default_local(), HashMap::new());
+        let mut router = ToolRouter::new(
+            ToolRegistry::default_local(),
+            HashMap::new(),
+            crate::core::profile::local_development_sandbox_policy(),
+        );
         router
             .mcp_clients
             .write()
@@ -871,16 +904,23 @@ mod egress_dispatch_tests {
         }
     }
 
+    /// The server-qualified reference the discovered tool registers under.
+    fn qualified_tool_name() -> String {
+        crate::core::mcp_tool_reference(SERVER_NAME, "external_tool")
+    }
+
     fn tool_invocation() -> ToolInvocation {
         ToolInvocation {
             id: None,
-            name: "external_tool".to_string(),
+            name: qualified_tool_name(),
             input: json!({ "note": "patient record" }),
         }
     }
 
     fn http_server(url: String, allowed: Vec<SensitivityClass>) -> McpServerConfig {
         McpServerConfig {
+            required: false,
+            discovery: moa_config::McpDiscoveryMode::Eager,
             name: SERVER_NAME.to_string(),
             transport: McpTransportConfig::Http,
             url: Some(url),
@@ -928,6 +968,7 @@ mod egress_dispatch_tests {
         McpDispatch {
             caller_identity,
             server_name: SERVER_NAME,
+            remote_tool_name: "external_tool",
             credential_scope: ToolCredentialScope::DeploymentOwnedMcp,
             tool_call_id: ToolCallId::new(),
         }
@@ -1044,16 +1085,17 @@ mod egress_dispatch_tests {
         // declares must still agree, so an ownership change can never serve one
         // owner's tools with the other owner's credential.
         let (url, tools_call_seen) = spawn_recording_mcp_server().await;
-        let mut router =
+        let router =
             router_with_mcp_server(http_server(url, Vec::new()), Some(permissive_guard())).await;
-        router
-            .registry
+        let mut registry = (*router.registry()).clone();
+        registry
             .register_mcp_tool(
                 SERVER_NAME,
                 McpServerCredentialScope::TenantOwned,
                 discovered_external_tool(),
             )
             .expect("register the discovered MCP tool");
+        router.publish_registry(registry);
 
         let session = session();
         let error = router

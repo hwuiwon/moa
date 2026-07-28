@@ -91,6 +91,13 @@ fn jti_expires_at(claims: &ApprovalClaims) -> Result<chrono::DateTime<Utc>, Hand
 /// stages in order, so each stage runs at most once per completed job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ErasureJobStage {
+    /// Learning derived from the subject's data not yet erased.
+    ///
+    /// First, deliberately: the closure walk needs the source memories to still
+    /// exist in order to find what was derived from them.
+    Learning,
+    /// Artifact-side dispositions not yet recorded.
+    Artifacts,
     /// PII vault subject keys not yet erased.
     Vault,
     /// Graph-memory candidates not yet purged.
@@ -106,6 +113,8 @@ pub(super) enum ErasureJobStage {
 impl ErasureJobStage {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Learning => "learning",
+            Self::Artifacts => "artifacts",
             Self::Vault => "vault",
             Self::Graph => "graph",
             Self::Digest => "digest",
@@ -116,6 +125,8 @@ impl ErasureJobStage {
 
     fn parse(raw: &str) -> Result<Self, HandlerError> {
         match raw {
+            "learning" => Ok(Self::Learning),
+            "artifacts" => Ok(Self::Artifacts),
             "vault" => Ok(Self::Vault),
             "graph" => Ok(Self::Graph),
             "digest" => Ok(Self::Digest),
@@ -131,6 +142,12 @@ impl ErasureJobStage {
 pub(super) struct ErasureJobProgress {
     /// Stage the job should run next.
     pub(super) stage: ErasureJobStage,
+    /// Learning candidates and learning-log entries erased so far.
+    pub(super) learning_erased: u64,
+    /// Artifact revisions and suite contributions erased or invalidated so far.
+    pub(super) artifact_erased: u64,
+    /// Durable per-record dispositions written so far.
+    pub(super) decisions_recorded: u64,
     /// PII vault rows erased so far.
     pub(super) pii_vault_erased: u64,
     /// Graph-memory nodes purged so far.
@@ -160,6 +177,9 @@ struct ErasureJobRow {
     status: String,
     stage: String,
     candidate_count: i64,
+    learning_erased: i64,
+    artifact_erased: i64,
+    decisions_recorded: i64,
     pii_vault_erased: i64,
     graph_erased: i64,
     digest_deleted: i64,
@@ -174,6 +194,9 @@ impl ErasureJobRow {
             candidate_count: nonneg_u64(self.candidate_count),
             progress: ErasureJobProgress {
                 stage: ErasureJobStage::parse(&self.stage)?,
+                learning_erased: nonneg_u64(self.learning_erased),
+                artifact_erased: nonneg_u64(self.artifact_erased),
+                decisions_recorded: nonneg_u64(self.decisions_recorded),
                 pii_vault_erased: nonneg_u64(self.pii_vault_erased),
                 graph_erased: nonneg_u64(self.graph_erased),
                 digest_deleted: nonneg_u64(self.digest_deleted),
@@ -192,6 +215,7 @@ fn u64_to_i64(value: u64) -> i64 {
 }
 
 const ERASURE_JOB_RETURNING: &str = "jti, request_fingerprint, status, stage, candidate_count, \
+     learning_erased, artifact_erased, decisions_recorded, \
      pii_vault_erased, graph_erased, digest_deleted, lineage_deleted";
 
 /// Atomically binds an approval JTI to one idempotent, resumable erasure job.
@@ -291,6 +315,9 @@ pub(super) async fn save_erasure_job_progress(
             graph_erased = $4,
             digest_deleted = $5,
             lineage_deleted = $6,
+            learning_erased = $7,
+            artifact_erased = $8,
+            decisions_recorded = $9,
             updated_at = now()
         WHERE jti = $1
         "#,
@@ -301,6 +328,9 @@ pub(super) async fn save_erasure_job_progress(
     .bind(u64_to_i64(progress.graph_erased))
     .bind(u64_to_i64(progress.digest_deleted))
     .bind(u64_to_i64(progress.lineage_deleted))
+    .bind(u64_to_i64(progress.learning_erased))
+    .bind(u64_to_i64(progress.artifact_erased))
+    .bind(u64_to_i64(progress.decisions_recorded))
     .execute(pool)
     .await
     .map_err(handler_error)?;
@@ -322,6 +352,9 @@ pub(super) async fn complete_erasure_job(
             graph_erased = $3,
             digest_deleted = $4,
             lineage_deleted = $5,
+            learning_erased = $6,
+            artifact_erased = $7,
+            decisions_recorded = $8,
             completed_at = now(),
             updated_at = now()
         WHERE jti = $1
@@ -332,6 +365,9 @@ pub(super) async fn complete_erasure_job(
     .bind(u64_to_i64(progress.graph_erased))
     .bind(u64_to_i64(progress.digest_deleted))
     .bind(u64_to_i64(progress.lineage_deleted))
+    .bind(u64_to_i64(progress.learning_erased))
+    .bind(u64_to_i64(progress.artifact_erased))
+    .bind(u64_to_i64(progress.decisions_recorded))
     .execute(pool)
     .await
     .map_err(handler_error)?;
@@ -475,7 +511,283 @@ pub async fn collect_privacy_export_data_sections(
     );
     counts.insert("embeddings", collect_embeddings(ctx, export_dir).await?);
     counts.insert("skills", collect_skills(ctx, export_dir).await?);
+    counts.insert(
+        "learning_candidates",
+        collect_learning_candidates(ctx, export_dir).await?,
+    );
+    counts.insert(
+        "learning_entries",
+        collect_learning_entries(ctx, export_dir).await?,
+    );
+    counts.insert(
+        "learning_decisions",
+        collect_learning_decisions(ctx, export_dir).await?,
+    );
+    counts.insert(
+        "erasure_decisions",
+        collect_erasure_decisions(ctx, export_dir).await?,
+    );
     Ok(counts)
+}
+
+/// Every learning candidate derived from the subject's data, with its sources.
+///
+/// Reached through the normalized provenance rows by typed join. The older
+/// sections in this file still search with `LIKE '%subject%'` over JSON and text,
+/// which both over-matches (any row that happens to contain the id as a
+/// substring) and under-matches (any row that references the subject indirectly).
+/// A derivation chain cannot be built on that, which is why these levels join
+/// instead.
+async fn collect_learning_candidates(
+    ctx: &PrivacyExportContext,
+    export_dir: &Path,
+) -> Result<usize, HandlerError> {
+    let mut tx = begin_audited_read(&ctx.pool).await?;
+    let mut rows = Vec::new();
+    for subject in &ctx.subjects {
+        rows.extend(
+            sqlx::query_scalar::<_, Value>(
+                r#"
+                SELECT jsonb_build_object(
+                    'id', candidate.id,
+                    'tenant_id', candidate.tenant_id,
+                    'candidate_type', candidate.candidate_type,
+                    'proposal_kind', candidate.proposal_kind,
+                    'status', candidate.status,
+                    'target_id', candidate.target_id,
+                    'target_label', candidate.target_label,
+                    'payload', candidate.payload,
+                    'evaluation_payload', candidate.evaluation_payload,
+                    'confidence', candidate.confidence,
+                    'risk_class', candidate.risk_class,
+                    'status_reason', candidate.status_reason,
+                    'created_at', candidate.created_at,
+                    'updated_at', candidate.updated_at,
+                    'privacy_subject_user_id', $3,
+                    'privacy_subject_provenance', $4,
+                    'sources', COALESCE((
+                        SELECT jsonb_agg(jsonb_build_object(
+                            'source_kind', source.source_kind,
+                            'experience_id', source.experience_id,
+                            'attribution_id', source.attribution_id,
+                            'session_id', source.session_id,
+                            'event_id', source.event_id,
+                            'segment_id', source.segment_id,
+                            'contact_id', source.contact_id,
+                            'promotion_candidate_id', source.promotion_candidate_id,
+                            'artifact_revision_uid', source.artifact_revision_uid,
+                            'experiment_run_uid', source.experiment_run_uid,
+                            'experiment_trial_uid', source.experiment_trial_uid,
+                            'score_run_id', source.score_run_id
+                        ) ORDER BY source.source_kind, source.id)
+                        FROM learning_candidate_source AS source
+                        WHERE source.candidate_id = candidate.id
+                    ), '[]'::jsonb)
+                )
+                FROM learning_candidates AS candidate
+                WHERE candidate.storage_partition_id = $1
+                  AND EXISTS (
+                      SELECT 1
+                      FROM learning_candidate_source AS reached
+                      WHERE reached.candidate_id = candidate.id
+                        AND (
+                            reached.contact_id = $2
+                            OR reached.session_id IN (
+                                SELECT id FROM sessions
+                                WHERE storage_partition_id = $1 AND user_id = $3
+                            )
+                            OR reached.experience_id IN (
+                                SELECT id FROM experience_records
+                                WHERE storage_partition_id = $1 AND user_id = $3
+                            )
+                        )
+                  )
+                ORDER BY candidate.created_at, candidate.id
+                "#,
+            )
+            .bind(ctx.storage_partition.as_deref())
+            .bind(subject.target_uid)
+            .bind(&subject.user_id)
+            .bind(subject.provenance.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(handler_error)?,
+        );
+    }
+    tx.commit().await.map_err(handler_error)?;
+    write_jsonl(export_dir.join("learning_candidates.jsonl"), &rows).await
+}
+
+/// Learning-log entries derived from the subject, with their typed sources.
+async fn collect_learning_entries(
+    ctx: &PrivacyExportContext,
+    export_dir: &Path,
+) -> Result<usize, HandlerError> {
+    let mut tx = begin_audited_read(&ctx.pool).await?;
+    let mut rows = Vec::new();
+    for subject in &ctx.subjects {
+        rows.extend(
+            sqlx::query_scalar::<_, Value>(
+                r#"
+                SELECT jsonb_build_object(
+                    'id', entry.id,
+                    'tenant_id', entry.tenant_id,
+                    'learning_type', entry.learning_type,
+                    'target_id', entry.target_id,
+                    'target_label', entry.target_label,
+                    'payload', entry.payload,
+                    'confidence', entry.confidence,
+                    'actor', entry.actor,
+                    'valid_from', entry.valid_from,
+                    'valid_to', entry.valid_to,
+                    'version', entry.version,
+                    'privacy_subject_user_id', $3,
+                    'privacy_subject_provenance', $4,
+                    'sources', COALESCE((
+                        SELECT jsonb_agg(jsonb_build_object(
+                            'source_kind', source.source_kind,
+                            'candidate_id', source.candidate_id,
+                            'experience_id', source.experience_id,
+                            'session_id', source.session_id,
+                            'segment_id', source.segment_id,
+                            'artifact_revision_uid', source.artifact_revision_uid
+                        ) ORDER BY source.source_kind, source.id)
+                        FROM learning_log_source AS source
+                        WHERE source.learning_id = entry.id
+                    ), '[]'::jsonb)
+                )
+                FROM learning_log AS entry
+                WHERE entry.storage_partition_id = $1
+                  AND EXISTS (
+                      SELECT 1
+                      FROM learning_log_source AS reached
+                      WHERE reached.learning_id = entry.id
+                        AND (
+                            reached.session_id IN (
+                                SELECT id FROM sessions
+                                WHERE storage_partition_id = $1 AND user_id = $3
+                            )
+                            OR reached.experience_id IN (
+                                SELECT id FROM experience_records
+                                WHERE storage_partition_id = $1 AND user_id = $3
+                            )
+                            OR reached.candidate_id IN (
+                                SELECT candidate_source.candidate_id
+                                FROM learning_candidate_source AS candidate_source
+                                WHERE candidate_source.contact_id = $2
+                            )
+                        )
+                  )
+                ORDER BY entry.valid_from, entry.id
+                "#,
+            )
+            .bind(ctx.storage_partition.as_deref())
+            .bind(subject.target_uid)
+            .bind(&subject.user_id)
+            .bind(subject.provenance.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(handler_error)?,
+        );
+    }
+    tx.commit().await.map_err(handler_error)?;
+    write_jsonl(export_dir.join("learning_entries.jsonl"), &rows).await
+}
+
+/// Historical review dispositions for candidates derived from the subject.
+///
+/// The candidate's current `status` says where it is now; this says what was
+/// decided about it and by whom, which a mutable column cannot answer after the
+/// fact and which a subject-access request is entitled to.
+async fn collect_learning_decisions(
+    ctx: &PrivacyExportContext,
+    export_dir: &Path,
+) -> Result<usize, HandlerError> {
+    let mut tx = begin_audited_read(&ctx.pool).await?;
+    let mut rows = Vec::new();
+    for subject in &ctx.subjects {
+        rows.extend(
+            sqlx::query_scalar::<_, Value>(
+                r#"
+                SELECT jsonb_build_object(
+                    'id', decision.id,
+                    'candidate_id', decision.candidate_id,
+                    'decision', decision.decision,
+                    'from_status', decision.from_status,
+                    'to_status', decision.to_status,
+                    'reviewer_subject', decision.reviewer_subject,
+                    'reason', decision.reason,
+                    'decided_at', decision.decided_at,
+                    'privacy_subject_user_id', $3,
+                    'privacy_subject_provenance', $4
+                )
+                FROM learning_candidate_decision AS decision
+                WHERE decision.storage_partition_id = $1
+                  AND EXISTS (
+                      SELECT 1
+                      FROM learning_candidate_source AS reached
+                      WHERE reached.candidate_id = decision.candidate_id
+                        AND (
+                            reached.contact_id = $2
+                            OR reached.session_id IN (
+                                SELECT id FROM sessions
+                                WHERE storage_partition_id = $1 AND user_id = $3
+                            )
+                            OR reached.experience_id IN (
+                                SELECT id FROM experience_records
+                                WHERE storage_partition_id = $1 AND user_id = $3
+                            )
+                        )
+                  )
+                ORDER BY decision.decided_at, decision.id
+                "#,
+            )
+            .bind(ctx.storage_partition.as_deref())
+            .bind(subject.target_uid)
+            .bind(&subject.user_id)
+            .bind(subject.provenance.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(handler_error)?,
+        );
+    }
+    tx.commit().await.map_err(handler_error)?;
+    write_jsonl(export_dir.join("learning_decisions.jsonl"), &rows).await
+}
+
+/// Prior erasure dispositions recorded for this subject.
+///
+/// Included so a subject who was told "a legal hold blocked your erasure" or
+/// "this was a dry run" can see exactly which records that covered, rather than
+/// having to trust a summary count.
+async fn collect_erasure_decisions(
+    ctx: &PrivacyExportContext,
+    export_dir: &Path,
+) -> Result<usize, HandlerError> {
+    let mut tx = begin_audited_read(&ctx.pool).await?;
+    let rows = sqlx::query_scalar::<_, Value>(
+        r#"
+        SELECT jsonb_build_object(
+            'operation_ref', operation_ref,
+            'attempt_id', attempt_id,
+            'record_kind', record_kind,
+            'record_id', record_id,
+            'disposition', disposition,
+            'applied', applied,
+            'reason', reason,
+            'decided_at', decided_at
+        )
+        FROM moa.privacy_erasure_record_decision
+        WHERE tenant_id = $1
+        ORDER BY decided_at, decision_uid
+        "#,
+    )
+    .bind(ctx.tenant_id.0)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(handler_error)?;
+    tx.commit().await.map_err(handler_error)?;
+    write_jsonl(export_dir.join("erasure_decisions.jsonl"), &rows).await
 }
 
 async fn collect_facts(
@@ -841,6 +1153,8 @@ mod tests {
         // Pins: stage serialization is stable so a resumed job reads back the exact
         // stage it persisted, and unknown stages fail closed instead of defaulting.
         for stage in [
+            ErasureJobStage::Learning,
+            ErasureJobStage::Artifacts,
             ErasureJobStage::Vault,
             ErasureJobStage::Graph,
             ErasureJobStage::Digest,

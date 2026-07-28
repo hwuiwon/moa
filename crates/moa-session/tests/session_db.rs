@@ -18,6 +18,8 @@ mod postgres_store_db;
 mod recurrence_db;
 #[path = "session_db/session_blobs_db.rs"]
 mod session_blobs_db;
+#[path = "session_db/session_retention_db.rs"]
+mod session_retention_db;
 #[path = "session_db/tenant_rls_db.rs"]
 mod tenant_rls_db;
 

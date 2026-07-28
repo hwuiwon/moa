@@ -57,14 +57,16 @@ async fn clickhouse_store_roundtrip_docker() -> TestResult<()> {
         .cloned()
         .ok_or("store must select the clickhouse backend")?;
 
-    // Drive rows through the real writer so journaling and batching are the
-    // production path, not a direct insert call.
-    let journal = tempfile::tempdir()?;
+    // Drive rows through the real writer so acceptance, claiming and batching
+    // are the production path, not a direct insert call.
     let sink_config = MpscSinkConfig {
         channel_capacity: 16,
         batch_size: 100,
         batch_max_age: Duration::from_secs(3600),
-        journal_path: journal.path().to_path_buf(),
+        claim_batch_size: 100,
+        lease_ttl: Duration::from_secs(60),
+        max_pending_age: Duration::from_secs(300),
+        drain_timeout: Duration::from_secs(30),
     };
     let (tx, rx) = mpsc::channel::<LineageEvent>(16);
     let handle = spawn_writer(rx, sink_config, store).await?;

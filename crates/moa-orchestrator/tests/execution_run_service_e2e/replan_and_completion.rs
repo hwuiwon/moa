@@ -1110,7 +1110,18 @@ async fn execution_eval_injected_tool_instruction_cannot_escape_envelope_service
                     json!({
                         "content": "",
                         "tool_calls": [{
-                            "name": FORBIDDEN_TOOL,
+                            // Qualified deliberately. The point of this test is
+                            // that the injected call is refused by the
+                            // AUTHORIZATION ENVELOPE — the capability exists in
+                            // the catalog and is simply not authorized for this
+                            // run. An unqualified name would be refused merely
+                            // for not existing, and the test would pass while
+                            // exercising none of the envelope check it exists
+                            // to pin.
+                            "name": moa_hands::mcp_tool_reference(
+                                FIXTURE_MCP_SERVER_NAME,
+                                FORBIDDEN_TOOL,
+                            ),
                             "id": "injected-forbidden-call",
                             "input": {"case": "escape"}
                         }]
@@ -1121,7 +1132,10 @@ async fn execution_eval_injected_tool_instruction_cannot_escape_envelope_service
                     json!({
                         "content": "",
                         "tool_calls": [{
-                            "name": SAFE_TOOL,
+                            "name": moa_hands::mcp_tool_reference(
+                                FIXTURE_MCP_SERVER_NAME,
+                                SAFE_TOOL,
+                            ),
                             "id": "safe-document-fetch",
                             "input": {"case": "injection"}
                         }]
@@ -1301,7 +1315,10 @@ async fn execution_eval_amendment_cannot_broaden_authorization_service_e2e() -> 
         .catalog
         .capabilities
         .iter()
-        .find(|capability| capability.reference.name == FORBIDDEN_TOOL)
+        .find(|capability| {
+            capability.reference.name
+                == moa_hands::mcp_tool_reference(FIXTURE_MCP_SERVER_NAME, FORBIDDEN_TOOL)
+        })
         .map(|capability| capability.reference.clone())
         .context("fixture catalog omitted forbidden amendment capability")?;
     let completed_before = snapshot
@@ -1429,7 +1446,15 @@ where
     let session_id = test.create_session(label).await?;
     let session = test.client().get_session(session_id).await?;
     if let Some(tool_name) = allowed_tool {
-        seed_allow_policy(fixture, test.client(), session.tenant_id, tool_name).await?;
+        // Callers name the tool the way the fixture server publishes it; the
+        // policy rule keys on the registered server-qualified reference.
+        seed_allow_policy(
+            fixture,
+            test.client(),
+            session.tenant_id,
+            &moa_hands::mcp_tool_reference(FIXTURE_MCP_SERVER_NAME, tool_name),
+        )
+        .await?;
     }
     let originating_user_sequence_num = test
         .client()
@@ -2404,18 +2429,27 @@ fn needs_replan_result(reason: &str) -> ExecutionTaskResult {
     }
 }
 
+/// Server name the loopback capability fixture is configured under.
+const FIXTURE_MCP_SERVER_NAME: &str = "fixture-capability";
+
+/// Resolves one fixture tool's catalogued reference from its unqualified name.
+///
+/// Callers name tools the way the fixture server publishes them; the catalog
+/// keys connector tools under their server-qualified reference, so the
+/// qualification happens here rather than at every call site.
 fn capability_reference(
     planning: &ExecutionPlanningContextResponse,
     name: &str,
 ) -> Result<CapabilityReference> {
+    let qualified = moa_hands::mcp_tool_reference(FIXTURE_MCP_SERVER_NAME, name);
     planning
         .snapshot
         .catalog
         .capabilities
         .iter()
-        .find(|capability| capability.reference.name == name)
+        .find(|capability| capability.reference.name == qualified)
         .map(|capability| capability.reference.clone())
-        .with_context(|| format!("planning catalog omitted fixture capability `{name}`"))
+        .with_context(|| format!("planning catalog omitted fixture capability `{qualified}`"))
 }
 
 fn map_tool(name: &str, item_key_pointer: &str) -> FixtureCapabilityTool {

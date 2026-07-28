@@ -1,13 +1,15 @@
 use moa_artifacts::simulation::ExperimentTargetKind;
+use moa_core::types::experiments::{
+    ExperimentScorecard, ScorecardEffect, ScorecardRequirement, ScorecardValueType,
+};
 use moa_core::{
     types::action_policy::ActionRuleScope, types::channel::Attachment,
     types::execution_planning::PinnedExecutionTemplateRef, types::identifiers::ModelId,
     types::identifiers::SessionId, types::identifiers::TenantId,
 };
 use moa_experiments::model::{
-    ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
-    ExperimentTarget, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason,
-    ExperimentVariant,
+    ExperimentRunRecord, ExperimentRunStatus, ExperimentSimulatorConfig, ExperimentTarget,
+    ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
 };
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -102,19 +104,39 @@ fn execution_template_target_round_trips_through_public_model_offline() {
 #[test]
 fn scorecard_carries_expected_scores_without_evaluator_execution_offline() {
     // Pins: scorecards define expected score names and evaluator metadata only.
-    let scorecard = ExperimentScorecard {
-        score_names: vec!["grounding".to_string(), "task_success".to_string()],
-        evaluator_metadata: json!({
-            "judge": "offline-replay",
-            "rubric_version": "2026-06-16"
-        }),
-    };
+    let scorecard = ExperimentScorecard::new(vec![
+        ScorecardRequirement {
+            evaluator_id: "target_completed".to_string(),
+            evaluator_version: "v1".to_string(),
+            score_name: "target_completed".to_string(),
+            value_type: ScorecardValueType::Boolean,
+            config: json!({}),
+            effect: ScorecardEffect::Blocking,
+        },
+        ScorecardRequirement {
+            evaluator_id: "scenario_quality".to_string(),
+            evaluator_version: "v1".to_string(),
+            score_name: "scenario_quality".to_string(),
+            value_type: ScorecardValueType::Numeric,
+            config: json!({}),
+            effect: ScorecardEffect::Informational,
+        },
+    ])
+    .expect("scorecard is structurally valid");
 
     let encoded = serde_json::to_string(&scorecard).expect("scorecard serializes");
     let decoded: ExperimentScorecard =
         serde_json::from_str(&encoded).expect("scorecard deserializes");
 
-    assert_eq!(decoded.score_names, ["grounding", "task_success"]);
+    assert_eq!(
+        decoded
+            .requirements()
+            .iter()
+            .map(|requirement| requirement.score_name.as_str())
+            .collect::<Vec<_>>(),
+        ["target_completed", "scenario_quality"]
+    );
+    assert_eq!(decoded.blocking_requirements().count(), 1);
     assert_eq!(decoded, scorecard);
 }
 
@@ -242,10 +264,15 @@ fn record_for_target(
             }),
             metadata: json!({ "cohort": "offline" }),
         },
-        scorecard: ExperimentScorecard {
-            score_names: vec!["grounding".to_string()],
-            evaluator_metadata: json!({ "judge": "offline-replay" }),
-        },
+        scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
+            evaluator_id: "target_completed".to_string(),
+            evaluator_version: "v1".to_string(),
+            score_name: "target_completed".to_string(),
+            value_type: ScorecardValueType::Boolean,
+            config: json!({}),
+            effect: ScorecardEffect::Blocking,
+        }])
+        .expect("fixture scorecard is valid"),
         score_run_id: Uuid::now_v7(),
         session_id,
         execution_run_uid,

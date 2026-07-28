@@ -7,6 +7,7 @@ use chrono::Utc;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::ArtifactRegistry;
 use moa_artifacts::simulation::ExperimentTargetKind;
+use moa_config::MoaConfig;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::{
     events::Event, events::EventType, traits::SessionStore, types::action_policy::ActionRuleScope,
@@ -36,6 +37,7 @@ use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
+use crate::lineage::ScoreLineageHandle;
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::llm_gateway::{LLMGatewayImpl, compute_cost_cents};
@@ -50,16 +52,18 @@ use crate::workflows::experiment_errors::{
     non_retryable_handler_error, plan_expansion_error_to_handler_error,
 };
 
+mod finalize;
 mod status;
 mod target_execution;
 mod trial_simulator;
 
+use finalize::{TrialFinalization, finalize_trial};
 use status::{
     attach_current_trial_trace, insert_or_load_trial, persist_trial_status,
     persist_trial_status_by_key, status_response_from_record, trial_status_allows_child_start,
     trial_status_response,
 };
-use target_execution::{run_agent_loop_trial, run_execution_template_trial};
+use target_execution::{TrialTargetOutcome, run_agent_loop_trial, run_execution_template_trial};
 use trial_simulator::load_simulator_context;
 
 const K_RUN_UID: &str = "run_uid";
@@ -151,20 +155,30 @@ pub struct ExperimentTrialRunImpl {
     pool: sqlx::PgPool,
     session_store: Arc<PostgresSessionStore>,
     providers: Arc<ProviderRegistry>,
+    score_lineage: Option<ScoreLineageHandle>,
+    config: Arc<MoaConfig>,
 }
 
 impl ExperimentTrialRunImpl {
     /// Creates a trial workflow with its durable stores and provider registry.
+    ///
+    /// `score_lineage` is `None` when the deployment selected a telemetry-only
+    /// lineage sink. Trials still run, but they fail with a stable code instead
+    /// of reporting evidence that was never stored.
     #[must_use]
     pub fn new(
         pool: sqlx::PgPool,
         session_store: Arc<PostgresSessionStore>,
         providers: Arc<ProviderRegistry>,
+        score_lineage: Option<ScoreLineageHandle>,
+        config: Arc<MoaConfig>,
     ) -> Self {
         Self {
             pool,
             session_store,
             providers,
+            score_lineage,
+            config,
         }
     }
 }
@@ -193,9 +207,11 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
         match run_trial(
             &ctx,
             request.clone(),
+            self.config.as_ref(),
             &self.pool,
             &self.session_store,
             &self.providers,
+            self.score_lineage.as_ref(),
         )
         .await
         {
@@ -286,12 +302,18 @@ pub fn trial_workflow_key(run_uid: Uuid, trial_key: &str) -> String {
     format!("{run_uid}:{trial_key}")
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the trial body keeps its durable stores and score sink explicit"
+)]
 async fn run_trial(
     ctx: &WorkflowContext<'_>,
     request: ExperimentTrialRunWorkflowRequest,
+    config: &MoaConfig,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
     providers: &Arc<ProviderRegistry>,
+    score_lineage: Option<&ScoreLineageHandle>,
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
     let trial = insert_or_load_trial(ctx, request.tenant_id, request.trial.clone(), pool).await?;
     ctx.set(K_TRIAL_UID, Json(trial.trial_uid));
@@ -315,23 +337,48 @@ async fn run_trial(
     ctx.set(K_STATUS, Json(trial.status));
 
     let simulator_context = load_simulator_context(ctx, trial.clone(), pool).await?;
-    match trial.target_kind {
+    let outcome = match trial.target_kind {
         ExperimentTargetKind::AgentLoop => {
             run_agent_loop_trial(
                 ctx,
                 request,
-                trial,
+                trial.clone(),
                 simulator_context,
                 pool,
                 session_store,
                 providers,
             )
-            .await
+            .await?
         }
         ExperimentTargetKind::ExecutionTemplate => {
-            run_execution_template_trial(ctx, request, trial, pool, session_store).await
+            run_execution_template_trial(ctx, request, trial.clone(), config, pool, session_store)
+                .await?
         }
-    }
+    };
+
+    // Evaluation happens here, before any terminal status is persisted. The
+    // target paths deliberately return evidence rather than writing a status
+    // themselves, so there is exactly one place a trial can become terminal and
+    // exactly one order in which that can happen.
+    let TrialTargetOutcome {
+        evidence,
+        terminal_status,
+        stop_reason,
+        error,
+    } = outcome;
+    finalize_trial(
+        ctx,
+        TrialFinalization {
+            trial: &trial,
+            evidence,
+            terminal_status,
+            stop_reason,
+            error,
+        },
+        score_lineage,
+        pool,
+    )
+    .await
 }
 
 fn new_session_meta(

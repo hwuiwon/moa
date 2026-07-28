@@ -6,6 +6,7 @@ pub mod artifact;
 pub mod candidates;
 pub mod distiller;
 pub mod embeddings;
+pub mod evidence;
 pub mod format;
 pub mod improver;
 pub mod lessons;

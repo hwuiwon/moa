@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moa_core::traits::SessionRepository;
+use moa_core::traits::{SessionEventLookupStore, SessionStore};
 use moa_core::{
     error::MoaError, error::ToolFailureClass, events::Event, events::EventType,
     types::action_policy::ExecutionTaskOrigin, types::completion::ToolInvocation,
@@ -113,11 +113,24 @@ pub struct ToolRunPlan {
     pub max_attempts: u32,
 }
 
+/// The two session-log contracts durable tool execution reads through.
+///
+/// They are supplied together because no path needs only one: a tool call is
+/// resolved against its session and then de-duplicated against that session's
+/// event log. Two independently settable options could be half-configured, and
+/// the missing half would surface as a terminal error on the first live call
+/// rather than at composition.
+#[derive(Clone)]
+struct SessionAccess {
+    sessions: Arc<dyn SessionStore>,
+    events: Arc<dyn SessionEventLookupStore>,
+}
+
 /// Concrete Restate service implementation backed by a shared `ToolRouter`.
 #[derive(Clone)]
 pub struct ToolExecutorImpl {
     router: Arc<ToolRouter>,
-    session_store: Option<Arc<dyn SessionRepository>>,
+    session_access: Option<SessionAccess>,
     trusted_manifest_store: Option<Arc<dyn TrustedSandboxFileManifestStore>>,
 }
 
@@ -127,15 +140,19 @@ impl ToolExecutorImpl {
     pub fn new(router: Arc<ToolRouter>) -> Self {
         Self {
             router,
-            session_store: None,
+            session_access: None,
             trusted_manifest_store: None,
         }
     }
 
-    /// Supplies the session repository used by durable execution paths.
+    /// Supplies the session reads and event lookups durable execution paths use.
     #[must_use]
-    pub fn with_session_store(mut self, session_store: Arc<dyn SessionRepository>) -> Self {
-        self.session_store = Some(session_store);
+    pub fn with_session_store(
+        mut self,
+        sessions: Arc<dyn SessionStore>,
+        events: Arc<dyn SessionEventLookupStore>,
+    ) -> Self {
+        self.session_access = Some(SessionAccess { sessions, events });
         self
     }
 
@@ -149,10 +166,22 @@ impl ToolExecutorImpl {
         self
     }
 
-    fn required_session_repository(&self) -> Result<Arc<dyn SessionRepository>, HandlerError> {
-        self.session_store.clone().ok_or_else(|| {
-            TerminalError::new("tool executor session repository is not configured").into()
-        })
+    fn required_sessions(&self) -> Result<Arc<dyn SessionStore>, HandlerError> {
+        self.session_access
+            .as_ref()
+            .map(|access| access.sessions.clone())
+            .ok_or_else(|| {
+                TerminalError::new("tool executor session access is not configured").into()
+            })
+    }
+
+    fn required_session_events(&self) -> Result<Arc<dyn SessionEventLookupStore>, HandlerError> {
+        self.session_access
+            .as_ref()
+            .map(|access| access.events.clone())
+            .ok_or_else(|| {
+                TerminalError::new("tool executor session access is not configured").into()
+            })
     }
 
     async fn execute_buffered(
@@ -233,12 +262,11 @@ impl ToolExecutorImpl {
         if let Some(store) = self.trusted_manifest_store.as_ref() {
             return store.load(session_id, manifest).await;
         }
-        let store = self.session_store.as_ref().ok_or_else(|| {
-            MoaError::ValidationError(
-                "tool executor session repository is not configured".to_string(),
-            )
+        let store = self.session_access.as_ref().ok_or_else(|| {
+            MoaError::ValidationError("tool executor session access is not configured".to_string())
         })?;
-        load_trusted_sandbox_manifest_from_store(store.as_ref(), session_id, manifest).await
+        load_trusted_sandbox_manifest_from_store(store.sessions.as_ref(), session_id, manifest)
+            .await
     }
 
     /// Returns the registered tool descriptors in stable name order.
@@ -307,7 +335,14 @@ impl ToolExecutor for ToolExecutorImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ToolExecutor", "execute");
         let request = request.into_inner();
-        let session = resolve_session(&ctx, &request, self.session_store.clone()).await?;
+        let session = resolve_session(
+            &ctx,
+            &request,
+            self.session_access
+                .as_ref()
+                .map(|access| access.sessions.clone()),
+        )
+        .await?;
         if request.caller_identity.tenant_id != session.tenant_id {
             return Err(TerminalError::new(
                 "tool caller identity does not match the loaded session tenant",
@@ -322,8 +357,15 @@ impl ToolExecutor for ToolExecutorImpl {
             screen_tool_input_for_canary(request.active_canary.as_deref(), &serialized_input),
             ToolInputCanaryScreening::Blocked(_)
         ) {
-            if !prior_tool_call_event_exists(&ctx, &session, &request, self.session_store.clone())
-                .await?
+            if !prior_tool_call_event_exists(
+                &ctx,
+                &session,
+                &request,
+                self.session_access
+                    .as_ref()
+                    .map(|access| access.events.clone()),
+            )
+            .await?
             {
                 append_tool_call_event(&ctx, &request).await?;
             }
@@ -334,8 +376,15 @@ impl ToolExecutor for ToolExecutorImpl {
             )));
         }
 
-        if !prior_tool_call_event_exists(&ctx, &session, &request, self.session_store.clone())
-            .await?
+        if !prior_tool_call_event_exists(
+            &ctx,
+            &session,
+            &request,
+            self.session_access
+                .as_ref()
+                .map(|access| access.events.clone()),
+        )
+        .await?
         {
             append_tool_call_event(&ctx, &request).await?;
         }
@@ -365,7 +414,7 @@ impl ToolExecutor for ToolExecutorImpl {
             &ctx,
             &session,
             &request,
-            self.required_session_repository()?,
+            self.required_session_events()?,
         )
         .await?
         {
@@ -418,12 +467,7 @@ impl ToolExecutor for ToolExecutorImpl {
         let request = request.into_inner();
         let origin = require_execution_task_origin(&request)?;
         let session_id = request.call.session_id;
-        let session = resolve_session(
-            &ctx,
-            &request.call,
-            Some(self.required_session_repository()?),
-        )
-        .await?;
+        let session = resolve_session(&ctx, &request.call, Some(self.required_sessions()?)).await?;
         if session.id != session_id || session.tenant_id != request.call.caller_identity.tenant_id {
             return Err(TerminalError::new(
                 "execution task tool call does not match its owning session",
@@ -672,7 +716,7 @@ fn annotate_tool_execution_span(session: &SessionMeta, request: &ToolCallRequest
 }
 
 async fn load_trusted_sandbox_manifest_from_store(
-    store: &(dyn SessionRepository + '_),
+    store: &(dyn SessionStore + '_),
     session_id: SessionId,
     manifest: &TrustedSandboxFileManifestRef,
 ) -> moa_core::error::Result<Vec<SandboxFile>> {
@@ -744,10 +788,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 async fn resolve_session(
     ctx: &Context<'_>,
     request: &ToolCallRequest,
-    session_store: Option<Arc<dyn SessionRepository>>,
+    session_store: Option<Arc<dyn SessionStore>>,
 ) -> Result<SessionMeta, HandlerError> {
     let session_store = session_store
-        .ok_or_else(|| TerminalError::new("tool executor session repository is not configured"))?;
+        .ok_or_else(|| TerminalError::new("tool executor session access is not configured"))?;
     let session_id = request.session_id;
     Ok(ctx
         .run(|| async move {
@@ -766,7 +810,7 @@ async fn prior_non_idempotent_result_exists(
     ctx: &Context<'_>,
     session: &SessionMeta,
     request: &ToolCallRequest,
-    session_store: Arc<dyn SessionRepository>,
+    session_store: Arc<dyn SessionEventLookupStore>,
 ) -> Result<bool, HandlerError> {
     let session_id = request.session_id;
     let storage_partition_id = storage_partition_id_for_session(session);
@@ -795,11 +839,11 @@ async fn prior_tool_call_event_exists(
     ctx: &Context<'_>,
     session: &SessionMeta,
     request: &ToolCallRequest,
-    session_store: Option<Arc<dyn SessionRepository>>,
+    session_store: Option<Arc<dyn SessionEventLookupStore>>,
 ) -> Result<bool, HandlerError> {
     let session_id = request.session_id;
     let session_store = session_store
-        .ok_or_else(|| TerminalError::new("tool executor session repository is not configured"))?;
+        .ok_or_else(|| TerminalError::new("tool executor session access is not configured"))?;
 
     let storage_partition_id = storage_partition_id_for_session(session);
     let tool_call_id = request.tool_call_id;
@@ -1052,6 +1096,9 @@ mod tests {
 
     #[async_trait]
     impl HandProvider for InstallingProvider {
+        fn capabilities(&self) -> moa_core::types::hands::HandProviderCapabilities {
+            moa_hands::LOCAL_HAND_CAPABILITIES.clone()
+        }
         fn provider_name(&self) -> &str {
             "install-provider"
         }
@@ -1354,6 +1401,8 @@ mod tests {
         config.local.sandbox_dir = dir.path().join("sandbox").display().to_string();
         config.local.docker_enabled = false;
         config.mcp_servers = vec![McpServerConfig {
+            required: false,
+            discovery: moa_config::McpDiscoveryMode::Eager,
             name: "reviewed-mcp".to_string(),
             transport: McpTransportConfig::Http,
             url: Some(format!("http://{addr}")),
@@ -1374,7 +1423,12 @@ mod tests {
             .await
             .expect("build MCP router");
         let executor = ToolExecutorImpl::new(Arc::new(router));
-        let mut request = tool_request("reviewed_lookup");
+        // The model calls the server-qualified reference; the assertion on the
+        // wire body above pins that the server is still asked for its own name.
+        let mut request = tool_request(&moa_hands::mcp_tool_reference(
+            "reviewed-mcp",
+            "reviewed_lookup",
+        ));
         request.provider_tool_use_id = Some("provider-reviewed-call-1".to_string());
         request.input = serde_json::json!({"item_key": "AAPL-10K"});
 
@@ -1417,6 +1471,9 @@ mod tests {
         registry.retarget_hand_tools(vec![HandRoute {
             provider: provider.provider_name().to_string(),
             tier: SandboxTier::Container,
+            policy: moa_core::types::hands::SandboxPolicySnapshot::builtin(
+                moa_core::types::hands::BuiltinPolicyRevision::RouteUnset,
+            ),
         }]);
         registry.retain_only(["bash"]);
         let provider_trait: Arc<dyn HandProvider> = provider.clone();
@@ -1438,10 +1495,14 @@ mod tests {
                 executable: false,
             }],
         };
-        let executor = ToolExecutorImpl::new(Arc::new(ToolRouter::new(registry, providers)))
-            .with_trusted_manifest_store(Arc::new(StaticTrustedManifestStore {
-                files: files.clone(),
-            }));
+        let executor = ToolExecutorImpl::new(Arc::new(ToolRouter::new(
+            registry,
+            providers,
+            moa_hands::local_development_sandbox_policy(),
+        )))
+        .with_trusted_manifest_store(Arc::new(StaticTrustedManifestStore {
+            files: files.clone(),
+        }));
         (executor, provider, files, manifest)
     }
 
@@ -1528,7 +1589,12 @@ mod tests {
         registry.register_builtin(Arc::new(moa_hands::tools::memory::MemoryRememberTool));
         let recorder = Arc::new(RecordingMemoryToolExecutor::default());
         let router = Arc::new(
-            ToolRouter::new(registry, HashMap::new()).with_memory_tool_executor(recorder.clone()),
+            ToolRouter::new(
+                registry,
+                HashMap::new(),
+                moa_hands::local_development_sandbox_policy(),
+            )
+            .with_memory_tool_executor(recorder.clone()),
         );
         let executor = ToolExecutorImpl::new(router);
 

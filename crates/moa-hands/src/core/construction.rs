@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use moa_config::CloudHandsConfig;
+use moa_config::LOCAL_DEVELOPMENT_SANDBOX_REVISION;
 use moa_config::McpServerCredentialScope;
 use moa_config::MoaConfig;
 use moa_config::ToolBudgetConfig;
@@ -12,31 +13,47 @@ use moa_config::ToolOutputConfig;
 use moa_core::{
     error::MoaError, error::Result, traits::HandProvider, traits::LineageHandle,
     traits::NullLineageHandle, traits::SessionStore, types::action_policy::ActionPolicyEffect,
+    types::hands::BuiltinPolicyRevision, types::hands::SandboxPolicySnapshot,
     types::hands::SandboxTier,
 };
 use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, MCPCredentialProxy, McpDeploymentCredentials,
-    McpEgressGuard,
+    McpEgressGuard, UnmatchedPermissionPattern,
 };
-
-use crate::adapters::daytona::DaytonaHandProvider;
-use crate::adapters::e2b::E2BHandProvider;
-use crate::adapters::local::LocalHandProvider;
-use crate::adapters::mcp::MCPClient;
 
 use super::mcp_connections::TenantMcpCredentialOwners;
 use super::normalization::expand_local_path;
+use super::profile::{deployment_sandbox_policy, route_sandbox_policy};
 use super::{DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, HandRoute, ToolRegistry, ToolRouter};
+use crate::adapters::daytona::DaytonaHandProvider;
+use crate::adapters::e2b::E2BHandProvider;
+use crate::adapters::local::LocalHandProvider;
 
 impl ToolRouter {
-    /// Creates a router from explicit providers and a tool registry.
-    pub fn new(registry: ToolRegistry, providers: HashMap<String, Arc<dyn HandProvider>>) -> Self {
+    /// Creates a router from explicit providers, a tool registry, and the
+    /// deployment sandbox policy layer.
+    ///
+    /// `deployment_sandbox_policy` is a required parameter rather than a
+    /// settable option: the outermost policy layer has to be stated before a
+    /// router exists, so no code path can reach provisioning with a substituted
+    /// default.
+    pub fn new(
+        registry: ToolRegistry,
+        providers: HashMap<String, Arc<dyn HandProvider>>,
+        deployment_sandbox_policy: SandboxPolicySnapshot,
+    ) -> Self {
+        let tool_schema_snapshot = Arc::new(registry.default_tool_schemas());
         Self {
-            registry,
+            registry: std::sync::RwLock::new(Arc::new(registry)),
+            tool_schema_snapshot: std::sync::RwLock::new(tool_schema_snapshot),
             providers,
+            deployment_sandbox_policy,
+            tenant_sandbox_policy: None,
+            hand_lease_reaper_installed: false,
             local_provider: None,
             mcp_clients: tokio::sync::RwLock::new(HashMap::new()),
             mcp_servers: HashMap::new(),
+            mcp_health: tokio::sync::RwLock::new(std::collections::BTreeMap::new()),
             mcp_proxy: None,
             tenant_mcp: None,
             mcp_egress_guard: None,
@@ -47,6 +64,7 @@ impl ToolRouter {
             installed_files: tokio::sync::RwLock::new(HashMap::new()),
             workspace_roots: tokio::sync::RwLock::new(HashMap::new()),
             policies: ActionPolicies::default(),
+            unmatched_permission_patterns: std::sync::RwLock::new(Vec::new()),
             rule_store: None,
             session_store: None,
             memory_tool_executor: tokio::sync::RwLock::new(None),
@@ -74,8 +92,33 @@ impl ToolRouter {
         Ok(Self {
             sandbox_root: Some(sandbox_root.as_ref().to_path_buf()),
             local_provider: Some(local_provider),
-            ..Self::new(registry, providers)
+            ..Self::new(
+                registry,
+                providers,
+                MoaConfig::default().sandbox_policy.deployment.snapshot()?,
+            )
         })
+    }
+
+    /// Attaches the durable owner of each tenant's authored sandbox policy layer.
+    #[must_use]
+    pub fn with_tenant_sandbox_policy_store(
+        mut self,
+        store: Arc<dyn super::profile::TenantSandboxPolicyStore>,
+    ) -> Self {
+        self.tenant_sandbox_policy = Some(store);
+        self
+    }
+
+    /// Declares that the durable hand-lease reaper is running for this deployment.
+    ///
+    /// Providers that rely on the reaper to enforce a deadline are admitted for
+    /// bounded deadlines only once this is set, so a deployment that forgets the
+    /// reaper fails admission instead of leaking sandboxes.
+    #[must_use]
+    pub fn with_hand_lease_reaper(mut self) -> Self {
+        self.hand_lease_reaper_installed = true;
+        self
     }
 
     /// Creates a tool router from the loaded MOA config.
@@ -100,6 +143,7 @@ impl ToolRouter {
                 "configured MCP servers require an egress guard".to_string(),
             ));
         }
+        validate_mcp_server_configuration(config)?;
         validate_tenant_mcp_owners(config, tenant_mcp.as_ref())?;
 
         let hand_routes = configured_hand_routes(config)?;
@@ -162,7 +206,7 @@ impl ToolRouter {
             mcp_egress_guard,
             rule_store,
             tenant_mcp: tenant_mcp.map(Arc::new),
-            ..Self::new(registry, providers)
+            ..Self::new(registry, providers, deployment_sandbox_policy(config)?)
         }
         .with_tool_output_config(config.tool_output.clone())
         .with_tool_budgets(config.tool_budgets.clone())
@@ -171,8 +215,90 @@ impl ToolRouter {
         if !config.mcp_servers.is_empty() {
             router.load_mcp_servers(config).await?;
         }
+        // Runs after discovery so connector tools are in the catalog being
+        // checked against; a pattern authored for a tool nobody registered is
+        // reported here rather than discovered when it fails to gate something.
+        router.refresh_unmatched_permission_patterns();
 
         Ok(router)
+    }
+
+    /// Rejects a fully assembled cloud router that has no owner for its
+    /// sandboxes' durable state or destruction.
+    ///
+    /// This runs after the builder chain rather than inside
+    /// [`ToolRouter::from_config`], because the lease store and the reaper are
+    /// attached by the composition root and simply do not exist yet while the
+    /// router is being constructed. A cloud deployment that provisions cloud
+    /// sandboxes with no durable lease owner cannot recover them across
+    /// replicas, and one with no reaper cannot destroy them at all — so both are
+    /// startup failures rather than something to discover in production.
+    pub fn validate_cloud_startup(&self, config: &MoaConfig) -> Result<()> {
+        if !config.security_profile.is_cloud() {
+            return Ok(());
+        }
+        if self.hand_leases.is_none() {
+            return Err(MoaError::ConfigError(
+                "security_profile=cloud requires a durable hand lease store owner".to_string(),
+            ));
+        }
+        if !self.hand_lease_reaper_installed {
+            return Err(MoaError::ConfigError(
+                "security_profile=cloud requires the durable hand-lease reaper; without it no \
+                 sandbox deadline has a destruction owner"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Recomputes which configured permission patterns govern no registered tool.
+    ///
+    /// Called after the catalog is built and after every refresh, because the
+    /// answer is a function of the live tool set: a pattern that matches nothing
+    /// today may match once a lazy connector is discovered, and one that matches
+    /// today stops mattering if its connector is withdrawn.
+    pub(super) fn refresh_unmatched_permission_patterns(&self) {
+        let tool_names = self.tool_names();
+        let unmatched = self.policies.unmatched_patterns(&tool_names);
+        for pattern in &unmatched {
+            tracing::warn!(
+                field = pattern.field,
+                pattern = %pattern.pattern,
+                registered_tools = tool_names.len(),
+                "configured permission pattern matches no registered tool, so it governs \
+                 nothing; a tool it was written to deny or gate would run ungated"
+            );
+        }
+        *self
+            .unmatched_permission_patterns
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = unmatched;
+    }
+
+    /// Returns the configured permission patterns that govern no registered tool.
+    #[must_use]
+    pub fn unmatched_permission_patterns(&self) -> Vec<UnmatchedPermissionPattern> {
+        self.unmatched_permission_patterns
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Returns the registered hand providers in stable name order.
+    ///
+    /// The durable reaper needs these to destroy sandboxes it claims, and it
+    /// must see exactly the providers this router can provision through — a
+    /// separately assembled list would silently stop reaping a provider someone
+    /// added here.
+    #[must_use]
+    pub fn hand_providers(&self) -> Vec<Arc<dyn HandProvider>> {
+        let mut names = self.providers.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        names
+            .into_iter()
+            .filter_map(|name| self.providers.get(&name).cloned())
+            .collect()
     }
 
     /// Attaches a persistent action-policy rule store to the router.
@@ -241,9 +367,57 @@ impl ToolRouter {
         self
     }
 
+    /// Returns the live catalog snapshot.
+    ///
+    /// Every read takes one whole snapshot, so a caller that inspects several
+    /// tools sees them all from the same catalog revision even if a background
+    /// refresh publishes between its calls.
+    pub(super) fn registry(&self) -> Arc<ToolRegistry> {
+        Arc::clone(
+            &self
+                .registry
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Publishes a new catalog snapshot and the prompt schemas derived from it.
+    ///
+    /// Both are replaced under the same publication so no caller can compile a
+    /// prompt from one catalog revision and dispatch against another.
+    pub(super) fn publish_registry(&self, registry: ToolRegistry) {
+        let schemas = Arc::new(registry.default_tool_schemas());
+        *self
+            .registry
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
+        *self
+            .tool_schema_snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = schemas;
+    }
+
     /// Returns the ordered tool schemas for prompt compilation.
+    ///
+    /// The order is the deployment's declared capability priority, not lexical
+    /// order: a consumer that must fit a schema cap drops from the end.
     pub fn tool_schemas(&self) -> Vec<serde_json::Value> {
-        self.registry.default_tool_schemas()
+        (*self.tool_schema_snapshot()).clone()
+    }
+
+    /// Returns the shared prompt-schema snapshot of the live catalog.
+    ///
+    /// Callers that recompile a prompt per turn should read this rather than
+    /// caching a copy at startup: a cached copy would keep advertising tools a
+    /// catalog refresh has already changed or withdrawn.
+    #[must_use]
+    pub fn tool_schema_snapshot(&self) -> Arc<Vec<serde_json::Value>> {
+        Arc::clone(
+            &self
+                .tool_schema_snapshot
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// Returns the prompt schemas for the read-only agentic memory tools.
@@ -252,20 +426,20 @@ impl ToolRouter {
     /// surfaces them onto a turn only when the agentic retrieval strategy is
     /// selected or the injected retrieval came back empty.
     pub fn agentic_memory_tool_schemas(&self) -> Vec<serde_json::Value> {
-        self.registry
+        self.registry()
             .tool_schemas_for(crate::tools::memory::AGENTIC_MEMORY_TOOL_NAMES)
     }
 
     /// Returns the stable registered tool names in sorted order.
     pub fn tool_names(&self) -> Vec<String> {
-        let mut names = self.registry.tools.keys().cloned().collect::<Vec<_>>();
+        let mut names = self.registry().tools.keys().cloned().collect::<Vec<_>>();
         names.sort();
         names
     }
 
     /// Returns whether a tool is currently registered on the router.
     pub fn has_tool(&self, name: &str) -> bool {
-        self.registry.tools.contains_key(name)
+        self.registry().tools.contains_key(name)
     }
 
     /// Returns whether the named tool provisions a hand/sandbox to execute.
@@ -274,12 +448,12 @@ impl ToolRouter {
     /// tools are the ones hard-excluded from the sandbox-free root coordinator's
     /// tool set; built-in and MCP tools are coordinator-safe.
     pub fn tool_requires_sandbox(&self, name: &str) -> bool {
-        self.registry.tool_requires_sandbox(name)
+        self.registry().tool_requires_sandbox(name)
     }
 
     /// Returns one registered tool definition by name.
     pub fn tool_definition(&self, name: &str) -> Option<moa_core::types::tools::ToolDefinition> {
-        self.registry
+        self.registry()
             .tools
             .get(name)
             .map(|registered| registered.definition.clone())
@@ -288,7 +462,7 @@ impl ToolRouter {
     /// Returns every registered tool definition in stable name order.
     pub fn tool_definitions(&self) -> Vec<moa_core::types::tools::ToolDefinition> {
         let mut definitions = self
-            .registry
+            .registry()
             .tools
             .values()
             .map(|registered| registered.definition.clone())
@@ -299,17 +473,19 @@ impl ToolRouter {
 
     /// Restricts the router to an explicit set of enabled tool names.
     #[must_use]
-    pub fn with_enabled_tools<I, S>(mut self, tool_names: I) -> Self
+    pub fn with_enabled_tools<I, S>(self, tool_names: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.registry.retain_only(tool_names);
+        let mut registry = (*self.registry()).clone();
+        registry.retain_only(tool_names);
+        self.publish_registry(registry);
         self
     }
 
+    /// Installs the MCP credential proxy and discovers the configured connectors.
     async fn load_mcp_servers(&mut self, config: &MoaConfig) -> Result<()> {
-        let mut registry = std::mem::take(&mut self.registry);
         // Deployment-owned servers have their operator credential read once here
         // and never again; tenant-owned servers contribute nothing to this set,
         // so no environment material is reachable from a tenant connector. The
@@ -323,21 +499,37 @@ impl ToolRouter {
         }));
 
         for server in &config.mcp_servers {
-            let client = Arc::new(MCPClient::connect(server).await?);
-            for tool in client.list_tools().await? {
-                registry.register_mcp_tool(&server.name, server.credential_scope, tool)?;
-            }
             self.mcp_servers.insert(server.name.clone(), server.clone());
-            self.mcp_clients
-                .write()
-                .await
-                .insert(server.name.clone(), client);
         }
 
-        registry.apply_budgets(&self.tool_budgets);
-        self.registry = registry;
-        Ok(())
+        self.load_mcp_catalog(config).await
     }
+}
+
+/// Rejects MCP server configurations a deterministic catalog cannot be built from.
+///
+/// Both rejections are startup failures because both are silent otherwise: a
+/// duplicate server name would have one connector's configuration quietly
+/// overwrite the other's, and a required connector configured for lazy discovery
+/// would let startup pass without ever having verified the integration the
+/// operator declared mandatory.
+fn validate_mcp_server_configuration(config: &MoaConfig) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for server in &config.mcp_servers {
+        if !seen.insert(server.name.as_str()) {
+            return Err(MoaError::ConfigError(format!(
+                "duplicate MCP server name configured: {}",
+                server.name
+            )));
+        }
+        if server.required && !server.discovery.is_eager() {
+            return Err(MoaError::ConfigError(format!(
+                "MCP server {} is required, so its tools cannot be discovered lazily",
+                server.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Requires the tenant-owned MCP owners whenever any configured server declares
@@ -442,6 +634,12 @@ fn validate_security_profile(
                 .to_string(),
         ));
     }
+    if config.sandbox_policy.is_local_development_default() {
+        return Err(MoaError::ConfigError(format!(
+            "security_profile=cloud requires an authored [sandbox_policy.deployment] section; \
+             found the built-in local development policy `{LOCAL_DEVELOPMENT_SANDBOX_REVISION}`"
+        )));
+    }
     let hands = config.cloud.hands.as_ref().ok_or_else(|| {
         MoaError::ConfigError(
             "security_profile=cloud requires a cloud.hands configuration section".to_string(),
@@ -477,7 +675,22 @@ fn cloud_provider_credential_present(hands: &CloudHandsConfig, provider: &str) -
     credential.is_some_and(|value| !value.trim().is_empty())
 }
 
+/// Attaches each route's authored sandbox policy layer, or the named
+/// route-unset layer when the deployment authored none for that provider.
+fn attach_route_policies(config: &MoaConfig, routes: &mut [HandRoute]) -> Result<()> {
+    for route in routes {
+        route.policy = route_sandbox_policy(config, &route.provider)?;
+    }
+    Ok(())
+}
+
 fn configured_hand_routes(config: &MoaConfig) -> Result<Vec<HandRoute>> {
+    let mut routes = configured_hand_route_targets(config)?;
+    attach_route_policies(config, &mut routes)?;
+    Ok(routes)
+}
+
+fn configured_hand_route_targets(config: &MoaConfig) -> Result<Vec<HandRoute>> {
     let provider = config
         .cloud
         .hands
@@ -523,28 +736,26 @@ fn configured_hand_routes(config: &MoaConfig) -> Result<Vec<HandRoute>> {
 
 fn route_for_provider(provider: &str) -> Result<HandRoute> {
     match provider {
-        DEFAULT_PROVIDER_NAME => Ok(HandRoute {
-            provider: DEFAULT_PROVIDER_NAME.to_string(),
-            tier: SandboxTier::Local,
-        }),
+        DEFAULT_PROVIDER_NAME => Ok(HandRoute::local()),
         cloud_provider => route_for_cloud_provider(cloud_provider),
     }
 }
 
 fn route_for_cloud_provider(provider: &str) -> Result<HandRoute> {
-    match provider {
-        "daytona" => Ok(HandRoute {
-            provider: "daytona".to_string(),
-            tier: SandboxTier::Container,
-        }),
-        "e2b" => Ok(HandRoute {
-            provider: "e2b".to_string(),
-            tier: SandboxTier::MicroVM,
-        }),
-        other => Err(MoaError::ConfigError(format!(
-            "unsupported cloud hand provider configured: {other}"
-        ))),
-    }
+    let tier = match provider {
+        "daytona" => SandboxTier::Container,
+        "e2b" => SandboxTier::MicroVM,
+        other => {
+            return Err(MoaError::ConfigError(format!(
+                "unsupported cloud hand provider configured: {other}"
+            )));
+        }
+    };
+    Ok(HandRoute {
+        provider: provider.to_string(),
+        tier,
+        policy: SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
+    })
 }
 
 fn cloud_provider_requested(hands: &CloudHandsConfig, provider: &str) -> bool {

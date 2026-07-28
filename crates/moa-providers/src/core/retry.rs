@@ -12,7 +12,7 @@ use reqwest::{
 use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::core::rate_guard::RateGuard;
+use crate::core::rate_guard::{RateGuard, RateLimitScope};
 
 /// Records a bounded `provider_retry` span event on the ambient span (the
 /// caller's `llm_completion`/embedding/rerank span, entered via
@@ -94,7 +94,7 @@ impl RetryPolicy {
                 Err(error) => {
                     let retry_eligible =
                         self.is_retryable_transport_error(&error) && attempt < self.max_retries;
-                    if retry_eligible && guard.allow_retry() {
+                    if retry_eligible && guard.allow_retry().await {
                         let delay = self.delay_for_attempt(attempt);
                         tracing::warn!(
                             attempt = attempt + 1,
@@ -135,10 +135,15 @@ impl RetryPolicy {
                 // Pause the shared provider guard immediately. This protects
                 // concurrent calls even when this request spends its own retry
                 // budget and later succeeds.
-                guard.record_rate_limited(rate_limit_delay);
+                // This path sees a status, headers, and an opaque body — not the
+                // vendor taxonomy that would say whether the limit is the
+                // model's or the whole account's. Record the broader scope.
+                guard
+                    .record_rate_limited(rate_limit_delay, RateLimitScope::unclassified())
+                    .await;
             }
             let retry_eligible = Self::is_retryable_status(status) && attempt < self.max_retries;
-            if retry_eligible && guard.allow_retry() {
+            if retry_eligible && guard.allow_retry().await {
                 let delay = self.retry_delay(rate_limit_delay, attempt);
                 tracing::warn!(
                     attempt = attempt + 1,
@@ -353,6 +358,8 @@ mod tests {
 
     use moa_core::error::MoaError;
 
+    use moa_config::ProviderPacingConfig;
+
     use super::{RateGuard, RetryPolicy, retry_after_delay_from_message};
 
     #[tokio::test]
@@ -385,7 +392,10 @@ mod tests {
         let url = format!("http://{address}/retry");
         let response = RetryPolicy::default()
             .with_max_retries(3)
-            .send_gated(|| client.get(&url), &RateGuard::new())
+            .send_gated(
+                || client.get(&url),
+                &RateGuard::new(ProviderPacingConfig::default()),
+            )
             .await
             .unwrap();
 
@@ -436,7 +446,10 @@ mod tests {
             let span = tracing::info_span!("test_retry_span");
             RetryPolicy::default()
                 .with_max_retries(3)
-                .send_gated(|| client.get(&url), &RateGuard::new())
+                .send_gated(
+                    || client.get(&url),
+                    &RateGuard::new(ProviderPacingConfig::default()),
+                )
                 .instrument(span)
                 .await
                 .unwrap();
@@ -504,7 +517,7 @@ mod tests {
             }
         });
 
-        let guard = RateGuard::new();
+        let guard = RateGuard::new(ProviderPacingConfig::default());
         let client = reqwest::Client::new();
         let url = format!("http://{address}/retry");
         let response = RetryPolicy {
@@ -519,7 +532,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(
-            guard.pause_remaining().is_some(),
+            guard.pause_remaining().await.expect("read pause").is_some(),
             "the guard must be paused by the first 429 even when a retry later succeeds"
         );
 
@@ -555,7 +568,10 @@ mod tests {
         };
 
         let result = policy
-            .send_gated(|| client.post(&url).body("payload"), &RateGuard::new())
+            .send_gated(
+                || client.post(&url).body("payload"),
+                &RateGuard::new(ProviderPacingConfig::default()),
+            )
             .await;
 
         assert!(result.is_err());
@@ -588,9 +604,9 @@ mod tests {
             }
         });
 
-        let guard = RateGuard::new();
+        let guard = RateGuard::new(ProviderPacingConfig::default());
         // Drain the retry budget so the next eligible retry is denied.
-        while guard.allow_retry() {}
+        while guard.allow_retry().await {}
 
         let client = reqwest::Client::new();
         let url = format!("http://{address}/exhausted");
@@ -604,6 +620,52 @@ mod tests {
             request_count.load(Ordering::SeqCst),
             1,
             "an exhausted retry budget must not drive additional requests"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_429_from_the_real_http_path_pauses_the_whole_credential() {
+        // Pins the conservative cooldown scope on the path that actually records
+        // it. The guard-level tests prove credential scope pauses every model;
+        // this proves the shared HTTP path CHOOSES credential scope, because
+        // nothing here can tell a model-scoped rate limit from account-level
+        // quota exhaustion. Without this, narrowing the recording call to the
+        // called model would let the credential's other models keep hammering an
+        // exhausted key with no test failing.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buffer = vec![0_u8; 2048];
+                let _ = socket.read(&mut buffer).await;
+                let response =
+                    "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 10\r\n\r\nrate limit";
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let guard = RateGuard::new(ProviderPacingConfig::default());
+        let called = guard.for_model("claude-opus-4-6");
+        let untouched = guard.for_model("claude-haiku-4-5");
+        assert!(untouched.pause_remaining().await.expect("read").is_none());
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/rate-limited");
+        let result = RetryPolicy::default()
+            .with_max_retries(0)
+            .send_gated(|| client.get(&url), &called)
+            .await;
+        assert!(matches!(result, Err(MoaError::RateLimited { .. })));
+
+        assert!(
+            untouched.pause_remaining().await.expect("read").is_some(),
+            "a 429 with no classifying evidence must pause every model on the credential"
         );
 
         server.abort();

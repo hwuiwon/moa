@@ -1,10 +1,10 @@
-//! mpsc to fjall to TimescaleDB/ClickHouse lineage writer.
+//! Postgres-accepted lineage capture: bounded ingress, a durable acceptance
+//! queue, and a leased drain into TimescaleDB or ClickHouse.
 
 pub mod admin;
 
 mod clickhouse;
 mod error;
-mod fjall_journal;
 mod mpsc_sink;
 pub mod otel;
 mod schema;
@@ -16,4 +16,4 @@ pub use error::{Error, Result};
 pub use mpsc_sink::{MpscSink, MpscSinkConfig, NullSink, OtelSink};
 pub use schema::ensure_schema;
 pub use store::LineageStore;
-pub use writer::{WriterHandle, WriterStats, spawn_writer};
+pub use writer::{WriterHandle, WriterHealth, WriterState, WriterStats, spawn_writer};

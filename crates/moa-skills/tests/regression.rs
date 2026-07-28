@@ -10,14 +10,15 @@ use moa_eval_core::{
     EvalResult, EvalStatus, Evaluator, OutputMatchEvaluator, TestSuite, TrajectoryMatchEvaluator,
     TrajectoryStep, score_is_failure,
 };
+use moa_skills::evidence::SanitizedLearningEvidence;
 use moa_skills::format::parse_skill_markdown;
 use moa_skills::regression::{
     SkillRegressionSummary, compare_scores, generate_skill_test_suite_source,
 };
-use support::{SESSION_WITH_8_TOOL_CALLS, load_session_fixture, skill_markdown};
+use support::{SESSION_WITH_8_TOOL_CALLS, experience_input, load_session_fixture, skill_markdown};
 
-#[test]
-fn generated_suite_source_is_reviewable_without_writing_files() {
+#[tokio::test]
+async fn generated_suite_source_is_reviewable_without_writing_files() {
     // Pins: proposal generation can attach a regression suite as draft payload text.
     let loaded = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
     let markdown = skill_markdown(
@@ -28,9 +29,9 @@ fn generated_suite_source_is_reviewable_without_writing_files() {
     );
     let skill = parse_skill_markdown(&markdown).expect("parse test skill");
 
-    let generated =
-        generate_skill_test_suite_source(loaded.session.tenant_id, &skill, &loaded.events)
-            .expect("generate suite source");
+    let evidence = fixture_evidence(&loaded).await;
+    let generated = generate_skill_test_suite_source(loaded.session.tenant_id, &skill, &evidence)
+        .expect("generate suite source");
 
     assert!(
         generated
@@ -88,9 +89,9 @@ async fn generated_regression_suite_runs_green_against_the_skill_canonical_traje
     );
     let skill = parse_skill_markdown(&markdown).expect("parse test skill");
 
-    let generated =
-        generate_skill_test_suite_source(loaded.session.tenant_id, &skill, &loaded.events)
-            .expect("generate suite source");
+    let evidence = fixture_evidence(&loaded).await;
+    let generated = generate_skill_test_suite_source(loaded.session.tenant_id, &skill, &evidence)
+        .expect("generate suite source");
     let suite: TestSuite =
         toml::from_str(&generated.source_toml).expect("generated suite source is valid TOML");
     let case = suite
@@ -181,4 +182,63 @@ async fn run_suite_case(
         );
     }
     scores
+}
+
+/// Sanitizes a loaded fixture session into the evidence the suite generator takes.
+async fn fixture_evidence(loaded: &support::LoadedSession) -> SanitizedLearningEvidence {
+    experience_input(loaded, "run the learned workflow")
+        .await
+        .evidence
+}
+
+#[tokio::test]
+async fn generated_suite_carries_redaction_placeholders_not_source_identifiers() {
+    // Pins: the suite TOML is a durable draft artifact that a reviewer reads and
+    // the gate executes, so identifiers present in the source transcript must not
+    // survive into it. The case input comes from the caller's message and the
+    // expectations from the assistant response, so both carriers are checked.
+    const PLANTED_USER_EMAIL: &str = "planted-user@example.com";
+    const PLANTED_RESPONSE_EMAIL: &str = "planted-response@example.com";
+
+    let mut loaded = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
+    let mut replaced_user = false;
+    let mut replaced_response = false;
+    for record in &mut loaded.events {
+        match &mut record.event {
+            Event::UserMessage { text, .. } if !replaced_user => {
+                *text = format!("reset the login for {PLANTED_USER_EMAIL}");
+                replaced_user = true;
+            }
+            Event::BrainResponse { text, .. } => {
+                *text = format!("completed the reset and notified {PLANTED_RESPONSE_EMAIL}");
+                replaced_response = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        replaced_user && replaced_response,
+        "the fixture must carry a user message and an assistant response to plant into"
+    );
+
+    let evidence = fixture_evidence(&loaded).await;
+    let generated = moa_skills::regression::generate_skill_test_suite_source_for_name(
+        loaded.session.tenant_id,
+        "redaction-suite-skill",
+        &evidence,
+    )
+    .expect("generate suite source");
+
+    for planted in [PLANTED_USER_EMAIL, PLANTED_RESPONSE_EMAIL] {
+        assert!(
+            !generated.source_toml.contains(planted),
+            "{planted} survived into the generated suite: {}",
+            generated.source_toml
+        );
+    }
+    assert!(
+        generated.source_toml.contains("[EMAIL_REDACTED]"),
+        "the suite should carry the redaction placeholder where the identifier was: {}",
+        generated.source_toml
+    );
 }

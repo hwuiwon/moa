@@ -1,19 +1,21 @@
 # moa-lineage-sink
 
-Durable lineage writer: a bounded hot-path mpsc sink feeds a fjall journal,
-and an async worker lands rows in Postgres/TimescaleDB or ClickHouse. The
-backend switches on config presence — when `[clickhouse]` is configured, the
-high-volume `turn_lineage` stream moves to ClickHouse while scores, dead
-letters, and compliance chain state stay in Postgres. Also hosts the OTel
-span bridge formerly published as `moa-lineage-otel`.
+Durable lineage writer. Acceptance is a Postgres commit into
+`analytics.lineage_journal`; a leased worker claims committed rows and lands
+them in Postgres/TimescaleDB or ClickHouse. The bounded hot-path mpsc channel
+is best-effort ingress and a payload-free wake signal, never durability. When
+the ClickHouse backend is selected the high-volume `turn_lineage` stream moves
+there while scores, dead letters, and compliance chain state stay in Postgres.
+Also hosts the OTel span bridge formerly published as `moa-lineage-otel`.
 
 ## Structure
 
 - `admin` — admin read helpers for hot lineage rows.
+- `writer::acceptance` — the durable acceptance queue: commit, claim, lease,
+  and dequeue.
 - `clickhouse` — ClickHouse-backed store for high-volume `turn_lineage`
   rows.
 - `error` — crate `Error`/`Result`.
-- `fjall_journal` — durable fjall journal for pending lineage rows.
 - `mpsc_sink` — bounded hot-path mpsc `LineageSink` implementations
   (`MpscSink`, `NullSink`, `OtelSink`).
 - `otel` — OpenTelemetry/OpenInference attribute emitters that annotate the

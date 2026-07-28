@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use httpmock::Method::POST;
 use httpmock::prelude::*;
-use moa_authz::{AuthzCheckError, FgaClient, FgaConfig, configure_security_audit, require_authz};
+use moa_authz::{AuthzCheckError, FgaClient, FgaConfig, SecurityAudit, require_authz};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::{
     traits::{Identity, IdentityType},
@@ -65,6 +65,25 @@ fn fga_client(server: &MockServer) -> FgaClient {
     .expect("test FGA config should be valid")
 }
 
+/// Builds a client whose authorization decisions are audited.
+///
+/// The audit runtime is returned alongside so the caller keeps it alive; a
+/// dropped runtime aborts its writer, which is exactly the behaviour that makes
+/// ownership visible.
+fn audited_fga_client(
+    server: &MockServer,
+    pool: &PgPool,
+    emit_allows: bool,
+) -> (FgaClient, moa_ocsf::AuditRuntime) {
+    let audit = moa_ocsf::AuditRuntime::start(pool.clone()).expect("audit runtime should start");
+    let client = fga_client(server).with_security_audit(SecurityAudit {
+        pool: pool.clone(),
+        emitter: audit.emitter(),
+        emit_allows,
+    });
+    (client, audit)
+}
+
 fn check_body(user: &str, relation: &str, object: &str) -> serde_json::Value {
     json!({
         "authorization_model_id": "model-1",
@@ -82,7 +101,6 @@ async fn denied_require_authz_persists_ocsf_security_event_db() {
     // Authorization event before returning Forbidden, so denied decisions remain
     // fail-closed when security audit is configured.
     let pool = migrated_ocsf_pool().await;
-    configure_security_audit(pool.clone(), false);
 
     let server = MockServer::start();
     let tenant_id = Uuid::from_u128(0x7001);
@@ -106,8 +124,9 @@ async fn denied_require_authz_persists_ocsf_security_event_db() {
         then.status(200).json_body(json!({ "allowed": false }));
     });
 
+    let (client, _audit) = audited_fga_client(&server, &pool, false);
     let error = require_authz(
-        &fga_client(&server),
+        &client,
         &identity,
         ObjectType::Session,
         session_id,

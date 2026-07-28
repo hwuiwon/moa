@@ -5,7 +5,8 @@ use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::{
     types::action_policy::ActionRuleScope, types::agent::AgentSessionSelection,
     types::channel::Attachment, types::execution_planning::PinnedExecutionTemplateRef,
-    types::identifiers::ModelId, types::identifiers::SessionId,
+    types::experiments::ExperimentScorecard, types::identifiers::ModelId,
+    types::identifiers::SessionId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -227,15 +228,6 @@ pub struct ExperimentVariant {
     pub execution_template: Option<PinnedExecutionTemplateRef>,
     /// Variant-specific metadata.
     pub metadata: Value,
-}
-
-/// Scorecard definition attached to an experiment run.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExperimentScorecard {
-    /// Score names expected for this experiment.
-    pub score_names: Vec<String>,
-    /// Metadata about evaluators that produce the scores.
-    pub evaluator_metadata: Value,
 }
 
 /// Simulator settings used when expanding an experiment plan into trials.

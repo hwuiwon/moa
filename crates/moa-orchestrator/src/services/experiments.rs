@@ -675,7 +675,9 @@ pub async fn run_agent_revision_simulation_inner(
             plan_revision_uid: Some(request.plan_revision_uid),
             target: None,
             variant: None,
-            scorecard: serde_json::json!({}),
+            // Plan-backed: the pinned plan revision owns the scorecard, so this
+            // path must not supply one that would compete with it.
+            scorecard: None,
             score_run_id: None,
             idempotency_key: request.idempotency_key,
             agent_revision_variants: variants.clone(),
@@ -1075,22 +1077,22 @@ fn compare_tool_dependencies(
         tools
             .entry(dependency.name.clone())
             .or_insert((None, None))
-            .0 = Some(dependency.schema_hash.clone());
+            .0 = Some(dependency.identity_hash.clone());
     }
     for dependency in &new.tool_dependencies {
         tools
             .entry(dependency.name.clone())
             .or_insert((None, None))
-            .1 = Some(dependency.schema_hash.clone());
+            .1 = Some(dependency.identity_hash.clone());
     }
     tools
         .into_iter()
-        .filter_map(|(name, (base_schema_hash, new_schema_hash))| {
-            dependency_change(base_schema_hash.as_deref(), new_schema_hash.as_deref()).map(
+        .filter_map(|(name, (base_identity_hash, new_identity_hash))| {
+            dependency_change(base_identity_hash.as_deref(), new_identity_hash.as_deref()).map(
                 |change| AgentToolDependencyDelta {
                     name,
-                    base_schema_hash,
-                    new_schema_hash,
+                    base_identity_hash,
+                    new_identity_hash,
                     change,
                 },
             )
@@ -1174,8 +1176,8 @@ mod tests {
         let tool_deltas = compare_tool_dependencies(&base, &new);
         assert_eq!(tool_deltas.len(), 1);
         assert_eq!(tool_deltas[0].name, "file_read");
-        assert_eq!(tool_deltas[0].base_schema_hash.as_deref(), Some("hash-a"));
-        assert_eq!(tool_deltas[0].new_schema_hash.as_deref(), Some("hash-b"));
+        assert_eq!(tool_deltas[0].base_identity_hash.as_deref(), Some("hash-a"));
+        assert_eq!(tool_deltas[0].new_identity_hash.as_deref(), Some("hash-b"));
         assert_eq!(tool_deltas[0].change, AgentDependencyChange::Changed);
     }
 
@@ -1198,10 +1200,10 @@ mod tests {
         }
     }
 
-    fn tool_dependency(name: &str, schema_hash: &str) -> LockedToolRef {
+    fn tool_dependency(name: &str, identity_hash: &str) -> LockedToolRef {
         LockedToolRef {
             name: name.to_string(),
-            schema_hash: schema_hash.to_string(),
+            identity_hash: identity_hash.to_string(),
             provider: None,
         }
     }

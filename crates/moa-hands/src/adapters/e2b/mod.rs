@@ -6,15 +6,18 @@ mod client;
 mod tests;
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_config::MoaConfig;
 use moa_core::{
     error::MoaError, error::Result, error::ToolFailureClass, traits::HandProvider,
-    types::hands::HandHandle, types::hands::HandSpec, types::hands::HandStatus,
-    types::hands::SandboxFile, types::hands::SandboxTier, types::hands::validate_sandbox_file_path,
-    types::tools::ToolOutput,
+    types::hands::DeadlineEnforcement, types::hands::EgressMode, types::hands::HandHandle,
+    types::hands::HandProviderCapabilities, types::hands::HandSpec, types::hands::HandStatus,
+    types::hands::ResourceSupport, types::hands::SandboxFile, types::hands::SandboxProfile,
+    types::hands::SandboxTier, types::hands::SandboxTierCapabilities,
+    types::hands::validate_sandbox_file_path, types::tools::ToolOutput,
 };
 use reqwest::header::CONTENT_TYPE;
 use serde_json::{Value, json};
@@ -57,7 +60,6 @@ pub struct E2BHandProvider {
     api_url: String,
     sandbox_domain: String,
     default_template: String,
-    allow_internet_access: bool,
     sandbox_base_url_override: Option<String>,
     sandboxes: RwLock<HashMap<String, ConnectedSandbox>>,
 }
@@ -120,18 +122,9 @@ impl E2BHandProvider {
             api_url: api_url.into().trim_end_matches('/').to_string(),
             sandbox_domain: sandbox_domain.into(),
             default_template: default_template.into(),
-            allow_internet_access: false,
             sandbox_base_url_override: None,
             sandboxes: RwLock::new(HashMap::new()),
         })
-    }
-
-    /// Explicitly configures E2B sandbox internet access.
-    #[cfg(test)]
-    #[must_use]
-    pub fn with_allow_internet_access(mut self, allow_internet_access: bool) -> Self {
-        self.allow_internet_access = allow_internet_access;
-        self
     }
 
     /// Overrides the computed envd sandbox base URL. Intended for tests and local proxies.
@@ -143,15 +136,16 @@ impl E2BHandProvider {
     }
 
     async fn create_sandbox(&self, spec: &HandSpec) -> Result<String> {
+        let translated = E2BProfileFields::translate(spec.effective_profile.profile())?;
         let response = self
             .client
             .post(format!("{}/sandboxes", self.api_url))
             .json(&json!({
                 "templateID": spec.image.clone().unwrap_or_else(|| self.default_template.clone()),
                 "envVars": spec.env,
-                "timeout": spec.idle_timeout.as_secs().max(60),
+                "timeout": translated.timeout_secs,
                 "secure": true,
-                "allow_internet_access": self.allow_internet_access,
+                "allow_internet_access": translated.allow_internet_access,
                 "autoPause": true,
                 "autoResume": { "enabled": true },
             }))
@@ -408,10 +402,102 @@ fn sandbox_id(handle: &HandHandle) -> Result<&str> {
     }
 }
 
+/// Revision of the E2B provider's capability declaration.
+pub const E2B_CAPABILITIES_REVISION: &str = "e2b-hands-v1";
+
+/// What E2B can enforce for a microVM sandbox.
+///
+/// Only two of the six dimensions map onto documented sandbox-create fields:
+/// `timeout`, which E2B enforces as the sandbox's maximum lifetime, and
+/// `allow_internet_access`, which is a whole-sandbox on/off switch. CPU,
+/// memory, and disk are fixed by the template at build time and are not
+/// settable per sandbox, so a bounded request for any of them is refused rather
+/// than serialized into a field E2B would ignore. There is no per-destination
+/// filter, so an egress allowlist is refused too, and no idle field, so the
+/// durable reaper owns the idle deadline.
+pub static E2B_CAPABILITIES: LazyLock<HandProviderCapabilities> =
+    LazyLock::new(|| HandProviderCapabilities {
+        revision: E2B_CAPABILITIES_REVISION.to_string(),
+        tiers: vec![SandboxTierCapabilities {
+            tier: SandboxTier::MicroVM,
+            cpu: ResourceSupport::unbounded_only(),
+            memory: ResourceSupport::unbounded_only(),
+            ephemeral_disk: ResourceSupport::unbounded_only(),
+            egress_modes: vec![EgressMode::DenyAll, EgressMode::Unrestricted],
+            idle_enforcement: DeadlineEnforcement::DurableReaper,
+            max_lifetime_enforcement: DeadlineEnforcement::Provider,
+        }],
+    });
+
+/// E2B's smallest accepted sandbox timeout, in seconds.
+const E2B_MIN_TIMEOUT_SECS: u64 = 60;
+
+/// The sandbox-create fields E2B actually honors, translated from a profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct E2BProfileFields {
+    timeout_secs: u64,
+    allow_internet_access: bool,
+}
+
+impl E2BProfileFields {
+    /// Translates the enforceable dimensions and refuses the rest.
+    fn translate(profile: &SandboxProfile) -> Result<Self> {
+        reject_unsupported_e2b_resource("CPU", profile.cpu.bounded_millicores().is_some())?;
+        reject_unsupported_e2b_resource("memory", profile.memory.bounded_mebibytes().is_some())?;
+        reject_unsupported_e2b_resource(
+            "ephemeral disk",
+            profile.ephemeral_disk.bounded_mebibytes().is_some(),
+        )?;
+        let allow_internet_access = match profile.egress.mode() {
+            EgressMode::DenyAll => false,
+            EgressMode::Unrestricted => true,
+            EgressMode::AllowList => {
+                return Err(MoaError::Unsupported(
+                    "E2B sandboxes cannot enforce a per-destination egress allowlist".to_string(),
+                ));
+            }
+        };
+        // An unbounded maximum lifetime still has to become a number here,
+        // because E2B has no "no timeout" value. Refusing is the honest answer:
+        // a sandbox MOA believes is unbounded must not silently acquire E2B's
+        // own deadline.
+        let seconds = profile.max_lifetime.bounded_seconds().ok_or_else(|| {
+            MoaError::Unsupported(
+                "E2B sandboxes always carry a maximum lifetime and cannot serve an unbounded one"
+                    .to_string(),
+            )
+        })?;
+        if seconds.get() < E2B_MIN_TIMEOUT_SECS {
+            return Err(MoaError::Unsupported(format!(
+                "E2B sandboxes require a maximum lifetime of at least {E2B_MIN_TIMEOUT_SECS}s, \
+                 requested {seconds}s"
+            )));
+        }
+        Ok(Self {
+            timeout_secs: seconds.get(),
+            allow_internet_access,
+        })
+    }
+}
+
+/// Refuses a bounded resource dimension E2B fixes at template build time.
+fn reject_unsupported_e2b_resource(dimension: &str, bounded: bool) -> Result<()> {
+    if bounded {
+        return Err(MoaError::Unsupported(format!(
+            "E2B fixes {dimension} in the sandbox template and cannot honor a per-sandbox bound"
+        )));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl HandProvider for E2BHandProvider {
     fn provider_name(&self) -> &str {
         "e2b"
+    }
+
+    fn capabilities(&self) -> HandProviderCapabilities {
+        E2B_CAPABILITIES.clone()
     }
 
     async fn provision(&self, spec: HandSpec) -> Result<HandHandle> {

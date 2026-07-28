@@ -3,9 +3,10 @@
 use chrono::{DateTime, Utc};
 use moa_core::{
     error::MoaError, types::identifiers::SegmentId, types::identifiers::TenantId,
-    types::learning::LearningEntry, types::segment_assessment::SegmentAssessment,
+    types::learning::LearningEntry, types::learning::LearningLogSourceRef,
+    types::segment_assessment::SegmentAssessment,
 };
-use moa_core::{events::Event, types::events_stream::EventRecord};
+use moa_skills::evidence::SanitizedLearningEvidence;
 use uuid::Uuid;
 
 /// Request for building a learning-log entry from a segment assessment.
@@ -39,7 +40,9 @@ pub(crate) fn segment_assessment_learning_entry(
             ))
         })?,
         confidence: Some(request.assessment.confidence),
-        source_refs: vec![request.segment_id.0],
+        sources: vec![LearningLogSourceRef::TaskSegment {
+            segment_id: request.segment_id,
+        }],
         actor: "system".to_string(),
         valid_from: request.valid_from,
         valid_to: None,
@@ -54,17 +57,13 @@ pub(crate) fn segment_assessment_learning_entry(
 /// threshold) so unlearnable experiences never spawn a detached workflow that
 /// would load session data only to skip.
 pub(crate) fn skill_learning_dispatch_is_eligible(
-    segment_events: &[EventRecord],
+    evidence: &SanitizedLearningEvidence,
     min_tool_calls: usize,
     experience: &moa_core::types::experience::ExperienceRecord,
     attributions: &[moa_core::types::experience::ExperienceAttribution],
 ) -> bool {
     moa_skills::distiller::experience_is_learnable(experience, attributions)
-        && segment_events
-            .iter()
-            .filter(|record| matches!(record.event, Event::ToolCall { .. }))
-            .count()
-            >= min_tool_calls
+        && evidence.tool_call_count() >= min_tool_calls
 }
 
 #[cfg(test)]
@@ -76,7 +75,9 @@ mod tests {
         types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentOutcome,
     };
 
-    use super::{SegmentAssessmentLearningRequest, segment_assessment_learning_entry};
+    use super::{
+        LearningLogSourceRef, SegmentAssessmentLearningRequest, segment_assessment_learning_entry,
+    };
 
     #[test]
     fn segment_assessment_learning_entry_preserves_assessment_identity() {
@@ -105,6 +106,9 @@ mod tests {
         assert_eq!(entry.target_id, segment_id.to_string());
         assert_eq!(entry.target_label, Some("resolved".to_string()));
         assert_eq!(entry.confidence, Some(0.9));
-        assert_eq!(entry.source_refs, vec![segment_id.0]);
+        assert_eq!(
+            entry.sources,
+            vec![LearningLogSourceRef::TaskSegment { segment_id }]
+        );
     }
 }

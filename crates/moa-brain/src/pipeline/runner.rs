@@ -380,9 +380,6 @@ fn stage_error(stage_name: &str, error: moa_core::error::MoaError) -> moa_core::
         moa_core::error::MoaError::Unsupported(_) => {
             moa_core::error::MoaError::Unsupported(message)
         }
-        moa_core::error::MoaError::NotImplemented(_) => {
-            moa_core::error::MoaError::NotImplemented(message)
-        }
         moa_core::error::MoaError::HttpStatus {
             status,
             retry_after,

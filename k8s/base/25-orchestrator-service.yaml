@@ -17,6 +17,3 @@ spec:
     - name: health
       port: 9081
       targetPort: health
-    - name: metrics
-      port: 9090
-      targetPort: metrics

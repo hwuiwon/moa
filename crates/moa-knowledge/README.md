@@ -14,10 +14,9 @@ repositories for connections, documents, and sync state.
   Reducto, Unstructured).
 - `chunking` — deterministic block and chunk construction.
 - `normalize` — provider-record and text normalization helpers.
-- `semantic_graph` — schema-constrained semantic graph extraction for
-  knowledge chunks.
-- `semantic_graph_model` — model-backed semantic graph extractor used in
-  production when a provider is configured.
+- `semantic_graph` — deterministic schema-constrained semantic graph extraction
+  for knowledge chunks, performed only under
+  `SemanticGraphPolicy::Deterministic`.
 - `graph_delta` — graph delta types emitted by knowledge ingestion.
 - `ingestion` — pipeline from provider records to graph/vector writes.
 - `repository` — repository traits and Postgres implementations for tenant

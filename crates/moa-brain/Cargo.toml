@@ -33,6 +33,7 @@ moa-ocsf = { workspace = true }
 moa-providers = { workspace = true }
 moa-retrieval = { workspace = true }
 moa-security = { workspace = true }
+moa-skills = { workspace = true }
 moka.workspace = true
 rust-stemmers.workspace = true
 secrecy.workspace = true

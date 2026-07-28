@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
 use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_MAX_IN_FLIGHT};
+use crate::core::concurrency_factory::ProviderCoordination;
 use crate::core::http::{build_json_http_client, post_json};
 use crate::core::instrumentation::{
     fail_provider_span, finish_rerank_span, provider_error_class, rerank_span,
@@ -60,6 +61,20 @@ impl CohereReranker {
         self.pacer = RatePacer::new(config);
         self
     }
+    /// Attaches the fleet-shared per-minute quota for this credential.
+    ///
+    /// Applied after any pacing override so the effective limits — the
+    /// provider's built-in defaults or the operator's — are the ones coordinated.
+    #[must_use]
+    pub(crate) fn with_shared_pacing(
+        mut self,
+        coordination: &ProviderCoordination,
+        provider: &str,
+        credential: &str,
+    ) -> Self {
+        self.pacer = coordination.share_pacing(self.pacer, provider, credential);
+        self
+    }
 
     /// Overrides the in-flight concurrency ceiling for rerank requests.
     #[must_use]
@@ -93,7 +108,7 @@ impl Reranker for CohereReranker {
             }
         };
         // Cohere Rerank is limited by requests/min.
-        self.pacer.acquire(1, 0).await;
+        self.pacer.acquire(model, 1, 0).await?;
         let span = rerank_span(COHERE_RERANK_PROVIDER, model, documents.len());
         let result: Result<CohereRerankResponse> = post_json(
             &self.client,

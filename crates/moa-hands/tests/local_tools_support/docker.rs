@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use moa_core::{traits::HandProvider, types::hands::HandResources, types::hands::HandSpec, types::hands::SandboxTier};
+use moa_core::{traits::HandProvider, types::hands::SandboxTier};
 use moa_hands::LocalHandProvider;
 use serde_json::json;
 use tempfile::{TempDir, tempdir, tempdir_in};

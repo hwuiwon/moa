@@ -165,10 +165,12 @@ The turn loop is durable because external calls and side effects are wrapped thr
 - unset / `null`: disables the lineage sink. This is the production default
   unless a deployment explicitly enables Postgres lineage storage.
 - `otel`: emits span attributes only.
-- `postgres`: journals accepted events to the configured fjall path before
-  queueing them, then writes to `analytics.turn_lineage` and related lineage
-  tables. In cloud, the journal path must be an explicit persistent mounted
-  path, not pod-local temp storage.
+- `postgres`: commits accepted events to `analytics.lineage_journal` before
+  returning, then claims and writes them to `analytics.turn_lineage` and
+  related lineage tables. Acceptance is a Postgres commit, so a record survives
+  the replica that accepted it and any replica can finish it; there is no local
+  path to configure. This selects Postgres for `turn_lineage` even when
+  `[clickhouse]` is configured.
 - `clickhouse`: the same durable sink, but fails startup when the
   `[clickhouse]` config section is missing. Useful to make the backend choice
   explicit in a deployment.
@@ -578,10 +580,9 @@ The orchestrator is responsible for connecting task work to learning:
 - Segment assessment writes `segment_assessed`.
 - Experience extraction writes immutable `experience_records` from assessed segments.
 - Attribution writes `experience_attributions` for skills, tools, memory, policy, and verification evidence.
-- Candidate generation writes proposed `learning_candidates`; automatic promotion is gated by explicit status transitions.
+- Candidate generation writes `learning_candidates` at the initial status their `proposal_kind` allows — `Proposed` only for the two reviewable kinds, `Advisory` or `NeedsAuthoring` for observations no code can materialize. Transitions are gated in the database, not only by convention.
 - `SkillLearning` writes only draft skill artifacts and proposed skill candidates.
 - `LearningReview` is the only runtime service that publishes accepted skill drafts, appends `skill_created` or `skill_improved`, and marks the candidate promoted.
-- Memory consolidation writes `memory_updated`.
 - Rejected skill candidates preserve draft artifacts for audit and never publish skill revisions.
 
 This makes the learning pipeline event-sourced enough to audit and rollback without hiding updates inside model prompts.

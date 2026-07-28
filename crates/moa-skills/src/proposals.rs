@@ -2,15 +2,17 @@
 
 use chrono::Utc;
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
-use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
+use moa_artifacts::registry::{
+    ArtifactRegistry, NewArtifactDraft, NewSuiteContribution, SuiteContributionKind,
+};
 use moa_core::types::memory::RlsContext;
 use moa_core::{
-    error::MoaError, error::Result, events::Event, types::action_policy::ActionRuleScope,
-    types::events_stream::EventRecord, types::experience::LearningCandidate,
+    error::MoaError, error::Result, types::action_policy::ActionRuleScope,
+    types::experience::LearningCandidate, types::experience::LearningCandidateSourceRef,
     types::experience::LearningCandidateStatus, types::experience::TaskFacetSet,
     types::experience::TaskFingerprint, types::identifiers::SessionId,
-    types::identifiers::TenantId, types::memory::SkillMetadata, types::provider::ModelTask,
-    types::session::SessionMeta,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::memory::SkillMetadata, types::provider::ModelTask, types::session::SessionMeta,
 };
 use moa_db::ScopedConn;
 use moa_eval_core::TestSuite;
@@ -25,13 +27,15 @@ use crate::artifact::{
     artifact_file_from_skill_file, skill_artifact_document_from_package, skill_artifact_source_text,
 };
 use crate::candidates::{
-    SkillDraftCandidateInput, deterministic_skill_candidate_id, skill_draft_candidate,
+    SkillDraftCandidateInput, deterministic_skill_candidate_id, experience_ids,
+    skill_draft_candidate,
 };
 use crate::distiller::DistillationSkipReason;
+use crate::evidence::SanitizedLearningEvidence;
 use crate::format::{
     build_skill_path, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
 };
-use crate::improver::{format_events_for_learning, normalize_llm_markdown};
+use crate::improver::{format_evidence_for_learning, normalize_llm_markdown};
 use crate::package::{SkillPackage, ValidatedSkillPackage};
 use crate::regression::GeneratedSkillSuite;
 use crate::util::map_sqlx_error;
@@ -135,7 +139,8 @@ pub enum SkillProposalOutcome {
 }
 
 pub(crate) struct SkillProposalSource {
-    pub source_experience_ids: Vec<Uuid>,
+    /// Typed provenance the proposal stands on, drawn from sanitized evidence.
+    pub sources: Vec<LearningCandidateSourceRef>,
     pub task_fingerprint: Option<TaskFingerprint>,
     pub task_facets: Option<TaskFacetSet>,
     pub confidence: Option<f64>,
@@ -238,7 +243,7 @@ pub(crate) async fn store_skill_draft_proposal(
     let candidate_id = deterministic_skill_candidate_id(
         session.tenant_id,
         session.id,
-        &source.source_experience_ids,
+        &experience_ids(&source.sources),
         operation_label,
         &metadata.name,
     );
@@ -286,7 +291,7 @@ pub(crate) async fn store_skill_draft_proposal(
         )
         .await?
     {
-        if let Some(source_experience_id) = source.source_experience_ids.first().copied() {
+        if let Some(source_experience_id) = experience_ids(&source.sources).first().copied() {
             accumulate_sibling_suite_in_tx(
                 store,
                 conn.as_mut(),
@@ -319,7 +324,7 @@ pub(crate) async fn store_skill_draft_proposal(
             )
             .await?
         {
-            if let Some(source_experience_id) = source.source_experience_ids.first().copied() {
+            if let Some(source_experience_id) = experience_ids(&source.sources).first().copied() {
                 accumulate_sibling_suite_in_tx(
                     store,
                     conn.as_mut(),
@@ -357,10 +362,10 @@ pub(crate) async fn store_skill_draft_proposal(
         metadata: &metadata,
         operation: &operation,
         source: &source,
-        generated_suite: &generated_suite,
         artifact_uid: stored.artifact_uid,
         draft_artifact_revision_uid: stored.revision_uid,
     });
+    let source_experience_id = experience_ids(&source.sources).first().copied();
     let candidate = skill_draft_candidate(
         session,
         SkillDraftCandidateInput {
@@ -368,7 +373,7 @@ pub(crate) async fn store_skill_draft_proposal(
             operation: operation_label.to_string(),
             metadata: metadata.clone(),
             payload,
-            source_experience_ids: source.source_experience_ids,
+            sources: source.sources,
             task_fingerprint: source.task_fingerprint,
             task_facets: source.task_facets,
             confidence: source.confidence,
@@ -378,6 +383,19 @@ pub(crate) async fn store_skill_draft_proposal(
     store
         .append_learning_candidate_with_conn(conn.as_mut(), &candidate)
         .await?;
+    // Written after the candidate row exists, because both contribution tables
+    // carry a real foreign key to it, and in the same transaction, so a draft
+    // revision and the record of whose data produced it cannot come apart.
+    record_draft_attribution(
+        conn.as_mut(),
+        session.tenant_id,
+        candidate_id,
+        stored.revision_uid,
+        &generated_suite,
+        session.id,
+        source_experience_id,
+    )
+    .await?;
     conn.commit().await?;
 
     Ok(SkillDraftProposal {
@@ -427,8 +445,8 @@ fn package_with_regression_suite(
 pub(crate) struct SiblingContribution<'a> {
     /// Deterministic regression suite generated from the sibling's session.
     pub suite: GeneratedSkillSuite,
-    /// Bounded segment events used as generalization evidence.
-    pub events: &'a [EventRecord],
+    /// Sanitized bounded segment evidence used for generalization.
+    pub evidence: &'a SanitizedLearningEvidence,
     /// Experience record that produced this sibling.
     pub source_experience_id: Uuid,
     /// Session that produced this sibling.
@@ -461,7 +479,7 @@ pub(crate) async fn accumulate_sibling_and_resynthesize(
 ) -> Result<SiblingResynthesis> {
     let SiblingContribution {
         suite,
-        events,
+        evidence,
         source_experience_id,
         source_session_id,
     } = contribution;
@@ -478,7 +496,7 @@ pub(crate) async fn accumulate_sibling_and_resynthesize(
         return Ok(SiblingResynthesis::DraftUnchanged);
     }
     let instances = [GeneralizationInstance {
-        events,
+        evidence,
         source_experience_id,
     }];
     match resynthesize_generalization(store, model_router, tenant_id, open, &instances).await {
@@ -503,8 +521,8 @@ pub(crate) async fn accumulate_sibling_and_resynthesize(
 /// path builds one per accepted cluster member so a single combined pass covers
 /// them all.
 struct GeneralizationInstance<'a> {
-    /// Bounded segment events (tool trajectory + evidence) for this sibling.
-    events: &'a [EventRecord],
+    /// Sanitized bounded segment evidence (tool trajectory + content) for this sibling.
+    evidence: &'a SanitizedLearningEvidence,
     /// Experience record that produced this sibling.
     source_experience_id: Uuid,
 }
@@ -515,8 +533,8 @@ struct GeneralizationInstance<'a> {
 /// caller (the recurrence workflow) loads these best-effort per member; a member
 /// whose events cannot be loaded is dropped before it reaches this struct.
 pub struct RecurrenceSiblingSuite<'a> {
-    /// Bounded segment events for the sibling.
-    pub events: &'a [EventRecord],
+    /// Sanitized bounded segment evidence for the sibling.
+    pub evidence: &'a SanitizedLearningEvidence,
     /// Experience record that produced the sibling.
     pub source_experience_id: Uuid,
     /// Session that produced the sibling.
@@ -550,7 +568,7 @@ pub async fn accumulate_recurrence_siblings(
         let suite = match crate::regression::generate_skill_test_suite_source_for_name(
             tenant_id,
             &open.metadata.name,
-            sibling.events,
+            sibling.evidence,
         ) {
             Ok(suite) => suite,
             Err(error) => {
@@ -575,7 +593,7 @@ pub async fn accumulate_recurrence_siblings(
         .await
         {
             Ok(true) => accepted.push(GeneralizationInstance {
-                events: sibling.events,
+                evidence: sibling.evidence,
                 source_experience_id: sibling.source_experience_id,
             }),
             Ok(false) => {}
@@ -654,7 +672,7 @@ pub(crate) async fn accumulate_sibling_suite(
 
 /// Applies sibling-suite accumulation inside the caller's locked transaction.
 ///
-/// Returns whether a new sibling suite was appended to the candidate payload.
+/// Returns whether a new sibling suite was stored for this candidate.
 async fn accumulate_sibling_suite_in_tx(
     store: &PostgresSessionStore,
     conn: &mut PgConnection,
@@ -666,24 +684,64 @@ async fn accumulate_sibling_suite_in_tx(
     if candidate.status != LearningCandidateStatus::Proposed {
         return Ok(false);
     }
-    // A replay of the proposal's own source experience is not a sibling.
-    if candidate
-        .source_experience_ids
-        .contains(&source_experience_id)
+    // Already-recorded evidence is not new evidence. This covers both the
+    // proposal's own source experience and a replayed sibling, so accumulation
+    // is idempotent rather than merely guarded against the origin case.
+    if candidate.sources.iter().any(|source| {
+        matches!(
+            source,
+            LearningCandidateSourceRef::Experience { experience_id }
+                if *experience_id == source_experience_id
+        )
+    }) {
+        return Ok(false);
+    }
+    if ArtifactRegistry::count_suite_contributions_in_tx(
+        conn,
+        candidate.id,
+        SuiteContributionKind::Accumulated,
+    )
+    .await?
+        >= MAX_ACCUMULATED_SIBLING_SUITES
     {
         return Ok(false);
     }
-    if !append_sibling_suite_to_payload(
-        &mut candidate.payload,
-        source_experience_id,
-        source_session_id,
-        suite,
-    ) {
+    let partition = StoragePartitionId::for_tenant(candidate.tenant_id).to_string();
+    // The suite bytes belong to the artifact registry, not to candidate JSON: a
+    // TOML blob inside a payload cannot be joined to its source session, counted,
+    // or deleted for one subject. The unique `(candidate, kind, suite_name)` index
+    // is also the dedupe: a replayed sibling inserts nothing and reports it.
+    let stored = ArtifactRegistry::record_suite_contribution_in_tx(
+        conn,
+        &partition,
+        &candidate.tenant_id.to_string(),
+        &NewSuiteContribution {
+            candidate_id: candidate.id,
+            // A sibling suite is held-out material for whatever draft is current;
+            // it is not embedded in a revision, so it guards none.
+            revision_uid: None,
+            kind: SuiteContributionKind::Accumulated,
+            suite_name: sibling_suite_name(source_experience_id),
+            suite_source: suite.source_toml.clone(),
+            source_session_id: Some(source_session_id.0),
+            source_experience_id: Some(source_experience_id),
+        },
+    )
+    .await?;
+    if !stored {
         return Ok(false);
     }
-    // Sibling provenance lives in the payload entries: the candidate-row upsert
-    // does not update `source_experience_ids`, and the origin list must stay
-    // stable for the replay guard above.
+    // A sibling contributed real evidence, so it joins the candidate's typed
+    // sources. Recording it there is what makes the replay guard above idempotent
+    // and what lets an erasure of the sibling's session reach this proposal.
+    candidate
+        .sources
+        .push(LearningCandidateSourceRef::Experience {
+            experience_id: source_experience_id,
+        });
+    candidate.sources.push(LearningCandidateSourceRef::Session {
+        session_id: source_session_id,
+    });
     candidate.updated_at = Utc::now();
     store
         .append_learning_candidate_with_conn(conn, &candidate)
@@ -691,43 +749,51 @@ async fn accumulate_sibling_suite_in_tx(
     Ok(true)
 }
 
-/// Appends one sibling suite entry to a proposal payload; returns whether it changed.
-fn append_sibling_suite_to_payload(
-    payload: &mut serde_json::Value,
-    source_experience_id: Uuid,
-    source_session_id: moa_core::types::identifiers::SessionId,
+/// Stable per-candidate name for one sibling's accumulated suite.
+fn sibling_suite_name(source_experience_id: Uuid) -> String {
+    format!("sibling/{source_experience_id}")
+}
+
+/// Records the draft revision's attribution and its generated suite.
+///
+/// Both rows name the candidate, so an erasure entering through the subject's
+/// session or experience reaches the revision text and the generated suite bytes
+/// by a typed join rather than by searching JSON.
+async fn record_draft_attribution(
+    conn: &mut PgConnection,
+    tenant_id: TenantId,
+    candidate_id: Uuid,
+    revision_uid: Uuid,
     suite: &GeneratedSkillSuite,
-) -> bool {
-    let entries = payload
-        .as_object_mut()
-        .map(|object| {
-            object
-                .entry("accumulated_regression_suites")
-                .or_insert_with(|| serde_json::Value::Array(Vec::new()))
-        })
-        .and_then(serde_json::Value::as_array_mut);
-    let Some(entries) = entries else {
-        return false;
-    };
-    if entries.len() >= MAX_ACCUMULATED_SIBLING_SUITES {
-        return false;
-    }
-    let experience_key = source_experience_id.to_string();
-    if entries.iter().any(|entry| {
-        entry
-            .get("source_experience_id")
-            .and_then(serde_json::Value::as_str)
-            == Some(experience_key.as_str())
-    }) {
-        return false;
-    }
-    entries.push(json!({
-        "source_experience_id": experience_key,
-        "source_session_id": source_session_id.to_string(),
-        "source_format": "toml",
-        "source_text": suite.source_toml,
-    }));
-    true
+    source_session_id: SessionId,
+    source_experience_id: Option<Uuid>,
+) -> Result<()> {
+    let partition = StoragePartitionId::for_tenant(tenant_id).to_string();
+    let tenant = tenant_id.to_string();
+    ArtifactRegistry::record_revision_attribution_in_tx(
+        conn,
+        &partition,
+        &tenant,
+        revision_uid,
+        candidate_id,
+    )
+    .await?;
+    ArtifactRegistry::record_suite_contribution_in_tx(
+        conn,
+        &partition,
+        &tenant,
+        &NewSuiteContribution {
+            candidate_id,
+            revision_uid: Some(revision_uid),
+            kind: SuiteContributionKind::Generated,
+            suite_name: suite.relative_path.clone(),
+            suite_source: suite.source_toml.clone(),
+            source_session_id: Some(source_session_id.0),
+            source_experience_id,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 /// Static generalization instructions; kept out of the dynamic user prompt so
@@ -802,7 +868,7 @@ async fn resynthesize_generalization(
     if instances.is_empty() {
         return Ok(false);
     }
-    let source_experience_ids: Vec<Uuid> = instances
+    let pass_experience_ids: Vec<Uuid> = instances
         .iter()
         .map(|instance| instance.source_experience_id)
         .collect();
@@ -810,13 +876,14 @@ async fn resynthesize_generalization(
     for attempt in 0..MAX_RESYNTHESIS_ATTEMPTS {
         // Preflight: reload the candidate and bail before any model spend when it
         // was claimed for evaluation or has reached the resynthesis cap.
-        let candidate = {
+        let (candidate, existing_suite) = {
             let mut conn = ScopedConn::begin(store.pool(), &RlsContext::tenant(tenant_id)).await?;
             let loaded = store
                 .get_learning_candidate_with_conn(conn.as_mut(), &tenant_id, open.candidate_id)
                 .await?;
+            let suite = generated_suite_in_tx(conn.as_mut(), open.candidate_id).await?;
             conn.commit().await?;
-            loaded
+            (loaded, suite)
         };
         let Some(candidate) = candidate else {
             return Ok(false);
@@ -841,9 +908,8 @@ async fn resynthesize_generalization(
         // Trajectory stability is recorded only: the mean LCS ratio of each new
         // instance's tool sequence against the candidate's existing expected
         // trajectory. Computed before the model call and independent of it.
-        let existing_trajectory = expected_trajectory_from_payload(&candidate.payload);
+        let existing_trajectory = expected_trajectory_from_suite(existing_suite.as_ref());
         let stability = mean_trajectory_stability(&existing_trajectory, instances);
-        let existing_suite = generated_suite_from_payload(&candidate.payload);
 
         // Generalization model call. No lock or transaction is held across it.
         let llm = model_router.provider_for(ModelTask::SkillDistillation);
@@ -863,7 +929,7 @@ async fn resynthesize_generalization(
             tenant_id,
             open,
             draft,
-            &source_experience_ids,
+            &pass_experience_ids,
             baseline_revision,
             stability,
         )
@@ -950,7 +1016,7 @@ async fn apply_resynthesis_result(
     tenant_id: TenantId,
     open: &SkillDraftProposal,
     draft: ResynthesisDraft,
-    source_experience_ids: &[Uuid],
+    pass_experience_ids: &[Uuid],
     baseline_revision: Uuid,
     stability: f64,
 ) -> Result<ResynthesisApply> {
@@ -1002,6 +1068,27 @@ async fn apply_resynthesis_result(
                 },
             )
             .await?;
+            // A generalization pass produces a NEW revision fused from the
+            // original draft plus every sibling in this pass, so the new revision
+            // needs its own attribution rows; without them an erasure would reach
+            // the superseded draft and leave the serving one standing. The suite
+            // rows follow the draft they guard, since `build_resynthesis_draft`
+            // re-attaches the same suite bytes to the rewritten package.
+            let partition = StoragePartitionId::for_tenant(tenant_id).to_string();
+            ArtifactRegistry::record_revision_attribution_in_tx(
+                conn.as_mut(),
+                &partition,
+                &tenant_id.to_string(),
+                stored.revision_uid,
+                candidate.id,
+            )
+            .await?;
+            ArtifactRegistry::repoint_suite_contributions_in_tx(
+                conn.as_mut(),
+                candidate.id,
+                stored.revision_uid,
+            )
+            .await?;
             let metadata_value = serde_json::to_value(&metadata)
                 .map_err(|error| MoaError::SerializationError(error.to_string()))?;
             if let Some(object) = candidate.payload.as_object_mut() {
@@ -1029,14 +1116,14 @@ async fn apply_resynthesis_result(
         &mut candidate.payload,
         ResynthesisEvidence {
             pass,
-            source_experience_ids,
+            pass_experience_ids,
             changed,
             trajectory_stability: stability,
             rejected_reason,
         },
     );
-    for source_experience_id in source_experience_ids {
-        append_payload_source_experience_id(&mut candidate.payload, *source_experience_id);
+    for experience_id in pass_experience_ids {
+        push_unique_experience_source(&mut candidate.sources, *experience_id);
     }
     candidate.updated_at = Utc::now();
     store
@@ -1052,7 +1139,7 @@ struct ResynthesisEvidence<'a> {
     /// Every sibling experience that contributed to this pass. One entry for the
     /// organic dedupe-hit; the whole accepted cluster for a combined recurrence
     /// pass.
-    source_experience_ids: &'a [Uuid],
+    pass_experience_ids: &'a [Uuid],
     changed: bool,
     trajectory_stability: f64,
     rejected_reason: Option<String>,
@@ -1068,6 +1155,27 @@ struct ResynthesisEvidence<'a> {
 fn resynthesis_gate_open(status: LearningCandidateStatus, payload: &serde_json::Value) -> bool {
     status == LearningCandidateStatus::Proposed
         && resynthesis_pass_count(payload) < MAX_ACCUMULATED_SIBLING_SUITES
+}
+
+/// Adds one experience source to a candidate, ignoring an id already recorded.
+///
+/// Sibling provenance grows once per contributing experience: a repeat of the
+/// same id is a no-op, so a replayed generalization pass neither duplicates a
+/// source row nor makes the same session look like two contributors.
+fn push_unique_experience_source(
+    sources: &mut Vec<LearningCandidateSourceRef>,
+    experience_id: Uuid,
+) {
+    if sources.iter().any(|source| {
+        matches!(
+            source,
+            LearningCandidateSourceRef::Experience { experience_id: existing }
+                if *existing == experience_id
+        )
+    }) {
+        return;
+    }
+    sources.push(LearningCandidateSourceRef::Experience { experience_id });
 }
 
 /// Number of generalization passes already recorded on a candidate payload.
@@ -1091,13 +1199,16 @@ fn append_resynthesis_evidence(payload: &mut serde_json::Value, evidence: Resynt
         return;
     };
     let source_ids: Vec<String> = evidence
-        .source_experience_ids
+        .pass_experience_ids
         .iter()
         .map(Uuid::to_string)
         .collect();
     let mut entry = json!({
         "pass": evidence.pass,
-        "source_experience_ids": source_ids,
+        // Display evidence only. The authoritative provenance for this pass is
+        // the typed source rows written beside the candidate; this list exists
+        // so a reviewer can read which siblings drove which pass without a join.
+        "pass_experience_ids": source_ids,
         "changed": evidence.changed,
         "trajectory_stability": evidence.trajectory_stability,
     });
@@ -1119,48 +1230,34 @@ fn payload_draft_revision(payload: &serde_json::Value) -> Option<Uuid> {
         .and_then(|value| Uuid::parse_str(value).ok())
 }
 
-/// Appends the sibling experience id to the payload's `source_experience_ids`
-/// provenance list, deduping. Leaves the candidate row's origin list untouched
-/// so the sibling replay guard in [`accumulate_sibling_suite_in_tx`] stays
-/// stable.
-fn append_payload_source_experience_id(
-    payload: &mut serde_json::Value,
-    source_experience_id: Uuid,
-) {
-    let Some(object) = payload.as_object_mut() else {
-        return;
-    };
-    let ids = object
-        .entry("source_experience_ids")
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-    let Some(ids) = ids.as_array_mut() else {
-        return;
-    };
-    let key = source_experience_id.to_string();
-    if ids.iter().any(|value| value.as_str() == Some(key.as_str())) {
-        return;
-    }
-    ids.push(json!(key));
-}
-
-/// Reconstructs the generated suite carried on a candidate payload, when present.
-fn generated_suite_from_payload(payload: &serde_json::Value) -> Option<GeneratedSkillSuite> {
-    let suite = payload.get("generated_regression_suite")?;
-    let relative_path = suite.get("relative_path")?.as_str()?.to_string();
-    let source_toml = suite.get("source_text")?.as_str()?.to_string();
-    Some(GeneratedSkillSuite {
-        relative_path,
-        source_toml,
-    })
+/// Reads back the candidate's own generated suite from the artifact owner.
+///
+/// The suite bytes live in `moa.artifact_suite_contribution`, so this is a
+/// storage read rather than a payload parse; a candidate with no generated
+/// contribution has no suite, which callers treat as non-generalizable.
+async fn generated_suite_in_tx(
+    conn: &mut PgConnection,
+    candidate_id: Uuid,
+) -> Result<Option<GeneratedSkillSuite>> {
+    Ok(
+        ArtifactRegistry::list_suite_contributions_in_tx(conn, candidate_id)
+            .await?
+            .into_iter()
+            .find(|contribution| contribution.kind == SuiteContributionKind::Generated)
+            .map(|contribution| GeneratedSkillSuite {
+                relative_path: contribution.suite_name,
+                source_toml: contribution.suite_source,
+            }),
+    )
 }
 
 /// Parses the candidate's expected tool trajectory from its generated suite.
 ///
-/// Reads the stored suite TOML from the payload rather than regenerating it, so
-/// the comparison is against the exact trajectory the review gate would use.
-/// Returns an empty trajectory when the payload lacks a parseable suite.
-fn expected_trajectory_from_payload(payload: &serde_json::Value) -> Vec<String> {
-    let Some(suite) = generated_suite_from_payload(payload) else {
+/// Reads the stored suite TOML rather than regenerating it, so the comparison is
+/// against the exact trajectory the review gate would use. Returns an empty
+/// trajectory when the candidate has no parseable suite.
+fn expected_trajectory_from_suite(suite: Option<&GeneratedSkillSuite>) -> Vec<String> {
+    let Some(suite) = suite else {
         return Vec::new();
     };
     let Ok(parsed) = toml::from_str::<TestSuite>(&suite.source_toml) else {
@@ -1185,20 +1282,9 @@ fn mean_trajectory_stability(expected: &[String], instances: &[GeneralizationIns
     }
     let total: f64 = instances
         .iter()
-        .map(|instance| trajectory_stability(expected, &tool_trajectory(instance.events)))
+        .map(|instance| trajectory_stability(expected, &instance.evidence.tool_trajectory()))
         .sum();
     total / instances.len() as f64
-}
-
-/// Extracts the ordered tool-call names from a segment's events.
-fn tool_trajectory(events: &[EventRecord]) -> Vec<String> {
-    events
-        .iter()
-        .filter_map(|record| match &record.event {
-            Event::ToolCall { tool_name, .. } => Some(tool_name.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 /// Longest-common-subsequence ratio between two tool-call sequences.
@@ -1243,7 +1329,7 @@ fn build_resynthesis_user_prompt(
     if let [single] = instances {
         prompt.push_str(&format!(
             "New sibling execution:\n{}",
-            format_events_for_learning(single.events)
+            format_evidence_for_learning(single.evidence)
         ));
     } else {
         prompt.push_str("New sibling executions:\n");
@@ -1251,7 +1337,7 @@ fn build_resynthesis_user_prompt(
             prompt.push_str(&format!(
                 "--- Instance {} ---\n{}\n",
                 index + 1,
-                format_events_for_learning(instance.events)
+                format_evidence_for_learning(instance.evidence)
             ));
         }
     }
@@ -1375,7 +1461,6 @@ struct ProposalPayloadInput<'a> {
     metadata: &'a SkillMetadata,
     operation: &'a SkillProposalOperation,
     source: &'a SkillProposalSource,
-    generated_suite: &'a GeneratedSkillSuite,
     artifact_uid: Uuid,
     draft_artifact_revision_uid: Uuid,
 }
@@ -1392,15 +1477,9 @@ fn proposal_payload(input: ProposalPayloadInput<'_>) -> serde_json::Value {
         "artifact_status": ArtifactStatus::Draft.as_str(),
         "surface": EditableSurface::SkillMarkdown,
         "source_session_id": input.session.id.to_string(),
-        "source_experience_ids": input.source.source_experience_ids.clone(),
         "skill_metadata": input.metadata.clone(),
         "artifact_path": input.metadata.path.clone(),
         "skill_markdown": input.package.skill_md.clone(),
-        "generated_regression_suite": {
-            "relative_path": input.generated_suite.relative_path.clone(),
-            "source_format": "toml",
-            "source_text": input.generated_suite.source_toml.clone(),
-        },
     });
 
     if let SkillProposalOperation::Improved { previous_version } = input.operation {
@@ -1523,12 +1602,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resynthesis_prompt_numbers_multiple_instances_but_not_a_single_one() {
+    #[tokio::test]
+    async fn resynthesis_prompt_numbers_multiple_instances_but_not_a_single_one() {
         // Pins: one sibling keeps the singular framing; a combined pass over several
         // siblings numbers each execution so the model sees them distinctly.
+        let empty = crate::evidence::sanitize_for_tests(&[]).await;
         let one = [GeneralizationInstance {
-            events: &[],
+            evidence: &empty,
             source_experience_id: Uuid::now_v7(),
         }];
         let single = build_resynthesis_user_prompt("draft body", &one);
@@ -1537,11 +1617,11 @@ mod tests {
 
         let many = [
             GeneralizationInstance {
-                events: &[],
+                evidence: &empty,
                 source_experience_id: Uuid::now_v7(),
             },
             GeneralizationInstance {
-                events: &[],
+                evidence: &empty,
                 source_experience_id: Uuid::now_v7(),
             },
         ];
@@ -1574,7 +1654,7 @@ mod tests {
             &mut payload,
             ResynthesisEvidence {
                 pass: 1,
-                source_experience_ids: &[experience],
+                pass_experience_ids: &[experience],
                 changed: true,
                 trajectory_stability: 0.75,
                 rejected_reason: None,
@@ -1584,7 +1664,7 @@ mod tests {
             &mut payload,
             ResynthesisEvidence {
                 pass: 2,
-                source_experience_ids: &combined,
+                pass_experience_ids: &combined,
                 changed: false,
                 trajectory_stability: 1.0,
                 rejected_reason: Some("re-synthesis changed the target skill name".to_string()),
@@ -1596,13 +1676,13 @@ mod tests {
         assert_eq!(entries[0]["changed"], true);
         assert_eq!(entries[0]["trajectory_stability"], 0.75);
         assert_eq!(
-            entries[0]["source_experience_ids"],
+            entries[0]["pass_experience_ids"],
             json!([experience.to_string()])
         );
         assert!(entries[0].get("rejected_reason").is_none());
         // A combined pass records every contributing experience id.
         assert_eq!(
-            entries[1]["source_experience_ids"],
+            entries[1]["pass_experience_ids"],
             json!([combined[0].to_string(), combined[1].to_string()])
         );
         assert_eq!(entries[1]["changed"], false);
@@ -1613,25 +1693,34 @@ mod tests {
     }
 
     #[test]
-    fn append_payload_source_experience_id_dedupes() {
-        // Pins: sibling provenance in the payload grows once per contributing experience; a
-        // repeat of the same id is a no-op so the reviewer sees each source once.
-        let mut payload = json!({});
-        let experience = Uuid::now_v7();
-        append_payload_source_experience_id(&mut payload, experience);
-        append_payload_source_experience_id(&mut payload, experience);
-        let ids = payload["source_experience_ids"]
-            .as_array()
-            .expect("provenance array");
-        assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0], experience.to_string());
+    fn sibling_experience_sources_dedupe_and_keep_other_source_kinds() {
+        // Pins: sibling provenance grows once per contributing experience, so a
+        // replayed generalization pass cannot make one session look like two
+        // contributors and inflate the closure an erasure walks. Also pins that
+        // deduping keys on the experience id alone: an unrelated session source
+        // must not block an experience source from being recorded.
+        let mut sources = vec![LearningCandidateSourceRef::Session {
+            session_id: SessionId(Uuid::from_u128(1)),
+        }];
+        let experience = Uuid::from_u128(2);
+
+        push_unique_experience_source(&mut sources, experience);
+        push_unique_experience_source(&mut sources, experience);
+
+        assert_eq!(sources.len(), 2);
+        assert_eq!(
+            sources[1],
+            LearningCandidateSourceRef::Experience {
+                experience_id: experience
+            }
+        );
     }
 
     #[test]
-    fn expected_trajectory_from_payload_parses_the_stored_suite() {
+    fn expected_trajectory_is_read_from_the_stored_suite_contribution() {
         // Pins: the candidate's expected trajectory is read from the stored suite TOML, not
-        // regenerated, so stability is scored against the exact gate trajectory. A payload
-        // without a parseable suite yields an empty trajectory.
+        // regenerated, so stability is scored against the exact gate trajectory. A candidate
+        // with no stored suite yields an empty trajectory rather than a fabricated one.
         use moa_eval_core::TestCase;
         let suite = TestSuite {
             name: "resynth-regression".to_string(),
@@ -1645,17 +1734,14 @@ mod tests {
             default_timeout_seconds: 120,
             tags: vec!["skill".to_string()],
         };
-        let source_toml = toml::to_string_pretty(&suite).expect("suite toml");
-        let payload = json!({
-            "generated_regression_suite": {
-                "relative_path": "tenants/x/skills/y/tests/suite.toml",
-                "source_text": source_toml,
-            },
-        });
+        let stored = GeneratedSkillSuite {
+            relative_path: "tenants/x/skills/y/tests/suite.toml".to_string(),
+            source_toml: toml::to_string_pretty(&suite).expect("suite toml"),
+        };
         assert_eq!(
-            expected_trajectory_from_payload(&payload),
+            expected_trajectory_from_suite(Some(&stored)),
             owned(&["bash", "file_read", "bash"])
         );
-        assert!(expected_trajectory_from_payload(&json!({})).is_empty());
+        assert!(expected_trajectory_from_suite(None).is_empty());
     }
 }

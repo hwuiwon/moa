@@ -1,87 +1,96 @@
-groups:
-  - name: moa-durability
-    interval: 60s
-    rules:
-      - alert: MOALineageDeadLettering
-        expr: rate(moa_lineage_dead_lettered_total[5m]) > 0
-        for: 5m
-        annotations:
-          summary: Lineage rows are being dead-lettered
-          description: "The lineage writer exhausted retries and dead-lettered {{ $value }} rows/sec on {{ $labels.instance }}. Provenance is being lost permanently; check Postgres/ClickHouse health and the dead-letter store."
+# Durability alerts for everything outside the lineage writer.
+#
+# Lineage journal, writer and drain alerts live in moa-lineage.yaml. The split is
+# by owning subsystem so a lineage change has one file to update.
+#
+# The grounding-rate, zero-recall, and cost-per-turn alerts previously in this
+# file read per-tenant-labeled brain metrics (moa_grounding_verified_rate,
+# moa_zero_recall_count, moa_turn_count, moa_cost_micros_per_turn) that were
+# deleted for unbounded cardinality. Those alerts now run as Grafana SQL rules
+# over the analytics tables - see
+# dashboards/grafana/alerting/moa-quality-alerts.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: moa-durability
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: moa-durability-alerts
+    app.kubernetes.io/part-of: moa
+    moa.dev/rule-sync: mimir
+spec:
+  groups:
+    - name: moa-durability
+      interval: 60s
+      rules:
+        - alert: MOAAuthzOutboxBacklogAge
+          expr: moa_authz_outbox_oldest_pending_age_seconds > 300
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenFGA authz outbox is backlogged
+            description: "The oldest pending authz outbox tuple is {{ $value }}s old (threshold 300s). Permission changes are not reaching OpenFGA; authorization decisions may be stale. Check the outbox poller and OpenFGA availability."
 
-      - alert: MOALineageRecordFailures
-        expr: rate(moa_lineage_failed_total{reason!="journal_timeout"}[5m]) > 0
-        for: 5m
-        annotations:
-          summary: Lineage records are failing to persist
-          description: "{{ $value }} lineage events/sec failed ({{ $labels.reason }}, mode {{ $labels.mode }}) on {{ $labels.instance }}. Malformed rows or storage errors mean provenance loss; check the writer and journal health. Journal timeouts alert separately via MOALineageJournalTimeout."
+        - alert: MOAAuthzOutboxDeadLetters
+          expr: rate(moa_authz_outbox_dead_letters_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenFGA authz outbox tuples are dead-lettering
+            description: "{{ $value }} authz outbox tuples/sec exhausted retries on {{ $labels.instance }}. Permission grants/revocations are silently not applied; inspect the dead-letter rows and OpenFGA errors."
 
-      - alert: MOALineageJournalBacklogAge
-        expr: moa_lineage_journal_oldest_age_seconds > 900
-        for: 10m
-        annotations:
-          summary: Lineage journal backlog is aging
-          description: "The oldest un-flushed lineage journal entry is {{ $value }}s old on {{ $labels.instance }} (threshold 900s). The writer is falling behind capture; check flush throughput and Postgres connectivity."
+        - alert: MOAProviderConcurrencySaturated
+          expr: sum(rate(moa_provider_concurrency_saturated_total[5m])) by (provider, kind) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Provider concurrency limiter is saturating
+            description: "Provider {{ $labels.provider }} ({{ $labels.kind }}) is hitting its concurrency limit {{ $value }} times/sec. Requests are queueing to the deadline; raise the limit or investigate upstream latency."
 
-      - alert: MOAAuthzOutboxBacklogAge
-        expr: moa_authz_outbox_oldest_pending_age_seconds > 300
-        for: 10m
-        annotations:
-          summary: OpenFGA authz outbox is backlogged
-          description: "The oldest pending authz outbox tuple is {{ $value }}s old (threshold 300s). Permission changes are not reaching OpenFGA; authorization decisions may be stale. Check the outbox poller and OpenFGA availability."
+        - alert: MOALLMFailoverElevated
+          expr: sum(rate(moa_llm_failover_total[5m])) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: LLM failover rate is elevated
+            description: "Models are failing over {{ $value }} times/sec sustained. The primary provider/model is degraded; check provider status and the failover reasons label."
 
-      - alert: MOAAuthzOutboxDeadLetters
-        expr: rate(moa_authz_outbox_dead_letters_total[5m]) > 0
-        for: 5m
-        annotations:
-          summary: OpenFGA authz outbox tuples are dead-lettering
-          description: "{{ $value }} authz outbox tuples/sec exhausted retries on {{ $labels.instance }}. Permission grants/revocations are silently not applied; inspect the dead-letter rows and OpenFGA errors."
+        - alert: MOAAnalyticsExportLag
+          expr: moa_analytics_export_lag_seconds > 300
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Analytics export is lagging
+            description: "Analytics export for table {{ $labels.table }} is {{ $value }}s behind (threshold 300s). Dashboards reading exported analytics are stale; check the exporter."
 
-      - alert: MOAProviderConcurrencySaturated
-        expr: sum(rate(moa_provider_concurrency_saturated_total[5m])) by (provider, kind) > 0.1
-        for: 10m
-        annotations:
-          summary: Provider concurrency limiter is saturating
-          description: "Provider {{ $labels.provider }} ({{ $labels.kind }}) is hitting its concurrency limit {{ $value }} times/sec. Requests are queueing to the deadline; raise the limit or investigate upstream latency."
+        - alert: MOAOCSFAuditEventsDropped
+          expr: rate(moa_ocsf_audit_events_dropped_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: OCSF audit events are being dropped
+            description: "{{ $value }} OCSF security audit events/sec dropped on {{ $labels.instance }} (reason {{ $labels.reason }}). The security audit trail is incomplete; investigate the audit sink immediately."
 
-      - alert: MOALLMFailoverElevated
-        expr: sum(rate(moa_llm_failover_total[5m])) > 0.1
-        for: 10m
-        annotations:
-          summary: LLM failover rate is elevated
-          description: "Models are failing over {{ $value }} times/sec sustained. The primary provider/model is degraded; check provider status and the failover reasons label."
+        - alert: MOAActionReviewBacklogAge
+          expr: max(moa_action_review_oldest_pending_age_seconds) > 86400
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Tenant action reviews are aging toward timeout
+            description: "The oldest pending tenant action review is {{ $value }}s old (threshold 86400s). Reviews that are not decided before their expiry fail closed and the gated action is denied; check that tenant admins are being notified and are working the queue."
 
-      - alert: MOAAnalyticsExportLag
-        expr: moa_analytics_export_lag_seconds > 300
-        for: 10m
-        annotations:
-          summary: Analytics export is lagging
-          description: "Analytics export for table {{ $labels.table }} is {{ $value }}s behind (threshold 300s). Dashboards reading exported analytics are stale; check the ClickHouse exporter."
-
-      - alert: MOAOCSFAuditEventsDropped
-        expr: rate(moa_ocsf_audit_events_dropped_total[5m]) > 0
-        for: 5m
-        annotations:
-          summary: OCSF audit events are being dropped
-          description: "{{ $value }} OCSF security audit events/sec dropped on {{ $labels.instance }} (reason {{ $labels.reason }}). The security audit trail is incomplete; investigate the audit sink immediately."
-
-      - alert: MOALineageJournalTimeout
-        expr: sum(rate(moa_lineage_failed_total{reason="journal_timeout"}[5m])) by (mode, event_class) > 0
-        for: 5m
-        annotations:
-          summary: Durable lineage writes are timing out on the journal
-          description: "{{ $value }} lineage events/sec (mode {{ $labels.mode }}, class {{ $labels.event_class }}) failed with a journal timeout. Durable provenance is being lost because the journal is not accepting writes in time; check journal disk throughput and Postgres/ClickHouse health. Other failure reasons alert via MOALineageRecordFailures."
-
-      - alert: MOAActionReviewBacklogAge
-        expr: max(moa_action_review_oldest_pending_age_seconds) > 86400
-        for: 15m
-        annotations:
-          summary: Tenant action reviews are aging toward timeout
-          description: "The oldest pending tenant action review is {{ $value }}s old (threshold 86400s). Reviews that are not decided before their expiry fail closed and the gated action is denied; check that tenant admins are being notified and are working the queue."
-
-      - alert: MOABuiltinApprovalBacklogAge
-        expr: max(moa_builtin_approval_oldest_pending_age_seconds) > 600
-        for: 10m
-        annotations:
-          summary: Builtin async-authorization approvals are backlogged
-          description: "The oldest pending builtin approval is {{ $value }}s old (threshold 600s). The requesting turn is blocked on this human-in-the-loop decision until it is decided or times out; check that the deciding user is reachable."
+        - alert: MOABuiltinApprovalBacklogAge
+          expr: max(moa_builtin_approval_oldest_pending_age_seconds) > 600
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Builtin async-authorization approvals are backlogged
+            description: "The oldest pending builtin approval is {{ $value }}s old (threshold 600s). The requesting turn is blocked on this human-in-the-loop decision until it is decided or times out; check that the deciding user is reachable."

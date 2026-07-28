@@ -28,6 +28,8 @@ mod openai_embedding_offline;
 mod openai_offline;
 #[path = "providers_offline/openai_provider.rs"]
 mod openai_provider;
+#[path = "providers_offline/provider_coordination_offline.rs"]
+mod provider_coordination_offline;
 #[path = "providers_offline/zeroentropy_embedding_offline.rs"]
 mod zeroentropy_embedding_offline;
 #[path = "providers_offline/zeroentropy_reranker_offline.rs"]

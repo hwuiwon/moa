@@ -503,18 +503,25 @@ where
         object: &KnowledgeObject,
         chunks: &[KnowledgeChunk],
     ) -> Result<SemanticGraphExtractionReport> {
+        // A disabled policy performs no extraction, writes no cache rows, and
+        // emits no semantic nodes or edges. This is the single gate: because the
+        // same policy value also decides whether retrieval may read the graph,
+        // there is no configuration in which this work is done for nothing.
+        if !self.semantic_policy.writes_semantic_graph() {
+            metrics::counter!(
+                "moa_knowledge_semantic_extraction_chunks_total",
+                "policy" => self.semantic_policy.as_str(),
+                "outcome" => "skipped"
+            )
+            .increment(chunks.len() as u64);
+            return Ok(SemanticGraphExtractionReport::default());
+        }
+        let extraction_started = std::time::Instant::now();
         let chunk_hashes = chunks
             .iter()
             .map(|chunk| chunk.chunk_hash.clone())
             .collect::<Vec<_>>();
-        // The active extractor's cache identity determines which cached rows a
-        // lookup hits: the model-backed and deterministic extractors stamp
-        // distinct `(model, prompt_version)` values, so switching between them
-        // re-extracts instead of serving the other extractor's output.
-        let identity = match &self.semantic_model_extractor {
-            Some(extractor) => extractor.cache_identity(),
-            None => SemanticExtractionCacheIdentity::deterministic(),
-        };
+        let identity = SemanticExtractionCacheIdentity::deterministic();
         let cached = self
             .repository
             .cached_semantic_graph_extractions(
@@ -540,7 +547,7 @@ where
                 extracted.push(extraction);
             } else {
                 cache_misses = cache_misses.saturating_add(1);
-                let extraction = self.extract_chunk(object, chunk).await;
+                let extraction = extract_chunk_semantics(object, chunk, true);
                 new_extractions.push(extraction.clone());
                 extracted.push(extraction);
             }
@@ -548,6 +555,27 @@ where
         self.repository
             .upsert_semantic_graph_extractions(tenant_id, new_extractions)
             .await?;
+
+        // Extraction cost telemetry. Cache hits are free; misses are the work
+        // actually paid for, and the duration is the wall-clock cost of paying it.
+        // Without this the only record of extraction cost was per-object step rows
+        // in Postgres, which no dashboard aggregates.
+        let policy = self.semantic_policy.as_str();
+        metrics::counter!(
+            "moa_knowledge_semantic_extraction_chunks_total",
+            "policy" => policy, "outcome" => "cache_hit"
+        )
+        .increment(cache_hits);
+        metrics::counter!(
+            "moa_knowledge_semantic_extraction_chunks_total",
+            "policy" => policy, "outcome" => "extracted"
+        )
+        .increment(cache_misses);
+        metrics::histogram!(
+            "moa_knowledge_semantic_extraction_seconds",
+            "policy" => policy
+        )
+        .record(extraction_started.elapsed().as_secs_f64());
 
         Ok(SemanticGraphExtractionReport {
             cache_hits,
@@ -563,36 +591,6 @@ where
             semantic_chunk_links: semantic_chunk_link_count(chunks, &extracted) as u64,
             extractions: extracted,
         })
-    }
-
-    /// Extracts one chunk's semantics, preferring the model-backed extractor.
-    ///
-    /// When a model extractor is configured it is the production path; a model
-    /// call, timeout, or parse failure falls back to the deterministic keyword
-    /// extractor for this chunk (with a warning) so a single bad response never
-    /// fails the sync run. Each returned extraction carries its own honest
-    /// `model`/`prompt_version`, so a fallback is cached under the deterministic
-    /// identity and re-attempted by the model on the next re-ingestion.
-    async fn extract_chunk(
-        &self,
-        object: &KnowledgeObject,
-        chunk: &KnowledgeChunk,
-    ) -> SemanticGraphExtraction {
-        if let Some(extractor) = &self.semantic_model_extractor {
-            match extractor.extract(object, chunk).await {
-                Ok(extraction) => return extraction,
-                Err(error) => {
-                    tracing::warn!(
-                        tenant_id = %object.tenant_id,
-                        object_id = %object.object_uid,
-                        chunk_hash = %chunk.chunk_hash,
-                        error = %error,
-                        "semantic graph model extraction failed; falling back to deterministic extractor"
-                    );
-                }
-            }
-        }
-        extract_chunk_semantics(object, chunk, self.semantic_generic_entities)
     }
 }
 

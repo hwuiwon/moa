@@ -2,6 +2,9 @@
 
 #![cfg(feature = "integration")]
 
+use moa_core::types::experiments::{
+    ExperimentScorecard, ScorecardEffect, ScorecardRequirement, ScorecardValueType,
+};
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
@@ -26,8 +29,7 @@ use moa_execution::wire::{
     ExecutionPlanningContextSnapshot, ExecutionRunRequest, planning_context_hash,
 };
 use moa_experiments::model::{
-    ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentTarget,
-    ExperimentVariant,
+    ExperimentRunRecord, ExperimentRunStatus, ExperimentTarget, ExperimentVariant,
 };
 use moa_test_support::{FixtureCapabilityOptions, OrchestratorTestFixture, TestApiClient};
 use moa_wire::experiments::{
@@ -116,10 +118,15 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
         execution_template: Some(exact_template.clone()),
         metadata: json!({"lane": "experiment_execution_service_e2e"}),
     };
-    let scorecard = ExperimentScorecard {
-        score_names: vec!["canonical_execution_completed".to_string()],
-        evaluator_metadata: json!({"mode": "deterministic-service-e2e"}),
-    };
+    let scorecard = ExperimentScorecard::new(vec![ScorecardRequirement {
+        evaluator_id: "target_completed".to_string(),
+        evaluator_version: "v1".to_string(),
+        score_name: "target_completed".to_string(),
+        value_type: ScorecardValueType::Boolean,
+        config: json!({}),
+        effect: ScorecardEffect::Blocking,
+    }])
+    .expect("fixture scorecard is valid");
     let score_run_id = Uuid::now_v7();
     let experiment_idempotency_key = format!("experiment-execution-{}", Uuid::now_v7());
     let request = ExperimentRunRequest {
@@ -128,7 +135,7 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
         plan_revision_uid: None,
         target: Some(serde_json::to_value(&target)?),
         variant: Some(serde_json::to_value(&variant)?),
-        scorecard: serde_json::to_value(&scorecard)?,
+        scorecard: Some(scorecard.clone()),
         score_run_id: Some(score_run_id),
         idempotency_key: Some(experiment_idempotency_key.clone()),
         agent_revision_variants: Vec::new(),

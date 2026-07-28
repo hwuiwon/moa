@@ -11,7 +11,7 @@ tier.
 | --- | --- | --- |
 | `core/` | `moa-lineage-core` | `LineageSink` trait; record shapes; scope and ID types; serde wire format |
 | `citation/` | `moa-lineage-citation` | Provider citation adapters plus BM25 and NLI-ready answer-source verification |
-| `sink/` | `moa-lineage-sink` | mpsc + fjall durable journal + TimescaleDB writer + worker lifecycle; OTel GenAI v1.38 + OpenInference attribute emitters (`otel` module) |
+| `sink/` | `moa-lineage-sink` | bounded mpsc ingress + Postgres acceptance queue + TimescaleDB writer + worker lifecycle; OTel GenAI v1.38 + OpenInference attribute emitters (`otel` module) |
 | `audit/` | `moa-lineage-audit` | BLAKE3 hash chain, object-lock metadata/manifest support, and PII HMAC vault |
 
 ## Public surface

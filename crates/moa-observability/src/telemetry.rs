@@ -7,6 +7,7 @@ use opentelemetry_otlp::{
     Protocol, SpanExporter, WithExportConfig, WithHttpConfig, WithTonicConfig,
 };
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tracing_subscriber::EnvFilter;
@@ -16,26 +17,64 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::runtime_metrics::init_metrics;
+use moa_config::MetricsConfig;
+use moa_config::MetricsExporter;
 use moa_config::MoaConfig;
 use moa_config::ObservabilityConfig;
 use moa_config::OtlpProtocol;
 use moa_core::{error::MoaError, error::Result};
 
-/// Keeps the configured OTLP tracer provider alive for the process lifetime.
+/// Owns the configured OTLP providers for the process lifetime.
+///
+/// Both signals live here. A guard that owned only the tracer would flush spans
+/// at shutdown and silently discard whatever the metric exporter had buffered,
+/// which is exactly the window in which the most interesting metrics (the drain,
+/// the backlog, the final counters) are produced.
 #[derive(Debug, Default)]
 pub struct TelemetryGuard {
     provider: Option<SdkTracerProvider>,
+    meter_provider: Option<SdkMeterProvider>,
 }
 
 impl TelemetryGuard {
     /// Creates an empty telemetry guard when OTLP export is disabled.
     pub fn disabled() -> Self {
-        Self { provider: None }
+        Self {
+            provider: None,
+            meter_provider: None,
+        }
+    }
+
+    /// Flushes and shuts both providers down, in the order that keeps data.
+    ///
+    /// Consuming, so a binary cannot call it and then keep exporting into a
+    /// provider that has already been shut down. Metrics are flushed before
+    /// traces because the metric exporter aggregates over an interval and holds
+    /// the most unexported state; tracing is span-per-event and its batch
+    /// exporter is closer to caught up at any instant.
+    ///
+    /// [`Drop`] remains a best-effort backstop for paths that exit without
+    /// calling this, but it cannot report failures and runs at an unpredictable
+    /// point, so it is not a substitute.
+    pub fn shutdown(mut self) {
+        if let Some(meter_provider) = self.meter_provider.take()
+            && let Err(error) = meter_provider.shutdown()
+        {
+            tracing::warn!(%error, "OTLP meter provider shutdown failed; metrics may be lost");
+        }
+        if let Some(provider) = self.provider.take()
+            && let Err(error) = provider.shutdown()
+        {
+            tracing::warn!(%error, "OTLP tracer provider shutdown failed; traces may be lost");
+        }
     }
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
+        if let Some(meter_provider) = self.meter_provider.take() {
+            let _ = meter_provider.shutdown();
+        }
         if let Some(provider) = self.provider.take() {
             let _ = provider.shutdown();
         }
@@ -77,18 +116,49 @@ pub fn init_observability(
         )
     };
 
+    // The resource identity is built once and used for BOTH signals. Traces and
+    // metrics that disagree about service.name, deployment.environment or
+    // service.version cannot be correlated at all, and the disagreement is
+    // invisible until someone tries to join them in a query.
+    let resource = build_resource(&config.observability);
+    let otlp_base = config.observability.otlp_endpoint.as_deref();
+    let otlp_protocol = config.observability.otlp_protocol;
+
     if !config.observability.enabled {
         let _ = tracing_subscriber::registry()
             .with(console_layer)
             .try_init();
-        init_metrics(&config.metrics)?;
-        return Ok(TelemetryGuard { provider: None });
+        // `observability.enabled` is the master switch for OTLP export, and it
+        // governs BOTH signals. Installing an OTLP meter provider here would
+        // have every default-config process pushing at a collector the operator
+        // never said existed, while traces stayed correctly off - the same
+        // one-signal-on, one-signal-off split this task exists to remove. The
+        // scrape and disabled exporters are unaffected: neither needs a
+        // collector.
+        let metrics = match config.metrics.exporter {
+            MetricsExporter::Otlp => {
+                tracing::info!(
+                    "runtime metrics are not exported: metrics.exporter is `otlp` but \
+                     observability.enabled is false, so there is no configured collector"
+                );
+                &MetricsConfig {
+                    exporter: MetricsExporter::Disabled,
+                    prometheus_listen: None,
+                }
+            }
+            _ => &config.metrics,
+        };
+        let meter_provider = init_metrics(metrics, otlp_base, otlp_protocol, resource)?;
+        return Ok(TelemetryGuard {
+            provider: None,
+            meter_provider,
+        });
     }
 
     let exporter = build_span_exporter(&config.observability)?;
     let provider = SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
-        .with_resource(build_resource(&config.observability))
+        .with_resource(resource.clone())
         .with_sampler(build_sampler(config.observability.sample_rate))
         .build();
     let tracer = provider.tracer(config.observability.service_name.clone());
@@ -100,10 +170,11 @@ pub fn init_observability(
         .with(console_layer)
         .with(otel_layer)
         .try_init();
-    init_metrics(&config.metrics)?;
+    let meter_provider = init_metrics(&config.metrics, otlp_base, otlp_protocol, resource)?;
 
     Ok(TelemetryGuard {
         provider: Some(provider),
+        meter_provider,
     })
 }
 
@@ -125,7 +196,11 @@ fn build_span_exporter(config: &ObservabilityConfig) -> Result<SpanExporter> {
         OtlpProtocol::Grpc => {
             let mut exporter = SpanExporter::builder().with_tonic();
             if let Some(endpoint) = config.otlp_endpoint.as_ref() {
-                exporter = exporter.with_endpoint(endpoint);
+                exporter = exporter.with_endpoint(moa_config::otlp_signal_endpoint(
+                    endpoint,
+                    OtlpProtocol::Grpc,
+                    moa_config::OtlpSignal::Traces,
+                )?);
             }
             if !config.otlp_headers.is_empty() {
                 exporter = exporter.with_metadata(build_grpc_metadata(&config.otlp_headers)?);
@@ -139,7 +214,11 @@ fn build_span_exporter(config: &ObservabilityConfig) -> Result<SpanExporter> {
                 .with_http()
                 .with_protocol(Protocol::HttpBinary);
             if let Some(endpoint) = config.otlp_endpoint.as_ref() {
-                exporter = exporter.with_endpoint(endpoint);
+                exporter = exporter.with_endpoint(moa_config::otlp_signal_endpoint(
+                    endpoint,
+                    OtlpProtocol::Http,
+                    moa_config::OtlpSignal::Traces,
+                )?);
             }
             if !config.otlp_headers.is_empty() {
                 exporter = exporter.with_headers(config.otlp_headers.clone());
@@ -231,11 +310,75 @@ mod tests {
     }
 
     #[test]
-    fn init_observability_disabled_returns_guard() {
+    fn init_observability_disabled_exports_neither_signal() {
+        // Pins: `observability.enabled = false` turns OFF both signals. The
+        // metrics exporter now defaults to `otlp`, so without this the default
+        // configuration would push runtime metrics at a collector nobody
+        // configured while traces stayed off - one signal on and one off, which
+        // is the exact split this task removes.
         let config = MoaConfig::default();
+        assert_eq!(
+            config.metrics.exporter,
+            moa_config::MetricsExporter::Otlp,
+            "precondition: the default exporter must be the push one, or this test \
+             proves nothing about the interaction"
+        );
+
         let guard = init_observability(&config, &TelemetryConfig::default())
             .expect("disabled observability should initialize");
-        assert!(guard.provider.is_none());
+
+        assert!(
+            guard.provider.is_none(),
+            "no tracer provider when OTLP is off"
+        );
+        assert!(
+            guard.meter_provider.is_none(),
+            "no meter provider either: OTLP export is disabled, so there is no collector"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_guard_owns_the_meter_provider_whenever_otlp_metrics_are_selected() {
+        // Pins: the guard actually HOLDS the meter provider. A shutdown that
+        // flushes traces and not metrics is invisible in any assertion about the
+        // shutdown call itself - the call succeeds either way - so what has to be
+        // pinned is ownership. Without the provider here there is nothing to
+        // flush, and every metric buffered in the final export interval (the
+        // drain, the backlog, the closing counters) is lost silently.
+        // Async because the default transport is gRPC, and building a tonic
+        // exporter needs a live reactor. That is production's situation too; a
+        // sync test here would only prove the HTTP arm.
+        let mut config = MoaConfig::default();
+        config.observability.enabled = true;
+        config.metrics.exporter = moa_config::MetricsExporter::Otlp;
+
+        let guard = init_observability(&config, &TelemetryConfig::default())
+            .expect("otlp metrics should initialize");
+
+        assert!(
+            guard.meter_provider.is_some(),
+            "the telemetry guard must own the meter provider so shutdown can flush it; \
+             exporter was {:?}",
+            config.metrics.exporter
+        );
+    }
+
+    #[tokio::test]
+    async fn the_guard_owns_no_meter_provider_when_metrics_are_disabled() {
+        // Negative control for the test above: without it, a guard that stored a
+        // provider unconditionally would satisfy the assertion while exporting
+        // nothing, and the pin would prove only that a field can be non-None.
+        let mut config = MoaConfig::default();
+        config.observability.enabled = true;
+        config.metrics.exporter = moa_config::MetricsExporter::Disabled;
+
+        let guard = init_observability(&config, &TelemetryConfig::default())
+            .expect("disabled metrics should initialize");
+
+        assert!(
+            guard.meter_provider.is_none(),
+            "a disabled exporter must own no provider to flush"
+        );
     }
 
     #[test]

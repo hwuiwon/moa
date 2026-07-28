@@ -156,7 +156,7 @@ pub(crate) fn session_summary_from_row(row: &PgRow) -> Result<SessionSummary> {
     })
 }
 
-fn tenant_id_from_storage(value: String) -> TenantId {
+pub(crate) fn tenant_id_from_storage(value: String) -> TenantId {
     if let Ok(uuid) = Uuid::parse_str(&value) {
         return TenantId::from(uuid);
     }
@@ -230,7 +230,7 @@ pub(crate) fn learning_entry_from_row(row: &PgRow) -> Result<LearningEntry> {
         target_label: row.col::<Option<String>>("target_label")?,
         payload: row.col::<serde_json::Value>("payload")?,
         confidence: row.col::<Option<f64>>("confidence")?,
-        source_refs: row.col::<Vec<Uuid>>("source_refs")?,
+        sources: Vec::new(),
         actor: row.col::<String>("actor")?,
         valid_from: row.col::<DateTime<Utc>>("valid_from")?,
         valid_to: row.col::<Option<DateTime<Utc>>>("valid_to")?,
@@ -302,6 +302,10 @@ pub(crate) fn learning_candidate_from_row(row: &PgRow) -> Result<LearningCandida
             "learning candidate type",
             &row.col::<String>("candidate_type")?,
         )?,
+        proposal_kind: from_db(
+            "learning proposal kind",
+            &row.col::<String>("proposal_kind")?,
+        )?,
         status: from_db("learning candidate status", &row.col::<String>("status")?)?,
         target_id: row.col::<Option<String>>("target_id")?,
         target_label: row.col::<Option<String>>("target_label")?,
@@ -323,7 +327,7 @@ pub(crate) fn learning_candidate_from_row(row: &PgRow) -> Result<LearningCandida
             .transpose()?,
         payload: row.col::<serde_json::Value>("payload")?,
         evaluation_payload: row.col::<Option<serde_json::Value>>("evaluation_payload")?,
-        source_experience_ids: row.col::<Vec<Uuid>>("source_experience_ids")?,
+        sources: Vec::new(),
         confidence: row.col::<Option<f64>>("confidence")?,
         risk_class: from_db("learning risk class", &row.col::<String>("risk_class")?)?,
         promotion_requirements: row.col::<Vec<String>>("promotion_requirements")?,

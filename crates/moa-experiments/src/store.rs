@@ -5,7 +5,8 @@ use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::types::memory::RlsContext;
 use moa_core::{
     error::MoaError, error::Result as MoaResult, types::action_policy::ActionRuleScope,
-    types::contact::ContactId, types::identifiers::ModelId, types::identifiers::SessionId,
+    types::contact::ContactId, types::experiments::ExperimentScorecard,
+    types::identifiers::ModelId, types::identifiers::SessionId,
     types::identifiers::StoragePartitionId, types::identifiers::TenantId,
 };
 use moa_db::ScopedConn;
@@ -15,9 +16,9 @@ use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use crate::model::{
-    ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
-    ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
-    NewExperimentRun, NewExperimentTrial,
+    ExperimentRunRecord, ExperimentRunStatus, ExperimentSimulatorConfig, ExperimentTrialRecord,
+    ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant, NewExperimentRun,
+    NewExperimentTrial,
 };
 use crate::scores::{SCORE_RUN_SOURCE_EXPERIMENT_RUN, SCORE_RUN_SOURCE_EXPERIMENT_TRIAL};
 

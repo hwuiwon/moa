@@ -20,8 +20,8 @@ use providers::{deserialize_optional_list, deserialize_optional_provider_ids};
 
 use super::{
     AsyncAuthzKind, AuthProviderKind, AuthzEngine, KmsProviderKind, McpServerConfig, MoaConfig,
-    OAuthClientConfig, OAuthRefreshConfig, OtlpProtocol, RuntimeCacheBackend, SecurityProfile,
-    SessionAttachmentBackend, SessionBlobBackend, TokenVaultKind,
+    OAuthClientConfig, OAuthRefreshConfig, OtlpProtocol, RuntimeCacheBackend, SandboxPolicyConfig,
+    SecurityProfile, SessionAttachmentBackend, SessionBlobBackend, TokenVaultKind,
 };
 
 /// Optional flat environment overrides for `MoaConfig`.
@@ -47,6 +47,9 @@ pub struct EnvOverlay {
     /// `MOA_MCP_SERVERS_JSON`.
     #[serde(deserialize_with = "deserialize_optional_mcp_servers")]
     pub mcp_servers_json: Option<Vec<McpServerConfig>>,
+    /// `MOA_SANDBOX_POLICY_JSON`.
+    #[serde(deserialize_with = "deserialize_optional_sandbox_policy")]
+    pub sandbox_policy_json: Option<SandboxPolicyConfig>,
     /// `MOA_LLM_DLP_TOKENIZE_ENABLED`.
     pub llm_dlp_tokenize_enabled: Option<bool>,
     /// `MOA_MODELS_MAIN`.
@@ -140,6 +143,24 @@ pub struct EnvOverlay {
     pub providers_stream_timeouts_idle_ms: Option<u64>,
     /// Provider total stream timeout in milliseconds.
     pub providers_stream_timeouts_total_ms: Option<u64>,
+    /// `MOA_PROVIDERS_CONCURRENCY_ON_COORDINATION_FAILURE` (`bounded_degraded` | `fail_closed`).
+    pub providers_concurrency_on_coordination_failure: Option<String>,
+    /// `MOA_PROVIDERS_PACING_SCOPE` (`local` | `global`).
+    pub providers_pacing_scope: Option<String>,
+    /// `MOA_PROVIDERS_PACING_STATE_TTL_MS`.
+    pub providers_pacing_state_ttl_ms: Option<u64>,
+    /// `MOA_PROVIDERS_PACING_MAX_PACING_WAIT_MS`.
+    pub providers_pacing_max_pacing_wait_ms: Option<u64>,
+    /// `MOA_PROVIDERS_PACING_DEFAULT_COOLDOWN_MS`.
+    pub providers_pacing_default_cooldown_ms: Option<u64>,
+    /// `MOA_PROVIDERS_PACING_MAX_COOLDOWN_MS`.
+    pub providers_pacing_max_cooldown_ms: Option<u64>,
+    /// `MOA_PROVIDERS_PACING_RETRY_BUDGET_WINDOW_MS`.
+    pub providers_pacing_retry_budget_window_ms: Option<u64>,
+    /// `MOA_PROVIDERS_PACING_RETRY_BUDGET_PERCENT`.
+    pub providers_pacing_retry_budget_percent: Option<u32>,
+    /// `MOA_PROVIDERS_PACING_RETRY_BUDGET_FLOOR`.
+    pub providers_pacing_retry_budget_floor: Option<u64>,
     /// `MOA_DATABASE_URL`.
     pub database_url: Option<String>,
     /// `MOA_DATABASE_ADMIN_URL`.
@@ -493,8 +514,14 @@ pub struct EnvOverlay {
     pub observability_lineage_batch_size: Option<usize>,
     /// `MOA_OBSERVABILITY_LINEAGE_BATCH_MAX_AGE_SECS`.
     pub observability_lineage_batch_max_age_secs: Option<u64>,
-    /// `MOA_OBSERVABILITY_LINEAGE_JOURNAL_PATH`.
-    pub observability_lineage_journal_path: Option<String>,
+    /// `MOA_OBSERVABILITY_LINEAGE_CLAIM_BATCH_SIZE`.
+    pub observability_lineage_claim_batch_size: Option<usize>,
+    /// `MOA_OBSERVABILITY_LINEAGE_LEASE_TTL_SECS`.
+    pub observability_lineage_lease_ttl_secs: Option<u64>,
+    /// `MOA_OBSERVABILITY_LINEAGE_MAX_PENDING_AGE_SECS`.
+    pub observability_lineage_max_pending_age_secs: Option<u64>,
+    /// `MOA_OBSERVABILITY_LINEAGE_DRAIN_TIMEOUT_SECS`.
+    pub observability_lineage_drain_timeout_secs: Option<u64>,
     /// `MOA_OBSERVABILITY_LINEAGE_SAMPLE_PGVECTOR_EXPLAIN`.
     pub observability_lineage_sample_pgvector_explain: Option<f64>,
     /// `MOA_CLICKHOUSE_URL`; empty means unset.
@@ -515,10 +542,11 @@ pub struct EnvOverlay {
     pub clickhouse_export_poll_secs: Option<u64>,
     /// `MOA_CLICKHOUSE_EXPORT_BATCH_ROWS`.
     pub clickhouse_export_batch_rows: Option<usize>,
-    /// `MOA_METRICS_ENABLED`.
-    pub metrics_enabled: Option<bool>,
-    /// `MOA_METRICS_LISTEN`.
-    pub metrics_listen: Option<String>,
+    /// `MOA_METRICS_EXPORTER`: `otlp`, `prometheus`, or `disabled`.
+    pub metrics_exporter: Option<String>,
+    /// `MOA_METRICS_PROMETHEUS_LISTEN`; required by, and only valid with, the
+    /// `prometheus` exporter.
+    pub metrics_prometheus_listen: Option<String>,
     /// `MOA_BUDGETS_DAILY_TENANT_CENTS`.
     pub budgets_daily_tenant_cents: Option<u32>,
     /// `MOA_SESSION_LIMITS_TURN_ADMISSION_FLEET_LIMIT`.
@@ -801,6 +829,9 @@ fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
     if field == "mcp_servers_json" {
         return Some(vec!["mcp_servers".to_string()]);
     }
+    if field == "sandbox_policy_json" {
+        return Some(vec!["sandbox_policy".to_string()]);
+    }
     providers::exact_overlay_path(field)
         .or_else(|| security::exact_overlay_path(field))
         .or_else(|| messaging::exact_overlay_path(field))
@@ -831,6 +862,15 @@ where
     D: serde::Deserializer<'de>,
 {
     deserialize_optional_json(deserializer, "MOA_MCP_SERVERS_JSON")
+}
+
+fn deserialize_optional_sandbox_policy<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<SandboxPolicyConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_json(deserializer, "MOA_SANDBOX_POLICY_JSON")
 }
 
 fn deserialize_optional_json<'de, D, T>(

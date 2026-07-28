@@ -2,11 +2,11 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
-    types::experience::LearningCandidateType, types::experience::LearningRiskClass,
-    types::experience::TaskFacetSet, types::experience::TaskFingerprint,
-    types::identifiers::SessionId, types::identifiers::TenantId, types::memory::SkillMetadata,
-    types::session::SessionMeta,
+    types::experience::LearningCandidate, types::experience::LearningCandidateSourceRef,
+    types::experience::LearningCandidateType, types::experience::LearningProposalKind,
+    types::experience::LearningRiskClass, types::experience::TaskFacetSet,
+    types::experience::TaskFingerprint, types::identifiers::SessionId,
+    types::identifiers::TenantId, types::memory::SkillMetadata, types::session::SessionMeta,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -15,15 +15,15 @@ use uuid::Uuid;
 pub(crate) fn deterministic_skill_candidate_id(
     tenant_id: TenantId,
     source_session_id: SessionId,
-    source_experience_ids: &[Uuid],
+    experience_ids: &[Uuid],
     operation: &str,
     target_skill_name: &str,
 ) -> Uuid {
-    let mut source_experience_ids = source_experience_ids
+    let mut experience_ids = experience_ids
         .iter()
         .map(Uuid::to_string)
         .collect::<Vec<_>>();
-    source_experience_ids.sort();
+    experience_ids.sort();
 
     let mut hasher = Sha256::new();
     for part in [
@@ -34,13 +34,13 @@ pub(crate) fn deterministic_skill_candidate_id(
     ] {
         hash_part(&mut hasher, part);
     }
-    if source_experience_ids.is_empty() {
+    if experience_ids.is_empty() {
         hash_part(&mut hasher, "source_session_id");
         hash_part(&mut hasher, &source_session_id.to_string());
     } else {
-        hash_part(&mut hasher, "source_experience_ids");
-        for source_experience_id in source_experience_ids {
-            hash_part(&mut hasher, &source_experience_id);
+        hash_part(&mut hasher, "source_experiences");
+        for experience_id in experience_ids {
+            hash_part(&mut hasher, &experience_id);
         }
     }
 
@@ -57,7 +57,7 @@ pub(crate) struct SkillDraftCandidateInput {
     pub operation: String,
     pub metadata: SkillMetadata,
     pub payload: Value,
-    pub source_experience_ids: Vec<Uuid>,
+    pub sources: Vec<LearningCandidateSourceRef>,
     pub task_fingerprint: Option<TaskFingerprint>,
     pub task_facets: Option<TaskFacetSet>,
     pub confidence: Option<f64>,
@@ -73,14 +73,15 @@ pub(crate) fn skill_draft_candidate(
         tenant_id: session.tenant_id,
         user_id: None,
         candidate_type: LearningCandidateType::Skill,
-        status: LearningCandidateStatus::Proposed,
+        proposal_kind: LearningProposalKind::SkillDraft,
+        status: LearningProposalKind::SkillDraft.initial_status(),
         target_id: Some(input.metadata.path),
         target_label: Some(input.metadata.name),
         task_fingerprint: input.task_fingerprint,
         task_facets: input.task_facets,
         payload: input.payload,
         evaluation_payload: None,
-        source_experience_ids: input.source_experience_ids,
+        sources: input.sources,
         confidence: input.confidence,
         risk_class: LearningRiskClass::Medium,
         promotion_requirements: vec![
@@ -96,6 +97,20 @@ pub(crate) fn skill_draft_candidate(
         created_at: input.now,
         updated_at: input.now,
     }
+}
+
+/// Returns the experience ids named by a typed source list, in given order.
+///
+/// The candidate id is keyed on evidence identity so retries of the same
+/// proposal dedupe, and only experience references carry that identity.
+pub(crate) fn experience_ids(sources: &[LearningCandidateSourceRef]) -> Vec<Uuid> {
+    sources
+        .iter()
+        .filter_map(|source| match source {
+            LearningCandidateSourceRef::Experience { experience_id } => Some(*experience_id),
+            _ => None,
+        })
+        .collect()
 }
 
 fn hash_part(hasher: &mut Sha256, part: &str) {

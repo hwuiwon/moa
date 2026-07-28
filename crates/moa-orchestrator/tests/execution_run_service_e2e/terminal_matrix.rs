@@ -77,7 +77,13 @@ const PLANNER_MATCH: &str = "<frozen_planning_context>";
 const AMENDMENT_MATCH: &str = "<frozen_amendment_context>";
 const SYNTHESIS_MATCH: &str = "Synthesize the final user response for execution run";
 const ESCALATION_OBJECTIVE: &str = "Investigate the unusual failure and explain it";
+/// Name the loopback capability fixture publishes the escalation tool under.
 const ESCALATION_TOOL: &str = "discover_fixture_work_scope";
+
+/// Server-qualified reference the model calls and the `ToolCall` event records.
+fn escalation_tool_reference() -> String {
+    moa_hands::mcp_tool_reference("fixture-capability", ESCALATION_TOOL)
+}
 const DURABLE_UPGRADE_CONTROL: &str = "request_durable_execution";
 const DURABLE_UPGRADE_CONTROL_BARRIER_MS: u64 = 15_000;
 const REPLAN_SEED_AGENT_SENTINEL: &str = "TERMINAL_MATRIX_REPLAN_SEED_AGENT";
@@ -185,7 +191,7 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
                     json!({
                         "content": "",
                         "tool_calls": [{
-                            "name": ESCALATION_TOOL,
+                            "name": escalation_tool_reference(),
                             "id": "terminal-matrix-durable-upgrade",
                             "input": {"query": "unusual failure"}
                         }]
@@ -232,7 +238,13 @@ async fn execute_inline_upgrades_once_to_durable_with_preserved_evidence_service
     let test = fixture.isolated().await;
     let session_id = test.create_session("strict-durable-upgrade").await?;
     let session = test.client().get_session(session_id).await?;
-    seed_allow_policy(&fixture, test.client(), session.tenant_id, ESCALATION_TOOL).await?;
+    seed_allow_policy(
+        &fixture,
+        test.client(),
+        session.tenant_id,
+        &escalation_tool_reference(),
+    )
+    .await?;
     let started = start_turn_in_session(&test, session_id, ESCALATION_OBJECTIVE, None).await?;
     let controller = fixture
         .fixture_capability()
@@ -486,7 +498,7 @@ async fn await_successful_probe_result(
         let probe_tool_id = events.iter().find_map(|record| match &record.event {
             Event::ToolCall {
                 tool_id, tool_name, ..
-            } if tool_name == ESCALATION_TOOL => Some(tool_id),
+            } if tool_name == &escalation_tool_reference() => Some(tool_id),
             _ => None,
         });
         if let Some(probe_tool_id) = probe_tool_id {
@@ -626,6 +638,15 @@ async fn await_single_execution_run_started_uid(
     }
 }
 
+/// Returns every offered schema claiming the durable-upgrade control's name.
+///
+/// The fixture publishes a decoy connector tool under this same name, and the
+/// assertion is that only MOA's authoritative control ever reaches the model.
+/// Server-qualified connector references now make that shadowing *structurally*
+/// impossible — the decoy registers as `mcp__fixture-capability__…`, so it can
+/// no longer contest the bare name at all. The check is kept because it pins the
+/// stronger guarantee at the layer the model actually sees, and would still
+/// catch a regression that reintroduced unqualified connector registration.
 fn durable_upgrade_control_schemas(
     request: &moa_core::types::completion::CompletionRequest,
 ) -> Vec<&Value> {

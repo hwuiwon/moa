@@ -28,7 +28,8 @@ use moa_orchestrator::{
         },
         jobs::{
             restate_ingress_base_url, spawn_default_cron_bootstrap, start_action_review_reaper,
-            start_authz_challenge_reaper_if_configured,
+            start_authz_challenge_reaper_if_configured, start_hand_lease_reaper,
+            start_mcp_catalog_refresh,
         },
         kms::KmsRuntime,
     },
@@ -220,7 +221,6 @@ async fn async_main() -> anyhow::Result<()> {
         runtime_deps.fga_client.clone(),
         runtime_deps.providers.clone(),
         runtime_deps.tool_router.clone(),
-        runtime_deps.tool_schemas.clone(),
         moa_config.session_limits.clone(),
         moa_config.clone(),
         runtime_deps.contact_token_issuer.clone(),
@@ -229,6 +229,7 @@ async fn async_main() -> anyhow::Result<()> {
         runtime_deps.embedding_provider.clone(),
         Arc::new(runtime_deps.channel_adapters.clone()),
         runtime_deps.runtime_cache.clone(),
+        runtime_deps.lineage.score_handle(),
     );
 
     let readiness = Arc::new(AtomicBool::new(false));
@@ -237,6 +238,7 @@ async fn async_main() -> anyhow::Result<()> {
         pool.clone(),
         runtime_deps.kms.clone(),
         restate_admin_url,
+        runtime_deps.lineage.writer.clone(),
     )?;
     let shutdown = CancellationToken::new();
     let authz_challenge_reaper_handle = start_authz_challenge_reaper_if_configured(
@@ -246,6 +248,18 @@ async fn async_main() -> anyhow::Result<()> {
     )?;
     let action_review_reaper_handle =
         start_action_review_reaper(&runtime_deps.background_pool, restate_ingress_url.clone());
+    // The destruction owner for every bounded sandbox deadline. It is started
+    // before the servers accept traffic, and startup fails outright if no hand
+    // provider is registered, so no sandbox is ever provisioned under a policy
+    // this process cannot enforce.
+    let _hand_lease_reaper_handle = start_hand_lease_reaper(
+        &runtime_deps.background_pool,
+        runtime_deps.tool_router.hand_providers(),
+    )?;
+    // Optional connectors that failed discovery at startup are retried here, and
+    // schema changes republished, without restarting the process.
+    let _mcp_catalog_refresh_handle =
+        start_mcp_catalog_refresh(moa_config.as_ref(), runtime_deps.tool_router.clone());
 
     let restate_listener = bind_listener(args.port).await?;
     let health_listener = bind_listener(args.health_port).await?;
@@ -342,16 +356,31 @@ async fn async_main() -> anyhow::Result<()> {
             }
             action_review_reaper_handle.shutdown().await;
 
+            let audit = runtime_deps.audit.clone();
+
             if let Some(writer) = runtime_deps.lineage.writer.clone() {
                 tracing::info!("draining lineage writer");
                 match writer.shutdown().await {
                     Ok(stats) => tracing::info!(
                         written = stats.written,
-                        journal_depth = stats.journal_depth,
-                        "lineage writer drained"
+                        pending = stats.pending,
+                        "lineage writer drained; any pending rows stay committed for \
+                         another replica"
                     ),
                     Err(error) => tracing::warn!(?error, "lineage writer drain failed"),
                 }
+            }
+
+            // Audit after lineage, because draining lineage can itself produce
+            // authorization audits; the reverse order would close the audit
+            // writer while the drain was still emitting into it.
+            let dropped = audit.shutdown().await;
+            if dropped > 0 {
+                tracing::warn!(
+                    dropped,
+                    "security audit events were dropped during this process lifetime; the \
+                     audit trail is incomplete"
+                );
             }
 
             if probe_state.deregister_on_shutdown() {
@@ -395,6 +424,14 @@ struct ProbeState {
     client: Client,
     require_registration: bool,
     deregister_on_shutdown: bool,
+    /// Durable lineage writer, when this deployment owns one.
+    ///
+    /// Held so readiness can refuse traffic for a writer that is dead, draining,
+    /// cut off from Postgres, or sitting on a backlog older than its limit. All
+    /// four are readiness conditions and none is a liveness condition: the
+    /// accepted rows are safe in Postgres, and restarting the process would only
+    /// drop leases and slow the drain that is already behind.
+    lineage_writer: Option<Arc<moa_lineage_sink::WriterHandle>>,
 }
 
 impl ProbeState {
@@ -403,6 +440,7 @@ impl ProbeState {
         pool: sqlx::PgPool,
         kms: KmsRuntime,
         admin_base_url: String,
+        lineage_writer: Option<Arc<moa_lineage_sink::WriterHandle>>,
     ) -> anyhow::Result<Self> {
         let client = Client::builder()
             .timeout(ADMIN_CHECK_TIMEOUT)
@@ -417,6 +455,7 @@ impl ProbeState {
             client,
             require_registration: env_flag("MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS", false),
             deregister_on_shutdown: env_flag("MOA_DEREGISTER_ON_SHUTDOWN", false),
+            lineage_writer,
         })
     }
 
@@ -439,6 +478,12 @@ impl ProbeState {
             .context("Postgres readiness check failed")?;
 
         self.kms.check_readiness().await?;
+
+        if let Some(writer) = &self.lineage_writer
+            && let Some(reason) = writer.unready_reason()
+        {
+            bail!("lineage writer not ready: {reason}");
+        }
 
         let deployments = self.fetch_deployments().await?;
         if self.require_registration && !services_registered(&deployments) {

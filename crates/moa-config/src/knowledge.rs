@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use moa_core::error::{MoaError, Result};
+use moa_core::types::memory::SemanticGraphPolicy;
 
 /// Tenant knowledge-base ingestion settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -28,8 +29,8 @@ pub struct KnowledgeConfig {
     pub sync: KnowledgeSyncConfig,
     /// Chunking controls.
     pub chunking: KnowledgeChunkingConfig,
-    /// Semantic graph extraction controls.
-    pub semantic: KnowledgeSemanticConfig,
+    /// Tenant-knowledge semantic graph policy.
+    pub semantic: SemanticGraphPolicy,
     /// Knowledge observability controls.
     pub observability: KnowledgeObservabilityConfig,
 }
@@ -328,49 +329,6 @@ impl Default for KnowledgeChunkingConfig {
     }
 }
 
-/// Tenant knowledge semantic graph extraction controls.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct KnowledgeSemanticConfig {
-    /// Emit deterministic generic proper-noun entities when the domain-specific
-    /// ruleset matches nothing in a chunk.
-    ///
-    /// Defaults to `true`: the fallback is purely lexical (no provider or LLM
-    /// calls) and cheap, and without it the graph retrieval leg never fires on
-    /// non-domain corpora because no entity nodes exist to seed traversal.
-    pub generic_entities: bool,
-    /// Model-backed semantic graph extraction settings.
-    pub model_extraction: KnowledgeSemanticModelConfig,
-}
-
-impl Default for KnowledgeSemanticConfig {
-    fn default() -> Self {
-        Self {
-            generic_entities: true,
-            model_extraction: KnowledgeSemanticModelConfig::default(),
-        }
-    }
-}
-
-/// Model-backed tenant knowledge semantic graph extraction controls.
-///
-/// The surface is deliberately just provider selection: enable the path and pick
-/// the model. Extraction bounds (per-chunk caps, request timeout) are constants
-/// in the extractor, matching how the deterministic extractor bounds itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct KnowledgeSemanticModelConfig {
-    /// Whether the model-backed extractor is the production semantic extractor.
-    ///
-    /// Defaults to `false`: the deterministic keyword extractor is the sole
-    /// extractor unless this is enabled and a provider resolves. When enabled the
-    /// model becomes the production extractor for new or changed chunks and the
-    /// keyword ruleset stays the per-chunk fallback for failed model calls.
-    pub enabled: bool,
-    /// Model id used for extraction; empty resolves the config's default model.
-    pub model: String,
-}
-
 /// Tenant knowledge observability controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -409,6 +367,52 @@ fn require_config_secret(kind: &str, selected: &str, value: &str) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_graph_writes_and_reads_are_never_independently_configurable() {
+        // Pins: the write-only semantic path is unrepresentable. Every policy value
+        // either writes AND reads or does neither, so no deployment can pay
+        // extraction and storage cost for data no retrieval leg can read.
+        for policy in [SemanticGraphPolicy::Off, SemanticGraphPolicy::Deterministic] {
+            assert_eq!(
+                policy.writes_semantic_graph(),
+                policy.enables_tenant_graph_expansion(),
+                "{} must not decouple semantic writes from semantic reads",
+                policy.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_graph_defaults_to_off() {
+        // Pins: the measured default. Graph expansion produced zero rescues on both
+        // the simulated and multihoprag corpora, so a default deployment neither
+        // extracts semantic data nor pays to traverse it.
+        let policy = SemanticGraphPolicy::default();
+        assert_eq!(policy, SemanticGraphPolicy::Off);
+        assert!(!policy.writes_semantic_graph());
+        assert!(!policy.enables_tenant_graph_expansion());
+        assert_eq!(
+            KnowledgeConfig::default().semantic,
+            SemanticGraphPolicy::Off
+        );
+    }
+
+    #[test]
+    fn semantic_graph_policy_is_one_scalar_config_value() {
+        // Pins: the policy deserializes from a single kebab-case scalar on
+        // `knowledge.semantic`, so an operator sets ONE value rather than the three
+        // switches across two crates that this replaced.
+        let parsed: KnowledgeConfig =
+            serde_json::from_str(r#"{"semantic":"deterministic"}"#).expect("parse config");
+        assert_eq!(parsed.semantic, SemanticGraphPolicy::Deterministic);
+        assert!(parsed.semantic.writes_semantic_graph());
+        assert!(parsed.semantic.enables_tenant_graph_expansion());
+        assert_eq!(
+            serde_json::to_string(&SemanticGraphPolicy::Off).expect("serialize"),
+            "\"off\""
+        );
+    }
 
     #[test]
     fn knowledge_selected_provider_requires_key_only_when_selected() {

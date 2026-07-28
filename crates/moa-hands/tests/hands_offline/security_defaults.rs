@@ -6,16 +6,19 @@ use async_trait::async_trait;
 use moa_config::CloudHandsConfig;
 use moa_config::McpServerCredentialScope;
 use moa_config::MoaConfig;
+use moa_config::SandboxProfileConfig;
 use moa_config::SecurityProfile;
 use moa_core::{
     error::MoaError, error::Result, traits::BuiltInTool, traits::Identity, traits::IdentityType,
     traits::ToolContext, types::action_policy::ActionClass,
     types::action_policy::ActionPolicyEffect, types::action_policy::ActionPolicyRule,
     types::action_policy::ActionRuleScope, types::action_policy::RiskLevel,
-    types::completion::ToolInvocation, types::identifiers::ModelId, types::identifiers::TenantId,
-    types::identifiers::ToolCallId, types::identifiers::UserId, types::session::SessionMeta,
-    types::tools::IdempotencyClass, types::tools::ToolDiffStrategy, types::tools::ToolInputShape,
-    types::tools::ToolOutput, types::tools::ToolPolicySpec,
+    types::completion::ToolInvocation, types::hands::CpuLimit, types::hands::DiskLimit,
+    types::hands::EgressPolicy, types::hands::LifetimeLimit, types::hands::MemoryLimit,
+    types::identifiers::ModelId, types::identifiers::TenantId, types::identifiers::ToolCallId,
+    types::identifiers::UserId, types::session::SessionMeta, types::tools::IdempotencyClass,
+    types::tools::ToolDiffStrategy, types::tools::ToolInputShape, types::tools::ToolOutput,
+    types::tools::ToolPolicySpec,
 };
 use moa_hands::{McpDiscoveredTool, ToolRegistry, ToolRouter};
 use moa_security::ActionPolicyRuleStore;
@@ -64,8 +67,9 @@ fn local_config() -> MoaConfig {
     config
 }
 
-/// Returns a fully valid `cloud` profile config: deny default, e2b backend, and
-/// a present backend credential. Individual tests break exactly one requirement.
+/// Returns a fully valid `cloud` profile config: deny default, e2b backend, a
+/// present backend credential, and an operator-authored deployment sandbox
+/// policy. Individual tests break exactly one requirement.
 fn cloud_config() -> MoaConfig {
     let mut config = MoaConfig {
         security_profile: SecurityProfile::Cloud,
@@ -77,7 +81,27 @@ fn cloud_config() -> MoaConfig {
         e2b_api_key: Some("MOA_TEST_E2B_KEY".to_string()),
         ..CloudHandsConfig::default()
     });
+    config.sandbox_policy.deployment = authored_deployment_sandbox_policy();
     config
+}
+
+/// An operator-authored deployment sandbox policy, as a cloud deployment must
+/// have: no outbound network, a bounded idle window inside a bounded hard
+/// lifetime, and resources left to the provider's template.
+fn authored_deployment_sandbox_policy() -> SandboxProfileConfig {
+    SandboxProfileConfig {
+        revision: "test-cloud-sandbox-v1".to_string(),
+        cpu: CpuLimit::Unbounded,
+        memory: MemoryLimit::Unbounded,
+        ephemeral_disk: DiskLimit::Unbounded,
+        egress: EgressPolicy::DenyAll,
+        idle_timeout: LifetimeLimit::Bounded {
+            seconds: std::num::NonZeroU64::new(300).expect("nonzero seconds"),
+        },
+        max_lifetime: LifetimeLimit::Bounded {
+            seconds: std::num::NonZeroU64::new(3600).expect("nonzero seconds"),
+        },
+    }
 }
 
 fn cloud_rule_store() -> Arc<dyn ActionPolicyRuleStore> {
@@ -425,7 +449,11 @@ async fn tool_telemetry_redacts_raw_input_and_execution_errors_by_default() {
         async move {
             let mut registry = ToolRegistry::new();
             registry.register_builtin(Arc::new(SecretErrorTool));
-            let router = ToolRouter::new(registry, HashMap::new());
+            let router = ToolRouter::new(
+                registry,
+                HashMap::new(),
+                moa_hands::local_development_sandbox_policy(),
+            );
             let error = router
                 .execute_authorized(
                     &session(),
@@ -580,6 +608,12 @@ fn discovered_mcp_tool(name: &str) -> McpDiscoveredTool {
     }
 }
 
+/// The server-qualified reference a tool discovered from `external-server`
+/// registers under, which is also the name every policy rule must key on.
+fn external_server_tool(name: &str) -> String {
+    moa_hands::mcp_tool_reference("external-server", name)
+}
+
 fn mcp_invocation(name: &str) -> ToolInvocation {
     ToolInvocation {
         id: None,
@@ -604,12 +638,20 @@ async fn ungranted_mcp_tool_is_denied_under_the_cloud_deny_default() {
         .expect("register mcp tool");
     let mut config = MoaConfig::default();
     config.permissions.default_effect = ActionPolicyEffect::Deny;
-    let router = ToolRouter::new(registry, HashMap::new()).with_policies(
+    let router = ToolRouter::new(
+        registry,
+        HashMap::new(),
+        moa_hands::local_development_sandbox_policy(),
+    )
+    .with_policies(
         moa_security::ActionPolicies::from_config(&config).expect("deny-default policies"),
     );
 
     let check = router
-        .check_policy(&session(), &mcp_invocation("external_action"))
+        .check_policy(
+            &session(),
+            &mcp_invocation(&external_server_tool("external_action")),
+        )
         .await
         .expect("policy check for mcp tool");
 
@@ -637,28 +679,38 @@ async fn configured_admin_review_still_gates_mcp_tools_that_a_rule_cannot_lift()
     let session = session();
     let mut config = MoaConfig::default();
     config.permissions.default_effect = ActionPolicyEffect::Deny;
-    config.permissions.admin_review = vec!["external_*".to_string()];
-    let router = ToolRouter::new(registry, HashMap::new())
-        .with_policies(
-            moa_security::ActionPolicies::from_config(&config).expect("review-config policies"),
-        )
-        .with_rule_store(Arc::new(StaticRuleStore {
-            rules: vec![ActionPolicyRule {
-                id: uuid::Uuid::now_v7(),
-                scope: ActionRuleScope::Tenant {
-                    tenant_id: session.tenant_id,
-                },
-                tool: "external_action".to_string(),
-                pattern: "*".to_string(),
-                effect: ActionPolicyEffect::Allow,
-                reason: Some("tenant grant".to_string()),
-                created_by: UserId::new("admin"),
-                created_at: chrono::Utc::now(),
-            }],
-        }));
+    // Every connector tool carries the `mcp__` reference prefix, so one
+    // operator pattern review-gates all of them regardless of what any
+    // individual server chose to call its tools.
+    config.permissions.admin_review = vec!["mcp__*".to_string()];
+    let router = ToolRouter::new(
+        registry,
+        HashMap::new(),
+        moa_hands::local_development_sandbox_policy(),
+    )
+    .with_policies(
+        moa_security::ActionPolicies::from_config(&config).expect("review-config policies"),
+    )
+    .with_rule_store(Arc::new(StaticRuleStore {
+        rules: vec![ActionPolicyRule {
+            id: uuid::Uuid::now_v7(),
+            scope: ActionRuleScope::Tenant {
+                tenant_id: session.tenant_id,
+            },
+            tool: external_server_tool("external_action"),
+            pattern: "*".to_string(),
+            effect: ActionPolicyEffect::Allow,
+            reason: Some("tenant grant".to_string()),
+            created_by: UserId::new("admin"),
+            created_at: chrono::Utc::now(),
+        }],
+    }));
 
     let check = router
-        .check_policy(&session, &mcp_invocation("external_action"))
+        .check_policy(
+            &session,
+            &mcp_invocation(&external_server_tool("external_action")),
+        )
         .await
         .expect("policy check for configured-review mcp tool");
 
@@ -675,7 +727,11 @@ async fn builtin_tool_keeps_its_descriptor_default_effect() {
     // own considered descriptor default (SecretErrorTool declares Allow).
     let mut registry = ToolRegistry::new();
     registry.register_builtin(Arc::new(SecretErrorTool));
-    let router = ToolRouter::new(registry, HashMap::new());
+    let router = ToolRouter::new(
+        registry,
+        HashMap::new(),
+        moa_hands::local_development_sandbox_policy(),
+    );
 
     let check = router
         .check_policy(&session(), &mcp_invocation("secret_error"))
@@ -711,7 +767,7 @@ async fn tenant_granted_mcp_tool_resolves_to_allow_under_the_cloud_deny_default(
         scope: ActionRuleScope::Tenant {
             tenant_id: session.tenant_id,
         },
-        tool: "external_action".to_string(),
+        tool: external_server_tool("external_action"),
         pattern: "*".to_string(),
         effect: ActionPolicyEffect::Allow,
         reason: Some("operator trusts this MCP tool".to_string()),
@@ -720,16 +776,23 @@ async fn tenant_granted_mcp_tool_resolves_to_allow_under_the_cloud_deny_default(
     };
     let mut config = MoaConfig::default();
     config.permissions.default_effect = ActionPolicyEffect::Deny;
-    let router = ToolRouter::new(registry, HashMap::new())
-        .with_policies(
-            moa_security::ActionPolicies::from_config(&config).expect("deny-default policies"),
-        )
-        .with_rule_store(Arc::new(StaticRuleStore {
-            rules: vec![allow_rule],
-        }));
+    let router = ToolRouter::new(
+        registry,
+        HashMap::new(),
+        moa_hands::local_development_sandbox_policy(),
+    )
+    .with_policies(
+        moa_security::ActionPolicies::from_config(&config).expect("deny-default policies"),
+    )
+    .with_rule_store(Arc::new(StaticRuleStore {
+        rules: vec![allow_rule],
+    }));
 
     let granted = router
-        .check_policy(&session, &mcp_invocation("external_action"))
+        .check_policy(
+            &session,
+            &mcp_invocation(&external_server_tool("external_action")),
+        )
         .await
         .expect("policy check for allowed mcp tool");
     assert_eq!(granted.effect, ActionPolicyEffect::Allow);
@@ -739,7 +802,10 @@ async fn tenant_granted_mcp_tool_resolves_to_allow_under_the_cloud_deny_default(
     );
 
     let ungranted = router
-        .check_policy(&session, &mcp_invocation("external_other"))
+        .check_policy(
+            &session,
+            &mcp_invocation(&external_server_tool("external_other")),
+        )
         .await
         .expect("policy check for ungranted mcp tool");
     assert_eq!(ungranted.effect, ActionPolicyEffect::Deny);
@@ -759,22 +825,26 @@ async fn a_rule_never_makes_an_unregistered_tool_visible() {
             discovered_mcp_tool("external_action"),
         )
         .expect("register mcp tool");
-    registry.retain_only(["external_action"]);
-    let router =
-        ToolRouter::new(registry, HashMap::new()).with_rule_store(Arc::new(StaticRuleStore {
-            rules: vec![ActionPolicyRule {
-                id: uuid::Uuid::now_v7(),
-                scope: ActionRuleScope::Tenant {
-                    tenant_id: session.tenant_id,
-                },
-                tool: "filtered_away".to_string(),
-                pattern: "*".to_string(),
-                effect: ActionPolicyEffect::Allow,
-                reason: Some("rule for a tool that is not registered".to_string()),
-                created_by: UserId::new("admin"),
-                created_at: chrono::Utc::now(),
-            }],
-        }));
+    registry.retain_only([external_server_tool("external_action")]);
+    let router = ToolRouter::new(
+        registry,
+        HashMap::new(),
+        moa_hands::local_development_sandbox_policy(),
+    )
+    .with_rule_store(Arc::new(StaticRuleStore {
+        rules: vec![ActionPolicyRule {
+            id: uuid::Uuid::now_v7(),
+            scope: ActionRuleScope::Tenant {
+                tenant_id: session.tenant_id,
+            },
+            tool: "filtered_away".to_string(),
+            pattern: "*".to_string(),
+            effect: ActionPolicyEffect::Allow,
+            reason: Some("rule for a tool that is not registered".to_string()),
+            created_by: UserId::new("admin"),
+            created_at: chrono::Utc::now(),
+        }],
+    }));
 
     assert!(!router.has_tool("filtered_away"));
     let error = router
@@ -788,5 +858,74 @@ async fn a_rule_never_makes_an_unregistered_tool_visible() {
             "expected an unknown-tool error, got: {message}"
         ),
         other => panic!("expected ToolError for an unregistered tool, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn sandbox_provision_spans_carry_policy_identity_and_no_policy_contents() {
+    // Pins: provisioning telemetry emits the sandbox's policy IDENTITY — the
+    // hash and the egress mode — and never its CONTENTS. The two fields also
+    // have to actually land: `Span::record` on a field the `info_span!` macro
+    // never declared is a silent no-op, so an undeclared field looks like
+    // working telemetry and emits nothing at all.
+    let dir = tempdir().expect("create tempdir");
+    let sandbox_root = dir.path().to_path_buf();
+    let spans = capture_spans(|| async move {
+        let router = ToolRouter::new_local(&sandbox_root)
+            .await
+            .expect("local router builds");
+        let _ = router
+            .execute_authorized_with_recovery(
+                &session(),
+                &identity(),
+                None,
+                &ToolInvocation {
+                    id: None,
+                    name: "file_search".to_string(),
+                    input: json!({ "pattern": "*.rs" }),
+                },
+                ToolCallId::new(),
+                None,
+            )
+            .await;
+    })
+    .await;
+
+    // The exported name carries the lifecycle stage (`otel.name` is set to
+    // "sandbox_provision {operation}"), so match on the prefix and take the
+    // cold-provision span, which is the one that resolves the policy.
+    let provision = spans
+        .iter()
+        .find(|span| span.name.as_ref() == "sandbox_provision get_or_provision_hand")
+        .unwrap_or_else(|| {
+            panic!(
+                "provisioning must emit a sandbox_provision span, saw {:?}",
+                spans
+                    .iter()
+                    .map(|span| span.name.as_ref())
+                    .collect::<Vec<_>>()
+            )
+        });
+
+    let hash = attr_string(provision, "moa.sandbox.profile_hash")
+        .expect("the resolved policy identity hash must reach the span");
+    assert!(
+        hash.starts_with("sha256:"),
+        "policy identity must be emitted as its hash, got {hash}"
+    );
+    assert_eq!(
+        attr_string(provision, "moa.sandbox.egress_mode").as_deref(),
+        Some("unrestricted"),
+        "the egress mode must be emitted as a stable label"
+    );
+
+    // Identity only: never the allowlist contents, the sandbox path, or env.
+    for forbidden in [
+        "moa.sandbox.egress_destinations",
+        "moa.sandbox.profile",
+        "moa.sandbox.env",
+        "moa.sandbox.workspace_mount",
+    ] {
+        assert_no_attr(provision, forbidden);
     }
 }

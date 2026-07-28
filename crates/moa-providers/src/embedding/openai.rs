@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
 use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_MAX_IN_FLIGHT};
+use crate::core::concurrency_factory::ProviderCoordination;
 use crate::core::http::{
     build_json_http_client, post_json, validate_embedding_count, validate_embedding_dimension,
 };
@@ -62,6 +63,20 @@ impl OpenAIEmbedding {
         self.pacer = RatePacer::new(config);
         self
     }
+    /// Attaches the fleet-shared per-minute quota for this credential.
+    ///
+    /// Applied after any pacing override so the effective limits — the
+    /// provider's built-in defaults or the operator's — are the ones coordinated.
+    #[must_use]
+    pub(crate) fn with_shared_pacing(
+        mut self,
+        coordination: &ProviderCoordination,
+        provider: &str,
+        credential: &str,
+    ) -> Self {
+        self.pacer = coordination.share_pacing(self.pacer, provider, credential);
+        self
+    }
 
     /// Overrides the in-flight concurrency ceiling for embedding requests.
     #[must_use]
@@ -90,7 +105,9 @@ impl OpenAIEmbedding {
                 ));
             }
         };
-        self.pacer.acquire(1, inputs.len() as u32).await;
+        self.pacer
+            .acquire(&self.model, 1, inputs.len() as u32)
+            .await?;
         let span = embedding_span(OPENAI_EMBEDDING_PROVIDER, &self.model, inputs.len());
         let result: Result<OpenAIEmbeddingResponse> = post_json(
             &self.client,

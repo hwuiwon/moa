@@ -7,7 +7,17 @@ metadata:
     app.kubernetes.io/name: alloy
     app.kubernetes.io/part-of: moa
 spec:
-  replicas: 2
+  # Exactly one. Two replicas behind one Service split the OTLP stream between
+  # two independent write-ahead logs and two independent rule synchronizers -
+  # each one reconciling Mimir's rule namespace against the same source and
+  # fighting the other over it. The collector is not the availability boundary
+  # here; the buffer on its PVC is.
+  replicas: 1
+  # The PVC is ReadWriteOnce, so a RollingUpdate would deadlock: the new pod
+  # cannot attach the volume until the old pod releases it, and the old pod is
+  # not terminated until the new one is Ready.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: alloy
@@ -21,19 +31,40 @@ spec:
       serviceAccountName: alloy
       containers:
         - name: alloy
-          image: grafana/alloy:latest
+          # Pinned to an exact release, read from the registry on 2026-07-28:
+          # grafana/alloy:v1.18.0 is
+          # sha256:491b0578c04983fd54fe99b587b6fab4404dc46d0dc16677bd6b00cc1140b308.
+          # `latest` on a telemetry collector means a silent pipeline-semantics
+          # change arrives with an unrelated pod restart.
+          image: grafana/alloy:v1.18.0
           args:
             - run
             - /etc/alloy/config.alloy
             - --storage.path=/var/lib/alloy
+            - --server.http.listen-addr=0.0.0.0:12345
           ports:
             - name: otlp-grpc
               containerPort: 4317
             - name: otlp-http
               containerPort: 4318
+            - name: http
+              containerPort: 12345
           envFrom:
             - secretRef:
                 name: grafana-cloud
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 5
           volumeMounts:
             - name: config
               mountPath: /etc/alloy
@@ -51,7 +82,8 @@ spec:
           configMap:
             name: alloy-config
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: alloy-data
 ---
 apiVersion: v1
 kind: Service

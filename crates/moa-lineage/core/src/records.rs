@@ -512,6 +512,54 @@ pub struct ScoreRecord {
     pub dataset_id: Option<Uuid>,
     /// Optional score comment.
     pub comment: Option<String>,
+    /// Behavior Lab provenance, present only for product-evaluator scores.
+    ///
+    /// A score carrying this is written to `moa.experiment_score_provenance` in
+    /// the same transaction as its `analytics.scores` row, and only a score with
+    /// provenance can satisfy a scorecard requirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_provenance: Option<ExperimentScoreProvenance>,
+}
+
+/// Exact target one Behavior Lab score observed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExperimentScoreTarget {
+    /// The trial drove an agent-loop session.
+    Session {
+        /// Exact target session.
+        session_id: SessionId,
+    },
+    /// The trial drove a typed execution run.
+    ExecutionRun {
+        /// Exact target execution run.
+        execution_run_uid: Uuid,
+    },
+}
+
+/// Behavior Lab provenance for one product-evaluator score.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentScoreProvenance {
+    /// Experiment run that owns the trial.
+    pub experiment_run_uid: Uuid,
+    /// Pinned plan revision the trial ran.
+    pub plan_revision_uid: Uuid,
+    /// Trial the score belongs to.
+    pub trial_uid: Uuid,
+    /// Exact target the score observed.
+    pub target: ExperimentScoreTarget,
+    /// Evaluator that produced the score.
+    pub evaluator_id: String,
+    /// Exact evaluator version that produced the score.
+    pub evaluator_version: String,
+    /// Score name, repeated here so provenance is self-describing.
+    pub score_name: String,
+    /// Score value type, repeated here so provenance is self-describing.
+    pub value_type: String,
+    /// Bounded reference to where the evidence lives.
+    pub evidence_ref: String,
+    /// BLAKE3 digest of the evidence the score was derived from.
+    pub evidence_hash: Vec<u8>,
 }
 
 /// Entity targeted by a score record.
@@ -561,6 +609,12 @@ pub enum ScoreSource {
     Human,
     /// Emitted by an external integration.
     External,
+    /// Emitted by a deterministic MOA product evaluator.
+    ///
+    /// Distinct from `OnlineJudge` because no model is involved: the same
+    /// evidence always yields the same result, which is what lets a Behavior Lab
+    /// score gate anything at all.
+    ProductEvaluator,
 }
 
 /// Compliance audit decision lineage for one policy boundary.
@@ -858,6 +912,7 @@ mod tests {
             run_id: None,
             dataset_id: None,
             comment: None,
+            experiment_provenance: None,
         });
 
         let value = serde_json::to_value(event).expect("serialize score event");

@@ -398,12 +398,17 @@ mod tests {
                 },
             )
             .expect("MCP fixture should register");
-        let router = Arc::new(ToolRouter::new(registry, HashMap::new()));
+        let github_issue_create = moa_hands::mcp_tool_reference("github", "github_issue_create");
+        let router = Arc::new(ToolRouter::new(
+            registry,
+            HashMap::new(),
+            moa_hands::local_development_sandbox_policy(),
+        ));
         let request = policy_request(
             SessionMeta::default(),
             ToolInvocation {
                 id: Some("invalid-input-call".to_string()),
-                name: "github_issue_create".to_string(),
+                name: github_issue_create.clone(),
                 input: json!({"title": 7}),
             },
             None,
@@ -415,7 +420,7 @@ mod tests {
         let PreparedActionReviewResponse::InvalidInput { reason } = response else {
             panic!("expected InvalidInput, got {response:?}");
         };
-        assert!(reason.contains("github_issue_create"), "reason: {reason}");
+        assert!(reason.contains(&github_issue_create), "reason: {reason}");
     }
 
     #[tokio::test]
@@ -433,7 +438,12 @@ mod tests {
                 },
             )
             .expect("MCP fixture should register");
-        let router = Arc::new(ToolRouter::new(registry, HashMap::new()));
+        let github_issue_create = moa_hands::mcp_tool_reference("github", "github_issue_create");
+        let router = Arc::new(ToolRouter::new(
+            registry,
+            HashMap::new(),
+            moa_hands::local_development_sandbox_policy(),
+        ));
         let cases = [
             (
                 "read",
@@ -458,7 +468,7 @@ mod tests {
             ),
             (
                 "external_mcp",
-                "github_issue_create",
+                github_issue_create.as_str(),
                 json!({"title": "issue"}),
                 ActionPolicyEffect::AdminReview,
                 false,

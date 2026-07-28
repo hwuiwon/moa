@@ -7,12 +7,12 @@
   path: /spec/template/spec/containers/0/env/-
   value:
     name: MOA_OBSERVABILITY_OTLP_ENDPOINT
-    value: http://alloy.observability.svc.cluster.local:4317
+    value: http://alloy.observability.svc.cluster.local:4318
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
     name: MOA_OBSERVABILITY_OTLP_PROTOCOL
-    value: grpc
+    value: http
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:

@@ -1272,7 +1272,7 @@ async fn replay_items_live(
         let records = replay_score_records_for_item(item, result, &replay_config, &evaluator);
         report.scores += records.len();
         for record in records {
-            sink.record_durable_event(LineageEvent::Eval(record))
+            sink.record_durable_events(vec![LineageEvent::Eval(record)])
                 .await?;
         }
         report.items += 1;
@@ -1353,6 +1353,7 @@ fn dataset_run_item_score_record(
         run_id: Some(replay_config.run_id),
         dataset_id: Some(replay_config.dataset_id),
         comment,
+        experiment_provenance: None,
     }
 }
 

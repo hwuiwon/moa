@@ -62,6 +62,50 @@ manifest_document() {
   ' "${manifest}"
 }
 
+# Pinned kubeconform. A different version can disagree about what strict mode
+# accepts, so a local pass would not predict CI.
+KUBECONFORM_VERSION="v0.7.0"
+
+# Validates every rendered manifest against real schemas, including the CRDs.
+#
+# `-strict` rejects unknown fields, which is the only thing that catches a
+# misspelled key: kustomize renders it happily and the API server drops it, so a
+# typo'd `readinessProbe` field ships as a deployment with no readiness gate.
+#
+# There is deliberately NO `-ignore-missing-schemas`. With it, every custom
+# resource - the Restate cluster and deployment, the alert rules, i.e. MOA's most
+# structurally complex manifests - passes unchecked, and the summary still says
+# valid. The vendored schemas under k8s/schemas exist so the flag is unnecessary.
+validate_schemas() {
+  local manifest_dir="$1" observed
+  command -v kubeconform >/dev/null 2>&1 \
+    || die "kubeconform is not on PATH. Install ${KUBECONFORM_VERSION} from https://github.com/yannh/kubeconform/releases"
+  observed="$(kubeconform -v 2>&1 | head -1)"
+  if [[ "${observed}" != *"${KUBECONFORM_VERSION}"* ]]; then
+    if [[ "${OBSERVABILITY_TOOLS_ALLOW_UNPINNED:-0}" == "1" ]]; then
+      echo "WARNING: kubeconform is ${observed}, pinned ${KUBECONFORM_VERSION}; continuing on request" >&2
+    else
+      die "kubeconform version mismatch: pinned '${KUBECONFORM_VERSION}', found '${observed}'. Install the pinned version, or set OBSERVABILITY_TOOLS_ALLOW_UNPINNED=1 to accept that a local pass may not predict CI."
+    fi
+  fi
+
+  local rendered summary
+  for rendered in "${manifest_dir}"/*.yaml; do
+    summary="$(
+      kubeconform -strict -summary \
+        -schema-location default \
+        -schema-location "${REPO_ROOT}/k8s/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+        "${rendered}" 2>&1
+    )" || die "$(printf 'kubeconform rejected %s:\n%s' "$(basename "${rendered}")" "${summary}")"
+    # A skipped resource is an unvalidated resource. Without this the suite
+    # reports success for a manifest whose schema is simply absent, which is the
+    # exact failure the vendored schemas exist to prevent.
+    assert_contains "${summary}" "Skipped: 0" \
+      "$(printf 'kubeconform skipped a resource in %s, so something rendered without a schema:\n%s' "$(basename "${rendered}")" "${summary}")"
+  done
+  echo "Schema validation OK"
+}
+
 validate_manifests() {
   local work_dir local_manifest production_manifest jobs_manifest
   local local_orchestrator production_orchestrator local_edge production_edge
@@ -146,6 +190,36 @@ validate_manifests() {
     assert_contains "${job}" "mountPath: /var/run/secrets/moa-kms/root-keys" "maintenance Job is missing the KMS mount path"
     assert_contains "${job}" "readOnly: true" "maintenance Job KMS mount is not read-only"
   done
+
+  # Termination grace periods, asserted by content because they CANNOT be
+  # schema-validated. `spec.template.spec` in the RestateDeployment CRD carries
+  # `x-kubernetes-preserve-unknown-fields: true`, so the entire pod spec - probes,
+  # env, grace period - is free-form as far as every schema validator is
+  # concerned. A misspelled `terminationGracePeriodSeconds` renders, applies, and
+  # silently reverts the workload to the 30s default, which is shorter than the
+  # drain both binaries perform on SIGTERM.
+  for orchestrator in "${local_orchestrator}" "${production_orchestrator}"; do
+    assert_contains "${orchestrator}" "terminationGracePeriodSeconds: 600" \
+      "orchestrator lost its 600s termination grace period, so SIGKILL would arrive mid-drain"
+  done
+  for edge in "${local_edge}" "${production_edge}"; do
+    assert_contains "${edge}" "terminationGracePeriodSeconds: 60" \
+      "edge lost its 60s termination grace period, so SIGKILL would arrive mid-drain"
+  done
+
+  # The observability stack renders only in the production overlay, and the
+  # deleted scrape surface has to stay deleted in what is actually applied - not
+  # merely in the source file that produced it.
+  assert_excludes "$(<"${production_manifest}")" "containerPort: 9090" \
+    "production overlay reintroduces a MOA metrics scrape port"
+  assert_excludes "$(<"${production_manifest}")" "grafana/alloy:latest" \
+    "production overlay renders an unpinned Alloy image"
+  assert_contains "${production_manifest_content:=$(<"${production_manifest}")}" "kind: PrometheusRule" \
+    "production overlay renders no alert rules, so the rule synchronizer has nothing to synchronize"
+  assert_contains "${production_manifest_content}" "MOA_METRICS_EXPORTER" \
+    "production overlay does not select a metrics exporter"
+
+  validate_schemas "${work_dir}"
 
   echo "Manifest validation OK"
 }

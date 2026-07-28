@@ -22,7 +22,9 @@ impl ToolRouter {
     /// Overrides the router's per-tool output budgets.
     #[must_use]
     pub fn with_tool_budgets(mut self, tool_budgets: ToolBudgetConfig) -> Self {
-        self.registry.apply_budgets(&tool_budgets);
+        let mut registry = (*self.registry()).clone();
+        registry.apply_budgets(&tool_budgets);
+        self.publish_registry(registry);
         self.tool_budgets = tool_budgets;
         self
     }

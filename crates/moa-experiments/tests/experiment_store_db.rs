@@ -1,4 +1,7 @@
 use moa_artifacts::simulation::ExperimentTargetKind;
+use moa_core::types::experiments::{
+    ExperimentScorecard, ScorecardEffect, ScorecardRequirement, ScorecardValueType,
+};
 use moa_core::types::memory::RlsContext;
 use moa_core::{
     error::Result, types::action_policy::ActionRuleScope, types::contact::ContactId,
@@ -9,9 +12,9 @@ use moa_core::{
 use moa_db::ScopedConn;
 use moa_experiments::{
     model::{
-        ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTarget,
-        ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
-        NewExperimentRun as NewExperiment, NewExperimentTrial,
+        ExperimentRunStatus, ExperimentSimulatorConfig, ExperimentTarget, ExperimentTrialStatus,
+        ExperimentTrialStopReason, ExperimentVariant, NewExperimentRun as NewExperiment,
+        NewExperimentTrial,
     },
     scores::{
         ExperimentRunCompareRef, ExperimentRunScoreRef, ScenarioScoreDeltaRow, TrialScoreSummary,
@@ -52,7 +55,15 @@ async fn tenant_scoped_run_insert_load_round_trip_db() -> Result<()> {
     assert_eq!(loaded.scope, scope);
     assert_eq!(loaded.status, ExperimentRunStatus::Accepted);
     assert_eq!(loaded.name, "round-trip");
-    assert_eq!(loaded.scorecard.score_names, ["task_success"]);
+    assert_eq!(
+        loaded
+            .scorecard
+            .requirements()
+            .iter()
+            .map(|requirement| requirement.score_name.as_str())
+            .collect::<Vec<_>>(),
+        ["target_completed"]
+    );
     assert_eq!(loaded.artifact_revision_uids, [artifact_revision_uid]);
     assert_eq!(loaded.idempotency_key.as_deref(), Some("round-trip-key"));
     assert_eq!(loaded.created_by_identity["id"], "experimenter");
@@ -1290,10 +1301,15 @@ fn new_experiment(
             execution_template: None,
             metadata: json!({ "cohort": "db" }),
         },
-        scorecard: ExperimentScorecard {
-            score_names: vec!["task_success".to_string()],
-            evaluator_metadata: json!({ "judge": "offline" }),
-        },
+        scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
+            evaluator_id: "target_completed".to_string(),
+            evaluator_version: "v1".to_string(),
+            score_name: "target_completed".to_string(),
+            value_type: ScorecardValueType::Boolean,
+            config: json!({}),
+            effect: ScorecardEffect::Blocking,
+        }])
+        .expect("fixture scorecard is valid"),
         score_run_id: Uuid::now_v7(),
         session_id: None,
         execution_run_uid: None,
@@ -1890,4 +1906,388 @@ fn scope_context(scope: &ActionRuleScope) -> RlsContext {
             contact_id,
         } => RlsContext::contact(*tenant_id, *contact_id),
     }
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn seeded_score_rows_without_provenance_never_satisfy_the_scorecard_db() -> Result<()> {
+    // Pins the task's headline claim on the real read path: score rows that were
+    // seeded straight into `analytics.scores` prove query mechanics and nothing
+    // else. The exact-row query inner-joins provenance, so a seeded row is
+    // structurally invisible to the gate and the trial reads Incomplete — not
+    // Eligible, and not "no rows found, nothing to check".
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let store = ExperimentStore::new(pool.clone());
+    let scope = tenant_scope("scorecard-seeded");
+    let artifact_revision_uid = insert_artifact_revision(&pool, &scope).await?;
+    let run = store
+        .insert_run(
+            &scope,
+            new_experiment("seeded", None, vec![artifact_revision_uid]),
+        )
+        .await?;
+    let plan_revision_uid = insert_artifact_revision(&pool, &scope).await?;
+    let trial = store
+        .insert_trial(
+            &scope,
+            new_trial(run.run_uid, "seeded/0", plan_revision_uid, Vec::new()),
+        )
+        .await?;
+    let session_id = SessionId(Uuid::now_v7());
+    attach_trial_session_row(
+        &pool,
+        &scope,
+        trial.trial_uid,
+        session_id,
+        artifact_revision_uid,
+    )
+    .await?;
+
+    // A score row with exactly the right name and value, and no provenance.
+    insert_score(
+        &pool,
+        &scope,
+        trial.score_run_id,
+        "target_completed",
+        "boolean",
+        None,
+        Some(true),
+    )
+    .await?;
+
+    let response = moa_experiments::app::scores(
+        pool.clone(),
+        moa_wire::experiments::ExperimentScoresRequest {
+            tenant_id: scope_tenant_id(&scope),
+            run_uid: run.run_uid,
+        },
+    )
+    .await
+    .expect("scores read should succeed");
+
+    assert_eq!(
+        response.run_scorecard.eligibility, "incomplete",
+        "a seeded score row must not make a run eligible"
+    );
+    assert_eq!(response.run_scorecard.trials, 1);
+    let trial_summary = response
+        .trials
+        .iter()
+        .find(|summary| summary.trial_uid == trial.trial_uid)
+        .expect("the scored trial should appear in the breakdown");
+    assert_eq!(trial_summary.eligibility, "incomplete");
+    assert!(
+        trial_summary
+            .eligibility_findings
+            .iter()
+            .any(|finding| finding.contains("no provenance-backed score row")),
+        "the finding must name the missing provenance: {:?}",
+        trial_summary.eligibility_findings
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn provenance_backed_rows_drive_run_scenario_and_variant_eligibility_db() -> Result<()> {
+    // Pins the full eligibility ladder on the real read path: one complete,
+    // correctly linked trial is Eligible; removing that trial's only required
+    // result drops it — and the scenario and variant and run above it — to
+    // Incomplete. Every level is derived from the same trial rows, so a scenario
+    // cannot look healthier than the trial inside it.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let store = ExperimentStore::new(pool.clone());
+    let scope = tenant_scope("scorecard-provenance");
+    let artifact_revision_uid = insert_artifact_revision(&pool, &scope).await?;
+    let run = store
+        .insert_run(
+            &scope,
+            new_experiment("provenance", None, vec![artifact_revision_uid]),
+        )
+        .await?;
+    let plan_revision_uid = insert_artifact_revision(&pool, &scope).await?;
+
+    let mut complete = new_trial(run.run_uid, "complete/0", plan_revision_uid, Vec::new());
+    complete.scenario_id = Some("scenario-a".to_string());
+    complete.variant_key = "variant-a".to_string();
+    let complete = store.insert_trial(&scope, complete).await?;
+    let mut missing = new_trial(run.run_uid, "missing/0", plan_revision_uid, Vec::new());
+    missing.scenario_id = Some("scenario-b".to_string());
+    missing.variant_key = "variant-b".to_string();
+    let missing = store.insert_trial(&scope, missing).await?;
+
+    let complete_session = SessionId(Uuid::now_v7());
+    let missing_session = SessionId(Uuid::now_v7());
+    attach_trial_session_row(
+        &pool,
+        &scope,
+        complete.trial_uid,
+        complete_session,
+        artifact_revision_uid,
+    )
+    .await?;
+    attach_trial_session_row(
+        &pool,
+        &scope,
+        missing.trial_uid,
+        missing_session,
+        artifact_revision_uid,
+    )
+    .await?;
+    insert_provenance_backed_score(
+        &pool,
+        &scope,
+        &complete,
+        run.run_uid,
+        plan_revision_uid,
+        complete_session,
+        true,
+    )
+    .await?;
+
+    let response = moa_experiments::app::scores(
+        pool.clone(),
+        moa_wire::experiments::ExperimentScoresRequest {
+            tenant_id: scope_tenant_id(&scope),
+            run_uid: run.run_uid,
+        },
+    )
+    .await
+    .expect("scores read should succeed");
+
+    let by_trial = response
+        .trials
+        .iter()
+        .map(|summary| (summary.trial_uid, summary.eligibility.as_str()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(by_trial.get(&complete.trial_uid).copied(), Some("eligible"));
+    assert_eq!(
+        by_trial.get(&missing.trial_uid).copied(),
+        Some("incomplete")
+    );
+
+    let scenarios = response
+        .scenario_scorecards
+        .iter()
+        .map(|rollup| (rollup.key.as_str(), rollup.eligibility.as_str()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(scenarios.get("scenario-a").copied(), Some("eligible"));
+    assert_eq!(scenarios.get("scenario-b").copied(), Some("incomplete"));
+
+    let variants = response
+        .variant_scorecards
+        .iter()
+        .map(|rollup| (rollup.key.as_str(), rollup.eligibility.as_str()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(variants.get("variant-a").copied(), Some("eligible"));
+    assert_eq!(variants.get("variant-b").copied(), Some("incomplete"));
+
+    assert_eq!(
+        response.run_scorecard.eligibility, "incomplete",
+        "one unproven trial must keep the whole run from being eligible"
+    );
+    assert_eq!(response.run_scorecard.trials, 2);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
+async fn a_provenance_backed_row_from_another_trial_never_satisfies_the_gate_db() -> Result<()> {
+    // Pins that borrowing evidence is refused end to end: a fully valid score row
+    // that belongs to a NEIGHBOURING trial in the same run does not count for this
+    // trial. Without the trial-linkage check, one scored trial would make every
+    // trial in the run look eligible.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let pool = test_db.store().pool().clone();
+    let store = ExperimentStore::new(pool.clone());
+    let scope = tenant_scope("scorecard-borrowed");
+    let artifact_revision_uid = insert_artifact_revision(&pool, &scope).await?;
+    let run = store
+        .insert_run(
+            &scope,
+            new_experiment("borrowed", None, vec![artifact_revision_uid]),
+        )
+        .await?;
+    let plan_revision_uid = insert_artifact_revision(&pool, &scope).await?;
+    let owner = store
+        .insert_trial(
+            &scope,
+            new_trial(run.run_uid, "owner/0", plan_revision_uid, Vec::new()),
+        )
+        .await?;
+    let borrower = store
+        .insert_trial(
+            &scope,
+            new_trial(run.run_uid, "borrower/0", plan_revision_uid, Vec::new()),
+        )
+        .await?;
+    let owner_session = SessionId(Uuid::now_v7());
+    let borrower_session = SessionId(Uuid::now_v7());
+    attach_trial_session_row(
+        &pool,
+        &scope,
+        owner.trial_uid,
+        owner_session,
+        artifact_revision_uid,
+    )
+    .await?;
+    attach_trial_session_row(
+        &pool,
+        &scope,
+        borrower.trial_uid,
+        borrower_session,
+        artifact_revision_uid,
+    )
+    .await?;
+    insert_provenance_backed_score(
+        &pool,
+        &scope,
+        &owner,
+        run.run_uid,
+        plan_revision_uid,
+        owner_session,
+        true,
+    )
+    .await?;
+
+    let response = moa_experiments::app::scores(
+        pool.clone(),
+        moa_wire::experiments::ExperimentScoresRequest {
+            tenant_id: scope_tenant_id(&scope),
+            run_uid: run.run_uid,
+        },
+    )
+    .await
+    .expect("scores read should succeed");
+
+    let borrower_summary = response
+        .trials
+        .iter()
+        .find(|summary| summary.trial_uid == borrower.trial_uid)
+        .expect("the unscored trial should still appear");
+    assert_eq!(
+        borrower_summary.eligibility, "incomplete",
+        "a neighbouring trial's score must not satisfy this trial's requirement"
+    );
+    Ok(())
+}
+
+/// Creates one target session and links a trial to it, as the trial workflow does.
+async fn attach_trial_session_row(
+    pool: &sqlx::PgPool,
+    scope: &ActionRuleScope,
+    trial_uid: Uuid,
+    session_id: SessionId,
+    agent_revision_uid: Uuid,
+) -> Result<()> {
+    let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO sessions (id, storage_partition_id, user_id, tenant_id, status, model)
+        VALUES ($1, $2, $3, $4, 'completed', 'gpt-5.1')
+        "#,
+    )
+    .bind(session_id.0)
+    .bind(scope_storage_partition_id(scope))
+    .bind(scope_user_id(scope).unwrap_or_else(|| "system".to_string()))
+    .bind(scope_tenant_id(scope).0)
+    .execute(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
+    // Every session carries an agent context; a deferred trigger refuses a
+    // session without one at commit, so the fixture must build a real session
+    // rather than a bare row.
+    sqlx::query(
+        r#"
+        INSERT INTO session_agent_context (
+            session_id, storage_partition_id, user_id, tenant_id, agent_definition_ref,
+            agent_revision_uid, policy_hash, display_name, policy_snapshot
+        )
+        VALUES ($1, $2, $3, $4, 'agent://experiment-fixture', $5, 'fixture-hash',
+                'Experiment fixture', '{}'::jsonb)
+        "#,
+    )
+    .bind(session_id.0)
+    .bind(scope_storage_partition_id(scope))
+    .bind(scope_user_id(scope).unwrap_or_else(|| "system".to_string()))
+    .bind(scope_tenant_id(scope).0)
+    .bind(agent_revision_uid)
+    .execute(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
+    sqlx::query("UPDATE moa.experiment_trial SET session_id = $1 WHERE trial_uid = $2")
+        .bind(session_id.0)
+        .bind(trial_uid)
+        .execute(conn.as_mut())
+        .await
+        .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
+    conn.commit().await?;
+    Ok(())
+}
+
+/// Writes one `target_completed` score with the provenance row that explains it.
+///
+/// This mirrors exactly what the lineage sink drain writes, so the read path
+/// under test sees the same shape production produces.
+#[allow(clippy::too_many_arguments)]
+async fn insert_provenance_backed_score(
+    pool: &sqlx::PgPool,
+    scope: &ActionRuleScope,
+    trial: &moa_experiments::model::ExperimentTrialRecord,
+    run_uid: Uuid,
+    plan_revision_uid: Uuid,
+    session_id: SessionId,
+    value: bool,
+) -> Result<()> {
+    let score_id = Uuid::now_v7();
+    let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO analytics.scores (
+            score_id, ts, storage_partition_id, user_id, target_kind, session_id, run_id,
+            name, value_type, value_boolean, source, model_or_evaluator
+        )
+        VALUES ($1, now(), $2, $3, 'session', $4, $5, 'target_completed', 'boolean', $6,
+                'product_evaluator', 'target_completed@v1')
+        "#,
+    )
+    .bind(score_id)
+    .bind(scope_storage_partition_id(scope))
+    .bind(scope_user_id(scope))
+    .bind(session_id.0)
+    .bind(trial.score_run_id)
+    .bind(value)
+    .execute(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.experiment_score_provenance (
+            score_id, storage_partition_id, user_id, score_run_id, experiment_run_uid,
+            plan_revision_uid, trial_uid, target_session_id, target_execution_run_uid,
+            evaluator_id, evaluator_version, score_name, value_type, evidence_ref, evidence_hash
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, 'target_completed', 'v1',
+                'target_completed', 'boolean', 'session:fixture#seq=1', $9)
+        "#,
+    )
+    .bind(score_id)
+    .bind(scope_storage_partition_id(scope))
+    .bind(scope_user_id(scope))
+    .bind(trial.score_run_id)
+    .bind(run_uid)
+    .bind(plan_revision_uid)
+    .bind(trial.trial_uid)
+    .bind(session_id.0)
+    .bind(vec![3_u8; 32])
+    .execute(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::error::MoaError::StorageError(error.to_string()))?;
+    conn.commit().await?;
+    Ok(())
 }

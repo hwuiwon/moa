@@ -27,6 +27,7 @@ moa-memory-graph = { workspace = true }
 moa-memory-ingest = { workspace = true, features = ["test-util"] }
 moa-memory-lifecycle = { workspace = true }
 moa-memory-pii = { workspace = true }
+moa-skills = { workspace = true }
 moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
 moa-providers = { workspace = true, features = ["test-util"] }
@@ -51,5 +52,4 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
-moa-skills = { workspace = true }
 tempfile.workspace = true

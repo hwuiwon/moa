@@ -281,7 +281,7 @@ impl Worker for WorkerImpl {
             prepare_turn_inner(
                 &mut ctx,
                 &self.providers,
-                &self.tool_schemas,
+                &self.tool_router.tool_schema_snapshot(),
                 &self.session_store,
             )
             .await?,
@@ -1071,7 +1071,7 @@ async fn prepare_turn_inner(
     ctx: &mut ObjectContext<'_>,
     providers: &ProviderRegistry,
     tool_schemas: &[serde_json::Value],
-    session_store: &Arc<dyn SessionRepository>,
+    session_store: &Arc<dyn SessionStore>,
 ) -> Result<WorkerTurnPreparation, HandlerError> {
     let mut state = Tracked::<WorkerVoState>::load(ctx).await?;
     if state.cancel_reason.is_some() {
@@ -1184,7 +1184,7 @@ async fn record_tool_result_inner(
     ctx: &ObjectContext<'_>,
     record: WorkerToolRecord,
     kind: ToolRecordKind,
-    session_store: &Arc<dyn SessionRepository>,
+    session_store: &Arc<dyn SessionStore>,
 ) -> Result<(), HandlerError> {
     let mut state = Tracked::<WorkerVoState>::load(ctx).await?;
     if let Some(turn_id) = record.turn_id.as_deref()
@@ -1229,7 +1229,7 @@ async fn record_tool_result_inner(
 async fn claim_check_worker_history(
     ctx: &ObjectContext<'_>,
     state: &mut WorkerVoState,
-    session_store: &Arc<dyn SessionRepository>,
+    session_store: &Arc<dyn SessionStore>,
 ) -> Result<(), HandlerError> {
     let Some(session_id) = state.parent_session else {
         return Ok(());
@@ -1263,7 +1263,7 @@ async fn extend_request_with_history(
     session_id: SessionId,
     history: &[WorkerHistoryEntry],
     out: &mut Vec<ContextMessage>,
-    session_store: &Arc<dyn SessionRepository>,
+    session_store: &Arc<dyn SessionStore>,
 ) -> Result<(), HandlerError> {
     for (idx, entry) in history.iter().enumerate() {
         match entry {
@@ -1285,7 +1285,7 @@ async fn hydrate_claimed_history_entry(
     session_id: SessionId,
     idx: usize,
     claimed: &ClaimedHistoryEntry,
-    session_store: &Arc<dyn SessionRepository>,
+    session_store: &Arc<dyn SessionStore>,
 ) -> Result<ContextMessage, HandlerError> {
     let claim_check = ClaimCheck {
         blob_id: claimed.blob_id.clone(),

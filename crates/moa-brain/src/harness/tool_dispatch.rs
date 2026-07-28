@@ -410,7 +410,7 @@ fn tool_error_class(error: &MoaError) -> &'static str {
         MoaError::PermissionDenied(_) => "permission_denied",
         MoaError::BudgetExhausted(_) => "budget_exhausted",
         MoaError::RateLimited { .. } => "rate_limited",
-        MoaError::Unsupported(_) | MoaError::NotImplemented(_) => "unsupported",
+        MoaError::Unsupported(_) => "unsupported",
         MoaError::ProviderError(_) | MoaError::ProviderQuirk(_) | MoaError::StreamError(_) => {
             "provider_error"
         }

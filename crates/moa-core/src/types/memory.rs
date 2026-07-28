@@ -771,6 +771,68 @@ impl fmt::Display for RechunkStagingMember {
     }
 }
 
+/// Single policy governing the tenant-knowledge semantic graph.
+///
+/// Writes and reads are derived from ONE value on purpose. Semantic extraction
+/// used to run unconditionally at ingestion while tenant-knowledge retrieval
+/// hard-disabled graph expansion, so every deployment paid extraction and
+/// storage cost for entities and relations no retrieval leg could read. Deriving
+/// both sides from one value makes that write-only combination unrepresentable:
+/// no setting writes without reading, and none reads without writing.
+///
+/// It lives in `moa-core` for the same reason
+/// [`contextual_chunk_embedding_input`] does: the configuration crate and the
+/// ingestion and retrieval crates must all agree, and a second copy of the rule
+/// is a copy that drifts.
+///
+/// The default is [`SemanticGraphPolicy::Off`], measured on 2026-07-28 against
+/// the WixQA `simulated` (200q/1000 articles) and `multihoprag` (150q/609
+/// articles) corpora over a graph holding ~1,984 semantic entity nodes and
+/// ~7,121 semantic edges. Graph expansion produced zero rescues and zero
+/// regressions on both: the entity-consuming policy walked 1,428 and 2,908 graph
+/// paths and moved no ranking position across 350 questions, at up to +64%
+/// retrieval p95. See `docs/21-tenant-knowledge-base.md`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SemanticGraphPolicy {
+    /// Semantic entities and relations are neither extracted nor written, and
+    /// tenant-knowledge retrieval performs no graph expansion.
+    #[default]
+    Off,
+    /// The deterministic keyword ruleset extracts semantic entities and
+    /// relations, and tenant-knowledge retrieval expands the graph to read them.
+    ///
+    /// Extraction is purely lexical: no provider or LLM call is made.
+    Deterministic,
+}
+
+impl SemanticGraphPolicy {
+    /// Returns whether ingestion extracts and writes semantic graph data.
+    #[must_use]
+    pub const fn writes_semantic_graph(self) -> bool {
+        matches!(self, Self::Deterministic)
+    }
+
+    /// Returns whether tenant-knowledge retrieval may expand the graph.
+    ///
+    /// This is the single source for that decision. Both the brain context
+    /// pipeline and the orchestrator memory-search tool read it, so the two
+    /// call sites cannot drift apart.
+    #[must_use]
+    pub const fn enables_tenant_graph_expansion(self) -> bool {
+        matches!(self, Self::Deterministic)
+    }
+
+    /// Returns the stable configuration and telemetry label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Deterministic => "deterministic",
+        }
+    }
+}
+
 /// Builds the contextual embedding input for one knowledge chunk.
 ///
 /// This is the authoritative embedding input for a `Chunk` vector, and it is
@@ -806,6 +868,55 @@ pub fn contextual_chunk_embedding_input(
         return text.to_string();
     }
     format!("{}\n\n{}", context.join(" > "), text)
+}
+
+#[cfg(test)]
+mod semantic_graph_policy_tests {
+    use super::SemanticGraphPolicy;
+
+    #[test]
+    fn semantic_graph_writes_and_reads_are_never_independently_configurable() {
+        // Pins the guarantee Task 5.5 exists to provide: there is no policy value
+        // that writes the semantic graph without reading it, or reads it without
+        // writing it. A write-only path is what made MOA pay extraction and storage
+        // cost for data no retrieval leg could reach, and coupling both sides to one
+        // value makes that combination unrepresentable rather than merely
+        // discouraged.
+        for policy in [SemanticGraphPolicy::Off, SemanticGraphPolicy::Deterministic] {
+            assert_eq!(
+                policy.writes_semantic_graph(),
+                policy.enables_tenant_graph_expansion(),
+                "{} must not decouple semantic writes from semantic reads",
+                policy.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_graph_defaults_to_off() {
+        // Pins the measured default. Graph expansion produced zero rescues and zero
+        // regressions on both the simulated and multihoprag corpora, so a default
+        // deployment neither extracts semantic data nor pays to traverse it.
+        let policy = SemanticGraphPolicy::default();
+        assert_eq!(policy, SemanticGraphPolicy::Off);
+        assert!(!policy.writes_semantic_graph());
+        assert!(!policy.enables_tenant_graph_expansion());
+    }
+
+    #[test]
+    fn semantic_graph_policy_labels_are_stable_kebab_case() {
+        // Pins: the label is both the config token and the metric dimension, so it
+        // must stay stable and match the serde representation.
+        assert_eq!(SemanticGraphPolicy::Off.as_str(), "off");
+        assert_eq!(SemanticGraphPolicy::Deterministic.as_str(), "deterministic");
+        for policy in [SemanticGraphPolicy::Off, SemanticGraphPolicy::Deterministic] {
+            let encoded = serde_json::to_string(&policy).expect("serialize policy");
+            assert_eq!(encoded, format!("\"{}\"", policy.as_str()));
+            let decoded: SemanticGraphPolicy =
+                serde_json::from_str(&encoded).expect("round-trip policy");
+            assert_eq!(decoded, policy);
+        }
+    }
 }
 
 #[cfg(test)]

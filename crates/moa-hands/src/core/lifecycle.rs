@@ -7,23 +7,33 @@ use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use moa_core::{
-    error::MoaError, error::Result, types::hands::HandHandle, types::hands::HandResources,
-    types::hands::HandSpec, types::hands::HandStatus, types::hands::SandboxFile,
-    types::hands::SandboxTier, types::identifiers::TenantId, types::session::SessionMeta,
+    error::MoaError, error::Result, types::hands::EffectiveSandboxProfile,
+    types::hands::HandHandle, types::hands::HandSpec, types::hands::HandStatus,
+    types::hands::SandboxFile, types::hands::SandboxTier, types::identifiers::TenantId,
+    types::session::SessionMeta,
 };
 use moa_observability::{current_turn_root_span, record_sandbox_provision_duration};
 use tracing::Instrument;
 
-use super::leases::{HandLease, HandLeaseStatus, LeaseHandle};
-use super::{DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, ToolRouter};
+use super::leases::{HandLease, HandLeasePolicy, HandLeaseStatus, LeaseHandle};
+use super::{DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, HandRoute, ToolRouter};
 
 /// Builds a sandbox-provisioning span parented to the active turn root when present.
 ///
 /// `operation` names the lifecycle stage (cache-aware dispatch, cold provision, or
 /// reprovision) so provisioning spans stay distinguishable in traces without
-/// putting any tenant-controlled data in the span name. `moa.sandbox.id` and
-/// `moa.sandbox.cold_start_ms` are declared empty and recorded once the caller
-/// knows the provisioned handle and, when a cold provision happened, its timing.
+/// putting any tenant-controlled data in the span name. `moa.sandbox.id`,
+/// `moa.sandbox.cold_start_ms`, `moa.sandbox.profile_hash`, and
+/// `moa.sandbox.egress_mode` are declared empty and recorded once the caller
+/// knows the provisioned handle, the resolved policy, and — when a cold
+/// provision happened — its timing.
+///
+/// Every field has to be declared here even though it is filled in later:
+/// `Span::record` on a field the macro never declared is a silent no-op, so an
+/// undeclared field looks like working telemetry and emits nothing.
+///
+/// Only the policy *identity* is emitted, never its contents: the hash and the
+/// egress mode, never the allowlist destinations, mount paths, or environment.
 fn sandbox_provision_span(
     operation: &'static str,
     provider: &str,
@@ -38,6 +48,8 @@ fn sandbox_provision_span(
             moa.sandbox.provider = %provider,
             moa.sandbox.tier = %tier,
             moa.sandbox.cold_start_ms = tracing::field::Empty,
+            moa.sandbox.profile_hash = tracing::field::Empty,
+            moa.sandbox.egress_mode = tracing::field::Empty,
         ),
         None => tracing::info_span!(
             "sandbox_provision",
@@ -46,16 +58,19 @@ fn sandbox_provision_span(
             moa.sandbox.provider = %provider,
             moa.sandbox.tier = %tier,
             moa.sandbox.cold_start_ms = tracing::field::Empty,
+            moa.sandbox.profile_hash = tracing::field::Empty,
+            moa.sandbox.egress_mode = tracing::field::Empty,
         ),
     }
 }
 
-const HAND_LEASE_TTL_SECS: i64 = 60 * 60;
-/// Remaining-TTL threshold below which a reused active lease is renewed.
+/// Idle window used when a profile declares an explicitly unbounded idle
+/// timeout, which has no deadline of its own to renew.
 ///
 /// Reusing a cached durable hand only rewrites the lease once less than half the
-/// TTL remains, so the hot path avoids a lease UPDATE on every tool call.
-const HAND_LEASE_RENEW_THRESHOLD_SECS: i64 = HAND_LEASE_TTL_SECS / 2;
+/// declared idle window remains, so the hot path avoids a lease UPDATE on every
+/// tool call.
+const HAND_LEASE_TTL_SECS: i64 = 60 * 60;
 const HAND_LEASE_PROVISION_WAIT_MS: u64 = 25;
 
 impl ToolRouter {
@@ -370,32 +385,45 @@ impl ToolRouter {
 
     pub(super) async fn get_or_provision_hand(
         &self,
-        provider: &str,
-        tier: SandboxTier,
+        route: &HandRoute,
         session: &SessionMeta,
         worker_id: Option<&str>,
     ) -> Result<HandHandle> {
-        let tier_label = sandbox_tier_label(&tier);
+        let provider = route.provider.as_str();
+        let tier_label = route.tier.as_str();
         let span = sandbox_provision_span("get_or_provision_hand", provider, tier_label);
         let record_span = span.clone();
         async move {
+            // Resolution runs before anything else on this path, including the
+            // cache lookup: a tenant that tightened its policy since the cached
+            // hand was provisioned must not be served that hand, and the only
+            // way to know is to resolve today's policy first.
+            let effective = self.resolve_sandbox_profile(route, session).await?;
+            record_span.record("moa.sandbox.profile_hash", effective.profile_hash());
+            record_span.record(
+                "moa.sandbox.egress_mode",
+                effective.profile().egress.mode().as_str(),
+            );
+            let policy = HandLeasePolicy::from_effective(&effective);
             let key = session_provider_key(session, worker_id, provider);
             let handle = if self.hand_leases.is_some() {
                 let cached_handle = self.active_hands.read().await.get(&key).cloned();
                 if let Some(handle) = cached_handle
                     && let Some(validated) = self
-                        .validate_cached_durable_hand(provider, session, worker_id, &key, &handle)
+                        .validate_cached_durable_hand(
+                            provider, session, worker_id, &key, &handle, &policy,
+                        )
                         .await?
                 {
                     validated
                 } else {
-                    self.get_or_provision_durable_hand(provider, tier, session, worker_id, key)
+                    self.get_or_provision_durable_hand(route, session, worker_id, key, &policy)
                         .await?
                 }
             } else if let Some(handle) = self.active_hands.read().await.get(&key) {
                 handle.clone()
             } else {
-                self.provision_uncached_hand(provider, tier, session, key)
+                self.provision_uncached_hand(route, session, key, &effective)
                     .await?
             };
             record_span.record("moa.sandbox.id", hand_id(&handle));
@@ -412,6 +440,7 @@ impl ToolRouter {
         worker_id: Option<&str>,
         key: &str,
         cached_handle: &HandHandle,
+        policy: &HandLeasePolicy,
     ) -> Result<Option<HandHandle>> {
         let scope = worker_id.unwrap_or_default();
         let Some(lease_store) = &self.hand_leases else {
@@ -421,8 +450,30 @@ impl ToolRouter {
             self.remove_cached_hand_if_matches(key, cached_handle).await;
             return Ok(None);
         };
-        if lease.status != HandLeaseStatus::Active || lease.expires_at <= Utc::now() {
+        if lease.status != HandLeaseStatus::Active || lease_expired(&lease) {
             self.remove_cached_hand_if_matches(key, cached_handle).await;
+            return Ok(None);
+        }
+        // The sandbox is reusable only if it was provisioned under exactly the
+        // policy that resolves today. Any change to the profile, to one of the
+        // four source revisions, or to the provider's capability revision moves
+        // the hash, and the hand is replaced rather than reinterpreted.
+        if !lease_matches_policy(&lease, policy) {
+            self.remove_cached_hand_if_matches(key, cached_handle).await;
+            tracing::info!(
+                provider,
+                generation = lease.generation,
+                "durable hand lease no longer matches the resolved sandbox policy; replacing"
+            );
+            lease_store
+                .mark_status(
+                    session.id,
+                    scope,
+                    provider,
+                    lease.generation,
+                    HandLeaseStatus::Stale,
+                )
+                .await?;
             return Ok(None);
         }
         let Some(lease_handle) = lease.handle.as_ref() else {
@@ -457,19 +508,21 @@ impl ToolRouter {
             self.remove_cached_hand_if_matches(key, cached_handle).await;
             return Ok(None);
         }
-        // Renewing on every call issues a lease UPDATE despite the long TTL. The
-        // `get` above already confirmed the lease is Active and unexpired and the
-        // hydrated handle matches the cached one, so the cached hand is safe to
-        // reuse without a write. Only extend (and re-fence the generation via the
-        // renew) once the remaining TTL has dropped below half.
-        if lease_renewal_due(lease.expires_at)
+        // Renewing on every call issues a lease UPDATE despite the long idle
+        // window. The `get` above already confirmed the lease is Active and
+        // unexpired, the policy still matches, and the hydrated handle matches
+        // the cached one, so the cached hand is safe to reuse without a write.
+        // Only extend (and re-fence the generation via the renew) once the
+        // remaining idle window has dropped below half.
+        if let Some(idle_expires_at) = lease.idle_expires_at
+            && lease_renewal_due(idle_expires_at, policy)
             && !lease_store
                 .renew_active(
                     session.id,
                     scope,
                     provider,
                     lease.generation,
-                    hand_lease_expires_at(),
+                    next_idle_deadline(policy),
                 )
                 .await?
         {
@@ -488,12 +541,13 @@ impl ToolRouter {
 
     async fn get_or_provision_durable_hand(
         &self,
-        provider: &str,
-        tier: SandboxTier,
+        route: &HandRoute,
         session: &SessionMeta,
         worker_id: Option<&str>,
         key: String,
+        policy: &HandLeasePolicy,
     ) -> Result<HandHandle> {
+        let provider = route.provider.as_str();
         let scope = worker_id.unwrap_or_default();
         let lease_store = self.hand_leases.as_ref().ok_or_else(|| {
             MoaError::StorageError("durable hand lease store missing".to_string())
@@ -502,20 +556,20 @@ impl ToolRouter {
         let wait_budget = provisioning_wait_budget(DEFAULT_TOOL_TIMEOUT);
 
         loop {
-            let expires_at = hand_lease_expires_at();
             if let Some(claim) = lease_store
                 .claim_for_provisioning(
                     session.id,
                     scope,
                     session.tenant_id,
                     provider,
-                    tier.clone(),
-                    expires_at,
+                    route.tier,
+                    policy,
                 )
                 .await?
             {
+                let effective = self.resolve_sandbox_profile(route, session).await?;
                 match self
-                    .provision_uncached_hand(provider, tier.clone(), session, key.clone())
+                    .provision_uncached_hand(route, session, key.clone(), &effective)
                     .await
                 {
                     Ok(handle) => {
@@ -547,14 +601,7 @@ impl ToolRouter {
                                 }
                             };
                         if let Err(error) = lease_store
-                            .activate(
-                                session.id,
-                                scope,
-                                provider,
-                                claim.generation,
-                                lease_handle,
-                                expires_at,
-                            )
+                            .activate(session.id, scope, provider, claim.generation, lease_handle)
                             .await
                         {
                             self.destroy_provisioned_hand(provider, &key, &handle).await;
@@ -589,7 +636,14 @@ impl ToolRouter {
 
             if let Some(lease) = lease_store.get(session.id, scope, provider).await? {
                 match lease.status {
-                    HandLeaseStatus::Active if lease.expires_at > Utc::now() => {
+                    // A lease another replica activated is only reusable when it
+                    // was provisioned under exactly the policy resolved above;
+                    // otherwise it falls through to the stale branch and is
+                    // replaced rather than adopted under a policy it never
+                    // passed admission for.
+                    HandLeaseStatus::Active
+                        if !lease_expired(&lease) && lease_matches_policy(&lease, policy) =>
+                    {
                         match self.resume_durable_lease(provider, &lease, &key).await {
                             Ok(handle) => {
                                 if lease_store
@@ -598,7 +652,7 @@ impl ToolRouter {
                                         scope,
                                         provider,
                                         lease.generation,
-                                        hand_lease_expires_at(),
+                                        next_idle_deadline(policy),
                                     )
                                     .await?
                                 {
@@ -649,6 +703,17 @@ impl ToolRouter {
                             .await?;
                         continue;
                     }
+                    // A generation the reaper owns is being destroyed. Waiting
+                    // it out is correct: taking it back would race the destroy
+                    // and hand out a sandbox that is about to disappear.
+                    HandLeaseStatus::Reaping => {
+                        if wait_started.elapsed() >= wait_budget {
+                            break;
+                        }
+                        tokio::time::sleep(provisioning_poll_delay(wait_started, wait_budget))
+                            .await;
+                        continue;
+                    }
                     HandLeaseStatus::Stale
                     | HandLeaseStatus::Destroyed
                     | HandLeaseStatus::Failed => {
@@ -671,12 +736,14 @@ impl ToolRouter {
 
     async fn provision_uncached_hand(
         &self,
-        provider: &str,
-        tier: SandboxTier,
+        route: &HandRoute,
         session: &SessionMeta,
         key: String,
+        effective: &EffectiveSandboxProfile,
     ) -> Result<HandHandle> {
-        let tier_label = sandbox_tier_label(&tier);
+        let provider = route.provider.as_str();
+        let tier = route.tier;
+        let tier_label = tier.as_str();
         let span = sandbox_provision_span("provision_uncached_hand", provider, tier_label);
         let record_span = span.clone();
         async move {
@@ -698,11 +765,9 @@ impl ToolRouter {
                 .provision(HandSpec {
                     sandbox_tier: tier,
                     image: None,
-                    resources: HandResources::default(),
                     env: HashMap::new(),
                     workspace_mount,
-                    idle_timeout: DEFAULT_TOOL_TIMEOUT,
-                    max_lifetime: DEFAULT_TOOL_TIMEOUT,
+                    effective_profile: effective.clone(),
                 })
                 .await?;
             let cold_start = started_at.elapsed();
@@ -803,10 +868,10 @@ impl ToolRouter {
         &self,
         session: &SessionMeta,
         worker_id: Option<&str>,
-        provider: &str,
-        tier: &SandboxTier,
+        route: &HandRoute,
     ) -> Result<HandHandle> {
-        let tier_label = sandbox_tier_label(tier);
+        let provider = route.provider.as_str();
+        let tier_label = route.tier.as_str();
         let span = sandbox_provision_span("reprovision_hand", provider, tier_label);
         let record_span = span.clone();
         async move {
@@ -854,7 +919,7 @@ impl ToolRouter {
 
             let started_at = Instant::now();
             let handle = self
-                .get_or_provision_hand(provider, tier.clone(), session, worker_id)
+                .get_or_provision_hand(route, session, worker_id)
                 .await?;
             let cold_start = started_at.elapsed();
             record_span.record("moa.sandbox.id", hand_id(&handle));
@@ -897,14 +962,49 @@ fn tenant_key(session: &SessionMeta) -> TenantId {
     session.tenant_id
 }
 
-fn hand_lease_expires_at() -> chrono::DateTime<Utc> {
-    Utc::now() + ChronoDuration::seconds(HAND_LEASE_TTL_SECS)
+/// Returns the idle deadline a renewal should ask for under `policy`.
+///
+/// The policy's own idle timeout is the ceiling: renewal restarts the idle
+/// window the operator declared, and never invents a longer one. A policy with
+/// an explicitly unbounded idle timeout still gets a finite renewal request,
+/// because an unbounded idle lease has no `idle_expires_at` to renew and never
+/// reaches this path.
+fn next_idle_deadline(policy: &HandLeasePolicy) -> chrono::DateTime<Utc> {
+    policy
+        .idle_deadline(Utc::now())
+        .unwrap_or_else(|| Utc::now() + ChronoDuration::seconds(HAND_LEASE_TTL_SECS))
 }
 
-/// Returns whether a reused active lease should be renewed based on remaining TTL.
-fn lease_renewal_due(expires_at: chrono::DateTime<Utc>) -> bool {
-    expires_at.signed_duration_since(Utc::now())
-        < ChronoDuration::seconds(HAND_LEASE_RENEW_THRESHOLD_SECS)
+/// Returns whether either of a lease's deadlines has already passed.
+fn lease_expired(lease: &HandLease) -> bool {
+    let now = Utc::now();
+    lease.idle_expires_at.is_some_and(|idle| idle <= now)
+        || lease.hard_expires_at.is_some_and(|hard| hard <= now)
+}
+
+/// Returns whether a persisted lease was provisioned under exactly `policy`.
+///
+/// The comparison is on the policy identity hash alone, which already covers
+/// the six-dimension profile, all four source revisions, and the provider's
+/// capability revision. A lease with no persisted policy — only the legacy rows
+/// V000359 marked stale — never matches.
+fn lease_matches_policy(lease: &HandLease, policy: &HandLeasePolicy) -> bool {
+    lease
+        .policy
+        .as_ref()
+        .is_some_and(|persisted| persisted.profile_hash == policy.profile_hash)
+}
+
+/// Returns whether a reused active lease should be renewed based on how much of
+/// its declared idle window is left.
+fn lease_renewal_due(idle_expires_at: chrono::DateTime<Utc>, policy: &HandLeasePolicy) -> bool {
+    let window_secs = policy
+        .profile
+        .idle_timeout
+        .bounded_seconds()
+        .and_then(|seconds| i64::try_from(seconds.get()).ok())
+        .unwrap_or(HAND_LEASE_TTL_SECS);
+    idle_expires_at.signed_duration_since(Utc::now()) < ChronoDuration::seconds(window_secs / 2)
 }
 
 fn provisioning_wait_budget(tool_timeout: StdDuration) -> StdDuration {
@@ -916,15 +1016,6 @@ fn provisioning_poll_delay(started_at: Instant, budget: StdDuration) -> StdDurat
     budget
         .checked_sub(started_at.elapsed())
         .map_or(poll, |remaining| remaining.min(poll))
-}
-
-pub(super) fn sandbox_tier_label(tier: &SandboxTier) -> &'static str {
-    match tier {
-        SandboxTier::None => "none",
-        SandboxTier::Container => "container",
-        SandboxTier::MicroVM => "microvm",
-        SandboxTier::Local => "local",
-    }
 }
 
 pub(super) fn hand_id(handle: &HandHandle) -> String {
@@ -975,6 +1066,10 @@ mod tests {
         provision_calls: AtomicUsize,
         execute_calls: AtomicUsize,
         destroy_calls: AtomicUsize,
+        /// The effective profile of the most recent `provision` call, so tests
+        /// can prove the router hands the provider the resolved policy rather
+        /// than a substituted default.
+        last_provisioned_profile: std::sync::Mutex<Option<EffectiveSandboxProfile>>,
     }
 
     impl CountingProvider {
@@ -987,6 +1082,7 @@ mod tests {
                 provision_calls: AtomicUsize::new(0),
                 execute_calls: AtomicUsize::new(0),
                 destroy_calls: AtomicUsize::new(0),
+                last_provisioned_profile: std::sync::Mutex::new(None),
             }
         }
 
@@ -1024,11 +1120,17 @@ mod tests {
 
     #[async_trait]
     impl HandProvider for CountingProvider {
+        fn capabilities(&self) -> moa_core::types::hands::HandProviderCapabilities {
+            crate::adapters::local::LOCAL_HAND_CAPABILITIES.clone()
+        }
         fn provider_name(&self) -> &str {
             &self.name
         }
 
-        async fn provision(&self, _spec: HandSpec) -> Result<HandHandle> {
+        async fn provision(&self, spec: HandSpec) -> Result<HandHandle> {
+            if let Ok(mut last) = self.last_provisioned_profile.lock() {
+                *last = Some(spec.effective_profile.clone());
+            }
             if !self.provision_delay.is_zero() {
                 tokio::time::sleep(self.provision_delay).await;
             }
@@ -1096,15 +1198,29 @@ mod tests {
             },
             IdempotencyClass::Idempotent,
         );
-        registry.retarget_hand_tools(vec![HandRoute {
-            provider: provider.provider_name().to_string(),
-            tier: SandboxTier::Container,
-        }]);
+        registry.retarget_hand_tools(vec![test_hand_route(provider.provider_name())]);
         registry.retain_only(["bash"]);
         let provider_trait: Arc<dyn HandProvider> = provider;
         let mut providers = HashMap::new();
         providers.insert(provider_trait.provider_name().to_string(), provider_trait);
-        ToolRouter::new(registry, providers).with_hand_lease_store(lease_store)
+        ToolRouter::new(
+            registry,
+            providers,
+            crate::core::profile::local_development_sandbox_policy(),
+        )
+        .with_hand_lease_store(lease_store)
+    }
+
+    /// The container route used by every lifecycle test, with the named
+    /// route-unset policy layer.
+    fn test_hand_route(provider: &str) -> HandRoute {
+        HandRoute {
+            provider: provider.to_string(),
+            tier: SandboxTier::Container,
+            policy: moa_core::types::hands::SandboxPolicySnapshot::builtin(
+                moa_core::types::hands::BuiltinPolicyRevision::RouteUnset,
+            ),
+        }
     }
 
     fn session() -> SessionMeta {
@@ -1298,7 +1414,7 @@ mod tests {
         assert_eq!(provider.provision_calls(), 1);
         assert_eq!(renewed.generation, first.generation);
         assert!(
-            renewed.expires_at > short_expiry,
+            renewed.idle_expires_at > Some(short_expiry),
             "reuse should renew the active durable lease"
         );
 
@@ -1426,18 +1542,12 @@ mod tests {
         let router = router(provider.clone(), lease_store.clone());
 
         let root = router
-            .get_or_provision_hand(
-                provider.provider_name(),
-                SandboxTier::Container,
-                &session,
-                None,
-            )
+            .get_or_provision_hand(&test_hand_route(provider.provider_name()), &session, None)
             .await
             .expect("session-scope hand provisions");
         let child = router
             .get_or_provision_hand(
-                provider.provider_name(),
-                SandboxTier::Container,
+                &test_hand_route(provider.provider_name()),
                 &session,
                 Some("sub-x"),
             )
@@ -1478,18 +1588,12 @@ mod tests {
         let router = router(provider.clone(), lease_store.clone());
 
         router
-            .get_or_provision_hand(
-                provider.provider_name(),
-                SandboxTier::Container,
-                &session,
-                None,
-            )
+            .get_or_provision_hand(&test_hand_route(provider.provider_name()), &session, None)
             .await
             .expect("session-scope hand provisions");
         router
             .get_or_provision_hand(
-                provider.provider_name(),
-                SandboxTier::Container,
+                &test_hand_route(provider.provider_name()),
                 &session,
                 Some("sub-x"),
             )
@@ -1529,12 +1633,7 @@ mod tests {
 
         for scope in [None, Some("sub-x"), Some("sub-y")] {
             router
-                .get_or_provision_hand(
-                    provider.provider_name(),
-                    SandboxTier::Container,
-                    &session,
-                    scope,
-                )
+                .get_or_provision_hand(&test_hand_route(provider.provider_name()), &session, scope)
                 .await
                 .expect("scope hand provisions");
         }
@@ -1584,18 +1683,12 @@ mod tests {
         // The intact scopes are still cached/active, so reusing them does not re-provision;
         // the destroyed target scope re-provisions on next demand.
         router
-            .get_or_provision_hand(
-                provider.provider_name(),
-                SandboxTier::Container,
-                &session,
-                None,
-            )
+            .get_or_provision_hand(&test_hand_route(provider.provider_name()), &session, None)
             .await
             .expect("session-scope hand reused");
         router
             .get_or_provision_hand(
-                provider.provider_name(),
-                SandboxTier::Container,
+                &test_hand_route(provider.provider_name()),
                 &session,
                 Some("sub-y"),
             )
@@ -1608,8 +1701,7 @@ mod tests {
         );
         router
             .get_or_provision_hand(
-                provider.provider_name(),
-                SandboxTier::Container,
+                &test_hand_route(provider.provider_name()),
                 &session,
                 Some("sub-x"),
             )
@@ -1635,8 +1727,7 @@ mod tests {
 
         first_router
             .get_or_provision_hand(
-                provider.provider_name(),
-                SandboxTier::Container,
+                &test_hand_route(provider.provider_name()),
                 &session,
                 Some("sub-x"),
             )
@@ -1658,18 +1749,74 @@ mod tests {
         assert_eq!(lease.status, HandLeaseStatus::Active);
     }
 
+    #[tokio::test]
+    async fn provisioning_hands_the_provider_the_resolved_policy_not_a_default() {
+        // Pins: the profile the router resolved is the profile the provider is
+        // asked to honor. Before this contract, provisioning substituted
+        // `HandResources::default()` and one fixed timeout for both deadlines,
+        // so every policy layer stopped at the router. A substitution here
+        // would silently discard whatever the deployment, tenant, agent, and
+        // route layers agreed on.
+        let lease_store = MemoryHandLeaseStore::shared();
+        let provider = Arc::new(CountingProvider::new("profile-passthrough"));
+        let session = session();
+        let router = router(provider.clone(), lease_store);
+        let route = test_hand_route(provider.provider_name());
+
+        router
+            .get_or_provision_hand(&route, &session, None)
+            .await
+            .expect("hand provisions");
+
+        let resolved = router
+            .resolve_sandbox_profile(&route, &session)
+            .await
+            .expect("resolve the same policy the router used");
+        let provisioned = provider
+            .last_provisioned_profile
+            .lock()
+            .expect("provisioned profile lock")
+            .clone()
+            .expect("the provider was asked to provision");
+
+        assert_eq!(
+            provisioned.profile_hash(),
+            resolved.profile_hash(),
+            "the provider must receive the resolved policy identity, not a substituted default"
+        );
+        assert_eq!(provisioned.profile(), resolved.profile());
+        assert_eq!(
+            provisioned.sources().deployment,
+            "local-development-unbounded",
+            "the deployment layer must reach the provider by name"
+        );
+        assert_eq!(
+            provisioned.capability_revision(),
+            provider.capabilities().revision,
+            "the serving provider's capability revision must reach the spec"
+        );
+    }
+
     #[test]
-    fn lifecycle_lease_renewal_is_deferred_until_half_ttl_remains() {
+    fn lifecycle_lease_renewal_is_deferred_until_half_the_declared_idle_window_remains() {
         // Pins: a freshly-renewed durable lease is not rewritten on reuse; the
-        // renew (and its generation fence) only fires once less than half the TTL
-        // remains, keeping the hot path free of a lease UPDATE per tool call.
-        assert!(
-            !lease_renewal_due(Utc::now() + ChronoDuration::seconds(HAND_LEASE_TTL_SECS - 60)),
-            "a nearly-full lease should not be renewed on reuse"
+        // renew (and its generation fence) only fires once less than half of the
+        // *policy's own* idle window remains, keeping the hot path free of a
+        // lease UPDATE per tool call. The threshold tracks the declared idle
+        // timeout rather than a fixed constant, so a 10-minute policy is not
+        // renewed on the schedule of a 1-hour one.
+        let policy = crate::core::leases::test_support::lease_policy(
+            Some(600),
+            Some(3600),
+            "renewal-capabilities-v1",
         );
         assert!(
-            lease_renewal_due(Utc::now() + ChronoDuration::seconds(60)),
-            "a lease with well under half the TTL remaining should be renewed"
+            !lease_renewal_due(Utc::now() + ChronoDuration::seconds(540), &policy),
+            "a nearly-full idle window should not be renewed on reuse"
+        );
+        assert!(
+            lease_renewal_due(Utc::now() + ChronoDuration::seconds(60), &policy),
+            "an idle window with well under half remaining should be renewed"
         );
     }
 

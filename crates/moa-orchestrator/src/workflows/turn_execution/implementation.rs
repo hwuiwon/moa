@@ -15,7 +15,6 @@ use moa_observability::{
 use moa_session::PostgresSessionStore;
 use moa_wire::turn::{RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress};
 use restate_sdk::prelude::*;
-use serde_json::Value;
 
 use super::{
     TurnExecution, execute_turn_inside_workflow, notify_session_of_outcome, parse_session_id,
@@ -37,6 +36,9 @@ pub struct TurnExecutionImpl {
     pub(super) tool_router: Arc<ToolRouter>,
     pub(super) lineage: Arc<dyn LineageHandle>,
     pub(super) channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
+    /// Classifier used to sanitize segment transcripts before any learning
+    /// artifact is derived from them.
+    pub(super) learning_classifier: Arc<dyn moa_memory_pii::PiiClassifier>,
     event_appender: TurnEventAppender,
 }
 
@@ -47,7 +49,6 @@ impl TurnExecutionImpl {
         session_store: Arc<PostgresSessionStore>,
         config: Arc<MoaConfig>,
         tool_router: Arc<ToolRouter>,
-        _tool_schemas: Arc<Vec<Value>>,
         lineage: Arc<dyn LineageHandle>,
         channel_adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
         event_appender: TurnEventAppender,
@@ -58,8 +59,26 @@ impl TurnExecutionImpl {
             tool_router,
             lineage,
             channel_adapters,
+            // The deterministic local heuristic, the same one lineage capture
+            // uses. Learning sanitization runs inside a durable step, so it must
+            // stay synchronous and free of network IO.
+            learning_classifier: Arc::new(moa_memory_pii::HeuristicPiiClassifier),
             event_appender,
         }
+    }
+
+    /// Replaces the learning-evidence classifier.
+    ///
+    /// Exists so a workflow test can drive the sanitization gate with an
+    /// abstaining, failing, or invalid-span classifier and observe that the
+    /// learning path refuses rather than proceeding.
+    #[must_use]
+    pub fn with_learning_classifier(
+        mut self,
+        classifier: Arc<dyn moa_memory_pii::PiiClassifier>,
+    ) -> Self {
+        self.learning_classifier = classifier;
+        self
     }
 
     pub(super) fn session_limits(&self) -> &SessionLimitsConfig {

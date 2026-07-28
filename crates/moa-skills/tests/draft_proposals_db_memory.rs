@@ -6,7 +6,7 @@
 mod support;
 
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
-use moa_artifacts::registry::ArtifactRegistry;
+use moa_artifacts::registry::{ArtifactRegistry, SuiteContributionKind};
 use moa_core::{
     types::experience::LearningCandidateStatus, types::experience::LearningCandidateType,
 };
@@ -21,8 +21,8 @@ use moa_skills::proposals::{
 };
 use support::{
     BASELINE_SKILL, IMPROVED_SKILL, SESSION_WITH_8_TOOL_CALLS, active_semantic_version,
-    artifact_revision_count, experience_input, learning_store, load_optional_active_skill,
-    load_session_fixture, race_mutating_router, scripted_router, seed_skill,
+    artifact_revision_count, learning_store, load_optional_active_skill, load_session_fixture,
+    race_mutating_router, scripted_router, seed_skill, seeded_experience_input,
     session_storage_partition_id, setup_test_db, skill_markdown, skill_row_count, tenant_scope,
     test_config,
 };
@@ -44,7 +44,7 @@ async fn skill_creation_proposal_stores_draft_artifact_without_active_skill_db()
     let outcome = distill_skill_from_experience_with_learning(
         &config,
         &loaded.session,
-        experience_input(&loaded, "capture the oauth refresh workflow"),
+        seeded_experience_input(&test_db, &loaded, "capture the oauth refresh workflow").await,
         scripted_router([proposed]),
         Some(store.clone()),
         None,
@@ -79,15 +79,33 @@ async fn skill_creation_proposal_stores_draft_artifact_without_active_skill_db()
         candidate.payload["draft_artifact_revision_uid"],
         proposal.draft_artifact_revision_uid.to_string()
     );
+    // The generated suite is attributable text, so it lives in an owned row that
+    // names its source session and experience — not in candidate JSON, where no
+    // erasure could join to it or delete it for one subject.
+    assert!(
+        candidate
+            .payload
+            .get("generated_regression_suite")
+            .is_none(),
+        "suite bytes must not survive in the candidate payload"
+    );
+    let contributions = ArtifactRegistry::new(test_db.store().pool().clone())
+        .list_suite_contributions(candidate.id)
+        .await
+        .expect("load suite contributions");
+    let generated = contributions
+        .iter()
+        .find(|contribution| contribution.kind == SuiteContributionKind::Generated)
+        .expect("the proposal's own generated suite is stored");
+    assert!(generated.suite_source.contains("[[cases]]"));
     assert_eq!(
-        candidate.payload["generated_regression_suite"]["source_format"],
-        "toml"
+        generated.source_session_id,
+        Some(loaded.session.id.0),
+        "the suite names the session whose transcript produced it"
     );
     assert!(
-        candidate.payload["generated_regression_suite"]["source_text"]
-            .as_str()
-            .expect("suite source is string")
-            .contains("[[cases]]")
+        generated.source_experience_id.is_some(),
+        "the suite names the experience whose transcript produced it"
     );
     let evidence = &candidate.payload["evidence"];
     assert_eq!(evidence["outcome"], "resolved");
@@ -123,6 +141,41 @@ async fn skill_creation_proposal_stores_draft_artifact_without_active_skill_db()
             .any(|file| file.path == "tests/regression-suite.toml"),
         "the generated suite must ride the draft package as held-out material for later revisions"
     );
+
+    // Every attributable byte of the revision names the candidate that produced
+    // it: the model-written definition, and each package file separately.
+    //
+    // The definition row is what a privacy erasure walks to decide whether a
+    // serving revision must be deleted or invalidated — `enumerate_learning_closure`
+    // derives both `revision_uids` and `sole_source_revision_uids` from this table
+    // and nothing else. Without these rows an erasure enumerates zero revisions
+    // forever: it never deletes a sole-source revision, never invalidates a shared
+    // one, and every count stays truthfully zero while the skill keeps serving.
+    let contributions: Vec<(String, Option<uuid::Uuid>)> = sqlx::query_as(
+        "SELECT contribution_kind, file_uid FROM moa.artifact_revision_contribution \
+         WHERE revision_uid = $1 AND candidate_id = $2",
+    )
+    .bind(proposal.draft_artifact_revision_uid)
+    .bind(candidate.id)
+    .fetch_all(test_db.store().pool())
+    .await
+    .expect("load revision contributions");
+    assert_eq!(
+        contributions
+            .iter()
+            .filter(|(kind, file_uid)| kind == "generated_definition" && file_uid.is_none())
+            .count(),
+        1,
+        "the revision's fused model output is attributed exactly once"
+    );
+    assert_eq!(
+        contributions
+            .iter()
+            .filter(|(kind, file_uid)| kind == "generated_file" && file_uid.is_some())
+            .count(),
+        files.len(),
+        "every package file is separately attributed, so a subtractable file can be erased alone"
+    );
 }
 
 #[tokio::test]
@@ -135,7 +188,8 @@ async fn skill_improvement_proposal_stores_draft_artifact_without_replacing_acti
     let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
     let store = learning_store(&test_db);
-    let improvement_input = experience_input(&loaded, "improve the auth flow skill");
+    let improvement_input =
+        seeded_experience_input(&test_db, &loaded, "improve the auth flow skill").await;
 
     let result = improve_skill_from_experience_with_learning(
         &loaded.session,
@@ -199,7 +253,8 @@ async fn skill_proposal_retry_reuses_candidate_id() {
     );
     let store = learning_store(&test_db);
 
-    let retried_input = experience_input(&loaded, "capture the oauth refresh workflow");
+    let retried_input =
+        seeded_experience_input(&test_db, &loaded, "capture the oauth refresh workflow").await;
 
     let first = distill_skill_from_experience_with_learning(
         &config,
@@ -254,11 +309,15 @@ async fn skill_proposal_retry_reuses_candidate_id() {
         .await
         .expect("reload retried candidate")
         .expect("candidate exists");
-    assert!(
-        candidate
-            .payload
-            .get("accumulated_regression_suites")
-            .is_none(),
+    let accumulated = ArtifactRegistry::new(test_db.store().pool().clone())
+        .list_suite_contributions(candidate.id)
+        .await
+        .expect("load suite contributions")
+        .into_iter()
+        .filter(|contribution| contribution.kind == SuiteContributionKind::Accumulated)
+        .count();
+    assert_eq!(
+        accumulated, 0,
         "a replay of the proposal's own experience is not a sibling suite"
     );
 }
@@ -285,7 +344,7 @@ async fn open_proposal_for_same_skill_name_dedupes_across_sessions_db() {
     let first = distill_skill_from_experience_with_learning(
         &config,
         &loaded_a.session,
-        experience_input(&loaded_a, "sync tickets"),
+        seeded_experience_input(&test_db, &loaded_a, "sync tickets").await,
         scripted_router([proposed.clone()]),
         Some(store.clone()),
         None,
@@ -296,7 +355,7 @@ async fn open_proposal_for_same_skill_name_dedupes_across_sessions_db() {
     let second = distill_skill_from_experience_with_learning(
         &config,
         &loaded_b.session,
-        experience_input(&loaded_b, "sync tickets again"),
+        seeded_experience_input(&test_db, &loaded_b, "sync tickets again").await,
         scripted_router([proposed]),
         Some(store.clone()),
         None,
@@ -356,7 +415,7 @@ async fn open_proposal_for_same_task_fingerprint_dedupes_across_skill_names_db()
     let first = distill_skill_from_experience_with_learning(
         &config,
         &loaded_a.session,
-        experience_input(&loaded_a, "deploy service to staging"),
+        seeded_experience_input(&test_db, &loaded_a, "deploy service to staging").await,
         scripted_router([first_name]),
         Some(store.clone()),
         None,
@@ -367,7 +426,7 @@ async fn open_proposal_for_same_task_fingerprint_dedupes_across_skill_names_db()
     // Empty scripted router: the fingerprint preflight must dedupe before any
     // LLM call, so an attempted generation would error the test.
     let _unused_second_name = second_name;
-    let input_b = experience_input(&loaded_b, "deploy service to staging");
+    let input_b = seeded_experience_input(&test_db, &loaded_b, "deploy service to staging").await;
     let sibling_experience_id = input_b.experience.id;
     let second = distill_skill_from_experience_with_learning(
         &config,
@@ -414,21 +473,29 @@ async fn open_proposal_for_same_task_fingerprint_dedupes_across_skill_names_db()
         .await
         .expect("reload deduped candidate")
         .expect("candidate exists");
-    let siblings = candidate.payload["accumulated_regression_suites"]
-        .as_array()
-        .expect("deduped session accumulates a sibling suite");
-    assert_eq!(siblings.len(), 1);
+    let siblings = ArtifactRegistry::new(test_db.store().pool().clone())
+        .list_suite_contributions(candidate.id)
+        .await
+        .expect("load suite contributions")
+        .into_iter()
+        .filter(|contribution| contribution.kind == SuiteContributionKind::Accumulated)
+        .collect::<Vec<_>>();
     assert_eq!(
-        siblings[0]["source_experience_id"],
-        sibling_experience_id.to_string(),
+        siblings.len(),
+        1,
+        "deduped session accumulates a sibling suite"
+    );
+    assert_eq!(
+        siblings[0].source_experience_id,
+        Some(sibling_experience_id),
         "sibling suite records which experience contributed it"
     );
-    assert!(
-        siblings[0]["source_text"]
-            .as_str()
-            .expect("sibling suite carries TOML")
-            .contains("[[cases]]")
+    assert_eq!(
+        siblings[0].source_session_id,
+        Some(loaded_b.session.id.0),
+        "sibling suite records the session an erasure would enter through"
     );
+    assert!(siblings[0].suite_source.contains("[[cases]]"));
 }
 
 #[tokio::test]
@@ -444,7 +511,8 @@ async fn concurrent_skill_proposal_attempts_share_one_draft_artifact_db() {
         "1.0",
     );
     let store = learning_store(&test_db);
-    let shared_input = experience_input(&loaded, "capture the oauth refresh workflow");
+    let shared_input =
+        seeded_experience_input(&test_db, &loaded, "capture the oauth refresh workflow").await;
 
     let (first, second) = tokio::join!(
         distill_skill_from_experience_with_learning(
@@ -493,6 +561,7 @@ async fn concurrent_skill_proposal_attempts_share_one_draft_artifact_db() {
 /// candidate id and whether the generalization pass rewrote the open draft. Each sibling gets a
 /// fresh session under the origin tenant so the fingerprint dedupe lands on the open candidate.
 async fn distill_sibling(
+    test_db: &moa_test_support::postgres::TestDb,
     config: &moa_config::MoaConfig,
     store: &std::sync::Arc<moa_session::PostgresSessionStore>,
     origin: &support::LoadedSession,
@@ -505,7 +574,7 @@ async fn distill_sibling(
     let outcome = distill_skill_from_experience_with_learning(
         config,
         &sibling.session,
-        experience_input(&sibling, task_summary),
+        seeded_experience_input(test_db, &sibling, task_summary).await,
         scripted_router([generalization.into()]),
         Some(store.clone()),
         None,
@@ -548,7 +617,7 @@ async fn sibling_experience_resynthesizes_the_open_draft_db() {
     let first = distill_skill_from_experience_with_learning(
         &config,
         &origin.session,
-        experience_input(&origin, "sync tickets"),
+        seeded_experience_input(&test_db, &origin, "sync tickets").await,
         scripted_router([created]),
         Some(store.clone()),
         None,
@@ -560,8 +629,15 @@ async fn sibling_experience_resynthesizes_the_open_draft_db() {
         panic!("expected creation proposal");
     };
 
-    let (sibling_candidate, resynthesis) =
-        distill_sibling(&config, &store, &origin, "sync tickets", generalized).await;
+    let (sibling_candidate, resynthesis) = distill_sibling(
+        &test_db,
+        &config,
+        &store,
+        &origin,
+        "sync tickets",
+        generalized,
+    )
+    .await;
     assert_eq!(
         sibling_candidate, first.candidate_id,
         "sibling must reuse the open candidate"
@@ -628,7 +704,7 @@ async fn sibling_resynthesis_unchanged_keeps_draft_but_records_evidence_db() {
     let first = distill_skill_from_experience_with_learning(
         &config,
         &origin.session,
-        experience_input(&origin, "sync tickets"),
+        seeded_experience_input(&test_db, &origin, "sync tickets").await,
         scripted_router([created]),
         Some(store.clone()),
         None,
@@ -640,8 +716,15 @@ async fn sibling_resynthesis_unchanged_keeps_draft_but_records_evidence_db() {
         panic!("expected creation proposal");
     };
 
-    let (_, resynthesis) =
-        distill_sibling(&config, &store, &origin, "sync tickets", "UNCHANGED").await;
+    let (_, resynthesis) = distill_sibling(
+        &test_db,
+        &config,
+        &store,
+        &origin,
+        "sync tickets",
+        "UNCHANGED",
+    )
+    .await;
     assert_eq!(
         resynthesis,
         SiblingResynthesis::DraftUnchanged,
@@ -705,7 +788,7 @@ async fn sibling_resynthesis_stops_at_the_pass_cap_db() {
     let first = distill_skill_from_experience_with_learning(
         &config,
         &origin.session,
-        experience_input(&origin, "sync tickets"),
+        seeded_experience_input(&test_db, &origin, "sync tickets").await,
         scripted_router([created]),
         Some(store.clone()),
         None,
@@ -720,6 +803,7 @@ async fn sibling_resynthesis_stops_at_the_pass_cap_db() {
     // Three accepted siblings fill both the sibling-suite and resynthesis caps.
     for _ in 0..3 {
         let (_, resynthesis) = distill_sibling(
+            &test_db,
             &config,
             &store,
             &origin,
@@ -752,7 +836,7 @@ async fn sibling_resynthesis_stops_at_the_pass_cap_db() {
     distill_skill_from_experience_with_learning(
         &config,
         &over_cap.session,
-        experience_input(&over_cap, "sync tickets"),
+        seeded_experience_input(&test_db, &over_cap, "sync tickets").await,
         scripted_router(Vec::<String>::new()),
         Some(store.clone()),
         None,
@@ -773,6 +857,78 @@ async fn sibling_resynthesis_stops_at_the_pass_cap_db() {
             .len(),
         3,
         "a sibling past the cap must not add another generalization pass"
+    );
+}
+
+#[tokio::test]
+async fn accumulated_sibling_suites_stop_at_the_cap_db() {
+    // Pins the ACCUMULATION cap, which is a different cap from the resynthesis pass
+    // cap and had no test of its own.
+    //
+    // Each accepted sibling stores a full regression suite. Unbounded, one popular
+    // recurring task would pool suites without limit, and the review gate prices and
+    // executes every pooled suite — so an uncapped pool grows the gate's cost estimate
+    // until promotion is blocked by budget, on a candidate that did nothing wrong.
+    // The bound now lives in a row count rather than a JSON array length, which is
+    // exactly why it needs asserting again.
+    let test_db = setup_test_db().await;
+    let origin = load_session_fixture(SESSION_WITH_8_TOOL_CALLS);
+    let (config, _temp_dir) = test_config(&test_db);
+    let store = learning_store(&test_db);
+    let created = skill_markdown(
+        "recurrence-capped",
+        "Capture recurring work",
+        "Original single-instance body.",
+        "1.0",
+    );
+
+    let first = distill_skill_from_experience_with_learning(
+        &config,
+        &origin.session,
+        seeded_experience_input(&test_db, &origin, "cap the pool").await,
+        scripted_router([created]),
+        Some(store.clone()),
+        None,
+        &DispatchEvidence::SingleSession,
+    )
+    .await
+    .expect("first proposal");
+    let DistillationOutcome::NewSkillProposed { proposal: open } = first else {
+        panic!("expected creation proposal");
+    };
+
+    // Four distinct siblings, one more than the cap.
+    let mut inputs = Vec::new();
+    for index in 0..4 {
+        inputs.push(
+            seeded_experience_input(&test_db, &origin, &format!("cap the pool {index}")).await,
+        );
+    }
+    let siblings = inputs
+        .iter()
+        .map(|input| RecurrenceSiblingSuite {
+            evidence: &input.evidence,
+            source_experience_id: input.experience.id,
+            source_session_id: origin.session.id,
+        })
+        .collect::<Vec<_>>();
+    // An empty router: every generalization call errors and is swallowed, so this
+    // test measures accumulation alone rather than model behavior.
+    let router = scripted_router(Vec::<String>::new());
+    accumulate_recurrence_siblings(&store, &router, origin.session.tenant_id, &open, &siblings)
+        .await
+        .expect("accumulate four siblings");
+
+    let accumulated = ArtifactRegistry::new(test_db.store().pool().clone())
+        .list_suite_contributions(open.candidate_id)
+        .await
+        .expect("load suite contributions")
+        .into_iter()
+        .filter(|contribution| contribution.kind == SuiteContributionKind::Accumulated)
+        .count();
+    assert_eq!(
+        accumulated, 3,
+        "the fourth sibling is refused; the pool is bounded by MAX_ACCUMULATED_SIBLING_SUITES"
     );
 }
 
@@ -803,7 +959,7 @@ async fn recurrence_siblings_generalize_in_one_combined_pass_db() {
     let first = distill_skill_from_experience_with_learning(
         &config,
         &origin.session,
-        experience_input(&origin, "combine siblings"),
+        seeded_experience_input(&test_db, &origin, "combine siblings").await,
         scripted_router([created]),
         Some(store.clone()),
         None,
@@ -815,16 +971,24 @@ async fn recurrence_siblings_generalize_in_one_combined_pass_db() {
         panic!("expected creation proposal");
     };
 
-    let sibling_a = uuid::Uuid::now_v7();
-    let sibling_b = uuid::Uuid::now_v7();
+    // Real experience rows: a sibling suite carries a foreign key to the
+    // experience it was generated from, so an invented id names a contributor
+    // that does not exist and the suite is refused rather than stored
+    // unattributably.
+    let sibling_a_input = seeded_experience_input(&test_db, &origin, "combine siblings").await;
+    let sibling_b_input =
+        seeded_experience_input(&test_db, &origin, "combine siblings again").await;
+    let sibling_a = sibling_a_input.experience.id;
+    let sibling_b = sibling_b_input.experience.id;
+    let sibling_evidence = sibling_a_input.evidence;
     let siblings = vec![
         RecurrenceSiblingSuite {
-            events: &origin.events,
+            evidence: &sibling_evidence,
             source_experience_id: sibling_a,
             source_session_id: origin.session.id,
         },
         RecurrenceSiblingSuite {
-            events: &origin.events,
+            evidence: &sibling_evidence,
             source_experience_id: sibling_b,
             source_session_id: origin.session.id,
         },
@@ -846,13 +1010,25 @@ async fn recurrence_siblings_generalize_in_one_combined_pass_db() {
         .await
         .expect("load candidate")
         .expect("candidate exists");
+    let contributions = ArtifactRegistry::new(test_db.store().pool().clone())
+        .list_suite_contributions(candidate.id)
+        .await
+        .expect("load suite contributions");
     assert_eq!(
-        candidate.payload["accumulated_regression_suites"]
-            .as_array()
-            .expect("sibling suites")
-            .len(),
+        contributions
+            .iter()
+            .filter(|contribution| contribution.kind == SuiteContributionKind::Accumulated)
+            .count(),
         2,
         "both siblings' suites pool as held-out material"
+    );
+    // The combined pass wrote a new draft revision, and the candidate's own suite
+    // follows the draft it guards rather than pointing at the superseded one.
+    assert!(
+        contributions
+            .iter()
+            .any(|contribution| contribution.kind == SuiteContributionKind::Generated),
+        "the proposal's own generated suite survives a generalization pass"
     );
     let passes = candidate.payload["resynthesis"]
         .as_array()
@@ -862,7 +1038,7 @@ async fn recurrence_siblings_generalize_in_one_combined_pass_db() {
         1,
         "N siblings collapse into a single combined generalization pass"
     );
-    let recorded: std::collections::HashSet<&str> = passes[0]["source_experience_ids"]
+    let recorded: std::collections::HashSet<&str> = passes[0]["pass_experience_ids"]
         .as_array()
         .expect("combined source ids")
         .iter()
@@ -911,7 +1087,7 @@ async fn concurrent_resynthesis_retries_instead_of_clobbering_db() {
     let first = distill_skill_from_experience_with_learning(
         &config,
         &origin.session,
-        experience_input(&origin, "race the draft"),
+        seeded_experience_input(&test_db, &origin, "race the draft").await,
         scripted_router([created]),
         Some(store.clone()),
         None,
@@ -929,9 +1105,11 @@ async fn concurrent_resynthesis_retries_instead_of_clobbering_db() {
         open.candidate_id,
         generalized,
     );
-    let sibling = uuid::Uuid::now_v7();
+    let sibling_input = seeded_experience_input(&test_db, &origin, "sync tickets").await;
+    let sibling = sibling_input.experience.id;
+    let sibling_evidence = sibling_input.evidence;
     let siblings = vec![RecurrenceSiblingSuite {
-        events: &origin.events,
+        evidence: &sibling_evidence,
         source_experience_id: sibling,
         source_session_id: origin.session.id,
     }];

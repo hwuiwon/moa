@@ -7,17 +7,15 @@
 
 use std::fmt;
 use std::future::Future;
-use std::sync::{OnceLock, RwLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
+use crate::client::SecurityAudit;
 use crate::{AuthzError, FgaClient};
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{Identity, IdentityType};
 use moka::future::Cache;
-use sqlx::PgPool;
 use thiserror::Error;
-
-static AUDIT: OnceLock<RwLock<Option<SecurityAuditConfig>>> = OnceLock::new();
 
 /// Default decision-cache TTL. Bounds how long a stale allow can outlive a
 /// revocation before the next check re-consults OpenFGA.
@@ -28,26 +26,6 @@ const DECISION_CACHE_CAPACITY: u64 = 100_000;
 const KEY_SEP: char = '\u{1f}';
 
 static DECISION_CACHE: OnceLock<Cache<String, ()>> = OnceLock::new();
-
-#[derive(Clone)]
-struct SecurityAuditConfig {
-    pool: PgPool,
-    emit_allows: bool,
-}
-
-/// Configure security-audit emission for authorization decisions.
-///
-/// Denied checks are always emitted. Allowed checks are emitted only when
-/// `emit_allows` is true because allow decisions are high-volume. This also
-/// initializes the background audit writer against `pool` so decision audits are
-/// persisted off the request path.
-pub fn configure_security_audit(pool: PgPool, emit_allows: bool) {
-    moa_ocsf::init_background_audit(pool.clone());
-    let audit = AUDIT.get_or_init(|| RwLock::new(None));
-    if let Ok(mut config) = audit.write() {
-        *config = Some(SecurityAuditConfig { pool, emit_allows });
-    }
-}
 
 /// Positive-decision cache. Only allows are cached; denials always re-check so a
 /// revocation takes effect within the TTL. Keyed by `(subject, relation, object)`.
@@ -131,7 +109,7 @@ pub async fn require_authz(
         fga.check(&subject, &relation_str, &object)
     })
     .await?;
-    emit_authz_audit(identity, &object, object_type, &relation, allowed).await?;
+    emit_authz_audit(fga, identity, &object, object_type, &relation, allowed).await?;
     if !allowed {
         return Err(AuthzCheckError::Forbidden {
             subject,
@@ -148,26 +126,25 @@ pub async fn require_authz(
 /// Denials are emitted synchronously and fail closed, preserving the security
 /// audit contract. Allows are high-volume and stay best-effort when configured.
 async fn emit_authz_audit(
+    fga: &FgaClient,
     identity: &Identity,
     object: &str,
     object_type: ObjectType,
     relation: &Relation,
     allowed: bool,
 ) -> Result<(), AuthzCheckError> {
-    let Some(config) = AUDIT
-        .get_or_init(|| RwLock::new(None))
-        .read()
-        .ok()
-        .and_then(|guard| guard.clone())
-    else {
+    let Some(audit): Option<&SecurityAudit> = fga.security_audit() else {
         return Ok(());
     };
-    if allowed && !config.emit_allows {
+    if allowed && !audit.emit_allows {
         return Ok(());
     }
     if !allowed {
+        // Denials stay synchronous and fail closed. A denial the audit trail did
+        // not record is a denial nobody can prove happened, so it must fail the
+        // check rather than be enqueued and hoped for.
         moa_ocsf::emit_authz_decision(
-            &config.pool,
+            &audit.pool,
             identity.tenant_id,
             identity,
             object,
@@ -180,6 +157,7 @@ async fn emit_authz_audit(
         return Ok(());
     }
     moa_ocsf::spawn_authz_decision(
+        &audit.emitter,
         identity.tenant_id,
         identity,
         object,
@@ -210,6 +188,7 @@ pub async fn require_authz_with_delegation(
     let agent_object = format!("{}:{agent_object_id}", ObjectType::Agent);
     if identity.identity_type != IdentityType::Agent {
         emit_authz_audit(
+            fga,
             identity,
             &agent_object,
             ObjectType::Agent,
@@ -265,6 +244,7 @@ pub async fn require_authz_with_delegation(
     };
 
     emit_authz_audit(
+        fga,
         identity,
         &agent_object,
         ObjectType::Agent,
@@ -281,7 +261,15 @@ pub async fn require_authz_with_delegation(
         });
     }
 
-    emit_authz_audit(identity, &object, object_type, &relation, resource_allowed).await?;
+    emit_authz_audit(
+        fga,
+        identity,
+        &object,
+        object_type,
+        &relation,
+        resource_allowed,
+    )
+    .await?;
     if !resource_allowed {
         return Err(AuthzCheckError::Forbidden {
             subject,

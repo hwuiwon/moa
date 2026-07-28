@@ -181,6 +181,74 @@ distillation, improvement, experiment-derived, or mined — only ever produces a
 through `LearningReview` before anything about the active skill changes. There
 is no unreviewed mutation path.
 
+### Sanitized learning evidence
+
+Nothing on the automatic learning path reads a raw transcript. Distillation,
+improvement, sibling re-synthesis, recurrence-cluster accumulation,
+regression-suite generation, provider prompt formatting, and task-summary
+embedding all take `moa_skills::evidence::SanitizedLearningEvidence`, and there
+is no overload, wrapper, or deprecated path that takes `EventRecord` instead.
+The type has private fields, no raw-string or raw-event constructor, and no
+`Deserialize`, so raw transcript evidence is not merely discouraged at those
+boundaries — it is unrepresentable.
+
+The one constructor, `sanitize_segment_evidence`, takes an injected
+`&dyn PiiClassifier` and runs every text carrier through
+`moa_memory_pii::sanitized::sanitize_with`. Production supplies the
+deterministic local heuristic, the same classifier lineage capture uses, so
+sanitization stays synchronous and free of network IO inside a durable step.
+`moa-skills` owns no classifier and no detection policy.
+
+The carriers covered are the caller's messages, queued messages, assistant
+responses and reasoning summaries, tool arguments, tool results, tool errors,
+memory paths, the task summary, and each segment-assessment evidence summary.
+Tool arguments are walked as JSON and sanitized in both key and value position,
+because a free-form argument map can put caller text in a key.
+
+Sanitization is irreversible. PII and PHI proceed only after redaction leaves a
+category placeholder in place of the original bytes; the original is not
+recoverable from the result. This is deliberately unlike `moa-dlp`, whose
+request-scoped tokens are *reversible* by design so a value can be restored into
+a tool argument later in the same request. The two must never be mixed: text
+that already carries the reserved DLP delimiters is refused outright, before the
+classifier is even consulted, because a restorable token inside a durable
+learning artifact would let the original value be reconstructed after the fact.
+
+Before any provider call or derived write, the gate refuses:
+
+- content classified `Restricted`, and any span carrying the secret/credential
+  category — a redacted credential is still a credential that reached the
+  learning boundary;
+- a classifier error or abstention, which must never degrade into an implicit
+  "no PII found";
+- spans that cannot be applied exactly as detected: empty or inverted,
+  past the end of the text, straddling a UTF-8 character boundary, or
+  overlapping another span;
+- residual sensitivity found by re-classifying the redacted text, which catches
+  a detector that located one of two occurrences;
+- reserved reversible DLP token delimiters.
+
+A refusal ends the pass. Nothing partial is written: no experience row, no
+attribution, no candidate, no draft, no suite, and zero provider calls. Refusing
+the whole segment rather than dropping the offending carrier is the point — a
+partially sanitized corpus would let a reviewer approve a draft built from
+evidence they could not tell was incomplete. Sibling and recurrence paths gate
+each member independently, so one unreleasable session neither suppresses its
+cluster nor rides through on its siblings.
+
+Errors and log lines carry the stable carrier label and reason code only —
+`restricted_class`, `classifier_abstained`, `span_out_of_range`,
+`residual_sensitivity`, and so on. They never carry the refused text or the
+classifier's own error string, either of which would re-leak what the gate
+refused to release.
+
+Derived rows keep provenance without content: tenant and contact scope, the
+exact session, segment, and experience identifiers, the source event ids, the
+detector version, the original sensitivity class, the redacted categories, and
+one constant privacy-policy revision. The raw session event log remains the
+separate source-of-truth owner of the unredacted transcript; erasure and
+retention are enforced there, not by re-deriving learning artifacts.
+
 Skill distillation runs after successful multi-step work that passes the
 configured evidence threshold. The current learning flow proposes tenant-local
 skill changes. Tenant learning is never globally promoted and never rewrites
@@ -201,17 +269,53 @@ shared defaults automatically. Current generation flow:
 6. Validate the generated package and store it as a tenant-scoped
    `ArtifactKind::Skill` draft revision.
 7. Generate reviewable regression suite TOML deterministically from the
-   segment events. It is stored in the candidate payload and rides the draft
-   package as `tests/regression-suite.toml`, so every promoted revision carries
-   the suite derived from its own source session; nothing runs at generation
-   time. When a recurring task dedupes onto an open proposal, the new session's
-   suite accumulates onto the candidate as sibling held-out material instead of
-   being discarded.
-8. Append one `LearningCandidateType::Skill` row with status `Proposed`,
-   source experience IDs, operation, draft artifact revision ID, and an
-   `evidence` payload carrying the assessed outcome and confidence,
-   segment-assessment evidence rows, attribution summaries, tools used, and
-   the similarity routing that chose improve-vs-create.
+   segment events. It rides the draft package as `tests/regression-suite.toml`,
+   so every promoted revision carries the suite derived from its own source
+   session; nothing runs at generation time. When a recurring task dedupes onto
+   an open proposal, the new session's suite accumulates as sibling held-out
+   material instead of being discarded.
+8. Append one `LearningCandidateType::Skill` row with status `Proposed` and
+   `proposal_kind = SkillDraft`, its typed provenance rows, operation, draft
+   artifact revision ID, and an `evidence` payload carrying the assessed
+   outcome and confidence, segment-assessment evidence rows, attribution
+   summaries, tools used, and the similarity routing that chose
+   improve-vs-create.
+9. Record who the derived bytes belong to, in the same transaction: one
+   `artifact_suite_contribution` row for the generated suite and one
+   `artifact_revision_contribution` row for the draft's definition plus one per
+   package file.
+
+### Where suite bytes live, and why not in the payload
+
+Suite TOML used to sit inside `learning_candidates.payload` as a JSON string,
+and sibling suites accumulated into a payload array. That put attributable
+generated text in a column nothing could join, enumerate, or selectively delete
+— an erasure could not reach it, and a reviewer could not tell which session
+produced which pooled suite without parsing JSON.
+
+The bytes now belong to the artifact registry in
+`moa.artifact_suite_contribution`, one row per suite, each naming the session
+and experience it was generated from. The consequences are the point:
+
+- **Erasure can reach them.** The rows are enumerable by a typed join from the
+  subject's sessions and experiences.
+- **The cap and the dedupe are the database's.** Sibling accumulation is bounded
+  by a row count and deduped by a unique `(candidate, kind, suite_name)` index,
+  not by scanning a JSON array.
+- **Review input has one assembler.** The regression gate asks the artifact owner
+  for the pool rather than re-parsing a payload shape, so there is exactly one
+  place that knows how these bytes are stored.
+
+A `generated` row is the candidate's own suite; `accumulated` rows are sibling
+sessions' suites and are the only ones the held-out pool draws on. Pooling the
+candidate's own suite would grade a draft on the cases it was derived from and
+report a passing held-out split that held nothing out.
+
+`artifact_revision_contribution` answers the same question one level up: which
+candidate's evidence produced a revision's model-written definition and each of
+its package files. Without it an erasure enumerates zero revisions — never
+deleting a sole-source revision and never invalidating a shared one — while every
+count stays truthfully zero.
 
 Proposal filing dedupes twice before creating a draft: an open `Proposed`
 skill candidate for the same skill name, or for the same task fingerprint
@@ -296,7 +400,6 @@ Learning is not a single subsystem. It is the record of all durable derived know
 - `target_label`
 - `payload`
 - `confidence`
-- `source_refs`
 - `actor`
 - `valid_from`
 - `valid_to`
@@ -304,21 +407,35 @@ Learning is not a single subsystem. It is the record of all durable derived know
 - `batch_id`
 - `version`
 
+Provenance is a separate `learning_log_source` table with one typed column per
+referent kind, not a `UUID[]` on the row. The array it replaced declared no
+referent type, so a reader could not tell whether a given uuid named a session, a
+segment, an experience, or a row that no longer existed — which meant an erasure
+walking it had to guess, and a guess is not a derivation chain. Entry and sources
+commit together, so no entry can stand without a traceable derivation.
+
 Rollback invalidates entries by setting `valid_to`. It does not delete rows.
 
 Current learning types include:
 
 - `skill_created`
 - `skill_improved`
-- `memory_updated`
+- `skill_rollback`
 - `segment_assessed`
 
 Weakness mining is the failure-driven counterpart to distillation: after each
 assessed segment, durable tool errors and denied action reviews in the session
 window are clustered deterministically (no model call) and recurring patterns
-file `Proposed` candidates naming the implicated editable surface. Re-observed
-patterns bump the open candidate's occurrence evidence instead of filing
-duplicates, and candidates a reviewer already claimed keep their review state.
+file `NeedsAuthoring` candidates naming the implicated editable surface. Mining
+observes that something keeps failing; it does not produce a change anything can
+apply, so its output is authoring work rather than a reviewable proposal.
+Re-observed patterns bump the open candidate's occurrence evidence instead of
+filing duplicates.
+
+A pattern whose only evidence is evaluation probe ids is **not filed at all**. A
+probe id names no row in this database, so the resulting candidate could be
+neither attributed to a data subject nor reached by a privacy erasure. Skipping
+it is the honest outcome; filing an unattributable candidate is not.
 
 `learning_candidates` is not a replacement for `learning_log`. Candidates are
 mutable proposal state with evaluation payloads and explicit status transitions.
@@ -326,9 +443,87 @@ They are also the required boundary for experiment-derived skill improvements;
 experiment outcomes must not mutate skill packages or execution-plan templates directly.
 `learning_log` remains the append-only audit stream for promoted learning.
 
+### Proposal kinds: what a reviewer can actually do
+
+`candidate_type` says which domain a candidate targets. `proposal_kind` says what
+a reviewer can do with it, and the two are deliberately separate fields.
+
+They used to be one. Memory, policy, prompt, and eval suggestions were written as
+`Proposed` and appeared on the review queue beside skill drafts, even though no
+code existed that could promote them — so a reviewer could press accept on a
+policy suggestion, get a success response, and nothing would happen. That is a
+review contract the system could not keep.
+
+| Kind | Reviewable | Lifecycle |
+|---|---|---|
+| `skill_draft` | yes | `Proposed -> Evaluating -> Promoted \| Rejected`; a promoted draft may later go `-> RolledBack` |
+| `skill_rollback` | yes | `Proposed -> Evaluating -> Promoted \| Rejected` |
+| `memory_advisory` | no | `Advisory -> Dismissed` |
+| `skill_authoring`, `policy_authoring`, `prompt_authoring`, `eval_authoring` | no | `NeedsAuthoring -> Dismissed` |
+
+Both reviewable kinds also permit an owner-only `Evaluating -> Proposed` claim
+release, so a transient execution failure never strands a proposal mid-review.
+
+The database enforces both the legal `(kind, status)` pairs and the legal
+transitions. The pairs are a `CHECK`; the transitions need a trigger, because a
+`CHECK` sees one row version and only a trigger sees the pair — and the pair is
+where "an advisory item was walked to `Promoted` one legal-looking step at a
+time" would live. `proposal_kind` itself is immutable, so an advisory item cannot
+be relabelled into a reviewable draft to escape its lifecycle. Repository-level
+compare-and-set sits on top as defense in depth; it does not constrain a direct
+SQL writer, which is why the authority is in the database.
+
+`LearningProposalKind` is a closed enum with no catch-all, so adding a kind is a
+compile error at every match plus a migration to widen the constraint, rather
+than a silently unconstrained row.
+
+#### The review surface, and what each route may do
+
+| Route | Handler | Admits |
+|---|---|---|
+| `POST /v1/learning-candidates/accept-skill` | `LearningReview/accept_skill` | `skill_draft` only |
+| `POST /v1/learning-candidates/accept-rollback` | `LearningReview/accept_rollback` | `skill_rollback` only |
+| `POST /v1/learning-candidates/reject` | `LearningReview/reject` | either reviewable kind |
+| `POST /v1/learning-candidates/dismiss` | `LearningReview/dismiss` | informational kinds only |
+
+Each entry point checks `proposal_kind`, not `candidate_type` and not a payload
+string. The target domain does not say whether a materializer exists: a skill
+suggestion with no draft behind it is also `candidate_type = Skill`, and
+accepting one would run the publish path against a revision nobody generated.
+Routing a revision-archiving rollback by a JSON `kind` field was the same
+mistake in a different place — a payload key is writable by whatever produced
+the candidate, while `proposal_kind` is a closed enum the database constrains
+and refuses to let a row change.
+
+Rejection walks `Proposed -> Evaluating -> Rejected` rather than jumping
+straight to `Rejected`. There is no direct edge, for the same reason acceptance
+has none: the claim is what stops two reviewers from both succeeding at
+contradictory decisions. A lost race after a successful claim releases the claim
+rather than stranding the proposal in `Evaluating`.
+
+Dismissal is the only decision an informational item admits, and it is a
+distinct action rather than a flavor of rejection — rejecting means a reviewer
+declined a proposal that *could* have been accepted, and there is no such
+proposal here. It permits only `Advisory | NeedsAuthoring -> Dismissed`; every
+other state is a typed conflict, and a candidate already `Dismissed` is a
+replayed success rather than an error. The status change and its durable audit
+in `learning_candidate_decision` commit in one transaction keyed
+`(candidate, decision)`, so a re-execution converges on exactly one audit and no
+item is ever left closed with no record of who closed it. There is deliberately
+no generic promotion switch on any of these routes.
+
 ## Memory Learning
 
-Memory consolidation appends `memory_updated` with the consolidation report. Memory pages explain what the system knows; the learning log explains where the update came from and whether it is still current.
+Memory consolidation writes **no** learning-log entry. It used to append a
+tenant-wide `memory_updated` row whose provenance was an empty array: nothing
+could say which subject's data the counts came from, so nothing could erase or
+export it, and no reader consumed the type either. Giving it invented
+tenant-wide provenance would have made it enumerable and still wrong, so the
+emission was deleted instead. The consolidation counts live on the returned
+report and in metrics.
+
+Memory pages explain what the system knows; the learning log explains where a
+*derived* update came from and whether it is still current.
 
 ## Audit And Rollback
 

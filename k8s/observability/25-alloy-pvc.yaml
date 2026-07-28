@@ -1,0 +1,24 @@
+# Alloy's write-ahead log. The Prometheus remote-write and Loki write paths
+# buffer here while an endpoint is unreachable, so this volume IS the delivery
+# guarantee: on an emptyDir the buffer is destroyed by every pod restart, and a
+# Grafana Cloud outage or a node drain becomes silent, permanent telemetry loss
+# with no error anywhere.
+#
+# ReadWriteOnce with one replica is the deliberate shape. A second replica cannot
+# attach this volume, which is why the Deployment uses the Recreate strategy: a
+# RollingUpdate would start the new pod before the old one released the volume
+# and deadlock the rollout on Multi-Attach.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: alloy-data
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/part-of: moa
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi

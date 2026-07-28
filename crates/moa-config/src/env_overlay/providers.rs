@@ -86,6 +86,19 @@ pub(super) fn exact_overlay_path(field: &str) -> Option<Vec<String>> {
         }
         "providers_stream_timeouts_idle_ms" => &["providers", "stream_timeouts", "idle_ms"],
         "providers_stream_timeouts_total_ms" => &["providers", "stream_timeouts", "total_ms"],
+        "providers_concurrency_on_coordination_failure" => {
+            &["providers", "concurrency", "on_coordination_failure"]
+        }
+        "providers_pacing_scope" => &["providers", "pacing", "scope"],
+        "providers_pacing_state_ttl_ms" => &["providers", "pacing", "state_ttl_ms"],
+        "providers_pacing_max_pacing_wait_ms" => &["providers", "pacing", "max_pacing_wait_ms"],
+        "providers_pacing_default_cooldown_ms" => &["providers", "pacing", "default_cooldown_ms"],
+        "providers_pacing_max_cooldown_ms" => &["providers", "pacing", "max_cooldown_ms"],
+        "providers_pacing_retry_budget_window_ms" => {
+            &["providers", "pacing", "retry_budget_window_ms"]
+        }
+        "providers_pacing_retry_budget_percent" => &["providers", "pacing", "retry_budget_percent"],
+        "providers_pacing_retry_budget_floor" => &["providers", "pacing", "retry_budget_floor"],
         _ => return None,
     };
     Some(strings(path))

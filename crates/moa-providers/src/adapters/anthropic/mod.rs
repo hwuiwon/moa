@@ -29,7 +29,9 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::core::concurrency::{ConcurrencyLimiter, DEFAULT_MAX_IN_FLIGHT};
-use crate::core::concurrency_factory::{CallKind, ProviderConcurrency};
+use moa_config::ProviderPacingConfig;
+
+use crate::core::concurrency_factory::{CallKind, ProviderCoordination};
 use crate::core::http::build_http_client;
 use crate::core::instrumentation::LLMSpanRecorder;
 use crate::core::pacer::{PacerConfig, RatePacer};
@@ -103,7 +105,7 @@ impl AnthropicProvider {
             // Direct construction uses the flat per-provider default; the config
             // path overrides it per credential (0 opts back into unbounded).
             limiter: ConcurrencyLimiter::new(DEFAULT_MAX_IN_FLIGHT),
-            guard: RateGuard::new(),
+            guard: RateGuard::new(ProviderPacingConfig::default()),
             stream_timeouts: ProviderStreamTimeoutConfig::default(),
         })
     }
@@ -125,10 +127,18 @@ impl AnthropicProvider {
 
         let mut provider = Self::new(api_key.clone(), default_model)?
             .with_web_search_enabled(config.general.web_search_enabled);
-        if let Some(max) = config.providers.anthropic.max_requests_per_min {
-            provider = provider.with_rate_limits(PacerConfig::requests_per_min(max));
-        }
-        provider.limiter = ProviderConcurrency::from_config(config).limiter(
+        // One coordination handle builds every distributed control for this
+        // credential, so concurrency, pacing, cooldown, and retry budget cannot
+        // disagree about whether they are fleet-wide.
+        let coordination = ProviderCoordination::from_config(config)?;
+        let pacing = config
+            .providers
+            .anthropic
+            .max_requests_per_min
+            .map_or_else(PacerConfig::disabled, PacerConfig::requests_per_min);
+        provider.pacer = coordination.pacer(pacing, "anthropic", &api_key);
+        provider.guard = coordination.rate_guard(CallKind::Chat, "anthropic", &api_key);
+        provider.limiter = coordination.limiter(
             CallKind::Chat,
             "anthropic",
             &api_key,
@@ -184,13 +194,6 @@ impl LLMProvider for AnthropicProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
-        // Cooperative 429 short-circuit: while paused, return a typed rate-limit
-        // error immediately without an HTTP round trip so callers can fail over.
-        if let Some(remaining) = self.guard.pause_remaining() {
-            return Err(rate_guard::rate_limited_paused(remaining));
-        }
-        self.guard.note_request();
-
         let requested_model = request
             .model
             .as_ref()
@@ -198,6 +201,15 @@ impl LLMProvider for AnthropicProvider {
             .unwrap_or(self.default_model.as_str())
             .to_string();
         let resolved_model = canonical_model_id(&requested_model)?;
+        // Cooldown and retry budget are scoped to the resolved model, so a 429 on
+        // one model does not stall calls to another model on the same credential.
+        let guard = self.guard.for_model(&resolved_model);
+        // Cooperative 429 short-circuit: while paused, return a typed rate-limit
+        // error immediately without an HTTP round trip so callers can fail over.
+        if let Some(remaining) = guard.pause_remaining().await? {
+            return Err(rate_guard::rate_limited_paused(remaining));
+        }
+        guard.note_request().await?;
         let model_capabilities = capabilities_for_model(&resolved_model)?;
         let max_output_tokens = Some(
             request
@@ -238,12 +250,14 @@ impl LLMProvider for AnthropicProvider {
         };
         // Chat completions are request-rate limited; pace after taking the
         // in-flight slot so queued callers do not consume rate budget early.
-        self.pacer.acquire(1, 0).await;
+        if let Err(error) = self.pacer.acquire(&resolved_model, 1, 0).await {
+            span_recorder.fail_at_stage("transport", &error);
+            return Err(error);
+        }
         let client = self.client.clone();
         let api_key = Arc::clone(&self.api_key);
         let messages_url = Arc::clone(&self.messages_url);
         let retry_policy = self.retry_policy.clone();
-        let guard = self.guard.clone();
         let stream_timeouts = self.stream_timeouts;
         let (tx, rx) = mpsc::channel(DEFAULT_STREAM_BUFFER);
 

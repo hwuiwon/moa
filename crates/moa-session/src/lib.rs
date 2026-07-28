@@ -4,6 +4,7 @@
 //! session-store queries.
 
 pub mod analytics;
+pub mod archive;
 mod attachment_storage;
 pub mod blob;
 #[cfg(feature = "failpoints")]

@@ -17,8 +17,9 @@ use moa_core::{
     types::completion::CompletionContent, types::completion::CompletionRequest,
     types::completion::CompletionResponse, types::completion::CompletionStream,
     types::completion::StopReason, types::completion::TokenUsage, types::contact::SessionActorRef,
-    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
-    types::experience::LearningCandidateType, types::experience::LearningRiskClass,
+    types::experience::LearningCandidate, types::experience::LearningCandidateSourceRef,
+    types::experience::LearningCandidateStatus, types::experience::LearningCandidateType,
+    types::experience::LearningProposalKind, types::experience::LearningRiskClass,
     types::experience::TaskFingerprint, types::identifiers::ModelId, types::identifiers::SegmentId,
     types::identifiers::SessionId, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId, types::identifiers::ToolCallId, types::model::ModelCapabilities,
@@ -29,6 +30,7 @@ use moa_core::{
     types::segments::TaskSegment, types::session::SessionMeta, types::session::SessionStatus,
     types::tools::ToolOutput,
 };
+use moa_memory_pii::HeuristicPiiClassifier;
 use moa_orchestrator::workflows::skill_learning::{
     RecurrenceDispatch, RecurrenceSiblingRef, RunSkillLearningRequest,
     record_skill_learning_failure, run_skill_learning_for_experience,
@@ -66,6 +68,7 @@ mod skill_learning {
             Arc::new(test_db.store().clone()),
             scripted_router([proposed]),
             None,
+            &HeuristicPiiClassifier,
             request.clone(),
         )
         .await
@@ -88,9 +91,17 @@ mod skill_learning {
         assert_eq!(candidate.status.as_str(), "proposed");
         assert_eq!(candidate.candidate_type.as_str(), "skill");
         assert_eq!(candidate.payload["operation"], "skill_created");
-        assert_eq!(
-            candidate.payload["source_experience_ids"][0],
-            request.experience_id.to_string()
+        assert_eq!(candidate.proposal_kind.as_str(), "skill_draft");
+        // Provenance is a typed row, not a payload array. Asserting on the row is
+        // what makes this test fail if the candidate stops being reachable from
+        // the experience a privacy erasure would enter through.
+        assert!(
+            candidate
+                .sources
+                .contains(&LearningCandidateSourceRef::Experience {
+                    experience_id: request.experience_id,
+                }),
+            "the filed candidate must carry its source experience as typed provenance"
         );
 
         let scope = tenant_scope(&storage_partition_id);
@@ -265,6 +276,7 @@ mod skill_learning {
             Arc::new(test_db.store().clone()),
             scripted_router([skill, "UNCHANGED".to_string(), "UNCHANGED".to_string()]),
             None,
+            &HeuristicPiiClassifier,
             request,
         )
         .await
@@ -289,12 +301,18 @@ mod skill_learning {
             3,
             "exemplar plus two siblings are recorded for the reviewer"
         );
-        let sibling_suites = candidate.payload["accumulated_regression_suites"]
-            .as_array()
-            .expect("accumulated sibling suites");
+        let sibling_suites =
+            moa_artifacts::registry::ArtifactRegistry::new(test_db.store().pool().clone())
+                .list_suite_contributions(candidate_id)
+                .await
+                .expect("load suite contributions")
+                .into_iter()
+                .filter(|contribution| {
+                    contribution.kind == moa_artifacts::registry::SuiteContributionKind::Accumulated
+                })
+                .count();
         assert_eq!(
-            sibling_suites.len(),
-            2,
+            sibling_suites, 2,
             "both cluster siblings pooled as held-out material"
         );
 
@@ -372,6 +390,7 @@ mod skill_learning {
             tenant_id,
             user_id: None,
             candidate_type: LearningCandidateType::Skill,
+            proposal_kind: LearningProposalKind::SkillDraft,
             status: LearningCandidateStatus::Rejected,
             target_id: None,
             target_label: Some("reconcile-ledger".to_string()),
@@ -383,7 +402,13 @@ mod skill_learning {
             task_facets: None,
             payload: json!({ "kind": "skill_draft_proposal" }),
             evaluation_payload: None,
-            source_experience_ids: Vec::new(),
+            // The seeded member's real experience, not a fabricated uuid: the
+            // candidate's provenance is a foreign key now, so a made-up id would
+            // fail the insert for a reason that has nothing to do with what this
+            // test pins.
+            sources: vec![LearningCandidateSourceRef::Experience {
+                experience_id: member.experience_id,
+            }],
             confidence: None,
             risk_class: LearningRiskClass::Medium,
             promotion_requirements: vec!["human_review".to_string()],
@@ -654,16 +679,17 @@ async fn seed_recurrence_member(
         .create_segment(&segment)
         .await
         .expect("create task segment");
+    let evidence = sanitized_evidence(&session, &segment, &assessment, &events).await;
     let experience = experience_from_assessment(
         &session,
         &segment,
         &assessment,
-        &events,
+        &evidence,
         None,
         Some(1_000),
         created_at,
     );
-    let attributions = attributions_for_experience(&experience, &events, created_at);
+    let attributions = attributions_for_experience(&experience, &evidence, created_at);
     test_db
         .store()
         .append_experience_record(&experience)
@@ -679,6 +705,185 @@ async fn seed_recurrence_member(
         session_id: session.id,
         experience_id: experience.id,
         fingerprint_hash: experience.task_fingerprint.hash,
+    }
+}
+
+/// A classifier that records how many times it ran and returns a fixed verdict.
+struct FixedClassifier {
+    result: moa_memory_pii::PiiResult,
+}
+
+#[async_trait]
+impl moa_memory_pii::PiiClassifier for FixedClassifier {
+    async fn classify(&self, _text: &str) -> moa_memory_pii::Result<moa_memory_pii::PiiResult> {
+        Ok(self.result.clone())
+    }
+}
+
+/// A classifier that always fails, standing in for an unavailable detector.
+struct DownClassifier;
+
+#[async_trait]
+impl moa_memory_pii::PiiClassifier for DownClassifier {
+    async fn classify(&self, _text: &str) -> moa_memory_pii::Result<moa_memory_pii::PiiResult> {
+        Err(moa_memory_pii::Error::Inference(
+            "privacy filter unreachable".to_string(),
+        ))
+    }
+}
+
+/// An LLM provider that fails loudly if the learning path ever calls it.
+struct NeverCalledProvider;
+
+#[async_trait]
+impl LLMProvider for NeverCalledProvider {
+    fn name(&self) -> &str {
+        "never-called"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        TestProvider {
+            responses: Mutex::new(VecDeque::new()),
+        }
+        .capabilities()
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> moa_core::error::Result<CompletionStream> {
+        panic!("learning must make zero provider calls when evidence is refused");
+    }
+}
+
+fn never_called_router() -> Arc<ModelRouter> {
+    Arc::new(ModelRouter::new(Arc::new(NeverCalledProvider), None))
+}
+
+mod skill_learning_evidence_gate {
+    use super::*;
+
+    /// Runs one learning pass against a seeded fixture with a refusing classifier
+    /// and returns the report plus the candidates that exist afterwards.
+    async fn run_with_classifier(
+        classifier: &dyn moa_memory_pii::PiiClassifier,
+    ) -> (
+        moa_orchestrator::workflows::skill_learning::SkillLearningReport,
+        Vec<LearningCandidate>,
+    ) {
+        let test_db = bootstrap_test_db()
+            .await
+            .expect("bootstrap evidence-gate db");
+        let (config, request, storage_partition_id) =
+            seed_experience_fixture(&test_db, "evidence-gate").await;
+        let tenant_id = tenant_id_from_storage_partition_id(&storage_partition_id);
+
+        let report = run_skill_learning_for_experience(
+            &config,
+            Arc::new(test_db.store().clone()),
+            never_called_router(),
+            None,
+            classifier,
+            request,
+        )
+        .await
+        .expect("a refused pass reports, it does not error");
+
+        let candidates = test_db
+            .store()
+            .list_learning_candidates(&tenant_id.to_string(), None, 100)
+            .await
+            .expect("list learning candidates");
+        (report, candidates)
+    }
+
+    #[tokio::test]
+    async fn abstained_classifier_produces_zero_provider_calls_and_zero_writes_db() {
+        // Pins: an abstaining detector refuses the pass. The provider panics if
+        // reached, and no learning candidate is filed, so an unavailable detector
+        // cannot degrade into "no PII found" and learn anyway.
+        let (report, candidates) = run_with_classifier(&FixedClassifier {
+            result: moa_memory_pii::PiiResult::fail_closed("test:v1"),
+        })
+        .await;
+
+        assert_eq!(report.outcome, "skipped");
+        let message = report.message.expect("a refusal carries its reason");
+        assert!(
+            message.contains("classifier_abstained"),
+            "refusal must name its stable reason code: {message}"
+        );
+        assert!(candidates.is_empty(), "{candidates:?}");
+    }
+
+    #[tokio::test]
+    async fn restricted_evidence_produces_zero_provider_calls_and_zero_writes_db() {
+        // Pins: restricted content refuses outright. Redaction is not an acceptable
+        // remedy for a credential that reached the learning boundary.
+        let (report, candidates) = run_with_classifier(&FixedClassifier {
+            result: moa_memory_pii::PiiResult {
+                class: moa_core::types::security::SensitivityClass::Restricted,
+                spans: Vec::new(),
+                model_version: "test:v1".to_string(),
+                abstained: false,
+            },
+        })
+        .await;
+
+        assert_eq!(report.outcome, "skipped");
+        assert!(
+            report
+                .message
+                .expect("a refusal carries its reason")
+                .contains("restricted_class")
+        );
+        assert!(candidates.is_empty(), "{candidates:?}");
+    }
+
+    #[tokio::test]
+    async fn classifier_error_refuses_without_leaking_the_source_error_db() {
+        // Pins: a detector failure refuses, and the durable report carries the
+        // stable reason code only — never the classifier's own error string, which
+        // can embed the very text it failed on.
+        let (report, candidates) = run_with_classifier(&DownClassifier).await;
+
+        assert_eq!(report.outcome, "skipped");
+        let message = report.message.expect("a refusal carries its reason");
+        assert!(message.contains("classifier_error"), "{message}");
+        assert!(
+            !message.contains("privacy filter unreachable"),
+            "classifier source error leaked into the durable report: {message}"
+        );
+        assert!(candidates.is_empty(), "{candidates:?}");
+    }
+
+    #[tokio::test]
+    async fn invalid_span_evidence_produces_zero_provider_calls_and_zero_writes_db() {
+        // Pins: a span that cannot be applied exactly as detected refuses, rather
+        // than being dropped so the original bytes ship inside "sanitized" text.
+        let (report, candidates) = run_with_classifier(&FixedClassifier {
+            result: moa_memory_pii::PiiResult {
+                class: moa_core::types::security::SensitivityClass::Pii,
+                spans: vec![moa_memory_pii::PiiSpan::new(
+                    0,
+                    1_000_000,
+                    moa_memory_pii::PiiCategory::Email,
+                    0.9,
+                )],
+                model_version: "test:v1".to_string(),
+                abstained: false,
+            },
+        })
+        .await;
+
+        assert_eq!(report.outcome, "skipped");
+        assert!(
+            report
+                .message
+                .expect("a refusal carries its reason")
+                .contains("span_out_of_range")
+        );
+        assert!(candidates.is_empty(), "{candidates:?}");
     }
 }
 
@@ -778,4 +983,35 @@ impl LLMProvider for TestProvider {
             thought_signature: None,
         }))
     }
+}
+
+/// Sanitizes a seeded segment's events into the evidence the learning path takes.
+async fn sanitized_evidence(
+    session: &SessionMeta,
+    segment: &TaskSegment,
+    assessment: &SegmentAssessment,
+    events: &[moa_core::types::events_stream::EventRecord],
+) -> moa_skills::evidence::SanitizedLearningEvidence {
+    let assessment_summaries = assessment
+        .evidence
+        .iter()
+        .map(|evidence| evidence.summary.clone())
+        .collect::<Vec<_>>();
+    moa_skills::evidence::sanitize_segment_evidence(
+        &HeuristicPiiClassifier,
+        moa_skills::evidence::EvidenceScope {
+            tenant_id: session.tenant_id,
+            contact_id: session.contact.as_ref().map(|contact| contact.contact_id),
+            session_id: session.id,
+            segment_id: segment.id,
+            experience_id: moa_brain::learning::experience::deterministic_experience_id(segment.id),
+        },
+        events,
+        moa_skills::evidence::SegmentNarrative {
+            task_summary: segment.task_summary.as_deref(),
+            assessment_summaries: &assessment_summaries,
+        },
+    )
+    .await
+    .expect("seeded fixture transcripts sanitize cleanly")
 }

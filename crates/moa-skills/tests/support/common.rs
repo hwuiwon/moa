@@ -60,6 +60,7 @@ use moa_core::{
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
 use moa_skills::distiller::ExperienceDistillationInput;
+use moa_skills::evidence::{EvidenceScope, SanitizedLearningEvidence, SegmentNarrative};
 use moa_skills::format::{
     build_skill_path, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
 };
@@ -239,7 +240,10 @@ pub fn failed_session(mut loaded: LoadedSession) -> LoadedSession {
 /// The experience carries a resolved outcome above the learnability threshold and
 /// reuses the fixture's events, so tests can drive the experience-native
 /// distillation path without seeding segment-assessment rows.
-pub fn experience_input(loaded: &LoadedSession, task_summary: &str) -> ExperienceDistillationInput {
+pub async fn experience_input(
+    loaded: &LoadedSession,
+    task_summary: &str,
+) -> ExperienceDistillationInput {
     let tools_used = loaded
         .events
         .iter()
@@ -284,11 +288,152 @@ pub fn experience_input(loaded: &LoadedSession, task_summary: &str) -> Experienc
         extraction_policy_version: "experience_v1".to_string(),
         created_at: moa_test_support::fixtures::pg_now(),
     };
+    let evidence = sanitized_evidence(loaded, &experience).await;
     ExperienceDistillationInput {
         experience,
         attributions: Vec::new(),
-        events: loaded.events.clone(),
+        evidence,
     }
+}
+
+/// Monotonic segment index for seeded fixture segments.
+static SEEDED_SEGMENT_INDEX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Builds a distillation input AND persists the rows its provenance points at.
+///
+/// A filed candidate carries typed `Session` and `Experience` sources with real
+/// composite foreign keys, so a fixture whose session and experience exist only
+/// in memory cannot commit one. That constraint is the guarantee — a candidate
+/// nobody can attribute is a candidate no erasure can reach — so the fixture
+/// seeds the rows production would already have written, rather than describing
+/// a proposal that could not exist.
+///
+/// `experience_input` stays pure for the offline tests that have no database.
+pub async fn seeded_experience_input(
+    test_db: &TestDb,
+    loaded: &LoadedSession,
+    task_summary: &str,
+) -> ExperienceDistillationInput {
+    // Persist the fixture's events FIRST and build the input from the records the
+    // store returned. A candidate's typed `Event` sources carry real composite
+    // foreign keys, so evidence derived from in-memory events with invented ids
+    // produces a candidate that cannot commit. Using the persisted records means
+    // the ids in the provenance rows are the ids an erasure would walk.
+    let persisted = seed_session_row(test_db, loaded).await;
+    let loaded = &LoadedSession {
+        session: loaded.session.clone(),
+        events: persisted,
+    };
+    let input = experience_input(loaded, task_summary).await;
+    // The experience hangs off a real segment, which hangs off a real session.
+    // Seeding the whole chain rather than the one row that failed first is the
+    // point: the chain IS the guarantee, and a fixture that satisfied only the
+    // constraint it tripped over would keep drifting from the production shape.
+    test_db
+        .store()
+        .create_segment(&TaskSegment {
+            id: input.experience.segment_id,
+            session_id: loaded.session.id,
+            tenant_id: loaded.session.tenant_id.to_string(),
+            // Unique per seeded segment: one fixture session can carry several
+            // inputs, and `(session_id, segment_index)` is unique in the schema
+            // because a session's segments really are ordered and distinct.
+            segment_index: SEEDED_SEGMENT_INDEX.fetch_add(1, Ordering::Relaxed),
+            task_summary: Some(task_summary.to_string()),
+            started_at: input.experience.created_at,
+            ended_at: Some(input.experience.created_at),
+            turn_count: input.experience.turn_count,
+            tools_used: input.experience.tools_used.clone(),
+            skills_activated: input.experience.skills_activated.clone(),
+            skills_used: input.experience.skills_used.clone(),
+            token_cost: input.experience.token_cost,
+            previous_segment_id: None,
+            outcome: Some("resolved".to_string()),
+            assessment: None,
+            outcome_confidence: Some(input.experience.confidence),
+        })
+        .await
+        .expect("seed the segment row the experience references");
+    test_db
+        .store()
+        .append_experience_record(&input.experience)
+        .await
+        .expect("seed the experience row a candidate source references");
+    input
+}
+
+/// Inserts the fixture's session and events, returning the persisted records.
+///
+/// Idempotent on the session so two inputs from the same fixture do not collide;
+/// events are appended once per call because each input represents one segment's
+/// worth of transcript.
+pub async fn seed_session_row(test_db: &TestDb, loaded: &LoadedSession) -> Vec<EventRecord> {
+    if moa_core::traits::SessionStore::get_session(test_db.store(), loaded.session.id)
+        .await
+        .is_err()
+    {
+        seed_session_meta(test_db, loaded).await;
+    }
+    let appends = loaded
+        .events
+        .iter()
+        .map(|record| moa_session::EventAppend {
+            event: record.event.clone(),
+            dedupe_key: None,
+        })
+        .collect::<Vec<_>>();
+    test_db
+        .store()
+        .append_events(loaded.session.id, appends)
+        .await
+        .expect("seed the events a candidate source references")
+}
+
+/// Creates the session row itself.
+async fn seed_session_meta(test_db: &TestDb, loaded: &LoadedSession) {
+    let mut meta = loaded.session.clone();
+    // Session creation requires attribution, and so does everything downstream:
+    // an unattributed session is exactly what the provenance chain cannot use.
+    if meta.contact.is_none() && meta.created_by.is_none() {
+        meta.created_by = Some(moa_core::types::contact::SessionActorRef::Identity {
+            id: Uuid::from_u128(1),
+        });
+    }
+    moa_core::traits::SessionStore::create_session(test_db.store(), meta)
+        .await
+        .expect("seed the session row a candidate source references");
+}
+
+/// Sanitizes a fixture session's events into learning evidence.
+///
+/// Uses the same deterministic heuristic classifier production uses, so a
+/// fixture exercises the real sanitization gate rather than a permissive stand-in.
+pub async fn sanitized_evidence(
+    loaded: &LoadedSession,
+    experience: &ExperienceRecord,
+) -> SanitizedLearningEvidence {
+    let assessment_summaries = experience
+        .evidence
+        .iter()
+        .map(|evidence| evidence.summary.clone())
+        .collect::<Vec<_>>();
+    moa_skills::evidence::sanitize_segment_evidence(
+        &moa_memory_pii::HeuristicPiiClassifier,
+        EvidenceScope {
+            tenant_id: loaded.session.tenant_id,
+            contact_id: None,
+            session_id: loaded.session.id,
+            segment_id: experience.segment_id,
+            experience_id: experience.id,
+        },
+        &loaded.events,
+        SegmentNarrative {
+            task_summary: experience.task_summary.as_deref(),
+            assessment_summaries: &assessment_summaries,
+        },
+    )
+    .await
+    .expect("fixture transcripts sanitize cleanly")
 }
 
 /// Builds a model router backed by deterministic text responses.
@@ -674,6 +819,29 @@ pub async fn seed_embedded_experience(
     created_at: DateTime<Utc>,
 ) {
     let store = test_db.store();
+    // The experience may already exist: `seeded_experience_input` persists the
+    // rows a candidate's provenance points at, and a test that then wants that
+    // same experience discoverable by the dedup nearest-neighbour is asking for
+    // an EMBEDDING, not a second row. Re-inserting would violate the primary key
+    // and, worse, a fixture that "fixed" it by minting a new id would embed a
+    // different experience than the one the proposal was filed from.
+    let already_persisted: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM experience_records WHERE id = $1)")
+            .bind(experience_id)
+            .fetch_one(store.pool())
+            .await
+            .expect("probe for an already-seeded experience");
+    if already_persisted {
+        store
+            .set_experience_task_embeddings(
+                &[(experience_id, task_summary.to_string(), embedding.to_vec())],
+                "scripted-embed",
+                1,
+            )
+            .await
+            .expect("set experience embedding");
+        return;
+    }
     let session_id: SessionId = store
         .create_session(embedding_session_meta(tenant_id))
         .await

@@ -257,7 +257,11 @@ pub(super) async fn search_hits_for_tool(
                 label_filter: plan.label_filter().map(<[NodeLabel]>::to_vec),
                 max_pii_class,
                 use_reranker: true,
-                disable_graph_expansion: plan.source_tier() == SourceTier::TenantKnowledge,
+                // Same rule as the brain context pipeline, read from the same
+                // policy value rather than restated here: tenant-knowledge
+                // expansion is enabled exactly when the semantic graph is written.
+                disable_graph_expansion: plan.source_tier() == SourceTier::TenantKnowledge
+                    && !config.knowledge.semantic.enables_tenant_graph_expansion(),
                 clearances: clearances.clone(),
             },
             query_embedding.clone(),

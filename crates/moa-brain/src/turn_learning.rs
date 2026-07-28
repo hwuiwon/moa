@@ -2,11 +2,11 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    types::events_stream::EventRecord, types::experience::ExperienceAttribution,
-    types::experience::ExperienceRecord, types::experience::LearningCandidate,
-    types::segment_assessment::SegmentAssessment, types::segments::TaskSegment,
-    types::session::SessionMeta,
+    types::experience::ExperienceAttribution, types::experience::ExperienceRecord,
+    types::experience::LearningCandidate, types::segment_assessment::SegmentAssessment,
+    types::segments::TaskSegment, types::session::SessionMeta,
 };
+use moa_skills::evidence::SanitizedLearningEvidence;
 
 use crate::query_rewrite::QueryRewriteResult;
 
@@ -27,12 +27,17 @@ pub struct SegmentLearningBundle {
 }
 
 /// Builds all learning artifacts for an assessed segment without persisting them.
+///
+/// The bundle is derived entirely from sanitized segment evidence, so every row
+/// it produces — experience, attribution, and candidate — carries redacted
+/// content. The raw session event log remains the separate source-of-truth owner
+/// of the unredacted transcript.
 #[must_use]
 pub fn build_segment_learning_bundle(
     meta: &SessionMeta,
     segment: &TaskSegment,
     assessment: &SegmentAssessment,
-    segment_events: &[EventRecord],
+    evidence: &SanitizedLearningEvidence,
     rewrite: Option<&QueryRewriteResult>,
     duration_ms: Option<u64>,
     now: DateTime<Utc>,
@@ -41,12 +46,12 @@ pub fn build_segment_learning_bundle(
         meta,
         segment,
         assessment,
-        segment_events,
+        evidence,
         rewrite,
         duration_ms,
         now,
     );
-    let attributions = attributions_for_experience(&experience, segment_events, now);
+    let attributions = attributions_for_experience(&experience, evidence, now);
     let candidates = propose_candidates_for_experience(&experience, &attributions, now);
     SegmentLearningBundle {
         experience,

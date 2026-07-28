@@ -1275,12 +1275,21 @@ fn find_capability<'a>(
         .ok_or_else(|| TerminalError::new("capability is absent from the persisted catalog").into())
 }
 
-fn capability_tool_name(capability: &ExecutionCapability) -> Result<String, HandlerError> {
+/// Returns the registered tool name a capability dispatches through.
+///
+/// Every arm must yield a name the router actually knows. A connector tool's
+/// published name is not one — it resolves only under its server-qualified
+/// reference — which is why `McpTool` contributes `tool_name` here and its
+/// `remote_name` appears nowhere in this function.
+pub(crate) fn capability_tool_name(
+    capability: &ExecutionCapability,
+) -> Result<String, HandlerError> {
     match &capability.source {
-        CapabilitySource::BuiltInTool { name }
-        | CapabilitySource::HandTool { name }
-        | CapabilitySource::McpTool { name, .. } => Ok(name.clone()),
-        CapabilitySource::ActionArtifact { tool_name, .. }
+        CapabilitySource::BuiltInTool { name } | CapabilitySource::HandTool { name } => {
+            Ok(name.clone())
+        }
+        CapabilitySource::McpTool { tool_name, .. }
+        | CapabilitySource::ActionArtifact { tool_name, .. }
         | CapabilitySource::ConnectorAction { tool_name, .. }
         | CapabilitySource::SkillAction { tool_name, .. }
         | CapabilitySource::Memory { tool_name, .. } => Ok(tool_name.clone()),

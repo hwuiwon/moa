@@ -24,7 +24,6 @@ use moa_execution::repository::{
 use moa_session::PostgresSessionStore;
 
 use super::*;
-use crate::ctx::OrchestratorCtx;
 use crate::services::execution::{
     record_execution_template_admission_origin, record_execution_template_admission_run,
     reserve_execution_template_admission,
@@ -62,6 +61,8 @@ pub(super) async fn admit_execution_template(
     ctx: &mut ObjectContext<'_>,
     state: &mut Tracked<SessionVoState>,
     session_store: Arc<PostgresSessionStore>,
+    admission_pool: &sqlx::PgPool,
+    config: &MoaConfig,
     identity: &moa_core::traits::Identity,
     request: moa_execution::wire::ExecutionTemplateAdmissionRequest,
 ) -> Result<moa_execution::wire::ExecutionTemplateAdmissionResponse, HandlerError> {
@@ -100,7 +101,7 @@ pub(super) async fn admit_execution_template(
         moa_execution::wire::execution_template_admission_request_fingerprint(&request)
             .map_err(|error| TerminalError::new_with_code(422, error.to_string()))?
             .to_string();
-    let pool = OrchestratorCtx::current_graph_pool();
+    let pool = admission_pool.clone();
     let reserved_request = request.clone();
     let reserved_fingerprint = request_fingerprint.clone();
     let replay = ctx
@@ -127,7 +128,7 @@ pub(super) async fn admit_execution_template(
             let persisted =
                 append_admission_objective(ctx, session_id, &request.objective, operation_uid)
                     .await?;
-            let pool = OrchestratorCtx::current_graph_pool();
+            let pool = admission_pool.clone();
             let fingerprint = request_fingerprint.clone();
             let sequence = persisted.sequence_num;
             ctx.run(|| async move {
@@ -169,6 +170,7 @@ pub(super) async fn admit_execution_template(
     let execution_run_uid = start_external_template_execution(
         ctx,
         session_store,
+        config,
         identity,
         &request,
         operation_uid,
@@ -178,7 +180,7 @@ pub(super) async fn admit_execution_template(
     state.apply_accepted_execution_turn(durable_utc_now(ctx).await?);
     state.persist(ctx);
     sync_status(ctx, session_id, state).await?;
-    let pool = OrchestratorCtx::current_graph_pool();
+    let pool = admission_pool.clone();
     let fingerprint = request_fingerprint.clone();
     let completed = ctx
         .run(|| async move {
@@ -276,6 +278,7 @@ async fn append_admission_objective(
 async fn start_external_template_execution(
     ctx: &ObjectContext<'_>,
     session_store: Arc<PostgresSessionStore>,
+    config: &MoaConfig,
     identity: &moa_core::traits::Identity,
     request: &moa_execution::wire::ExecutionTemplateAdmissionRequest,
     operation_uid: uuid::Uuid,
@@ -286,7 +289,6 @@ async fn start_external_template_execution(
         template: request.template.clone(),
         input: request.input.clone(),
     };
-    let config = OrchestratorCtx::current_config();
     let classifier_model = ModelId::new(
         config
             .models

@@ -45,6 +45,14 @@ use super::mcp_router::{mcp_egress_guard, opt_into_development_local_hands};
 const SERVER: &str = "tenant-search";
 const OPERATION: &str = "search_documents";
 
+/// The server-qualified reference the discovered operation registers under.
+///
+/// The tenant binding's allowlist stays keyed on [`OPERATION`] — the connector's
+/// own name — while the model and the registry see this qualified reference.
+fn qualified_operation() -> String {
+    moa_hands::mcp_tool_reference(SERVER, OPERATION)
+}
+
 /// One recorded outbound `tools/call`: its credential header and its JSON-RPC
 /// body, so a test can assert exactly where material is allowed to appear.
 #[derive(Clone)]
@@ -426,6 +434,8 @@ fn tenant_owned_config(url: &str, sandbox_dir: &std::path::Path) -> MoaConfig {
     config.local.sandbox_dir = sandbox_dir.join("sandbox").display().to_string();
     opt_into_development_local_hands(&mut config);
     config.mcp_servers = vec![McpServerConfig {
+        required: false,
+        discovery: moa_config::McpDiscoveryMode::Eager,
         name: SERVER.to_string(),
         transport: McpTransportConfig::Http,
         url: Some(url.to_string()),
@@ -440,7 +450,7 @@ fn tenant_owned_config(url: &str, sandbox_dir: &std::path::Path) -> MoaConfig {
 fn invocation() -> ToolInvocation {
     ToolInvocation {
         id: None,
-        name: OPERATION.to_string(),
+        name: qualified_operation(),
         input: json!({}),
     }
 }
@@ -599,7 +609,7 @@ async fn nothing_a_caller_supplies_can_change_the_credential_owner_offline() {
 
     let hostile = ToolInvocation {
         id: Some("credential_scope=deployment_owned_mcp".to_string()),
-        name: OPERATION.to_string(),
+        name: qualified_operation(),
         input: json!({}),
     };
     let error = router

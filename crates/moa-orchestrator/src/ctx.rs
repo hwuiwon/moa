@@ -7,7 +7,7 @@ use moa_brain::pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector};
 use moa_config::MoaConfig;
 use moa_core::{
     traits::LineageHandle,
-    traits::{EmbeddingProvider, Identity, RuntimeCacheStore, SessionRepository},
+    traits::{EmbeddingProvider, Identity, RuntimeCacheStore, SessionStore},
 };
 use moa_crypto::KeyManagementProvider;
 use moa_hands::ToolRouter;
@@ -21,7 +21,7 @@ static CTX: OnceLock<Arc<OrchestratorCtx>> = OnceLock::new();
 /// Persistence dependencies shared by handlers that read or write product data.
 #[derive(Clone)]
 pub struct PersistenceDeps {
-    session_repository: Arc<dyn SessionRepository>,
+    session_store: Arc<dyn SessionStore>,
     session_store_backend: Arc<PostgresSessionStore>,
     graph_pool: sqlx::PgPool,
 }
@@ -31,16 +31,21 @@ impl PersistenceDeps {
     #[must_use]
     pub fn new(session_store: Arc<PostgresSessionStore>, graph_pool: sqlx::PgPool) -> Self {
         Self {
-            session_repository: session_store.clone(),
+            session_store: session_store.clone(),
             session_store_backend: session_store,
             graph_pool,
         }
     }
 
-    /// Returns the session repository contract.
+    /// Returns the session-log read and write contract.
+    ///
+    /// Deliberately the narrow `SessionStore` and not an aggregate: the one
+    /// caller compiles a turn from a session and its recent events, and the
+    /// aggregate handed it analytics, learning-log, experience, segment and
+    /// candidate surfaces it never used and should not be able to reach.
     #[must_use]
-    pub fn session_store(&self) -> Arc<dyn SessionRepository> {
-        self.session_repository.clone()
+    pub fn session_store(&self) -> Arc<dyn SessionStore> {
+        self.session_store.clone()
     }
 
     /// Returns the concrete Postgres session-store backend for composition-only surfaces.
@@ -113,14 +118,13 @@ impl ProviderDeps {
 #[derive(Clone)]
 pub struct ToolDeps {
     router: Arc<ToolRouter>,
-    schemas: Arc<Vec<Value>>,
 }
 
 impl ToolDeps {
     /// Creates a tool dependency group.
     #[must_use]
-    pub fn new(router: Arc<ToolRouter>, schemas: Arc<Vec<Value>>) -> Self {
-        Self { router, schemas }
+    pub fn new(router: Arc<ToolRouter>) -> Self {
+        Self { router }
     }
 
     /// Returns the configured tool router.
@@ -129,10 +133,15 @@ impl ToolDeps {
         self.router.clone()
     }
 
-    /// Returns the precompiled tool schemas exposed to model requests.
+    /// Returns the tool schemas of the router's live catalog.
+    ///
+    /// Read from the router per turn rather than captured at startup, because a
+    /// connector catalog refresh has to reach the prompt: a startup copy would
+    /// keep advertising a schema the router no longer routes, and the model
+    /// would be shown one contract while dispatch enforced another.
     #[must_use]
     pub fn schemas(&self) -> Arc<Vec<Value>> {
-        self.schemas.clone()
+        self.router.tool_schema_snapshot()
     }
 }
 
@@ -308,7 +317,7 @@ impl OrchestratorCtx {
 
     /// Returns the session store from persistence dependencies.
     #[must_use]
-    pub fn session_store(&self) -> Arc<dyn SessionRepository> {
+    pub fn session_store(&self) -> Arc<dyn SessionStore> {
         self.persistence.session_store()
     }
 
@@ -506,4 +515,34 @@ pub fn current_identity(
 
 fn parse_uuid(value: &str, header: &'static str) -> Result<Uuid, IdentityHeaderError> {
     Uuid::parse_str(value).map_err(|_| IdentityHeaderError::Malformed(header))
+}
+
+#[cfg(test)]
+mod tool_deps_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use moa_hands::{ToolRegistry, ToolRouter, local_development_sandbox_policy};
+
+    use super::ToolDeps;
+
+    #[test]
+    fn tool_deps_serve_the_routers_live_schema_snapshot() {
+        // Pins: the schemas a turn compiles from are the router's current ones,
+        // not a copy taken when dependencies were built. A captured copy would
+        // go stale the first time a connector catalog refreshed, and the
+        // coordinator and its workers — which build their loadouts separately —
+        // would then disagree about which tools exist.
+        let router = Arc::new(ToolRouter::new(
+            ToolRegistry::default_local(),
+            HashMap::new(),
+            local_development_sandbox_policy(),
+        ));
+        let deps = ToolDeps::new(Arc::clone(&router));
+
+        assert!(
+            Arc::ptr_eq(&deps.schemas(), &router.tool_schema_snapshot()),
+            "tool dependencies must hand out the router's own snapshot, not a copy"
+        );
+    }
 }

@@ -10,8 +10,9 @@ use moa_config::MoaConfig;
 use moa_core::types::memory::RlsContext;
 use moa_core::{
     types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
-    types::experience::LearningCandidateStatusUpdate, types::experience::LearningCandidateType,
+    types::experience::LearningCandidateStatusUpdate, types::experience::LearningProposalKind,
     types::identifiers::TenantId, types::learning::LearningEntry,
+    types::learning::LearningLogSourceRef,
 };
 use moa_db::ScopedConn;
 use moa_hands::ToolRouter;
@@ -61,6 +62,11 @@ pub trait LearningReview {
 
     /// Rejects a proposed learning candidate while preserving its draft artifacts.
     async fn reject(
+        request: Json<LearningCandidateReviewRequest>,
+    ) -> Result<Json<LearningCandidateReviewResponse>, HandlerError>;
+
+    /// Dismisses an informational candidate that no materializer can apply.
+    async fn dismiss(
         request: Json<LearningCandidateReviewRequest>,
     ) -> Result<Json<LearningCandidateReviewResponse>, HandlerError>;
 }
@@ -189,6 +195,28 @@ impl LearningReview for LearningReviewImpl {
                     .map(Json::from)
             })
             .name("learning_review_reject")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn dismiss(
+        &self,
+        ctx: Context<'_>,
+        request: Json<LearningCandidateReviewRequest>,
+    ) -> Result<Json<LearningCandidateReviewResponse>, HandlerError> {
+        annotate_restate_handler_span("LearningReview", "dismiss");
+        let mut request = request.into_inner();
+        let identity = authorize_tenant_operator(&ctx, request.tenant_id).await?;
+        request.reviewer_subject = fga_subject(&identity);
+        let store = self.store.clone();
+
+        Ok(ctx
+            .run(|| async move {
+                dismiss_learning_candidate_after_authz(store, request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("learning_review_dismiss")
             .await?)
     }
 }
@@ -762,7 +790,17 @@ fn rollback_learning_entry(
             "review": evaluation_payload,
         }),
         confidence: None,
-        source_refs: vec![candidate.id, execution.promotion_candidate_id],
+        sources: vec![
+            LearningLogSourceRef::Candidate {
+                candidate_id: candidate.id,
+            },
+            LearningLogSourceRef::Candidate {
+                candidate_id: execution.promotion_candidate_id,
+            },
+            LearningLogSourceRef::ArtifactRevision {
+                revision_uid: execution.promoted_revision_uid,
+            },
+        ],
         actor: format!("review:{}", request.reviewer_subject),
         valid_from: Utc::now(),
         valid_to: None,
@@ -771,8 +809,18 @@ fn rollback_learning_entry(
     }
 }
 
+/// Refuses anything but an open skill-rollback proposal at this entry point.
+///
+/// Gated on `proposal_kind`, which is the review contract, rather than on
+/// `candidate_type` plus a payload `kind` string. Routing a destructive
+/// revision-archiving action by a JSON string was the shape this task deletes:
+/// a payload key is writable by whatever produced the candidate, while
+/// `proposal_kind` is a closed enum the database constrains and refuses to let
+/// a row change. The state machine already makes a wrong-kind row unreachable
+/// here, so this check exists to answer a wrong request with a 400 rather than
+/// letting it reach the transactional rollback and fail as a constraint error.
 fn ensure_rollback_proposal(candidate: &LearningCandidate) -> Result<(), HandlerError> {
-    if candidate.candidate_type != LearningCandidateType::Skill {
+    if candidate.proposal_kind != LearningProposalKind::SkillRollback {
         return Err(TerminalError::new_with_code(
             400,
             "only skill rollback proposals can be accepted here",
@@ -783,15 +831,6 @@ fn ensure_rollback_proposal(candidate: &LearningCandidate) -> Result<(), Handler
         return Err(TerminalError::new_with_code(
             400,
             "rollback proposal must be proposed before review",
-        )
-        .into());
-    }
-    if candidate.payload.get("kind").and_then(Value::as_str)
-        != Some(moa_skills::rollback::ROLLBACK_PROPOSAL_KIND)
-    {
-        return Err(TerminalError::new_with_code(
-            400,
-            "learning candidate is not a skill rollback proposal",
         )
         .into());
     }
@@ -816,6 +855,132 @@ fn optional_payload_uuid(payload: &Value, key: &str) -> Result<Option<Uuid>, Han
         TerminalError::new_with_code(400, format!("rollback payload {key} is invalid: {error}"))
             .into()
     })
+}
+
+/// Dismisses one informational candidate after the caller has authorized access.
+///
+/// The only decision an advisory or authoring item admits. Everything about this
+/// handler is shaped by one rule: an item that no code can apply must never be
+/// reachable by an action that implies it was. So there is no promotion switch
+/// here, no acceptance path, and no status argument — dismissal is the single
+/// outcome, and the database refuses every other transition for these kinds
+/// regardless of what this handler asks for.
+///
+/// The status change and its durable audit commit in ONE transaction. That is
+/// the point of the transaction rather than a nicety: an audit written after a
+/// separate commit could be lost, leaving an item closed with no record of who
+/// closed it or why — and "closed by nobody" is exactly the state a compliance
+/// export cannot explain. The audit is keyed `(candidate, decision)`, so a
+/// Restate re-execution converges on exactly one row: the replay finds the
+/// candidate already `Dismissed`, and reports success without writing a second
+/// identical audit.
+///
+/// A candidate in any other state gets a typed 409 rather than a silent success,
+/// including a reviewable proposal that a caller mistook for an advisory one.
+pub async fn dismiss_learning_candidate_after_authz(
+    store: Arc<PostgresSessionStore>,
+    request: LearningCandidateReviewRequest,
+) -> Result<LearningCandidateReviewResponse, HandlerError> {
+    ensure_requested_action(request.action, LearningCandidateReviewAction::Dismiss)?;
+    let tenant_id = request.tenant_id;
+    let candidate = store
+        .get_learning_candidate(&tenant_id, request.candidate_id)
+        .await
+        .map_err(moa_error_to_status_handler_error)?
+        .ok_or_else(|| TerminalError::new_with_code(404, "learning candidate not found"))?;
+
+    if candidate.proposal_kind.is_reviewable() {
+        return Err(TerminalError::new_with_code(
+            400,
+            "reviewable proposals are accepted or rejected, not dismissed",
+        )
+        .into());
+    }
+    // A replay of the same dismissal is a success, not a conflict: the caller
+    // asked for a state the candidate already holds and nothing else changed it.
+    if candidate.status == LearningCandidateStatus::Dismissed {
+        record_review_decision("dismiss", "replayed");
+        return Ok(dismissal_response(candidate.id));
+    }
+    let from_status = candidate.status;
+    if !matches!(
+        from_status,
+        LearningCandidateStatus::Advisory | LearningCandidateStatus::NeedsAuthoring
+    ) {
+        return Err(TerminalError::new_with_code(
+            409,
+            format!(
+                "learning candidate is `{}` and cannot be dismissed",
+                from_status.as_str()
+            ),
+        )
+        .into());
+    }
+
+    let now = Utc::now();
+    let mut conn = ScopedConn::begin(store.pool(), &RlsContext::tenant(tenant_id))
+        .await
+        .map_err(moa_error_to_status_handler_error)?;
+    let dismissed = store
+        .update_learning_candidate_status_from_in_tx(
+            conn.as_mut(),
+            &LearningCandidateStatusUpdate {
+                candidate_id: candidate.id,
+                status: LearningCandidateStatus::Dismissed,
+                status_reason: Some(
+                    request
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "dismissed by reviewer".to_string()),
+                ),
+                evaluation_payload: None,
+                updated_at: now,
+            },
+            from_status,
+        )
+        .await
+        .map_err(moa_error_to_status_handler_error)?;
+    if !dismissed {
+        return Err(TerminalError::new_with_code(
+            409,
+            "learning candidate changed status before the dismissal could be applied",
+        )
+        .into());
+    }
+    store
+        .record_learning_candidate_decision_in_tx(
+            conn.as_mut(),
+            &moa_core::types::experience::LearningCandidateDecisionRecord {
+                id: Uuid::now_v7(),
+                candidate_id: candidate.id,
+                tenant_id,
+                decision: moa_core::types::experience::LearningReviewDecision::Dismissed,
+                from_status,
+                to_status: LearningCandidateStatus::Dismissed,
+                reviewer_subject: Some(request.reviewer_subject.clone()),
+                reason: request.reason.clone(),
+                decided_at: now,
+            },
+        )
+        .await
+        .map_err(moa_error_to_status_handler_error)?;
+    conn.commit()
+        .await
+        .map_err(moa_error_to_status_handler_error)?;
+
+    record_review_decision("dismiss", "dismissed");
+    Ok(dismissal_response(candidate.id))
+}
+
+/// Builds the response for a dismissal, which never touches an artifact.
+fn dismissal_response(candidate_id: Uuid) -> LearningCandidateReviewResponse {
+    LearningCandidateReviewResponse {
+        candidate_id,
+        status: LearningCandidateStatus::Dismissed,
+        artifact_uid: None,
+        draft_artifact_revision_uid: None,
+        published_artifact_revision_uid: None,
+    }
 }
 
 /// Rejects one candidate after the caller has authorized tenant operator access.
@@ -885,6 +1050,7 @@ fn review_action_label(action: LearningCandidateReviewAction) -> &'static str {
     match action {
         LearningCandidateReviewAction::Accept => "accept",
         LearningCandidateReviewAction::Reject => "reject",
+        LearningCandidateReviewAction::Dismiss => "dismiss",
     }
 }
 

@@ -348,8 +348,10 @@ Consolidation v1 runs six deterministic operations:
 
 The v1 pass deliberately does not do semantic near-duplicate merging, LLM-polished digest prose, episode building, scope-drift repair, or destructive (hard-delete) expiry. `at_floor` is reported alongside `expired_idle`; floor-bound facts inside the idle window remain active unless another write supersedes them.
 
-Successful consolidation appends a tenant-local `memory_updated` entry to
-`learning_log`.
+Consolidation writes no `learning_log` entry. The tenant-wide `memory_updated`
+row it used to append carried no per-subject provenance, so it could be neither
+erased nor explained, and nothing read it; its counts live on the returned
+consolidation report and in metrics instead.
 
 The lifecycle crate also owns the dark quality-scoring job. It joins
 `moa.retrieval_lineage` to persisted task-segment outcomes and writes
@@ -378,3 +380,23 @@ Memory candidates can be proposed from high-confidence resolved experiences,
 but the first implementation does not auto-promote them into graph writes.
 Promotion remains a consolidation or human-reviewed action so a single noisy
 segment cannot mutate durable memory.
+
+Every arrow above is a real foreign key, not a convention. `learning_candidate_source`
+and `learning_log_source` hold one typed column per referent kind with a
+composite key carrying the partition, which is what lets a privacy erasure walk
+the chain in reverse: delete a subject's memories and the learning distilled
+from them is reached and removed too, instead of surviving as an orphaned
+conclusion whose evidence is gone.
+
+Which review contract a candidate offers is `proposal_kind`, kept separate from
+`candidate_type` (the target domain). Only `skill_draft` and `skill_rollback`
+have a materializer and can be accepted; memory, policy, prompt, and eval
+observations live on advisory or authoring lifecycles whose only exit is
+dismissal. The database enforces both the legal `(kind, status)` pairs and the
+legal transitions, so an advisory item cannot be walked to `promoted` one
+legal-looking step at a time.
+
+**Scope note.** Reverse-derived erasure covers learning-derived rows only. It
+does not claim raw session-event, attachment, blob, or archive erasure — those
+have their own owners and their own paths. See the scope fence in
+`docs/08-security.md#learning-derived-erasure` before assuming coverage.

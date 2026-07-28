@@ -1,5 +1,6 @@
 //! Tenant-configurable agent artifact definitions.
 
+use moa_core::types::agent::AgentSandboxPolicy;
 use moa_core::types::guardrails::GuardrailMode;
 use moa_core::types::memory::{InformationBarrierClearances, InformationBarrierId};
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,14 @@ pub struct AgentDefinition {
     /// Optional input and output guardrails for this agent.
     #[serde(default)]
     pub guardrail_policy: GuardrailPolicy,
+    /// Sandbox resource and egress limits this agent adds on top of the
+    /// deployment's and the tenant's.
+    ///
+    /// Defaults to [`AgentSandboxPolicy::Unset`], which is the identity element
+    /// of the sandbox policy intersection: an agent that says nothing here
+    /// cannot widen what the deployment, tenant, or route already bounded.
+    #[serde(default)]
+    pub sandbox_policy: AgentSandboxPolicy,
     /// Optional admin-facing revision note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_note: Option<String>,

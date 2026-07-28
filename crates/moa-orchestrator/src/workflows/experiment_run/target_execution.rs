@@ -36,7 +36,7 @@ use moa_execution::{
 };
 use moa_wire::session_store::AppendEventRequest;
 
-use crate::ctx::OrchestratorCtx;
+use moa_config::MoaConfig;
 
 use crate::services::{execution::ExecutionClient, session_store::RestateSessionStoreClient};
 
@@ -169,6 +169,7 @@ pub(super) async fn run_execution_template_target(
     input: Value,
     target_session_id: Option<SessionId>,
     idempotency_key: Option<String>,
+    config: &MoaConfig,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
@@ -202,6 +203,7 @@ pub(super) async fn run_execution_template_target(
         scope,
         variant.model,
         target_session_id,
+        config,
         pool,
         session_store,
     )
@@ -241,6 +243,7 @@ pub(super) async fn run_execution_template_target(
     let compiled = compile_experiment_template(ExperimentTemplateCompileRequest {
         context: &planning_context.snapshot,
         requested: &template,
+        config,
         objective,
         input,
         experiment_run_uid: request.run_uid,
@@ -314,12 +317,17 @@ pub(super) async fn run_execution_template_target(
     .await
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the workflow target keeps durable input and concrete stores explicit instead of hiding them in a dependency bag"
+)]
 async fn ensure_execution_session(
     ctx: &WorkflowContext<'_>,
     request: &ExperimentRunWorkflowRequest,
     scope: ActionRuleScope,
     variant_model: Option<ModelId>,
     target_session_id: Option<SessionId>,
+    config: &MoaConfig,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<EffectiveExecutionSession, HandlerError> {
@@ -360,7 +368,6 @@ async fn ensure_execution_session(
 
     let session_id =
         experiment_execution_session_id(request.tenant_id, request.run_uid, request.score_run_id)?;
-    let config = OrchestratorCtx::current_config();
     let model = variant_model.unwrap_or_else(|| ModelId::new(config.models.main.clone()));
     let now = durable_utc_now(ctx, "experiment_internal_execution_session_now").await?;
     let meta = internal_execution_session_meta(session_id, scope, model, now, &request.identity)?;
@@ -633,6 +640,7 @@ enum ExperimentCompileClassification {
 struct ExperimentTemplateCompileRequest<'a> {
     context: &'a moa_execution::wire::ExecutionPlanningContextSnapshot,
     requested: &'a PinnedExecutionTemplateRef,
+    config: &'a MoaConfig,
     objective: String,
     input: Value,
     experiment_run_uid: Uuid,
@@ -647,6 +655,7 @@ fn compile_experiment_template(
     let ExperimentTemplateCompileRequest {
         context,
         requested,
+        config,
         objective,
         input,
         experiment_run_uid,
@@ -699,7 +708,6 @@ fn compile_experiment_template(
         .map_err(|error| TerminalError::new(error.to_string()))?;
     let candidate_hash =
         execution_planning_hash("moa.execution.compile-candidate", &candidate_bytes);
-    let config = OrchestratorCtx::current_config();
     let started_at = Instant::now();
     let outcome = compile(CompileExecutionRequest {
         goal: candidate.goal,

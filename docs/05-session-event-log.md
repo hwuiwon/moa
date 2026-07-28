@@ -10,6 +10,7 @@ Postgres stores:
 
 - session metadata
 - append-only event records
+- archived terminal-session history (`session_event_archives`)
 - session-event idempotency dedupe rows (`session_event_dedupe`)
 - action policy rules
 - pending signals
@@ -60,7 +61,8 @@ CREATE TABLE sessions (
     contact_canonical_id UUID,
     created_by_actor_type TEXT,
     created_by_actor_id UUID,
-    contact_promoted_from_id UUID
+    contact_promoted_from_id UUID,
+    events_archived_at TIMESTAMPTZ
 );
 
 CREATE TABLE session_agent_context (
@@ -476,7 +478,111 @@ Compaction is segment-aware because segment start/completion events remain durab
 - pending action reviews
 - checkpoint summaries
 
-The compactor stage can create checkpoint events, but it does not remove event history from Postgres.
+The compactor stage can create checkpoint events, but it does not remove event history from Postgres. Removing history from Postgres is retention's job, described next, and it is a different mechanism with a different guarantee: compaction shortens what the model sees, retention moves what the database stores.
+
+## Archival And Retention
+
+`events` is append-only, and append-only with no lifecycle boundary means a
+session that ended a year ago still occupies the hottest and most heavily
+indexed table in the system, and every backup taken since. Retention gives
+terminal-session history a normal end state without making it unrecoverable.
+
+The unit is one session, never a time range. `events` is HASH-partitioned on
+`session_id`, so deleting one session's history prunes to exactly one of the
+sixteen partitions; a retention pass expressed as a timestamp range would fan
+out across all sixteen and cost more than leaving the data alone. The retention
+boundary selects *which sessions* are eligible; the delete is always keyed by
+session.
+
+`session_event_archives` (migration `V000364`) holds one row per archived
+session: the full history serialized in sequence order exactly as the rows were
+stored, its BLAKE3 digest, the event count and sequence span, and the archival
+timestamp. The archive row and the deletion of the rows it replaces are written
+in **one transaction**, so there is no state in which an archive exists that
+does not match the history it stands for. Before any delete, that transaction
+reads the archive back out of the database, re-derives the digest from the bytes
+Postgres is actually holding, decodes the body, and compares it event for event
+against the rows about to be removed; a mismatch aborts the transaction and the
+live history survives. The delete then asserts it removed exactly the number of
+rows the archive captured.
+
+`moa-session` owns the whole decision. `crate::archive` owns the serialized
+format and the pure rules; `crate::store::session_archive` owns the SQL. A
+session is archived only when, under its own row lock:
+
+- its status is terminal (`completed`, `cancelled`, `failed`) — a session that
+  can still append would be archived as a prefix;
+- it reached that state at or before a caller-supplied boundary, never a
+  boundary the storage layer derives from its own clock;
+- no active `moa.legal_hold` row covers the tenant or the session's subject;
+- no `moa.destruction_operation_fence` row shows a durable erasure or tenant
+  purge already owns those rows;
+- and the archive just written verifies.
+
+The hold and fence checks run after the transaction takes
+`pg_advisory_xact_lock` on the same `moa:destruction:tenant:<id>` key that
+`place_hold` and `start_destruction` take, so a hold landing concurrently
+either wins outright or waits for the pass to finish. There is exactly one
+enforcement point: the durable workflow above it schedules and reports, it does
+not re-decide.
+
+Retention is the one path that opts out of the append-only guard. It sets
+`moa.events_maintenance = 'on'` transaction-locally, which is the escape hatch
+`events_append_only_guard()` has always carried; the guard stays in force for
+every other writer, and active history is never touched. The archive write, the
+delete, and the marker are one transaction, so a failure at any point between
+them rolls back together — a session whose events were deleted without its
+archive becoming durable would be history that no longer exists. The archive's
+foreign key to `sessions` makes that structural rather than merely intended: an
+archive row cannot be inserted from outside the transaction holding the session
+row, because the key check would block on it.
+
+`sessions.events_archived_at` marks a session whose history now lives in the
+archive. It is set in the same transaction, and it lives on `sessions` rather
+than being derived from the archive table because the append path already holds
+that row under `FOR UPDATE`: an append to an archived session is refused there
+with no extra round trip. Without that refusal a later append would resurrect
+rows for an archived session and permanently hide the archive from the read
+path.
+
+Replay of an archived session is indistinguishable from replay of a live one.
+Which store holds a session's history is a *fact* — `events_archived_at` — and
+`get_events` branches on that fact, not on the live table happening to come back
+empty. Emptiness is also what a range past the last sequence returns for a
+perfectly live session, and a stray row written after archival would hide the
+archive entirely, so the marker is read and believed. A session marked archived
+with no archive row is an error rather than an empty history: the marker and the
+archive are written together, so their disagreement means something destroyed
+one of them, and returning "this conversation has no messages" would present
+that as a fact about the conversation. Hydration reproduces the same
+`EventRecord` values with the same ids, sequence numbers, and timestamps,
+applying the same range, type, and limit semantics as the live query. Claim-check references resolve normally because retention never
+touches `session_blobs`. A hydration whose digest does not match is an error,
+never a shorter history: a truncated archive must not be servable as an
+authentic conversation.
+
+`SessionRetention` is the durable workflow, dispatched per tenant and logical
+date by `SessionStore/start_session_retention`, which requires **tenant admin**
+on the target tenant — retention is the same class of irreversible act as a
+purge. The pass captures its timestamp as its first durable step and derives one
+boundary from it, so a replay re-derives the boundary it originally used instead
+of drifting forward with the wall clock. Each session is archived behind its own
+journaled step, so a crashed pass resumes rather than restarting, and a replayed
+step sees `AlreadyArchived`. A retention window below one day is refused
+outright: zero would turn a misconfigured schedule into an immediate mass delete
+of history users are still looking at.
+
+There is deliberately **no default cron job** for retention. The feature is
+inert until an operator schedules or invokes it with an explicit window and
+per-pass session cap, because a data-deleting maintenance pass should not become
+active merely by deploying the code that implements it.
+
+The archive is immutable: an UPDATE trigger refuses every rewrite, so the copy
+that replaced live history can never be silently altered. Its foreign key to
+`sessions` deliberately does **not** cascade, so the tenant-purge step that
+removes archived history stays falsifiable — without that step, a tenant's
+session delete fails on a foreign-key violation instead of quietly leaving a
+purged tenant's conversations in the archive.
 
 ## Analytics
 

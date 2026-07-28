@@ -52,8 +52,6 @@ spec:
               containerPort: 9080
             - name: health
               containerPort: 9081
-            - name: metrics
-              containerPort: 9090
           readinessProbe:
             httpGet:
               path: /_health/ready
@@ -142,10 +140,14 @@ spec:
                 secretKeyRef:
                   name: moa-runtime-cache
                   key: redis-url
-            - name: MOA_METRICS_ENABLED
-              value: "true"
-            - name: MOA_METRICS_LISTEN
-              value: 0.0.0.0:9090
+            # Push, not scrape. Production runs behind a non-sticky Service with an
+            # autoscaled replica count, so a scrape through that Service lands on an
+            # arbitrary replica each interval and blends unrelated processes into one
+            # series. There is deliberately no listen address here: a configured but
+            # unbound port reads to operators, manifests and network policies as a
+            # scrape endpoint that exists.
+            - name: MOA_METRICS_EXPORTER
+              value: otlp
             # Gate readiness on the orchestrator's Restate services (Session, Worker,
             # TurnExecution, WorkerTurnExecution, ...) being registered with the cluster,
             # so non-sticky traffic never lands on a replica whose handlers aren't live.

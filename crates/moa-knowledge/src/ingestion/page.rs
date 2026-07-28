@@ -30,37 +30,21 @@ where
             chunking: config.chunking,
             provider: config.provider,
             parser_label: config.parser_label,
-            semantic_generic_entities: true,
-            semantic_model_extractor: None,
+            semantic_policy: SemanticGraphPolicy::default(),
             content_fetcher: None,
             source_acl,
         }
     }
 
-    /// Sets whether semantic extraction emits the deterministic generic
-    /// proper-noun entity fallback for chunks with no domain-rule match.
+    /// Sets the tenant-knowledge semantic graph policy.
     ///
-    /// Defaults to enabled; wire this from `knowledge.semantic.generic_entities`
-    /// to disable the fallback for a deployment.
+    /// Defaults to [`SemanticGraphPolicy::Off`], which skips semantic extraction
+    /// and writes entirely. The same policy value decides whether
+    /// tenant-knowledge retrieval reads the graph, so extraction cost is never
+    /// paid for data nothing can read.
     #[must_use]
-    pub fn with_semantic_generic_entities(mut self, enabled: bool) -> Self {
-        self.semantic_generic_entities = enabled;
-        self
-    }
-
-    /// Attaches a model-backed semantic graph extractor as the production
-    /// extractor.
-    ///
-    /// When present it replaces the deterministic keyword ruleset for new or
-    /// changed chunks; the keyword ruleset remains the per-chunk fallback used
-    /// whenever a model call, timeout, or parse fails. Passing `None` keeps the
-    /// deterministic keyword extractor as the sole extractor.
-    #[must_use]
-    pub fn with_semantic_model_extractor(
-        mut self,
-        extractor: Option<Arc<ModelSemanticGraphExtractor>>,
-    ) -> Self {
-        self.semantic_model_extractor = extractor;
+    pub fn with_semantic_policy(mut self, policy: SemanticGraphPolicy) -> Self {
+        self.semantic_policy = policy;
         self
     }
 

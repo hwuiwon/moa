@@ -17,6 +17,130 @@ pub enum ConcurrencyScope {
     Global,
 }
 
+/// What a distributed provider control does when coordination is unavailable.
+///
+/// "Unavailable" covers both a runtime-store failure at call time and a
+/// deployment that declares a distributed scope without injecting a coordination
+/// store at startup. It does **not** cover a deliberate
+/// [`ConcurrencyScope::Local`] deployment, which is a configured choice rather
+/// than a failure and stays silent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinationFailurePolicy {
+    /// Fall back to the process-local bound, with an explicit metric, a
+    /// fleet-ceiling warning, and the degradation duration. Availability is
+    /// preserved, but the effective ceiling is multiplied by the replica count
+    /// while degraded, so this is only safe when the provider quota has headroom.
+    #[default]
+    BoundedDegraded,
+    /// Reject admission instead of enforcing a ceiling that is no longer
+    /// fleet-wide. Provider calls fail with a typed rate-limit error rather than
+    /// risking a quota breach.
+    FailClosed,
+}
+
+impl CoordinationFailurePolicy {
+    /// Returns whether this policy rejects admission when coordination fails.
+    #[must_use]
+    pub const fn rejects_admission(self) -> bool {
+        matches!(self, Self::FailClosed)
+    }
+}
+
+/// Fleet coordination for per-minute pacing, 429 cooldown, and retry budget.
+///
+/// Concurrency admission has its own scope
+/// ([`ProviderConcurrencyConfig::scope`]) because it is enforced with leases;
+/// the controls here are enforced with shared counters and deadlines. Under
+/// [`ConcurrencyScope::Global`] all three become fleet-wide through the runtime
+/// coordination store, keyed by provider, opaque credential identity, model, and
+/// rate class, so one API key's documented per-minute budget is not multiplied by
+/// the replica count. The defaults reproduce the historical process-local
+/// behavior exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderPacingConfig {
+    /// Whether pacing, cooldown, and retry budget are per process or fleet-wide.
+    pub scope: ConcurrencyScope,
+    /// How long an idle shared pacing/retry key survives in the store, in ms.
+    pub state_ttl_ms: u64,
+    /// Upper bound on one pacing wait before the caller re-checks, in ms. Keeps
+    /// a hostile or miscomputed refill estimate from parking a call indefinitely.
+    pub max_pacing_wait_ms: u64,
+    /// Cooldown applied to a rate-limit response with no `Retry-After`, in ms.
+    pub default_cooldown_ms: u64,
+    /// Ceiling on any single cooldown, in ms. A provider-supplied `Retry-After`
+    /// longer than this is capped, so one hostile header cannot pause a whole
+    /// fleet's access to a credential for an unbounded time.
+    pub max_cooldown_ms: u64,
+    /// Sliding window over which request and retry volume is measured, in ms.
+    pub retry_budget_window_ms: u64,
+    /// Percentage of window request volume that in-call retries may consume.
+    pub retry_budget_percent: u32,
+    /// Retries always allowed per window regardless of volume, so low-volume
+    /// callers keep normal retry behavior.
+    pub retry_budget_floor: u64,
+}
+
+impl Default for ProviderPacingConfig {
+    fn default() -> Self {
+        Self {
+            scope: ConcurrencyScope::Local,
+            state_ttl_ms: 300_000,
+            max_pacing_wait_ms: 60_000,
+            default_cooldown_ms: 5_000,
+            max_cooldown_ms: 300_000,
+            retry_budget_window_ms: 60_000,
+            retry_budget_percent: 20,
+            retry_budget_floor: 8,
+        }
+    }
+}
+
+impl ProviderPacingConfig {
+    /// Returns whether pacing state is coordinated across replicas.
+    #[must_use]
+    pub const fn is_global(&self) -> bool {
+        matches!(self.scope, ConcurrencyScope::Global)
+    }
+
+    /// Validates the pacing settings, rejecting budgets that cannot bound anything.
+    pub fn validate(&self) -> Result<(), MoaError> {
+        if self.retry_budget_percent == 0 || self.retry_budget_percent > 100 {
+            return Err(MoaError::ConfigError(
+                "providers.pacing.retry_budget_percent must be between 1 and 100".to_string(),
+            ));
+        }
+        if self.retry_budget_window_ms == 0 {
+            return Err(MoaError::ConfigError(
+                "providers.pacing.retry_budget_window_ms must be greater than zero".to_string(),
+            ));
+        }
+        if self.default_cooldown_ms == 0 || self.max_cooldown_ms == 0 {
+            return Err(MoaError::ConfigError(
+                "providers.pacing cooldown durations must be greater than zero".to_string(),
+            ));
+        }
+        if self.default_cooldown_ms > self.max_cooldown_ms {
+            return Err(MoaError::ConfigError(
+                "providers.pacing.default_cooldown_ms must not exceed max_cooldown_ms".to_string(),
+            ));
+        }
+        if self.max_pacing_wait_ms == 0 {
+            return Err(MoaError::ConfigError(
+                "providers.pacing.max_pacing_wait_ms must be greater than zero".to_string(),
+            ));
+        }
+        if self.is_global() && self.state_ttl_ms == 0 {
+            return Err(MoaError::ConfigError(
+                "providers.pacing.state_ttl_ms must be greater than zero for global scope"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// In-flight concurrency limits applied to outbound provider calls.
 ///
 /// Provider rate limits are tied to the account's tier (Anthropic tier N, a
@@ -49,6 +173,11 @@ pub struct ProviderConcurrencyConfig {
     /// so this is the operator-tunable ceiling for the longest expected stream. A
     /// killed replica's slots self-expire after this TTL.
     pub lease_ttl_ms: u64,
+    /// What every distributed provider control does when the coordination store
+    /// is unreachable or was never injected. Applies to concurrency admission and
+    /// to pacing, cooldown, and retry budget alike, so one deployment decision
+    /// governs the whole fleet-coordination surface.
+    pub on_coordination_failure: CoordinationFailurePolicy,
 }
 
 impl Default for ProviderConcurrencyConfig {
@@ -58,11 +187,18 @@ impl Default for ProviderConcurrencyConfig {
             default_max_in_flight: 16,
             block_threshold_ms: 2_000,
             lease_ttl_ms: 600_000,
+            on_coordination_failure: CoordinationFailurePolicy::BoundedDegraded,
         }
     }
 }
 
 impl ProviderConcurrencyConfig {
+    /// Returns whether in-flight admission is coordinated across replicas.
+    #[must_use]
+    pub const fn is_global(&self) -> bool {
+        matches!(self.scope, ConcurrencyScope::Global)
+    }
+
     /// Validates the concurrency settings, rejecting nonsensical durations.
     pub fn validate(&self) -> Result<(), MoaError> {
         if self.block_threshold_ms == 0 {
@@ -357,6 +493,9 @@ pub struct ProvidersConfig {
     /// In-flight concurrency limits and coordination scope for provider calls.
     #[serde(default)]
     pub concurrency: ProviderConcurrencyConfig,
+    /// Fleet coordination for per-minute pacing, 429 cooldown, and retry budget.
+    #[serde(default)]
+    pub pacing: ProviderPacingConfig,
     /// First-byte, idle, and total deadlines for streaming LLM responses.
     #[serde(default)]
     pub stream_timeouts: ProviderStreamTimeoutConfig,
@@ -369,6 +508,7 @@ impl ProvidersConfig {
     /// Validates provider concurrency, stream timeouts, capabilities, and policy.
     pub fn validate(&self) -> Result<(), MoaError> {
         self.concurrency.validate()?;
+        self.pacing.validate()?;
         self.stream_timeouts.validate()?;
         if self.concurrency.scope == ConcurrencyScope::Global
             && self.concurrency.lease_ttl_ms <= self.stream_timeouts.total_ms
@@ -394,8 +534,9 @@ mod tests {
     use moa_core::types::provider::ProviderId;
 
     use super::{
-        ConcurrencyScope, DeploymentProviderPolicyConfig, ProviderConcurrencyConfig,
-        ProviderCredentialConfig, ProviderStreamTimeoutConfig, ProvidersConfig,
+        ConcurrencyScope, CoordinationFailurePolicy, DeploymentProviderPolicyConfig,
+        ProviderConcurrencyConfig, ProviderCredentialConfig, ProviderPacingConfig,
+        ProviderStreamTimeoutConfig, ProvidersConfig,
     };
 
     #[test]
@@ -471,6 +612,130 @@ mod tests {
         assert!(
             bad_ttl.validate().is_ok(),
             "a zero lease TTL is only rejected under global scope"
+        );
+    }
+
+    #[test]
+    fn pacing_defaults_reproduce_the_historical_process_local_behavior() {
+        // Pins: adding fleet coordination changes nothing for an existing
+        // deployment — pacing stays process-local, and the cooldown and
+        // retry-budget numbers are the constants the guard used before they
+        // became configurable.
+        let pacing = ProviderPacingConfig::default();
+        assert_eq!(pacing.scope, ConcurrencyScope::Local);
+        assert!(!pacing.is_global());
+        assert_eq!(pacing.default_cooldown_ms, 5_000);
+        assert_eq!(pacing.retry_budget_window_ms, 60_000);
+        assert_eq!(pacing.retry_budget_percent, 20);
+        assert_eq!(pacing.retry_budget_floor, 8);
+        assert!(pacing.validate().is_ok());
+
+        assert_eq!(
+            ProviderConcurrencyConfig::default().on_coordination_failure,
+            CoordinationFailurePolicy::BoundedDegraded,
+            "the default policy must preserve availability, as the code did before"
+        );
+        assert!(!CoordinationFailurePolicy::BoundedDegraded.rejects_admission());
+        assert!(CoordinationFailurePolicy::FailClosed.rejects_admission());
+    }
+
+    #[test]
+    fn pacing_validation_rejects_budgets_that_cannot_bound_anything() {
+        // Pins: each pacing knob that could silently disable a bound is rejected
+        // at config load rather than producing an unbounded control at runtime.
+        let base = ProviderPacingConfig::default();
+        for (label, invalid) in [
+            (
+                "zero percent",
+                ProviderPacingConfig {
+                    retry_budget_percent: 0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "percent above 100",
+                ProviderPacingConfig {
+                    retry_budget_percent: 101,
+                    ..base.clone()
+                },
+            ),
+            (
+                "zero window",
+                ProviderPacingConfig {
+                    retry_budget_window_ms: 0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "zero pacing wait",
+                ProviderPacingConfig {
+                    max_pacing_wait_ms: 0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "cooldown above its own cap",
+                ProviderPacingConfig {
+                    default_cooldown_ms: 10_000,
+                    max_cooldown_ms: 5_000,
+                    ..base.clone()
+                },
+            ),
+            (
+                "global scope with no state ttl",
+                ProviderPacingConfig {
+                    scope: ConcurrencyScope::Global,
+                    state_ttl_ms: 0,
+                    ..base.clone()
+                },
+            ),
+        ] {
+            assert!(
+                invalid.validate().is_err(),
+                "{label} must be rejected by pacing validation"
+            );
+        }
+
+        // A zero state TTL only matters when the state is shared.
+        assert!(
+            ProviderPacingConfig {
+                state_ttl_ms: 0,
+                ..base
+            }
+            .validate()
+            .is_ok(),
+            "a process-local deployment has no shared state to expire"
+        );
+    }
+
+    #[test]
+    fn coordination_policy_and_pacing_scope_parse_from_config() {
+        // Pins: operators opt into fleet-wide pacing and the strict failure policy
+        // through config, and `ProvidersConfig::validate` reaches the pacing
+        // section (an invalid pacing block fails the whole provider config).
+        let parsed: ProvidersConfig = serde_json::from_value(serde_json::json!({
+            "concurrency": { "on_coordination_failure": "fail_closed" },
+            "pacing": { "scope": "global", "retry_budget_percent": 50 }
+        }))
+        .expect("providers config with coordination settings should parse");
+        assert_eq!(
+            parsed.concurrency.on_coordination_failure,
+            CoordinationFailurePolicy::FailClosed
+        );
+        assert!(parsed.pacing.is_global());
+        assert_eq!(parsed.pacing.retry_budget_percent, 50);
+        assert!(parsed.validate().is_ok());
+
+        let invalid = ProvidersConfig {
+            pacing: ProviderPacingConfig {
+                retry_budget_percent: 0,
+                ..ProviderPacingConfig::default()
+            },
+            ..ProvidersConfig::default()
+        };
+        assert!(
+            invalid.validate().is_err(),
+            "provider validation must reach the pacing section"
         );
     }
 

@@ -188,6 +188,313 @@ mod tests {
         Ok(())
     }
 
+    /// The behavior every coordination backend must agree on, written once.
+    ///
+    /// Backends that disagree here make the same deployment behave differently
+    /// depending on which cache it happens to run against, which is exactly the
+    /// class of bug a per-backend test suite hides. Uses real (short) durations
+    /// so it can run unchanged against an out-of-process store.
+    pub(crate) async fn assert_shared_coordination_conformance(
+        store: &dyn RuntimeCacheStore,
+        prefix: &str,
+    ) -> Result<()> {
+        let ttl = Duration::from_secs(30);
+        let window = Duration::from_secs(30);
+        let pace_key = format!("{prefix}:pace");
+        let cooldown_key = format!("{prefix}:cooldown");
+        let budget_key = format!("{prefix}:budget");
+
+        // 600/min = 10 tokens/sec. The first minute of budget is available as a
+        // burst; the next permit must then report a positive refill wait.
+        assert!(
+            store
+                .try_consume_rate_tokens(&pace_key, 600, 600, ttl)
+                .await?
+                .admitted
+        );
+        let denied = store
+            .try_consume_rate_tokens(&pace_key, 600, 10, ttl)
+            .await?;
+        assert!(
+            !denied.admitted,
+            "a drained bucket must deny further permits"
+        );
+        assert!(
+            denied.retry_after > Duration::ZERO,
+            "a denial must carry the wait that makes it actionable"
+        );
+
+        // Cooldowns move forward only, and a separate reader observes them.
+        assert_eq!(
+            store.cooldown_remaining(&cooldown_key).await?,
+            Duration::ZERO
+        );
+        let long = store
+            .extend_cooldown(&cooldown_key, Duration::from_secs(20))
+            .await?;
+        assert!(long > Duration::from_secs(15));
+        let shortened = store
+            .extend_cooldown(&cooldown_key, Duration::from_secs(1))
+            .await?;
+        assert!(
+            shortened > Duration::from_secs(15),
+            "a shorter cooldown must not shorten an active longer pause"
+        );
+        assert!(store.cooldown_remaining(&cooldown_key).await? > Duration::from_secs(15));
+
+        // The retry budget allows the floor, then refuses until volume grows.
+        assert_eq!(store.note_windowed_request(&budget_key, window).await?, 1);
+        for _ in 0..4 {
+            assert!(
+                store
+                    .try_consume_retry_budget(&budget_key, window, 20, 4)
+                    .await?
+                    .allowed
+            );
+        }
+        let exhausted = store
+            .try_consume_retry_budget(&budget_key, window, 20, 4)
+            .await?;
+        assert!(
+            !exhausted.allowed,
+            "the floor must bound low-volume retries"
+        );
+        assert_eq!(exhausted.requests, 1);
+        assert_eq!(exhausted.retries, 4);
+
+        // Growing request volume raises the allowance above the floor.
+        for _ in 0..99 {
+            store.note_windowed_request(&budget_key, window).await?;
+        }
+        assert!(
+            store
+                .try_consume_retry_budget(&budget_key, window, 20, 4)
+                .await?
+                .allowed,
+            "20% of 100 requests must exceed the 4 retries already spent"
+        );
+
+        store.delete(&pace_key).await?;
+        store.delete(&cooldown_key).await?;
+        store.delete(&budget_key).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_backend_meets_the_shared_coordination_contract() -> Result<()> {
+        // Pins: the in-memory backend satisfies the same coordination contract the
+        // Redis backend is held to by its live test.
+        assert_shared_coordination_conformance(&MemoryRuntimeCacheStore::new(), "conformance").await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shared_rate_tokens_pace_one_bucket_and_report_the_refill_wait() -> Result<()> {
+        // Pins: one shared per-minute bucket admits a full minute of burst, then
+        // denies further permits with the exact refill wait rather than a guess,
+        // and admits again once that wait has elapsed. A demand larger than the
+        // whole bucket drains it instead of deadlocking.
+        let store = MemoryRuntimeCacheStore::default();
+        let ttl = Duration::from_secs(300);
+
+        // 120/min = 2 tokens/sec; the initial burst is the whole minute.
+        let burst = store.try_consume_rate_tokens("pace", 120, 120, ttl).await?;
+        assert!(burst.admitted);
+        assert_eq!(burst.retry_after, Duration::ZERO);
+
+        let denied = store.try_consume_rate_tokens("pace", 120, 2, ttl).await?;
+        assert!(
+            !denied.admitted,
+            "a drained shared bucket must deny permits"
+        );
+        assert_eq!(
+            denied.retry_after,
+            Duration::from_secs(1),
+            "2 permits at 2 tokens/sec is exactly one second of refill"
+        );
+
+        advance(Duration::from_secs(1)).await;
+        assert!(
+            store
+                .try_consume_rate_tokens("pace", 120, 2, ttl)
+                .await?
+                .admitted,
+            "the refilled bucket must admit the same permits"
+        );
+
+        // An oversized single demand is clamped to capacity: it drains rather
+        // than waiting for a refill that can never satisfy it.
+        assert!(
+            store
+                .try_consume_rate_tokens("oversized", 10, 1_000, ttl)
+                .await?
+                .admitted
+        );
+
+        let error = store
+            .try_consume_rate_tokens("zero", 0, 1, ttl)
+            .await
+            .expect_err("a zero limit is a configuration error, not an unbounded bucket");
+        assert!(matches!(
+            error,
+            moa_core::error::MoaError::ValidationError(_)
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shared_cooldown_only_moves_forward_and_clears_on_expiry() -> Result<()> {
+        // Pins: a shared 429 cooldown takes the longest deadline any replica
+        // recorded (a later short cooldown cannot shorten it) and reports no
+        // remaining pause once it elapses.
+        let store = MemoryRuntimeCacheStore::default();
+
+        assert_eq!(store.cooldown_remaining("cool").await?, Duration::ZERO);
+
+        let long = store
+            .extend_cooldown("cool", Duration::from_secs(10))
+            .await?;
+        assert_eq!(long, Duration::from_secs(10));
+
+        let short = store
+            .extend_cooldown("cool", Duration::from_secs(1))
+            .await?;
+        assert_eq!(
+            short,
+            Duration::from_secs(10),
+            "a shorter cooldown must not shorten an active longer pause"
+        );
+
+        advance(Duration::from_secs(4)).await;
+        assert_eq!(
+            store.cooldown_remaining("cool").await?,
+            Duration::from_secs(6)
+        );
+
+        advance(Duration::from_secs(7)).await;
+        assert_eq!(
+            store.cooldown_remaining("cool").await?,
+            Duration::ZERO,
+            "the pause must clear once the deadline passes"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shared_retry_budget_tracks_fleet_volume_and_rotates_its_window() -> Result<()> {
+        // Pins: the shared budget allows the floor at low volume, grows to the
+        // configured percentage of fleet-wide request volume, and resets when
+        // the sliding window rotates.
+        let store = MemoryRuntimeCacheStore::default();
+        let window = Duration::from_secs(60);
+
+        assert_eq!(store.note_windowed_request("budget", window).await?, 1);
+        for _ in 0..8 {
+            assert!(
+                store
+                    .try_consume_retry_budget("budget", window, 20, 8)
+                    .await?
+                    .allowed,
+                "retries within the floor are allowed at low volume"
+            );
+        }
+        assert!(
+            !store
+                .try_consume_retry_budget("budget", window, 20, 8)
+                .await?
+                .allowed,
+            "the floor must stop further retries until request volume grows"
+        );
+
+        // Fleet volume grows: 100 requests at 20% allows 20 retries total, so 12
+        // more beyond the 8 already spent.
+        for _ in 0..99 {
+            store.note_windowed_request("budget", window).await?;
+        }
+        let mut allowed = 0;
+        for _ in 0..50 {
+            if store
+                .try_consume_retry_budget("budget", window, 20, 8)
+                .await?
+                .allowed
+            {
+                allowed += 1;
+            }
+        }
+        assert_eq!(
+            allowed, 12,
+            "20% of 100 fleet requests minus the 8 already consumed"
+        );
+
+        advance(Duration::from_secs(61)).await;
+        let rotated = store
+            .try_consume_retry_budget("budget", window, 20, 8)
+            .await?;
+        assert!(rotated.allowed, "a rotated window restores the floor");
+        assert_eq!(rotated.requests, 0, "the rotated window starts empty");
+        assert_eq!(rotated.retries, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_cache_without_coordination_support_fails_closed_on_every_control() {
+        // Pins: the trait defaults refuse to answer coordination questions, so a
+        // cache that only implements plain key/value operations can never be
+        // mistaken for a fleet-wide pacer, cooldown, or retry budget.
+        struct KeyValueOnlyCache;
+
+        #[async_trait::async_trait]
+        impl RuntimeCacheStore for KeyValueOnlyCache {
+            async fn get(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
+            async fn set(&self, _key: &str, _value: Vec<u8>, _ttl: Duration) -> Result<()> {
+                Ok(())
+            }
+            async fn delete(&self, _key: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn compare_and_set(
+                &self,
+                _key: &str,
+                _expected: Option<&[u8]>,
+                _value: Vec<u8>,
+                _ttl: Duration,
+            ) -> Result<bool> {
+                Ok(true)
+            }
+            async fn expire(&self, _key: &str, _ttl: Duration) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let store = KeyValueOnlyCache;
+        let ttl = Duration::from_secs(1);
+        assert!(
+            store
+                .try_consume_rate_tokens("k", 60, 1, ttl)
+                .await
+                .is_err()
+        );
+        assert!(store.extend_cooldown("k", ttl).await.is_err());
+        assert!(store.cooldown_remaining("k").await.is_err());
+        assert!(store.note_windowed_request("k", ttl).await.is_err());
+        assert!(
+            store
+                .try_consume_retry_budget("k", ttl, 20, 8)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .try_acquire_bounded_lease("k", "lease", 1, ttl)
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn memory_compare_and_set_matches_absent_and_exact_values() -> Result<()> {
         // Pins: compare-and-set only mutates when the expected bytes match current cache state.

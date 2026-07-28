@@ -25,9 +25,40 @@ pub struct FgaConfig {
 }
 
 /// Reusable OpenFGA client.
+///
+/// Also carries the security-audit wiring for authorization decisions, when the
+/// deployment has any. Every `require_authz*` helper already takes this client,
+/// so hanging the audit here makes the audit writer an explicit dependency of
+/// the check without touching a single call site — and makes a client built
+/// without one visibly unable to emit, instead of silently resolving a process
+/// global that may never have been installed.
 #[derive(Clone)]
 pub struct FgaClient {
     inner: Arc<FgaInner>,
+    audit: Option<Arc<SecurityAudit>>,
+}
+
+/// Security-audit wiring for authorization decisions.
+///
+/// Denied checks are emitted synchronously and fail closed. Allowed checks are
+/// high volume, so they are emitted on the owned background writer and only when
+/// `emit_allows` is set.
+pub struct SecurityAudit {
+    /// Pool used for the synchronous, fail-closed denial audit.
+    pub pool: sqlx::PgPool,
+    /// Background writer handle for allow audits.
+    pub emitter: moa_ocsf::AuditEmitter,
+    /// Whether allow decisions are audited at all.
+    pub emit_allows: bool,
+}
+
+impl std::fmt::Debug for SecurityAudit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SecurityAudit")
+            .field("emit_allows", &self.emit_allows)
+            .finish_non_exhaustive()
+    }
 }
 
 struct FgaInner {
@@ -87,7 +118,23 @@ impl FgaClient {
                 store_id: cfg.store_id,
                 model_id: cfg.model_id,
             }),
+            audit: None,
         })
+    }
+
+    /// Returns a client that audits its authorization decisions.
+    ///
+    /// Cheap: the OpenFGA connection is shared, only the audit wiring is added.
+    #[must_use]
+    pub fn with_security_audit(mut self, audit: SecurityAudit) -> Self {
+        self.audit = Some(Arc::new(audit));
+        self
+    }
+
+    /// Returns this client's security-audit wiring, when it has any.
+    #[must_use]
+    pub fn security_audit(&self) -> Option<&SecurityAudit> {
+        self.audit.as_deref()
     }
 
     /// Return the configured OpenFGA store ID.

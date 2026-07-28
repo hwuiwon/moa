@@ -670,24 +670,32 @@ fn task14_ingestion_pipeline(
         "knowledge-auto-sync-test",
         None,
     ));
-    Arc::new(KnowledgeIngestionPipeline::new(
-        repository,
-        Arc::new(Task14Parser),
-        Arc::new(Task14Embedder),
-        graph_writer,
-        KnowledgeIngestionPipelineConfig {
-            chunking: ChunkingConfig {
-                target_tokens: 128,
-                max_tokens: 256,
-                min_tokens: 1,
+    Arc::new(
+        KnowledgeIngestionPipeline::new(
+            repository,
+            Arc::new(Task14Parser),
+            Arc::new(Task14Embedder),
+            graph_writer,
+            KnowledgeIngestionPipelineConfig {
+                chunking: ChunkingConfig {
+                    target_tokens: 128,
+                    max_tokens: 256,
+                    min_tokens: 1,
+                },
+                provider: provider.to_string(),
+                parser_label: "task14".to_string(),
             },
-            provider: provider.to_string(),
-            parser_label: "task14".to_string(),
-        },
-        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
-            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
-        ),
-    ))
+            moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
+                moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
+            ),
+        )
+        // This fixture pins graph node/edge counter plumbing, so it opts into the
+        // semantic-enabled policy to keep exercising the full write set. The default
+        // (off) policy's write set is pinned separately by
+        // `disabled_semantic_policy_writes_no_semantic_rows_nodes_or_edges_db_memory`
+        // in moa-knowledge.
+        .with_semantic_policy(moa_core::types::memory::SemanticGraphPolicy::Deterministic),
+    )
 }
 
 fn test_handler_error(error: impl std::fmt::Display) -> HandlerError {
@@ -1059,8 +1067,20 @@ fn assert_sync_status_counters(
     assert_eq!(status.records_failed, 0);
     assert_eq!(status.objects_parsed, expected_records);
     assert_eq!(status.chunks_embedded, expected_records);
-    assert_eq!(status.graph_nodes_upserted, expected_graph_nodes);
-    assert_eq!(status.graph_edges_upserted, expected_graph_edges);
+    // Graph counts are the extractor's output, so a change here means the
+    // extraction path changed rather than the ingestion counters. Print both so
+    // the failure names which extractor produced what instead of sending the
+    // reader to diff two integers.
+    assert_eq!(
+        status.graph_nodes_upserted, expected_graph_nodes,
+        "graph nodes upserted changed: observed {} nodes / {} edges",
+        status.graph_nodes_upserted, status.graph_edges_upserted
+    );
+    assert_eq!(
+        status.graph_edges_upserted, expected_graph_edges,
+        "graph edges upserted changed: observed {} nodes / {} edges",
+        status.graph_nodes_upserted, status.graph_edges_upserted
+    );
 }
 
 fn object_ingestion_steps() -> Vec<&'static str> {

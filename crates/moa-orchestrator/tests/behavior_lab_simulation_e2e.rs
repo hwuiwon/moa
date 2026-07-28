@@ -2,6 +2,9 @@
 
 #![cfg(feature = "integration")]
 
+use moa_core::types::experiments::{
+    ExperimentScorecard, ScorecardEffect, ScorecardRequirement, ScorecardValueType,
+};
 use std::{
     fs,
     path::Path,
@@ -22,7 +25,7 @@ use moa_core::{
     },
 };
 use moa_experiments::{
-    model::{ExperimentScorecard, ExperimentTarget, ExperimentVariant, NewExperimentRun},
+    model::{ExperimentTarget, ExperimentVariant, NewExperimentRun},
     store::ExperimentStore,
 };
 use moa_orchestrator::workflows::experiment_run::ExperimentRunWorkflowRequest;
@@ -385,8 +388,7 @@ async fn run_tenant_experiment(
         plan_revision_uid: None,
         target: Some(serde_json::to_value(target).context("serialize experiment target")?),
         variant: Some(serde_json::to_value(variant).context("serialize experiment variant")?),
-        scorecard: serde_json::to_value(experiment_scorecard())
-            .context("serialize experiment scorecard")?,
+        scorecard: Some(experiment_scorecard()),
         score_run_id: None,
         idempotency_key: Some(format!("tenant-template-experiment-{}", Uuid::now_v7())),
         agent_revision_variants: Vec::new(),
@@ -399,10 +401,15 @@ async fn run_tenant_experiment(
 }
 
 fn experiment_scorecard() -> ExperimentScorecard {
-    ExperimentScorecard {
-        score_names: vec!["template_completed".to_string()],
-        evaluator_metadata: json!({"mode": "manual-or-later"}),
-    }
+    ExperimentScorecard::new(vec![ScorecardRequirement {
+        evaluator_id: "target_completed".to_string(),
+        evaluator_version: "v1".to_string(),
+        score_name: "target_completed".to_string(),
+        value_type: ScorecardValueType::Boolean,
+        config: json!({}),
+        effect: ScorecardEffect::Blocking,
+    }])
+    .expect("fixture scorecard is valid")
 }
 
 async fn wait_for_execution_delivery(

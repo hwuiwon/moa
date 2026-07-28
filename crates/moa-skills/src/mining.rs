@@ -12,9 +12,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    types::experience::LearningCandidate, types::experience::LearningCandidateStatus,
-    types::experience::LearningCandidateStatusUpdate, types::experience::LearningCandidateType,
-    types::experience::LearningRiskClass, types::identifiers::TenantId,
+    types::experience::LearningCandidate, types::experience::LearningCandidateSourceRef,
+    types::experience::LearningCandidateStatus, types::experience::LearningCandidateStatusUpdate,
+    types::experience::LearningCandidateType, types::experience::LearningProposalKind,
+    types::experience::LearningRiskClass, types::identifiers::SessionId,
+    types::identifiers::TenantId,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -68,8 +70,15 @@ impl SessionFailureKind {
 /// One failure signal recorded from a session event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionFailure {
-    /// Stable event identifier used as an evidence reference.
-    pub event_id: String,
+    /// Event that carried the failure signal.
+    ///
+    /// Events are hash-partitioned by session, so naming one takes both halves
+    /// of its key. Carrying them separately (rather than as a display string) is
+    /// what lets the filed candidate reference the exact event row instead of
+    /// quoting an id into JSON that nothing can join or erase.
+    pub event_id: Uuid,
+    /// Session that owns the event.
+    pub session_id: SessionId,
     /// Failure signal kind.
     pub kind: SessionFailureKind,
     /// Failing surface subject: the tool name, or a turn tag when no tool applies.
@@ -111,6 +120,13 @@ pub struct FailurePattern {
     pub occurrences: usize,
     /// Bounded, sorted evidence references (event/probe ids only).
     pub evidence: Vec<String>,
+    /// Typed database references behind the evidence, in the same bounded order.
+    ///
+    /// Only session-event signals produce these; an evaluation probe id names no
+    /// row in this database. A pattern with no typed sources therefore cannot be
+    /// filed as a candidate at all, which is the point: an unattributable
+    /// candidate is one privacy erasure can never reach.
+    pub sources: Vec<LearningCandidateSourceRef>,
     /// Editable surface this pattern implicates, derived deterministically from the signal.
     pub surface: EditableSurface,
 }
@@ -146,7 +162,8 @@ pub fn session_failures_from_events(
                 retryable: false,
                 ..
             } => failures.push(SessionFailure {
-                event_id: record.id.to_string(),
+                event_id: record.id,
+                session_id: record.session_id,
                 kind: SessionFailureKind::DurableToolError,
                 subject: tool_name.clone(),
             }),
@@ -162,7 +179,8 @@ pub fn session_failures_from_events(
                 decision: ActionReviewDecision::Denied { .. },
                 ..
             } => failures.push(SessionFailure {
-                event_id: record.id.to_string(),
+                event_id: record.id,
+                session_id: record.session_id,
                 kind: SessionFailureKind::RejectedApproval,
                 subject: review_subjects
                     .get(review_id)
@@ -198,14 +216,13 @@ pub async fn mine_and_file_session_failures(
     });
 
     let tenant_key = tenant_id.to_string();
-    let mut open = store
-        .list_learning_candidates(&tenant_key, Some(LearningCandidateStatus::Proposed), 200)
+    let open = store
+        .list_learning_candidates(
+            &tenant_key,
+            Some(LearningCandidateStatus::NeedsAuthoring),
+            200,
+        )
         .await?;
-    open.extend(
-        store
-            .list_learning_candidates(&tenant_key, Some(LearningCandidateStatus::Evaluating), 200)
-            .await?,
-    );
 
     let mut applied = 0usize;
     for filing in file_candidates(&patterns, DEFAULT_MINING_THRESHOLD, &open, tenant_id, now) {
@@ -219,7 +236,7 @@ pub async fn mine_and_file_session_failures(
                 if store
                     .update_learning_candidate_status_from(
                         &update,
-                        LearningCandidateStatus::Proposed,
+                        LearningCandidateStatus::NeedsAuthoring,
                     )
                     .await?
                 {
@@ -238,7 +255,7 @@ pub async fn mine_and_file_session_failures(
 /// at [`MAX_EVIDENCE_REFS`], and the returned patterns are ordered by key.
 #[must_use]
 pub fn mine_failure_patterns(inputs: &MiningInputs) -> Vec<FailurePattern> {
-    let mut clusters: BTreeMap<FailurePatternKey, (usize, BTreeSet<String>)> = BTreeMap::new();
+    let mut clusters: BTreeMap<FailurePatternKey, FailureCluster> = BTreeMap::new();
 
     for probe in &inputs.failed_probes {
         let key = FailurePatternKey {
@@ -246,8 +263,8 @@ pub fn mine_failure_patterns(inputs: &MiningInputs) -> Vec<FailurePattern> {
             subject: probe.probe_type.clone(),
         };
         let entry = clusters.entry(key).or_default();
-        entry.0 += 1;
-        entry.1.insert(probe.probe_id.clone());
+        entry.occurrences += 1;
+        entry.evidence.insert(probe.probe_id.clone());
     }
     for failure in &inputs.session_failures {
         let key = FailurePatternKey {
@@ -255,22 +272,46 @@ pub fn mine_failure_patterns(inputs: &MiningInputs) -> Vec<FailurePattern> {
             subject: failure.subject.clone(),
         };
         let entry = clusters.entry(key).or_default();
-        entry.0 += 1;
-        entry.1.insert(failure.event_id.clone());
+        entry.occurrences += 1;
+        entry.evidence.insert(failure.event_id.to_string());
+        entry
+            .events
+            .insert((failure.event_id, failure.session_id.0));
     }
 
     clusters
         .into_iter()
-        .map(|(key, (occurrences, evidence))| {
+        .map(|(key, cluster)| {
             let surface = surface_for_signal(&key.signal);
             FailurePattern {
                 key,
-                occurrences,
-                evidence: evidence.into_iter().take(MAX_EVIDENCE_REFS).collect(),
+                occurrences: cluster.occurrences,
+                evidence: cluster
+                    .evidence
+                    .into_iter()
+                    .take(MAX_EVIDENCE_REFS)
+                    .collect(),
+                sources: cluster
+                    .events
+                    .into_iter()
+                    .take(MAX_EVIDENCE_REFS)
+                    .map(|(event_id, session_id)| LearningCandidateSourceRef::Event {
+                        event_id,
+                        session_id: SessionId(session_id),
+                    })
+                    .collect(),
                 surface,
             }
         })
         .collect()
+}
+
+/// Accumulator for one `(signal, subject)` cluster during a mining pass.
+#[derive(Default)]
+struct FailureCluster {
+    occurrences: usize,
+    evidence: BTreeSet<String>,
+    events: BTreeSet<(Uuid, Uuid)>,
 }
 
 /// Files candidates for patterns that cross `threshold`, deduplicating against open candidates.
@@ -290,6 +331,21 @@ pub fn file_candidates(
     patterns
         .iter()
         .filter(|pattern| pattern.occurrences >= threshold)
+        .filter(|pattern| {
+            if pattern.sources.is_empty() {
+                // Probe-only clusters name no row in this database, so a filed
+                // candidate could never be attributed to a data subject or
+                // reached by an erasure. Skipping is the honest outcome; filing
+                // an unattributable candidate is not.
+                tracing::warn!(
+                    pattern_key = %pattern.key.as_string(),
+                    occurrences = pattern.occurrences,
+                    "skipping weakness-mining candidate with no typed source references"
+                );
+                return false;
+            }
+            true
+        })
         .map(|pattern| {
             let key = pattern.key.as_string();
             match open_candidate_for_key(open_candidates, &key) {
@@ -307,17 +363,21 @@ fn open_candidate_for_key<'a>(
     key: &str,
 ) -> Option<&'a LearningCandidate> {
     open_candidates.iter().find(|candidate| {
-        matches!(
-            candidate.status,
-            LearningCandidateStatus::Proposed | LearningCandidateStatus::Evaluating
-        ) && candidate
-            .payload
-            .get("pattern_key")
-            .and_then(|value| value.as_str())
-            == Some(key)
+        candidate.status == LearningCandidateStatus::NeedsAuthoring
+            && candidate
+                .payload
+                .get("pattern_key")
+                .and_then(|value| value.as_str())
+                == Some(key)
     })
 }
 
+/// Re-states the candidate's own status rather than choosing one.
+///
+/// A recurrence bump is new evidence, not a review decision. Every mined
+/// candidate is an authoring item, so naming any other status here would be a
+/// transition the database rejects — and before this task, naming `Proposed`
+/// silently moved mined items onto the reviewable queue.
 fn bump_update(
     existing: &LearningCandidate,
     pattern: &FailurePattern,
@@ -325,7 +385,7 @@ fn bump_update(
 ) -> LearningCandidateStatusUpdate {
     LearningCandidateStatusUpdate {
         candidate_id: existing.id,
-        status: LearningCandidateStatus::Proposed,
+        status: existing.status,
         status_reason: Some(format!(
             "weakness pattern re-observed: {} now at {} occurrences",
             pattern.key.as_string(),
@@ -358,7 +418,8 @@ fn mining_candidate(
         tenant_id,
         user_id: None,
         candidate_type: candidate_type_for_surface(pattern.surface),
-        status: LearningCandidateStatus::Proposed,
+        proposal_kind: proposal_kind_for_surface(pattern.surface),
+        status: proposal_kind_for_surface(pattern.surface).initial_status(),
         target_id: None,
         target_label: Some(pattern.surface.as_str().to_string()),
         task_fingerprint: None,
@@ -374,10 +435,10 @@ fn mining_candidate(
             "description": description,
         }),
         evaluation_payload: None,
-        source_experience_ids: Vec::new(),
+        sources: pattern.sources.clone(),
         confidence: None,
         risk_class: LearningRiskClass::Medium,
-        promotion_requirements: vec!["human_review".to_string()],
+        promotion_requirements: vec!["human_authoring".to_string()],
         status_reason: Some(description),
         batch_id: None,
         created_at: now,
@@ -395,6 +456,21 @@ fn surface_for_signal(signal: &str) -> EditableSurface {
         // Zero-recall, unverified-citation, and eval retrieval-metric failures all point at
         // retrieval ranking.
         EditableSurface::RankingConfig
+    }
+}
+
+/// Maps an implicated surface to its authoring kind.
+///
+/// Every mined pattern is authoring work: mining observes that something keeps
+/// failing, it does not produce a change anything can apply. None of these kinds
+/// is reviewable, so none of them can reach `Promoted`.
+fn proposal_kind_for_surface(surface: EditableSurface) -> LearningProposalKind {
+    match surface {
+        EditableSurface::SkillMarkdown => LearningProposalKind::SkillAuthoring,
+        EditableSurface::RewritePromptVersion => LearningProposalKind::PromptAuthoring,
+        EditableSurface::RouterRules | EditableSurface::RankingConfig => {
+            LearningProposalKind::PolicyAuthoring
+        }
     }
 }
 
@@ -438,9 +514,10 @@ mod tests {
         }
     }
 
-    fn failure(event_id: &str, kind: SessionFailureKind, subject: &str) -> SessionFailure {
+    fn failure(event_seed: u128, kind: SessionFailureKind, subject: &str) -> SessionFailure {
         SessionFailure {
-            event_id: event_id.to_string(),
+            event_id: Uuid::from_u128(event_seed),
+            session_id: SessionId(Uuid::from_u128(9_000)),
             kind,
             subject: subject.to_string(),
         }
@@ -458,8 +535,8 @@ mod tests {
                 probe("p9", "point_recall", "recall_at_4"),
             ],
             session_failures: vec![
-                failure("e2", SessionFailureKind::DurableToolError, "bash"),
-                failure("e1", SessionFailureKind::DurableToolError, "bash"),
+                failure(2, SessionFailureKind::DurableToolError, "bash"),
+                failure(1, SessionFailureKind::DurableToolError, "bash"),
             ],
         };
 
@@ -480,7 +557,28 @@ mod tests {
             .find(|pattern| pattern.key.signal == "durable_tool_error")
             .expect("tool cluster");
         assert_eq!(tool.occurrences, 2);
-        assert_eq!(tool.evidence, vec!["e1", "e2"]);
+        assert_eq!(
+            tool.evidence,
+            vec![
+                Uuid::from_u128(1).to_string(),
+                Uuid::from_u128(2).to_string(),
+            ]
+        );
+        // The typed sources carry the same two events with their session halves, so
+        // the derivation is joinable rather than only readable.
+        assert_eq!(
+            tool.sources,
+            vec![
+                LearningCandidateSourceRef::Event {
+                    event_id: Uuid::from_u128(1),
+                    session_id: SessionId(Uuid::from_u128(9_000)),
+                },
+                LearningCandidateSourceRef::Event {
+                    event_id: Uuid::from_u128(2),
+                    session_id: SessionId(Uuid::from_u128(9_000)),
+                },
+            ]
+        );
         assert_eq!(tool.surface, EditableSurface::SkillMarkdown);
     }
 
@@ -509,13 +607,14 @@ mod tests {
         // Pins: the recurrence threshold gates filing; below-threshold patterns produce nothing.
         let inputs = MiningInputs {
             failed_probes: vec![
-                probe("p1", "multi_hop", "recall_at_4"),
-                probe("p2", "multi_hop", "recall_at_4"),
-                probe("p3", "multi_hop", "recall_at_4"),
                 probe("q1", "point_recall", "recall_at_4"),
                 probe("q2", "point_recall", "recall_at_4"),
             ],
-            session_failures: Vec::new(),
+            session_failures: vec![
+                failure(1, SessionFailureKind::DurableToolError, "bash"),
+                failure(2, SessionFailureKind::DurableToolError, "bash"),
+                failure(3, SessionFailureKind::DurableToolError, "bash"),
+            ],
         };
         let patterns = mine_failure_patterns(&inputs);
 
@@ -531,13 +630,17 @@ mod tests {
         let CandidateFiling::New(candidate) = &filings[0] else {
             panic!("expected a new candidate");
         };
-        assert_eq!(candidate.candidate_type, LearningCandidateType::Policy);
+        assert_eq!(candidate.candidate_type, LearningCandidateType::Skill);
+        assert_eq!(
+            candidate.proposal_kind,
+            LearningProposalKind::SkillAuthoring
+        );
         assert_eq!(
             candidate
                 .payload
                 .get("pattern_key")
                 .and_then(|value| value.as_str()),
-            Some("recall_at_4:multi_hop")
+            Some("durable_tool_error:bash")
         );
         assert_eq!(
             candidate
@@ -553,13 +656,13 @@ mod tests {
         // Pins: an open candidate for the same pattern key yields an occurrence bump, not a
         // duplicate new candidate.
         let inputs = MiningInputs {
-            failed_probes: vec![
-                probe("p1", "multi_hop", "recall_at_4"),
-                probe("p2", "multi_hop", "recall_at_4"),
-                probe("p3", "multi_hop", "recall_at_4"),
-                probe("p4", "multi_hop", "recall_at_4"),
+            failed_probes: Vec::new(),
+            session_failures: vec![
+                failure(1, SessionFailureKind::DurableToolError, "bash"),
+                failure(2, SessionFailureKind::DurableToolError, "bash"),
+                failure(3, SessionFailureKind::DurableToolError, "bash"),
+                failure(4, SessionFailureKind::DurableToolError, "bash"),
             ],
-            session_failures: Vec::new(),
         };
         let patterns = mine_failure_patterns(&inputs);
         let existing = match &file_candidates(&patterns, 3, &[], tenant(), Utc::now())[0] {
@@ -580,7 +683,9 @@ mod tests {
             panic!("re-filing an open pattern must bump, not duplicate");
         };
         assert_eq!(update.candidate_id, existing.id);
-        assert_eq!(update.status, LearningCandidateStatus::Proposed);
+        // A recurrence bump is new evidence, not a review decision: it restates the
+        // authoring status rather than moving the item onto the reviewable queue.
+        assert_eq!(update.status, LearningCandidateStatus::NeedsAuthoring);
         assert_eq!(
             update
                 .evaluation_payload
@@ -592,16 +697,101 @@ mod tests {
     }
 
     #[test]
-    fn mining_candidate_id_is_stable_per_tenant_and_pattern_key() {
-        // Pins: candidate ids are a pure function of tenant + pattern key, so re-mining the same
-        // weakness resolves to one candidate id across runs.
-        let inputs = MiningInputs {
+    fn a_probe_only_pattern_is_never_filed_because_it_names_no_row() {
+        // Pins: an evaluation probe id names nothing in this database, so a cluster
+        // built only from probes cannot be attributed to a data subject and could
+        // never be reached by a privacy erasure. It is skipped rather than filed as
+        // an unattributable candidate. The identically-sized session-failure cluster
+        // beside it proves the threshold is not what rejected it.
+        let probe_only = MiningInputs {
             failed_probes: vec![
                 probe("p1", "multi_hop", "recall_at_4"),
                 probe("p2", "multi_hop", "recall_at_4"),
                 probe("p3", "multi_hop", "recall_at_4"),
             ],
             session_failures: Vec::new(),
+        };
+        let attributable = MiningInputs {
+            failed_probes: Vec::new(),
+            session_failures: vec![
+                failure(1, SessionFailureKind::DurableToolError, "bash"),
+                failure(2, SessionFailureKind::DurableToolError, "bash"),
+                failure(3, SessionFailureKind::DurableToolError, "bash"),
+            ],
+        };
+
+        let probe_patterns = mine_failure_patterns(&probe_only);
+        assert_eq!(probe_patterns.len(), 1);
+        assert_eq!(probe_patterns[0].occurrences, 3);
+        assert!(probe_patterns[0].sources.is_empty());
+        assert!(
+            file_candidates(&probe_patterns, 3, &[], tenant(), Utc::now()).is_empty(),
+            "a pattern with no typed source must not become a candidate"
+        );
+
+        assert_eq!(
+            file_candidates(
+                &mine_failure_patterns(&attributable),
+                3,
+                &[],
+                tenant(),
+                Utc::now()
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn mined_candidates_carry_the_exact_source_events_they_were_mined_from() {
+        // Pins: the filed candidate references the real event rows, both halves of
+        // each partitioned key. Before this, mining stringified event ids into a
+        // payload array, so an erasure walking a subject's sessions could not tell
+        // that this candidate was built from them.
+        let inputs = MiningInputs {
+            failed_probes: Vec::new(),
+            session_failures: vec![
+                failure(1, SessionFailureKind::DurableToolError, "bash"),
+                failure(2, SessionFailureKind::DurableToolError, "bash"),
+                failure(3, SessionFailureKind::DurableToolError, "bash"),
+            ],
+        };
+
+        let filings = file_candidates(
+            &mine_failure_patterns(&inputs),
+            3,
+            &[],
+            tenant(),
+            Utc::now(),
+        );
+        let CandidateFiling::New(candidate) = &filings[0] else {
+            panic!("expected a new candidate");
+        };
+
+        assert_eq!(candidate.sources.len(), 3);
+        for seed in 1..=3u128 {
+            assert!(
+                candidate
+                    .sources
+                    .contains(&LearningCandidateSourceRef::Event {
+                        event_id: Uuid::from_u128(seed),
+                        session_id: SessionId(Uuid::from_u128(9_000)),
+                    })
+            );
+        }
+    }
+
+    #[test]
+    fn mining_candidate_id_is_stable_per_tenant_and_pattern_key() {
+        // Pins: candidate ids are a pure function of tenant + pattern key, so re-mining the same
+        // weakness resolves to one candidate id across runs.
+        let inputs = MiningInputs {
+            failed_probes: Vec::new(),
+            session_failures: vec![
+                failure(1, SessionFailureKind::DurableToolError, "bash"),
+                failure(2, SessionFailureKind::DurableToolError, "bash"),
+                failure(3, SessionFailureKind::DurableToolError, "bash"),
+            ],
         };
         let patterns = mine_failure_patterns(&inputs);
         let first = file_candidates(&patterns, 3, &[], tenant(), Utc::now());

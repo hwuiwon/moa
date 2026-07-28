@@ -316,7 +316,7 @@ it is realized as Restate services and virtual objects in `moa-orchestrator`
 | `BlobStore` | Claim-check storage for large session artifacts | `PostgresBlobStore` by default; explicit `FileBlobStore` for local or mounted-path use |
 | `RuntimeCacheStore` | Short-lived runtime coordination/cache values with TTL | in-process memory fallback; optional Redis backend |
 | `BranchManager` | Optional database checkpoint branches | `NeonBranchManager` |
-| `HandProvider` | Provision, execute, pause/resume, destroy hands | local, Docker, Daytona, E2B |
+| `HandProvider` | Declare enforceable capabilities per sandbox tier, then provision, execute, pause/resume, destroy hands. `capabilities()` is required with no default body, and every provisioned hand carries one required six-dimension `EffectiveSandboxProfile` the provider must translate or reject. | local, Docker, Daytona, E2B |
 | `LLMProvider` | Provider completion interface | Anthropic, OpenAI, Gemini through `moa-providers` |
 | `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, ZeroEntropy zembed-1, Gemini embedding, and test/mock adapters |
 | `Reranker` | Shared reranking interface | Noop, Cohere Rerank, and ZeroEntropy rerank through `moa-providers` |
@@ -379,17 +379,13 @@ scanner constrains raw `OrchestratorCtx` dependency reads under `objects/`,
 a claim that every `OrchestratorCtx` use has been removed from the entire
 repository.
 
-Raw `OrchestratorCtx::current()` reads under those roots are zero and no
-allowance may reintroduce one. Eight counted `current_*` reads remain as
-temporary exceptions: four in `objects/session/execution_runs.rs` (three
-`current_graph_pool()` for keyed Session admission's control-plane replay
-transactions, one `current_config()` for Session-owned template planning), two
-`current_config()` in `workflows/experiment_run/target_execution.rs`, and two
-`current_config()` in `workflows/experiment_trial_run/target_execution.rs`.
-Each is counted per accessor, so a ninth read fails the checker even in an
-already-allowed file. Task 6.6 injects those dependencies through their
-implementation constructors and empties the list. `docs/15-architecture-policy.md`
-holds the authoritative table.
+`OrchestratorCtx` dependency reads under those roots are zero — both the bare
+`current()` and every per-accessor `current_*`. The last eight counted
+exceptions were removed by injecting their dependencies through implementation
+constructors: `SessionImpl` takes the admission pool and configuration,
+`ExperimentRunImpl` and `ExperimentTrialRunImpl` take the configuration. No
+allowance remains, so a new read under those roots fails the checker outright.
+`docs/15-architecture-policy.md` holds the authoritative statement.
 
 `Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `Worker` owns conversational delegated state with depth and budget limits, while `WorkerTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
 
@@ -475,14 +471,15 @@ policy.
 |---|---|---|
 | Session metadata and events | Postgres | `sessions`, `events`, `pending_signals`, `context_snapshots` |
 | Task segmentation | Postgres | `task_segments`, segment baselines, skill resolution rates |
-| Experience learning | Postgres | `experience_records`, `experience_attributions`, `learning_candidates`, task-conditioned strategy rates |
+| Experience learning | Postgres | `experience_records`, `experience_attributions`, `learning_candidates`, `learning_candidate_source` (typed provenance), `learning_candidate_decision` (durable review history), task-conditioned strategy rates |
 | Live behavior experiments | Postgres | `moa.experiment_run`, `moa.experiment_run_artifact_revision`, and linked `analytics.score_run` rows |
 | Tenant knowledge base | Postgres | `moa-knowledge` owns linked connections, sync runs, ingestion steps, document versions, blocks, chunks, and provider event state; `moa-memory-*` owns the resulting graph/vector storage |
 | Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
 | Memory vectors | Postgres or configured vector backend | pgvector embeddings or Turbopuffer namespaces for graph retrieval; graph storage remains relational Postgres |
 | Skill packages | Postgres | `moa.artifact`, `moa.artifact_revision`, and `moa.artifact_file` store tenant-owned skill documents and package bytes; generated tenant updates first land as tenant-scoped draft skill artifacts plus proposed `learning_candidates` and only become active after review acceptance |
 | Execution runs | Postgres | `moa.execution_run` and `moa.execution_task` store immutable plan snapshots, provenance, amendments, budgets, stable logical tasks, outcomes, citations, completion checks, and terminal results |
-| Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity |
+| Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity, plus `learning_log_source` typed provenance |
+| Learning attribution | Postgres | `moa.artifact_revision_contribution` and `moa.artifact_suite_contribution` record whose data produced which derived artifact bytes; `moa.privacy_erasure_record_decision` records one durable disposition per record per erasure operation |
 | Hand leases | Postgres | `moa.hand_leases` stores session/provider sandbox bindings, serialized handles, generation fencing, status, and expiry for cross-pod reuse and cleanup |
 | Claim-check blobs | Postgres by default | large event payloads use `session_blobs`; local filesystem blobs require explicit configuration and a persistent mounted path in cloud |
 | Session attachments | Postgres + object storage | `session_attachments` stores metadata and object keys; bytes live in RustFS locally or AWS S3/GCS in cloud; session events carry `Attachment` refs with durable ids. `SessionAttachmentStore::put` takes a deterministic slot (tenant, session, client message id, ordinal) whose UUIDv5 is the row's primary key, claims that row before writing the object create-only, and reports whether the write created storage or replayed an identical one |
@@ -568,6 +565,23 @@ written asynchronously to `analytics.turn_lineage`. Eval, online-judge, and
 human-review scores use the same sink via `LineageEvent::Eval(ScoreRecord)` and
 land in `analytics.scores`, keyed by turn, session, or dataset replay item.
 
+Acceptance is owned by Postgres. `record_durable_batch` commits the whole batch
+to `analytics.lineage_journal` and returns only after that commit, so a record
+the caller was told is durable survives the pod that accepted it. Replicas claim
+queue rows in acceptance order under an expiring lease with
+`FOR UPDATE SKIP LOCKED`; the store and the dequeue commit in one transaction,
+as do a permanent failure's dead-letter and its dequeue. A recoverable failure
+defers the rows with backoff and preserves them. A claimant that dies needs no
+handoff: its lease expires and any replica takes the work. Rows accepted before
+a tenant purge are made invisible to the write by an anti-join against
+`moa.destruction_operation_fence`, so no ordering of claim, lease, retry and
+commit can write a purged tenant's lineage back.
+
+The local channel in front of this is best-effort ingress and a payload-free
+wake signal, never durability. There is no pod-local journal: acceptance that
+lived on one replica's filesystem could not survive a rollout, and no
+configuration of such a path was ever correct.
+
 Regression evals, live behavior experiments, and analytics insights are
 separate surfaces:
 
@@ -624,8 +638,16 @@ must become `learning_candidates` before any skill change is
 accepted. Experiment runs do not auto-create those proposals, and no experiment
 path may auto-promote skills. The explicit
 `Experiments/propose_improvements` operation attaches experiment run IDs, score
-run IDs, and artifact revision references to the candidate payload so reviewers
-can reproduce the evidence.
+run IDs, and artifact revision references to the candidate so reviewers can
+reproduce the evidence. Those references are normalized `learning_candidate_source`
+rows, not payload strings, so the same evidence a reviewer reads is the evidence a
+privacy erasure can reach.
+
+A candidate also declares a `proposal_kind` separate from its `candidate_type`:
+only `skill_draft` and `skill_rollback` have a materializer and can be accepted.
+Experiment proposals carry `no_automatic_artifact_publish`, so they are authoring
+work (`NeedsAuthoring`), never a reviewable proposal that could be promoted. See
+`docs/09-skills-and-learning.md` for the full kind/status table.
 
 Skill-derived improvements use the same boundary. `TurnExecution` may dispatch a
 detached `SkillLearning` workflow after experience persistence, but that
@@ -635,6 +657,15 @@ and are never promoted into shared defaults automatically. `LearningReview`
 is the only runtime path that publishes those drafts inside the tenant, records
 `skill_created`/`skill_improved`, and marks the candidate promoted.
 
+`LearningReview` exposes four decisions — `accept_skill`, `accept_rollback`,
+`reject`, and `dismiss` — each reachable through its own authorized HTTP route
+and each admitting only the proposal kinds it can actually apply. They are
+separate handlers rather than one endpoint with an action switch because the
+operations differ in blast radius: accepting a rollback archives a *serving*
+revision, and routing that by a field in a caller-supplied body would put it one
+typo away from a draft promotion. `dismiss` is the only decision an informational
+candidate admits; nothing on this surface can promote one.
+
 Future MCP support is a transport adapter over product/default services such as
 `Experiments`, direct edge analytics/lineage reads, `Skills`, and other typed
 surfaces. If internal eval is exposed through MCP, it must remain explicitly
@@ -642,10 +673,22 @@ internal and operator/admin-authorized. MCP must not publish public
 `/v1/evals/*` semantics, own experiment, eval, analytics, learning, or lineage
 domain models, or bypass service-level authorization.
 
-Grafana dashboards live in `dashboards/grafana/` and Prometheus alert rules live
-in `ops/prometheus/alerts/`. Import the dashboards with a Postgres datasource
-named `DS_POSTGRES` and a Prometheus datasource named `DS_PROMETHEUS`; the
-tenant selector is populated from `analytics.turn_lineage`.
+Grafana dashboards live in `dashboards/grafana/` and alert rules live in
+`ops/prometheus/alerts/`. Import the dashboards with a Postgres datasource named
+`DS_POSTGRES` and a Prometheus datasource named `DS_PROMETHEUS`; the tenant
+selector is populated from `analytics.turn_lineage`.
+
+Telemetry leaves MOA by push, never by scrape: both binaries export traces and
+runtime metrics over OTLP to one collector base URL, and neither exposes a
+metrics port. A single Grafana Alloy replica in the `observability` namespace
+receives them, remote-writes metrics to Mimir, and is also the one component
+that synchronizes alert rules into Mimir — rules are authored as `PrometheusRule`
+resources and adopted by their `moa.dev/rule-sync` label, so the rules Mimir
+evaluates are the rules in this repository. The collector buffers undelivered
+telemetry on a persistent volume, which is why it runs exactly one replica with
+the `Recreate` strategy. Deployment shape, the settings that are load-bearing
+rather than defaults, and the offline validation contracts are in
+[`docs/10-technology-stack.md`](10-technology-stack.md).
 
 ## Compliance Audit Tier
 

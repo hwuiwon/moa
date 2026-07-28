@@ -6,8 +6,11 @@ use std::time::Duration;
 
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+use opentelemetry_otlp::{MetricExporter, WithExportConfig};
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::{Aggregation, Instrument, SdkMeterProvider, Stream};
 
-use moa_config::MetricsConfig;
+use moa_config::{MetricsConfig, MetricsExporter, OtlpProtocol};
 use moa_core::{
     error::MoaError,
     error::Result,
@@ -579,112 +582,203 @@ impl SessionEventAppendPhase {
 
 static PROMETHEUS_ENDPOINT: OnceLock<SocketAddr> = OnceLock::new();
 
-/// Initializes the global Prometheus exporter when metrics are enabled.
-pub fn init_metrics(config: &MetricsConfig) -> Result<()> {
-    if !config.enabled {
+/// Installs the configured metrics exporter, once per process.
+///
+/// Returns the OTLP meter provider when that exporter is selected, so the caller
+/// owns it and can flush it at shutdown. The provider is deliberately NOT stored
+/// in a global: a global could not be shut down in a defined order relative to
+/// the tracer, and flushing metrics is the step this process used to skip.
+pub fn init_metrics(
+    config: &MetricsConfig,
+    otlp_endpoint: Option<&str>,
+    otlp_protocol: OtlpProtocol,
+    resource: Resource,
+) -> Result<Option<SdkMeterProvider>> {
+    match config.exporter {
+        MetricsExporter::Disabled => Ok(None),
+        MetricsExporter::Otlp => {
+            install_otlp_metrics(otlp_endpoint, otlp_protocol, resource).map(Some)
+        }
+        MetricsExporter::Prometheus => {
+            install_prometheus_metrics(config)?;
+            Ok(None)
+        }
+    }
+}
+
+/// Installs the OTLP push exporter and bridges the `metrics` facade onto it.
+///
+/// The bridge preserves the exact histogram boundaries the Prometheus exporter
+/// used. Those buckets are not decoration: sub-10ms boundaries exist because
+/// turn steps sit in the 1-20ms range, and exporting the same histograms with
+/// default OTel boundaries would quantize every latency panel and SLO built on
+/// them to a useless floor while still reporting a number.
+fn install_otlp_metrics(
+    endpoint: Option<&str>,
+    protocol: OtlpProtocol,
+    resource: Resource,
+) -> Result<SdkMeterProvider> {
+    // The transport is the one the operator configured, not a hardcoded default.
+    // Reading `otlp_protocol` for traces and ignoring it here meant a fleet on
+    // gRPC posted HTTP/1.1 at a gRPC port and exported no metric at all, with
+    // nothing in-process saying so.
+    let resolved = endpoint
+        .map(|base| {
+            moa_config::otlp_signal_endpoint(base, protocol, moa_config::OtlpSignal::Metrics)
+        })
+        .transpose()?;
+    let exporter = match protocol {
+        OtlpProtocol::Grpc => {
+            let mut exporter = MetricExporter::builder().with_tonic();
+            if let Some(resolved) = resolved.as_deref() {
+                exporter = exporter.with_endpoint(resolved);
+            }
+            exporter.build()
+        }
+        OtlpProtocol::Http => {
+            let mut exporter = MetricExporter::builder().with_http();
+            if let Some(resolved) = resolved.as_deref() {
+                exporter = exporter.with_endpoint(resolved);
+            }
+            exporter.build()
+        }
+    };
+    let exporter = exporter.map_err(|error| MoaError::ProviderError(error.to_string()))?;
+    let mut builder = SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter)
+        .with_resource(resource);
+    for (metric, boundaries) in HISTOGRAM_BOUNDARIES {
+        builder = builder.with_view(explicit_bucket_view(metric, boundaries));
+    }
+    let provider = builder.build();
+    if OTEL_METRICS_INSTALLED.set(()).is_ok() {
+        metrics::set_global_recorder(metrics_exporter_otel::OpenTelemetryRecorder::new(
+            opentelemetry::metrics::MeterProvider::meter(&provider, "moa"),
+        ))
+        .map_err(|error| {
+            MoaError::ProviderError(format!("metrics recorder already installed: {error}"))
+        })?;
+        register_metric_descriptions();
+    }
+    Ok(provider)
+}
+
+/// Builds a view that pins one metric's histogram boundaries.
+///
+/// Without these views the OTLP exporter would use the SDK's default bucket
+/// layout, and every latency percentile MOA reports would quantize to that
+/// layout while still producing a number. The sub-10ms boundaries in particular
+/// exist because turn steps sit in the 1-20ms range; losing them turns a working
+/// latency panel into a flat line at the default floor.
+fn explicit_bucket_view(
+    metric: &'static str,
+    boundaries: &'static [f64],
+) -> impl Fn(&Instrument) -> Option<Stream> + Send + Sync + 'static {
+    move |instrument: &Instrument| {
+        if instrument.name() != metric {
+            return None;
+        }
+        Stream::builder()
+            .with_aggregation(Aggregation::ExplicitBucketHistogram {
+                boundaries: boundaries.to_vec(),
+                record_min_max: true,
+            })
+            .build()
+            .ok()
+    }
+}
+
+/// Every histogram whose bucket layout is load-bearing, with its boundaries.
+///
+/// Single-sourced with the Prometheus exporter below: both exporters read this
+/// table, so the two cannot drift into reporting different distributions for the
+/// same metric.
+const HISTOGRAM_BOUNDARIES: &[(&str, &[f64])] = &[
+    ("moa_cache_hit_rate", CACHE_HIT_RATE_BUCKETS),
+    (
+        GENAI_CLIENT_OPERATION_DURATION_METRIC,
+        GENAI_CLIENT_DURATION_BUCKETS,
+    ),
+    (
+        GENAI_CLIENT_TIME_TO_FIRST_CHUNK_METRIC,
+        GENAI_CLIENT_DURATION_BUCKETS,
+    ),
+    (GENAI_CLIENT_TOKEN_USAGE_METRIC, GENAI_CLIENT_TOKEN_BUCKETS),
+    (
+        "moa_execution_compile_duration_seconds",
+        EXECUTION_DURATION_SECONDS_BUCKETS,
+    ),
+    (
+        "moa_execution_route_classifier_duration_seconds",
+        EXECUTION_DURATION_SECONDS_BUCKETS,
+    ),
+    (
+        "moa_execution_run_queue_to_start_seconds",
+        EXECUTION_DURATION_SECONDS_BUCKETS,
+    ),
+    (
+        "moa_execution_task_duration_seconds",
+        EXECUTION_DURATION_SECONDS_BUCKETS,
+    ),
+    (
+        "moa_execution_map_fanout_items",
+        EXECUTION_CARDINALITY_BUCKETS,
+    ),
+    (
+        "moa_execution_run_cost_microusd",
+        EXECUTION_COST_MICROUSD_BUCKETS,
+    ),
+    ("moa_execution_run_tokens", EXECUTION_TOKEN_BUCKETS),
+    ("moa_execution_run_tasks", EXECUTION_CARDINALITY_BUCKETS),
+    (
+        "moa_execution_run_tool_calls",
+        EXECUTION_CARDINALITY_BUCKETS,
+    ),
+    ("moa_execution_run_retrieved_bytes", EXECUTION_BYTE_BUCKETS),
+    ("moa_execution_run_coverage_ratio", EXECUTION_RATIO_BUCKETS),
+    ("moa_execution_reducer_depth", EXECUTION_CARDINALITY_BUCKETS),
+];
+
+/// Guards the one-time global recorder installation.
+static OTEL_METRICS_INSTALLED: OnceLock<()> = OnceLock::new();
+
+/// Installs the development-only Prometheus scrape exporter.
+fn install_prometheus_metrics(config: &MetricsConfig) -> Result<()> {
+    if PROMETHEUS_ENDPOINT.get().is_some() {
         return Ok(());
     }
 
-    if PROMETHEUS_ENDPOINT.get().is_none() {
-        let addr = parse_metrics_listen_addr(config)?;
-        let builder = PrometheusBuilder::new()
-            .with_http_listener(addr)
-            .set_buckets(LATENCY_BUCKETS)
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_cache_hit_rate".to_string()),
-                CACHE_HIT_RATE_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full(GENAI_CLIENT_OPERATION_DURATION_METRIC.to_string()),
-                GENAI_CLIENT_DURATION_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full(GENAI_CLIENT_TIME_TO_FIRST_CHUNK_METRIC.to_string()),
-                GENAI_CLIENT_DURATION_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full(GENAI_CLIENT_TOKEN_USAGE_METRIC.to_string()),
-                GENAI_CLIENT_TOKEN_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_compile_duration_seconds".to_string()),
-                EXECUTION_DURATION_SECONDS_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_route_classifier_duration_seconds".to_string()),
-                EXECUTION_DURATION_SECONDS_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_queue_to_start_seconds".to_string()),
-                EXECUTION_DURATION_SECONDS_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_task_duration_seconds".to_string()),
-                EXECUTION_DURATION_SECONDS_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_map_fanout_items".to_string()),
-                EXECUTION_CARDINALITY_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_cost_microusd".to_string()),
-                EXECUTION_COST_MICROUSD_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_tokens".to_string()),
-                EXECUTION_TOKEN_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_tasks".to_string()),
-                EXECUTION_CARDINALITY_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_tool_calls".to_string()),
-                EXECUTION_CARDINALITY_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_retrieved_bytes".to_string()),
-                EXECUTION_BYTE_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_run_coverage_ratio".to_string()),
-                EXECUTION_RATIO_BUCKETS,
-            )
-            .map_err(|error| MoaError::ConfigError(error.to_string()))?
-            .set_buckets_for_metric(
-                Matcher::Full("moa_execution_reducer_depth".to_string()),
-                EXECUTION_CARDINALITY_BUCKETS,
-            )
+    let addr = parse_metrics_listen_addr(config)?;
+    let mut builder = PrometheusBuilder::new()
+        .with_http_listener(addr)
+        .set_buckets(LATENCY_BUCKETS)
+        .map_err(|error| MoaError::ConfigError(error.to_string()))?;
+    // The same table the OTLP views read, so a metric cannot have one bucket
+    // layout when pushed and another when scraped.
+    for (metric, boundaries) in HISTOGRAM_BOUNDARIES {
+        builder = builder
+            .set_buckets_for_metric(Matcher::Full((*metric).to_string()), boundaries)
             .map_err(|error| MoaError::ConfigError(error.to_string()))?;
-
-        builder
-            .install()
-            .map_err(|error| MoaError::ProviderError(error.to_string()))?;
-        register_metric_descriptions();
-        let _ = PROMETHEUS_ENDPOINT.set(addr);
     }
 
+    builder
+        .install()
+        .map_err(|error| MoaError::ProviderError(error.to_string()))?;
+    register_metric_descriptions();
+    let _ = PROMETHEUS_ENDPOINT.set(addr);
     Ok(())
 }
 
-/// Returns the configured scrape URL when the metrics listen address parses successfully.
+/// Returns the scrape URL when the development Prometheus exporter is selected.
+///
+/// `None` under the OTLP and disabled exporters, because there is no endpoint to
+/// name. Reporting a URL for a port nothing binds is what let manifests and
+/// network policies grow scrape targets that never existed.
 #[must_use]
 pub fn metrics_endpoint_url(config: &MetricsConfig) -> Option<String> {
+    if config.exporter != MetricsExporter::Prometheus {
+        return None;
+    }
     parse_metrics_listen_addr(config)
         .ok()
         .map(format_metrics_endpoint_url)
@@ -1440,10 +1534,14 @@ pub fn record_builtin_approval_wait(wait: Duration) {
 }
 
 fn parse_metrics_listen_addr(config: &MetricsConfig) -> Result<SocketAddr> {
-    config.listen.parse::<SocketAddr>().map_err(|error| {
+    let listen = config.prometheus_listen.as_deref().ok_or_else(|| {
+        MoaError::ConfigError(
+            "metrics.prometheus_listen is required by the prometheus exporter".to_string(),
+        )
+    })?;
+    listen.parse::<SocketAddr>().map_err(|error| {
         MoaError::ConfigError(format!(
-            "invalid metrics.listen `{}`: {error}",
-            config.listen
+            "invalid metrics.prometheus_listen `{listen}`: {error}"
         ))
     })
 }
@@ -2010,11 +2108,62 @@ mod tests {
     #[test]
     fn metrics_endpoint_url_uses_localhost_for_unspecified_listener() {
         let url = metrics_endpoint_url(&MetricsConfig {
-            enabled: true,
-            listen: "0.0.0.0:9090".to_string(),
+            exporter: MetricsExporter::Prometheus,
+            prometheus_listen: Some("0.0.0.0:9090".to_string()),
         });
 
         assert_eq!(url.as_deref(), Some("http://localhost:9090/metrics"));
+    }
+
+    #[test]
+    fn no_scrape_url_is_reported_under_the_push_exporter() {
+        // Pins: the OTLP default advertises no scrape endpoint. Reporting one
+        // would put a URL in startup logs, manifests and network policies for a
+        // port nothing binds - which is exactly the fake 9090 surface production
+        // grew before this.
+        //
+        // The listen address is deliberately PRESENT. With it absent the address
+        // parse fails and returns None on its own, so the exporter check would
+        // never run and this test would pass with that check deleted - which is
+        // exactly what it did when first written. `validate()` refuses this
+        // combination, so it can only reach the function from a caller that
+        // skipped validation; the exporter check is the guard for precisely that
+        // caller, and this is the only shape that exercises it.
+        for exporter in [MetricsExporter::Otlp, MetricsExporter::Disabled] {
+            let config = MetricsConfig {
+                exporter,
+                prometheus_listen: Some("0.0.0.0:9090".to_string()),
+            };
+            assert!(
+                config.validate().is_err(),
+                "precondition: this combination must be one `validate()` refuses, or the \
+                 guard under test is unreachable in production and should be deleted instead"
+            );
+
+            let url = metrics_endpoint_url(&config);
+
+            assert_eq!(
+                url,
+                None,
+                "exporter {} must advertise no scrape URL even when a listen address is \
+                 present, got {url:?}",
+                exporter.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_listen_address_also_yields_no_scrape_url() {
+        // Negative control for the neighbour the test above deliberately avoids:
+        // an unparseable (here absent) address must also produce no URL, so the
+        // two guards are pinned separately rather than one standing in for both.
+        assert_eq!(
+            metrics_endpoint_url(&MetricsConfig {
+                exporter: MetricsExporter::Prometheus,
+                prometheus_listen: None,
+            }),
+            None
+        );
     }
 
     #[tokio::test]
@@ -2026,10 +2175,16 @@ mod tests {
             .expect("local addr")
             .port();
         let config = MetricsConfig {
-            enabled: true,
-            listen: format!("127.0.0.1:{port}"),
+            exporter: MetricsExporter::Prometheus,
+            prometheus_listen: Some(format!("127.0.0.1:{port}")),
         };
-        init_metrics(&config).expect("metrics exporter should initialize");
+        init_metrics(
+            &config,
+            None,
+            OtlpProtocol::Http,
+            Resource::builder().build(),
+        )
+        .expect("metrics exporter should initialize");
 
         record_genai_client_operation_duration(
             "mock",

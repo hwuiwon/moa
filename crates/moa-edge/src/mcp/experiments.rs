@@ -66,9 +66,11 @@ struct ExperimentRunInput {
     target: Option<Value>,
     /// Optional JSON behavior variant for an ad hoc run.
     variant: Option<Value>,
-    /// JSON scorecard definition; use the published plan's scorecard when `plan_revision_uid` is supplied.
-    #[serde(default)]
-    scorecard: Value,
+    /// Typed scorecard for an ad hoc run: `{"requirements": [{"evaluator_id", "evaluator_version",
+    /// "score_name", "value_type", "config", "effect"}]}` with at least one `blocking` requirement.
+    /// Omit it entirely when `plan_revision_uid` is supplied; the pinned plan owns the scorecard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scorecard: Option<Value>,
     /// Optional existing score-run UUID used to join external or previously collected scores.
     score_run_id: Option<Uuid>,
     /// Optional stable retry key; reuse only when retrying the same logical experiment admission.

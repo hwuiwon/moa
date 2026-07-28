@@ -10,7 +10,7 @@ use super::cohere::COHERE_DEFAULT_RERANK_MODEL;
 use super::zeroentropy::ZEROENTROPY_DEFAULT_RERANK_MODEL;
 use super::zeroentropy::ZeroEntropyRerankLatency;
 use super::{CohereReranker, NOOP_RERANK_MODEL, NoopReranker, Reranker, ZeroEntropyReranker};
-use crate::core::concurrency_factory::{CallKind, ProviderConcurrency};
+use crate::core::concurrency_factory::{CallKind, ProviderCoordination};
 use crate::core::pacer::PacerConfig;
 use crate::model_selection::{normalize_provider_name, split_explicit_provider_model};
 
@@ -126,12 +126,16 @@ fn build_provider(provider: RerankerProviderKind, config: &MoaConfig) -> Result<
                 "MOA_COHERE_API_KEY",
                 &config.providers.cohere.api_key,
             )?;
+            let coordination = ProviderCoordination::from_config(config)?;
             let mut reranker = CohereReranker::new(api_key.clone())?;
             if let Some(pacer) = rerank_pacer_override(config.providers.cohere.max_requests_per_min)
             {
                 reranker = reranker.with_rate_limits(pacer);
             }
-            reranker = reranker.with_limiter(ProviderConcurrency::from_config(config).limiter(
+            // Shared pacing is attached after any override so the coordinated
+            // limits are the effective ones.
+            reranker = reranker.with_shared_pacing(&coordination, COHERE_PROVIDER_NAME, &api_key);
+            reranker = reranker.with_limiter(coordination.limiter(
                 CallKind::Rerank,
                 COHERE_PROVIDER_NAME,
                 &api_key,
@@ -152,13 +156,18 @@ fn build_provider(provider: RerankerProviderKind, config: &MoaConfig) -> Result<
                 .filter(|value| !value.trim().is_empty())
                 .map(ZeroEntropyRerankLatency::parse)
                 .transpose()?;
+            let coordination = ProviderCoordination::from_config(config)?;
             let mut reranker = ZeroEntropyReranker::new(api_key.clone())?.with_latency(latency);
             if let Some(pacer) =
                 rerank_pacer_override(config.providers.zeroentropy.max_requests_per_min)
             {
                 reranker = reranker.with_rate_limits(pacer);
             }
-            reranker = reranker.with_limiter(ProviderConcurrency::from_config(config).limiter(
+            // Shared pacing is attached after any override so the coordinated
+            // limits are the effective ones.
+            reranker =
+                reranker.with_shared_pacing(&coordination, ZEROENTROPY_PROVIDER_NAME, &api_key);
+            reranker = reranker.with_limiter(coordination.limiter(
                 CallKind::Rerank,
                 ZEROENTROPY_PROVIDER_NAME,
                 &api_key,

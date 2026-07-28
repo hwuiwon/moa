@@ -1,14 +1,19 @@
 //! DB-backed coverage for the lineage writer worker.
 //!
-//! These tests drive the real `spawn_writer` worker against an isolated Postgres
-//! database. They pin two durability contracts that have no other integration
-//! coverage:
-//! 1. graceful shutdown flushes the in-memory batch so pending rows land in
-//!    `analytics.turn_lineage`; and
-//! 2. a batch whose write fails non-retryably is persisted once to
-//!    `analytics.lineage_dead_letters` and its journal sequence is acknowledged
-//!    after the DLQ commit (F16), so the journal drains and a restart neither
-//!    replays the row into `turn_lineage` nor re-dead-letters it.
+//! These tests drive the real writer against an isolated Postgres database
+//! carrying the full central migration set. They pin the durability contracts
+//! that have no other integration coverage:
+//!
+//! 1. acceptance means committed - a durable batch is visible to an independent
+//!    connection the moment its call returns, so no rollout can lose it;
+//! 2. a committed batch a dead replica never finished is completed by another
+//!    replica once the lease expires;
+//! 3. storing a batch and dequeuing it are one transaction, in both the success
+//!    and the permanent-failure direction;
+//! 4. a recoverable failure preserves the accepted rows;
+//! 5. lineage for a purged tenant cannot be written back after the fence; and
+//! 6. a shutdown that runs out of drain budget leaves accepted rows for someone
+//!    else rather than consuming them.
 //!
 //! They require `MOA_DATABASE_URL` to point at a reachable Postgres superuser
 //! role that can `CREATE DATABASE`; each test creates and drops its own database.
@@ -17,6 +22,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::Utc;
+use moa_core::traits::LineageHandle;
 use moa_core::{
     types::identifiers::SessionId, types::identifiers::StoragePartitionId,
     types::identifiers::TenantId, types::identifiers::UserId,
@@ -24,7 +30,7 @@ use moa_core::{
 use moa_lineage_core::{
     BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, StageTimings,
 };
-use moa_lineage_sink::{LineageStore, MpscSinkConfig, spawn_writer};
+use moa_lineage_sink::{LineageStore, MpscSink, MpscSinkConfig, WriterState, spawn_writer};
 use moa_memory_types::MemoryScope;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::sync::mpsc;
@@ -34,24 +40,19 @@ type TestResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 
 #[tokio::test]
 async fn lineage_writer_flush_on_shutdown_drains_pending_rows_db() -> TestResult<()> {
+    let partition = test_partition();
     // Pins: events buffered in the writer's batch (never reaching the size or
     // age flush thresholds) are still drained to Postgres at graceful shutdown.
     let (pool, database_name, cleanup_pool) = isolated_pool().await?;
-    let journal = tempfile::tempdir()?;
 
-    let config = MpscSinkConfig {
-        channel_capacity: 64,
-        batch_size: 100,
-        batch_max_age: Duration::from_secs(3600),
-        journal_path: journal.path().to_path_buf(),
-    };
+    let config = test_sink_config(Duration::from_secs(3600));
 
     let (tx, rx) = mpsc::channel::<LineageEvent>(64);
     let handle = spawn_writer(rx, config, LineageStore::Postgres(pool.clone())).await?;
 
     let turn_ids: Vec<Uuid> = (0..3).map(|_| Uuid::now_v7()).collect();
     for turn_id in &turn_ids {
-        tx.send(retrieval_event(*turn_id, "flush-partition"))
+        tx.send(retrieval_event(*turn_id, &partition))
             .await
             .map_err(|error| test_error(format!("send should enqueue event: {error}")))?;
     }
@@ -68,7 +69,7 @@ async fn lineage_writer_flush_on_shutdown_drains_pending_rows_db() -> TestResult
     let written: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM analytics.turn_lineage WHERE storage_partition_id = $1",
     )
-    .bind("flush-partition")
+    .bind(&partition)
     .fetch_one(&pool)
     .await?;
     assert_eq!(written, 3, "three lineage rows should be durably persisted");
@@ -80,22 +81,16 @@ async fn lineage_writer_flush_on_shutdown_drains_pending_rows_db() -> TestResult
 
 #[tokio::test]
 async fn lineage_writer_poison_batch_dead_letters_and_acks_journal_db() -> TestResult<()> {
-    // Pins (F16): a batch whose write fails non-retryably is moved once to
-    // `analytics.lineage_dead_letters` AND its journal sequence is acknowledged
-    // after the DLQ commit, so the journal drains (depth 0) and a fresh writer
-    // over the same journal neither replays the row into `turn_lineage` nor
-    // re-dead-letters it. This is the inverse of the pre-F16 behavior, where the
-    // retained sequence was replayed on every restart.
+    let partition = test_partition();
+    // Pins: a batch whose write fails non-retryably is moved once to
+    // `analytics.lineage_dead_letters` AND dequeued from the acceptance queue in
+    // the same transaction, so a second replica over the SAME queue neither
+    // replays the row into `turn_lineage` nor re-dead-letters it. The second
+    // writer here is a genuinely independent claimant, not a restart over a
+    // private directory only one pod could read.
     let (pool, database_name, cleanup_pool) = isolated_pool().await?;
-    let journal = tempfile::tempdir()?;
-    let journal_path = journal.path().to_path_buf();
 
-    let config = MpscSinkConfig {
-        channel_capacity: 64,
-        batch_size: 100,
-        batch_max_age: Duration::from_secs(3600),
-        journal_path: journal_path.clone(),
-    };
+    let config = test_sink_config(Duration::from_secs(3600));
 
     let (tx, rx) = mpsc::channel::<LineageEvent>(64);
     let handle = spawn_writer(rx, config.clone(), LineageStore::Postgres(pool.clone())).await?;
@@ -107,7 +102,7 @@ async fn lineage_writer_poison_batch_dead_letters_and_acks_journal_db() -> TestR
         .await?;
 
     let turn_id = Uuid::now_v7();
-    tx.send(retrieval_event(turn_id, "poison-partition"))
+    tx.send(retrieval_event(turn_id, &partition))
         .await
         .map_err(|error| test_error(format!("send should enqueue event: {error}")))?;
     drop(tx);
@@ -117,13 +112,13 @@ async fn lineage_writer_poison_batch_dead_letters_and_acks_journal_db() -> TestR
         stats.written, 0,
         "the poison batch must not count as written"
     );
-    // Note: `journal_depth` reflects fjall's approximate_len, which counts the
-    // removal tombstone alongside the original insert, so it is not a reliable
-    // exact-zero signal. The acknowledgement is instead proven deterministically
-    // below: a restart over the same journal does not replay the row (replay reads
-    // real keys, not the approximate count).
+    assert_eq!(
+        stats.pending, 0,
+        "the dead-lettered batch must be gone from the acceptance queue, not left \
+         for the next claimant to dead-letter again"
+    );
 
-    let (dead_letters, row_count, partition): (i64, i32, String) = sqlx::query_as(
+    let (dead_letters, row_count, dead_letter_partition): (i64, i32, String) = sqlx::query_as(
         "SELECT COUNT(*), MAX(row_count), MAX(first_storage_partition_id) FROM analytics.lineage_dead_letters WHERE first_turn_id = $1",
     )
     .bind(turn_id)
@@ -138,13 +133,13 @@ async fn lineage_writer_poison_batch_dead_letters_and_acks_journal_db() -> TestR
         "the dead-letter row should record one buffered event"
     );
     assert_eq!(
-        partition, "poison-partition",
+        dead_letter_partition, partition,
         "the dead-letter row should retain the source partition for triage"
     );
 
-    // Restart over the same journal with a healthy store (its schema bootstrap
-    // restores turn_lineage). Because the dead-lettered sequence was acked, the
-    // row is NOT replayed into turn_lineage and NOT re-dead-lettered.
+    // A second writer over the same queue with a healthy store (its schema
+    // bootstrap restores turn_lineage). Because the dead-letter commit dequeued
+    // the row, it is NOT replayed into turn_lineage and NOT re-dead-lettered.
     let (tx2, rx2) = mpsc::channel::<LineageEvent>(64);
     let handle2 = spawn_writer(rx2, config, LineageStore::Postgres(pool.clone())).await?;
     drop(tx2);
@@ -182,25 +177,21 @@ async fn lineage_writer_poison_batch_dead_letters_and_acks_journal_db() -> TestR
 
 #[tokio::test]
 async fn lineage_writer_repeated_dead_letter_of_same_batch_is_idempotent_db() -> TestResult<()> {
-    // Pins (F16): the crash-between-DLQ-commit-and-ack window is safe. Processing the
-    // identical batch twice (two fresh writer lifetimes over a still-poisoned target)
-    // re-derives the same content-addressed dead_letter_id and upserts it, so
-    // at-least-once dead-lettering yields exactly one DLQ row, never a duplicate.
+    // Pins: at-least-once dead-lettering yields exactly one row. Processing the
+    // identical batch twice (two fresh writer lifetimes over a still-poisoned
+    // target) re-derives the same content-addressed dead_letter_id and upserts
+    // it, so a crash between the dead-letter commit and anything after it cannot
+    // multiply the record.
     let (pool, database_name, cleanup_pool) = isolated_pool().await?;
     let turn_id = Uuid::now_v7();
-    let event = retrieval_event(turn_id, "idempotent-poison");
+    let partition = test_partition();
+    let event = retrieval_event(turn_id, &partition);
 
     for _ in 0..2 {
-        let journal = tempfile::tempdir()?;
-        let config = MpscSinkConfig {
-            channel_capacity: 64,
-            batch_size: 100,
-            batch_max_age: Duration::from_secs(3600),
-            journal_path: journal.path().to_path_buf(),
-        };
+        let config = test_sink_config(Duration::from_secs(3600));
         let (tx, rx) = mpsc::channel::<LineageEvent>(64);
-        // spawn_writer bootstraps the schema, so drop the target AFTER it opens to
-        // keep the write path poisoned for this lifetime.
+        // spawn_writer bootstraps the schema, so drop the target AFTER it opens
+        // to keep the write path poisoned for this lifetime.
         let handle = spawn_writer(rx, config, LineageStore::Postgres(pool.clone())).await?;
         sqlx::query("DROP TABLE analytics.turn_lineage CASCADE")
             .execute(&pool)
@@ -234,18 +225,12 @@ async fn lineage_writer_compliance_partition_writes_verifiable_hash_chain_db() -
     // per-row HashChain::link walk would, links each row to the prior tip (genesis first), and
     // advances the partition state tip and record count exactly once per row.
     let (pool, database_name, cleanup_pool) = isolated_pool().await?;
-    let journal = tempfile::tempdir()?;
-    let config = MpscSinkConfig {
-        channel_capacity: 64,
-        batch_size: 100,
-        batch_max_age: Duration::from_secs(3600),
-        journal_path: journal.path().to_path_buf(),
-    };
+    let config = test_sink_config(Duration::from_secs(3600));
 
     let (tx, rx) = mpsc::channel::<LineageEvent>(64);
     let handle = spawn_writer(rx, config, LineageStore::Postgres(pool.clone())).await?;
 
-    let partition = "compliance-partition";
+    let partition = test_partition();
     sqlx::query(
         r#"
         INSERT INTO analytics.compliance_tenants
@@ -253,7 +238,7 @@ async fn lineage_writer_compliance_partition_writes_verifiable_hash_chain_db() -
         VALUES ($1, 'test-bucket', 'test-signing-key', TRUE)
         "#,
     )
-    .bind(partition)
+    .bind(&partition)
     .execute(&pool)
     .await?;
 
@@ -265,7 +250,7 @@ async fn lineage_writer_compliance_partition_writes_verifiable_hash_chain_db() -
     .expect("microsecond timestamp");
     for offset in 0..3_i64 {
         let ts = base + chrono::Duration::seconds(offset);
-        tx.send(retrieval_event_at(Uuid::now_v7(), partition, ts))
+        tx.send(retrieval_event_at(Uuid::now_v7(), &partition, ts))
             .await
             .map_err(|error| test_error(format!("send should enqueue event: {error}")))?;
     }
@@ -285,7 +270,7 @@ async fn lineage_writer_compliance_partition_writes_verifiable_hash_chain_db() -
         ORDER BY ts ASC
         "#,
     )
-    .bind(partition)
+    .bind(&partition)
     .fetch_all(&pool)
     .await?;
     assert_eq!(rows.len(), 3, "three compliance rows should be persisted");
@@ -312,7 +297,7 @@ async fn lineage_writer_compliance_partition_writes_verifiable_hash_chain_db() -
         WHERE storage_partition_id = $1
         "#,
     )
-    .bind(partition)
+    .bind(&partition)
     .fetch_one(&pool)
     .await?;
     assert_eq!(
@@ -349,11 +334,11 @@ struct RecordedClickHouseRow {
 
 #[tokio::test]
 async fn lineage_writer_clickhouse_backend_splits_rows_from_scores_db() -> TestResult<()> {
+    let partition = test_partition();
     // Pins: with [clickhouse] configured, turn_lineage rows land in ClickHouse
     // (bootstrapped with database + TTL table DDL) and NOT in Postgres, while
     // score rows still land in Postgres analytics.scores.
     let (pool, database_name, cleanup_pool) = isolated_pool().await?;
-    let journal = tempfile::tempdir()?;
 
     let mock = clickhouse::test::Mock::new();
     let create_database = mock.add(clickhouse::test::handlers::record_ddl());
@@ -366,18 +351,13 @@ async fn lineage_writer_clickhouse_backend_splits_rows_from_scores_db() -> TestR
     };
     let store = LineageStore::from_config(Some(&clickhouse_config), pool.clone());
 
-    let config = MpscSinkConfig {
-        channel_capacity: 64,
-        batch_size: 100,
-        batch_max_age: Duration::from_secs(3600),
-        journal_path: journal.path().to_path_buf(),
-    };
+    let config = test_sink_config(Duration::from_secs(3600));
     let (tx, rx) = mpsc::channel::<LineageEvent>(64);
     let handle = spawn_writer(rx, config, store).await?;
 
     let turn_id = Uuid::now_v7();
     let score_id = Uuid::now_v7();
-    tx.send(retrieval_event(turn_id, "clickhouse-partition"))
+    tx.send(retrieval_event(turn_id, &partition))
         .await
         .map_err(|error| test_error(format!("send should enqueue event: {error}")))?;
     tx.send(LineageEvent::Eval(moa_lineage_core::ScoreRecord {
@@ -389,7 +369,7 @@ async fn lineage_writer_clickhouse_backend_splits_rows_from_scores_db() -> TestR
         target: moa_lineage_core::ScoreTarget::Turn {
             turn_id: moa_lineage_core::TurnId(turn_id),
         },
-        storage_partition_id: StoragePartitionId::new("clickhouse-partition"),
+        storage_partition_id: StoragePartitionId::new(&partition),
         user_id: None,
         name: "retrieval_zero_recall".to_string(),
         value: moa_lineage_core::ScoreValue::Boolean(false),
@@ -398,6 +378,7 @@ async fn lineage_writer_clickhouse_backend_splits_rows_from_scores_db() -> TestR
         run_id: None,
         dataset_id: None,
         comment: None,
+        experiment_provenance: None,
     }))
     .await
     .map_err(|error| test_error(format!("send should enqueue score: {error}")))?;
@@ -420,7 +401,7 @@ async fn lineage_writer_clickhouse_backend_splits_rows_from_scores_db() -> TestR
     let rows: Vec<RecordedClickHouseRow> = insert.collect().await;
     assert_eq!(rows.len(), 1, "exactly the lineage row goes to ClickHouse");
     assert_eq!(rows[0].turn_id, turn_id);
-    assert_eq!(rows[0].storage_partition_id, "clickhouse-partition");
+    assert_eq!(rows[0].storage_partition_id, partition);
     assert_eq!(rows[0].record_kind, 1, "retrieval record kind");
     assert!(
         rows[0].payload.contains("what is oauth"),
@@ -455,6 +436,16 @@ async fn lineage_writer_clickhouse_backend_splits_rows_from_scores_db() -> TestR
 }
 
 /// Builds a minimal but valid retrieval lineage event for one turn.
+/// Returns a fresh tenant-scoped storage partition.
+///
+/// The central migration set derives `analytics.turn_lineage.tenant_id` from the
+/// partition and refuses a value it cannot parse, so tests must use the same
+/// tenant-UUID partitions production does. A made-up label would fail the
+/// production trigger, which is the point.
+fn test_partition() -> String {
+    StoragePartitionId::for_tenant(TenantId::from(Uuid::now_v7())).to_string()
+}
+
 fn retrieval_event(turn_id: Uuid, storage_partition_id: &str) -> LineageEvent {
     retrieval_event_at(
         turn_id,
@@ -534,7 +525,42 @@ async fn isolated_pool() -> TestResult<(sqlx::PgPool, String, sqlx::PgPool)> {
                 "isolated lineage writer test database should be reachable: {error}"
             ))
         })?;
+    // The full central migration set, not just the lineage bootstrap. The
+    // acceptance queue's row-level security, and the destruction fence the
+    // writer refuses to write past, are both defined there. A lineage-only
+    // schema would let these tests pass against a permissive stand-in that
+    // production never runs.
+    for extension in [
+        "CREATE EXTENSION IF NOT EXISTS vector",
+        "CREATE EXTENSION IF NOT EXISTS pgaudit",
+    ] {
+        sqlx::raw_sql(extension).execute(&pool).await?;
+    }
+    let target_url = match database_url.rsplit_once('/') {
+        Some((prefix, _)) => format!("{prefix}/{database_name}"),
+        None => database_url.clone(),
+    };
+    moa_migrations::run(&target_url)
+        .await
+        .map_err(|error| test_error(format!("central migrations should apply: {error}")))?;
     Ok((pool, database_name, cleanup_pool))
+}
+
+/// Writer configuration for these tests.
+///
+/// `batch_max_age` doubles as the drain poll cadence, so a long value keeps a
+/// test deterministic (nothing happens until an explicit shutdown) and a short
+/// one lets the writer poll on its own.
+fn test_sink_config(batch_max_age: Duration) -> MpscSinkConfig {
+    MpscSinkConfig {
+        channel_capacity: 64,
+        batch_size: 100,
+        batch_max_age,
+        claim_batch_size: 100,
+        lease_ttl: Duration::from_secs(60),
+        max_pending_age: Duration::from_secs(300),
+        drain_timeout: Duration::from_secs(30),
+    }
 }
 
 async fn drop_database(pool: &sqlx::PgPool, database_name: &str) {
@@ -564,4 +590,845 @@ fn quote_identifier(identifier: &str) -> String {
 
 fn test_error(message: String) -> Box<dyn std::error::Error + Send + Sync> {
     Box::new(std::io::Error::other(message))
+}
+
+#[tokio::test]
+async fn lineage_writer_experiment_score_provenance_lands_with_its_score_row_db() -> TestResult<()>
+{
+    // Pins: the lineage sink is the only writer of Behavior Lab score provenance,
+    // and it writes provenance in the SAME transaction as the score row. A score
+    // row with no provenance row cannot satisfy a scorecard requirement, so a
+    // partial write here would look like complete evidence to nothing and like
+    // missing evidence to the gate — both wrong, and neither observable without
+    // reading both tables.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let fixture = seed_experiment_fixture(&pool, &database_name).await?;
+
+    let config = test_sink_config(Duration::from_secs(3600));
+    let (tx, rx) = mpsc::channel::<LineageEvent>(16);
+    let handle = spawn_writer(rx, config, LineageStore::Postgres(pool.clone())).await?;
+
+    let score_id = Uuid::now_v7();
+    tx.send(experiment_score_event(
+        &fixture,
+        score_id,
+        "target_completed",
+        true,
+        replay_stable_ts(),
+    ))
+    .await
+    .map_err(|error| test_error(format!("send should enqueue score: {error}")))?;
+    drop(tx);
+    let stats = handle.shutdown().await?;
+    assert_eq!(stats.written, 1, "the score row must be written");
+
+    let joined: (
+        String,
+        String,
+        String,
+        Uuid,
+        Uuid,
+        Uuid,
+        Option<Uuid>,
+        Vec<u8>,
+    ) = sqlx::query_as(
+        "SELECT score.name,
+                score.value_type,
+                provenance.evaluator_version,
+                provenance.experiment_run_uid,
+                provenance.plan_revision_uid,
+                provenance.trial_uid,
+                provenance.target_session_id,
+                provenance.evidence_hash
+           FROM analytics.scores AS score
+           JOIN moa.experiment_score_provenance AS provenance
+             ON provenance.score_id = score.score_id
+          WHERE score.score_id = $1",
+    )
+    .bind(score_id)
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(joined.0, "target_completed");
+    assert_eq!(joined.1, "boolean");
+    assert_eq!(joined.2, "v1");
+    assert_eq!(joined.3, fixture.run_uid);
+    assert_eq!(joined.4, fixture.plan_revision_uid);
+    assert_eq!(joined.5, fixture.trial_uid);
+    assert_eq!(joined.6, Some(fixture.session_id));
+    assert_eq!(joined.7, vec![7_u8; 32]);
+
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn lineage_writer_experiment_score_replay_is_accepted_but_never_rewrites_db() -> TestResult<()>
+{
+    // Pins the replay contract in both directions. A byte-identical replay of the
+    // same score is accepted as a no-op — a workflow retry must not fail. A replay
+    // that keeps the score id but changes what the score claims to have observed
+    // is REFUSED, because that is a different score wearing the same identity.
+    // Before this, the writer's `ON CONFLICT ... DO UPDATE SET <every column>`
+    // would have silently rewritten history in exactly that case.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let fixture = seed_experiment_fixture(&pool, &database_name).await?;
+    let score_id = Uuid::now_v7();
+
+    // One replay-stable timestamp, as the trial finalizer's journaled
+    // `durable_utc_now` step produces. This is what makes a replay land on the
+    // same `(score_id, ts)` primary key instead of beside it.
+    let ts = replay_stable_ts();
+
+    let identical_replay_stats = {
+        let (tx, rx) = mpsc::channel::<LineageEvent>(16);
+        let handle = spawn_writer(
+            rx,
+            test_sink_config(Duration::from_secs(3600)),
+            LineageStore::Postgres(pool.clone()),
+        )
+        .await?;
+        for _ in 0..2 {
+            tx.send(experiment_score_event(
+                &fixture,
+                score_id,
+                "target_completed",
+                true,
+                ts,
+            ))
+            .await
+            .map_err(|error| test_error(format!("send should enqueue score: {error}")))?;
+        }
+        drop(tx);
+        handle.shutdown().await?
+    };
+    assert_eq!(
+        identical_replay_stats.written, 2,
+        "an identical replay must be accepted rather than refused"
+    );
+
+    let rows_after_replay: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM analytics.scores WHERE score_id = $1")
+            .bind(score_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        rows_after_replay, 1,
+        "an identical replay must not add a second score row"
+    );
+
+    // Now the same score id derived from different evidence. The provenance
+    // comparison must refuse it, and the writer dead-letters the batch rather
+    // than absorbing the change.
+    let conflicting_stats = {
+        let (tx, rx) = mpsc::channel::<LineageEvent>(16);
+        let handle = spawn_writer(
+            rx,
+            test_sink_config(Duration::from_secs(3600)),
+            LineageStore::Postgres(pool.clone()),
+        )
+        .await?;
+        let mut event = experiment_score_event(&fixture, score_id, "target_completed", true, ts);
+        if let LineageEvent::Eval(record) = &mut event
+            && let Some(provenance) = record.experiment_provenance.as_mut()
+        {
+            provenance.evidence_hash = vec![9_u8; 32];
+            provenance.evidence_ref = "session:rewritten#seq=99".to_string();
+        }
+        tx.send(event)
+            .await
+            .map_err(|error| test_error(format!("send should enqueue score: {error}")))?;
+        drop(tx);
+        handle.shutdown().await?
+    };
+    assert_eq!(
+        conflicting_stats.written, 0,
+        "a provenance collision must not count as written"
+    );
+
+    let stored: (String, Vec<u8>) = sqlx::query_as(
+        "SELECT evidence_ref, evidence_hash
+           FROM moa.experiment_score_provenance
+          WHERE score_id = $1",
+    )
+    .bind(score_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored.0, "session:fixture#seq=1",
+        "the refused replay must have left the stored evidence reference untouched"
+    );
+    assert_eq!(
+        stored.1,
+        vec![7_u8; 32],
+        "the refused replay must have left the stored evidence hash untouched"
+    );
+
+    // A NON-replay-stable timestamp is the other half of the contract: the score
+    // row is keyed `(score_id, ts)`, so a finalizer that called `Utc::now()` per
+    // attempt would insert a SECOND row for the same score. Nothing refuses that
+    // at the storage layer, which is exactly why the eligibility gate treats two
+    // rows for one requirement as Invalid rather than as a pass.
+    let drifted_stats = {
+        let (tx, rx) = mpsc::channel::<LineageEvent>(16);
+        let handle = spawn_writer(
+            rx,
+            test_sink_config(Duration::from_secs(3600)),
+            LineageStore::Postgres(pool.clone()),
+        )
+        .await?;
+        tx.send(experiment_score_event(
+            &fixture,
+            score_id,
+            "target_completed",
+            true,
+            ts + chrono::Duration::seconds(1),
+        ))
+        .await
+        .map_err(|error| test_error(format!("send should enqueue score: {error}")))?;
+        drop(tx);
+        handle.shutdown().await?
+    };
+    assert_eq!(drifted_stats.written, 1);
+    let rows_after_drift: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM analytics.scores WHERE score_id = $1")
+            .bind(score_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        rows_after_drift, 2,
+        "a drifted timestamp duplicates the score row, which the eligibility gate must catch"
+    );
+
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+/// Returns a microsecond-truncated timestamp, matching what Postgres stores.
+fn replay_stable_ts() -> chrono::DateTime<Utc> {
+    chrono::DateTime::<Utc>::from_timestamp_micros(Utc::now().timestamp_micros())
+        .expect("microsecond timestamp")
+}
+
+/// Identity of the experiment run, trial, and target one fixture score belongs to.
+struct ExperimentFixture {
+    storage_partition_id: String,
+    score_run_id: Uuid,
+    run_uid: Uuid,
+    trial_uid: Uuid,
+    plan_revision_uid: Uuid,
+    session_id: Uuid,
+}
+
+/// Builds one `LineageEvent::Eval` carrying Behavior Lab provenance.
+fn experiment_score_event(
+    fixture: &ExperimentFixture,
+    score_id: Uuid,
+    score_name: &str,
+    value: bool,
+    ts: chrono::DateTime<Utc>,
+) -> LineageEvent {
+    LineageEvent::Eval(moa_lineage_core::ScoreRecord {
+        score_id,
+        ts,
+        target: moa_lineage_core::ScoreTarget::Session {
+            session_id: SessionId(fixture.session_id),
+        },
+        storage_partition_id: StoragePartitionId::new(&fixture.storage_partition_id),
+        user_id: None,
+        name: score_name.to_string(),
+        value: moa_lineage_core::ScoreValue::Boolean(value),
+        source: moa_lineage_core::ScoreSource::ProductEvaluator,
+        model_or_evaluator: "target_completed@v1".to_string(),
+        run_id: Some(fixture.score_run_id),
+        dataset_id: None,
+        comment: None,
+        experiment_provenance: Some(moa_lineage_core::ExperimentScoreProvenance {
+            experiment_run_uid: fixture.run_uid,
+            plan_revision_uid: fixture.plan_revision_uid,
+            trial_uid: fixture.trial_uid,
+            target: moa_lineage_core::ExperimentScoreTarget::Session {
+                session_id: SessionId(fixture.session_id),
+            },
+            evaluator_id: "target_completed".to_string(),
+            evaluator_version: "v1".to_string(),
+            score_name: score_name.to_string(),
+            value_type: "boolean".to_string(),
+            evidence_ref: "session:fixture#seq=1".to_string(),
+            evidence_hash: vec![7_u8; 32],
+        }),
+    })
+}
+
+/// Applies the full central migration set and seeds the rows V000361's composite
+/// foreign keys require.
+///
+/// `ensure_lineage_schema` alone creates only the `analytics` bootstrap tables,
+/// so a provenance write needs the real migration set — which is what production
+/// runs, and what makes this test exercise the real constraints rather than a
+/// permissive stand-in.
+async fn seed_experiment_fixture(
+    pool: &sqlx::PgPool,
+    database_name: &str,
+) -> TestResult<ExperimentFixture> {
+    let database_url = std::env::var("MOA_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://moa_owner:dev@127.0.0.1:10040/moa".to_string());
+    let target_url = match database_url.rsplit_once('/') {
+        Some((prefix, _)) => format!("{prefix}/{database_name}"),
+        None => database_url.clone(),
+    };
+    let _ = &target_url;
+
+    let tenant_id = Uuid::now_v7();
+    let fixture = ExperimentFixture {
+        storage_partition_id: StoragePartitionId::for_tenant(TenantId(tenant_id)).to_string(),
+        score_run_id: Uuid::now_v7(),
+        run_uid: Uuid::now_v7(),
+        trial_uid: Uuid::now_v7(),
+        plan_revision_uid: Uuid::now_v7(),
+        session_id: Uuid::now_v7(),
+    };
+
+    sqlx::query(
+        "INSERT INTO analytics.score_run (run_id, storage_partition_id, user_id, source)
+         VALUES ($1, $2, NULL, 'experiment_trial')",
+    )
+    .bind(fixture.score_run_id)
+    .bind(&fixture.storage_partition_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO moa.experiment_run (
+             run_uid, storage_partition_id, user_id, name, target_kind, status, target, variant,
+             scorecard, score_run_id, artifact_revision_uids, created_by_identity
+         ) VALUES ($1, $2, NULL, 'sink fixture', 'agent_loop', 'running', '{}'::jsonb, '{}'::jsonb,
+                   '{}'::jsonb, $3, '{}', '{}'::jsonb)",
+    )
+    .bind(fixture.run_uid)
+    .bind(&fixture.storage_partition_id)
+    .bind(fixture.score_run_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO moa.experiment_trial (
+             trial_uid, run_uid, storage_partition_id, user_id, trial_key, status, target_kind,
+             variant_key, plan_revision_uid, simulator, simulator_model, score_run_id
+         ) VALUES ($1, $2, $3, NULL, 'sink/0', 'running', 'agent_loop', 'baseline', $4,
+                   '{}'::jsonb, 'sim-model', $5)",
+    )
+    .bind(fixture.trial_uid)
+    .bind(fixture.run_uid)
+    .bind(&fixture.storage_partition_id)
+    .bind(fixture.plan_revision_uid)
+    .bind(fixture.score_run_id)
+    .execute(pool)
+    .await?;
+    Ok(fixture)
+}
+
+#[tokio::test]
+async fn durable_acceptance_is_committed_before_the_call_returns_db() -> TestResult<()> {
+    // Pins THE acceptance boundary. `record_durable_batch` returning must mean
+    // the batch is committed in Postgres, observable from a connection that
+    // shares nothing with the writer. The shape this replaces returned after an
+    // fsync to a pod-local directory, so "accepted" survived exactly as long as
+    // the pod did.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let partition = test_partition();
+
+    // A long poll interval so nothing drains behind our back: the rows we look
+    // for must be there because acceptance committed them, not because a drain
+    // happened to run.
+    let (sink, handle) = MpscSink::spawn(
+        test_sink_config(Duration::from_secs(3600)),
+        LineageStore::Postgres(pool.clone()),
+    )
+    .await?;
+
+    let turn_id = Uuid::now_v7();
+    let event = retrieval_event(turn_id, &partition);
+    LineageHandle::record_durable_batch(&sink, vec![serde_json::to_value(&event)?])
+        .await
+        .map_err(|error| test_error(format!("durable batch should be accepted: {error}")))?;
+
+    // An independent connection, opened after the call returned.
+    let observer = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(PgConnectOptions::from_str(&test_database_url())?.database(&database_name))
+        .await?;
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM analytics.lineage_journal WHERE storage_partition_id = $1",
+    )
+    .bind(&partition)
+    .fetch_one(&observer)
+    .await?;
+    assert_eq!(
+        queued, 1,
+        "a returned durable batch must already be committed and visible to an \
+         independent connection; found {queued} queued rows for {partition}"
+    );
+    observer.close().await;
+
+    handle.shutdown().await?;
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_committed_batch_is_finished_by_another_replica_after_a_lease_expires_db()
+-> TestResult<()> {
+    // Pins the rollout guarantee. A replica accepts a batch, claims it, and dies
+    // without storing it. A second replica must finish that exact record with no
+    // handoff, no shared filesystem, and nothing noticing the death - only the
+    // lease expiring.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let partition = test_partition();
+
+    // Replica one: accept, then claim under a lease that has already expired by
+    // the time we drop it. Dropping the handle aborts its task mid-flight, which
+    // is what an evicted pod looks like from the database's side.
+    let doomed_config = MpscSinkConfig {
+        lease_ttl: Duration::from_millis(1),
+        ..test_sink_config(Duration::from_secs(3600))
+    };
+    let (sink, doomed) =
+        MpscSink::spawn(doomed_config, LineageStore::Postgres(pool.clone())).await?;
+    let turn_id = Uuid::now_v7();
+    LineageHandle::record_durable_batch(
+        &sink,
+        vec![serde_json::to_value(retrieval_event(turn_id, &partition))?],
+    )
+    .await
+    .map_err(|error| test_error(format!("durable batch should be accepted: {error}")))?;
+
+    // Lease the row on behalf of the doomed replica, then abandon it.
+    sqlx::query(
+        "UPDATE analytics.lineage_journal \
+         SET lease_owner = gen_random_uuid(), lease_expires_at = now() - interval '1 second' \
+         WHERE storage_partition_id = $1",
+    )
+    .bind(&partition)
+    .execute(&pool)
+    .await?;
+    drop(sink);
+    drop(doomed);
+
+    let still_unstored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM analytics.turn_lineage WHERE turn_id = $1")
+            .bind(turn_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        still_unstored, 0,
+        "the precondition of this test is that the dead replica stored nothing; if it \
+         already stored the row, the surviving replica below proves nothing"
+    );
+
+    // Replica two knows nothing about replica one.
+    let (tx, rx) = mpsc::channel::<LineageEvent>(8);
+    let survivor = spawn_writer(
+        rx,
+        test_sink_config(Duration::from_millis(50)),
+        LineageStore::Postgres(pool.clone()),
+    )
+    .await?;
+    drop(tx);
+    let stats = survivor.shutdown().await?;
+
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM analytics.turn_lineage WHERE turn_id = $1")
+            .bind(turn_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        stored, 1,
+        "the surviving replica must complete the dead replica's committed batch; \
+         turn {turn_id} was accepted but never stored"
+    );
+    assert_eq!(
+        stats.pending, 0,
+        "and it must dequeue it, leaving nothing for a third claimant"
+    );
+
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_recoverable_write_failure_preserves_the_accepted_rows_db() -> TestResult<()> {
+    // Pins: storing and dequeuing are one transaction. A retryable failure inside
+    // the store must roll the dequeue back with it, leaving the accepted row in
+    // the queue with its attempt recorded. If the dequeue could commit
+    // separately, this is precisely where an accepted record would vanish.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let partition = test_partition();
+
+    let (sink, handle) = MpscSink::spawn(
+        test_sink_config(Duration::from_secs(3600)),
+        LineageStore::Postgres(pool.clone()),
+    )
+    .await?;
+    // Poison BEFORE accepting, not after. The durable call wakes the drain, so a
+    // batch accepted first can be stored before the trigger lands - which passed
+    // in isolation and failed under a loaded parallel run. The writer's schema
+    // bootstrap has already happened at `spawn`, so this is safe here.
+    //
+    // A serialization failure is retryable by SQLSTATE, so the writer must
+    // preserve rather than dead-letter.
+    poison_turn_lineage_with_sqlstate(&pool, "40001").await?;
+
+    let turn_id = Uuid::now_v7();
+    LineageHandle::record_durable_batch(
+        &sink,
+        vec![serde_json::to_value(retrieval_event(turn_id, &partition))?],
+    )
+    .await
+    .map_err(|error| test_error(format!("durable batch should be accepted: {error}")))?;
+
+    let stats = handle.shutdown().await?;
+
+    assert_eq!(
+        stats.written, 0,
+        "the failing batch must not count as written"
+    );
+    let (queued, attempts, leased, deferred): (i64, i32, i64, bool) = sqlx::query_as(
+        "SELECT count(*), COALESCE(max(attempts), 0), \
+                count(*) FILTER (WHERE lease_owner IS NOT NULL), \
+                COALESCE(bool_and(available_at > now()), false) \
+           FROM analytics.lineage_journal WHERE storage_partition_id = $1",
+    )
+    .bind(&partition)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        queued, 1,
+        "a recoverable failure must leave the accepted row queued; found {queued} rows"
+    );
+    assert_eq!(
+        attempts, 1,
+        "the failed claim must be recorded as an attempt"
+    );
+    assert_eq!(
+        leased, 0,
+        "the lease must be released so any replica can take the next attempt"
+    );
+    assert!(
+        deferred,
+        "the row must be deferred into the future so the next attempt backs off"
+    );
+
+    let dead_letters: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM analytics.lineage_dead_letters WHERE first_turn_id = $1",
+    )
+    .bind(turn_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        dead_letters, 0,
+        "a transient database failure must never consume the record it could not write"
+    );
+
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_purged_tenant_cannot_have_lineage_written_back_after_the_fence_db() -> TestResult<()> {
+    // Pins the purge race. A batch accepted before a tenant purge is still in the
+    // queue when the purge commits its permanent fence. Whatever order the claim,
+    // lease, retry and commit happen in, the row must not reappear in
+    // `turn_lineage` afterwards - and it must not sit in the queue forever
+    // either, because a row nothing will ever store is a permanent backlog.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let purged_tenant = Uuid::now_v7();
+    let purged = StoragePartitionId::for_tenant(TenantId::from(purged_tenant)).to_string();
+    let neighbour = test_partition();
+
+    // Accepting replica: `claim_batch_size: 0` means it can never claim, so the
+    // batch is committed and provably still queued when the fence lands. Without
+    // this the durable call's wake races the fence insert, and the drain can
+    // store the row first - which is the ordering the test is NOT about.
+    let accepting = MpscSinkConfig {
+        claim_batch_size: 0,
+        ..test_sink_config(Duration::from_secs(3600))
+    };
+    let (sink, accepting_handle) =
+        MpscSink::spawn(accepting, LineageStore::Postgres(pool.clone())).await?;
+    let purged_turn = Uuid::now_v7();
+    let neighbour_turn = Uuid::now_v7();
+    LineageHandle::record_durable_batch(
+        &sink,
+        vec![
+            serde_json::to_value(retrieval_event(purged_turn, &purged))?,
+            serde_json::to_value(retrieval_event(neighbour_turn, &neighbour))?,
+        ],
+    )
+    .await
+    .map_err(|error| test_error(format!("durable batch should be accepted: {error}")))?;
+    accepting_handle.shutdown().await?;
+
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM analytics.lineage_journal WHERE storage_partition_id = $1",
+    )
+    .bind(&purged)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        queued, 1,
+        "precondition: the purged tenant's row must still be queued when the fence lands, \
+         or this test is not exercising the accepted-before-purge ordering at all"
+    );
+
+    // The purge commits its fence while the batch is still queued.
+    sqlx::query(
+        "INSERT INTO moa.destruction_operation_fence \
+         (tenant_id, subject_id, operation_id, operation_kind) \
+         VALUES ($1, NULL, 'lineage-race', 'tenant.purge')",
+    )
+    .bind(purged_tenant)
+    .execute(&pool)
+    .await?;
+
+    // A second replica, which knows nothing about the purge, drains the queue.
+    let (tx, rx) = mpsc::channel::<LineageEvent>(8);
+    let handle = spawn_writer(
+        rx,
+        test_sink_config(Duration::from_millis(50)),
+        LineageStore::Postgres(pool.clone()),
+    )
+    .await?;
+    drop(tx);
+    let stats = handle.shutdown().await?;
+
+    let resurrected: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM analytics.turn_lineage WHERE turn_id = $1")
+            .bind(purged_turn)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        resurrected, 0,
+        "lineage accepted before the purge must not be written after it; turn \
+         {purged_turn} reappeared for purged tenant {purged_tenant}"
+    );
+    let survived: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM analytics.turn_lineage WHERE turn_id = $1")
+            .bind(neighbour_turn)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        survived, 1,
+        "the un-purged neighbour in the SAME batch must still be stored; a fence that \
+         discarded the whole batch would satisfy the assertion above for the wrong reason"
+    );
+    assert_eq!(
+        stats.pending, 0,
+        "the fenced row must be dequeued rather than retried forever"
+    );
+
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_drain_that_runs_out_of_budget_leaves_accepted_rows_for_another_replica_db()
+-> TestResult<()> {
+    // Pins: a shutdown timeout preserves committed rows. Deleting or abandoning
+    // them to bound the drain would turn "we shut down promptly" into silent data
+    // loss, and the caller was already told the batch was accepted.
+    //
+    // Determinism: `claim_batch_size` is 1 and the durable call wakes the drain
+    // exactly once, so precisely one row is stored before shutdown. The drain
+    // budget is then zero, so every remaining row is a row the budget refused to
+    // work on - which is the state under test.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let partition = test_partition();
+    const ACCEPTED: usize = 20;
+
+    let config = MpscSinkConfig {
+        claim_batch_size: 1,
+        drain_timeout: Duration::ZERO,
+        ..test_sink_config(Duration::from_secs(3600))
+    };
+    let (sink, handle) = MpscSink::spawn(config, LineageStore::Postgres(pool.clone())).await?;
+    let mut events = Vec::with_capacity(ACCEPTED);
+    for _ in 0..ACCEPTED {
+        events.push(serde_json::to_value(retrieval_event(
+            Uuid::now_v7(),
+            &partition,
+        ))?);
+    }
+    LineageHandle::record_durable_batch(&sink, events)
+        .await
+        .map_err(|error| test_error(format!("durable batch should be accepted: {error}")))?;
+
+    let stats = handle.shutdown().await?;
+    assert!(
+        stats.written < ACCEPTED as u64,
+        "the precondition is that the zero drain budget left work undone; the writer \
+         stored all {ACCEPTED} rows, so this test is not exercising the timeout"
+    );
+
+    let (queued, claimable): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE claimable_at <= now()) \
+           FROM analytics.lineage_journal WHERE storage_partition_id = $1",
+    )
+    .bind(&partition)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        queued,
+        ACCEPTED as i64 - stats.written as i64,
+        "every accepted row the drain did not store must still be queued; stored \
+         {} and found {queued} queued of {ACCEPTED} accepted",
+        stats.written
+    );
+    assert_eq!(
+        claimable, queued,
+        "and every preserved row must be immediately claimable, so a successor does \
+         not wait out a lease that belongs to a process that has already exited"
+    );
+
+    // A successor with a real budget finishes them.
+    let (tx, rx) = mpsc::channel::<LineageEvent>(8);
+    let survivor = spawn_writer(
+        rx,
+        test_sink_config(Duration::from_millis(50)),
+        LineageStore::Postgres(pool.clone()),
+    )
+    .await?;
+    drop(tx);
+    survivor.shutdown().await?;
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM analytics.turn_lineage WHERE storage_partition_id = $1",
+    )
+    .bind(&partition)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored, ACCEPTED as i64,
+        "every preserved row must still be completable by another replica"
+    );
+
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_over_age_backlog_fails_readiness_while_the_writer_stays_alive_db() -> TestResult<()> {
+    // Pins: an accepted record that is not getting stored makes this replica
+    // unready, and it does so from the queue's own view rather than from anything
+    // this process remembers. It must NOT report failed - the task is healthy,
+    // the backlog is not, and restarting the process would only drop leases.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let partition = test_partition();
+
+    let config = MpscSinkConfig {
+        max_pending_age: Duration::from_secs(1),
+        ..test_sink_config(Duration::from_millis(50))
+    };
+    let (sink, handle) = MpscSink::spawn(config, LineageStore::Postgres(pool.clone())).await?;
+    assert_eq!(
+        handle.unready_reason(),
+        None,
+        "a fresh writer with an empty queue must be ready"
+    );
+
+    // A row that cannot be stored, backdated past the age limit.
+    poison_turn_lineage_with_sqlstate(&pool, "40001").await?;
+    LineageHandle::record_durable_batch(
+        &sink,
+        vec![serde_json::to_value(retrieval_event(
+            Uuid::now_v7(),
+            &partition,
+        ))?],
+    )
+    .await
+    .map_err(|error| test_error(format!("durable batch should be accepted: {error}")))?;
+    sqlx::query(
+        "UPDATE analytics.lineage_journal SET accepted_at = now() - interval '10 minutes' \
+         WHERE storage_partition_id = $1",
+    )
+    .bind(&partition)
+    .execute(&pool)
+    .await?;
+
+    let reason = wait_for(Duration::from_secs(10), || handle.unready_reason()).await;
+    let reason = reason.ok_or_else(|| {
+        test_error(format!(
+            "an over-age backlog must fail readiness; health was {:?}",
+            handle.health()
+        ))
+    })?;
+    assert!(
+        reason.contains("over the"),
+        "the reason must name the age limit it exceeded so an operator can act on it, got: {reason}"
+    );
+    let health = handle.health();
+    assert_eq!(
+        health.state,
+        WriterState::Running,
+        "an over-age backlog is a readiness condition, not a dead task; health was {health:?}"
+    );
+    assert_eq!(
+        health.fatal_error, None,
+        "no fatal error should be recorded for a healthy task with a slow queue"
+    );
+
+    handle.shutdown().await?;
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+/// Makes every `analytics.turn_lineage` insert fail with `sqlstate`.
+///
+/// A trigger rather than a dropped table, so the SQLSTATE - and therefore the
+/// writer's retryable/permanent decision - is chosen by the test rather than
+/// inferred from whichever failure a schema change happens to produce.
+async fn poison_turn_lineage_with_sqlstate(pool: &sqlx::PgPool, sqlstate: &str) -> TestResult<()> {
+    sqlx::raw_sql(&format!(
+        r#"
+        CREATE OR REPLACE FUNCTION pg_temp_poison_lineage() RETURNS TRIGGER
+        LANGUAGE plpgsql AS $poison$
+        BEGIN
+            RAISE EXCEPTION USING ERRCODE = '{sqlstate}',
+                MESSAGE = 'lineage write poisoned by test';
+        END
+        $poison$;
+        DROP TRIGGER IF EXISTS poison_lineage ON analytics.turn_lineage;
+        CREATE TRIGGER poison_lineage
+            BEFORE INSERT ON analytics.turn_lineage
+            FOR EACH ROW EXECUTE FUNCTION pg_temp_poison_lineage();
+        "#
+    ))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Polls `probe` until it yields a value or `budget` expires.
+async fn wait_for<T>(budget: Duration, probe: impl Fn() -> Option<T>) -> Option<T> {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if let Some(value) = probe() {
+            return Some(value);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Returns the configured test Postgres URL.
+fn test_database_url() -> String {
+    std::env::var("MOA_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://moa_owner:dev@127.0.0.1:10040/moa".to_string())
 }

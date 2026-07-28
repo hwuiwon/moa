@@ -517,6 +517,22 @@ pub struct ToolCallRequest {
     pub worker_id: Option<String>,
 }
 
+/// Name of the built-in tool that reads a line range from a stored tool result.
+pub const TOOL_RESULT_READ_TOOL_NAME: &str = "tool_result_read";
+/// Name of the built-in tool that searches a stored tool result.
+pub const TOOL_RESULT_SEARCH_TOOL_NAME: &str = "tool_result_search";
+
+/// Tools the agent loop needs in order to operate on its own outputs.
+///
+/// These are control, not capability: they do no task work, they are how the
+/// model recovers content from a tool result that was truncated or claim-checked
+/// out of the transcript. A loadout that drops them still looks complete while
+/// every large tool output silently becomes unreadable, so a selection policy
+/// that must fit a schema cap keeps them ahead of anything it is choosing
+/// between.
+pub const CONTROL_TOOL_NAMES: [&str; 2] =
+    [TOOL_RESULT_READ_TOOL_NAME, TOOL_RESULT_SEARCH_TOOL_NAME];
+
 /// Shared metadata that describes one callable tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDefinition {

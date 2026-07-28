@@ -167,6 +167,7 @@ pub(super) async fn emit_retrieval_lineage(
         run_id: None,
         dataset_id: None,
         comment: None,
+        experiment_provenance: None,
     };
     push_event(
         &mut events,

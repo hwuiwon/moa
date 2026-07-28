@@ -25,13 +25,24 @@ async fn postgres_lineage_sink_writes_rows() -> Result<()> {
         .execute(&pool)
         .await?;
 
-    let journal_dir = tempfile::tempdir()?;
-    let mut config = MoaConfig::default();
-    config.observability.lineage.journal_path = journal_dir
-        .path()
-        .join("lineage-journal")
-        .display()
-        .to_string();
+    // No local path to configure: acceptance is owned by Postgres, so the sink
+    // needs nothing from the filesystem.
+    //
+    // `[clickhouse]` is configured ON PURPOSE. `MOA_LINEAGE_SINK=postgres` used
+    // to share a match arm with the ClickHouse mode and select the backend from
+    // config presence alone, so naming Postgres silently yielded ClickHouse with
+    // no error and no warning. The rows landing in `analytics.turn_lineage`
+    // below are the assertion that `postgres` means Postgres: with the old
+    // behaviour they would have gone to a ClickHouse endpoint that is not even
+    // running here, and this test would fail on the write rather than pass
+    // vacuously.
+    let config = MoaConfig {
+        clickhouse: Some(moa_config::ClickHouseConfig {
+            url: "http://127.0.0.1:1".to_string(),
+            ..moa_config::ClickHouseConfig::default()
+        }),
+        ..MoaConfig::default()
+    };
 
     let runtime =
         build_lineage_sink_from_env_value(&config, pool.clone(), Some("postgres")).await?;
@@ -70,6 +81,10 @@ async fn postgres_lineage_sink_writes_rows() -> Result<()> {
     let stats = writer.shutdown().await?;
 
     assert_eq!(stats.written, 1);
+    assert_eq!(
+        stats.pending, 0,
+        "the accepted row must be dequeued once stored, not left for the next claimant"
+    );
 
     let count: i64 = sqlx::query_scalar(
         r#"

@@ -281,7 +281,11 @@ async fn list_tools_returns_workspace_tools() {
             write_tool_policy(ToolInputShape::Json, ToolDiffStrategy::None),
         )),
     ]);
-    let router = Arc::new(ToolRouter::new(registry, HashMap::new()));
+    let router = Arc::new(ToolRouter::new(
+        registry,
+        HashMap::new(),
+        moa_hands::local_development_sandbox_policy(),
+    ));
     let executor = ToolExecutorImpl::new(router);
 
     let descriptors = executor.list_descriptors();

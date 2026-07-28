@@ -18,7 +18,6 @@ use moa_core::{
     traits::{HandProvider, Identity, IdentityType},
     types::completion::ToolInvocation,
     types::hands::HandHandle,
-    types::hands::HandResources,
     types::hands::HandSpec,
     types::hands::HandStatus,
     types::identifiers::TenantId,
@@ -147,28 +146,14 @@ async fn daytona_provider_round_trip() {
     let provider = live_provider();
 
     let unsupported = provider
-        .provision(HandSpec {
-            sandbox_tier: moa_core::types::hands::SandboxTier::MicroVM,
-            image: None,
-            resources: HandResources::default(),
-            env: std::collections::HashMap::new(),
-            workspace_mount: None,
-            idle_timeout: Duration::from_secs(300),
-            max_lifetime: Duration::from_secs(600),
-        })
+        .provision(live_hand_spec(moa_core::types::hands::SandboxTier::MicroVM))
         .await;
     assert!(matches!(unsupported, Err(MoaError::Unsupported(_))));
 
     let handle = provider
-        .provision(HandSpec {
-            sandbox_tier: moa_core::types::hands::SandboxTier::Container,
-            image: None,
-            resources: HandResources::default(),
-            env: std::collections::HashMap::new(),
-            workspace_mount: None,
-            idle_timeout: Duration::from_secs(300),
-            max_lifetime: Duration::from_secs(600),
-        })
+        .provision(live_hand_spec(
+            moa_core::types::hands::SandboxTier::Container,
+        ))
         .await
         .expect("failed to provision Daytona sandbox");
 
@@ -460,5 +445,43 @@ async fn daytona_router_reuses_and_isolates() {
             cleanup_result.expect("router cleanup should succeed after panic");
             resume_unwind(panic);
         }
+    }
+}
+
+/// A live-provider hand spec: unrestricted egress with a 5-minute idle window
+/// inside a 10-minute hard lifetime, which is what both cloud providers can
+/// actually enforce.
+fn live_hand_spec(tier: moa_core::types::hands::SandboxTier) -> HandSpec {
+    use moa_core::types::hands::{
+        BuiltinPolicyRevision, CpuLimit, DiskLimit, EgressPolicy, LifetimeLimit, MemoryLimit,
+        SandboxPolicySnapshot, SandboxProfile, resolve_effective_sandbox_profile,
+    };
+
+    let seconds = |value: u64| LifetimeLimit::Bounded {
+        seconds: std::num::NonZeroU64::new(value).expect("nonzero seconds"),
+    };
+    let profile = SandboxProfile::new(
+        CpuLimit::Unbounded,
+        MemoryLimit::Unbounded,
+        DiskLimit::Unbounded,
+        EgressPolicy::Unrestricted,
+        seconds(300),
+        seconds(600),
+    )
+    .expect("live profile should validate");
+    let effective_profile = resolve_effective_sandbox_profile(
+        &SandboxPolicySnapshot::new("live-deployment", profile).expect("deployment snapshot"),
+        &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::TenantUnset),
+        &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::AgentUnset),
+        &SandboxPolicySnapshot::builtin(BuiltinPolicyRevision::RouteUnset),
+        "live-capabilities-v1",
+    )
+    .expect("live policy resolution should succeed");
+    HandSpec {
+        sandbox_tier: tier,
+        image: None,
+        env: std::collections::HashMap::new(),
+        workspace_mount: None,
+        effective_profile,
     }
 }

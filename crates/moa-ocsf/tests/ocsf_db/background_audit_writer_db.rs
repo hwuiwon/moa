@@ -7,7 +7,7 @@ use moa_core::{
     traits::{Identity, IdentityType},
     types::identifiers::TenantId,
 };
-use moa_ocsf::{init_background_audit, signing, spawn_authn_success};
+use moa_ocsf::{AuditRuntime, signing, spawn_authn_success};
 use uuid::Uuid;
 
 use super::support;
@@ -25,7 +25,8 @@ async fn background_audit_writer_persists_signed_events_off_the_request_path_db(
     // Pins: spawn_authn_success enqueues events that the background writer signs
     // and batch-inserts, and nothing is dropped when the queue has headroom.
     let pool = support::migrated_ocsf_pool().await;
-    init_background_audit(pool.clone());
+    let audit = AuditRuntime::start(pool.clone()).expect("audit runtime should start");
+    let emitter = audit.emitter();
 
     let tenant_id = Uuid::from_u128(0x501);
     let user_id = Uuid::from_u128(0x502);
@@ -39,7 +40,7 @@ async fn background_audit_writer_persists_signed_events_off_the_request_path_db(
 
     let expected = 5;
     for _ in 0..expected {
-        spawn_authn_success(tenant_id, &identity, "api_key", Some("127.0.0.1"));
+        spawn_authn_success(&emitter, tenant_id, &identity, "api_key", Some("127.0.0.1"));
     }
 
     // Poll until the background writer has flushed (age flush is ~500ms).
@@ -52,6 +53,11 @@ async fn background_audit_writer_persists_signed_events_off_the_request_path_db(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(count, expected, "all enqueued events are persisted");
+    assert_eq!(
+        emitter.dropped_count(),
+        0,
+        "nothing may be dropped while the queue has headroom"
+    );
 
     // The background-signed rows verify against the tenant's signing key.
     let (signing_key_id, signature_hex, event_jcs): (Uuid, String, Vec<u8>) = sqlx::query_as(
@@ -150,5 +156,40 @@ async fn sign_cached_concurrent_first_use_shares_created_key_db() {
     assert!(
         keys.iter().all(|key| *key == keys[0]),
         "all concurrent signers should use the same active key"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_drains_events_queued_before_it_was_requested_db() {
+    // Pins: SIGTERM must not discard the audit trail. Events enqueued and then
+    // immediately followed by a shutdown are persisted, without the test waiting
+    // out the writer's 500ms age flush - so a shutdown that abandoned the queue
+    // instead of draining it fails here rather than looking like a slow flush.
+    let pool = support::migrated_ocsf_pool().await;
+    let audit = AuditRuntime::start(pool.clone()).expect("audit runtime should start");
+    let emitter = audit.emitter();
+
+    let tenant_id = Uuid::from_u128(0x901);
+    let identity = Identity {
+        identity_type: IdentityType::Operator,
+        id: Uuid::from_u128(0x902),
+        tenant_id: TenantId::from(tenant_id),
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    };
+
+    let expected = 7;
+    for _ in 0..expected {
+        spawn_authn_success(&emitter, tenant_id, &identity, "api_key", Some("127.0.0.1"));
+    }
+
+    let dropped = audit.shutdown().await;
+    assert_eq!(dropped, 0, "a bounded shutdown must not drop queued events");
+
+    let count = security_event_count(&pool, tenant_id).await;
+    assert_eq!(
+        count, expected,
+        "every event queued before shutdown must be persisted by the drain; found {count} \
+         of {expected} for tenant {tenant_id}"
     );
 }

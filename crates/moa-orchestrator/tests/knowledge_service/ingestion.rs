@@ -228,7 +228,15 @@ async fn mock_connector_end_to_end_db_memory() {
         moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
             moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
         ),
-    );
+    )
+    // Opts into the semantic-enabled policy for the same reason
+    // `task14_ingestion_pipeline` does: this test pins the graph node/edge
+    // counters, and the full write set is the interesting one to pin. Under the
+    // default (off) policy the same three records per connector produce 16/13
+    // and 15/12 — no semantic entity or edge at all — which is pinned separately
+    // by `disabled_semantic_policy_writes_no_semantic_rows_nodes_or_edges_db_memory`
+    // in moa-knowledge.
+    .with_semantic_policy(moa_core::types::memory::SemanticGraphPolicy::Deterministic);
 
     let merge_connection_row = repository
         .get_connection(merge_connection.connection_uid)
@@ -397,8 +405,12 @@ async fn mock_connector_end_to_end_db_memory() {
         })
         .await
         .expect("nango status should render");
-    // The deterministic generic proper-noun fallback (semantic.generic_entities,
-    // default on) emits one extra Entity node + link edge for each chunk whose
+    // Counts are for the semantic-enabled policy this pipeline opts into above.
+    // Of these, the semantic write set is 5 nodes / 5 edges per connector: drop
+    // the opt-in and the same records produce 16/13 and 15/12.
+    //
+    // The deterministic generic proper-noun fallback emits one extra Entity node
+    // + link edge for each chunk whose
     // text concatenates a bare heading with its body, producing a capitalized
     // span: merge's "PTO Policy PTO" (+1 node/+1 edge), and nango's
     // "Finance Controls Finance" and "Support Guide Support" (+2 nodes/+2 edges).

@@ -824,16 +824,48 @@ async fn materialize_primary_learning_if_requested(
     };
 
     environment.segment_store.create_segment(&segment).await?;
+    // The eval harness materializes learning rows through the same sanitized
+    // contract production uses, so a fixture cannot exercise a raw-evidence path
+    // that no longer exists.
+    let assessment_summaries = assessment
+        .evidence
+        .iter()
+        .map(|evidence| evidence.summary.clone())
+        .collect::<Vec<_>>();
+    let evidence = moa_skills::evidence::sanitize_segment_evidence(
+        &moa_memory_pii::HeuristicPiiClassifier,
+        moa_skills::evidence::EvidenceScope {
+            tenant_id: meta.tenant_id,
+            contact_id: meta.contact.as_ref().map(|contact| contact.contact_id),
+            session_id: primary.session_id,
+            segment_id,
+            experience_id: moa_brain::learning::experience::deterministic_experience_id(segment_id),
+        },
+        &events,
+        moa_skills::evidence::SegmentNarrative {
+            task_summary: segment.task_summary.as_deref(),
+            assessment_summaries: &assessment_summaries,
+        },
+    )
+    .await
+    .map_err(|rejection| {
+        Error::InvalidConfig(format!(
+            "learning materialization for '{}' produced unreleasable evidence: carrier={} reason={}",
+            case.name,
+            rejection.carrier.as_str(),
+            rejection.code()
+        ))
+    })?;
     let experience = experience_from_assessment(
         &meta,
         &segment,
         &assessment,
-        &events,
+        &evidence,
         None,
         Some(duration_ms),
         now,
     );
-    let attributions = attributions_for_experience(&experience, &events, now);
+    let attributions = attributions_for_experience(&experience, &evidence, now);
     let candidates = propose_candidates_for_experience(&experience, &attributions, now);
     environment
         .experience_store
