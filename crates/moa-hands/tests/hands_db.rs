@@ -2,5 +2,3 @@
 
 #[path = "hands_db/hand_lease_reaper_db.rs"]
 mod hand_lease_reaper_db;
-#[path = "hands_db/tenant_mcp_connection_db.rs"]
-mod tenant_mcp_connection_db;

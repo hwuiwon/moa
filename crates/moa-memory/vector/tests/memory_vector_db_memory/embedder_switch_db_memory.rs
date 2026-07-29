@@ -100,34 +100,31 @@ async fn set_embedder_state(
     storage_partition_id: &str,
     model: &str,
     dimension: i32,
-    state: &str,
 ) {
     let mut conn = scoped_conn(pool, storage_partition_id).await;
     sqlx::query(
         r#"
         INSERT INTO moa.storage_partition_state
-            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension, reembed_state)
-        VALUES ($1, $2, 1, $3, $4)
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
+        VALUES ($1, $2, 1, $3)
         ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
-                embedding_dimension = EXCLUDED.embedding_dimension,
-                reembed_state = EXCLUDED.reembed_state
+                embedding_dimension = EXCLUDED.embedding_dimension
         "#,
     )
     .bind(storage_partition_id)
     .bind(model)
     .bind(dimension)
-    .bind(state)
     .execute(conn.as_mut())
     .await
     .expect("set workspace embedder state");
     conn.commit().await.expect("commit embedder state");
 }
 
-fn query(storage_partition_id: &str, embedding: Vec<f32>) -> VectorQuery {
-    let _ = storage_partition_id;
+fn query(embedding_model: &str, embedding: Vec<f32>) -> VectorQuery {
     VectorQuery {
-        embedding,
+        embedding: moa_memory_vector::QueryEmbedding::new(embedding, embedding_model.to_string())
+            .expect("valid query embedding"),
         k: 5,
         label_filter: Some(vec!["Fact".to_string()]),
         max_pii_class: SensitivityClass::Restricted,
@@ -151,7 +148,6 @@ async fn switching_embedder_dimensions_blocks_knn_until_reembedded() {
         &storage_partition_id,
         "embed-v4.0",
         1024,
-        "steady",
     )
     .await;
     let store = store(&test_db, &storage_partition_id);
@@ -171,11 +167,10 @@ async fn switching_embedder_dimensions_blocks_knn_until_reembedded() {
         &storage_partition_id,
         "gemini-embedding-2",
         768,
-        "steady",
     )
     .await;
     let error = store
-        .knn(&query(&storage_partition_id, basis_vector(0)))
+        .knn(&query("gemini-embedding-2", basis_vector(0)))
         .await
         .expect_err("dimension switch must block KNN");
 
@@ -204,7 +199,6 @@ async fn reembed_workspace_with_new_embedder_overwrites_existing_vectors_atomica
         &storage_partition_id,
         "embed-v4.0",
         1024,
-        "steady",
     )
     .await;
     let store = store(&test_db, &storage_partition_id);
@@ -224,7 +218,6 @@ async fn reembed_workspace_with_new_embedder_overwrites_existing_vectors_atomica
         &storage_partition_id,
         "replacement-embedder",
         1024,
-        "steady",
     )
     .await;
     store
@@ -239,7 +232,7 @@ async fn reembed_workspace_with_new_embedder_overwrites_existing_vectors_atomica
         .expect("overwrite vector with replacement embedder");
 
     let matches = store
-        .knn(&query(&storage_partition_id, basis_vector(7)))
+        .knn(&query("replacement-embedder", basis_vector(7)))
         .await
         .expect("KNN succeeds after reembed state is steady");
     assert_eq!(matches.first().map(|hit| hit.uid), Some(uid));
@@ -266,51 +259,6 @@ async fn reembed_workspace_with_new_embedder_overwrites_existing_vectors_atomica
 }
 
 #[tokio::test]
-async fn reembed_in_progress_state_blocks_concurrent_knn_queries_until_complete() {
-    // Pins: re-embedding state blocks reads even when matching vectors already exist.
-    let _guard = TEST_LOCK.lock().await;
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
-    let storage_partition_id = Uuid::now_v7().to_string();
-    let uid = Uuid::now_v7();
-    seed_node_index(test_db.store().pool(), &storage_partition_id, uid).await;
-    set_embedder_state(
-        test_db.store().pool(),
-        &storage_partition_id,
-        "embed-v4.0",
-        1024,
-        "steady",
-    )
-    .await;
-    let store = store(&test_db, &storage_partition_id);
-    store
-        .upsert(&[item(
-            uid,
-            &storage_partition_id,
-            basis_vector(0),
-            "embed-v4.0",
-            1,
-        )])
-        .await
-        .expect("seed vector");
-    set_embedder_state(
-        test_db.store().pool(),
-        &storage_partition_id,
-        "embed-v4.0",
-        1024,
-        "in_progress",
-    )
-    .await;
-
-    let error = store
-        .knn(&query(&storage_partition_id, basis_vector(0)))
-        .await
-        .expect_err("in-progress reembed must block KNN");
-    assert!(matches!(error, Error::ReembedInProgress { .. }));
-}
-
-#[tokio::test]
 async fn configured_workspace_embedder_allows_same_model_vector_write() {
     // Pins: embedding writes succeed only after explicit workspace embedder state exists.
     let _guard = TEST_LOCK.lock().await;
@@ -325,7 +273,6 @@ async fn configured_workspace_embedder_allows_same_model_vector_write() {
         &storage_partition_id,
         "embed-v4.0",
         1024,
-        "steady",
     )
     .await;
 
@@ -418,7 +365,6 @@ async fn configured_workspace_embedder_rejects_mixed_model_vector_write() {
         &storage_partition_id,
         "embed-v4.0",
         1024,
-        "steady",
     )
     .await;
 

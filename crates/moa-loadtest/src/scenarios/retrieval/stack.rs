@@ -178,7 +178,7 @@ impl TenantRetriever {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: query.text.clone(),
-            query_embedding: query.embedding.clone(),
+            query_embedding: Some(query.embedding.clone()),
             scope: self.scope.clone(),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,

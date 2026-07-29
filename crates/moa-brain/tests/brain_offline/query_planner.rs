@@ -53,7 +53,10 @@ async fn planner_classify_vector_query_and_builds_retrieval_request() {
     assert_eq!(planned.strategy, Strategy::VectorFirst);
     let request = planned.into_retrieval_request(
         "How often does the deploy fail?",
-        vec![0.0; 1024],
+        Some(
+            moa_memory_vector::QueryEmbedding::new(vec![0.0; 1024], "test-embed")
+                .expect("valid query embedding"),
+        ),
         SensitivityClass::Restricted,
         5,
         false,

@@ -528,7 +528,9 @@ mod tests {
         ParseInput, parse_input_from_fetched_content, parse_input_from_record,
         record_has_materializable_content, use_native_document_fallback,
     };
-    use crate::domain::{FetchedRecordContent, KnowledgeObject, ObjectStatus, ProviderRecord};
+    use crate::domain::{
+        FetchedRecordContent, KnowledgeObject, ObjectStatus, ProviderRecord, ProviderRecordAcl,
+    };
     use serde_json::{Value, json};
     use uuid::Uuid;
 
@@ -553,7 +555,11 @@ mod tests {
 
     fn record(title: Option<&str>, source_uri: Option<&str>, payload: Value) -> ProviderRecord {
         ProviderRecord {
-            acl: crate::domain::RecordAcl::UniformlyPublic,
+            acl: ProviderRecordAcl {
+                provider_revision: "fixture-acl-rev".to_string(),
+                complete: true,
+                entries: Vec::new(),
+            },
             source_id: "src-1".to_string(),
             object_type: "document".to_string(),
             title: title.map(ToString::to_string),

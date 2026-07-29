@@ -163,6 +163,11 @@ pub trait Worker {
     async fn action_review_resolved(receipt: Json<ActionReviewReceipt>)
     -> Result<(), HandlerError>;
 
+    /// Releases one timed-out or security-stopped review without a model continuation.
+    async fn release_action_review(
+        release: Json<moa_core::types::action_policy::ActionReviewRelease>,
+    ) -> Result<(), HandlerError>;
+
     /// Clears all persisted state for this child key.
     async fn destroy() -> Result<(), HandlerError>;
 

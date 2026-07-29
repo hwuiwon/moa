@@ -79,8 +79,7 @@ async fn seed_storage_partition_state(
                 vector_backend_state = 'steady',
                 embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
-                embedding_dimension = EXCLUDED.embedding_dimension,
-                reembed_state = 'steady'
+                embedding_dimension = EXCLUDED.embedding_dimension
         "#,
     )
     .bind(storage_partition_id)
@@ -136,10 +135,10 @@ async fn insert_knowledge_chunk(
         INSERT INTO moa.knowledge_connections (
             connection_uid, tenant_id, storage_partition_id, provider,
             provider_config_key, provider_connection_id, connector,
-            credential_ref, status, acl_mode
+            credential_ref, status
         )
         VALUES ($1, $2, $3, 'test-provider', 'default', $4, 'test-connector',
-                'test-credential', 'active', 'tenant_public')
+                'test-credential', 'active')
         "#,
     )
     .bind(connection_uid)

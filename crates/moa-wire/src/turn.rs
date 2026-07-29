@@ -715,6 +715,12 @@ impl<ExecutionBudgetLimit> PendingUserReplyTarget<ExecutionBudgetLimit> {
 pub struct ApplySecurityAssessmentRequest {
     /// Exact generation-fenced circuit owner.
     pub owner: moa_core::types::security::SecurityCircuitOwner,
+    /// Whether a strictly newer owner may discard this reviewed-action assessment.
+    ///
+    /// Ordinary turn execution leaves this false so a late result cannot reach the
+    /// model without updating its circuit. Action-review resolution sets it true:
+    /// the owner callback independently drops that superseded continuation.
+    pub allow_superseded_owner_noop: bool,
     /// Canonical capability identity resolved by the router.
     pub capability: moa_core::types::security::ToolCapabilityId,
     /// Tool call whose output produced the assessment.

@@ -6,7 +6,7 @@ use pgvector::HalfVector;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{Error, Result, VectorItem, VectorQuery, validate_dimension};
+use crate::{Error, QueryEmbedding, Result, VectorItem, VectorQuery, validate_dimension};
 
 #[derive(Debug, Clone)]
 pub(crate) struct EmbeddingRow {
@@ -60,7 +60,7 @@ impl EmbeddingRow {
         let embedding = self.embedding_f32();
         validate_dimension(&embedding)?;
         Ok(VectorQuery {
-            embedding,
+            embedding: QueryEmbedding::new(embedding, self.embedding_model.clone())?,
             k,
             label_filter: Some(vec![self.label.clone()]),
             max_pii_class: SensitivityClass::Restricted,

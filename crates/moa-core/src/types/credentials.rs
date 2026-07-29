@@ -34,8 +34,6 @@ pub enum CredentialKind {
     ProviderApiKey,
     /// OAuth access/refresh material brokered for a tenant connection.
     OAuth,
-    /// Bearer token presented to an external MCP server.
-    McpBearer,
 }
 
 impl CredentialKind {
@@ -45,7 +43,6 @@ impl CredentialKind {
         match self {
             Self::ProviderApiKey => "provider_api_key",
             Self::OAuth => "oauth",
-            Self::McpBearer => "mcp_bearer",
         }
     }
 
@@ -55,7 +52,6 @@ impl CredentialKind {
         match value {
             "provider_api_key" => Some(Self::ProviderApiKey),
             "oauth" => Some(Self::OAuth),
-            "mcp_bearer" => Some(Self::McpBearer),
             _ => None,
         }
     }

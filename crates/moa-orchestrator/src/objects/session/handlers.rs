@@ -293,6 +293,7 @@ impl Session for SessionImpl {
                 .take_next(pending_state.turn_generation)
         {
             pending_state.active_turn_id = Some(queued.turn_id.clone());
+            activate_coordinator_security_owner(&mut state, &queued.turn_id, queued.generation);
             let now = durable_utc_now(&ctx).await?;
             state.set_status(SessionStatus::Running, now);
             let identity = state.owning_identity.clone().ok_or_else(|| {
@@ -320,6 +321,7 @@ impl Session for SessionImpl {
         if dispatch_next && let Some(next) = pending_state.pending_messages.pop_front() {
             let next_turn_id = generate_turn_id(&mut ctx);
             pending_state.active_turn_id = Some(next_turn_id.clone());
+            activate_coordinator_security_owner(&mut state, &next_turn_id, next.generation);
             let now = durable_utc_now(&ctx).await?;
             state.set_status(SessionStatus::Running, now);
             // The dequeued message's admission now owns a running turn. Its recorded
@@ -528,10 +530,7 @@ impl Session for SessionImpl {
         // the exact turn that will run it, even when it has to wait behind the origin.
         let continuation_turn_id = generate_turn_id(&mut ctx);
         let entry = QueuedActionReviewContinuation {
-            continuation: moa_core::types::action_policy::ActionReviewContinuation {
-                review_id: receipt.review_id,
-                receipt,
-            },
+            continuation: moa_core::types::action_policy::ActionReviewContinuation { receipt },
             turn_id: continuation_turn_id,
             generation: registered.generation,
             ordinal: registered.ordinal,
@@ -550,6 +549,7 @@ impl Session for SessionImpl {
         };
         if let Some(dispatch) = dispatch.as_ref() {
             pending_state.active_turn_id = Some(dispatch.turn_id.clone());
+            activate_coordinator_security_owner(&mut state, &dispatch.turn_id, dispatch.generation);
             let now = durable_utc_now(&ctx).await?;
             state.set_status(SessionStatus::Running, now);
         }
@@ -561,17 +561,93 @@ impl Session for SessionImpl {
             &ctx,
             session_id,
             Event::ActionReviewContinuationRequested {
-                review_id: fact.continuation.review_id,
+                review_id: fact.continuation.receipt.review_id,
                 turn_id: fact.turn_id.clone(),
                 receipt: fact.continuation.receipt.clone(),
             },
             moa_core::types::action_policy::action_review_continuation_dedupe_key(
-                fact.continuation.review_id,
+                fact.continuation.receipt.review_id,
             ),
         )
         .await?;
 
         if let Some(dispatch) = dispatch {
+            dispatch_turn_execution(
+                &ctx,
+                action_review_run_request(
+                    ctx.key().to_string(),
+                    dispatch.turn_id,
+                    identity,
+                    contact,
+                    dispatch.generation,
+                    dispatch.continuation,
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, release))]
+    // SAFETY: internal control-plane release from the action-review reaper or
+    // security circuit. It removes only the matching review registration owned by
+    // this session and does not create a continuation for that review.
+    async fn release_action_review(
+        &self,
+        ctx: ObjectContext<'_>,
+        release: Json<moa_core::types::action_policy::ActionReviewRelease>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Session", "release_action_review");
+        let release = release.into_inner();
+        let session_id = parse_session_key(ctx.key())?;
+        if !matches!(
+            &release.owner,
+            moa_core::types::action_policy::ActionReviewOwner::Coordinator {
+                session_id: owner_session,
+                ..
+            } if *owner_session == session_id
+        ) {
+            return Err(TerminalError::new(
+                "action review release does not belong to this session coordinator",
+            )
+            .into());
+        }
+        let mut pending_state = load_pending_state(&ctx).await?;
+        if pending_state
+            .action_reviews
+            .resolve(release.review_id)
+            .is_none()
+        {
+            return Ok(());
+        }
+        let mut state = Tracked::<SessionVoState>::load(&ctx).await?;
+        let identity = state.owning_identity.clone();
+        let contact = state.meta.as_ref().and_then(|meta| meta.contact.clone());
+        let can_dispatch = release.resume_queued
+            && pending_state.active_turn_id.is_none()
+            && !pending_state.task_tree_cancellation_fenced()
+            && !matches!(
+                state.status,
+                Some(SessionStatus::Cancelled) | Some(SessionStatus::Failed)
+            )
+            && identity.is_some();
+        let dispatch = if can_dispatch {
+            pending_state
+                .action_reviews
+                .take_next(pending_state.turn_generation)
+        } else {
+            None
+        };
+        if let Some(dispatch) = dispatch.as_ref() {
+            pending_state.active_turn_id = Some(dispatch.turn_id.clone());
+            activate_coordinator_security_owner(&mut state, &dispatch.turn_id, dispatch.generation);
+            let now = durable_utc_now(&ctx).await?;
+            state.set_status(SessionStatus::Running, now);
+        }
+        state.persist(&ctx);
+        persist_pending_state(&ctx, &pending_state);
+        sync_status(&ctx, session_id, &state).await?;
+        if let (Some(dispatch), Some(identity)) = (dispatch, identity) {
             dispatch_turn_execution(
                 &ctx,
                 action_review_run_request(
@@ -740,6 +816,51 @@ impl Session for SessionImpl {
             },
             &request.assessment,
         );
+        let transition = match transition {
+            Ok(transition) => transition,
+            Err(error)
+                if request.allow_superseded_owner_noop
+                    && matches!(
+                        (error.active.as_ref(), &error.received),
+                        (
+                            Some(
+                                moa_core::types::security::SecurityCircuitOwner::Coordinator {
+                                    generation: active_generation,
+                                    ..
+                                }
+                            ),
+                            moa_core::types::security::SecurityCircuitOwner::Coordinator {
+                                generation: received_generation,
+                                ..
+                            }
+                        ) if active_generation > received_generation
+                    ) =>
+            {
+                tracing::info!(
+                    active_owner_generation = error.active.as_ref().map(|owner| owner.generation()),
+                    received_owner_generation = error.received.generation(),
+                    "discarded superseded reviewed session security assessment"
+                );
+                return Ok(Json::from(ApplySecurityAssessmentResponse {
+                    transition: None,
+                    stage: moa_core::types::security::SecurityCircuitStage::Clear,
+                }));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    active_owner_kind = error.active.as_ref().map(|owner| owner.kind()),
+                    active_owner_generation = error.active.as_ref().map(|owner| owner.generation()),
+                    received_owner_kind = error.received.kind(),
+                    received_owner_generation = error.received.generation(),
+                    "rejected stale session security assessment"
+                );
+                return Err(TerminalError::new_with_code(
+                    409,
+                    "security assessment owner is no longer active",
+                )
+                .into());
+            }
+        };
         let stage = state
             .security_circuit
             .stage(&request.owner, &request.capability);
@@ -837,6 +958,11 @@ impl Session for SessionImpl {
             )
             .await?;
         pending_state.active_turn_id = Some(requested.turn_id.clone());
+        activate_coordinator_security_owner(
+            &mut state,
+            &requested.turn_id,
+            pending_state.turn_generation,
+        );
         arm_turn_admission_heartbeat(&ctx, &mut pending_state, &self.turn_admission);
         let now = durable_utc_now(&ctx).await?;
         state.set_status(SessionStatus::Running, now);
@@ -1348,6 +1474,11 @@ impl Session for SessionImpl {
                 // an active turn and no second root turn can start.
                 let mut pending_state = load_pending_state(&ctx).await?;
                 pending_state.active_turn_id = Some(turn_id.clone());
+                activate_coordinator_security_owner(
+                    &mut state,
+                    &turn_id,
+                    pending_state.turn_generation,
+                );
                 arm_turn_admission_heartbeat(&ctx, &mut pending_state, &self.turn_admission);
                 state.set_status(SessionStatus::Running, now);
                 state.record_resume_dispatch(turn_id.clone(), now, limits.worker_resume_window_ms);
@@ -1959,6 +2090,7 @@ async fn dispatch_queued_parent_resume_if_idle(
     )
     .await?;
     pending_state.active_turn_id = Some(turn_id.clone());
+    activate_coordinator_security_owner(state, &turn_id, pending_state.turn_generation);
     state.set_status(SessionStatus::Running, now);
     state.record_resume_dispatch(turn_id.clone(), now, limits.worker_resume_window_ms);
     let contact = state.meta.as_ref().and_then(|meta| meta.contact.clone());
@@ -2270,6 +2402,7 @@ async fn start_turn_inner(
     let generation = pending_state.advance_turn_generation();
     let turn_id = generate_turn_id(ctx);
     pending_state.active_turn_id = Some(turn_id.clone());
+    activate_coordinator_security_owner(&mut state, &turn_id, generation);
     arm_turn_admission_heartbeat(ctx, &mut pending_state, turn_admission);
     state.set_status(SessionStatus::Running, now);
     // Capture the session's owning-actor identity from the first verified turn
@@ -2399,19 +2532,48 @@ async fn require_session_participant(
     Ok(identity)
 }
 
+/// Installs the coordinator circuit owner as part of admitting a turn.
+fn activate_coordinator_security_owner(state: &mut SessionVoState, turn_id: &str, generation: u64) {
+    state.security_circuit.adopt_owner(
+        &moa_core::types::security::SecurityCircuitOwner::Coordinator {
+            turn_id: turn_id.to_string(),
+            generation,
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use moa_core::{
         types::channel::Channel, types::contact::ContactId, types::contact::ContactRef,
         types::contact::ContactVerificationState, types::identifiers::ModelId,
-        types::identifiers::SessionId, types::identifiers::TenantId, types::session::SessionMeta,
+        types::identifiers::SessionId, types::identifiers::TenantId,
+        types::security::SecurityCircuitOwner, types::session::SessionMeta,
     };
     use restate_sdk::prelude::TerminalError;
 
     use super::{
-        WorkerInputTarget, active_turn_progress_or_none, admitted_contact_for_turn,
-        pending_message_queue_is_full, worker_provide_input_request,
+        SessionVoState, WorkerInputTarget, activate_coordinator_security_owner,
+        active_turn_progress_or_none, admitted_contact_for_turn, pending_message_queue_is_full,
+        worker_provide_input_request,
     };
+
+    #[test]
+    fn coordinator_turn_admission_installs_the_security_owner() {
+        // Pins: the owner fence exists before any classified tool output or
+        // delayed action-review assessment can reach the Session VO.
+        let mut state = SessionVoState::default();
+
+        activate_coordinator_security_owner(&mut state, "turn-7", 7);
+
+        assert_eq!(
+            state.security_circuit.owner,
+            Some(SecurityCircuitOwner::Coordinator {
+                turn_id: "turn-7".to_string(),
+                generation: 7,
+            })
+        );
+    }
 
     #[test]
     fn pending_message_queue_rejects_exactly_at_the_configured_bound() {

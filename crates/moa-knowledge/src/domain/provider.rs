@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{KnowledgeConnection, RecordAcl};
+use super::{KnowledgeConnection, ProviderRecordAcl};
 
 /// Linked-account provider identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -309,7 +309,7 @@ pub struct ProviderRecord {
     /// Required with no default: a record whose ACL was never stated cannot be
     /// distinguished from one the provider said was public, and the ingestion
     /// pipeline refuses to guess.
-    pub acl: RecordAcl,
+    pub acl: ProviderRecordAcl,
 }
 
 /// Request to fetch the byte content of one provider record.

@@ -10,7 +10,6 @@ pub mod backend;
 pub(crate) mod embedding_row;
 pub mod pgvector_store;
 pub mod promotion;
-pub mod rebuild;
 pub mod sync;
 pub mod turbopuffer;
 
@@ -21,11 +20,6 @@ pub use pgvector_store::PgvectorStore;
 pub use promotion::{
     PROMOTION_BATCH_SIZE, PROMOTION_OVERLAP_THRESHOLD, PromotionOptions, PromotionReport,
     VectorPartitionPromotion, finalize_promotion, rollback_promotion,
-};
-pub use rebuild::{
-    ActiveGenerationPointer, BatchCommit, BatchCounters, CandidateVector, REBUILD_BATCH_SIZE,
-    REBUILD_OVERLAP_THRESHOLD, RebuildFence, RebuildGeneration, RebuildOperation,
-    RebuildRepository, StartRebuild, TransitionOutcome,
 };
 pub use sync::{
     VECTOR_SYNC_MAX_ATTEMPTS, VECTOR_SYNC_POST_COMMIT_LIMIT, VectorSyncOperation, VectorSyncReport,
@@ -71,6 +65,9 @@ pub enum Error {
     /// Embedder configuration is invalid.
     #[error("invalid embedder configuration: {0}")]
     EmbedderConfig(String),
+    /// A query embedding was empty or did not identify its embedding model.
+    #[error("invalid query embedding: {0}")]
+    InvalidQueryEmbedding(&'static str),
     /// The storage-partition embedder configuration does not match the pgvector index shape.
     #[error(
         "storage partition {storage_partition_id} embedder `{configured_model}` uses {configured_dimension} dimensions, but pgvector KNN requires {required_dimension}"
@@ -102,12 +99,6 @@ pub enum Error {
         configured_model: String,
         /// Model used by the embedding write.
         requested_model: String,
-    },
-    /// The storage partition is being re-embedded and cannot serve stale KNN reads.
-    #[error("storage partition {storage_partition_id} re-embedding is in progress")]
-    ReembedInProgress {
-        /// Storage partition whose vectors are being rewritten.
-        storage_partition_id: String,
     },
     /// The vector provider returned a non-success status.
     #[error("vector provider `{provider}` returned HTTP {status}: {body}")]
@@ -198,104 +189,6 @@ pub enum Error {
         /// Unsupported feature identifier.
         feature: &'static str,
     },
-    /// A rebuild could not reconstruct a vector's original embedding input.
-    #[error("cannot reconstruct the embedding input for {label} {uid}: {reason}")]
-    RebuildProvenanceMissing {
-        /// Graph node whose provenance is missing.
-        uid: uuid::Uuid,
-        /// Graph vertex label.
-        label: String,
-        /// Why the input could not be reconstructed.
-        reason: &'static str,
-    },
-    /// A rebuild found a vector whose label has no reconstruction rule.
-    #[error("no rebuild rule reconstructs the embedding input for {label} {uid}")]
-    RebuildLabelUnsupported {
-        /// Graph node with the unsupported label.
-        uid: uuid::Uuid,
-        /// Graph vertex label.
-        label: String,
-    },
-    /// The storage partition already has a live rebuild operation.
-    #[error("storage partition {storage_partition_id} already has a live rebuild operation")]
-    RebuildPartitionBusy {
-        /// Storage partition holding the live operation.
-        storage_partition_id: String,
-    },
-    /// A rebuild operation row was not found.
-    #[error("rebuild operation {operation_uid} not found")]
-    RebuildOperationNotFound {
-        /// Operation that was expected to exist.
-        operation_uid: uuid::Uuid,
-    },
-    /// A rebuild generation row was not found.
-    #[error("rebuild generation {generation_uid} not found")]
-    RebuildGenerationNotFound {
-        /// Generation that was expected to exist.
-        generation_uid: uuid::Uuid,
-    },
-    /// A compare-and-swap transition lost to another writer or a moved lifecycle.
-    #[error("rebuild operation {operation_uid} expected `{expected}` but observed `{observed}`")]
-    RebuildFenceLost {
-        /// Operation whose transition was refused.
-        operation_uid: uuid::Uuid,
-        /// Lifecycle or ownership the caller assumed.
-        expected: &'static str,
-        /// Lifecycle or ownership actually found.
-        observed: &'static str,
-    },
-    /// A build batch targeted a generation the operation does not own.
-    #[error("rebuild operation {operation_uid} does not own candidate generation {generation_uid}")]
-    RebuildGenerationMismatch {
-        /// Operation that attempted the write.
-        operation_uid: uuid::Uuid,
-        /// Generation the write targeted.
-        generation_uid: uuid::Uuid,
-    },
-    /// A generation was asked to activate before every source vector was rebuilt.
-    #[error(
-        "rebuild generation {generation_uid} has {actual} of {expected} vectors and cannot activate"
-    )]
-    RebuildGenerationIncomplete {
-        /// Generation that is not yet complete.
-        generation_uid: uuid::Uuid,
-        /// Partition-wide vector census.
-        expected: i64,
-        /// Candidate vectors written so far.
-        actual: i64,
-    },
-    /// A generation in this state cannot be activated.
-    #[error("rebuild generation {generation_uid} is `{state}` and cannot be activated")]
-    RebuildGenerationNotActivatable {
-        /// Generation that cannot activate.
-        generation_uid: uuid::Uuid,
-        /// Current generation state.
-        state: &'static str,
-    },
-    /// The storage partition has no active-generation pointer.
-    #[error("storage partition {storage_partition_id} has no active generation")]
-    ActiveGenerationMissing {
-        /// Storage partition missing its pointer row.
-        storage_partition_id: String,
-    },
-    /// An activation or rollback lost the pointer compare-and-swap.
-    #[error(
-        "storage partition {storage_partition_id} active-generation pointer moved from {expected} to {observed}"
-    )]
-    ActiveGenerationPointerConflict {
-        /// Storage partition whose pointer moved.
-        storage_partition_id: String,
-        /// Pointer version the caller assumed.
-        expected: i64,
-        /// Pointer version actually found.
-        observed: i64,
-    },
-    /// No prior generation is retained for this partition.
-    #[error("storage partition {storage_partition_id} has no retained generation to roll back to")]
-    RebuildRollbackUnavailable {
-        /// Storage partition with nothing to roll back to.
-        storage_partition_id: String,
-    },
     /// An HTTP request failed.
     #[error("embedding HTTP request failed: {0}")]
     Reqwest(#[from] reqwest::Error),
@@ -311,7 +204,7 @@ impl Error {
     /// 4xx client responses other than throttling/timeout) will never succeed on
     /// retry without operator remediation, so the vector-sync drainer quarantines
     /// them immediately instead of retrying forever. Transient failures (network,
-    /// Postgres, 5xx/429/408, malformed responses, in-progress re-embedding) stay
+    /// Postgres, 5xx/429/408, malformed responses) stay
     /// eligible for backed-off retries.
     #[must_use]
     pub fn is_permanent(&self) -> bool {
@@ -320,6 +213,7 @@ impl Error {
             | Self::InvalidSensitivityClass(_)
             | Self::EmbeddingResponseLength { .. }
             | Self::EmbedderConfig(_)
+            | Self::InvalidQueryEmbedding(_)
             | Self::EmbedderMismatch { .. }
             | Self::EmbedderModelMismatch { .. }
             | Self::StoragePartitionEmbedderStateMissing { .. }
@@ -333,28 +227,11 @@ impl Error {
             | Self::TransactionalWritesUnsupported(_)
             | Self::InvalidVectorSyncOperation(_)
             | Self::UnsupportedVectorBackend { .. }
-            | Self::UnsupportedQueryFeature { .. }
-            // Rebuild faults are all operator-remediable rather than transient:
-            // a missing input, an unsupported label, a busy partition, a lost
-            // fence, or an incomplete generation will read exactly the same on
-            // the next attempt.
-            | Self::RebuildProvenanceMissing { .. }
-            | Self::RebuildLabelUnsupported { .. }
-            | Self::RebuildPartitionBusy { .. }
-            | Self::RebuildOperationNotFound { .. }
-            | Self::RebuildGenerationNotFound { .. }
-            | Self::RebuildFenceLost { .. }
-            | Self::RebuildGenerationMismatch { .. }
-            | Self::RebuildGenerationIncomplete { .. }
-            | Self::RebuildGenerationNotActivatable { .. }
-            | Self::ActiveGenerationMissing { .. }
-            | Self::ActiveGenerationPointerConflict { .. }
-            | Self::RebuildRollbackUnavailable { .. } => true,
+            | Self::UnsupportedQueryFeature { .. } => true,
             Self::ProviderStatus { status, .. } | Self::VectorProviderStatus { status, .. } => {
                 is_permanent_http_status(*status)
             }
-            Self::ReembedInProgress { .. }
-            | Self::TurbopufferResponse(_)
+            Self::TurbopufferResponse(_)
             | Self::Core(_)
             | Self::Sqlx(_)
             | Self::Reqwest(_)
@@ -419,8 +296,8 @@ pub struct VectorItem {
 /// KNN vector query parameters.
 #[derive(Debug, Clone)]
 pub struct VectorQuery {
-    /// Dense 1024-dimensional query embedding.
-    pub embedding: Vec<f32>,
+    /// Dense query vector and the model that produced it.
+    pub embedding: QueryEmbedding,
     /// Number of nearest neighbors to return.
     pub k: usize,
     /// Optional graph label allowlist.
@@ -431,6 +308,41 @@ pub struct VectorQuery {
     pub include_global: bool,
     /// Optional application-time filter for bitemporal retrieval.
     pub as_of: Option<DateTime<Utc>>,
+}
+
+/// Dense query vector coupled to the model identity that produced it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryEmbedding {
+    vector: Vec<f32>,
+    model: String,
+}
+
+impl QueryEmbedding {
+    /// Couples a non-empty query vector to a non-empty embedding model identifier.
+    pub fn new(vector: Vec<f32>, model: impl Into<String>) -> Result<Self> {
+        if vector.is_empty() {
+            return Err(Error::InvalidQueryEmbedding("vector must not be empty"));
+        }
+        let model = model.into();
+        if model.trim().is_empty() {
+            return Err(Error::InvalidQueryEmbedding(
+                "embedding model must not be empty",
+            ));
+        }
+        Ok(Self { vector, model })
+    }
+
+    /// Returns the dense query vector.
+    #[must_use]
+    pub fn vector(&self) -> &[f32] {
+        &self.vector
+    }
+
+    /// Returns the embedding model identifier.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
 }
 
 /// One KNN result from vector retrieval.

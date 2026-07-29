@@ -1,19 +1,16 @@
 //! Provider-native source ACL domain types.
 //!
-//! A tenant knowledge connection is either uniformly public inside its tenant or
-//! carries the source system's own permissions. That distinction is the whole
-//! security model here: a permission-bearing connector (Google Drive through
-//! Nango, a Merge knowledge base) can hold documents that only some people in the
-//! tenant may read, so MOA must reproduce the provider's decision rather than
-//! fall back to "everyone in the tenant".
+//! Every tenant knowledge connection carries the source system's own
+//! permissions. A permission-bearing connector (Google Drive through Nango, a
+//! Merge knowledge base) can hold documents that only some people in the tenant
+//! may read, so MOA reproduces the provider's decision and never falls back to
+//! "everyone in the tenant".
 //!
 //! The types in this module make that reproduction explicit and fail closed:
 //!
-//! * [`ProviderAclCapability`] is declared by the adapter, not chosen by a
-//!   caller, and decides the only legal [`ConnectionAclMode`].
 //! * A [`ProviderAclSnapshot`] is immutable and carries the provider's own
-//!   revision, a canonical hash, and its provenance. Admission requires a
-//!   snapshot that is complete, current, and revision-matched.
+//!   revision and a canonical hash. Admission requires a snapshot that is
+//!   complete, current, and revision-matched.
 //! * Principals are never stored in the clear. A [`CanonicalSourcePrincipal`] is
 //!   normalized and then reduced to a keyed [`SourcePrincipalFingerprint`].
 
@@ -21,7 +18,6 @@ use chrono::{DateTime, Utc};
 use moa_core::types::identifiers::TenantId;
 use moa_core::types::memory::SourcePrincipalFingerprint;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
@@ -32,118 +28,6 @@ use crate::error::{Error, Result};
 /// subject, so two different principals can never canonicalize to the same
 /// string by splicing their parts together.
 const PRINCIPAL_FIELD_SEPARATOR: char = '\u{1f}';
-
-/// What a linked-account adapter can tell MOA about source permissions.
-///
-/// Declared by the adapter itself. There is no default: a connector that has not
-/// stated its capability cannot be linked, because MOA would otherwise have to
-/// guess whether its documents are tenant-wide readable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderAclCapability {
-    /// Every record this connector returns is readable by the whole tenant.
-    ///
-    /// Only a connector with no per-record permissions at all may declare this;
-    /// it is the sole capability that can produce
-    /// [`ConnectionAclMode::TenantPublic`].
-    UniformlyPublic,
-    /// The connector returns the source system's native per-record ACLs.
-    ///
-    /// Linking and syncing require a complete native snapshot for every record;
-    /// a record whose permissions cannot be enumerated is hidden rather than
-    /// shared.
-    NativeSnapshots,
-}
-
-impl ProviderAclCapability {
-    /// Returns the stable database identifier.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::UniformlyPublic => "uniformly_public",
-            Self::NativeSnapshots => "native_snapshots",
-        }
-    }
-
-    /// Resolves the declared capability of one stored provider identifier.
-    ///
-    /// This is the canonical registry used where only a persisted provider
-    /// string survives (an ingestion run resumed from its journal, for example)
-    /// and the adapter instance is not at hand. Both shipped adapters are
-    /// permission-bearing.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Provider`] for an unrecognized provider. That is
-    /// deliberate rather than a permissive default: an unknown connector's
-    /// content would otherwise be ingested under whichever guess was convenient,
-    /// and the convenient guess is the one that shares everything.
-    pub fn for_provider(provider: &str) -> Result<Self> {
-        match provider {
-            "nango" | "merge" => Ok(Self::NativeSnapshots),
-            other => Err(Error::Provider {
-                provider: other.to_string(),
-                message: "provider has not declared a source ACL capability".to_string(),
-            }),
-        }
-    }
-
-    /// Returns the only connection ACL mode this capability may produce.
-    #[must_use]
-    pub fn required_mode(self) -> ConnectionAclMode {
-        match self {
-            Self::UniformlyPublic => ConnectionAclMode::TenantPublic,
-            Self::NativeSnapshots => ConnectionAclMode::ProviderManaged,
-        }
-    }
-}
-
-/// How a linked connection's records are admitted to retrieval.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConnectionAclMode {
-    /// Records are readable by every caller inside the owning tenant.
-    TenantPublic,
-    /// Records are readable only through the provider's own ACL snapshot.
-    ProviderManaged,
-}
-
-impl ConnectionAclMode {
-    /// Returns the stable database identifier.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::TenantPublic => "tenant_public",
-            Self::ProviderManaged => "provider_managed",
-        }
-    }
-
-    /// Parses the stable database identifier.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Repository`] for any value outside the closed set. There
-    /// is no permissive fallback: an unrecognized stored mode is corruption, and
-    /// guessing it would either hide everything or expose everything.
-    pub fn parse(value: &str) -> Result<Self> {
-        match value {
-            "tenant_public" => Ok(Self::TenantPublic),
-            "provider_managed" => Ok(Self::ProviderManaged),
-            other => Err(Error::Repository(format!(
-                "unknown connection ACL mode `{other}`"
-            ))),
-        }
-    }
-
-    /// Returns whether moving from `self` to `candidate` widens visibility.
-    ///
-    /// Used to reject a re-link or operator edit that would turn a
-    /// provider-managed connection into a tenant-public one.
-    #[must_use]
-    pub fn widens_to(self, candidate: Self) -> bool {
-        self == Self::ProviderManaged && candidate == Self::TenantPublic
-    }
-}
 
 /// Freshness of one knowledge object's provider ACL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -184,7 +68,7 @@ impl SourceAclState {
         }
     }
 
-    /// Returns whether this state can admit provider-managed content at all.
+    /// Returns whether this state can admit the governed object at all.
     #[must_use]
     pub fn admits(self) -> bool {
         matches!(self, Self::Current)
@@ -391,46 +275,6 @@ pub struct ProviderAclEntry {
     pub principal: SourcePrincipalFingerprint,
 }
 
-/// Where a provider ACL snapshot came from.
-///
-/// Kept alongside the snapshot so an operator investigating an unexpected denial
-/// can tell a full permission listing apart from a webhook-driven refresh
-/// without the answer depending on log retention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderAclProvenance {
-    /// Captured by enumerating the provider's permission listing during a sync.
-    ProviderListing,
-    /// Captured after the provider announced an ACL change for this record.
-    ProviderChangeNotification,
-}
-
-impl ProviderAclProvenance {
-    /// Returns the stable database identifier.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ProviderListing => "provider_listing",
-            Self::ProviderChangeNotification => "provider_change_notification",
-        }
-    }
-
-    /// Parses the stable database identifier.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Repository`] for any value outside the closed set.
-    pub fn parse(value: &str) -> Result<Self> {
-        match value {
-            "provider_listing" => Ok(Self::ProviderListing),
-            "provider_change_notification" => Ok(Self::ProviderChangeNotification),
-            other => Err(Error::Repository(format!(
-                "unknown provider ACL provenance `{other}`"
-            ))),
-        }
-    }
-}
-
 /// An immutable capture of one source object's provider-native permissions.
 ///
 /// Snapshots are never edited. A permission change produces a new snapshot with
@@ -454,8 +298,6 @@ pub struct ProviderAclSnapshot {
     pub provider_revision: String,
     /// Canonical hash over the normalized, sorted entry set.
     pub snapshot_hash: String,
-    /// How this snapshot was captured.
-    pub provenance: ProviderAclProvenance,
     /// Whether the provider enumeration completed.
     ///
     /// `false` means the adapter could not list every permission (pagination cut
@@ -471,15 +313,20 @@ pub struct ProviderAclSnapshot {
 impl ProviderAclSnapshot {
     /// Returns the canonical hash for a normalized entry set.
     ///
-    /// Computed over the sorted, deduplicated entries plus the provider revision
-    /// so two captures of the same permissions produce the same hash regardless
-    /// of the order the provider listed them in.
+    /// Computed over completeness, the sorted deduplicated entries, and the
+    /// provider revision. A partial listing must not collide with a later
+    /// complete listing of the entries seen so far.
     #[must_use]
-    pub fn canonical_hash(provider_revision: &str, entries: &[ProviderAclEntry]) -> String {
+    pub fn canonical_hash(
+        provider_revision: &str,
+        complete: bool,
+        entries: &[ProviderAclEntry],
+    ) -> String {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"moa/source-acl/snapshot/v1");
         hasher.update(&(provider_revision.len() as u32).to_be_bytes());
         hasher.update(provider_revision.as_bytes());
+        hasher.update(&[u8::from(complete)]);
         for entry in entries {
             hasher.update(entry.entry_kind.as_str().as_bytes());
             hasher.update(&[PRINCIPAL_FIELD_SEPARATOR as u8]);
@@ -501,18 +348,11 @@ impl ProviderAclSnapshot {
     /// Returns [`Error::Provider`] when the provider revision is empty: without
     /// a revision there is nothing to compare a later provider announcement
     /// against, so staleness could never be detected.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "a snapshot's identity is its full provider provenance; bundling these into a \
-                  struct would just move the same fields behind one more name"
-    )]
     pub fn normalized(
-        snapshot_uid: Uuid,
         tenant_id: TenantId,
         connection_uid: Uuid,
         object_uid: Uuid,
         provider_revision: impl Into<String>,
-        provenance: ProviderAclProvenance,
         complete: bool,
         entries: Vec<ProviderAclEntry>,
         captured_at: DateTime<Utc>,
@@ -527,7 +367,10 @@ impl ProviderAclSnapshot {
         let mut entries = entries;
         entries.sort();
         entries.dedup();
-        let snapshot_hash = Self::canonical_hash(&provider_revision, &entries);
+        let snapshot_hash = Self::canonical_hash(&provider_revision, complete, &entries);
+        let snapshot_uid = crate::graph_delta::stable_uid(&format!(
+            "source-acl-snapshot:{object_uid}:{snapshot_hash}"
+        ));
         Ok(Self {
             snapshot_uid,
             tenant_id,
@@ -535,7 +378,6 @@ impl ProviderAclSnapshot {
             object_uid,
             provider_revision,
             snapshot_hash,
-            provenance,
             complete,
             entries,
             captured_at,
@@ -614,18 +456,12 @@ impl ObjectAcl {
         }
     }
 
-    /// Returns whether this object's content may be surfaced to anyone at all.
+    /// Returns whether this object's content has a current source ACL snapshot.
     ///
-    /// `TenantPublic` objects always may; `ProviderManaged` objects need a
-    /// current snapshot, and the per-principal decision then happens in SQL.
+    /// The per-principal decision happens in SQL after this structural check.
     #[must_use]
-    pub fn admits_under(&self, mode: ConnectionAclMode) -> bool {
-        match mode {
-            ConnectionAclMode::TenantPublic => true,
-            ConnectionAclMode::ProviderManaged => {
-                self.state.admits() && self.current_snapshot_uid.is_some()
-            }
-        }
+    pub fn admits(&self) -> bool {
+        self.state.admits() && self.current_snapshot_uid.is_some()
     }
 }
 
@@ -680,10 +516,9 @@ pub struct SourcePrincipalGroupBinding {
 /// The ACL half of one provider record, produced during normalization.
 ///
 /// The entries are ALREADY fingerprinted: an adapter keys each principal with
-/// the tenant's ACL key as it normalizes, so a raw provider identity never
-/// outlives the normalization call. That is what makes a provider record safe to
-/// journal — the durable Restate step result for a listed page contains opaque
-/// fingerprints and nothing else.
+/// the tenant's ACL key while converting the provider response and strips the
+/// readable permission fields before returning the record. That makes the
+/// durable Restate page result safe to journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderRecordAcl {
     /// The provider's ACL revision for this record.
@@ -694,57 +529,8 @@ pub struct ProviderRecordAcl {
     /// permission type the adapter does not model — and it hides the record
     /// rather than sharing it.
     pub complete: bool,
-    /// How the ACL was captured.
-    pub provenance: ProviderAclProvenance,
     /// Fingerprinted allow/deny entries for the record.
     pub entries: Vec<ProviderAclEntry>,
-    /// Redacted provider metadata about the capture, never raw principals.
-    #[serde(default)]
-    pub metadata: Value,
-}
-
-/// The ACL a provider adapter attaches to one record.
-///
-/// There is no "unknown" arm and no `Option`: an adapter must state which world
-/// its record lives in. A [`ProviderAclCapability::NativeSnapshots`] adapter that
-/// returns [`RecordAcl::UniformlyPublic`] is a typed ingestion error, not a
-/// record that quietly becomes tenant-readable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RecordAcl {
-    /// The connector has no per-record permissions; the tenant reads everything.
-    UniformlyPublic,
-    /// The connector reported this record's native permissions.
-    Provider(ProviderRecordAcl),
-}
-
-impl RecordAcl {
-    /// Validates this ACL against the adapter's declared capability.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Provider`] when a permission-bearing adapter claims a
-    /// record is uniformly public, or when a uniformly-public adapter returns
-    /// per-record permissions it has no business having. Either mismatch means
-    /// the adapter's declared capability and its behavior disagree, and the safe
-    /// reading of that disagreement is not one to infer.
-    pub fn validate_for(&self, provider: &str, capability: ProviderAclCapability) -> Result<()> {
-        match (self, capability) {
-            (Self::UniformlyPublic, ProviderAclCapability::UniformlyPublic)
-            | (Self::Provider(_), ProviderAclCapability::NativeSnapshots) => Ok(()),
-            (Self::UniformlyPublic, ProviderAclCapability::NativeSnapshots) => {
-                Err(Error::Provider {
-                    provider: provider.to_string(),
-                    message: "permission-bearing connector returned a record with no native ACL"
-                        .to_string(),
-                })
-            }
-            (Self::Provider(_), ProviderAclCapability::UniformlyPublic) => Err(Error::Provider {
-                provider: provider.to_string(),
-                message: "uniformly public connector returned per-record permissions".to_string(),
-            }),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -763,24 +549,6 @@ mod tests {
             principal_kind: SourcePrincipalKind::User,
             principal: fingerprint(byte),
         }
-    }
-
-    #[test]
-    fn capability_pins_the_only_legal_connection_mode() {
-        // Pins: a permission-bearing adapter can never produce a tenant-public
-        // connection, and widening an existing provider-managed connection is
-        // recognizable as a downgrade.
-        assert_eq!(
-            ProviderAclCapability::UniformlyPublic.required_mode(),
-            ConnectionAclMode::TenantPublic
-        );
-        assert_eq!(
-            ProviderAclCapability::NativeSnapshots.required_mode(),
-            ConnectionAclMode::ProviderManaged
-        );
-        assert!(ConnectionAclMode::ProviderManaged.widens_to(ConnectionAclMode::TenantPublic));
-        assert!(!ConnectionAclMode::TenantPublic.widens_to(ConnectionAclMode::ProviderManaged));
-        assert!(!ConnectionAclMode::ProviderManaged.widens_to(ConnectionAclMode::ProviderManaged));
     }
 
     #[test]
@@ -838,12 +606,10 @@ mod tests {
         // Pins: the canonical hash identifies the permission set, not the order
         // the provider listed it in, and a revision change changes identity.
         let forward = ProviderAclSnapshot::normalized(
-            Uuid::from_u128(1),
             TenantId::from(Uuid::from_u128(2)),
             Uuid::from_u128(3),
             Uuid::from_u128(4),
             "rev-1",
-            ProviderAclProvenance::ProviderListing,
             true,
             vec![
                 entry(SourceAclEntryKind::Allow, 9),
@@ -854,12 +620,10 @@ mod tests {
         )
         .expect("normalizes");
         let reversed = ProviderAclSnapshot::normalized(
-            Uuid::from_u128(5),
             TenantId::from(Uuid::from_u128(2)),
             Uuid::from_u128(3),
             Uuid::from_u128(4),
             "rev-1",
-            ProviderAclProvenance::ProviderChangeNotification,
             true,
             vec![
                 entry(SourceAclEntryKind::Deny, 1),
@@ -869,10 +633,28 @@ mod tests {
         )
         .expect("normalizes");
         assert_eq!(forward.snapshot_hash, reversed.snapshot_hash);
+        assert_eq!(forward.snapshot_uid, reversed.snapshot_uid);
         assert_eq!(forward.entries.len(), 2, "duplicate entries collapse");
 
-        let next_revision = ProviderAclSnapshot::canonical_hash("rev-2", &forward.entries);
+        let next_revision = ProviderAclSnapshot::canonical_hash("rev-2", true, &forward.entries);
         assert_ne!(forward.snapshot_hash, next_revision);
+        assert_ne!(
+            forward.snapshot_hash,
+            ProviderAclSnapshot::canonical_hash("rev-1", false, &forward.entries),
+            "a partial listing must not occupy the complete snapshot's identity"
+        );
+
+        let changed_entries = ProviderAclSnapshot::normalized(
+            TenantId::from(Uuid::from_u128(2)),
+            Uuid::from_u128(3),
+            Uuid::from_u128(4),
+            "rev-1",
+            true,
+            vec![entry(SourceAclEntryKind::Allow, 8)],
+            Utc::now(),
+        )
+        .expect("normalizes");
+        assert_ne!(forward.snapshot_uid, changed_entries.snapshot_uid);
     }
 
     #[test]
@@ -883,12 +665,10 @@ mod tests {
         let allowed = fingerprint(9);
         let denied = fingerprint(1);
         let snapshot = ProviderAclSnapshot::normalized(
-            Uuid::from_u128(1),
             TenantId::from(Uuid::from_u128(2)),
             Uuid::from_u128(3),
             Uuid::from_u128(4),
             "rev-1",
-            ProviderAclProvenance::ProviderListing,
             true,
             vec![
                 entry(SourceAclEntryKind::Allow, 9),
@@ -914,12 +694,10 @@ mod tests {
         assert!(!snapshot.admits_principals(&BTreeSet::new()));
 
         let incomplete = ProviderAclSnapshot::normalized(
-            Uuid::from_u128(6),
             TenantId::from(Uuid::from_u128(2)),
             Uuid::from_u128(3),
             Uuid::from_u128(4),
             "rev-1",
-            ProviderAclProvenance::ProviderListing,
             false,
             vec![entry(SourceAclEntryKind::Allow, 9)],
             Utc::now(),
@@ -929,23 +707,18 @@ mod tests {
     }
 
     #[test]
-    fn object_acl_hides_provider_managed_objects_without_a_current_snapshot() {
+    fn object_acl_hides_objects_without_a_current_snapshot() {
         // Pins: the backfill's `incomplete` position, and a stale object, both
         // stay invisible until a resync produces a current snapshot.
         let mut acl = ObjectAcl::incomplete();
-        assert!(!acl.admits_under(ConnectionAclMode::ProviderManaged));
+        assert!(!acl.admits());
 
         acl.state = SourceAclState::Stale;
         acl.revision = Some("rev-2".to_string());
         acl.current_snapshot_uid = Some(Uuid::from_u128(7));
-        assert!(!acl.admits_under(ConnectionAclMode::ProviderManaged));
+        assert!(!acl.admits());
 
         let current = ObjectAcl::current("rev-2", Uuid::from_u128(7));
-        assert!(current.admits_under(ConnectionAclMode::ProviderManaged));
-
-        assert!(
-            ObjectAcl::incomplete().admits_under(ConnectionAclMode::TenantPublic),
-            "a uniformly public source needs no snapshot"
-        );
+        assert!(current.admits());
     }
 }

@@ -11,7 +11,7 @@ use moa_core::types::{
 use moa_lineage_core::TurnId;
 use moa_memory_graph::{Error, NodeIndexRow, NodeLabel};
 use moa_memory_types::MemoryScope;
-use moa_memory_vector::Error as VectorError;
+use moa_memory_vector::{Error as VectorError, QueryEmbedding};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -77,8 +77,8 @@ pub struct RetrievalRequest {
     pub seeds: Vec<Uuid>,
     /// Query text used by lexical retrieval and reranking.
     pub query_text: String,
-    /// Dense query embedding used by vector retrieval.
-    pub query_embedding: Vec<f32>,
+    /// Dense query embedding and its model identity, or `None` for lexical-only retrieval.
+    pub query_embedding: Option<QueryEmbedding>,
     /// Request memory scope used for sidecar RLS GUCs.
     pub scope: MemoryScope,
     /// The caller's resolved provider-source admission context.

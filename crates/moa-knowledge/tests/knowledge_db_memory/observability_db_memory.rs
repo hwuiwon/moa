@@ -13,7 +13,7 @@ use moa_knowledge::{
     domain::{
         ConnectionStatus, DocumentElement, DocumentElementKind, IngestionStepStatus,
         KnowledgeConnection, KnowledgeIngestionStep, KnowledgeSyncCounters, KnowledgeSyncRun,
-        ParsedDocument, ProviderRecord, RecordPage, SyncRunStatus,
+        ParsedDocument, ProviderRecord, ProviderRecordAcl, RecordPage, SyncRunStatus,
     },
     error::Error,
     graph_delta::KnowledgeGraphDelta,
@@ -30,6 +30,14 @@ use uuid::Uuid;
 
 const SECRET_TOKEN: &str = "raw-provider-secret-token";
 const RAW_DOCUMENT: &str = "RAW_DOCUMENT_TEXT_SHOULD_NOT_BE_IN_STEPS";
+
+fn provider_record_acl() -> ProviderRecordAcl {
+    ProviderRecordAcl {
+        provider_revision: "fixture-acl-rev".to_string(),
+        complete: true,
+        entries: Vec::new(),
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum ParserMode {
@@ -183,7 +191,6 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
     let connection_uid = Uuid::now_v7();
     repository
         .upsert_connection(KnowledgeConnection {
-            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -520,9 +527,6 @@ async fn run_failure_case(case: FailureCase) -> Uuid {
             provider: format!("test_provider_{label}"),
             parser_label: "test_parser".to_string(),
         },
-        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
-            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
-        ),
     );
     let error = pipeline
         .ingest_record_page(
@@ -640,7 +644,7 @@ async fn assert_counter_projection(
 
 fn provider_failure_record() -> ProviderRecord {
     ProviderRecord {
-        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
+        acl: provider_record_acl(),
         source_id: format!("provider-missing-text-{}", Uuid::now_v7()),
         object_type: "page".to_string(),
         title: None,
@@ -655,7 +659,7 @@ fn provider_failure_record() -> ProviderRecord {
 
 fn content_record(label: &str) -> ProviderRecord {
     ProviderRecord {
-        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
+        acl: provider_record_acl(),
         source_id: format!("{label}-{}", Uuid::now_v7()),
         object_type: "page".to_string(),
         title: Some(format!("Fixture {label}")),

@@ -189,7 +189,7 @@ impl KmsSourceAclKeyOwner {
                 Error::Repository(format!("failed to generate the source ACL key: {error}"))
             })?;
 
-        let mut conn = self.begin().await?;
+        let mut conn = self.begin_for_tenant(tenant_id).await?;
         let inserted = sqlx::query_as::<_, StoredAclKeyRow>(
             r#"
             INSERT INTO moa.knowledge_source_acl_keys (
@@ -226,16 +226,6 @@ impl KmsSourceAclKeyOwner {
         };
         conn.commit().await.map_err(map_moa_error)?;
         self.unwrap_row(tenant_id, row).await
-    }
-
-    async fn begin(&self) -> Result<ScopedConn<'_>> {
-        ScopedConn::begin_as_app(
-            &self.pool,
-            &moa_core::types::memory::RlsContext::tenant(TenantId::from(Uuid::nil())),
-            self.assume_app_role,
-        )
-        .await
-        .map_err(map_moa_error)
     }
 
     async fn begin_for_tenant(&self, tenant_id: TenantId) -> Result<ScopedConn<'_>> {

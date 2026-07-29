@@ -561,7 +561,7 @@ fn mcp_servers_json_replaces_configured_servers() {
     // rather than appends to, file-backed server configuration.
     let overlay = EnvOverlay::from_iter(env_pairs([(
         "MOA_MCP_SERVERS_JSON",
-        r#"[{"name":"fixture","transport":"http","url":"http://127.0.0.1:4321","credential_scope":"deployment_owned","trust_tool_annotations":true}]"#,
+        r#"[{"name":"fixture","url":"http://127.0.0.1:4321","trust_tool_annotations":true}]"#,
     )]))
     .expect("MCP JSON overlay should deserialize");
     let mut config = MoaConfig::default();
@@ -569,9 +569,7 @@ fn mcp_servers_json_replaces_configured_servers() {
         required: false,
         discovery: crate::McpDiscoveryMode::Eager,
         name: "file-backed".to_string(),
-        transport: crate::McpTransportConfig::Http,
-        url: None,
-        credential_scope: crate::McpServerCredentialScope::DeploymentOwned,
+        url: "http://127.0.0.1:1".to_string(),
         credentials: None,
         trust_tool_annotations: false,
         allowed_data_classes: Vec::new(),
@@ -583,10 +581,7 @@ fn mcp_servers_json_replaces_configured_servers() {
 
     assert_eq!(config.mcp_servers.len(), 1);
     assert_eq!(config.mcp_servers[0].name, "fixture");
-    assert_eq!(
-        config.mcp_servers[0].url.as_deref(),
-        Some("http://127.0.0.1:4321")
-    );
+    assert_eq!(config.mcp_servers[0].url, "http://127.0.0.1:4321");
     assert!(config.mcp_servers[0].trust_tool_annotations);
 }
 
@@ -600,16 +595,54 @@ fn mcp_servers_json_rejects_malformed_json_through_config_error() {
 }
 
 #[test]
-fn mcp_server_without_a_credential_scope_is_a_typed_config_error() {
-    // Pins: which owner's credential an MCP server is invoked with has no default
-    // and no inferred value — a server configuration that omits it fails startup
-    // instead of silently picking an ownership model.
+fn mcp_servers_json_rejects_unknown_server_fields() {
+    // Pins: retired MCP configuration vocabulary is rejected instead of being
+    // silently ignored and leaving an operator with a different security model.
     assert_config_error_contains(
         EnvOverlay::from_iter(env_pairs([(
             "MOA_MCP_SERVERS_JSON",
-            r#"[{"name":"fixture","transport":"http","url":"http://127.0.0.1:4321"}]"#,
+            r#"[{"name":"fixture","url":"http://127.0.0.1:4321","credential_scope":"deployment_owned"}]"#,
         )])),
-        "MOA_MCP_SERVERS_JSON",
+        "unknown field",
+    );
+}
+
+#[test]
+fn mcp_servers_json_rejects_retired_oauth_credential_type() {
+    // Pins: MCP bearer authentication has one configuration spelling; the
+    // behavior-identical OAuth alias is not silently accepted.
+    assert_config_error_contains(
+        EnvOverlay::from_iter(env_pairs([(
+            "MOA_MCP_SERVERS_JSON",
+            r#"[{"name":"fixture","url":"http://127.0.0.1:4321","credentials":{"type":"oauth","token_env":"MCP_TOKEN"}}]"#,
+        )])),
+        "unknown variant",
+    );
+}
+
+#[test]
+fn mcp_servers_json_rejects_retired_transport_field() {
+    // Pins: the remote MCP client has one content-type-aware HTTP path, so a
+    // no-op transport selector is rejected instead of accepted and ignored.
+    assert_config_error_contains(
+        EnvOverlay::from_iter(env_pairs([(
+            "MOA_MCP_SERVERS_JSON",
+            r#"[{"name":"fixture","url":"http://127.0.0.1:4321","transport":"http"}]"#,
+        )])),
+        "unknown field",
+    );
+}
+
+#[test]
+fn mcp_servers_json_requires_server_url() {
+    // Pins: every configured remote MCP server has an endpoint; omission is a
+    // typed configuration error rather than a deferred router failure.
+    assert_config_error_contains(
+        EnvOverlay::from_iter(env_pairs([(
+            "MOA_MCP_SERVERS_JSON",
+            r#"[{"name":"fixture"}]"#,
+        )])),
+        "missing field",
     );
 }
 

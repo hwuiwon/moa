@@ -238,11 +238,12 @@ history until the review resolves or is superseded.
 
 When a review resolves, the owner receives one typed receipt
 (`ClearedSuccess`, `ClearedToolError`, or `Denied`) carrying the review, both tool
-ids, the owner, a bounded safe summary, and the exact ordered terminal facts the
-callback waited on. The callback is sent only after `ActionReviewDecided` and, for
-a cleared action, the executed tool's terminal `ToolResult`/`ToolError` are
-durable. The reviewed execution is a new MOA-owned invocation: it gets a fresh
-tool-call id and drops the provider tool-use id.
+ids, the owner, and closed-vocabulary outcome metadata. Tool/admin output remains
+in canonical history and is never copied into the system directive. The callback
+is sent only after `ActionReviewDecided` and, for a cleared action, the executed
+tool's terminal `ToolResult`/`ToolError` are durable. The reviewed execution is a
+new MOA-owned invocation: it gets a fresh tool-call id and drops the provider
+tool-use id.
 
 The owner then runs one continuation turn:
 
@@ -251,8 +252,11 @@ The owner then runs one continuation turn:
 - Worker: one no-tools synthesis turn that updates local history and result, then
   normal parent-result and cleanup ownership resumes.
 - `ExecutionTask`: no conversational callback at all; it stays on the durable
-  run/task outbox and ack path. Review timeout remains fail-closed and produces no
-  conversational resume.
+  run/task outbox and ack path.
+
+Review timeout remains fail-closed and produces no conversational resume. The
+reaper durably releases the Session or Worker lifecycle hold through a
+claim/backoff delivery record, so an expired review cannot pin its owner.
 
 Continuations are generation-fenced. A callback arriving while the origin or
 another continuation is active queues once and runs before ordinary FIFO, unless a

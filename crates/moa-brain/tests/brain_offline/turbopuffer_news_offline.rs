@@ -56,7 +56,11 @@ async fn turbopuffer_news_offline_upsert_and_query_returns_promoted_news_fact() 
         .expect("wiremock upsert should succeed");
     let matches = store
         .knn(&VectorQuery {
-            embedding: basis_vector(7),
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                basis_vector(7),
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 5,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,

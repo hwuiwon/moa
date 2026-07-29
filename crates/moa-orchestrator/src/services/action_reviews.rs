@@ -4,14 +4,13 @@ use chrono::{DateTime, Utc};
 use moa_artifacts::execution_plan::ExecutionFailureClass;
 use moa_authz_schema::Relation;
 use moa_core::{
-    events::Event, events::EventType, types::action_policy::ActionClass,
-    types::action_policy::ActionEnvelope, types::action_policy::ActionReviewFailureClass,
+    events::Event, types::action_policy::ActionClass, types::action_policy::ActionEnvelope,
     types::action_policy::ActionReviewOutcome, types::action_policy::ActionReviewOwner,
     types::action_policy::ActionReviewPreview, types::action_policy::ActionReviewReceipt,
     types::action_policy::ActionReviewRegistration, types::action_policy::ActionReviewStatus,
-    types::action_policy::ActionReviewTerminalEvent, types::identifiers::StoragePartitionId,
-    types::identifiers::TenantId, types::identifiers::ToolCallId,
-    types::security::ToolCapabilityId, types::security::ToolOutputAssessment,
+    types::action_policy::ToolResultSecurityMetadata, types::action_policy::ToolTerminalFact,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
+    types::identifiers::ToolCallId, types::security::SecurityCircuitStage,
     types::tools::SecuredToolOutput, types::tools::ToolCallRequest,
 };
 use moa_observability::propagation::ValidatedTraceContext;
@@ -197,49 +196,40 @@ impl ActionReviews for ActionReviewsImpl {
             .name("action_reviews_request")
             .await?
             .into_inner();
-        if stored.record_requested_event {
-            let event_exists = prior_action_review_event_exists(
-                &ctx,
-                &storage_partition_id(stored.summary.tenant_id),
-                session_id,
-                EventType::ActionReviewRequested,
-                stored.summary.id,
-                &self.session_events,
-            )
-            .await?;
-            if !event_exists {
-                crate::restate_identity::replay_safe_request(
-                    ctx.service_client::<RestateSessionStoreClient>()
-                        .append_event(Json(AppendEventRequest {
-                            session_id,
-                            event,
-                            dedupe_key: None,
-                        })),
-                )
-                .call()
-                .await?;
-            }
+        let owner_needs_registration =
+            !stored.owner_registered && stored.summary.status == ActionReviewStatus::Pending;
+        if owner_needs_registration {
+            // The database row is deliberately not decision-ready until the typed
+            // owner has durably acknowledged registration. A crash between these
+            // two steps safely retries the idempotent owner call.
+            register_conversational_review(&ctx, &owner, stored.summary.id).await?;
+        }
+        crate::restate_identity::replay_safe_request(
+            ctx.service_client::<RestateSessionStoreClient>()
+                .append_event(Json(AppendEventRequest {
+                    session_id,
+                    event,
+                    dedupe_key: Some(
+                        moa_core::types::action_policy::action_review_requested_dedupe_key(
+                            stored.summary.id,
+                        ),
+                    ),
+                })),
+        )
+        .call()
+        .await?;
+        if owner_needs_registration {
             let pool = self.pool.clone();
             let storage_partition_id = storage_partition_id(stored.summary.tenant_id);
             let review_id = stored.summary.id;
             ctx.run(|| async move {
-                action_review_app::mark_requested_event_recorded(
-                    pool,
-                    storage_partition_id,
-                    review_id,
-                )
-                .await
-                .map(Json::from)
+                action_review_app::mark_owner_registered(pool, storage_partition_id, review_id)
+                    .await
+                    .map(Json::from)
             })
-            .name("action_reviews_mark_requested_event_recorded")
+            .name("action_reviews_mark_owner_registered")
             .await?;
         }
-        // Registration happens before this handler returns Pending, so the owning
-        // Session or Worker durably knows it has an outstanding review before the
-        // requesting turn ever sees the pending-review tool output. Doing it after the
-        // return would leave a window in which a worker could finish, deliver its
-        // parent result, and self-clean while a review it raised was still open.
-        register_conversational_review(&ctx, &owner, stored.summary.id).await?;
         if stored.newly_inserted {
             record_action_review_requested(
                 moa_core::types::action_policy::ActionPolicyEffect::AdminReview,
@@ -325,7 +315,7 @@ impl ActionReviews for ActionReviewsImpl {
                     if secured.is_error() {
                         ExecutionActionReviewResolution::Failed {
                             class: ExecutionFailureClass::Terminal,
-                            message: secured.safe_output.to_text(),
+                            message: "reviewed tool returned a classified error".to_string(),
                         }
                     } else {
                         ExecutionActionReviewResolution::Completed {
@@ -337,9 +327,10 @@ impl ActionReviews for ActionReviewsImpl {
                         }
                     }
                 }
-                Err(error) => ExecutionActionReviewResolution::Failed {
+                Err(_) => ExecutionActionReviewResolution::Failed {
                     class: ExecutionFailureClass::Terminal,
-                    message: format!("{error:?}"),
+                    message: "reviewed tool execution failed before producing a classified result"
+                        .to_string(),
                 },
             };
             let pool = self.pool.clone();
@@ -360,48 +351,25 @@ impl ActionReviews for ActionReviewsImpl {
                 .into_inner();
         }
 
-        if decided.record_decision_event {
-            let event_exists = prior_action_review_event_exists(
-                &ctx,
-                &decided.storage_partition_id,
-                decided.owner.session_id(),
-                EventType::ActionReviewDecided,
-                decided.review_id,
-                &self.session_events,
-            )
-            .await?;
-            if !event_exists {
-                crate::restate_identity::replay_safe_request(
-                    ctx.service_client::<RestateSessionStoreClient>()
-                        .append_event(Json(AppendEventRequest {
-                            session_id: decided.owner.session_id(),
-                            event: Event::ActionReviewDecided {
-                                review_id: decided.review_id,
-                                decision: decided.decision.clone(),
-                                decided_by: decided.decided_by.clone(),
-                                decided_at: decided.decided_at,
-                            },
-                            dedupe_key: None,
-                        })),
-                )
-                .call()
-                .await?;
-            }
-            let pool = self.pool.clone();
-            let storage_partition_id = decided.storage_partition_id.clone();
-            let review_id = decided.review_id;
-            ctx.run(|| async move {
-                action_review_app::mark_decision_event_recorded(
-                    pool,
-                    storage_partition_id,
-                    review_id,
-                )
-                .await
-                .map(Json::from)
-            })
-            .name("action_reviews_mark_decision_event_recorded")
-            .await?;
-        }
+        crate::restate_identity::replay_safe_request(
+            ctx.service_client::<RestateSessionStoreClient>()
+                .append_event(Json(AppendEventRequest {
+                    session_id: decided.owner.session_id(),
+                    event: Event::ActionReviewDecided {
+                        review_id: decided.review_id,
+                        decision: decided.decision.clone(),
+                        decided_by: decided.decided_by.clone(),
+                        decided_at: decided.decided_at,
+                    },
+                    dedupe_key: Some(
+                        moa_core::types::action_policy::action_review_decided_dedupe_key(
+                            decided.review_id,
+                        ),
+                    ),
+                })),
+        )
+        .call()
+        .await?;
         if decided.newly_decided {
             record_action_review_decision(decided.status, decided.action_class);
             let wait = (decided.decided_at - decided.created_at)
@@ -424,7 +392,7 @@ impl ActionReviews for ActionReviewsImpl {
                 )
                 .call()
                 .await?;
-            } else if prior_tool_terminal_event_exists(
+            } else if prior_tool_terminal_fact(
                 &ctx,
                 &decided,
                 tool_request.tool_call_id,
@@ -446,7 +414,7 @@ impl ActionReviews for ActionReviewsImpl {
                     // that already recorded its terminal tool event is recovered from
                     // that durable fact instead of re-running a reviewed side effect.
                     Err(error) => {
-                        if prior_tool_terminal_event_exists(
+                        if prior_tool_terminal_fact(
                             &ctx,
                             &decided,
                             tool_request.tool_call_id,
@@ -460,16 +428,6 @@ impl ActionReviews for ActionReviewsImpl {
                     }
                 }
             }
-            let pool = self.pool.clone();
-            let storage_partition_id = decided.storage_partition_id.clone();
-            let review_id = decided.review_id;
-            ctx.run(|| async move {
-                action_review_app::mark_execution_requested(pool, storage_partition_id, review_id)
-                    .await
-                    .map(Json::from)
-            })
-            .name("action_reviews_mark_execution_requested")
-            .await?;
         }
 
         // An execution-task owner keeps its existing run/task outbox and ack path and
@@ -483,7 +441,24 @@ impl ActionReviews for ActionReviewsImpl {
             )
             .await?
         {
-            deliver_conversational_resolution(&ctx, receipt).await?;
+            let security_stage =
+                apply_receipt_security_assessment(&ctx, tenant_id, &receipt).await?;
+            if matches!(
+                security_stage,
+                Some(SecurityCircuitStage::SuspendedForInput | SecurityCircuitStage::Halted)
+            ) {
+                release_conversational_review(
+                    &ctx,
+                    moa_core::types::action_policy::ActionReviewRelease {
+                        review_id: receipt.review_id,
+                        owner: receipt.owner,
+                        resume_queued: false,
+                    },
+                )
+                .await?;
+            } else {
+                deliver_conversational_resolution(&ctx, receipt).await?;
+            }
         }
         Ok(())
     }
@@ -552,6 +527,60 @@ async fn deliver_conversational_resolution(
     Ok(())
 }
 
+/// Applies one reviewed `ToolResult` assessment before any model continuation.
+async fn apply_receipt_security_assessment(
+    ctx: &Context<'_>,
+    tenant_id: TenantId,
+    receipt: &ActionReviewReceipt,
+) -> Result<Option<SecurityCircuitStage>, HandlerError> {
+    let metadata = match &receipt.outcome {
+        ActionReviewOutcome::Cleared(ToolTerminalFact::Result(metadata)) => metadata,
+        ActionReviewOutcome::Cleared(ToolTerminalFact::Error) | ActionReviewOutcome::Denied => {
+            return Ok(None);
+        }
+    };
+    let tool_call_id = receipt.executed_tool_call_id.ok_or_else(|| {
+        TerminalError::new("reviewed ToolResult receipt has no executed tool call id")
+    })?;
+    crate::services::security_events::apply_reviewed_conversational_assessment(
+        ctx,
+        tenant_id,
+        &receipt.owner,
+        tool_call_id,
+        &metadata.capability,
+        &metadata.assessment,
+    )
+    .await
+    .map(Some)
+}
+
+/// Releases a review registration without scheduling a model continuation.
+async fn release_conversational_review(
+    ctx: &Context<'_>,
+    release: moa_core::types::action_policy::ActionReviewRelease,
+) -> Result<(), HandlerError> {
+    match release.owner.clone() {
+        ActionReviewOwner::Coordinator { session_id, .. } => {
+            crate::restate_identity::replay_safe_request(
+                ctx.object_client::<SessionClient>(session_id.to_string())
+                    .release_action_review(Json::from(release)),
+            )
+            .call()
+            .await?;
+        }
+        ActionReviewOwner::Worker { worker_id, .. } => {
+            crate::restate_identity::replay_safe_request(
+                ctx.object_client::<WorkerClient>(worker_id)
+                    .release_action_review(Json::from(release)),
+            )
+            .call()
+            .await?;
+        }
+        ActionReviewOwner::ExecutionTask { .. } => {}
+    }
+    Ok(())
+}
+
 /// Builds the typed receipt for a conversational owner, or `None` when the
 /// terminal facts a callback depends on are not durable yet.
 ///
@@ -564,26 +593,16 @@ async fn conversational_receipt(
     executed_output: Option<&SecuredToolOutput>,
     session_events: &Arc<dyn SessionEventLookupStore>,
 ) -> Result<Option<ActionReviewReceipt>, HandlerError> {
-    let mut terminal_events = vec![ActionReviewTerminalEvent::Decided];
     let outcome = match decided.status {
-        ActionReviewStatus::Denied => ActionReviewOutcome::Denied {
-            reason: decided
-                .deny_reason
-                .as_deref()
-                .map(ActionReviewReceipt::bounded_summary),
-        },
+        ActionReviewStatus::Denied => ActionReviewOutcome::Denied,
         ActionReviewStatus::Cleared => {
             let Some(executed_tool_call_id) = decided.executed_tool_call_id else {
                 return Ok(None);
             };
             match executed_output {
-                Some(output) => {
-                    let (outcome, terminal) = executed_outcome(output);
-                    terminal_events.push(terminal);
-                    outcome
-                }
+                Some(output) => ActionReviewOutcome::Cleared(executed_terminal_fact(output)),
                 None => {
-                    let Some(terminal) = prior_tool_terminal_event_exists(
+                    let Some(terminal) = prior_tool_terminal_fact(
                         ctx,
                         decided,
                         executed_tool_call_id,
@@ -593,18 +612,7 @@ async fn conversational_receipt(
                     else {
                         return Ok(None);
                     };
-                    terminal_events.push(terminal);
-                    // The output itself is gone, but the assessment the circuit
-                    // acted on is durable on the ToolResult. Read it back rather
-                    // than stamping a fresh "safe" verdict nothing re-checked.
-                    let recorded = durable_tool_security_metadata(
-                        ctx,
-                        decided,
-                        executed_tool_call_id,
-                        session_events,
-                    )
-                    .await?;
-                    recovered_outcome(terminal, recorded)
+                    ActionReviewOutcome::Cleared(terminal)
                 }
             }
         }
@@ -615,107 +623,22 @@ async fn conversational_receipt(
         review_id: decided.review_id,
         owner: decided.owner.clone(),
         tool_name: decided.tool_name.clone(),
-        requested_tool_call_id: decided.requested_tool_call_id,
         executed_tool_call_id: decided.executed_tool_call_id,
         outcome,
-        terminal_events,
     }))
 }
 
-/// Classifies the output this invocation just produced and its durable terminal fact.
+/// Classifies the output this invocation just produced.
 ///
 /// A tool that returned an error output still produced a durable `ToolResult`; the
 /// distinction from an `ExecutionError` is what tells the continuation whether the
 /// action ran at all.
-fn executed_outcome(
-    secured: &SecuredToolOutput,
-) -> (ActionReviewOutcome, ActionReviewTerminalEvent) {
-    // Bounded from the *classified* output. The classifier has already redacted
-    // or destroyed unsafe carriers, so this is a length bound on safe text — not
-    // a security control, and never a substitute for one.
-    let summary = ActionReviewReceipt::bounded_summary(&secured.safe_output.to_text());
-    let assessment = secured.assessment.clone();
-    let capability = secured.capability.clone();
-    if secured.is_error() {
-        (
-            ActionReviewOutcome::ClearedToolError {
-                failure_class: ActionReviewFailureClass::ToolError,
-                summary,
-                assessment,
-                capability,
-            },
-            ActionReviewTerminalEvent::ToolResult,
-        )
-    } else {
-        (
-            ActionReviewOutcome::ClearedSuccess {
-                summary,
-                assessment,
-                capability,
-            },
-            ActionReviewTerminalEvent::ToolResult,
-        )
-    }
-}
-
-/// Rebuilds the outcome from an already-durable terminal fact, without re-execution.
-///
-/// Reached on replay and after an infrastructure failure that still recorded its
-/// terminal event. The summary is intentionally generic: the exact output is
-/// already in the session's own tool history, and re-reading it here would add a
-/// second copy of the same bytes to the continuation event.
-fn recovered_outcome(
-    terminal: ActionReviewTerminalEvent,
-    recorded: Option<(ToolOutputAssessment, ToolCapabilityId)>,
-) -> ActionReviewOutcome {
-    // A `ToolError` never produced a classified output, so its capability is the
-    // reviewed tool under the built-in namespace and its assessment is the
-    // detector's verdict on the absence of output, not a claim about bytes.
-    let (assessment, capability) = recorded.unwrap_or_else(|| {
-        (
-            ToolOutputAssessment::safe(),
-            ToolCapabilityId::builtin("unknown"),
-        )
-    });
-    match terminal {
-        ActionReviewTerminalEvent::ToolResult => ActionReviewOutcome::ClearedSuccess {
-            summary: "The reviewed action completed; its result is in this session's tool history."
-                .to_string(),
-            assessment,
-            capability,
-        },
-        ActionReviewTerminalEvent::ToolError | ActionReviewTerminalEvent::Decided => {
-            ActionReviewOutcome::ClearedToolError {
-                failure_class: ActionReviewFailureClass::ExecutionError,
-                summary: "The reviewed action failed before producing a tool result.".to_string(),
-                assessment,
-                capability,
-            }
-        }
-    }
-}
-
-/// Reads back the security metadata one durable `ToolResult` recorded.
-async fn durable_tool_security_metadata(
-    ctx: &Context<'_>,
-    decided: &action_review_app::DecidedReview,
-    tool_call_id: ToolCallId,
-    session_events: &Arc<dyn SessionEventLookupStore>,
-) -> Result<Option<(ToolOutputAssessment, ToolCapabilityId)>, HandlerError> {
-    let store = session_events.clone();
-    let storage_partition_id = decided.storage_partition_id.clone();
-    let session_id = decided.owner.session_id();
-    Ok(ctx
-        .run(|| async move {
-            store
-                .tool_result_security_metadata(&storage_partition_id, session_id, tool_call_id)
-                .await
-                .map(Json::from)
-                .map_err(HandlerError::from)
-        })
-        .name("action_reviews_tool_result_security_metadata")
-        .await?
-        .into_inner())
+fn executed_terminal_fact(secured: &SecuredToolOutput) -> ToolTerminalFact {
+    ToolTerminalFact::Result(ToolResultSecurityMetadata {
+        success: !secured.is_error(),
+        assessment: secured.assessment.clone(),
+        capability: secured.capability.clone(),
+    })
 }
 
 fn execution_task_review_request(
@@ -728,69 +651,25 @@ fn execution_task_review_request(
     })
 }
 
-/// Returns which terminal tool event is already durable for one reviewed call.
-///
-/// `ToolResult` is checked first because a tool that produced a model-visible
-/// output — successful or not — has a result, while `ToolError` records a failure
-/// that never reached one.
-async fn prior_tool_terminal_event_exists(
+/// Loads the terminal fact already durable for one reviewed call.
+async fn prior_tool_terminal_fact(
     ctx: &Context<'_>,
     decided: &action_review_app::DecidedReview,
     tool_call_id: ToolCallId,
     session_events: &Arc<dyn SessionEventLookupStore>,
-) -> Result<Option<ActionReviewTerminalEvent>, HandlerError> {
-    for (event_type, terminal) in [
-        (EventType::ToolResult, ActionReviewTerminalEvent::ToolResult),
-        (EventType::ToolError, ActionReviewTerminalEvent::ToolError),
-    ] {
-        let store = session_events.clone();
-        let storage_partition_id = decided.storage_partition_id.clone();
-        let session_id = decided.owner.session_id();
-        let exists = ctx
-            .run(|| async move {
-                store
-                    .tool_event_exists(&storage_partition_id, session_id, event_type, tool_call_id)
-                    .await
-                    .map(Json::from)
-                    .map_err(HandlerError::from)
-            })
-            .name(format!(
-                "action_reviews_tool_terminal_exists:{}",
-                terminal.as_str()
-            ))
-            .await?
-            .into_inner();
-        if exists {
-            return Ok(Some(terminal));
-        }
-    }
-    Ok(None)
-}
-
-async fn prior_action_review_event_exists(
-    ctx: &Context<'_>,
-    storage_partition_id: &StoragePartitionId,
-    session_id: moa_core::types::identifiers::SessionId,
-    event_type: EventType,
-    review_id: Uuid,
-    session_events: &Arc<dyn SessionEventLookupStore>,
-) -> Result<bool, HandlerError> {
+) -> Result<Option<ToolTerminalFact>, HandlerError> {
     let store = session_events.clone();
-    let storage_partition_id = storage_partition_id.clone();
+    let storage_partition_id = decided.storage_partition_id.clone();
+    let session_id = decided.owner.session_id();
     Ok(ctx
         .run(|| async move {
             store
-                .action_review_event_exists(
-                    &storage_partition_id,
-                    session_id,
-                    event_type,
-                    review_id,
-                )
+                .tool_terminal_fact(&storage_partition_id, session_id, tool_call_id)
                 .await
                 .map(Json::from)
                 .map_err(HandlerError::from)
         })
-        .name("action_reviews_event_exists")
+        .name("action_reviews_tool_terminal_fact")
         .await?
         .into_inner())
 }
@@ -820,55 +699,34 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{executed_outcome, execution_task_review_request, recovered_outcome};
-    use moa_core::types::action_policy::{
-        ActionReviewFailureClass, ActionReviewOutcome, ActionReviewTerminalEvent,
-    };
+    use super::{executed_terminal_fact, execution_task_review_request};
+    use moa_core::types::action_policy::{ToolResultSecurityMetadata, ToolTerminalFact};
 
     #[test]
-    fn action_review_receipt_distinguishes_success_tool_error_and_execution_error() {
-        // Pins: the continuation must be able to tell the user which of three things
-        // happened. A tool that ran and returned an error output still produced a
-        // durable ToolResult, and it must not be reported the same way as an execution
-        // failure that never produced one.
-        let (success, success_terminal) =
-            executed_outcome(&moa_core::types::tools::SecuredToolOutput::assessed_safe(
+    fn executed_terminal_fact_preserves_tool_result_success_bit() {
+        // Pins: a tool that ran and returned an error output still produced a
+        // durable ToolResult, but its terminal metadata must retain `success=false`.
+        let success =
+            executed_terminal_fact(&moa_core::types::tools::SecuredToolOutput::assessed_safe(
                 moa_core::types::tools::ToolOutput::text("ok", std::time::Duration::from_millis(1)),
                 moa_core::types::security::ToolCapabilityId::builtin("noop"),
             ));
-        assert_eq!(success_terminal, ActionReviewTerminalEvent::ToolResult);
         assert!(matches!(
             success,
-            ActionReviewOutcome::ClearedSuccess { .. }
+            ToolTerminalFact::Result(ToolResultSecurityMetadata { success: true, .. })
         ));
 
-        let (tool_error, tool_error_terminal) =
-            executed_outcome(&moa_core::types::tools::SecuredToolOutput::assessed_safe(
+        let tool_error =
+            executed_terminal_fact(&moa_core::types::tools::SecuredToolOutput::assessed_safe(
                 moa_core::types::tools::ToolOutput::error(
                     "exit 1",
                     std::time::Duration::from_millis(1),
                 ),
                 moa_core::types::security::ToolCapabilityId::builtin("noop"),
             ));
-        assert_eq!(tool_error_terminal, ActionReviewTerminalEvent::ToolResult);
-        assert_eq!(
-            match tool_error {
-                ActionReviewOutcome::ClearedToolError { failure_class, .. } => failure_class,
-                other => panic!("expected a cleared tool error, got {other:?}"),
-            },
-            ActionReviewFailureClass::ToolError
-        );
-
-        assert_eq!(
-            match recovered_outcome(ActionReviewTerminalEvent::ToolError, None) {
-                ActionReviewOutcome::ClearedToolError { failure_class, .. } => failure_class,
-                other => panic!("expected an execution error, got {other:?}"),
-            },
-            ActionReviewFailureClass::ExecutionError
-        );
         assert!(matches!(
-            recovered_outcome(ActionReviewTerminalEvent::ToolResult, None),
-            ActionReviewOutcome::ClearedSuccess { .. }
+            tool_error,
+            ToolTerminalFact::Result(ToolResultSecurityMetadata { success: false, .. })
         ));
     }
 

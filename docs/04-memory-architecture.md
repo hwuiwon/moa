@@ -105,75 +105,18 @@ and silently trims as-of expansion on large shared databases.
 
 Embedder selection is deployment/process configured through one
 `provider:model` selector, for example `cohere:embed-v4.0` or
-`gemini:gemini-embedding-2`. The resulting vector identity (model, version, and
+`gemini:gemini-embedding-2`. The resulting vector identity (model and
 dimensions) is pinned per tenant storage partition. Those models use
 incompatible vector spaces, so switching the process configuration requires
 re-embedding each affected partition before retrieval can safely use the new
-model. That re-embedding is a first-class durable operation rather than an
-operator script: see "Storage-partition index rebuilds" below.
+model. MOA does not currently expose an online rebuild API: the partition's
+pinned model and dimensions make incompatible writes and queries fail closed,
+and a model switch requires an offline replacement procedure.
 Embedding construction never falls back across providers or models:
 ingestion and retrieval each build the selected provider with their respective
 role, and a failure stays within that vector space. Credential changes are
 startup-only configuration because the process runtime and its provider client
 are installed once.
-### Storage-partition index rebuilds
-
-Changing the embedder, changing the chunker, or recovering a corrupt index all
-mean recomputing a whole storage partition. `moa.knowledge_rebuild_operation`
-and its companions (V000351) make that a resumable operation instead of a
-bespoke script.
-
-A rebuild builds a *candidate generation* while the partition keeps serving the
-generation it already has. Candidate vectors are written to
-`moa.knowledge_rebuild_candidate_vector`, a table no retrieval leg reads, so a
-shadow result cannot reach retrieval, ranking, hydration, lineage, or citations
-even if a filter is forgotten. Exclusion is structural, not a predicate.
-
-The properties the schema enforces, rather than the application:
-
-* At most one nonterminal operation per partition, and exactly one `active`
-  generation per partition, both partial unique indexes.
-* Every lifecycle transition is a compare-and-swap on
-  `(operation_uid, owner_token, lifecycle)`. A replayed Restate step observes
-  `AlreadyApplied`; a foreign writer is refused and told what it observed.
-* Progress is a keyset checkpoint that only advances, and `vectors_rebuilt` is
-  recounted from the candidate table rather than incremented, so a replayed
-  batch cannot inflate it.
-* Activation is one compare-and-swap on `moa.knowledge_active_generation`, in
-  the same transaction that promotes the candidate vectors into
-  `moa.embeddings` and enqueues the external-backend outbox rows.
-
-**Partition-wide, not chunk-only.** Facts, incidents, entities, and knowledge
-chunks share one vector space, so a rebuild reconstructs the authoritative
-embedding input for every label and fails closed on any it does not recognize.
-The reconstruction rules are not uniform: a `Chunk` embeds its contextual form
-(document title, heading path, then body — `contextual_chunk_embedding_input` in
-`moa-core`), an `Entity` embeds its normalized name rather than its display
-name, and the ingest-path labels embed `properties_summary->>'summary'`. The
-Turbopuffer sync's `search_text` is the BM25 body and is *not* the embedding
-input; rebuilding from it would silently produce a different vector space.
-
-**Validation and rollback.** A complete candidate generation is scored by
-bounded shadow queries that compare its top-K neighbors against the served
-generation's, reusing only the pure overlap rule from the backend-promotion
-engine — none of that engine's dual-read serving path. Below the 0.95 bar the
-candidate is abandoned and the old generation was authoritative throughout.
-After activation the prior generation is retained for explicit rollback;
-finalization discards it, and only then is the retired contract unreadable.
-
-**Rechunk** runs on the same generation state machine. It stages six members per
-document version — chunks, graph deltas, embeddings, ACL snapshot fingerprints,
-occurrence identity, and provenance — and refuses to activate until all six are
-present, then applies document, chunk, graph, vector, changelog, outbox, and the
-generation pointer in one scoped transaction. Staged ACL state holds only keyed
-`SourcePrincipalFingerprint` hex; a provider principal never enters durable
-rebuild state.
-
-Ordinary vector writes are fenced while `reembed_state = 'in_progress'`. A write
-that landed mid-build would either miss the census and vanish at activation, or
-survive in the retired model's space; both are undetectable downstream, so
-writers fail fast and retry after the rebuild finishes.
-
 Gemini Embedding 2 is exposed as a text-only `Embedder` today; its API supports
 multimodal inputs, but MOA needs a separate multimodal chunker and embedder
 trait before image, audio, video, or PDF chunks are indexed.

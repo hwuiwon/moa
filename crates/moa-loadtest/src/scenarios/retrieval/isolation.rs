@@ -90,7 +90,8 @@ pub(super) async fn attack_vector_oracle(stack: &Stack) -> Result<(), String> {
     let matches = moa_memory_vector::VectorStore::knn(
         &vector,
         &moa_memory_vector::VectorQuery {
-            embedding,
+            embedding: moa_memory_vector::QueryEmbedding::new(embedding, "test-model".to_string())
+                .expect("valid query embedding"),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,

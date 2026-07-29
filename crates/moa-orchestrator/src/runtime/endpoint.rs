@@ -13,7 +13,6 @@ use crate::services::{
     security_events::{SecurityEvents, SecurityEventsImpl},
     tenants::{Tenants, TenantsImpl},
 };
-use crate::workflows::knowledge_index_rebuild::{KnowledgeIndexRebuild, KnowledgeIndexRebuildImpl};
 use crate::workflows::knowledge_sync_ingestion::{
     KnowledgeSyncIngestion, KnowledgeSyncIngestionImpl,
 };
@@ -104,7 +103,6 @@ const CORE_BODY_SERVICE_NAMES: &[&str] = &[
     "ExecutionRun",
     "ExecutionTask",
     "KnowledgeSyncIngestion",
-    "KnowledgeIndexRebuild",
     "Consolidate",
     "SessionRetention",
     "TenantPurge",
@@ -220,7 +218,7 @@ pub fn build_endpoint(
             )
             .serve(),
         )
-        .bind(GraphMemoryMaintImpl::new(pool.clone(), config.clone(), fga_client.clone()).serve())
+        .bind(GraphMemoryMaintImpl::new(pool.clone(), config.clone()).serve())
         .bind(SecurityEventsImpl::new(pool.clone()).serve())
         .bind(
             KnowledgeImpl::new(KnowledgeService::from_config(
@@ -321,7 +319,6 @@ pub fn build_endpoint(
             )
             .serve(),
         )
-        .bind(KnowledgeIndexRebuildImpl::new(pool.clone(), embedding_provider.clone()).serve())
         .bind(SessionRetentionImpl::new(session_store.clone()).serve())
         .bind(ConsolidateImpl::new(pool.clone(), kms, config.clone(), embedding_provider).serve());
 

@@ -185,8 +185,7 @@ async fn set_workspace_embedder_state(pool: &PgPool, storage_partition_id: &str,
         VALUES ($1, $2, 1, 1024)
         ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
-                embedding_dimension = EXCLUDED.embedding_dimension,
-                reembed_state = 'steady'
+                embedding_dimension = EXCLUDED.embedding_dimension
         "#,
     )
     .bind(storage_partition_id)
@@ -273,7 +272,11 @@ async fn pgvector_round_trip_returns_identical_seed_first() {
     let seed = &items[42];
     let matches = store
         .knn(&VectorQuery {
-            embedding: seed.embedding.clone(),
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                seed.embedding.clone(),
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,
@@ -295,14 +298,27 @@ async fn pgvector_round_trip_returns_identical_seed_first() {
 }
 
 #[tokio::test]
-async fn knn_on_unprovisioned_partition_returns_no_hits_instead_of_erroring() {
-    // Pins: a partition with no embedder state row (a brand-new tenant that
-    // has never ingested memory) answers reads with zero hits instead of the
-    // turn-fatal StoragePartitionEmbedderStateMissing error.
+async fn knn_on_partition_without_vectors_returns_no_hits_instead_of_erroring() {
+    // Pins: a graph-only partition has a state row but no vector model. Reads
+    // answer with zero hits instead of comparing the query against a fabricated
+    // legacy model.
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
     let storage_partition_id = Uuid::now_v7().to_string();
+    let scope = tenant_scope(&storage_partition_id);
+    let mut conn = ScopedConn::begin(session_store.pool(), &scope)
+        .await
+        .expect("begin graph-only partition transaction");
+    set_app_role(conn.as_mut()).await;
+    sqlx::query("INSERT INTO moa.storage_partition_state (storage_partition_id) VALUES ($1)")
+        .bind(&storage_partition_id)
+        .execute(conn.as_mut())
+        .await
+        .expect("seed graph-only partition state");
+    conn.commit()
+        .await
+        .expect("commit graph-only partition state");
 
     let store = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),
@@ -310,7 +326,11 @@ async fn knn_on_unprovisioned_partition_returns_no_hits_instead_of_erroring() {
     );
     let matches = store
         .knn(&VectorQuery {
-            embedding: basis_vector(0),
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                basis_vector(0),
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 10,
             label_filter: None,
             max_pii_class: SensitivityClass::Restricted,
@@ -318,10 +338,10 @@ async fn knn_on_unprovisioned_partition_returns_no_hits_instead_of_erroring() {
             as_of: None,
         })
         .await
-        .expect("unprovisioned partition read must not error");
+        .expect("graph-only partition read must not error");
     assert!(
         matches.is_empty(),
-        "expected zero hits from an unprovisioned partition, got {}",
+        "expected zero hits from a graph-only partition, got {}",
         matches.len()
     );
 
@@ -398,6 +418,60 @@ async fn preseeded_partition_pins_embedder_model_for_vector_writes() {
 }
 
 #[tokio::test]
+async fn same_dimension_query_from_different_model_is_rejected_db_memory() {
+    // Pins: equal vector dimensions do not make different embedding models
+    // compatible; KNN must reject a query before searching the partition.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = Uuid::now_v7().to_string();
+    set_workspace_embedder_state(
+        session_store.pool(),
+        &storage_partition_id,
+        "partition-model",
+    )
+    .await;
+    let store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    );
+
+    let error = store
+        .knn(&VectorQuery {
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                basis_vector(0),
+                "query-model".to_string(),
+            )
+            .expect("valid query embedding"),
+            k: 1,
+            label_filter: None,
+            max_pii_class: SensitivityClass::Restricted,
+            include_global: false,
+            as_of: None,
+        })
+        .await
+        .expect_err("a query from another model must fail closed");
+
+    match error {
+        moa_memory_vector::Error::EmbedderModelMismatch {
+            storage_partition_id: actual_partition,
+            configured_model,
+            requested_model,
+        } => {
+            assert_eq!(actual_partition, storage_partition_id);
+            assert_eq!(configured_model, "partition-model");
+            assert_eq!(requested_model, "query-model");
+        }
+        other => panic!("expected EmbedderModelMismatch, got {other:?}"),
+    }
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
 async fn cross_tenant_knn_cannot_see_other_workspace_vectors() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
@@ -429,7 +503,11 @@ async fn cross_tenant_knn_cannot_see_other_workspace_vectors() {
     );
     let matches = store_b
         .knn(&VectorQuery {
-            embedding: item_a.embedding.clone(),
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                item_a.embedding.clone(),
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,
@@ -482,7 +560,11 @@ async fn control_plane_knn_can_validate_contact_workspace_vectors() {
         .expect("upsert contact vector");
 
     let query = VectorQuery {
-        embedding: item.embedding.clone(),
+        embedding: moa_memory_vector::QueryEmbedding::new(
+            item.embedding.clone(),
+            "test-model".to_string(),
+        )
+        .expect("valid query embedding"),
         k: 10,
         label_filter: Some(vec!["Fact".to_string()]),
         max_pii_class: SensitivityClass::Restricted,
@@ -581,7 +663,11 @@ async fn pgvector_as_of_filters_by_node_index_validity_window() {
 
     let matches = store
         .knn(&VectorQuery {
-            embedding: old.embedding.clone(),
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                old.embedding.clone(),
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 5,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,
@@ -649,7 +735,11 @@ async fn pgvector_knn_excludes_pii_vectors_under_none_ceiling() {
         .expect("upsert mixed-pii vectors");
 
     let query_at = |ceiling| VectorQuery {
-        embedding: basis_vector(0),
+        embedding: moa_memory_vector::QueryEmbedding::new(
+            basis_vector(0),
+            "test-model".to_string(),
+        )
+        .expect("valid query embedding"),
         k: 10,
         label_filter: Some(vec!["Fact".to_string()]),
         max_pii_class: ceiling,
@@ -808,7 +898,11 @@ async fn pgvector_knn_returns_topk_in_strict_distance_order_db_memory() {
     let probe = mixed_vector(1.0, 0.0);
     let full = store
         .knn(&VectorQuery {
-            embedding: probe.clone(),
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                probe.clone(),
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 5,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,
@@ -834,7 +928,8 @@ async fn pgvector_knn_returns_topk_in_strict_distance_order_db_memory() {
     // A smaller k must return exactly the top-k prefix of the same ordering.
     let topk = store
         .knn(&VectorQuery {
-            embedding: probe,
+            embedding: moa_memory_vector::QueryEmbedding::new(probe, "test-model".to_string())
+                .expect("valid query embedding"),
             k: 3,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,
@@ -898,7 +993,11 @@ async fn pgvector_knn_excludes_soft_deleted_embedding_even_when_nearest_db_memor
 
     let matches = store
         .knn(&VectorQuery {
-            embedding: mixed_vector(1.0, 0.0),
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                mixed_vector(1.0, 0.0),
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 5,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,
@@ -984,7 +1083,11 @@ async fn pgvector_knn_hnsw_tuning_does_not_leak_past_transaction_db_memory() {
     // default; any leak would surface as "100" below.
     let matches = pinned_store
         .knn(&VectorQuery {
-            embedding: mixed_vector(1.0, 0.0),
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                mixed_vector(1.0, 0.0),
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,
@@ -1057,7 +1160,11 @@ async fn seed_mrl_prefix_ordered_corpus(
 
 fn topk_query(k: usize) -> VectorQuery {
     VectorQuery {
-        embedding: mixed_vector(10.0, 0.0),
+        embedding: moa_memory_vector::QueryEmbedding::new(
+            mixed_vector(10.0, 0.0),
+            "test-model".to_string(),
+        )
+        .expect("valid query embedding"),
         k,
         label_filter: Some(vec!["Fact".to_string()]),
         max_pii_class: SensitivityClass::Restricted,

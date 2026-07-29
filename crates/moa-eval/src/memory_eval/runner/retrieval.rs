@@ -43,7 +43,11 @@ pub(super) async fn retrieve_probe(
         .plan(&probe.query, &planning)
         .await
         .map_err(|error| memory_retrieval_error(probe, error))?;
-    let query_embedding = embed_probe_query(embedder, probe).await?;
+    let query_embedding = moa_memory_vector::QueryEmbedding::new(
+        embed_probe_query(embedder, probe).await?,
+        embedder.model_id(),
+    )
+    .map_err(|error| memory_retrieval_error(probe, error))?;
 
     let pre_rerank_output = retrieve_probe_output(
         &hybrid,
@@ -169,7 +173,7 @@ pub(super) async fn retrieve_probe_output(
     hybrid: &HybridRetriever,
     planned: &PlannedQuery,
     probe: &Probe,
-    query_embedding: Vec<f32>,
+    query_embedding: moa_memory_vector::QueryEmbedding,
     options: ProbeHitOptions,
 ) -> Result<RetrievalOutput> {
     let request = probe_retrieval_request(planned, probe, query_embedding, options);
@@ -182,12 +186,12 @@ pub(super) async fn retrieve_probe_output(
 pub(super) fn probe_retrieval_request(
     planned: &PlannedQuery,
     probe: &Probe,
-    query_embedding: Vec<f32>,
+    query_embedding: moa_memory_vector::QueryEmbedding,
     options: ProbeHitOptions,
 ) -> RetrievalRequest {
     let mut request = planned.clone().into_retrieval_request(
         &probe.query,
-        query_embedding,
+        Some(query_embedding),
         SensitivityClass::Restricted,
         options.k_final,
         options.use_reranker,

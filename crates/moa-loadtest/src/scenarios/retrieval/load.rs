@@ -6,7 +6,7 @@ use super::*;
 pub(super) struct RetrievalQuery {
     pub(super) tenant_index: usize,
     pub(super) text: String,
-    pub(super) embedding: Vec<f32>,
+    pub(super) embedding: moa_memory_vector::QueryEmbedding,
     pub(super) is_repeated: bool,
 }
 
@@ -215,7 +215,7 @@ pub(super) async fn hydrate_queries(
             Ok(RetrievalQuery {
                 tenant_index: template.tenant_index,
                 text: template.text,
-                embedding,
+                embedding: moa_memory_vector::QueryEmbedding::new(embedding, embedder.model_id())?,
                 is_repeated: template.is_repeated,
             })
         })

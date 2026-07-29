@@ -959,7 +959,10 @@ mod tests {
             cleared_barriers: Default::default(),
             seeds: planned.seeds.clone(),
             query_text: query.to_string(),
-            query_embedding: vec![0.0; 1024],
+            query_embedding: Some(
+                moa_memory_vector::QueryEmbedding::new(vec![0.0; 1024], "test-model")
+                    .expect("valid query embedding"),
+            ),
             scope: planned.scope.clone(),
             // Mirror production: the planner-inferred hint rides as a soft
             // boost, and only a scope plan would set the hard `label_filter`.

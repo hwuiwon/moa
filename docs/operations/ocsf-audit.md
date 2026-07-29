@@ -36,8 +36,10 @@ event — join on it to line a finding up with its session history.
 
 Queryable columns: `actor_session_uid` is the owning session and
 `target_resource_uid` is the canonical capability that tripped
-(`builtin:<tool>`, `mcp:<server>:<tool>`, or `hand:<tool>`). `actor_user_uid` is
-NULL because a circuit transition has no human actor, and
+(`builtin:<byte-length>:<tool>`,
+`mcp:<server-byte-length>:<server>:<tool-byte-length>:<tool>`, or the
+equivalent framed Hand identity). `actor_user_uid` is NULL because a circuit
+transition has no human actor, and
 `retrieval_operation_id` is NULL because these findings deliberately do not
 borrow the data-access uniqueness contract.
 

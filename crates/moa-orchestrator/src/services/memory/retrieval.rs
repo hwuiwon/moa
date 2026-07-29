@@ -5,10 +5,11 @@ use std::time::Instant;
 
 use moa_config::MoaConfig;
 use moa_core::traits::{EmbeddingProvider, Identity, RuntimeCacheStore};
-use moa_core::types::memory::InformationBarrierClearances;
+use moa_core::types::memory::{InformationBarrierClearances, SourceAclContext};
 use moa_core::types::security::SensitivityClass;
 use moa_core::types::session::SessionMeta;
 use moa_crypto::KeyManagementProvider;
+use moa_db::resolve_source_acl_context;
 use moa_memory_graph::{EdgeLabel, GraphStore, NodeIndexRow, NodeLabel, PostgresGraphStore};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::VectorStoreFactory;
@@ -50,9 +51,8 @@ pub(super) async fn search_inner(
     config: &MoaConfig,
 ) -> Result<MemorySearchResponse, HandlerError> {
     let started = Instant::now();
-    let policy =
-        MemoryAdmissionPolicy::from_session(&provenance.session).map_err(memory_handler_error)?;
     let clearances = session_clearances(&provenance.session)?;
+    let policy = resolved_policy(deps.pool, &provenance.session).await?;
     let scope = policy.traversal_scope();
     let hits = search_hits_for_tool(
         &deps,
@@ -87,11 +87,16 @@ pub(super) async fn show_inner(
     deps: MemoryServiceDeps<'_>,
 ) -> Result<MemoryShowResponse, HandlerError> {
     let started = Instant::now();
-    let policy =
-        MemoryAdmissionPolicy::from_session(&provenance.session).map_err(memory_handler_error)?;
     let clearances = session_clearances(&provenance.session)?;
+    let policy = resolved_policy(deps.pool, &provenance.session).await?;
     let scope = policy.traversal_scope();
-    let graph = graph_store(deps.pool, deps.kms, &scope, &clearances);
+    let graph = graph_store(
+        deps.pool,
+        deps.kms,
+        &scope,
+        &clearances,
+        policy.source_acl(),
+    );
     let node = graph
         .get_node(request.uid)
         .await
@@ -166,9 +171,8 @@ pub(super) async fn retrieve_debug_inner(
     config: &MoaConfig,
 ) -> Result<MemoryRetrieveDebugResponse, HandlerError> {
     let started = Instant::now();
-    let policy =
-        MemoryAdmissionPolicy::from_session(&provenance.session).map_err(memory_handler_error)?;
     let clearances = session_clearances(&provenance.session)?;
+    let policy = resolved_policy(deps.pool, &provenance.session).await?;
     let scope = policy.traversal_scope();
     let hits = search_hits_for_tool(
         &deps,
@@ -216,6 +220,7 @@ struct RetrievalInputs {
     use_reranker: bool,
     disable_graph_expansion: bool,
     clearances: InformationBarrierClearances,
+    source_acl: SourceAclContext,
 }
 
 /// Runs the same scoped hybrid retrieval the injection path uses for the
@@ -243,9 +248,15 @@ pub(super) async fn search_hits_for_tool(
         debug_query_embedding_with_config(config, Arc::clone(deps.runtime_cache), query).await?;
     let mut admitted = Vec::new();
     for plan in policy.plans() {
-        let (graph, retriever) =
-            memory_stack_with_runtime(deps.pool, deps.kms, config, plan.scope(), &clearances)
-                .await?;
+        let (graph, retriever) = memory_stack_with_runtime(
+            deps.pool,
+            deps.kms,
+            config,
+            plan.scope(),
+            &clearances,
+            policy.source_acl(),
+        )
+        .await?;
         let seeds = lookup_seed_uids(graph.as_ref(), query, retrieval_limit).await?;
         let hits = retrieve_hits_with_embedding(
             retriever.as_ref(),
@@ -259,6 +270,7 @@ pub(super) async fn search_hits_for_tool(
                 use_reranker: true,
                 disable_graph_expansion: plan.source_tier() == SourceTier::TenantKnowledge,
                 clearances: clearances.clone(),
+                source_acl: policy.source_acl().clone(),
             },
             query_embedding.clone(),
         )
@@ -290,6 +302,7 @@ pub(super) async fn neighbors_for_tool(
         kms.clone(),
         &policy.traversal_scope(),
         &clearances,
+        policy.source_acl(),
     );
     let Some(seed_node) = graph.get_node(seed).await.map_err(memory_handler_error)? else {
         return Ok(Vec::new());
@@ -310,11 +323,11 @@ pub(super) async fn neighbors_for_tool(
 async fn retrieve_hits_with_embedding(
     retriever: &HybridRetriever,
     inputs: RetrievalInputs,
-    query_embedding: Vec<f32>,
+    query_embedding: Option<moa_memory_vector::QueryEmbedding>,
 ) -> Result<Vec<RetrievalHit>, HandlerError> {
     retriever
         .retrieve(RetrievalRequest {
-            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
+            source_acl: inputs.source_acl,
             cleared_barriers: inputs.clearances,
             seeds: inputs.seeds,
             query_text: inputs.query,
@@ -341,9 +354,9 @@ async fn debug_query_embedding_with_config(
     config: &MoaConfig,
     runtime_cache: Arc<dyn RuntimeCacheStore>,
     query: &str,
-) -> Result<Vec<f32>, HandlerError> {
+) -> Result<Option<moa_memory_vector::QueryEmbedding>, HandlerError> {
     if query.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     let embedder = match build_embedder_from_config(
         config,
@@ -356,10 +369,13 @@ async fn debug_query_embedding_with_config(
                 %error,
                 "memory debug retrieval falling back without query embedding"
             );
-            return Ok(Vec::new());
+            return Ok(None);
         }
     };
-    embed_one(embedder.as_ref(), query).await
+    let embedding = embed_one(embedder.as_ref(), query).await?;
+    moa_memory_vector::QueryEmbedding::new(embedding, embedder.model_id())
+        .map(Some)
+        .map_err(memory_handler_error)
 }
 
 async fn embed_one(
@@ -391,18 +407,21 @@ async fn memory_stack_with_runtime(
     config: &MoaConfig,
     scope: &MemoryScope,
     clearances: &InformationBarrierClearances,
+    source_acl: &SourceAclContext,
 ) -> Result<(Arc<dyn GraphStore>, Arc<HybridRetriever>), HandlerError> {
     let graph = Arc::new(graph_store_with_pool(
         pool.clone(),
         kms.clone(),
         scope,
         clearances,
+        source_acl,
     ));
     let vector_factory = VectorStoreFactory::from_config(config);
     let pgvector_source = vector_factory.pgvector_source_for_app_role(
         pool.clone(),
         scope
             .to_rls_context()
+            .with_source_acl(source_acl.clone())
             .with_cleared_barriers(clearances.clone()),
     );
     let retriever =
@@ -416,8 +435,9 @@ fn graph_store(
     kms: &Arc<dyn KeyManagementProvider>,
     scope: &MemoryScope,
     clearances: &InformationBarrierClearances,
+    source_acl: &SourceAclContext,
 ) -> PostgresGraphStore {
-    graph_store_with_pool(pool.clone(), kms.clone(), scope, clearances)
+    graph_store_with_pool(pool.clone(), kms.clone(), scope, clearances, source_acl)
 }
 
 fn graph_store_with_pool(
@@ -425,14 +445,28 @@ fn graph_store_with_pool(
     kms: Arc<dyn KeyManagementProvider>,
     scope: &MemoryScope,
     clearances: &InformationBarrierClearances,
+    source_acl: &SourceAclContext,
 ) -> PostgresGraphStore {
     PostgresGraphStore::scoped_for_app_role(
         pool,
         scope
             .to_rls_context()
+            .with_source_acl(source_acl.clone())
             .with_cleared_barriers(clearances.clone()),
         kms,
     )
+}
+
+/// Resolves one durable source-ACL context and attaches it to the session policy.
+pub(super) async fn resolved_policy(
+    pool: &sqlx::PgPool,
+    session: &SessionMeta,
+) -> Result<MemoryAdmissionPolicy, HandlerError> {
+    let policy = MemoryAdmissionPolicy::from_session(session).map_err(memory_handler_error)?;
+    let source_acl = resolve_source_acl_context(pool, session.tenant_id, policy.contact_id(), true)
+        .await
+        .map_err(memory_handler_error)?;
+    Ok(policy.with_source_acl(source_acl))
 }
 
 async fn audit_service_access(

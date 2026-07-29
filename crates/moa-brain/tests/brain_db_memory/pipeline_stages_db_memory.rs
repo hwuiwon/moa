@@ -715,8 +715,7 @@ async fn seed_workspace_embedder_state(
         ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
-                embedding_dimension = EXCLUDED.embedding_dimension,
-                reembed_state = 'steady'
+                embedding_dimension = EXCLUDED.embedding_dimension
         "#,
     )
     .bind(storage_partition_id)

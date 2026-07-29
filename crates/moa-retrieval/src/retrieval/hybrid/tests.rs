@@ -6,6 +6,44 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 #[test]
+fn backend_state_rejects_query_from_different_embedding_model_offline() {
+    // Pins: the shared retrieval coordinator rejects a model-mismatched query
+    // before selecting pgvector or an external vector backend.
+    let mut request = vector_request();
+    request.query_embedding = Some(
+        moa_memory_vector::QueryEmbedding::new(vec![0.0; 1024], "query-model")
+            .expect("valid query embedding"),
+    );
+    let state = VectorBackendState {
+        embedding_model: Some("generation-model".to_string()),
+        ..VectorBackendState::default()
+    };
+
+    let error = state
+        .guard_query_embedder(&request)
+        .expect_err("different model identities must fail closed");
+    match error {
+        RetrievalError::GenerationEmbedderMismatch {
+            generation_model,
+            query_model,
+            ..
+        } => {
+            assert_eq!(generation_model, "generation-model");
+            assert_eq!(query_model, "query-model");
+        }
+        other => panic!("expected GenerationEmbedderMismatch, got {other:?}"),
+    }
+
+    request.query_embedding = Some(
+        moa_memory_vector::QueryEmbedding::new(vec![0.0; 1024], "generation-model")
+            .expect("valid query embedding"),
+    );
+    state
+        .guard_query_embedder(&request)
+        .expect("matching model identities are accepted");
+}
+
+#[test]
 fn lineage_sampling_is_deterministic_and_respects_rate_bounds() {
     // Pins: lineage sampling keys on (session, turn) so the same turn always
     // makes the same decision, 1.0 records everything, 0.0 records nothing,
@@ -75,7 +113,7 @@ async fn reranker_reorders_candidates_when_enabled() {
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: "deploy provider".to_string(),
-        query_embedding: Vec::new(),
+        query_embedding: None,
         scope: tenant_scope(),
         label_filter: None,
         label_boost: None,
@@ -128,7 +166,7 @@ async fn reranker_receives_hydrated_chunk_text_for_knowledge_hits() {
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: "how do I connect a custom domain?".to_string(),
-        query_embedding: Vec::new(),
+        query_embedding: None,
         scope: tenant_scope(),
         label_filter: None,
         label_boost: None,
@@ -207,7 +245,7 @@ fn feature_ranker_rescues_lexical_non_vector_hit_over_vector_noise() {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "contact email".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_scope(),
             label_filter: None,
             label_boost: None,
@@ -260,7 +298,7 @@ fn label_boost_reorders_without_excluding_non_hinted() {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "what did we learn from the auth outage?".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_scope(),
             label_filter: None,
             label_boost: Some(vec![NodeLabel::Lesson]),
@@ -322,7 +360,7 @@ fn feature_ranker_rescue_skips_graph_lexical_neighbors() {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "regional network".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_scope(),
             label_filter: None,
             label_boost: None,
@@ -382,7 +420,7 @@ fn feature_ranker_rescues_graph_only_expansion_hit() {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "library owner".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_scope(),
             label_filter: None,
             label_boost: None,
@@ -444,7 +482,7 @@ fn anchored_rescue_preserves_vector_rank_one_over_graph_only_hit() {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "library owner".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -531,7 +569,7 @@ fn source_graph_ranking_groups_chunks_and_reports_typed_graph_features() {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "custom domain dns records".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -623,7 +661,7 @@ fn source_graph_preserves_vector_article_without_typed_graph_evidence() {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "custom domain dns records".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -703,7 +741,7 @@ fn source_graph_keeps_original_order_when_top_article_is_unchanged() {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "custom domain dns records".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -795,7 +833,7 @@ fn entity_local_search_keeps_original_order_when_top_article_is_unchanged() {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "custom domain dns records".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -882,7 +920,7 @@ fn entity_local_source_object_ranking_preserves_vector_rank_one_with_semantic_pa
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "custom domain dns records".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -956,7 +994,7 @@ fn entity_local_source_object_ranking_ignores_disallowed_raw_paths() {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "custom domain dns records".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_scope(),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -1291,7 +1329,7 @@ fn turbopuffer_bm25_lexical_only_request_keeps_candidates() {
         LexicalBackend::TurbopufferBm25,
     );
     let mut req = vector_request();
-    req.query_embedding.clear();
+    req.query_embedding = None;
     req.label_filter = Some(vec![NodeLabel::Chunk]);
 
     apply_lexical_boost_only_policy(&req, &[], &mut lexical_hits);
@@ -1503,11 +1541,6 @@ fn retrieval_error_classification_matches_fatal_transient_table() {
             body: "down".to_string(),
         }
     )));
-    assert!(!is_fatal_retrieval_error(&RetrievalError::Vector(
-        VectorError::ReembedInProgress {
-            storage_partition_id: "sp".to_string(),
-        }
-    )));
     assert!(!is_fatal_retrieval_error(&RetrievalError::Graph(
         Error::GraphQuery("backend hiccup".to_string())
     )));
@@ -1591,6 +1624,7 @@ async fn turbopuffer_vector_leg_requires_configured_client() {
                 vector_backend: "turbopuffer".to_string(),
                 vector_backend_state: "steady".to_string(),
                 dual_read_until: None,
+                embedding_model: None,
             },
         )
         .await
@@ -1608,7 +1642,7 @@ async fn turbopuffer_lexical_leg_requires_configured_client_for_chunk_bm25() {
     // not degrade to Postgres lexical when the client is absent.
     let retriever = lazy_retriever();
     let mut req = vector_request();
-    req.query_embedding.clear();
+    req.query_embedding = None;
     req.query_text = "deployment runbook".to_string();
     req.label_filter = Some(vec![NodeLabel::Chunk]);
     let error = retriever
@@ -1618,6 +1652,7 @@ async fn turbopuffer_lexical_leg_requires_configured_client_for_chunk_bm25() {
                 vector_backend: "turbopuffer".to_string(),
                 vector_backend_state: "steady".to_string(),
                 dual_read_until: None,
+                embedding_model: None,
             },
         )
         .await
@@ -1657,6 +1692,7 @@ fn is_dual_read_active_respects_state_and_expiry() {
             vector_backend: "turbopuffer".to_string(),
             vector_backend_state: "dual_read".to_string(),
             dual_read_until: Some(future),
+            embedding_model: None,
         }
         .is_dual_read_active(),
         "dual_read with a future deadline is active"
@@ -1666,6 +1702,7 @@ fn is_dual_read_active_respects_state_and_expiry() {
             vector_backend: "turbopuffer".to_string(),
             vector_backend_state: "dual_read".to_string(),
             dual_read_until: None,
+            embedding_model: None,
         }
         .is_dual_read_active(),
         "dual_read with no deadline is active"
@@ -1675,6 +1712,7 @@ fn is_dual_read_active_respects_state_and_expiry() {
             vector_backend: "turbopuffer".to_string(),
             vector_backend_state: "dual_read".to_string(),
             dual_read_until: Some(past),
+            embedding_model: None,
         }
         .is_dual_read_active(),
         "an expired deadline ends dual-read"
@@ -1684,6 +1722,7 @@ fn is_dual_read_active_respects_state_and_expiry() {
             vector_backend: "pgvector".to_string(),
             vector_backend_state: "steady".to_string(),
             dual_read_until: Some(future),
+            embedding_model: None,
         }
         .is_dual_read_active(),
         "the steady state is never dual-read"
@@ -1706,7 +1745,7 @@ fn empty_corpus_request(k_final: usize, use_reranker: bool) -> RetrievalRequest 
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: String::new(),
-        query_embedding: Vec::new(),
+        query_embedding: None,
         scope: tenant_scope(),
         label_filter: None,
         label_boost: None,
@@ -1728,7 +1767,10 @@ fn vector_request() -> RetrievalRequest {
         source_acl: moa_core::types::memory::SourceAclContext::empty(0),
         cleared_barriers: Default::default(),
         query_text: "deployment runbook".to_string(),
-        query_embedding: vec![0.0; 1024],
+        query_embedding: Some(
+            moa_memory_vector::QueryEmbedding::new(vec![0.0; 1024], "test-model")
+                .expect("valid query embedding"),
+        ),
         ..empty_corpus_request(5, false)
     }
 }
@@ -2093,7 +2135,7 @@ fn evidence_floor_drops_lexically_unsupported_hits_but_keeps_graph_hits() {
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: "what is the deploy target for checkout".to_string(),
-        query_embedding: Vec::new(),
+        query_embedding: None,
         scope: tenant_scope(),
         label_filter: None,
         label_boost: None,
@@ -2215,7 +2257,7 @@ fn window_abstention_clears_low_evidence_windows_but_spares_supported_and_graph_
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: "what is the deploy target for checkout".to_string(),
-        query_embedding: Vec::new(),
+        query_embedding: None,
         scope: tenant_scope(),
         label_filter: None,
         label_boost: None,
@@ -2279,7 +2321,7 @@ fn default_window_policy_never_abstains() {
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: "what is the deploy target for checkout".to_string(),
-        query_embedding: Vec::new(),
+        query_embedding: None,
         scope: tenant_scope(),
         label_filter: None,
         label_boost: None,

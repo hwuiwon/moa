@@ -258,8 +258,6 @@ pub struct ToolOutputAssessment {
     pub signals: Vec<InjectionSignal>,
     /// Number of suspicious spans replaced in place.
     pub redacted_spans: u32,
-    /// Whether every raw carrier was cleared and replaced with safe text.
-    pub cleared_raw_carriers: bool,
     /// Number of duplicate carrier bodies collapsed before scoring.
     pub deduplicated_carriers: u32,
 }
@@ -273,7 +271,6 @@ impl ToolOutputAssessment {
             detector_revision: PROMPT_INJECTION_DETECTOR_REVISION.to_string(),
             signals: Vec::new(),
             redacted_spans: 0,
-            cleared_raw_carriers: false,
             deduplicated_carriers: 0,
         }
     }
@@ -335,13 +332,19 @@ impl ToolCapabilityId {
         Self::Hand { tool: tool.into() }
     }
 
-    /// Returns the stable rendered identity used in keys, events, and findings.
+    /// Returns the stable, injective identity used in keys, events, and findings.
+    ///
+    /// Every attacker-controlled coordinate is byte-length-framed. This keeps
+    /// distinct MCP `(server, tool)` pairs distinct even when either name
+    /// contains the `:` separator.
     #[must_use]
     pub fn render(&self) -> String {
         match self {
-            Self::BuiltIn { tool } => format!("builtin:{tool}"),
-            Self::Mcp { server, tool } => format!("mcp:{server}:{tool}"),
-            Self::Hand { tool } => format!("hand:{tool}"),
+            Self::BuiltIn { tool } => format!("builtin:{}:{tool}", tool.len()),
+            Self::Mcp { server, tool } => {
+                format!("mcp:{}:{server}:{}:{tool}", server.len(), tool.len())
+            }
+            Self::Hand { tool } => format!("hand:{}:{tool}", tool.len()),
         }
     }
 }
@@ -477,30 +480,22 @@ impl fmt::Display for SecurityCircuitStage {
     }
 }
 
-/// Identity of one already-processed assessment under a capability's circuit.
-///
-/// Deduplication is by triggering [`ToolCallId`], so a Restate replay of the same
-/// tool call applies its assessment exactly once no matter how many times the
-/// journal is re-read.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProcessedAssessmentId {
-    /// Capability the assessment scored against.
-    pub capability: ToolCapabilityId,
-    /// Tool call that produced the assessment.
-    pub tool_call_id: ToolCallId,
-}
-
 /// Per-capability circuit state under one owner generation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecurityCircuitCapabilityState {
     /// Accumulated additive score.
     pub score: u32,
-    /// Stage the accumulated score has reached.
-    pub stage: SecurityCircuitStage,
     /// Tool calls already applied, in sorted order.
     pub applied_tool_calls: Vec<ToolCallId>,
+}
+
+impl SecurityCircuitCapabilityState {
+    /// Returns the stage derived from the accumulated score.
+    #[must_use]
+    pub const fn stage(&self) -> SecurityCircuitStage {
+        SecurityCircuitStage::for_score(self.score)
+    }
 }
 
 /// One owner's complete prompt-injection circuit.
@@ -515,8 +510,50 @@ pub struct SecurityCircuitCapabilityState {
 pub struct SecurityCircuitState {
     /// Logical owner the current capability map belongs to.
     pub owner: Option<SecurityCircuitOwner>,
-    /// Per-capability circuit state, keyed by rendered canonical capability id.
-    pub capabilities: std::collections::BTreeMap<String, SecurityCircuitCapabilityState>,
+    /// Per-capability circuit state, keyed by canonical typed capability id.
+    #[serde(with = "capability_state_map")]
+    pub capabilities: std::collections::BTreeMap<ToolCapabilityId, SecurityCircuitCapabilityState>,
+}
+
+/// Serde support for a map whose typed enum keys cannot be JSON object keys.
+///
+/// The durable shape is an ordered list of `(capability, state)` pairs. Duplicate
+/// capabilities are rejected instead of silently overwriting one circuit entry.
+mod capability_state_map {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+
+    use super::{SecurityCircuitCapabilityState, ToolCapabilityId};
+
+    pub(super) fn serialize<S>(
+        value: &BTreeMap<ToolCapabilityId, SecurityCircuitCapabilityState>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<BTreeMap<ToolCapabilityId, SecurityCircuitCapabilityState>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries =
+            Vec::<(ToolCapabilityId, SecurityCircuitCapabilityState)>::deserialize(deserializer)?;
+        let mut value = BTreeMap::new();
+        for (capability, state) in entries {
+            if value.insert(capability, state).is_some() {
+                return Err(D::Error::custom(
+                    "duplicate capability in security circuit state",
+                ));
+            }
+        }
+        Ok(value)
+    }
 }
 
 impl SecurityCircuitState {
@@ -535,8 +572,8 @@ impl SecurityCircuitState {
             return true;
         }
         self.capabilities
-            .get(&capability.render())
-            .is_none_or(|state| state.stage.permits_dispatch())
+            .get(capability)
+            .is_none_or(|state| state.stage().permits_dispatch())
     }
 
     /// Returns the stage this capability has reached under `owner`.
@@ -550,8 +587,8 @@ impl SecurityCircuitState {
             return SecurityCircuitStage::Clear;
         }
         self.capabilities
-            .get(&capability.render())
-            .map(|state| state.stage)
+            .get(capability)
+            .map(SecurityCircuitCapabilityState::stage)
             .unwrap_or_default()
     }
 
@@ -574,7 +611,7 @@ impl SecurityCircuitState {
         capability: &ToolCapabilityId,
     ) -> SecurityCircuitCapabilityState {
         self.capabilities
-            .get(&capability.render())
+            .get(capability)
             .cloned()
             .unwrap_or_default()
     }
@@ -585,7 +622,7 @@ impl SecurityCircuitState {
         capability: &ToolCapabilityId,
         state: SecurityCircuitCapabilityState,
     ) {
-        self.capabilities.insert(capability.render(), state);
+        self.capabilities.insert(capability.clone(), state);
     }
 }
 
@@ -644,19 +681,25 @@ pub struct TransitionKeyInput<'a> {
     pub reached_stage: SecurityCircuitStage,
 }
 
+/// Adds one unambiguous length-framed field to a transition digest.
+fn hash_transition_field(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&(value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
 /// Derives the replay-stable Session transition key.
 ///
-/// The digest is taken over domain-separated canonical JSON, so the key depends
-/// only on the logical coordinates of the transition — never on wall-clock time,
-/// attempt count, or field ordering. Two replays of one transition therefore
-/// collapse onto one Session fact and one security event.
+/// The digest uses the capability's canonical injective rendering followed by
+/// length-framed canonical JSON for the remaining coordinates. It therefore
+/// depends only on the logical transition — never wall-clock time, attempt
+/// count, or field ordering. Two replays of one transition collapse onto one
+/// Session fact and one security event.
 #[must_use]
 pub fn transition_key(input: TransitionKeyInput<'_>) -> String {
     let payload = serde_json::json!({
         "schema_version": PROMPT_INJECTION_CIRCUIT_SCHEMA_VERSION,
         "session_id": input.session_id.0,
         "owner": input.owner,
-        "capability": input.capability.render(),
         "tool_call_id": input.tool_call_id.0,
         "prior_stage": input.prior_stage.as_str(),
         "reached_stage": input.reached_stage.as_str(),
@@ -670,7 +713,8 @@ pub fn transition_key(input: TransitionKeyInput<'_>) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(TRANSITION_DIGEST_DOMAIN.as_bytes());
     hasher.update(b"\x00");
-    hasher.update(&canonical);
+    hash_transition_field(&mut hasher, input.capability.render().as_bytes());
+    hash_transition_field(&mut hasher, &canonical);
     format!("{TRANSITION_KEY_PREFIX}{}", hasher.finalize().to_hex())
 }
 
@@ -706,8 +750,9 @@ mod tests {
 
         use crate::types::identifiers::{SessionId, ToolCallId};
         use crate::types::security::{
-            OutputAssessmentClass, SecurityCircuitOwner, SecurityCircuitStage, ToolCapabilityId,
-            TransitionKeyInput, transition_key,
+            OutputAssessmentClass, SecurityCircuitCapabilityState, SecurityCircuitOwner,
+            SecurityCircuitStage, SecurityCircuitState, ToolCapabilityId, TransitionKeyInput,
+            transition_key,
         };
 
         fn owner() -> SecurityCircuitOwner {
@@ -783,13 +828,13 @@ mod tests {
             let capability = ToolCapabilityId::Hand {
                 tool: "bash".to_string(),
             };
-            assert_eq!(capability.render(), "hand:bash");
+            assert_eq!(capability.render(), "hand:4:bash");
             assert_eq!(
                 ToolCapabilityId::BuiltIn {
                     tool: "file_read".to_string()
                 }
                 .render(),
-                "builtin:file_read"
+                "builtin:9:file_read"
             );
             assert_eq!(
                 ToolCapabilityId::Mcp {
@@ -797,8 +842,37 @@ mod tests {
                     tool: "query".to_string()
                 }
                 .render(),
-                "mcp:search:query"
+                "mcp:6:search:5:query"
             );
+        }
+
+        #[test]
+        fn circuit_state_round_trips_typed_capability_keys() {
+            // Pins: persisted circuit state keeps the complete typed capability
+            // identity. Serializing through JSON must not flatten MCP server and
+            // tool coordinates into an unchecked rendered string.
+            let owner = owner();
+            let capability = ToolCapabilityId::mcp("search", "query");
+            let mut circuit = SecurityCircuitState::default();
+            circuit.adopt_owner(&owner);
+            circuit.set_capability_state(
+                &capability,
+                SecurityCircuitCapabilityState {
+                    score: 2,
+                    applied_tool_calls: vec![ToolCallId(Uuid::from_u128(0x55))],
+                },
+            );
+
+            let encoded = serde_json::to_string(&circuit).expect("serialize circuit");
+            let decoded: SecurityCircuitState =
+                serde_json::from_str(&encoded).expect("deserialize circuit");
+
+            assert_eq!(decoded, circuit);
+            assert_eq!(
+                decoded.stage(&owner, &capability),
+                SecurityCircuitStage::Disabled
+            );
+            assert!(!decoded.permits_dispatch(&owner, &capability));
         }
 
         #[test]
@@ -881,6 +955,36 @@ mod tests {
                     "every transition coordinate must change the key"
                 );
             }
+        }
+
+        #[test]
+        fn capability_render_and_transition_key_avoid_delimiter_collisions() {
+            // Pins: the canonical identity used by OCSF, dashboards, and
+            // transition hashing keeps MCP server and tool coordinates distinct
+            // even when either contains the separator.
+            let session_id = SessionId(Uuid::from_u128(0x51));
+            let owner = owner();
+            let left = ToolCapabilityId::mcp("a:b", "c");
+            let right = ToolCapabilityId::mcp("a", "b:c");
+            assert_ne!(
+                left.render(),
+                right.render(),
+                "canonical capability rendering must be injective"
+            );
+            let left_input = TransitionKeyInput {
+                session_id,
+                owner: &owner,
+                capability: &left,
+                tool_call_id: ToolCallId(Uuid::from_u128(0x77)),
+                prior_stage: SecurityCircuitStage::Clear,
+                reached_stage: SecurityCircuitStage::Disabled,
+            };
+            let right_input = TransitionKeyInput {
+                capability: &right,
+                ..left_input
+            };
+
+            assert_ne!(transition_key(left_input), transition_key(right_input));
         }
 
         #[test]

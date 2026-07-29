@@ -121,8 +121,8 @@ impl MemoryAdmissionPolicy {
             // Deliberately unresolved: the agent knowledge policy is authored
             // configuration, while provider-source admission is durable identity
             // state that only a database read can establish. Until the retrieval
-            // entry point attaches it, this policy admits tenant-public sources
-            // only and its results are not cacheable.
+            // entry point attaches it, this policy admits no governed source and
+            // its results are not cacheable.
             source_acl: SourceAclContext::empty(SOURCE_ACL_EPOCH_UNRESOLVED),
         }
     }

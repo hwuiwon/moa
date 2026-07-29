@@ -540,13 +540,13 @@ pub async fn vector_leg(
     vector: &dyn VectorStore,
     req: &RetrievalRequest,
 ) -> Result<Vec<LegCandidate>> {
-    if req.query_embedding.is_empty() {
+    let Some(query_embedding) = &req.query_embedding else {
         return Ok(Vec::new());
-    }
+    };
 
     let hits = vector
         .knn(&VectorQuery {
-            embedding: req.query_embedding.clone(),
+            embedding: query_embedding.clone(),
             k: leg_candidate_limit(req.k_final),
             label_filter: Some(effective_label_filter_values(req.label_filter.as_deref())),
             max_pii_class: req.max_pii_class,
@@ -1991,7 +1991,10 @@ mod tests {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "who owns the dependency".to_string(),
-            query_embedding: vec![0.1, 0.2],
+            query_embedding: Some(
+                moa_memory_vector::QueryEmbedding::new(vec![0.1, 0.2], "test-model")
+                    .expect("valid query embedding"),
+            ),
             scope: MemoryScope::Tenant {
                 tenant_id: TenantId::from(Uuid::from_u128(0x100)),
             },

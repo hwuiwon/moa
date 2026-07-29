@@ -4,10 +4,7 @@ use chrono::{DateTime, Utc};
 use moa_core::{
     types::contact::ContactId,
     types::identifiers::{SessionId, TenantId},
-    types::memory::{
-        EmbeddingGenerationId, InformationBarrierId, RebuildKind, RebuildLifecycle,
-        RebuildOperationId,
-    },
+    types::memory::InformationBarrierId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -242,94 +239,4 @@ mod tests {
             "strict wire decoding should reject self-asserted policy: {error}"
         );
     }
-}
-
-// ---------------------------------------------------------------------------
-// Storage-partition index rebuilds
-// ---------------------------------------------------------------------------
-
-/// Request payload for starting a storage-partition index rebuild.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RebuildStartRequest {
-    /// Tenant whose storage partition is rebuilt.
-    pub tenant_id: TenantId,
-    /// Which rebuild to run.
-    pub kind: RebuildKind,
-}
-
-/// Request payload naming one existing rebuild operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RebuildOperationRequest {
-    /// Tenant whose storage partition holds the operation.
-    pub tenant_id: TenantId,
-    /// Operation to act on.
-    pub operation_uid: RebuildOperationId,
-}
-
-/// Operator-visible state of one rebuild operation.
-///
-/// Cost is reported as an estimate and named as one. The embedding provider
-/// trait exposes no billed usage, so no field here is a bill and none should be
-/// added that implies otherwise.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RebuildStatusResponse {
-    /// Operation identity.
-    pub operation_uid: RebuildOperationId,
-    /// Tenant that owns the partition.
-    pub tenant_id: TenantId,
-    /// Storage partition being rebuilt.
-    pub storage_partition_id: String,
-    /// Which rebuild this is.
-    pub kind: RebuildKind,
-    /// Current lifecycle position.
-    pub lifecycle: RebuildLifecycle,
-    /// Candidate generation being built, once one exists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub candidate_generation_uid: Option<EmbeddingGenerationId>,
-    /// Generation production currently reads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_generation_uid: Option<EmbeddingGenerationId>,
-    /// Generation a rollback would restore.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous_generation_uid: Option<EmbeddingGenerationId>,
-    /// Partition-wide vector census.
-    pub vectors_total: i64,
-    /// Candidate vectors written so far.
-    pub vectors_rebuilt: i64,
-    /// Source vectors whose input could not be reconstructed.
-    pub vectors_failed: i64,
-    /// Deterministic input-token estimate.
-    pub estimated_input_tokens: i64,
-    /// Deterministic cost projection in micros. Not a billed figure.
-    pub estimated_cost_micros: i64,
-    /// Embedding requests issued.
-    pub provider_requests: i64,
-    /// Embedding requests the provider throttled.
-    pub provider_throttles: i64,
-    /// Embedding requests retried after a transient failure.
-    pub provider_retries: i64,
-    /// Mean top-K overlap measured by shadow validation, when it has run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub validation_overlap: Option<f64>,
-    /// Whether an operator has asked the operation to stop.
-    pub cancel_requested: bool,
-    /// Closed-vocabulary failure code.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_error_code: Option<String>,
-    /// Operator-safe failure summary.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_error_message: Option<String>,
-}
-
-/// Response payload for a rebuild control action.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebuildActionResponse {
-    /// Operation the action targeted.
-    pub operation_uid: RebuildOperationId,
-    /// Lifecycle after the action.
-    pub lifecycle: RebuildLifecycle,
-    /// Whether the action changed anything, as opposed to being a replay.
-    pub applied: bool,
 }

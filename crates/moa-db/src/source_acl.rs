@@ -61,17 +61,21 @@ pub fn push_source_acl_predicate(
         r#"NOT EXISTS (
             SELECT 1
             FROM (
-                SELECT acl_version.object_id AS object_id
+                SELECT acl_version.object_id, acl_version.tenant_id, acl_version.storage_partition_id
                 FROM moa.knowledge_chunks AS acl_chunk
                 JOIN moa.knowledge_document_versions AS acl_version
                   ON acl_version.document_version_uid = acl_chunk.document_version_id
+                 AND acl_version.tenant_id = acl_chunk.tenant_id
+                 AND acl_version.storage_partition_id = acl_chunk.storage_partition_id
                 WHERE acl_chunk.chunk_uid = "#,
     );
     builder.push(uid_expr);
     builder.push(
         r#"
                 UNION ALL
-                SELECT acl_doc_version.object_id AS object_id
+                SELECT acl_doc_version.object_id,
+                       acl_doc_version.tenant_id,
+                       acl_doc_version.storage_partition_id
                 FROM moa.knowledge_document_versions AS acl_doc_version
                 WHERE acl_doc_version.graph_node_uid = "#,
     );
@@ -81,25 +85,26 @@ pub fn push_source_acl_predicate(
             ) AS acl_governed
             JOIN moa.knowledge_objects AS acl_object
               ON acl_object.object_uid = acl_governed.object_id
-            JOIN moa.knowledge_connections AS acl_connection
-              ON acl_connection.connection_uid = acl_object.connection_id
+             AND acl_object.tenant_id = acl_governed.tenant_id
+             AND acl_object.storage_partition_id = acl_governed.storage_partition_id
             WHERE NOT (
-                acl_connection.acl_mode = 'tenant_public'
-                OR (
-                    acl_connection.acl_mode = 'provider_managed'
-                    AND acl_object.acl_state = 'current'
-                    AND EXISTS (
+                acl_object.acl_state = 'current'
+                AND EXISTS (
                         SELECT 1
                         FROM moa.knowledge_source_acl_snapshots AS acl_snapshot
                         WHERE acl_snapshot.snapshot_uid = acl_object.current_acl_snapshot_id
                           AND acl_snapshot.object_id = acl_object.object_uid
+                          AND acl_snapshot.tenant_id = acl_object.tenant_id
+                          AND acl_snapshot.storage_partition_id = acl_object.storage_partition_id
                           AND acl_snapshot.complete
                           AND acl_snapshot.provider_revision = acl_object.acl_revision
                     )
-                    AND EXISTS (
+                AND EXISTS (
                         SELECT 1
                         FROM moa.knowledge_source_acl_entries AS acl_allow
                         WHERE acl_allow.snapshot_id = acl_object.current_acl_snapshot_id
+                          AND acl_allow.tenant_id = acl_object.tenant_id
+                          AND acl_allow.storage_partition_id = acl_object.storage_partition_id
                           AND acl_allow.entry_kind = 'allow'
                           AND acl_allow.principal_fingerprint = ANY("#,
     );
@@ -107,10 +112,12 @@ pub fn push_source_acl_predicate(
     builder.push(
         r#")
                     )
-                    AND NOT EXISTS (
+                AND NOT EXISTS (
                         SELECT 1
                         FROM moa.knowledge_source_acl_entries AS acl_deny
                         WHERE acl_deny.snapshot_id = acl_object.current_acl_snapshot_id
+                          AND acl_deny.tenant_id = acl_object.tenant_id
+                          AND acl_deny.storage_partition_id = acl_object.storage_partition_id
                           AND acl_deny.entry_kind = 'deny'
                           AND acl_deny.principal_fingerprint = ANY("#,
     );
@@ -118,7 +125,6 @@ pub fn push_source_acl_predicate(
     builder.push(
         r#")
                     )
-                )
             )
         )"#,
     );
@@ -252,7 +258,10 @@ mod tests {
 
         assert!(sql.contains("moa.knowledge_chunks"));
         assert!(sql.contains("acl_doc_version.graph_node_uid = node.uid"));
-        assert!(sql.contains("acl_connection.acl_mode = 'tenant_public'"));
+        assert!(!sql.contains("acl_connection"));
+        assert!(sql.contains("acl_object.tenant_id = acl_governed.tenant_id"));
+        assert!(sql.contains("acl_snapshot.tenant_id = acl_object.tenant_id"));
+        assert!(sql.contains("acl_allow.tenant_id = acl_object.tenant_id"));
         assert!(sql.contains("acl_object.acl_state = 'current'"));
         assert!(sql.contains("acl_snapshot.provider_revision = acl_object.acl_revision"));
         assert!(sql.contains("acl_snapshot.complete"));
@@ -273,7 +282,7 @@ mod tests {
     #[test]
     fn empty_principal_set_still_emits_the_bind_and_denies() {
         // Pins: a caller with no resolved principals produces an empty array
-        // bind, so `= ANY` is false and provider-managed content is denied — it
+        // bind, so `= ANY` is false and source-governed content is denied — it
         // must not degrade into an omitted predicate.
         let acl = SourceAclContext::empty(0);
         assert!(acl.bind_values().is_empty());

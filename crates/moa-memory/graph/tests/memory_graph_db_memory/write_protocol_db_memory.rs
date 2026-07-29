@@ -183,8 +183,7 @@ async fn seed_workspace_embedder_state(pool: &PgPool, storage_partition_id: &str
         ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
-                embedding_dimension = EXCLUDED.embedding_dimension,
-                reembed_state = 'steady'
+                embedding_dimension = EXCLUDED.embedding_dimension
         "#,
     )
     .bind(storage_partition_id)
@@ -773,7 +772,11 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
     );
     let matches = vector
         .knn(&VectorQuery {
-            embedding: basis_vector(0),
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                basis_vector(0),
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 1,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,
@@ -813,7 +816,11 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
     );
     let historical_vector_matches = vector
         .knn(&VectorQuery {
-            embedding: basis_vector(0),
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                basis_vector(0),
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 5,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,

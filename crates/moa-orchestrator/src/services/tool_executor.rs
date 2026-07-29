@@ -1050,7 +1050,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
-    use moa_config::{McpServerConfig, McpServerCredentialScope, McpTransportConfig, MoaConfig};
+    use moa_config::{McpServerConfig, MoaConfig};
     use moa_core::{
         events::Event, events::EventType, traits::HandProvider,
         types::action_policy::ExecutionTaskOrigin, types::action_policy::RiskLevel,
@@ -1405,9 +1405,7 @@ mod tests {
             required: false,
             discovery: moa_config::McpDiscoveryMode::Eager,
             name: "reviewed-mcp".to_string(),
-            transport: McpTransportConfig::Http,
-            url: Some(format!("http://{addr}")),
-            credential_scope: McpServerCredentialScope::DeploymentOwned,
+            url: format!("http://{addr}"),
             credentials: None,
             trust_tool_annotations: false,
             allowed_data_classes: Vec::new(),
@@ -1420,7 +1418,7 @@ mod tests {
                 abstained: false,
             },
         })));
-        let router = ToolRouter::from_config(&config, Some(mcp_egress_guard), None, None)
+        let router = ToolRouter::from_config(&config, Some(mcp_egress_guard), None)
             .await
             .expect("build MCP router");
         let executor = ToolExecutorImpl::new(Arc::new(router));
@@ -1702,7 +1700,7 @@ mod tests {
              because of where it came from"
         );
         assert!(
-            secured.assessment.cleared_raw_carriers,
+            secured.assessment.class.clears_raw_carriers(),
             "a confirmed injection must clear every raw carrier"
         );
         assert_eq!(

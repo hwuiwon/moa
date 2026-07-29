@@ -158,6 +158,7 @@ fn summarize_session_events(
             | Event::PromptInjectionCircuitTransition { .. }
             | Event::ActionReviewRequested { .. }
             | Event::ActionReviewDecided { .. }
+            | Event::ActionReviewTimedOut { .. }
             | Event::ActionReviewContinuationRequested { .. }
             | Event::WorkerSpawned { .. }
             | Event::WorkerMessageSent { .. }

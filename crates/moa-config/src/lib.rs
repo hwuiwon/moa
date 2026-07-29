@@ -81,8 +81,8 @@ pub use providers::{
 pub use runtime_cache::{RuntimeCacheBackend, RuntimeCacheConfig};
 pub use sandbox::{
     CloudConfig, CloudHandsConfig, LOCAL_DEVELOPMENT_SANDBOX_REVISION, LocalConfig,
-    McpCredentialConfig, McpDiscoveryMode, McpServerConfig, McpServerCredentialScope,
-    McpTransportConfig, SandboxPolicyConfig, SandboxProfileConfig,
+    McpCredentialConfig, McpDiscoveryMode, McpServerConfig, SandboxPolicyConfig,
+    SandboxProfileConfig,
 };
 pub use security::{PermissionsConfig, SecurityProfile};
 pub use session::{

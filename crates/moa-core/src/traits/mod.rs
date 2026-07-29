@@ -24,8 +24,9 @@ use crate::error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 use crate::events::{Event, EventType};
 use crate::types::experience::LearningCandidateSummary;
 use crate::types::{
-    channel::Attachment, channel::Channel, channel::ChannelAccountId, channel::ChannelCapabilities,
-    channel::ChannelEvent, channel::ChannelRef, channel::MessageId, channel::OutboundMessage,
+    action_policy::ToolResultSecurityMetadata, channel::Attachment, channel::Channel,
+    channel::ChannelAccountId, channel::ChannelCapabilities, channel::ChannelEvent,
+    channel::ChannelRef, channel::MessageId, channel::OutboundMessage,
     channel::SessionChannelBinding, channel::SessionChannelBindingId,
     channel::SessionChannelBindingResolution, completion::CompletionRequest,
     completion::CompletionStream, contact::ContactId, contact::ContactPointId,
@@ -41,10 +42,10 @@ use crate::types::{
     hands::HandSpec, hands::HandStatus, hands::SandboxFile, identifiers::SegmentId,
     identifiers::SessionAttachmentId, identifiers::SessionId, identifiers::StoragePartitionId,
     identifiers::TenantId, identifiers::ToolCallId, learning::LearningEntry,
-    model::ModelCapabilities, security::ToolCapabilityId, security::ToolOutputAssessment,
-    segment_assessment::SegmentAssessment, segment_assessment::SegmentBaseline,
-    segment_assessment::SkillResolutionRate, segments::SegmentCompletion, segments::TaskSegment,
-    session::Checkpoint, session::CheckpointHandle, session::SessionFilter, session::SessionMeta,
+    model::ModelCapabilities, segment_assessment::SegmentAssessment,
+    segment_assessment::SegmentBaseline, segment_assessment::SkillResolutionRate,
+    segments::SegmentCompletion, segments::TaskSegment, session::Checkpoint,
+    session::CheckpointHandle, session::SessionFilter, session::SessionMeta,
     session::SessionStatus, session::SessionSummary, snapshot::ContextSnapshot, tools::ToolOutput,
 };
 
@@ -244,7 +245,7 @@ pub trait SessionChannelStore: Send + Sync {
     ) -> Result<Option<SessionChannelBindingResolution>>;
 }
 
-/// Focused contract for event-idempotency lookups that avoid decoding payloads.
+/// Focused contract for recovering durable terminal tool facts.
 #[async_trait]
 pub trait SessionEventLookupStore: Send + Sync {
     /// Returns whether a persisted tool event already exists.
@@ -254,15 +255,6 @@ pub trait SessionEventLookupStore: Send + Sync {
         session_id: SessionId,
         event_type: EventType,
         tool_call_id: ToolCallId,
-    ) -> Result<bool>;
-
-    /// Returns whether a persisted action-review event already exists.
-    async fn action_review_event_exists(
-        &self,
-        storage_partition_id: &StoragePartitionId,
-        session_id: SessionId,
-        event_type: EventType,
-        review_id: uuid::Uuid,
     ) -> Result<bool>;
 
     /// Loads the security metadata recorded on one durable `ToolResult`.
@@ -277,7 +269,15 @@ pub trait SessionEventLookupStore: Send + Sync {
         storage_partition_id: &StoragePartitionId,
         session_id: SessionId,
         tool_call_id: ToolCallId,
-    ) -> Result<Option<(ToolOutputAssessment, ToolCapabilityId)>>;
+    ) -> Result<Option<ToolResultSecurityMetadata>>;
+
+    /// Loads one reviewed tool call's terminal fact in a single lookup.
+    async fn tool_terminal_fact(
+        &self,
+        storage_partition_id: &StoragePartitionId,
+        session_id: SessionId,
+        tool_call_id: ToolCallId,
+    ) -> Result<Option<crate::types::action_policy::ToolTerminalFact>>;
 }
 
 /// Focused contract for analytics read models derived from the session log.

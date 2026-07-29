@@ -218,8 +218,7 @@ async fn seed_embedder_state(pool: &PgPool, tenant_id: TenantId) {
         ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
-                embedding_dimension = EXCLUDED.embedding_dimension,
-                reembed_state = 'steady'
+                embedding_dimension = EXCLUDED.embedding_dimension
         "#,
     )
     .bind(&partition)

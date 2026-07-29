@@ -19,11 +19,7 @@ use moa_core::{
     types::channel::Channel,
 };
 use moa_hands::{
-    PostgresTenantSandboxPolicyStore, ToolRouter,
-    core::leases::PostgresHandLeaseStore,
-    core::mcp_connections::{
-        PostgresTenantMcpConnectionBindings, TenantMcpAuthorizer, TenantMcpCredentialOwners,
-    },
+    PostgresTenantSandboxPolicyStore, ToolRouter, core::leases::PostgresHandLeaseStore,
 };
 use moa_memory_pii::{HeuristicPiiClassifier, OpenAiPrivacyFilterClassifier, PiiClassifier};
 use moa_providers::{
@@ -171,22 +167,10 @@ impl RuntimeDeps {
             Some(Arc::clone(&runtime_cache)),
         )?;
         let mcp_egress_guard = build_mcp_egress_guard(config.as_ref(), egress_classifier.as_ref())?;
-        // Tenant-owned MCP servers need all three owners at once. They are built
-        // only when the authorization engine is available, so a deployment that
-        // skips OpenFGA cannot serve a tenant-owned server through an unchecked
-        // path — the router refuses to construct instead.
-        let tenant_mcp = fga_client
-            .clone()
-            .map(|fga_client| TenantMcpCredentialOwners {
-                vault: Arc::clone(&credential_vault),
-                bindings: Arc::new(PostgresTenantMcpConnectionBindings::new(pool.clone())),
-                authorizer: Arc::new(FgaTenantMcpAuthorizer::new(fga_client)),
-            });
         let tool_router = ToolRouter::from_config(
             config.as_ref(),
             mcp_egress_guard,
             Some(session_store.clone()),
-            tenant_mcp,
         )
         .await?
         .with_hand_lease_store(Arc::new(PostgresHandLeaseStore::new(pool.clone())))
@@ -503,41 +487,6 @@ fn build_egress_pii_classifier(config: &MoaConfig) -> EgressPiiClassifier {
     }
 }
 
-/// Delegated tenant-operator authorization for tenant-owned MCP dispatches.
-///
-/// Tool routing does not depend on the authorization engine; it depends on this
-/// port. The check is the same delegated one every tenant-scoped handler uses,
-/// so an agent acting for a user must hold `can_act_as` on top of the tenant
-/// operator relation, and an engine failure denies rather than proceeding.
-struct FgaTenantMcpAuthorizer {
-    fga: FgaClient,
-}
-
-impl FgaTenantMcpAuthorizer {
-    fn new(fga: FgaClient) -> Self {
-        Self { fga }
-    }
-}
-
-#[async_trait::async_trait]
-impl TenantMcpAuthorizer for FgaTenantMcpAuthorizer {
-    async fn require_tenant_operator(
-        &self,
-        identity: &moa_core::traits::Identity,
-        tenant_id: moa_core::types::identifiers::TenantId,
-    ) -> moa_core::error::Result<()> {
-        moa_authz::require_authz_with_delegation(
-            &self.fga,
-            identity,
-            moa_authz_schema::ObjectType::Tenant,
-            tenant_id,
-            moa_authz_schema::Relation::Operator,
-        )
-        .await
-        .map_err(|error| moa_core::error::MoaError::PermissionDenied(error.to_string()))
-    }
-}
-
 fn build_fga_client(config: &MoaConfig) -> Result<FgaClient> {
     let openfga = config
         .authz
@@ -559,10 +508,7 @@ mod tests {
     use std::time::Duration;
 
     use moa_config::MoaConfig;
-    use moa_config::{
-        McpServerConfig, McpServerCredentialScope, McpTransportConfig, RuntimeCacheBackend,
-        RuntimeCacheConfig,
-    };
+    use moa_config::{McpServerConfig, RuntimeCacheBackend, RuntimeCacheConfig};
     use moa_core::traits::RuntimeCacheStore;
 
     use super::{build_egress_pii_classifier, build_mcp_egress_guard, build_runtime_cache_store};
@@ -577,9 +523,7 @@ mod tests {
             required: false,
             discovery: moa_config::McpDiscoveryMode::Eager,
             name: "external".to_string(),
-            transport: McpTransportConfig::Http,
-            url: Some("http://127.0.0.1:1".to_string()),
-            credential_scope: McpServerCredentialScope::DeploymentOwned,
+            url: "http://127.0.0.1:1".to_string(),
             credentials: None,
             trust_tool_annotations: false,
             allowed_data_classes: Vec::new(),

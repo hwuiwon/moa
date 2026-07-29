@@ -23,10 +23,10 @@ use crate::services::action_reviews::{
 pub(crate) struct RequestedReview {
     /// Stored review DTO rendered by the service.
     pub(crate) summary: ActionReviewSummary,
-    /// Whether the service should append the requested event.
-    pub(crate) record_requested_event: bool,
     /// Whether this request inserted the review row.
     pub(crate) newly_inserted: bool,
+    /// Whether the owner has already acknowledged registration.
+    pub(crate) owner_registered: bool,
 }
 
 /// Result of deciding a tenant action review.
@@ -40,10 +40,6 @@ pub(crate) struct DecidedReview {
     pub(crate) owner: ActionReviewOwner,
     /// Reviewed tool name, carried into the typed resolution receipt.
     pub(crate) tool_name: String,
-    /// Model-visible tool call id from the original reviewed request.
-    pub(crate) requested_tool_call_id: ToolCallId,
-    /// Denial reason recorded for a denied review, when the admin supplied one.
-    pub(crate) deny_reason: Option<String>,
     /// Admin decision.
     pub(crate) decision: ActionReviewDecision,
     /// Terminal review status.
@@ -56,8 +52,6 @@ pub(crate) struct DecidedReview {
     pub(crate) created_at: DateTime<Utc>,
     /// Decision timestamp.
     pub(crate) decided_at: DateTime<Utc>,
-    /// Whether the service should append the decision event.
-    pub(crate) record_decision_event: bool,
     /// Whether this call newly moved the review out of pending.
     pub(crate) newly_decided: bool,
     /// Stored tool request to invoke after a clear decision.
@@ -97,8 +91,8 @@ pub(crate) async fn request_review(
     )
     .await?;
     Ok(RequestedReview {
-        record_requested_event: stored.requested_event_recorded_at.is_none(),
         newly_inserted: stored.newly_inserted,
+        owner_registered: stored.owner_registered_at.is_some(),
         summary: stored.summary,
     })
 }
@@ -128,6 +122,13 @@ pub(crate) async fn decide_review(
     let storage_partition_id = storage_partition_id(request.tenant_id);
     let row =
         store::load_review_for_update(&mut tx, &storage_partition_id, request.review_id).await?;
+    if row.status == ActionReviewStatus::Pending && row.owner_registered_at.is_none() {
+        return Err(TerminalError::new_with_code(
+            409,
+            "action review owner registration is not durable yet",
+        )
+        .into());
+    }
     if row.status == ActionReviewStatus::Pending && row.execution_requested_at.is_some() {
         let exact_claim_replay = matches!(decision, ActionReviewDecision::Cleared)
             && row.decided_by.as_deref() == Some(requested_decider.as_str());
@@ -143,8 +144,43 @@ pub(crate) async fn decide_review(
     let decided_at = row.decided_at.unwrap_or_else(Utc::now);
     let decided_by = row.decided_by.clone().unwrap_or(requested_decider);
     let deny_reason = deny_reason_for_decision(&decision, row.deny_reason.clone());
-    let stored_deny_reason = deny_reason.clone();
     let execution_tool_call_id = execution_tool_call_id_for_decision(&decision, &row);
+
+    if matches!(decision, ActionReviewDecision::Cleared)
+        && row.owner.is_conversational()
+        && row.status == ActionReviewStatus::Pending
+    {
+        let execution_tool_call_id = execution_tool_call_id.ok_or_else(|| {
+            TerminalError::new("cleared conversational review has no execution tool call id")
+        })?;
+        store::claim_conversational_review(
+            &mut tx,
+            &storage_partition_id,
+            request.review_id,
+            &decided_by,
+            decided_at,
+            execution_tool_call_id,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+        return Ok(DecidedReview {
+            review_id: request.review_id,
+            storage_partition_id,
+            owner: row.owner.clone(),
+            tool_name: row.tool_name.clone(),
+            decision,
+            status: ActionReviewStatus::Cleared,
+            action_class: row.action_class,
+            decided_by,
+            created_at: row.created_at,
+            decided_at,
+            newly_decided: true,
+            tool_request: Some(execution_tool_request(&row, execution_tool_call_id)),
+            executed_tool_call_id: Some(ToolCallId(execution_tool_call_id)),
+        });
+    }
 
     if matches!(decision, ActionReviewDecision::Cleared)
         && row.owner.execution_origin().is_some()
@@ -178,15 +214,12 @@ pub(crate) async fn decide_review(
             storage_partition_id,
             owner: row.owner.clone(),
             tool_name: row.tool_name.clone(),
-            requested_tool_call_id: row.tool_request.tool_call_id,
-            deny_reason: stored_deny_reason,
             decision,
             status: ActionReviewStatus::Pending,
             action_class: row.action_class,
             decided_by,
             created_at: row.created_at,
             decided_at,
-            record_decision_event: false,
             newly_decided: false,
             tool_request,
             executed_tool_call_id: Some(ToolCallId(execution_tool_call_id)),
@@ -235,15 +268,12 @@ pub(crate) async fn decide_review(
         storage_partition_id,
         owner: row.owner.clone(),
         tool_name: row.tool_name.clone(),
-        requested_tool_call_id: row.tool_request.tool_call_id,
-        deny_reason: stored_deny_reason,
         decision,
         status: desired_status,
         action_class: row.action_class,
         decided_by,
         created_at: row.created_at,
         decided_at,
-        record_decision_event: row.decision_event_recorded_at.is_none(),
         newly_decided,
         tool_request,
         executed_tool_call_id: execution_tool_call_id.map(ToolCallId),
@@ -320,15 +350,12 @@ pub(crate) async fn finalize_execution_review(
         storage_partition_id,
         owner: row.owner.clone(),
         tool_name: row.tool_name.clone(),
-        requested_tool_call_id: row.tool_request.tool_call_id,
-        deny_reason: None,
         decision: ActionReviewDecision::Cleared,
         status: ActionReviewStatus::Cleared,
         action_class: row.action_class,
         decided_by,
         created_at: row.created_at,
         decided_at,
-        record_decision_event: row.decision_event_recorded_at.is_none(),
         newly_decided,
         tool_request: None,
         executed_tool_call_id: row.execution_tool_call_id.map(ToolCallId),
@@ -339,31 +366,13 @@ fn storage_partition_id(tenant_id: moa_core::types::identifiers::TenantId) -> St
     StoragePartitionId::for_tenant(tenant_id)
 }
 
-/// Mark the requested event as recorded.
-pub(crate) async fn mark_requested_event_recorded(
+/// Mark the owner registration acknowledgement as durable.
+pub(crate) async fn mark_owner_registered(
     pool: sqlx::PgPool,
     storage_partition_id: StoragePartitionId,
     review_id: Uuid,
 ) -> Result<(), HandlerError> {
-    store::mark_requested_event_recorded(pool, storage_partition_id, review_id).await
-}
-
-/// Mark the decision event as recorded.
-pub(crate) async fn mark_decision_event_recorded(
-    pool: sqlx::PgPool,
-    storage_partition_id: StoragePartitionId,
-    review_id: Uuid,
-) -> Result<(), HandlerError> {
-    store::mark_decision_event_recorded(pool, storage_partition_id, review_id).await
-}
-
-/// Mark cleared execution as requested.
-pub(crate) async fn mark_execution_requested(
-    pool: sqlx::PgPool,
-    storage_partition_id: StoragePartitionId,
-    review_id: Uuid,
-) -> Result<(), HandlerError> {
-    store::mark_execution_requested(pool, storage_partition_id, review_id).await
+    store::mark_owner_registered(pool, storage_partition_id, review_id).await
 }
 
 fn decision_from_request(request: &DecideActionReviewRequest) -> ActionReviewDecision {
@@ -536,6 +545,7 @@ mod tests {
             action_class: ActionClass::CommandExecution,
             created_at: Utc::now(),
             status: ActionReviewStatus::Pending,
+            owner_registered_at: Some(Utc::now()),
             tool_request: ToolCallRequest {
                 tool_call_id: original_tool_id,
                 caller_identity: test_identity(),
@@ -551,7 +561,6 @@ mod tests {
             decided_by: None,
             deny_reason: None,
             decided_at: Some(Utc::now()),
-            decision_event_recorded_at: None,
             execution_tool_call_id: None,
             execution_requested_at: None,
         };
@@ -581,6 +590,7 @@ mod tests {
             action_class: ActionClass::CommandExecution,
             created_at: Utc::now(),
             status: ActionReviewStatus::Cleared,
+            owner_registered_at: Some(Utc::now()),
             tool_request: ToolCallRequest {
                 tool_call_id: ToolCallId::new(),
                 caller_identity: test_identity(),
@@ -596,7 +606,6 @@ mod tests {
             decided_by: Some("admin".to_string()),
             deny_reason: None,
             decided_at: Some(Utc::now()),
-            decision_event_recorded_at: Some(Utc::now()),
             execution_tool_call_id: Some(Uuid::now_v7()),
             execution_requested_at: Some(Utc::now()),
         };

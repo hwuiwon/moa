@@ -19,10 +19,12 @@ use moa_eval::kernel::cost::{
     COHERE_EMBED_V4_INPUT_USD_PER_MILLION_TOKENS, COHERE_RERANK_V4_FAST_USD_PER_SEARCH,
     PRICING_AS_OF,
 };
+use moa_knowledge::acl_key::{KmsSourceAclKeyOwner, SourceAclKey, SourceAclKeyOwner};
 use moa_knowledge::chunking::{ChunkingConfig, content_hash};
 use moa_knowledge::domain::{
-    ConnectionStatus, KnowledgeConnection, KnowledgeSyncRun, ProviderRecord, RecordPage,
-    SyncRunStatus,
+    CanonicalSourcePrincipal, ConnectionStatus, KnowledgeConnection, KnowledgeSyncRun,
+    ProviderAclEntry, ProviderRecord, ProviderRecordAcl, RecordPage, SourceAclEntryKind,
+    SourcePrincipalKind, SyncRunStatus,
 };
 use moa_knowledge::graph_delta::stable_uid;
 use moa_knowledge::ingestion::{
@@ -508,15 +510,14 @@ async fn seed_storage_partition_state(
         r#"
         INSERT INTO moa.storage_partition_state
             (storage_partition_id, vector_backend, vector_backend_state, embedding_model,
-             embedding_model_version, embedding_dimension, reembed_state)
-        VALUES ($1, $2, 'steady', $3, $4, $5, 'steady')
+             embedding_model_version, embedding_dimension)
+        VALUES ($1, $2, 'steady', $3, $4, $5)
         ON CONFLICT (storage_partition_id) DO UPDATE
             SET vector_backend = EXCLUDED.vector_backend,
                 vector_backend_state = EXCLUDED.vector_backend_state,
                 embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
                 embedding_dimension = EXCLUDED.embedding_dimension,
-                reembed_state = EXCLUDED.reembed_state,
                 updated_at = now()
         "#,
     )
@@ -551,7 +552,6 @@ async fn ingest_articles(
     let now = Utc::now();
     repository
         .upsert_connection(KnowledgeConnection {
-            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: WIXQA_PROVIDER.to_string(),
@@ -610,8 +610,13 @@ async fn ingest_articles(
     let vector_factory = VectorStoreFactory::from_config(config);
     let vector_backend =
         vector_factory.transactional_graph_backend(pool.clone(), scope.clone(), true);
-    let graph_store = PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone(), kms)
-        .with_vector_store(vector_backend.vector_store());
+    let acl_key = KmsSourceAclKeyOwner::new_for_app_role(pool.clone(), Arc::clone(&kms))
+        .current_key(tenant_id)
+        .await
+        .context("load WixQA source ACL key")?;
+    let graph_store =
+        PostgresGraphStore::scoped_for_app_role(pool.clone(), scope.clone(), Arc::clone(&kms))
+            .with_vector_store(vector_backend.vector_store());
     let graph_writer = Arc::new(MemoryKnowledgeGraphWriter::new(
         Arc::new(graph_store),
         MemoryScope::Tenant { tenant_id },
@@ -628,15 +633,16 @@ async fn ingest_articles(
             provider: WIXQA_PROVIDER.to_string(),
             parser_label: "native".to_string(),
         },
-        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
-            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
-        ),
     );
 
     let started = Instant::now();
     let mut page_report = PageIngestionReport::default();
+    let public_acl = wixqa_public_acl(connection_uid, &acl_key);
     for batch in selected.articles.chunks(INGESTION_BATCH_SIZE) {
-        let records = batch.iter().map(article_to_record).collect::<Vec<_>>();
+        let records = batch
+            .iter()
+            .map(|article| article_to_record(article, &public_acl))
+            .collect::<Vec<_>>();
         let report = pipeline
             .ingest_record_page(
                 sync_run_uid,
@@ -775,6 +781,8 @@ async fn retrieve_questions(inputs: RetrievalEvalInputs<'_>) -> Result<QueryRun>
             embedding: query_embedding.clone(),
         });
         let query_embedding_ms = elapsed_ms(embed_started);
+        let query_embedding =
+            moa_memory_vector::QueryEmbedding::new(query_embedding, embedder.model_id())?;
         let retrieve_started = Instant::now();
         let mut output = retrieve_wixqa_output(
             &retriever,
@@ -875,7 +883,7 @@ async fn retrieve_wixqa_output(
     retriever: &HybridRetriever,
     memory_scope: &MemoryScope,
     question: &WixQuestion,
-    query_embedding: Vec<f32>,
+    query_embedding: moa_memory_vector::QueryEmbedding,
     top_k: usize,
     use_reranker: bool,
     disable_graph_expansion: bool,
@@ -886,7 +894,7 @@ async fn retrieve_wixqa_output(
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: question.question.clone(),
-            query_embedding,
+            query_embedding: Some(query_embedding),
             scope: memory_scope.clone(),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -1468,9 +1476,27 @@ fn estimate_tokens(text: &str) -> u64 {
     u64::try_from(chars.max(1).div_ceil(4)).unwrap_or(u64::MAX)
 }
 
-fn article_to_record(article: &WixArticle) -> ProviderRecord {
+fn wixqa_public_acl(connection_uid: Uuid, acl_key: &SourceAclKey) -> ProviderRecordAcl {
+    let principal = CanonicalSourcePrincipal::new(
+        format!("{WIXQA_PROVIDER}:{WIXQA_CONNECTOR}:{connection_uid}"),
+        SourcePrincipalKind::Anyone,
+        "",
+    )
+    .expect("the static WixQA principal namespace is valid");
+    ProviderRecordAcl {
+        provider_revision: "wixqa-public-v1".to_string(),
+        complete: true,
+        entries: vec![ProviderAclEntry {
+            entry_kind: SourceAclEntryKind::Allow,
+            principal_kind: SourcePrincipalKind::Anyone,
+            principal: acl_key.fingerprint(&principal),
+        }],
+    }
+}
+
+fn article_to_record(article: &WixArticle, public_acl: &ProviderRecordAcl) -> ProviderRecord {
     ProviderRecord {
-        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
+        acl: public_acl.clone(),
         source_id: article.id.clone(),
         object_type: article.article_type.clone(),
         title: Some(article.title.clone()),

@@ -81,12 +81,16 @@ fn drive_file_segments(file_id: &str, export: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::content_fetch_plan;
-    use crate::domain::ProviderRecord;
+    use crate::domain::{ProviderRecord, ProviderRecordAcl};
     use serde_json::{Value, json};
 
     fn record(source_id: &str, payload: Value) -> ProviderRecord {
         ProviderRecord {
-            acl: crate::domain::RecordAcl::UniformlyPublic,
+            acl: ProviderRecordAcl {
+                provider_revision: "fixture-acl-rev".to_string(),
+                complete: true,
+                entries: Vec::new(),
+            },
             source_id: source_id.to_string(),
             object_type: "drive_file".to_string(),
             title: Some("Doc".to_string()),

@@ -3,10 +3,10 @@
 use chrono::{DateTime, Utc};
 use moa_core::{
     types::action_policy::ActionClass, types::action_policy::ActionEnvelope,
-    types::action_policy::ActionReviewOwner, types::action_policy::ActionReviewStatus,
-    types::action_policy::ExecutionTaskOrigin, types::contact::SessionActorRef,
-    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
-    types::identifiers::ToolCallId, types::tools::ToolCallRequest,
+    types::action_policy::ActionReviewOwner, types::action_policy::ActionReviewRelease,
+    types::action_policy::ActionReviewStatus, types::action_policy::ExecutionTaskOrigin,
+    types::contact::SessionActorRef, types::identifiers::StoragePartitionId,
+    types::identifiers::TenantId, types::identifiers::ToolCallId, types::tools::ToolCallRequest,
 };
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use serde_json::Value;
@@ -26,12 +26,12 @@ const EXECUTION_REVIEW_OUTBOX_CLAIM_TIMEOUT_SECS: i64 = 300;
 pub(crate) struct StoredReview {
     /// Review DTO rendered by the service.
     pub(crate) summary: ActionReviewSummary,
-    /// Timestamp proving the requested event was appended.
-    pub(crate) requested_event_recorded_at: Option<DateTime<Utc>>,
     /// Whether this call inserted the row rather than observing an existing row.
     pub(crate) newly_inserted: bool,
-    /// First validated execution-task context stored with the review.
-    execution_task_trace_context: Option<ValidatedTraceContext>,
+    /// Timestamp proving the owner acknowledged registration.
+    pub(crate) owner_registered_at: Option<DateTime<Utc>>,
+    /// Canonical persisted identity of the first request using this review id.
+    request_identity: Option<Value>,
 }
 
 /// Durable row state needed to apply an action-review decision.
@@ -46,6 +46,8 @@ pub(crate) struct ReviewDecisionRow {
     pub(crate) created_at: DateTime<Utc>,
     /// Current review status.
     pub(crate) status: ActionReviewStatus,
+    /// Timestamp proving the owner acknowledged registration.
+    pub(crate) owner_registered_at: Option<DateTime<Utc>>,
     /// Stored tool request to execute after a clear decision.
     pub(crate) tool_request: ToolCallRequest,
     /// Original execution-task context stored when the review was created.
@@ -56,8 +58,6 @@ pub(crate) struct ReviewDecisionRow {
     pub(crate) deny_reason: Option<String>,
     /// Existing decision timestamp, if any.
     pub(crate) decided_at: Option<DateTime<Utc>>,
-    /// Timestamp proving the decision event was appended.
-    pub(crate) decision_event_recorded_at: Option<DateTime<Utc>>,
     /// Tool-call id assigned to a cleared execution.
     pub(crate) execution_tool_call_id: Option<Uuid>,
     /// Timestamp proving cleared execution was requested.
@@ -94,6 +94,14 @@ pub(crate) struct ClaimedExecutionReviewResolution {
     pub(crate) resolution_trace_context: Option<ValidatedTraceContext>,
     /// Immutable execution-task context linked on every callback retry.
     pub(crate) task_trace_context: Option<ValidatedTraceContext>,
+}
+
+/// One timed-out review awaiting release from its conversational owner.
+pub(crate) struct PendingActionReviewRelease {
+    /// Durable timestamp recorded when the review timed out.
+    pub(crate) timed_out_at: DateTime<Utc>,
+    /// Typed release request sent to the exact owner.
+    pub(crate) release: ActionReviewRelease,
 }
 
 /// Insert a pending tenant action review, or load the existing idempotent row.
@@ -146,9 +154,9 @@ pub(crate) async fn insert_review(
     .bind(request.envelope.risk_level.as_str())
     .bind(&request.envelope.input_summary)
     .bind(&request.envelope.normalized_input)
-    .bind(envelope)
-    .bind(preview)
-    .bind(tool_request)
+    .bind(&envelope)
+    .bind(&preview)
+    .bind(&tool_request)
     .bind(&requested_by)
     .bind(
         execution_task_trace_context
@@ -165,16 +173,28 @@ pub(crate) async fn insert_review(
     .await
     .map_err(db_error)?;
 
-    let mut stored =
-        load_review_state(pool, storage_partition_id, request.envelope.review_id).await?;
-    stored.newly_inserted = insert.rows_affected() > 0;
-    if !stored.newly_inserted && stored.execution_task_trace_context != execution_task_trace_context
-    {
-        return Err(TerminalError::new_with_code(
-            409,
-            "action review replay conflicts with the first execution-task trace context",
-        )
-        .into());
+    let newly_inserted = insert.rows_affected() > 0;
+    let mut stored = load_review_state(
+        pool,
+        storage_partition_id,
+        request.envelope.review_id,
+        !newly_inserted,
+    )
+    .await?;
+    stored.newly_inserted = newly_inserted;
+    if !newly_inserted {
+        let request_identity = serde_json::json!({
+            "envelope": envelope,
+            "preview": preview,
+            "tool_request": tool_request,
+        });
+        if stored.request_identity.as_ref() != Some(&request_identity) {
+            return Err(TerminalError::new_with_code(
+                409,
+                "action review id conflicts with the first canonical request",
+            )
+            .into());
+        }
     }
     Ok(stored)
 }
@@ -198,7 +218,9 @@ pub(crate) async fn list_pending_reviews(
                action_class, risk_level, input_summary, envelope, preview, status,
                requested_by, decided_by, deny_reason, created_at, decided_at
         FROM tenant_action_reviews
-        WHERE storage_partition_id = $1 AND status = 'pending'
+        WHERE storage_partition_id = $1
+          AND status = 'pending'
+          AND owner_registered_at IS NOT NULL
         ORDER BY created_at DESC
         LIMIT 100
         "#,
@@ -220,9 +242,9 @@ pub(crate) async fn load_review_for_update(
     let row = sqlx::query(
         r#"
         SELECT id, tenant_id, storage_partition_id, action_class, status, tool_request, envelope,
-               decided_by, deny_reason, created_at, decided_at, decision_event_recorded_at,
+               decided_by, deny_reason, created_at, decided_at,
                execution_tool_call_id, execution_requested_at,
-               execution_task_traceparent, execution_task_tracestate
+               execution_task_traceparent, execution_task_tracestate, owner_registered_at
         FROM tenant_action_reviews
         WHERE storage_partition_id = $1 AND id = $2
         FOR UPDATE
@@ -252,6 +274,7 @@ pub(crate) async fn load_review_for_update(
             "status",
             row.try_get::<String, _>("status").map_err(db_error)?,
         )?,
+        owner_registered_at: row.try_get("owner_registered_at").map_err(db_error)?,
         tool_request: serde_json::from_value(
             row.try_get::<serde_json::Value, _>("tool_request")
                 .map_err(db_error)?,
@@ -265,9 +288,6 @@ pub(crate) async fn load_review_for_update(
         decided_by: row.try_get("decided_by").map_err(db_error)?,
         deny_reason: row.try_get("deny_reason").map_err(db_error)?,
         decided_at: row.try_get("decided_at").map_err(db_error)?,
-        decision_event_recorded_at: row
-            .try_get("decision_event_recorded_at")
-            .map_err(db_error)?,
         execution_tool_call_id: row.try_get("execution_tool_call_id").map_err(db_error)?,
         execution_requested_at: row.try_get("execution_requested_at").map_err(db_error)?,
     })
@@ -342,6 +362,48 @@ pub(crate) async fn claim_execution_review(
     Ok(())
 }
 
+/// Atomically clears and claims one conversational review for execution.
+pub(crate) async fn claim_conversational_review(
+    tx: &mut Transaction<'_, Postgres>,
+    storage_partition_id: &StoragePartitionId,
+    review_id: Uuid,
+    decided_by: &str,
+    decided_at: DateTime<Utc>,
+    execution_tool_call_id: Uuid,
+) -> Result<(), HandlerError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE tenant_action_reviews
+        SET status = 'cleared',
+            decided_by = $3,
+            decided_at = $4,
+            deny_reason = NULL,
+            execution_tool_call_id = $5,
+            execution_requested_at = NOW()
+        WHERE storage_partition_id = $1
+          AND id = $2
+          AND status = 'pending'
+          AND execution_requested_at IS NULL
+        "#,
+    )
+    .bind(storage_partition_id.to_string())
+    .bind(review_id)
+    .bind(decided_by)
+    .bind(decided_at)
+    .bind(execution_tool_call_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_error)?;
+    if result.rows_affected() != 1 {
+        return Err(TerminalError::new_with_code(
+            409,
+            "action review cleared execution is already claimed",
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Atomically inserts the execution-task resolution owned by a terminal review.
 pub(crate) async fn insert_execution_review_resolution(
     tx: &mut Transaction<'_, Postgres>,
@@ -373,17 +435,19 @@ pub(crate) async fn insert_execution_review_resolution(
     Ok(())
 }
 
-/// Mark the request event as durably recorded.
-pub(crate) async fn mark_requested_event_recorded(
+/// Marks the review ready only after its owner acknowledged registration.
+pub(crate) async fn mark_owner_registered(
     pool: sqlx::PgPool,
     storage_partition_id: StoragePartitionId,
     review_id: Uuid,
 ) -> Result<(), HandlerError> {
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         UPDATE tenant_action_reviews
-        SET requested_event_recorded_at = COALESCE(requested_event_recorded_at, NOW())
-        WHERE storage_partition_id = $1 AND id = $2
+        SET owner_registered_at = COALESCE(owner_registered_at, NOW())
+        WHERE storage_partition_id = $1
+          AND id = $2
+          AND status = 'pending'
         "#,
     )
     .bind(storage_partition_id.to_string())
@@ -391,48 +455,13 @@ pub(crate) async fn mark_requested_event_recorded(
     .execute(&pool)
     .await
     .map_err(db_error)?;
-    Ok(())
-}
-
-/// Mark the decision event as durably recorded.
-pub(crate) async fn mark_decision_event_recorded(
-    pool: sqlx::PgPool,
-    storage_partition_id: StoragePartitionId,
-    review_id: Uuid,
-) -> Result<(), HandlerError> {
-    sqlx::query(
-        r#"
-        UPDATE tenant_action_reviews
-        SET decision_event_recorded_at = COALESCE(decision_event_recorded_at, NOW())
-        WHERE storage_partition_id = $1 AND id = $2
-        "#,
-    )
-    .bind(storage_partition_id.to_string())
-    .bind(review_id)
-    .execute(&pool)
-    .await
-    .map_err(db_error)?;
-    Ok(())
-}
-
-/// Mark a cleared review execution as requested.
-pub(crate) async fn mark_execution_requested(
-    pool: sqlx::PgPool,
-    storage_partition_id: StoragePartitionId,
-    review_id: Uuid,
-) -> Result<(), HandlerError> {
-    sqlx::query(
-        r#"
-        UPDATE tenant_action_reviews
-        SET execution_requested_at = COALESCE(execution_requested_at, NOW())
-        WHERE storage_partition_id = $1 AND id = $2
-        "#,
-    )
-    .bind(storage_partition_id.to_string())
-    .bind(review_id)
-    .execute(&pool)
-    .await
-    .map_err(db_error)?;
+    if result.rows_affected() != 1 {
+        return Err(TerminalError::new_with_code(
+            409,
+            "action review is no longer pending during owner registration",
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -465,6 +494,7 @@ pub(crate) async fn timeout_expired_reviews(
             decided_at = NOW(),
             deny_reason = COALESCE(deny_reason, 'review expired without a decision')
         WHERE status = 'pending'
+          AND owner_registered_at IS NOT NULL
           AND execution_requested_at IS NULL
           AND expires_at <= NOW()
         RETURNING id, tenant_id, action_class, created_at, decided_at, envelope,
@@ -515,6 +545,70 @@ pub(crate) async fn timeout_expired_reviews(
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
     tx.commit().await?;
     Ok(timed_out)
+}
+
+/// Loads one bounded batch of timed-out conversational owner releases.
+pub(crate) async fn pending_action_review_releases(
+    pool: &sqlx::PgPool,
+    limit: i64,
+) -> Result<Vec<PendingActionReviewRelease>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    install_control_plane_scope(&mut tx).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, envelope, decided_at
+        FROM tenant_action_reviews
+        WHERE status = 'timeout'
+          AND owner_registered_at IS NOT NULL
+          AND owner_release_delivered_at IS NULL
+          AND envelope -> 'owner' ->> 'owner' IN ('coordinator', 'worker')
+        ORDER BY created_at, id
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
+    let pending = rows
+        .iter()
+        .map(|row| {
+            let review_id = row.try_get("id")?;
+            let envelope: ActionEnvelope = serde_json::from_value(row.try_get("envelope")?)
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+            Ok(PendingActionReviewRelease {
+                timed_out_at: row.try_get("decided_at")?,
+                release: ActionReviewRelease {
+                    review_id,
+                    owner: envelope.owner,
+                    resume_queued: true,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    tx.commit().await?;
+    Ok(pending)
+}
+
+/// Marks one timeout release delivered.
+pub(crate) async fn mark_action_review_release_delivered(
+    pool: &sqlx::PgPool,
+    review_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    install_control_plane_scope(&mut tx).await?;
+    sqlx::query(
+        r#"
+        UPDATE tenant_action_reviews
+        SET owner_release_delivered_at = COALESCE(owner_release_delivered_at, NOW())
+        WHERE id = $1
+          AND status = 'timeout'
+        "#,
+    )
+    .bind(review_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Claims one bounded outbox batch with a persisted attempt count and stale-lease recovery.
@@ -725,6 +819,7 @@ pub(crate) async fn pending_review_stats(
         SELECT risk_level, COUNT(*) AS depth
         FROM tenant_action_reviews
         WHERE status = 'pending'
+          AND owner_registered_at IS NOT NULL
         GROUP BY risk_level
         "#,
     )
@@ -745,6 +840,7 @@ pub(crate) async fn pending_review_stats(
         SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::DOUBLE PRECISION
         FROM tenant_action_reviews
         WHERE status = 'pending'
+          AND owner_registered_at IS NOT NULL
         "#,
     )
     .fetch_one(pool)
@@ -760,13 +856,14 @@ async fn load_review_state(
     pool: sqlx::PgPool,
     storage_partition_id: StoragePartitionId,
     review_id: Uuid,
+    include_request_identity: bool,
 ) -> Result<StoredReview, HandlerError> {
     let row = sqlx::query(
         r#"
         SELECT id, tenant_id, storage_partition_id, session_id, worker_id, tool_call_id, tool_name,
                action_class, risk_level, input_summary, envelope, preview, status,
-               requested_by, requested_event_recorded_at, decided_by, deny_reason,
-               created_at, decided_at, execution_task_traceparent, execution_task_tracestate
+               requested_by, decided_by, deny_reason, created_at, decided_at,
+               owner_registered_at, tool_request
         FROM tenant_action_reviews
         WHERE storage_partition_id = $1 AND id = $2
         "#,
@@ -777,18 +874,21 @@ async fn load_review_state(
     .await
     .map_err(db_error)?
     .ok_or_else(|| TerminalError::new_with_code(404, "action review not found"))?;
+    let request_identity = if include_request_identity {
+        Some(serde_json::json!({
+            "envelope": row.try_get::<serde_json::Value, _>("envelope").map_err(db_error)?,
+            "preview": row.try_get::<serde_json::Value, _>("preview").map_err(db_error)?,
+            "tool_request": row.try_get::<serde_json::Value, _>("tool_request").map_err(db_error)?,
+        }))
+    } else {
+        None
+    };
 
     Ok(StoredReview {
         summary: summary_from_row(&row)?,
-        requested_event_recorded_at: row
-            .try_get("requested_event_recorded_at")
-            .map_err(db_error)?,
         newly_inserted: false,
-        execution_task_trace_context: trace_context_from_columns(
-            row.try_get("execution_task_traceparent")
-                .map_err(db_error)?,
-            row.try_get("execution_task_tracestate").map_err(db_error)?,
-        ),
+        owner_registered_at: row.try_get("owner_registered_at").map_err(db_error)?,
+        request_identity,
     })
 }
 

@@ -68,7 +68,6 @@ impl ToolRouter {
                 None,
             ));
         };
-        let credential_scope = registered_tool.execution.credential_scope();
         let capability = registered_tool.execution.capability_id(&invocation.name);
 
         match &registered_tool.execution {
@@ -115,10 +114,8 @@ impl ToolRouter {
                     invocation,
                     &registered_tool.definition,
                     McpDispatch {
-                        caller_identity,
                         server_name,
                         remote_tool_name,
-                        credential_scope,
                         tool_call_id,
                     },
                     active_canary,
@@ -471,7 +468,6 @@ impl ToolRouter {
             fallback_provider = %next_route.provider,
             tool = %invocation.name,
             class = class.label(),
-            reason = %class.reason(),
             "hand route failed; trying fallback provider"
         );
 
@@ -581,7 +577,6 @@ impl ToolRouter {
             class = class.label(),
             retry_attempts,
             reprovisions,
-            reason = %class.reason(),
             "tool execution failed"
         );
 
@@ -621,7 +616,7 @@ impl ToolRouter {
                 {
                     return Ok(secured(classify_tool_error(&error, 0)));
                 }
-                self.record_reprovision(&ctx.route.provider, &ctx.invocation.name, class.reason())
+                self.record_reprovision(&ctx.route.provider, &ctx.invocation.name)
                     .await;
                 Ok(None)
             }
@@ -644,7 +639,6 @@ impl ToolRouter {
             class = class.label(),
             retry_attempts,
             reprovisions,
-            reason = %class.reason(),
             "MCP tool execution failed"
         );
 
@@ -681,7 +675,7 @@ impl ToolRouter {
                 if let Err(error) = self.reconnect_mcp_client(ctx.server_name).await {
                     return Ok(secured(classify_tool_error(&error, 0)));
                 }
-                self.record_reprovision(ctx.server_name, &ctx.invocation.name, class.reason())
+                self.record_reprovision(ctx.server_name, &ctx.invocation.name)
                     .await;
                 Ok(None)
             }
@@ -711,13 +705,12 @@ impl ToolRouter {
         .await;
     }
 
-    async fn record_reprovision(&self, provider: &str, tool_name: &str, reason: &str) {
+    async fn record_reprovision(&self, provider: &str, tool_name: &str) {
         record_tool_reprovision(provider);
         let reprovision_span = tracing::info_span!(
             "tool_reprovision",
             provider,
-            tool = %tool_name,
-            reason
+            tool = %tool_name
         );
         async {}.instrument(reprovision_span).await;
     }

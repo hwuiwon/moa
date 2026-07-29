@@ -152,22 +152,16 @@ async fn mcp_tool_output_is_classified_at_its_source_offline() {
         required: false,
         discovery: moa_config::McpDiscoveryMode::Eager,
         name: "third-party".to_string(),
-        transport: moa_config::McpTransportConfig::Http,
-        url: Some(format!("http://{addr}")),
+        url: format!("http://{addr}"),
         credentials: None,
         trust_tool_annotations: false,
         allowed_data_classes: Vec::new(),
-        credential_scope: moa_config::McpServerCredentialScope::DeploymentOwned,
     }];
 
-    let router = ToolRouter::from_config(
-        &config,
-        Some(crate::mcp_router::mcp_egress_guard()),
-        None,
-        None,
-    )
-    .await
-    .expect("router with a configured MCP server");
+    let router =
+        ToolRouter::from_config(&config, Some(crate::mcp_router::mcp_egress_guard()), None)
+            .await
+            .expect("router with a configured MCP server");
 
     let secured = router
         .execute_authorized(
@@ -188,11 +182,11 @@ async fn mcp_tool_output_is_classified_at_its_source_offline() {
         OutputAssessmentClass::ConfirmedInjection,
         "a third-party MCP server's output must be classified at the MCP source"
     );
-    assert!(secured.assessment.cleared_raw_carriers);
+    assert!(secured.assessment.class.clears_raw_carriers());
     assert_eq!(
         secured.capability,
         ToolCapabilityId::mcp("third-party", "lookup"),
-        "MCP capabilities key the circuit under mcp:<server>:<tool>, so one bad server \
+        "MCP capabilities key the circuit under a framed server/tool identity, so one bad server \
          cannot trip another server's identically named tool"
     );
     assert_payload_is_gone(&secured);
@@ -257,7 +251,7 @@ async fn recovery_created_error_output_is_classified_offline() {
         OutputAssessmentClass::ConfirmedInjection,
         "recovery-created error output is text the model reads and must be classified"
     );
-    assert!(secured.assessment.cleared_raw_carriers);
+    assert!(secured.assessment.class.clears_raw_carriers());
     assert_payload_is_gone(&secured);
 }
 
@@ -291,11 +285,11 @@ async fn builtin_tool_output_is_classified_at_its_source_offline() {
         OutputAssessmentClass::ConfirmedInjection,
         "a built-in tool's output is not trusted just because MOA registered the tool"
     );
-    assert!(secured.assessment.cleared_raw_carriers);
+    assert!(secured.assessment.class.clears_raw_carriers());
     assert_eq!(
         secured.capability,
         ToolCapabilityId::builtin("memory_remember"),
-        "built-in capabilities key the circuit under builtin:<tool>"
+        "built-in capabilities key the circuit under a framed tool identity"
     );
     assert_payload_is_gone(&secured);
 }
@@ -343,7 +337,7 @@ async fn hand_file_read_output_is_classified_at_its_source_offline() {
          classified like any other untrusted output"
     );
     assert!(
-        secured.assessment.cleared_raw_carriers,
+        secured.assessment.class.clears_raw_carriers(),
         "a confirmed injection must clear every raw carrier"
     );
     assert_eq!(
@@ -384,7 +378,7 @@ async fn process_stdout_is_classified_at_its_source_offline() {
         OutputAssessmentClass::ConfirmedInjection,
         "process stdout must be classified, not trusted because a process produced it"
     );
-    assert!(secured.assessment.cleared_raw_carriers);
+    assert!(secured.assessment.class.clears_raw_carriers());
     assert_eq!(secured.capability, ToolCapabilityId::hand("bash"));
     assert_payload_is_gone(&secured);
 }
@@ -432,7 +426,7 @@ async fn classification_precedes_the_output_budget_offline() {
         "a payload buried in the middle of an oversized output must still be caught; \
          seeing Safe here means the budget truncated it away before the classifier ran"
     );
-    assert!(secured.assessment.cleared_raw_carriers);
+    assert!(secured.assessment.class.clears_raw_carriers());
     assert!(
         !secured
             .safe_output
@@ -486,7 +480,7 @@ async fn byte_identical_carriers_collapse_instead_of_escalating_offline() {
         secured.assessment.deduplicated_carriers
     );
     assert!(
-        !secured.assessment.cleared_raw_carriers,
+        !secured.assessment.class.clears_raw_carriers(),
         "a merely suspicious output keeps its carriers; only the matched spans go"
     );
 }

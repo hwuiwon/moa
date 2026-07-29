@@ -191,7 +191,7 @@ impl ToolRouter {
                 continue;
             }
             let observed_at = Utc::now();
-            match discover_server_tools(server).await {
+            match self.discover_server_tools(server).await {
                 Ok(discovered) => {
                     self.mcp_clients
                         .write()
@@ -200,11 +200,7 @@ impl ToolRouter {
                     registry.remove_mcp_server_tools(&server.name);
                     let mut registered = 0_usize;
                     for tool in discovered.tools {
-                        match registry.register_mcp_tool(
-                            &server.name,
-                            server.credential_scope,
-                            tool,
-                        ) {
+                        match registry.register_mcp_tool(&server.name, tool) {
                             Ok(_) => registered += 1,
                             Err(error) => tracing::warn!(
                                 mcp_server = %server.name,
@@ -274,6 +270,11 @@ impl ToolRouter {
         *self.mcp_health.write().await = health.clone();
         McpCatalogRefresh { health, revision }
     }
+
+    async fn discover_server_tools(&self, server: &McpServerConfig) -> Result<DiscoveredConnector> {
+        let headers = self.mcp_credentials.headers_for(server)?;
+        discover_server_tools(server, headers).await
+    }
 }
 
 /// Which discovery pass is running.
@@ -305,8 +306,11 @@ struct DiscoveredConnector {
 /// call. Connectors that are never discovered — lazy ones, and ones added
 /// between refreshes — are connected by [`ToolRouter::mcp_client`] on first use,
 /// so a configured connector nobody calls still holds no socket.
-async fn discover_server_tools(server: &McpServerConfig) -> Result<DiscoveredConnector> {
-    let client = Arc::new(MCPClient::connect(server).await?);
+async fn discover_server_tools(
+    server: &McpServerConfig,
+    headers: std::collections::HashMap<String, String>,
+) -> Result<DiscoveredConnector> {
+    let client = Arc::new(MCPClient::connect(server, headers).await?);
     let mut tools = client.list_tools().await?;
     // A server is free to return `tools/list` in any order, and some return
     // insertion order that changes as tools are edited. Sorting here is what

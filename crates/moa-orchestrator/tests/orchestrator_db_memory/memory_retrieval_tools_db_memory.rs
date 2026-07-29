@@ -13,6 +13,7 @@ use moa_core::{
     types::memory::RlsContext, types::session::SessionMeta, types::tools::ToolContent,
     types::tools::ToolOutput,
 };
+use moa_db::{ScopedConn, TENANT_WIDE_PRINCIPAL_HOLDER};
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PostgresGraphStore,
 };
@@ -23,8 +24,10 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn search_and_navigation_share_the_contact_memory_admission_boundary() {
-    // Pins: agentic memory tools expose tenant knowledge and current-contact
-    // memory only, and navigation cannot reveal a hidden seed or neighbor.
+    // Pins: agentic memory tools resolve provider-source principals once from
+    // durable bindings, expose only bound governed tenant knowledge plus
+    // current-contact memory, and navigation cannot reveal an unbound source,
+    // hidden seed, or hidden neighbor.
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
@@ -56,6 +59,18 @@ async fn search_and_navigation_share_the_contact_memory_admission_boundary() {
         ))
         .await
         .expect("create tenant knowledge chunk");
+    govern_tenant_chunk(&pool, tenant_id, tenant_chunk_uid, true).await;
+    let unbound_tenant_chunk_uid = tenant_graph
+        .create_node(node_intent(
+            tenant_id,
+            None,
+            NodeLabel::Chunk,
+            "shared admission boundary answer",
+            "unbound tenant knowledge must stay hidden",
+        ))
+        .await
+        .expect("create unbound tenant knowledge chunk");
+    govern_tenant_chunk(&pool, tenant_id, unbound_tenant_chunk_uid, false).await;
     let hidden_tenant_fact_uid = tenant_graph
         .create_node(node_intent(
             tenant_id,
@@ -179,9 +194,32 @@ async fn search_and_navigation_share_the_contact_memory_admission_boundary() {
         result_uids(&missing_seed, "neighbors", "uid"),
         "hidden and missing seeds must have indistinguishable observable results"
     );
+    let unbound_seed = executor
+        .execute_retrieval_tool(
+            &session,
+            &identity,
+            "tool-call-unbound-seed",
+            "memory_navigate",
+            &json!({ "node_uid": unbound_tenant_chunk_uid, "hops": 1 }),
+        )
+        .await
+        .expect("navigate from unbound governed seed");
+    assert_eq!(
+        tool_summary(&unbound_seed),
+        tool_summary(&missing_seed),
+        "an unbound source-ACL seed must be indistinguishable from a missing seed"
+    );
+    assert_eq!(
+        result_uids(&unbound_seed, "neighbors", "uid"),
+        result_uids(&missing_seed, "neighbors", "uid"),
+        "an unbound source-ACL seed must not enter graph traversal"
+    );
 
     let _ = tenant_graph
         .hard_purge(tenant_chunk_uid, "redacted:memory-admission-test")
+        .await;
+    let _ = tenant_graph
+        .hard_purge(unbound_tenant_chunk_uid, "redacted:memory-admission-test")
         .await;
     let _ = tenant_graph
         .hard_purge(hidden_tenant_fact_uid, "redacted:memory-admission-test")
@@ -196,6 +234,142 @@ async fn search_and_navigation_share_the_contact_memory_admission_boundary() {
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await
         .expect("drop isolated database");
+}
+
+async fn govern_tenant_chunk(
+    pool: &sqlx::PgPool,
+    tenant_id: TenantId,
+    chunk_uid: Uuid,
+    bind_tenant_wide_principal: bool,
+) {
+    let partition = tenant_id.to_string();
+    let connection_uid = Uuid::now_v7();
+    let object_uid = Uuid::now_v7();
+    let version_uid = Uuid::now_v7();
+    let snapshot_uid = Uuid::now_v7();
+    let mut principal_digest = [0_u8; 32];
+    principal_digest[..16].copy_from_slice(chunk_uid.as_bytes());
+    principal_digest[16..].copy_from_slice(chunk_uid.as_bytes());
+    let principal =
+        moa_core::types::memory::SourcePrincipalFingerprint::from_digest(1, principal_digest);
+    let mut conn = ScopedConn::begin_as_app(pool, &RlsContext::tenant(tenant_id), true)
+        .await
+        .expect("begin source-ACL fixture transaction");
+    sqlx::query(
+        "INSERT INTO moa.knowledge_connections ( \
+             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key, \
+             provider_connection_id, connector, credential_ref, status, metadata) \
+         VALUES ($1, $2, $3, 'nango', 'memory-tool-test', $4, 'google-drive', \
+                 'test-credential', 'active', '{}'::JSONB)",
+    )
+    .bind(connection_uid)
+    .bind(tenant_id.0)
+    .bind(&partition)
+    .bind(connection_uid.to_string())
+    .execute(conn.as_mut())
+    .await
+    .expect("insert governed connection");
+    sqlx::query(
+        "INSERT INTO moa.knowledge_objects ( \
+             object_uid, tenant_id, storage_partition_id, connection_id, object_type, \
+             external_object_id, status, metadata, acl_state) \
+         VALUES ($1, $2, $3, $4, 'document', $5, 'active', '{}'::JSONB, 'incomplete')",
+    )
+    .bind(object_uid)
+    .bind(tenant_id.0)
+    .bind(&partition)
+    .bind(connection_uid)
+    .bind(object_uid.to_string())
+    .execute(conn.as_mut())
+    .await
+    .expect("insert governed object");
+    sqlx::query(
+        "INSERT INTO moa.knowledge_document_versions ( \
+             document_version_uid, tenant_id, storage_partition_id, object_id, \
+             parser_provider, content_hash, metadata) \
+         VALUES ($1, $2, $3, $4, 'native', $5, '{}'::JSONB)",
+    )
+    .bind(version_uid)
+    .bind(tenant_id.0)
+    .bind(&partition)
+    .bind(object_uid)
+    .bind(version_uid.to_string())
+    .execute(conn.as_mut())
+    .await
+    .expect("insert governed document version");
+    sqlx::query(
+        "INSERT INTO moa.knowledge_chunks ( \
+             chunk_uid, tenant_id, storage_partition_id, document_version_id, graph_node_uid, \
+             chunk_hash, block_hashes, heading_path, text, ordinal, token_count, metadata) \
+         VALUES ($1, $2, $3, $4, $1, $5, ARRAY[$5]::TEXT[], ARRAY[]::TEXT[], \
+                 'tenant knowledge answer', 0, 3, '{}'::JSONB)",
+    )
+    .bind(chunk_uid)
+    .bind(tenant_id.0)
+    .bind(&partition)
+    .bind(version_uid)
+    .bind(chunk_uid.to_string())
+    .execute(conn.as_mut())
+    .await
+    .expect("attach graph chunk to governed object");
+    sqlx::query(
+        "INSERT INTO moa.knowledge_source_acl_snapshots ( \
+             snapshot_uid, tenant_id, storage_partition_id, connection_id, object_id, \
+             provider_revision, snapshot_hash, complete, entry_count, captured_at) \
+         VALUES ($1, $2, $3, $4, $5, 'rev-1', 'hash-1', TRUE, 1, now())",
+    )
+    .bind(snapshot_uid)
+    .bind(tenant_id.0)
+    .bind(&partition)
+    .bind(connection_uid)
+    .bind(object_uid)
+    .execute(conn.as_mut())
+    .await
+    .expect("insert complete ACL snapshot");
+    sqlx::query(
+        "INSERT INTO moa.knowledge_source_acl_entries ( \
+             entry_uid, tenant_id, storage_partition_id, snapshot_id, entry_kind, \
+             principal_kind, principal_fingerprint, fingerprint_key_version) \
+         VALUES ($1, $2, $3, $4, 'allow', 'anyone', $5, 1)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant_id.0)
+    .bind(&partition)
+    .bind(snapshot_uid)
+    .bind(principal.as_bytes())
+    .execute(conn.as_mut())
+    .await
+    .expect("insert Anyone allow entry");
+    if bind_tenant_wide_principal {
+        sqlx::query(
+            "INSERT INTO moa.knowledge_source_principal_bindings ( \
+                 binding_uid, tenant_id, storage_partition_id, contact_id, connection_id, \
+                 principal_kind, principal_fingerprint, fingerprint_key_version, verified_at) \
+             VALUES ($1, $2, $3, $4, $5, 'anyone', $6, 1, now())",
+        )
+        .bind(Uuid::now_v7())
+        .bind(tenant_id.0)
+        .bind(&partition)
+        .bind(TENANT_WIDE_PRINCIPAL_HOLDER)
+        .bind(connection_uid)
+        .bind(principal.as_bytes())
+        .execute(conn.as_mut())
+        .await
+        .expect("bind connection-scoped Anyone principal");
+    }
+    sqlx::query(
+        "UPDATE moa.knowledge_objects \
+            SET acl_state = 'current', acl_revision = 'rev-1', current_acl_snapshot_id = $2 \
+          WHERE object_uid = $1",
+    )
+    .bind(object_uid)
+    .bind(snapshot_uid)
+    .execute(conn.as_mut())
+    .await
+    .expect("activate governed object ACL");
+    conn.commit()
+        .await
+        .expect("commit source-ACL fixture transaction");
 }
 
 fn graph_store(

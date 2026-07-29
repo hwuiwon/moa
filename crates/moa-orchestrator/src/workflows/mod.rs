@@ -12,7 +12,6 @@ pub(crate) mod experiment_cancel;
 pub(crate) mod experiment_errors;
 pub mod experiment_run;
 pub mod experiment_trial_run;
-pub mod knowledge_index_rebuild;
 pub mod knowledge_sync_ingestion;
 pub(crate) mod progress_delivery;
 pub mod session_retention;

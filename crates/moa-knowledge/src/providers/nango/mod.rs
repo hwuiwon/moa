@@ -12,14 +12,14 @@ use crate::{
     domain::{
         ApplySourceSelectionRequest, CreateLinkTokenRequest, ExchangePublicTokenRequest,
         FetchRecordContentRequest, FetchedRecordContent, InitialSyncStarted, KnowledgeConnection,
-        LinkToken, LinkedAccount, ListChangedRecordsRequest, ProviderAclCapability,
-        ProviderIntegration, ProviderRecord, RecordPage, StartInitialSyncRequest,
-        TriggerSyncRequest, TriggeredSync, WebhookEvent,
+        LinkToken, LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord,
+        RecordPage, StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
     providers::{
         LinkedIntegrationProvider,
+        acl_normalize::principal_namespace,
         http::{self, string_field, trim_base_url},
     },
 };
@@ -180,14 +180,6 @@ impl NangoProvider {
 
 #[async_trait::async_trait]
 impl LinkedIntegrationProvider for NangoProvider {
-    /// Nango proxies permission-bearing sources (Google Drive above all), so it
-    /// always returns native ACLs and can never produce a tenant-public
-    /// connection. A Nango connector whose records carry no permission listing
-    /// normalizes to an INCOMPLETE ACL and stays hidden.
-    fn acl_capability(&self) -> ProviderAclCapability {
-        ProviderAclCapability::NativeSnapshots
-    }
-
     async fn create_link_token(&self, req: CreateLinkTokenRequest) -> Result<LinkToken> {
         #[derive(Deserialize)]
         struct ResponseData {
@@ -471,10 +463,17 @@ impl LinkedIntegrationProvider for NangoProvider {
             .await
             .map_err(|error| Error::provider("nango", format!("record listing failed: {error}")))?;
         let page: NangoRecordPage = http::json_response(response).await?;
-        // Principals are scoped to the connector, so an identity in Drive is not
-        // silently the same principal as a same-named identity in another
-        // connector on the same Nango account.
-        Ok(page.into_record_page(&format!("nango:{}", req.connection.connector), &req.acl_key))
+        // Connection identity is part of the namespace because provider-local
+        // principal ids may be reused by two linked accounts of the same
+        // connector.
+        Ok(page.into_record_page(
+            &principal_namespace(
+                "nango",
+                &req.connection.connector,
+                req.connection.connection_uid,
+            ),
+            &req.acl_key,
+        ))
     }
 
     async fn fetch_record_content(
@@ -719,12 +718,8 @@ impl NangoRecord {
     /// are never treated as the same principal.
     fn into_provider_record(self, namespace: &str, acl_key: &SourceAclKey) -> ProviderRecord {
         let payload = redact_provider_metadata(self.payload);
-        let acl = crate::providers::acl_normalize::record_acl_from_payload(
-            namespace,
-            &payload,
-            crate::domain::ProviderAclProvenance::ProviderListing,
-            acl_key,
-        );
+        let acl =
+            crate::providers::acl_normalize::record_acl_from_payload(namespace, &payload, acl_key);
         ProviderRecord {
             source_id: self.id.unwrap_or_else(|| stable_payload_id(&payload)),
             object_type: self.model.unwrap_or_else(|| "record".to_string()),
@@ -736,8 +731,10 @@ impl NangoRecord {
             ),
             deleted: self.deleted,
             source_updated_at: self.modified_at,
-            metadata: redact_provider_metadata(self.metadata),
-            payload,
+            metadata: crate::providers::acl_normalize::strip_acl_principal_carriers(
+                redact_provider_metadata(self.metadata),
+            ),
+            payload: crate::providers::acl_normalize::strip_acl_principal_carriers(payload),
             acl,
         }
     }
@@ -751,8 +748,50 @@ fn stable_payload_id(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::nango_metadata;
+    use super::{NangoRecord, nango_metadata};
+    use crate::acl_key::SourceAclKey;
     use serde_json::json;
+
+    #[test]
+    fn converted_record_contains_only_fingerprinted_acl_principals() {
+        // Pins: the adapter production conversion fingerprints permissions,
+        // then removes every readable carrier before a RecordPage can be
+        // journaled.
+        let record: NangoRecord = serde_json::from_value(json!({
+            "id": "doc-1",
+            "model": "file",
+            "version": "7",
+            "content": "Quarterly plan",
+            "metadata": {
+                "safe": "kept",
+                "permissions": [{
+                    "type": "group",
+                    "emailAddress": "finance@example.com",
+                    "role": "reader"
+                }]
+            },
+            "permissions": [{
+                "type": "user",
+                "emailAddress": "alice@example.com",
+                "role": "reader"
+            }],
+            "permissionIds": ["provider-readable-id"]
+        }))
+        .expect("fixture record decodes");
+        let converted = record.into_provider_record(
+            "nango:google-drive:connection-1",
+            &SourceAclKey::new(1, vec![7; 32]),
+        );
+
+        assert!(converted.acl.complete);
+        assert_eq!(converted.acl.entries.len(), 1);
+        let serialized = serde_json::to_string(&converted).expect("record serializes");
+        assert!(!serialized.contains("alice@example.com"));
+        assert!(!serialized.contains("finance@example.com"));
+        assert!(!serialized.contains("provider-readable-id"));
+        assert_eq!(converted.metadata["safe"], "kept");
+        assert!(serialized.contains("Quarterly plan"));
+    }
 
     #[test]
     fn control_only_selection_yields_no_connection_metadata() {

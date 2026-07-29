@@ -7,7 +7,6 @@ use sha2::{Digest, Sha256};
 
 use crate::adapters::mcp::McpDiscoveredToolRegistration;
 use crate::tools::{memory, session_search, tool_result};
-use moa_config::McpServerCredentialScope;
 use moa_config::ToolBudgetConfig;
 use moa_core::{
     error::{MoaError, Result},
@@ -31,7 +30,6 @@ use crate::tools::sandbox_descriptor::{
     SandboxToolDescriptor, default_sandbox_tool_descriptors, sandbox_tool_descriptors,
 };
 
-use super::mcp_connections::ToolCredentialScope;
 use super::{DEFAULT_PROVIDER_NAME, ToolRouter};
 
 /// One provider route for a hand-routed tool.
@@ -70,12 +68,6 @@ pub enum ToolExecution {
     Mcp {
         /// Configured MCP server that owns the remote tool.
         server_name: String,
-        /// Credential owner the server is invoked with, copied from that
-        /// server's configuration when the tool was discovered. Dispatch requires
-        /// it to still agree with the live server configuration, so a server that
-        /// changes ownership cannot serve a tool registered under the other
-        /// owner's scope.
-        credential_scope: McpServerCredentialScope,
         /// Tool name as the owning server knows it.
         ///
         /// The registered name is server-qualified, so this is the only name
@@ -111,17 +103,6 @@ impl ToolExecution {
                 remote_tool_name,
                 ..
             } => ToolCapabilityId::mcp(server_name, remote_tool_name),
-        }
-    }
-
-    /// Returns the credential scope every invocation of this tool carries.
-    #[must_use]
-    pub fn credential_scope(&self) -> ToolCredentialScope {
-        match self {
-            Self::BuiltIn(_) | Self::Hand { .. } => ToolCredentialScope::NonMcp,
-            Self::Mcp {
-                credential_scope, ..
-            } => ToolCredentialScope::for_server(*credential_scope),
         }
     }
 }
@@ -233,11 +214,7 @@ impl RegisteredTool {
         }
     }
 
-    fn mcp(
-        server_name: &str,
-        credential_scope: McpServerCredentialScope,
-        registration: McpDiscoveredToolRegistration,
-    ) -> Result<Self> {
+    fn mcp(server_name: &str, registration: McpDiscoveredToolRegistration) -> Result<Self> {
         let idempotency_class = if registration.allows_idempotent_retry() {
             IdempotencyClass::Idempotent
         } else {
@@ -279,7 +256,6 @@ impl RegisteredTool {
             },
             execution: ToolExecution::Mcp {
                 server_name: server_name.to_string(),
-                credential_scope,
                 remote_tool_name,
                 schema_hash,
             },
@@ -376,18 +352,12 @@ impl ToolRegistry {
     /// Registers a discovered MCP tool under its server-qualified reference and
     /// adds it to the default loadout.
     ///
-    /// `credential_scope` is the owning server's configured credential scope. It
-    /// is recorded on the registration so every invocation of this tool carries a
-    /// credential scope derived from operator configuration rather than from the
-    /// call.
-    ///
     /// Returns the reference the tool registered under. Model-unsafe references
     /// and duplicate qualified references are rejected rather than overwriting
     /// an existing executable definition.
     pub fn register_mcp_tool(
         &mut self,
         server_name: &str,
-        credential_scope: McpServerCredentialScope,
         tool: impl Into<McpDiscoveredToolRegistration>,
     ) -> Result<String> {
         let registration = tool.into();
@@ -404,7 +374,7 @@ impl ToolRegistry {
                 "MCP server {server_name} discovered duplicate qualified tool reference {name}"
             )));
         }
-        let registered = RegisteredTool::mcp(server_name, credential_scope, registration)?;
+        let registered = RegisteredTool::mcp(server_name, registration)?;
         self.tools.insert(name.clone(), registered);
         if !self
             .default_loadout
@@ -592,7 +562,6 @@ fn default_budget_for_tool(tool_name: &str) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use moa_config::McpServerCredentialScope;
     use serde_json::json;
 
     use crate::adapters::mcp::McpDiscoveredTool;
@@ -622,17 +591,10 @@ mod tests {
 
         let mut registry = ToolRegistry::new();
         let reference = registry
-            .register_mcp_tool(
-                "github",
-                McpServerCredentialScope::DeploymentOwned,
-                discovered_tool("search", "first"),
-            )
+            .register_mcp_tool("github", discovered_tool("search", "first"))
             .expect("first qualified registration succeeds");
-        let duplicate = registry.register_mcp_tool(
-            "github",
-            McpServerCredentialScope::DeploymentOwned,
-            discovered_tool("search", "replacement"),
-        );
+        let duplicate =
+            registry.register_mcp_tool("github", discovered_tool("search", "replacement"));
 
         assert!(
             duplicate.is_err(),
@@ -653,11 +615,7 @@ mod tests {
         // provider to reject the entire model tool loadout.
         let mut registry = ToolRegistry::new();
         let error = registry
-            .register_mcp_tool(
-                "unsafe.server",
-                McpServerCredentialScope::DeploymentOwned,
-                discovered_tool("search", "search"),
-            )
+            .register_mcp_tool("unsafe.server", discovered_tool("search", "search"))
             .expect_err("a dot is outside the model tool-name alphabet");
         assert!(
             error.to_string().contains("not a model-safe tool name"),

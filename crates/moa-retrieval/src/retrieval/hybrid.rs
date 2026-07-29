@@ -239,6 +239,7 @@ impl HybridRetriever {
         } else {
             VectorBackendState::default()
         };
+        backend_state.guard_query_embedder(&req)?;
         // Per-leg spans parent under the enclosing pipeline stage span (ambient,
         // task-local) and carry only bounded counts/timings — never query text.
         let vector_span = tracing::debug_span!(
@@ -555,7 +556,7 @@ impl HybridRetriever {
         req: &RetrievalRequest,
         state: &VectorBackendState,
     ) -> Result<Vec<LegCandidate>> {
-        if req.query_embedding.is_empty() {
+        if req.query_embedding.is_none() {
             return Ok(Vec::new());
         }
 
@@ -673,9 +674,9 @@ impl HybridRetriever {
                 .execute(conn.as_mut())
                 .await?;
         }
-        let row = sqlx::query_as::<_, (String, String, Option<DateTime<Utc>>)>(
+        let row = sqlx::query_as::<_, (String, String, Option<DateTime<Utc>>, Option<String>)>(
             r#"
-                SELECT vector_backend, vector_backend_state, dual_read_until
+                SELECT vector_backend, vector_backend_state, dual_read_until, embedding_model
                 FROM moa.storage_partition_state
                 WHERE tenant_id = $1
                 "#,
@@ -686,10 +687,13 @@ impl HybridRetriever {
         conn.commit().await?;
         Ok(row
             .map(
-                |(vector_backend, vector_backend_state, dual_read_until)| VectorBackendState {
-                    vector_backend,
-                    vector_backend_state,
-                    dual_read_until,
+                |(vector_backend, vector_backend_state, dual_read_until, embedding_model)| {
+                    VectorBackendState {
+                        vector_backend,
+                        vector_backend_state,
+                        dual_read_until,
+                        embedding_model,
+                    }
                 },
             )
             .unwrap_or_default())
@@ -779,7 +783,7 @@ fn should_retry_vector_after_empty_fusion(
     // vector result (or a degraded transient failure) is not masking candidates,
     // so re-running it would only duplicate work.
     !req.disable_leg_timeouts
-        && !req.query_embedding.is_empty()
+        && req.query_embedding.is_some()
         && vector_timed_out
         && lexical_hits.is_empty()
         && graph_hits.is_empty()
@@ -820,6 +824,7 @@ struct VectorBackendState {
     vector_backend: String,
     vector_backend_state: String,
     dual_read_until: Option<DateTime<Utc>>,
+    embedding_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -843,11 +848,33 @@ impl Default for VectorBackendState {
             vector_backend: "pgvector".to_string(),
             vector_backend_state: "steady".to_string(),
             dual_read_until: None,
+            embedding_model: None,
         }
     }
 }
 
 impl VectorBackendState {
+    fn guard_query_embedder(&self, req: &RetrievalRequest) -> Result<()> {
+        let Some(query_embedding) = &req.query_embedding else {
+            return Ok(());
+        };
+        let Some(generation_model) = &self.embedding_model else {
+            return Ok(());
+        };
+        if generation_model == query_embedding.model() {
+            return Ok(());
+        }
+        Err(RetrievalError::GenerationEmbedderMismatch {
+            storage_partition_id: req
+                .scope
+                .to_rls_context()
+                .storage_partition_id()
+                .to_string(),
+            generation_model: generation_model.clone(),
+            query_model: query_embedding.model().to_string(),
+        })
+    }
+
     fn is_dual_read_active(&self) -> bool {
         self.vector_backend_state == "dual_read"
             && self.dual_read_until.is_none_or(|until| until > Utc::now())
@@ -859,7 +886,7 @@ impl VectorBackendState {
 }
 
 fn retrieval_needs_backend_state(req: &RetrievalRequest) -> bool {
-    !req.query_embedding.is_empty() || !req.query_text.trim().is_empty()
+    req.query_embedding.is_some() || !req.query_text.trim().is_empty()
 }
 
 fn turbopuffer_unavailable_for_request(req: &RetrievalRequest) -> RetrievalError {
@@ -1079,6 +1106,7 @@ fn is_fatal_vector_error(error: &VectorError) -> bool {
         VectorError::DimensionMismatch { .. }
         | VectorError::InvalidSensitivityClass(_)
         | VectorError::EmbedderConfig(_)
+        | VectorError::InvalidQueryEmbedding(_)
         | VectorError::EmbedderMismatch { .. }
         | VectorError::StoragePartitionEmbedderStateMissing { .. }
         | VectorError::EmbedderModelMismatch { .. }
@@ -1092,27 +1120,11 @@ fn is_fatal_vector_error(error: &VectorError) -> bool {
         | VectorError::TransactionalWritesUnsupported(_)
         | VectorError::InvalidVectorSyncOperation(_)
         | VectorError::UnsupportedVectorBackend { .. }
-        | VectorError::UnsupportedQueryFeature { .. }
-        // Rebuild-state invariants. A partition whose rebuild state is
-        // inconsistent (missing pointer, lost fence, unreconstructable input)
-        // must not answer from whatever vectors happen to be present.
-        | VectorError::RebuildProvenanceMissing { .. }
-        | VectorError::RebuildLabelUnsupported { .. }
-        | VectorError::RebuildPartitionBusy { .. }
-        | VectorError::RebuildOperationNotFound { .. }
-        | VectorError::RebuildGenerationNotFound { .. }
-        | VectorError::RebuildFenceLost { .. }
-        | VectorError::RebuildGenerationMismatch { .. }
-        | VectorError::RebuildGenerationIncomplete { .. }
-        | VectorError::RebuildGenerationNotActivatable { .. }
-        | VectorError::ActiveGenerationMissing { .. }
-        | VectorError::ActiveGenerationPointerConflict { .. }
-        | VectorError::RebuildRollbackUnavailable { .. } => true,
+        | VectorError::UnsupportedQueryFeature { .. } => true,
         // Transient backend/provider/network/response failures degrade the leg.
         VectorError::EmbeddingResponseLength { .. }
         | VectorError::ProviderStatus { .. }
         | VectorError::VectorProviderStatus { .. }
-        | VectorError::ReembedInProgress { .. }
         | VectorError::TurbopufferResponse(_)
         | VectorError::Core(_)
         | VectorError::Sqlx(_)

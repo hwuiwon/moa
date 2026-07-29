@@ -1,4 +1,4 @@
-//! Shared normalization of provider permission payloads into a [`RecordAcl`].
+//! Shared normalization and removal of provider permission payloads.
 //!
 //! Google Drive (through Nango) and Merge both express per-record permissions as
 //! a list of entries naming a user, a group, a domain, or "anyone", so one
@@ -13,11 +13,12 @@
 //! and the only safe reading of that is "nobody".
 
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::acl_key::SourceAclKey;
 use crate::domain::{
-    CanonicalSourcePrincipal, ProviderAclEntry, ProviderAclProvenance, ProviderRecordAcl,
-    RecordAcl, SourceAclEntryKind, SourcePrincipalKind,
+    CanonicalSourcePrincipal, ProviderAclEntry, ProviderRecordAcl, SourceAclEntryKind,
+    SourcePrincipalKind,
 };
 
 /// Payload keys, in priority order, that hold the permission list.
@@ -42,26 +43,38 @@ const REVISION_FIELDS: &[&str] = &[
     "modifiedTime",
 ];
 
+/// Builds the fingerprint namespace for one concrete provider connection.
+///
+/// Including the MOA connection identity prevents identical provider
+/// principals from matching across independently linked accounts.
+pub(crate) fn principal_namespace(provider: &str, connector: &str, connection_uid: Uuid) -> String {
+    format!(
+        "{}:{}:{}",
+        provider.trim().to_ascii_lowercase(),
+        connector.trim().to_ascii_lowercase(),
+        connection_uid
+    )
+}
+
 /// Normalizes one provider record payload into its source ACL.
 ///
 /// `namespace` scopes the resulting principals to one provider identity domain,
 /// so `alice@example.com` in Drive and `alice@example.com` in a different
 /// connector are different principals unless a binding says otherwise.
 ///
-/// Each principal is keyed with `acl_key` here, inside the same call that reads
-/// it. A raw provider identity therefore never outlives normalization, which is
-/// what lets the resulting record be journaled durably.
+/// Each principal is keyed with `acl_key` here. The caller then removes the raw
+/// permission carriers before returning the provider record for durable
+/// journaling.
 pub(crate) fn record_acl_from_payload(
     namespace: &str,
     payload: &Value,
-    provenance: ProviderAclProvenance,
     acl_key: &SourceAclKey,
-) -> RecordAcl {
+) -> ProviderRecordAcl {
     let revision = first_string(payload, REVISION_FIELDS);
     let entries = first_array(payload, PERMISSION_LIST_FIELDS);
     let truncated = TRUNCATION_MARKER_FIELDS
         .iter()
-        .any(|field| payload.get(*field).is_some_and(|value| !value.is_null()));
+        .any(|field| payload.get(*field).is_some_and(truncation_marker_is_set));
 
     let mut grants = Vec::new();
     let mut complete = revision.is_some() && entries.is_some() && !truncated;
@@ -75,19 +88,46 @@ pub(crate) fn record_acl_from_payload(
         }
     }
 
-    RecordAcl::Provider(ProviderRecordAcl {
+    ProviderRecordAcl {
         // A record whose revision the provider did not state is already
         // incomplete; the placeholder keeps the snapshot storable as evidence
         // without ever matching a real revision.
         provider_revision: revision.unwrap_or_else(|| "unknown".to_string()),
         complete,
-        provenance,
         entries: grants,
-        metadata: serde_json::json!({
-            "permission_count": grants_len(payload),
-            "listing_truncated": truncated,
-        }),
-    })
+    }
+}
+
+/// Removes raw permission carriers after they have been fingerprinted.
+///
+/// Provider records are journaled durably, so the readable identities used to
+/// build the ACL must not remain in the returned payload. Content and revision
+/// fields are preserved.
+pub(crate) fn strip_acl_principal_carriers(mut payload: Value) -> Value {
+    let Some(object) = payload.as_object_mut() else {
+        return payload;
+    };
+    for field in [
+        "permissions",
+        "permission_list",
+        "access_control_list",
+        "permissionIds",
+        "permission_ids",
+    ] {
+        object.remove(field);
+    }
+    payload
+}
+
+fn truncation_marker_is_set(value: &Value) -> bool {
+    match value {
+        Value::Bool(value) => *value,
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Number(value) => value.as_u64().is_none_or(|value| value != 0),
+        Value::Null => false,
+        // An unexpected structured marker cannot prove the listing completed.
+        Value::Array(_) | Value::Object(_) => true,
+    }
 }
 
 /// What one provider permission entry contributes to the normalized ACL.
@@ -195,10 +235,6 @@ fn first_array<'a>(value: &'a Value, keys: &[&str]) -> Option<Vec<&'a Value>> {
         .map(|entries| entries.iter().collect())
 }
 
-fn grants_len(payload: &Value) -> usize {
-    first_array(payload, PERMISSION_LIST_FIELDS).map_or(0, |entries| entries.len())
-}
-
 /// Resolves the first present dotted key to a trimmed non-empty string.
 fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| {
@@ -219,6 +255,7 @@ fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeSet;
 
     /// Fixed fixture key so a fingerprint computed in an assertion matches the
     /// one normalization produced.
@@ -237,15 +274,7 @@ mod tests {
     }
 
     fn provider_acl(payload: &Value) -> ProviderRecordAcl {
-        match record_acl_from_payload(
-            "google_drive",
-            payload,
-            ProviderAclProvenance::ProviderListing,
-            &test_key(),
-        ) {
-            RecordAcl::Provider(acl) => acl,
-            RecordAcl::UniformlyPublic => panic!("normalizer must never claim uniform public"),
-        }
+        record_acl_from_payload("google_drive", payload, &test_key())
     }
 
     #[test]
@@ -358,6 +387,75 @@ mod tests {
     }
 
     #[test]
+    fn truncation_markers_use_typed_truthiness() {
+        // Pins: false, zero, null, and an empty token mean the provider
+        // completed the listing; true, nonzero, and a non-empty token do not.
+        for marker in [json!(false), json!(0), Value::Null, json!("")] {
+            let acl = provider_acl(&json!({
+                "version": "3",
+                "permissions_truncated": marker,
+                "permissions": [{ "type": "anyone", "role": "reader" }]
+            }));
+            assert!(acl.complete, "marker {marker} should not truncate");
+        }
+        for marker in [json!(true), json!(1), json!("page-2"), json!({})] {
+            let acl = provider_acl(&json!({
+                "version": "3",
+                "permissions_truncated": marker,
+                "permissions": [{ "type": "anyone", "role": "reader" }]
+            }));
+            assert!(!acl.complete, "marker {marker} must truncate");
+        }
+    }
+
+    #[test]
+    fn permission_carriers_are_removed_after_fingerprinting() {
+        // Pins: raw provider identities never survive in the durable record
+        // payload, while ordinary content and the ACL revision remain.
+        let payload = json!({
+            "version": "3",
+            "content": "Quarterly plan",
+            "permissions": [{
+                "type": "user",
+                "emailAddress": "alice@example.com",
+                "role": "reader"
+            }],
+            "permissionIds": ["provider-readable-id"]
+        });
+        let acl = provider_acl(&payload);
+        assert!(acl.complete);
+
+        let stripped = strip_acl_principal_carriers(payload);
+        let serialized = serde_json::to_string(&stripped).expect("payload serializes");
+        assert!(!serialized.contains("alice@example.com"));
+        assert!(!serialized.contains("provider-readable-id"));
+        assert_eq!(stripped["content"], "Quarterly plan");
+        assert_eq!(stripped["version"], "3");
+    }
+
+    #[test]
+    fn identical_anyone_acl_does_not_cross_connection_namespaces() {
+        // Pins: a public grant from linked connection A is not a principal for
+        // linked connection B, even when provider and connector are identical.
+        let namespace_a = principal_namespace("nango", "google-drive", Uuid::from_u128(41));
+        let namespace_b = principal_namespace("nango", "google-drive", Uuid::from_u128(42));
+        let payload = json!({
+            "version": "3",
+            "permissions": [{ "type": "anyone", "role": "reader" }]
+        });
+        let acl_a = record_acl_from_payload(&namespace_a, &payload, &test_key());
+        let acl_b = record_acl_from_payload(&namespace_b, &payload, &test_key());
+        let principal_a = acl_a.entries[0].principal.clone();
+        let principal_b = acl_b.entries[0].principal.clone();
+
+        assert_ne!(principal_a, principal_b);
+        assert!(
+            !BTreeSet::from([principal_a]).contains(&principal_b),
+            "connection A's Anyone context must not match connection B"
+        );
+    }
+
+    #[test]
     fn explicit_denials_survive_normalization() {
         // Pins: an explicit refusal is carried through as a deny grant. Dropping
         // it would turn the most restrictive statement a source can make into
@@ -390,7 +488,7 @@ mod tests {
     fn merge_nested_principal_shape_normalizes() {
         // Pins: Merge nests the principal under `user`/`group` and spells the
         // type in upper case, and both still reach the same canonical principal.
-        let acl = match record_acl_from_payload(
+        let acl = record_acl_from_payload(
             "merge",
             &json!({
                 "remote_updated_at": "2026-07-01T00:00:00Z",
@@ -399,12 +497,8 @@ mod tests {
                     { "type": "COMPANY", "domain": "example.com" }
                 ]
             }),
-            ProviderAclProvenance::ProviderListing,
             &test_key(),
-        ) {
-            RecordAcl::Provider(acl) => acl,
-            RecordAcl::UniformlyPublic => panic!("normalizer must never claim uniform public"),
-        };
+        );
         assert!(acl.complete);
         assert_eq!(acl.provider_revision, "2026-07-01T00:00:00Z");
         assert_eq!(

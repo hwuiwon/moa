@@ -341,8 +341,8 @@ pub struct RlsContext {
     contact_id: Option<ContactId>,
     /// Provider-source ACL admission context for this caller.
     ///
-    /// Every constructor starts at [`SourceAclContext::empty`], which admits only
-    /// `TenantPublic` sources; callers attach a resolved set with
+    /// Every constructor starts at [`SourceAclContext::empty`], which admits no
+    /// provider-managed source; callers attach a resolved set with
     /// [`RlsContext::with_source_acl`]. There is no serde default: a serialized
     /// context without this field is a typed decode error rather than a silently
     /// widened one.
@@ -394,9 +394,8 @@ impl RlsContext {
     /// Returns this context extended with the caller's resolved provider-source
     /// admission context.
     ///
-    /// The unattached default admits only `TenantPublic` sources, so forgetting
-    /// to attach a resolved set hides provider-managed content instead of
-    /// exposing it.
+    /// The unattached default admits no provider-managed source, so forgetting
+    /// to attach a resolved set fails closed.
     #[must_use]
     pub fn with_source_acl(mut self, source_acl: SourceAclContext) -> Self {
         self.source_acl = source_acl;
@@ -523,254 +522,6 @@ pub struct SkillMetadata {
     pub estimated_tokens: usize,
 }
 
-// ---------------------------------------------------------------------------
-// Storage-partition index rebuilds
-// ---------------------------------------------------------------------------
-
-uuid_id!(
-    /// Identifier for one durable storage-partition index rebuild operation.
-    pub struct RebuildOperationId
-);
-
-uuid_id!(
-    /// Identifier for one embedding generation of a storage partition.
-    pub struct EmbeddingGenerationId
-);
-
-/// Which rebuild an operation performs.
-///
-/// Both kinds share one generation state machine: they differ in what they
-/// stage and what activation replaces, not in how progress, validation,
-/// activation, or rollback are sequenced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RebuildKind {
-    /// Recompute every vector in the partition under a new embedding identity.
-    Reembed,
-    /// Recompute chunk boundaries and everything derived from them.
-    Rechunk,
-}
-
-impl RebuildKind {
-    /// Returns the persisted SQL discriminator.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Reembed => "reembed",
-            Self::Rechunk => "rechunk",
-        }
-    }
-
-    /// Parses a persisted SQL discriminator.
-    pub fn parse(value: &str) -> crate::error::Result<Self> {
-        match value {
-            "reembed" => Ok(Self::Reembed),
-            "rechunk" => Ok(Self::Rechunk),
-            other => Err(crate::error::MoaError::ValidationError(format!(
-                "unknown rebuild kind `{other}`"
-            ))),
-        }
-    }
-}
-
-impl fmt::Display for RebuildKind {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// Lifecycle position of one rebuild operation.
-///
-/// Transitions are compare-and-swap against the operation's fence token, so a
-/// replayed workflow step observes a lost swap rather than reapplying a
-/// transition that already happened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RebuildLifecycle {
-    /// Census taken, candidate generation not yet created.
-    Planning,
-    /// Candidate vectors are being built in bounded batches.
-    Building,
-    /// Bounded shadow queries are scoring the candidate generation.
-    Validating,
-    /// Validation passed; the candidate is complete and awaiting activation.
-    AwaitingActivation,
-    /// The candidate generation is the production read generation; the prior
-    /// generation is retained for rollback.
-    Activated,
-    /// Retired generation data has been removed; the operation is closed.
-    Finalized,
-    /// The prior generation was restored as the production read generation.
-    RolledBack,
-    /// An operator cancelled the operation before activation.
-    Cancelled,
-    /// The operation stopped on an error and did not activate.
-    Failed,
-}
-
-impl RebuildLifecycle {
-    /// Returns the persisted SQL discriminator.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Planning => "planning",
-            Self::Building => "building",
-            Self::Validating => "validating",
-            Self::AwaitingActivation => "awaiting_activation",
-            Self::Activated => "activated",
-            Self::Finalized => "finalized",
-            Self::RolledBack => "rolled_back",
-            Self::Cancelled => "cancelled",
-            Self::Failed => "failed",
-        }
-    }
-
-    /// Parses a persisted SQL discriminator.
-    pub fn parse(value: &str) -> crate::error::Result<Self> {
-        match value {
-            "planning" => Ok(Self::Planning),
-            "building" => Ok(Self::Building),
-            "validating" => Ok(Self::Validating),
-            "awaiting_activation" => Ok(Self::AwaitingActivation),
-            "activated" => Ok(Self::Activated),
-            "finalized" => Ok(Self::Finalized),
-            "rolled_back" => Ok(Self::RolledBack),
-            "cancelled" => Ok(Self::Cancelled),
-            "failed" => Ok(Self::Failed),
-            other => Err(crate::error::MoaError::ValidationError(format!(
-                "unknown rebuild lifecycle `{other}`"
-            ))),
-        }
-    }
-
-    /// Whether no further transition is possible.
-    ///
-    /// The partial unique index that admits one rebuild per storage partition
-    /// uses exactly this set, so the Rust and SQL definitions cannot drift
-    /// without the index rejecting a start that this predicate allowed.
-    #[must_use]
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Finalized | Self::RolledBack | Self::Cancelled | Self::Failed
-        )
-    }
-}
-
-impl fmt::Display for RebuildLifecycle {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// Serving state of one embedding generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GenerationState {
-    /// Built but never served. Candidate vectors live in their own table and no
-    /// production reader joins it.
-    Candidate,
-    /// The production read generation named by the active-generation pointer.
-    Active,
-    /// Superseded by a later activation, retained until finalization.
-    Retired,
-}
-
-impl GenerationState {
-    /// Returns the persisted SQL discriminator.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Candidate => "candidate",
-            Self::Active => "active",
-            Self::Retired => "retired",
-        }
-    }
-
-    /// Parses a persisted SQL discriminator.
-    pub fn parse(value: &str) -> crate::error::Result<Self> {
-        match value {
-            "candidate" => Ok(Self::Candidate),
-            "active" => Ok(Self::Active),
-            "retired" => Ok(Self::Retired),
-            other => Err(crate::error::MoaError::ValidationError(format!(
-                "unknown generation state `{other}`"
-            ))),
-        }
-    }
-}
-
-impl fmt::Display for GenerationState {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// One member of the state a rechunk must stage before it can activate.
-///
-/// Activation replaces all of these in one scoped transaction. A rechunk that
-/// staged only some of them is refused, because applying a subset would leave
-/// chunks whose graph, ACL, or occurrence identity described the old text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RechunkStagingMember {
-    /// Replacement chunk rows for the document version.
-    Chunk,
-    /// Graph node and edge deltas derived from the new chunks.
-    GraphDelta,
-    /// Candidate embeddings for the new chunks.
-    Embedding,
-    /// Source-ACL snapshot fingerprints carried forward onto the new chunks.
-    AclSnapshot,
-    /// Per-occurrence identity for the new chunks.
-    OccurrenceIdentity,
-    /// Provenance linking each new chunk to the parsed source it came from.
-    Provenance,
-}
-
-impl RechunkStagingMember {
-    /// Every member a complete rechunk staging set must contain.
-    pub const ALL: [Self; 6] = [
-        Self::Chunk,
-        Self::GraphDelta,
-        Self::Embedding,
-        Self::AclSnapshot,
-        Self::OccurrenceIdentity,
-        Self::Provenance,
-    ];
-
-    /// Returns the persisted SQL discriminator.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Chunk => "chunk",
-            Self::GraphDelta => "graph_delta",
-            Self::Embedding => "embedding",
-            Self::AclSnapshot => "acl_snapshot",
-            Self::OccurrenceIdentity => "occurrence_identity",
-            Self::Provenance => "provenance",
-        }
-    }
-
-    /// Parses a persisted SQL discriminator.
-    pub fn parse(value: &str) -> crate::error::Result<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|member| member.as_str() == value)
-            .ok_or_else(|| {
-                crate::error::MoaError::ValidationError(format!(
-                    "unknown rechunk staging member `{value}`"
-                ))
-            })
-    }
-}
-
-impl fmt::Display for RechunkStagingMember {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
 /// Builds the contextual embedding input for one knowledge chunk.
 ///
 /// This is the authoritative embedding input for a `Chunk` vector, and it is
@@ -809,40 +560,8 @@ pub fn contextual_chunk_embedding_input(
 }
 
 #[cfg(test)]
-mod rebuild_tests {
+mod contextual_chunk_tests {
     use super::*;
-
-    #[test]
-    fn rebuild_lifecycle_terminal_set_matches_the_single_operation_index() {
-        // Pins: the Rust terminal set and the V000351 partial unique index
-        // predicate name the same four lifecycles. If they diverge, a second
-        // rebuild either starts against a live one or is refused after a
-        // finished one.
-        let terminal = [
-            RebuildLifecycle::Finalized,
-            RebuildLifecycle::RolledBack,
-            RebuildLifecycle::Cancelled,
-            RebuildLifecycle::Failed,
-        ];
-        for lifecycle in terminal {
-            assert!(
-                lifecycle.is_terminal(),
-                "{lifecycle} must be terminal to leave the partition free"
-            );
-        }
-        for lifecycle in [
-            RebuildLifecycle::Planning,
-            RebuildLifecycle::Building,
-            RebuildLifecycle::Validating,
-            RebuildLifecycle::AwaitingActivation,
-            RebuildLifecycle::Activated,
-        ] {
-            assert!(
-                !lifecycle.is_terminal(),
-                "{lifecycle} must hold the partition against a concurrent rebuild"
-            );
-        }
-    }
 
     #[test]
     fn contextual_chunk_input_prefixes_title_and_heading_path() {
@@ -887,20 +606,5 @@ mod rebuild_tests {
             contextual_chunk_embedding_input(Some("   "), &["".to_string()], "Bare chunk."),
             "Bare chunk."
         );
-    }
-
-    #[test]
-    fn rechunk_staging_members_round_trip_their_sql_discriminators() {
-        // Pins: the six-member completeness rule shares one vocabulary with
-        // `moa.knowledge_rechunk_staged_members()`; a member that failed to
-        // round-trip would be silently absent from the completeness check.
-        for member in RechunkStagingMember::ALL {
-            assert_eq!(
-                RechunkStagingMember::parse(member.as_str()).expect("member round-trips"),
-                member
-            );
-        }
-        assert_eq!(RechunkStagingMember::ALL.len(), 6);
-        assert!(RechunkStagingMember::parse("citations").is_err());
     }
 }

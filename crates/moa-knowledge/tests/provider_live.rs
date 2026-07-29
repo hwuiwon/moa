@@ -447,7 +447,6 @@ async fn discover_sync_model(
 fn live_connection(connector: &str, connection_id: &str, model: &str) -> KnowledgeConnection {
     let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
-        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid: Uuid::now_v7(),
         tenant_id: TenantId::from(Uuid::now_v7()),
         provider: "nango".to_string(),

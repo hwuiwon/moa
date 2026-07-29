@@ -472,7 +472,6 @@ async fn seed_storage_partition_embedder_state(
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
                 embedding_dimension = EXCLUDED.embedding_dimension,
-                reembed_state = 'steady',
                 updated_at = now()
         "#,
     )

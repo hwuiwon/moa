@@ -343,11 +343,7 @@ impl OrchestratorTestFixture {
                 let runtime = fixture_capability::FixtureCapabilityRuntime::start(options).await?;
                 let mcp_servers = serde_json::to_string(&json!([{
                     "name": "fixture-capability",
-                    "transport": "http",
                     "url": runtime.endpoint(),
-                    // The loopback fixture presents no credential; deployment
-                    // ownership keeps it off the tenant-vault dispatch path.
-                    "credential_scope": "deployment_owned",
                     "trust_tool_annotations": true,
                     // This loopback fixture intentionally accepts arbitrary synthetic
                     // lifecycle payloads; production MCP servers retain the fail-closed

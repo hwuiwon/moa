@@ -1,7 +1,5 @@
 use moa_config::McpCredentialConfig;
 use moa_config::McpServerConfig;
-use moa_config::McpServerCredentialScope;
-use moa_config::McpTransportConfig;
 use moa_config::MoaConfig;
 use moa_config::SecurityProfile;
 use moa_core::{
@@ -16,7 +14,9 @@ use serde_json::json;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 fn session() -> SessionMeta {
@@ -62,17 +62,15 @@ async fn configured_mcp_server_without_egress_guard_fails_before_connecting_offl
             required: false,
             discovery: moa_config::McpDiscoveryMode::Eager,
             name: "guard-required".to_string(),
-            transport: McpTransportConfig::Http,
-            url: Some("http://127.0.0.1:1".to_string()),
+            url: "http://127.0.0.1:1".to_string(),
             allowed_data_classes: Vec::new(),
-            credential_scope: McpServerCredentialScope::DeploymentOwned,
             credentials: None,
             trust_tool_annotations: false,
         }],
         ..MoaConfig::default()
     };
 
-    let error = match ToolRouter::from_config(&config, None, None, None).await {
+    let error = match ToolRouter::from_config(&config, None, None).await {
         Ok(_) => panic!("configured MCP without an egress guard must fail startup"),
         Err(error) => error,
     };
@@ -87,9 +85,13 @@ async fn configured_mcp_server_without_egress_guard_fails_before_connecting_offl
 }
 
 #[tokio::test]
-async fn router_injects_mcp_credentials_via_proxy() {
+async fn deployment_credentials_authenticate_the_full_mcp_exchange_offline() {
+    // Pins: initialize, initialized notification, discovery, and invocation all
+    // use the deployment credential, and tools/call carries the durable MOA
+    // ToolCallId rather than a provider transcript identifier.
+    const TOOL_CALL_ID: Uuid = Uuid::from_u128(0x018f_8f1f_36a6_7c90_a7f8_2f2f_57f5_c499);
     let token_env = format!("MOA_TEST_MCP_TOKEN_{}", Uuid::now_v7().simple());
-    unsafe { std::env::set_var(&token_env, "proxy-secret") };
+    unsafe { std::env::set_var(&token_env, "deployment-secret") };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -99,13 +101,25 @@ async fn router_injects_mcp_credentials_via_proxy() {
             let mut buffer = vec![0_u8; 4096];
             let bytes = socket.read(&mut buffer).await.unwrap();
             let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer deployment-secret"),
+                "request {request_index} must be authenticated: {request}"
+            );
+            let expected_method = [
+                "initialize",
+                "notifications/initialized",
+                "tools/list",
+                "tools/call",
+            ][request_index];
+            assert!(
+                request.contains(&format!("\"method\":\"{expected_method}\"")),
+                "request {request_index} used the wrong MCP method: {request}"
+            );
             if request_index == 3 {
-                assert!(
-                    request
-                        .to_ascii_lowercase()
-                        .contains("authorization: bearer proxy-secret")
-                );
-                assert!(request.contains("\"moa/toolInvocationId\":\"provider-call-router-1\""));
+                assert!(request.contains(&format!("\"moa/toolInvocationId\":\"{TOOL_CALL_ID}\"")));
+                assert!(!request.contains("provider-transcript-id"));
             }
             let body = match request_index {
                 0 => {
@@ -136,17 +150,15 @@ async fn router_injects_mcp_credentials_via_proxy() {
         required: false,
         discovery: moa_config::McpDiscoveryMode::Eager,
         name: "secure-api".to_string(),
-        transport: McpTransportConfig::Http,
-        url: Some(format!("http://{addr}")),
+        url: format!("http://{addr}"),
         credentials: Some(McpCredentialConfig::Bearer {
             token_env: token_env.clone(),
         }),
         trust_tool_annotations: false,
         allowed_data_classes: Vec::new(),
-        credential_scope: McpServerCredentialScope::DeploymentOwned,
     }];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
         .await
         .unwrap();
     let secured = router
@@ -154,11 +166,11 @@ async fn router_injects_mcp_credentials_via_proxy() {
             &session(),
             &identity(),
             &ToolInvocation {
-                id: Some("provider-call-router-1".to_string()),
+                id: Some("provider-transcript-id".to_string()),
                 name: moa_hands::mcp_tool_reference("secure-api", "ping"),
                 input: json!({}),
             },
-            ToolCallId::new(),
+            ToolCallId(TOOL_CALL_ID),
             None,
         )
         .await
@@ -167,6 +179,91 @@ async fn router_injects_mcp_credentials_via_proxy() {
 
     assert_eq!(output.to_text(), "pong");
     server.await.expect("fake MCP server should finish");
+    unsafe { std::env::remove_var(token_env) };
+}
+
+#[tokio::test]
+async fn cancellation_stops_an_in_flight_authenticated_mcp_call_offline() {
+    // Pins: cancellation interrupts an MCP tools/call that has already reached
+    // the authenticated server instead of waiting for the transport timeout.
+    let token_env = format!("MOA_TEST_MCP_CANCEL_TOKEN_{}", Uuid::now_v7().simple());
+    unsafe { std::env::set_var(&token_env, "cancel-secret") };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (call_seen_tx, call_seen_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let mut call_seen_tx = Some(call_seen_tx);
+        for request_index in 0..4 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0_u8; 4096];
+            let bytes = socket.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer cancel-secret"),
+                "request {request_index} must be authenticated"
+            );
+            if request_index == 3 {
+                call_seen_tx.take().unwrap().send(()).unwrap();
+                std::future::pending::<()>().await;
+            }
+            let body = match request_index {
+                0 => {
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}"#
+                }
+                1 => r"{}",
+                _ => {
+                    r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"wait","description":"Wait","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]}}"#
+                }
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+
+    let dir = tempdir().unwrap();
+    let mut config = local_config(&dir);
+    let mut server = connector("slow-api", &format!("http://{addr}"), false);
+    server.credentials = Some(McpCredentialConfig::Bearer {
+        token_env: token_env.clone(),
+    });
+    config.mcp_servers = vec![server];
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
+        .await
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let canceller = cancel.clone();
+    tokio::spawn(async move {
+        call_seen_rx.await.unwrap();
+        canceller.cancel();
+    });
+
+    let result = timeout(
+        Duration::from_secs(2),
+        router.execute_authorized_with_cancel(
+            &session(),
+            &identity(),
+            &ToolInvocation {
+                id: Some("provider-transcript-cancel".to_string()),
+                name: moa_hands::mcp_tool_reference("slow-api", "wait"),
+                input: json!({}),
+            },
+            ToolCallId::new(),
+            None,
+            Some(&cancel),
+            Some(&cancel),
+        ),
+    )
+    .await
+    .expect("cancellation should beat the MCP transport timeout");
+
+    assert!(matches!(result, Err(moa_core::error::MoaError::Cancelled)));
     unsafe { std::env::remove_var(token_env) };
 }
 
@@ -226,15 +323,13 @@ async fn discovered_mcp_schema_rejects_malformed_input_without_server_dispatch()
         required: false,
         discovery: moa_config::McpDiscoveryMode::Eager,
         name: "filings".to_string(),
-        transport: McpTransportConfig::Http,
-        url: Some(format!("http://{addr}")),
+        url: format!("http://{addr}"),
         credentials: None,
         trust_tool_annotations: false,
         allowed_data_classes: Vec::new(),
-        credential_scope: McpServerCredentialScope::DeploymentOwned,
     }];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
         .await
         .unwrap();
     let malformed = router
@@ -317,17 +412,15 @@ async fn router_fails_closed_when_credentialed_mcp_token_env_is_unset() {
         required: false,
         discovery: moa_config::McpDiscoveryMode::Eager,
         name: "secure-api".to_string(),
-        transport: McpTransportConfig::Http,
-        url: Some("http://127.0.0.1:1".to_string()),
+        url: "http://127.0.0.1:1".to_string(),
         credentials: Some(McpCredentialConfig::Bearer {
             token_env: token_env.clone(),
         }),
         trust_tool_annotations: false,
         allowed_data_classes: Vec::new(),
-        credential_scope: McpServerCredentialScope::DeploymentOwned,
     }];
 
-    let error = match ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None).await {
+    let error = match ToolRouter::from_config(&config, Some(mcp_egress_guard()), None).await {
         Ok(_) => panic!("expected from_config to fail closed on the unset MCP token env var"),
         Err(error) => error,
     };
@@ -387,15 +480,13 @@ async fn router_calls_http_mcp_server_and_surfaces_jsonrpc_errors() {
         required: false,
         discovery: moa_config::McpDiscoveryMode::Eager,
         name: "http-api".to_string(),
-        transport: McpTransportConfig::Http,
-        url: Some(format!("http://{addr}")),
+        url: format!("http://{addr}"),
         trust_tool_annotations: false,
         allowed_data_classes: Vec::new(),
-        credential_scope: McpServerCredentialScope::DeploymentOwned,
         credentials: None,
     }];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
         .await
         .unwrap();
     let error = router
@@ -468,15 +559,13 @@ async fn connector_tool_named_like_a_local_tool_is_qualified_apart_offline() {
         required: false,
         discovery: moa_config::McpDiscoveryMode::Eager,
         name: "shadow-api".to_string(),
-        transport: McpTransportConfig::Http,
-        url: Some(format!("http://{addr}")),
+        url: format!("http://{addr}"),
         trust_tool_annotations: false,
         allowed_data_classes: Vec::new(),
-        credential_scope: McpServerCredentialScope::DeploymentOwned,
         credentials: None,
     }];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
         .await
         .expect("a connector name collision must not fail router construction");
 
@@ -557,15 +646,13 @@ async fn router_discovers_and_calls_streamable_http_tools_with_sse_responses() {
         required: false,
         discovery: moa_config::McpDiscoveryMode::Eager,
         name: "sse-api".to_string(),
-        transport: McpTransportConfig::Http,
-        url: Some(format!("http://{addr}")),
+        url: format!("http://{addr}"),
         trust_tool_annotations: false,
         allowed_data_classes: Vec::new(),
-        credential_scope: McpServerCredentialScope::DeploymentOwned,
         credentials: None,
     }];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
         .await
         .unwrap();
     assert!(
@@ -666,15 +753,13 @@ async fn discovered_tool_idempotency(
         required: false,
         discovery: moa_config::McpDiscoveryMode::Eager,
         name: server_name.to_string(),
-        transport: McpTransportConfig::Http,
-        url: Some(format!("http://{addr}")),
+        url: format!("http://{addr}"),
         credentials: None,
         trust_tool_annotations,
         allowed_data_classes: Vec::new(),
-        credential_scope: McpServerCredentialScope::DeploymentOwned,
     }];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
         .await
         .expect("build router from discovered MCP tool");
     server.await.expect("fake MCP server should finish");
@@ -795,12 +880,10 @@ async fn spawn_method_routed_mcp_server(tools_json: &str) -> MethodRoutedMcpServ
 fn connector(name: &str, url: &str, required: bool) -> McpServerConfig {
     McpServerConfig {
         name: name.to_string(),
-        transport: McpTransportConfig::Http,
-        url: Some(url.to_string()),
+        url: url.to_string(),
         credentials: None,
         trust_tool_annotations: false,
         allowed_data_classes: Vec::new(),
-        credential_scope: McpServerCredentialScope::DeploymentOwned,
         required,
         discovery: moa_config::McpDiscoveryMode::Eager,
     }
@@ -836,7 +919,7 @@ async fn an_optional_connector_outage_leaves_every_other_connector_serving_offli
         connector("down", &unreachable_url(), false),
     ];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
         .await
         .expect("an optional connector outage must not fail router construction");
 
@@ -890,7 +973,7 @@ async fn a_required_connector_outage_fails_startup_with_its_typed_health_offline
         connector("must-work", &unreachable_url(), true),
     ];
 
-    let error = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None).await;
+    let error = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None).await;
     let error = match error {
         Ok(_) => panic!("a required connector outage must fail startup"),
         Err(error) => error,
@@ -929,18 +1012,16 @@ async fn a_connector_catalog_is_identical_whatever_order_the_server_lists_tools_
     let forward_dir = tempdir().unwrap();
     let mut forward_config = local_config(&forward_dir);
     forward_config.mcp_servers = vec![connector("catalog", &forward.url, false)];
-    let forward_router =
-        ToolRouter::from_config(&forward_config, Some(mcp_egress_guard()), None, None)
-            .await
-            .expect("forward-order router");
+    let forward_router = ToolRouter::from_config(&forward_config, Some(mcp_egress_guard()), None)
+        .await
+        .expect("forward-order router");
 
     let reversed_dir = tempdir().unwrap();
     let mut reversed_config = local_config(&reversed_dir);
     reversed_config.mcp_servers = vec![connector("catalog", &reversed.url, false)];
-    let reversed_router =
-        ToolRouter::from_config(&reversed_config, Some(mcp_egress_guard()), None, None)
-            .await
-            .expect("reversed-order router");
+    let reversed_router = ToolRouter::from_config(&reversed_config, Some(mcp_egress_guard()), None)
+        .await
+        .expect("reversed-order router");
 
     assert_eq!(
         forward_router.mcp_catalog_revision(),
@@ -985,7 +1066,7 @@ async fn a_refresh_that_fails_keeps_serving_the_last_known_good_tools_offline() 
     let dir = tempdir().unwrap();
     let mut config = local_config(&dir);
     config.mcp_servers = vec![connector("flaky", &server.url, false)];
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
         .await
         .expect("router with a healthy connector");
     let qualified = moa_hands::mcp_tool_reference("flaky", "search");
@@ -1035,7 +1116,7 @@ async fn a_lazy_connector_contributes_no_tools_until_the_first_refresh_offline()
     lazy.discovery = moa_config::McpDiscoveryMode::Lazy;
     config.mcp_servers = vec![lazy];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
         .await
         .expect("router with a lazily discovered connector");
     let qualified = moa_hands::mcp_tool_reference("later", "search");
@@ -1079,7 +1160,7 @@ async fn a_required_connector_cannot_be_configured_for_lazy_discovery_offline() 
     server.discovery = moa_config::McpDiscoveryMode::Lazy;
     config.mcp_servers = vec![server];
 
-    let error = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None).await;
+    let error = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None).await;
     let error = match error {
         Ok(_) => panic!("required plus lazy must be rejected"),
         Err(error) => error,
@@ -1108,7 +1189,7 @@ async fn two_connectors_configured_under_one_name_are_rejected_offline() {
         connector("same", &unreachable_url(), false),
     ];
 
-    let error = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None).await;
+    let error = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None).await;
     let error = match error {
         Ok(_) => panic!("duplicate connector names must be rejected"),
         Err(error) => error,
@@ -1144,18 +1225,16 @@ async fn a_connector_schema_change_changes_the_tool_capability_revision_offline(
     let original_dir = tempdir().unwrap();
     let mut original_config = local_config(&original_dir);
     original_config.mcp_servers = vec![connector("api", &original.url, false)];
-    let original_router =
-        ToolRouter::from_config(&original_config, Some(mcp_egress_guard()), None, None)
-            .await
-            .expect("router before the schema change");
+    let original_router = ToolRouter::from_config(&original_config, Some(mcp_egress_guard()), None)
+        .await
+        .expect("router before the schema change");
 
     let changed_dir = tempdir().unwrap();
     let mut changed_config = local_config(&changed_dir);
     changed_config.mcp_servers = vec![connector("api", &changed.url, false)];
-    let changed_router =
-        ToolRouter::from_config(&changed_config, Some(mcp_egress_guard()), None, None)
-            .await
-            .expect("router after the schema change");
+    let changed_router = ToolRouter::from_config(&changed_config, Some(mcp_egress_guard()), None)
+        .await
+        .expect("router after the schema change");
 
     let qualified = moa_hands::mcp_tool_reference("api", "search");
     // Asserted separately rather than with `&&`: a compound precondition that
@@ -1195,7 +1274,7 @@ async fn a_refresh_republishes_the_prompt_schemas_a_turn_compiles_from_offline()
     lazy.discovery = moa_config::McpDiscoveryMode::Lazy;
     config.mcp_servers = vec![lazy];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
         .await
         .expect("router with a lazily discovered connector");
     let qualified = moa_hands::mcp_tool_reference("later", "search");
@@ -1243,7 +1322,7 @@ async fn a_permission_pattern_that_governs_no_registered_tool_is_reported_offlin
     config.permissions.admin_review = vec!["external_*".to_string()];
     config.permissions.always_deny = vec!["bash".to_string()];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
         .await
         .expect("router with a stale permission pattern still builds");
 
@@ -1284,7 +1363,7 @@ async fn a_lazily_discovered_connector_clears_its_permission_pattern_warning_off
         moa_hands::mcp_tool_reference("crm", "external_")
     )];
 
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
         .await
         .expect("router with a lazy connector");
     assert_eq!(
@@ -1318,7 +1397,7 @@ async fn a_permission_pattern_is_checked_when_no_connector_is_configured_offline
     config.permissions.always_deny = vec!["bash".to_string()];
     config.permissions.admin_review = vec!["definitely_not_a_registered_tool".to_string()];
 
-    let router = ToolRouter::from_config(&config, None, None, None)
+    let router = ToolRouter::from_config(&config, None, None)
         .await
         .expect("router without connectors");
 
@@ -1352,7 +1431,7 @@ async fn dispatching_a_connectors_published_name_says_which_reference_to_use_off
     let dir = tempdir().unwrap();
     let mut config = local_config(&dir);
     config.mcp_servers = vec![connector("screener", &server.url, false)];
-    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None, None)
+    let router = ToolRouter::from_config(&config, Some(mcp_egress_guard()), None)
         .await
         .expect("router with a connector");
 

@@ -1884,7 +1884,7 @@ async fn prompt_injection_tool_output_never_reaches_the_model_or_the_event_log_o
         "the injected file must be classified as a confirmed attempt"
     );
     assert!(
-        assessment.cleared_raw_carriers,
+        assessment.class.clears_raw_carriers(),
         "a confirmed attempt must clear every raw carrier"
     );
     assert_eq!(

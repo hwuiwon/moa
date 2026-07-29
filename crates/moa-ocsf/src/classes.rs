@@ -326,7 +326,7 @@ pub struct PromptInjectionCircuit {
     pub owner_kind: String,
     /// Owner generation fence.
     pub owner_generation: u64,
-    /// Canonical capability identity, e.g. `mcp:search:query`.
+    /// Canonical capability identity, e.g. `mcp:6:search:5:query`.
     pub capability: String,
     /// Tool call that produced the triggering assessment.
     pub tool_call_uid: String,

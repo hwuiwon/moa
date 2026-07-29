@@ -101,7 +101,7 @@ impl ContradictionDetector for ScriptedConflictDetector {
     async fn check_one_fast(
         &self,
         _fact_text: &str,
-        _embedding: &[f32],
+        _query_embedding: Option<moa_memory_vector::QueryEmbedding>,
         _label: NodeLabel,
         _pii_class: SensitivityClass,
         _ctx: &ContradictionContext,
@@ -613,8 +613,7 @@ async fn seed_tenant_embedder_state(pool: &PgPool, tenant_id: Uuid) {
         ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
-                embedding_dimension = EXCLUDED.embedding_dimension,
-                reembed_state = 'steady'
+                embedding_dimension = EXCLUDED.embedding_dimension
         "#,
     )
     .bind(tenant_id.to_string())
@@ -1500,7 +1499,10 @@ async fn fast_remember_real_detector_flags_restated_fact_as_duplicate_db_memory(
     let verdict = detector
         .check_one_fast(
             fact,
-            &deterministic_vector(fact),
+            Some(
+                moa_memory_vector::QueryEmbedding::new(deterministic_vector(fact), "test-embed")
+                    .expect("valid query embedding"),
+            ),
             NodeLabel::Fact,
             SensitivityClass::None,
             &contradiction_ctx,

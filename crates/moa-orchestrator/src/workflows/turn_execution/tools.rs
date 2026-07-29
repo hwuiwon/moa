@@ -793,6 +793,7 @@ async fn apply_coordinator_security_assessment(
             .apply_security_assessment(Json::from(
                 moa_wire::turn::ApplySecurityAssessmentRequest {
                     owner,
+                    allow_superseded_owner_noop: false,
                     capability: result.output.capability.clone(),
                     tool_call_id: result.tool_id,
                     assessment: result.output.assessment.clone(),

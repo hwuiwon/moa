@@ -337,7 +337,11 @@ impl EntityResolver {
         let mut matches = blocker
             .vector
             .knn(&VectorQuery {
-                embedding,
+                embedding: moa_memory_vector::QueryEmbedding::new(
+                    embedding,
+                    blocker.embedder.model_id().to_string(),
+                )
+                .expect("valid query embedding"),
                 k: EMBEDDING_BLOCK_K,
                 label_filter: Some(vec![NodeLabel::Entity.as_str().to_string()]),
                 max_pii_class: pii_class,

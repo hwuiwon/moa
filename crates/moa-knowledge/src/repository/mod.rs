@@ -23,15 +23,14 @@ use row_mapping::*;
 
 use crate::{
     domain::{
-        ConnectionAclMode, ConnectionStatus, ContactGroup, ContactGroupMembership,
-        ContactGroupTarget, ContactGroupTargetMember, DocumentVersion, IngestionStepStatus,
-        KnowledgeBlock, KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionProjection,
-        KnowledgeIngestionStep, KnowledgeObject, KnowledgeObjectInspection,
-        KnowledgeObjectProjection, KnowledgeProviderEventRecord, KnowledgeSyncCounters,
-        KnowledgeSyncRun, LinkClaim, LinkClaimReservation, LinkClaimState, LinkClaimTransition,
-        NewLinkClaim, ObjectAcl, ObjectStatus, ProviderAclEntry, ProviderAclSnapshot,
-        SourceAclEntryKind, SourceAclState, SourcePrincipalBinding, SourcePrincipalGroupBinding,
-        SourcePrincipalKind, SyncRunStatus,
+        ConnectionStatus, ContactGroup, ContactGroupMembership, ContactGroupTarget,
+        ContactGroupTargetMember, DocumentVersion, IngestionStepStatus, KnowledgeBlock,
+        KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionProjection, KnowledgeIngestionStep,
+        KnowledgeObject, KnowledgeObjectInspection, KnowledgeObjectProjection,
+        KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, LinkClaim,
+        LinkClaimReservation, LinkClaimState, LinkClaimTransition, NewLinkClaim, ObjectAcl,
+        ObjectStatus, ProviderAclEntry, ProviderAclSnapshot, SourceAclEntryKind, SourceAclState,
+        SourcePrincipalBinding, SourcePrincipalGroupBinding, SourcePrincipalKind, SyncRunStatus,
     },
     error::{Error, Result},
     normalize::{normalize_source_selection, redact_provider_metadata},

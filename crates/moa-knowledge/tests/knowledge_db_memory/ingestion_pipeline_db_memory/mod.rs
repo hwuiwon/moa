@@ -25,7 +25,7 @@ use moa_knowledge::{
         ConnectionStatus, DocumentElement, DocumentElementKind, DocumentVersion,
         FetchedRecordContent, IngestionStepStatus, KnowledgeChunk, KnowledgeConnection,
         KnowledgeIngestionStep, KnowledgeObject, KnowledgeSyncCounters, KnowledgeSyncRun,
-        ObjectStatus, ParsedDocument, ProviderRecord, RecordPage, SyncRunStatus,
+        ObjectStatus, ParsedDocument, ProviderRecord, ProviderRecordAcl, RecordPage, SyncRunStatus,
     },
     graph_delta::KnowledgeGraphDelta,
     ingestion::{
@@ -41,6 +41,14 @@ use moa_test_support::postgres;
 use serde_json::{Value, json};
 use tokio::sync::Barrier;
 use uuid::Uuid;
+
+fn provider_record_acl() -> ProviderRecordAcl {
+    ProviderRecordAcl {
+        provider_revision: "fixture-acl-rev".to_string(),
+        complete: true,
+        entries: Vec::new(),
+    }
+}
 
 #[derive(Debug, Default)]
 struct ParagraphParser;
@@ -428,7 +436,6 @@ impl KnowledgeGraphWriter for FakeGraphWriter {
 
 fn drive_connection(connection_uid: Uuid, tenant_id: TenantId) -> KnowledgeConnection {
     KnowledgeConnection {
-        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid,
         tenant_id,
         provider: "test_provider".to_string(),
@@ -447,7 +454,7 @@ fn drive_connection(connection_uid: Uuid, tenant_id: TenantId) -> KnowledgeConne
 
 fn metadata_only_record(source_id: &str, change_token: &str, title: &str) -> ProviderRecord {
     ProviderRecord {
-        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
+        acl: provider_record_acl(),
         source_id: source_id.to_string(),
         object_type: "drive_file".to_string(),
         title: Some(title.to_string()),
@@ -506,7 +513,7 @@ fn record_with_source(
     text: &str,
 ) -> ProviderRecord {
     ProviderRecord {
-        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
+        acl: provider_record_acl(),
         source_id: source_id.to_string(),
         object_type: "page".to_string(),
         title: Some(if source_id == "doc-1" {

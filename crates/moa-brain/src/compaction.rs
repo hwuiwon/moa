@@ -402,10 +402,17 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
             "#{} action_review_decided: {decision:?}",
             record.sequence_num
         )),
+        Event::ActionReviewTimedOut {
+            review_id,
+            timed_out_at,
+        } => Some(format!(
+            "#{} action_review_timed_out review={review_id} at={timed_out_at}",
+            record.sequence_num
+        )),
         // A compaction summary keeps only the bounded outcome class. The receipt's
-        // own summary can quote tool output, and by the time a continuation fact is
-        // being compacted its answer already lives in the assistant response the
-        // continuation produced.
+        // terminal fact contains only closed-vocabulary metadata, and by the time
+        // a continuation is compacted its answer already lives in the assistant
+        // response the continuation produced.
         Event::ActionReviewContinuationRequested { receipt, .. } => Some(format!(
             "#{} action_review_continuation {}: {}",
             record.sequence_num,
@@ -589,14 +596,11 @@ mod tests {
     use super::{compaction_request, event_summary_line, should_compact, watermark_may_compact};
 
     #[test]
-    fn action_review_continuation_compacts_to_a_bounded_outcome_class_only() {
-        // Pins: compaction of a continuation fact keeps only the bounded outcome class.
-        // The receipt's summary can quote reviewed tool output, and by the time the fact
-        // is being compacted the continuation's own assistant answer already carries
-        // whatever the user needed, so re-emitting the output here would leak it into a
-        // long-lived checkpoint for no benefit.
+    fn action_review_continuation_compacts_to_a_closed_outcome_class_only() {
+        // Pins: compaction of a continuation fact keeps only its closed-vocabulary
+        // outcome class; reviewed tool output remains in canonical tool history.
         use moa_core::types::action_policy::{
-            ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt, ActionReviewTerminalEvent,
+            ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt,
         };
         use moa_core::types::identifiers::ToolCallId;
 
@@ -614,17 +618,18 @@ mod tests {
                         generation: 1,
                     },
                     tool_name: "bash".to_string(),
-                    requested_tool_call_id: ToolCallId::new(),
                     executed_tool_call_id: Some(ToolCallId::new()),
-                    outcome: ActionReviewOutcome::ClearedSuccess {
-                        summary: "SECRET-TOOL-OUTPUT-b7f3".to_string(),
-                        assessment: moa_core::types::security::ToolOutputAssessment::safe(),
-                        capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
-                    },
-                    terminal_events: vec![
-                        ActionReviewTerminalEvent::Decided,
-                        ActionReviewTerminalEvent::ToolResult,
-                    ],
+                    outcome: ActionReviewOutcome::Cleared(
+                        moa_core::types::action_policy::ToolTerminalFact::Result(
+                            moa_core::types::action_policy::ToolResultSecurityMetadata {
+                                success: true,
+                                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                                capability: moa_core::types::security::ToolCapabilityId::builtin(
+                                    "bash",
+                                ),
+                            },
+                        ),
+                    ),
                 },
             },
         );
@@ -633,10 +638,6 @@ mod tests {
         assert!(summary.contains("action_review_continuation"), "{summary}");
         assert!(summary.contains("bash"), "{summary}");
         assert!(summary.contains("cleared_success"), "{summary}");
-        assert!(
-            !summary.contains("SECRET-TOOL-OUTPUT-b7f3"),
-            "the reviewed output must not survive into a compaction summary: {summary}"
-        );
     }
 
     #[test]

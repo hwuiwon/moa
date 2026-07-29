@@ -216,7 +216,10 @@ fn request_for_policy(query_text: &str) -> RetrievalRequest {
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: query_text.to_string(),
-        query_embedding: vec![0.0; VECTOR_DIMENSION],
+        query_embedding: Some(
+            moa_memory_vector::QueryEmbedding::new(vec![0.0; VECTOR_DIMENSION], "test-model")
+                .expect("valid query embedding"),
+        ),
         scope: MemoryScope::Tenant {
             tenant_id: TenantId::new(),
         },

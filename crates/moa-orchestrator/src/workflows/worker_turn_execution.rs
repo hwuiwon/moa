@@ -5,7 +5,7 @@
 //! can return quickly and child execution has a durable progress/cancellation
 //! surface like top-level session turns.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -91,6 +91,7 @@ struct WorkerIterationInput<'a> {
     parent_session: SessionId,
     turn_evidence: &'a mut TurnEvidence,
     tool_budget: &'a mut ToolBudgetState,
+    disabled_capabilities: &'a mut BTreeMap<String, moa_core::types::security::ToolCapabilityId>,
 }
 
 /// Restate workflow surface for durable worker turn execution.
@@ -280,6 +281,8 @@ async fn run_worker_inside_workflow(
     );
     let max_turns = loop_plan.max_turns;
     let mut tool_budget = loop_plan.tool_budget();
+    let mut disabled_capabilities =
+        BTreeMap::<String, moa_core::types::security::ToolCapabilityId>::new();
     driver_progress::initialize_loop_progress(
         ctx,
         loop_plan.route,
@@ -364,6 +367,7 @@ async fn run_worker_inside_workflow(
                     parent_session,
                     turn_evidence: &mut turn_evidence,
                     tool_budget: &mut tool_budget,
+                    disabled_capabilities: &mut disabled_capabilities,
                 },
             )
             .instrument(turn_span.clone()),
@@ -558,6 +562,7 @@ async fn run_worker_iteration(
             active_canary: input.active_canary.as_deref(),
             trusted_sandbox_manifest: input.request.trusted_sandbox_manifest.as_ref(),
             selected_skills: &selected_skills,
+            disabled_capabilities: &mut *input.disabled_capabilities,
         };
         if handle_tool_call(
             workflow,
@@ -649,12 +654,13 @@ struct WorkerToolContext<'a> {
     /// Skills the root turn activated on the active segment, used to detect which a worker
     /// tool call engaged so worker skill use is credited to the root segment.
     selected_skills: &'a [String],
+    disabled_capabilities: &'a mut BTreeMap<String, moa_core::types::security::ToolCapabilityId>,
 }
 
 async fn handle_tool_call(
     workflow: &WorkerTurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
-    tool_context: WorkerToolContext<'_>,
+    mut tool_context: WorkerToolContext<'_>,
     allowed_tools: &BTreeSet<String>,
     index: usize,
     tool_call: &ToolCallContent,
@@ -686,6 +692,25 @@ async fn handle_tool_call(
                 tool_call,
                 report_tool,
             },
+            turn_evidence,
+        )
+        .await?;
+        return Ok(WorkerToolCallDisposition::Continue);
+    }
+
+    if let Some(disabled_capability) = disabled_capability_for_tool(
+        tool_context.disabled_capabilities,
+        &tool_call.invocation.name,
+    )
+    .cloned()
+    {
+        refuse_disabled_worker_capability(
+            workflow,
+            ctx,
+            &tool_context,
+            &disabled_capability,
+            tool_id,
+            tool_call,
             turn_evidence,
         )
         .await?;
@@ -740,17 +765,8 @@ async fn handle_tool_call(
                 )
                 .await?;
             }
-            disposition = apply_worker_security_assessment(
-                workflow,
-                ctx,
-                tool_context.meta.tenant_id,
-                session_id,
-                worker_id,
-                tool_context.turn_id,
-                tool_context.generation,
-                &result,
-            )
-            .await?;
+            disposition =
+                apply_worker_security_assessment(workflow, ctx, &mut tool_context, &result).await?;
             turn_evidence.record_tool_result(&result.invocation, &result.output.safe_output);
             if result.should_record_segment_tool_use() {
                 record_governed_segment_tool_use(ctx, session_id, &result.invocation.name).await?;
@@ -807,6 +823,64 @@ async fn handle_tool_call(
     }
     Ok(disposition)
 }
+
+/// Resolves a disabled registered tool name back to its typed capability identity.
+fn disabled_capability_for_tool<'a>(
+    disabled_capabilities: &'a BTreeMap<String, moa_core::types::security::ToolCapabilityId>,
+    tool_name: &str,
+) -> Option<&'a moa_core::types::security::ToolCapabilityId> {
+    disabled_capabilities.get(tool_name)
+}
+
+/// Records a fixed refusal without dispatching a worker capability disabled by its circuit.
+async fn refuse_disabled_worker_capability(
+    workflow: &WorkerTurnExecutionImpl,
+    ctx: &WorkflowContext<'_>,
+    tool_context: &WorkerToolContext<'_>,
+    capability: &moa_core::types::security::ToolCapabilityId,
+    tool_id: ToolCallId,
+    tool_call: &ToolCallContent,
+    turn_evidence: &mut TurnEvidence,
+) -> Result<(), HandlerError> {
+    append_tool_call_event(
+        workflow.event_appender(),
+        ctx,
+        tool_context.session_id,
+        tool_id,
+        tool_call,
+    )
+    .await?;
+    let secured = moa_security::classify_tool_output(
+        &ToolOutput::error(WORKER_DISABLED_CAPABILITY_MESSAGE, Duration::ZERO),
+        moa_security::OutputClassification {
+            capability,
+            active_canary: None,
+        },
+    );
+    append_tool_result_event(
+        workflow.event_appender(),
+        ctx,
+        tool_context.session_id,
+        tool_id,
+        &tool_call.invocation,
+        &secured,
+    )
+    .await?;
+    record_denied_tool(
+        ctx,
+        tool_context.turn_id,
+        tool_context.worker_id,
+        tool_id,
+        &tool_call.invocation,
+        &secured,
+    )
+    .await?;
+    turn_evidence.record_tool_result(&tool_call.invocation, &secured.safe_output);
+    Ok(())
+}
+
+/// Fixed model-facing refusal for a capability disabled by the worker circuit.
+const WORKER_DISABLED_CAPABILITY_MESSAGE: &str = "This tool capability is disabled for the current worker turn because its prior output triggered the security circuit.";
 
 /// Fixed question asked when the circuit suspends a worker turn.
 ///
@@ -1319,24 +1393,19 @@ async fn record_worker_turn_cap_stop(
 /// are deliberately neutral in the shared Session history: the worker's own
 /// signals and turn outcome are what suspend or terminate it, so a child's
 /// transition must not look like pending root work to the session scheduler.
-#[allow(clippy::too_many_arguments)]
 async fn apply_worker_security_assessment(
     workflow: &WorkerTurnExecutionImpl,
     ctx: &WorkflowContext<'_>,
-    tenant_id: moa_core::types::identifiers::TenantId,
-    session_id: SessionId,
-    worker_id: &str,
-    turn_id: &str,
-    generation: u64,
+    tool_context: &mut WorkerToolContext<'_>,
     result: &crate::tool_invocation::governed::GovernedInvocationResult,
 ) -> Result<WorkerToolCallDisposition, HandlerError> {
     if result.output.assessment.is_safe() {
         return Ok(WorkerToolCallDisposition::Continue);
     }
     let owner = moa_core::types::security::SecurityCircuitOwner::Worker {
-        worker_id: worker_id.to_string(),
-        turn_id: turn_id.to_string(),
-        generation,
+        worker_id: tool_context.worker_id.to_string(),
+        turn_id: tool_context.turn_id.to_string(),
+        generation: tool_context.generation,
     };
     // Journaled BEFORE the circuit moves; see the coordinator path for why the
     // ordering matters on a crash between apply and journal.
@@ -1347,10 +1416,11 @@ async fn apply_worker_security_assessment(
         .into_inner();
     moa_core::coordination_counters::record_worker_vo_call();
     let applied = crate::restate_identity::replay_safe_request(
-        ctx.object_client::<WorkerClient>(worker_id.to_string())
+        ctx.object_client::<WorkerClient>(tool_context.worker_id.to_string())
             .apply_security_assessment(Json::from(
                 moa_wire::turn::ApplySecurityAssessmentRequest {
                     owner,
+                    allow_superseded_owner_noop: false,
                     capability: result.output.capability.clone(),
                     tool_call_id: result.tool_id,
                     assessment: result.output.assessment.clone(),
@@ -1361,6 +1431,12 @@ async fn apply_worker_security_assessment(
     .await?
     .into_inner();
 
+    if !applied.stage.permits_dispatch() {
+        tool_context.disabled_capabilities.insert(
+            result.invocation.name.clone(),
+            result.output.capability.clone(),
+        );
+    }
     let disposition = match applied.stage {
         moa_core::types::security::SecurityCircuitStage::Halted => {
             WorkerToolCallDisposition::SecurityHalt
@@ -1377,7 +1453,7 @@ async fn apply_worker_security_assessment(
     append_session_event_with_dedupe_key(
         workflow.event_appender(),
         ctx,
-        session_id,
+        tool_context.session_id,
         moa_core::events::Event::PromptInjectionCircuitTransition {
             transition: transition.clone(),
             signals: result.output.assessment.signals.clone(),
@@ -1392,8 +1468,8 @@ async fn apply_worker_security_assessment(
         ctx.service_client::<crate::services::security_events::SecurityEventsClient>()
             .record_circuit_transition(Json::from(
                 crate::services::security_events::RecordCircuitTransitionRequest {
-                    tenant_id,
-                    session_id,
+                    tenant_id: tool_context.meta.tenant_id,
+                    session_id: tool_context.session_id,
                     transition,
                     signals: result.output.assessment.signals.clone(),
                     occurred_at,
@@ -1625,20 +1701,39 @@ fn workflow_outcome_from_core(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use chrono::Utc;
     use moa_core::{
         types::identifiers::AgentSignalId, types::identifiers::SessionId,
-        types::worker::commands::ChildReportKind, types::worker::commands::ReportToParentInput,
-        types::worker::state::ChildSignalKind, types::worker::state::InputAudience,
-        types::worker::state::ParentResumePolicy, types::worker::state::SignalSeverity,
-        types::worker::state::WorkerInputRequest, types::worker::state::WorkerInputTarget,
+        types::security::ToolCapabilityId, types::worker::commands::ChildReportKind,
+        types::worker::commands::ReportToParentInput, types::worker::state::ChildSignalKind,
+        types::worker::state::InputAudience, types::worker::state::ParentResumePolicy,
+        types::worker::state::SignalSeverity, types::worker::state::WorkerInputRequest,
+        types::worker::state::WorkerInputTarget,
     };
     use moa_wire::turn::{TurnOutcome, TurnOutcomeKind};
 
     use super::{
         build_child_report_signal, build_failed_child_signal, build_needs_input_signal,
-        enforce_worker_user_message_origin, short_failure_summary,
+        disabled_capability_for_tool, enforce_worker_user_message_origin, short_failure_summary,
     };
+
+    #[test]
+    fn disabled_mcp_capability_matches_its_registered_tool_name() {
+        // Pins: MCP circuit identity uses server plus remote tool, while the model
+        // emits the server-qualified registered name. The typed disabled map must
+        // retain both without flattening either into a collision-prone string key.
+        let capability = ToolCapabilityId::mcp("search", "query");
+        let mut disabled = BTreeMap::new();
+        disabled.insert("mcp__6_search__query".to_string(), capability.clone());
+
+        assert_eq!(
+            disabled_capability_for_tool(&disabled, "mcp__6_search__query"),
+            Some(&capability)
+        );
+        assert_eq!(disabled_capability_for_tool(&disabled, "query"), None);
+    }
 
     #[test]
     fn worker_accepted_run_outcome_fails_user_message_origin_invariant() {

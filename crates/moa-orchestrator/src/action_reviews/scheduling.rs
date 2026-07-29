@@ -131,11 +131,9 @@ impl ActionReviewSchedule {
 
     /// Queues one resolved continuation, at most once per review.
     pub(crate) fn enqueue(&mut self, entry: QueuedActionReviewContinuation) -> bool {
-        if self
-            .queued
-            .iter()
-            .any(|queued| queued.continuation.review_id == entry.continuation.review_id)
-        {
+        if self.queued.iter().any(|queued| {
+            queued.continuation.receipt.review_id == entry.continuation.receipt.review_id
+        }) {
             return false;
         }
         self.queued.push(entry);
@@ -146,10 +144,11 @@ impl ActionReviewSchedule {
     ///
     /// Ordering is durable registration sequence first, then review id, so multiple
     /// reviews resolved out of order still continue in the order they were raised.
+    /// An earlier unresolved registration fences every later resolved continuation.
     /// A continuation from an older generation is never returned: a newer user or
     /// follow-up admission superseded it.
     pub(crate) fn take_next(&mut self, generation: u64) -> Option<QueuedActionReviewContinuation> {
-        let index = self
+        let (index, queued_ordinal) = self
             .queued
             .iter()
             .enumerate()
@@ -157,11 +156,19 @@ impl ActionReviewSchedule {
             .min_by(|(_, left), (_, right)| {
                 left.ordinal.cmp(&right.ordinal).then_with(|| {
                     left.continuation
+                        .receipt
                         .review_id
-                        .cmp(&right.continuation.review_id)
+                        .cmp(&right.continuation.receipt.review_id)
                 })
             })
-            .map(|(index, _)| index)?;
+            .map(|(index, entry)| (index, entry.ordinal))?;
+        if self
+            .registered
+            .iter()
+            .any(|entry| entry.generation == generation && entry.ordinal < queued_ordinal)
+        {
+            return None;
+        }
         Some(self.queued.remove(index))
     }
 
@@ -178,7 +185,7 @@ impl ActionReviewSchedule {
 mod tests {
     use super::*;
     use moa_core::types::action_policy::{
-        ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt, ActionReviewTerminalEvent,
+        ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt,
     };
     use moa_core::types::identifiers::{SessionId, ToolCallId};
 
@@ -193,7 +200,6 @@ mod tests {
 
     fn continuation(review_id: Uuid) -> ActionReviewContinuation {
         ActionReviewContinuation {
-            review_id,
             receipt: ActionReviewReceipt {
                 review_id,
                 owner: ActionReviewOwner::Coordinator {
@@ -202,17 +208,18 @@ mod tests {
                     generation: 4,
                 },
                 tool_name: "bash".to_string(),
-                requested_tool_call_id: ToolCallId::new(),
                 executed_tool_call_id: Some(ToolCallId::new()),
-                outcome: ActionReviewOutcome::ClearedSuccess {
-                    summary: "ok".to_string(),
-                    assessment: moa_core::types::security::ToolOutputAssessment::safe(),
-                    capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
-                },
-                terminal_events: vec![
-                    ActionReviewTerminalEvent::Decided,
-                    ActionReviewTerminalEvent::ToolResult,
-                ],
+                outcome: ActionReviewOutcome::Cleared(
+                    moa_core::types::action_policy::ToolTerminalFact::Result(
+                        moa_core::types::action_policy::ToolResultSecurityMetadata {
+                            success: true,
+                            assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                            capability: moa_core::types::security::ToolCapabilityId::builtin(
+                                "bash",
+                            ),
+                        },
+                    ),
+                ),
             },
         }
     }
@@ -258,16 +265,50 @@ mod tests {
         assert_eq!(
             schedule
                 .take_next(7)
-                .map(|entry| entry.continuation.review_id),
+                .map(|entry| entry.continuation.receipt.review_id),
             Some(first)
         );
         assert_eq!(
             schedule
                 .take_next(7)
-                .map(|entry| entry.continuation.review_id),
+                .map(|entry| entry.continuation.receipt.review_id),
             Some(second)
         );
         assert!(schedule.take_next(7).is_none());
+    }
+
+    #[test]
+    fn later_resolution_waits_for_earlier_unresolved_review_offline() {
+        // Pins: resolving review two first must not let it continue past review one,
+        // whose admin decision has not arrived yet.
+        let first = Uuid::from_u128(0x5010);
+        let second = Uuid::from_u128(0x5011);
+        let mut schedule = ActionReviewSchedule::default();
+        schedule.register(first, "turn-order".to_string(), 8);
+        schedule.register(second, "turn-order".to_string(), 8);
+
+        let second_entry = schedule.resolve(second).expect("second review resolves");
+        schedule.enqueue(queued(
+            second,
+            second_entry.generation,
+            second_entry.ordinal,
+        ));
+        assert!(schedule.take_next(8).is_none());
+
+        let first_entry = schedule.resolve(first).expect("first review resolves");
+        schedule.enqueue(queued(first, first_entry.generation, first_entry.ordinal));
+        assert_eq!(
+            schedule
+                .take_next(8)
+                .map(|entry| entry.continuation.receipt.review_id),
+            Some(first)
+        );
+        assert_eq!(
+            schedule
+                .take_next(8)
+                .map(|entry| entry.continuation.receipt.review_id),
+            Some(second)
+        );
     }
 
     #[test]

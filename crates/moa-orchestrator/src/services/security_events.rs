@@ -8,8 +8,12 @@
 //! transition stays a fast in-memory step, and the caller still awaits the
 //! finding's durability before acting on it.
 
-use moa_core::types::identifiers::{SessionId, TenantId};
-use moa_core::types::security::{InjectionSignal, SecurityCircuitTransition};
+use moa_core::types::action_policy::ActionReviewOwner;
+use moa_core::types::identifiers::{SessionId, TenantId, ToolCallId};
+use moa_core::types::security::{
+    InjectionSignal, SecurityCircuitOwner, SecurityCircuitStage, SecurityCircuitTransition,
+    ToolCapabilityId, ToolOutputAssessment,
+};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -111,6 +115,111 @@ impl SecurityEvents for SecurityEventsImpl {
     }
 }
 
+/// Applies durable reviewed output metadata to its conversational owner's circuit.
+///
+/// Action-review recovery may have only the persisted capability and assessment,
+/// not the original secured output envelope. Keeping this boundary on those exact
+/// durable facts makes replay and crash recovery use the same circuit input.
+pub(crate) async fn apply_reviewed_conversational_assessment(
+    ctx: &Context<'_>,
+    tenant_id: TenantId,
+    owner: &ActionReviewOwner,
+    tool_call_id: ToolCallId,
+    capability: &ToolCapabilityId,
+    assessment: &ToolOutputAssessment,
+) -> Result<SecurityCircuitStage, HandlerError> {
+    let session_id = owner.session_id();
+    let circuit_owner = match owner {
+        ActionReviewOwner::Coordinator {
+            turn_id,
+            generation,
+            ..
+        } => SecurityCircuitOwner::Coordinator {
+            turn_id: turn_id.clone(),
+            generation: *generation,
+        },
+        ActionReviewOwner::Worker {
+            worker_id,
+            turn_id,
+            generation,
+            ..
+        } => SecurityCircuitOwner::Worker {
+            worker_id: worker_id.to_string(),
+            turn_id: turn_id.clone(),
+            generation: *generation,
+        },
+        ActionReviewOwner::ExecutionTask { .. } => {
+            return Err(TerminalError::new(
+                "execution-task reviews do not have a conversational security-circuit owner",
+            )
+            .into());
+        }
+    };
+    let occurred_at = ctx
+        .run(|| async move { Ok(Json::from(chrono::Utc::now())) })
+        .name("reviewed_prompt_injection_transition_timestamp")
+        .await?
+        .into_inner();
+    let request = moa_wire::turn::ApplySecurityAssessmentRequest {
+        owner: circuit_owner,
+        allow_superseded_owner_noop: true,
+        capability: capability.clone(),
+        tool_call_id,
+        assessment: assessment.clone(),
+    };
+    let applied = match owner {
+        ActionReviewOwner::Coordinator { .. } => crate::restate_identity::replay_safe_request(
+            ctx.object_client::<crate::objects::session::SessionClient>(session_id.to_string())
+                .apply_security_assessment(Json::from(request)),
+        )
+        .call()
+        .await?
+        .into_inner(),
+        ActionReviewOwner::Worker { worker_id, .. } => {
+            crate::restate_identity::replay_safe_request(
+                ctx.object_client::<crate::objects::worker::WorkerClient>(worker_id.clone())
+                    .apply_security_assessment(Json::from(request)),
+            )
+            .call()
+            .await?
+            .into_inner()
+        }
+        ActionReviewOwner::ExecutionTask { .. } => unreachable!("handled above"),
+    };
+
+    let Some(transition) = applied.transition else {
+        return Ok(applied.stage);
+    };
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<crate::services::session_store::RestateSessionStoreClient>()
+            .append_event(Json::from(moa_wire::session_store::AppendEventRequest {
+                session_id,
+                event: moa_core::events::Event::PromptInjectionCircuitTransition {
+                    transition: transition.clone(),
+                    signals: assessment.signals.clone(),
+                    redacted_spans: assessment.redacted_spans,
+                    deduplicated_carriers: assessment.deduplicated_carriers,
+                },
+                dedupe_key: Some(transition.key.clone()),
+            })),
+    )
+    .call()
+    .await?;
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<SecurityEventsClient>()
+            .record_circuit_transition(Json::from(RecordCircuitTransitionRequest {
+                tenant_id,
+                session_id,
+                transition,
+                signals: assessment.signals.clone(),
+                occurred_at,
+            })),
+    )
+    .call()
+    .await?;
+    Ok(applied.stage)
+}
+
 /// Maps a finding-emission failure onto the right Restate error kind.
 ///
 /// A replay conflict means two genuinely different transitions collided on one
@@ -125,6 +234,55 @@ fn finding_error_to_handler_error(error: moa_ocsf::EmitError) -> HandlerError {
         moa_ocsf::EmitError::InvalidInput(message) => {
             TerminalError::new(format!("invalid security finding: {message}")).into()
         }
-        other => HandlerError::from(anyhow::anyhow!("security finding write failed: {other}")),
+        internal @ (moa_ocsf::EmitError::Signing(_)
+        | moa_ocsf::EmitError::Serialize(_)
+        | moa_ocsf::EmitError::Database(_)) => {
+            tracing::error!(
+                error = ?internal,
+                "security finding write failed"
+            );
+            HandlerError::from(anyhow::anyhow!("security finding write failed"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_finding_errors_do_not_cross_the_service_boundary() {
+        // Pins: signing material, serializer inputs, and database diagnostics
+        // remain server-side even though these failures stay retryable.
+        let serialize =
+            serde_json::from_str::<serde_json::Value>("{").expect_err("invalid JSON fixture");
+        let serialize_detail = serialize.to_string();
+        let cases = [
+            (
+                moa_ocsf::EmitError::Signing(moa_ocsf::signing::SigningError::InvalidKey(
+                    "raw-signing-detail".to_string(),
+                )),
+                "raw-signing-detail".to_string(),
+            ),
+            (moa_ocsf::EmitError::Serialize(serialize), serialize_detail),
+            (
+                moa_ocsf::EmitError::Database(sqlx::Error::Protocol(
+                    "raw-database-detail".to_string(),
+                )),
+                "raw-database-detail".to_string(),
+            ),
+        ];
+
+        for (error, raw_detail) in cases {
+            let rendered = format!("{:?}", finding_error_to_handler_error(error));
+            assert!(
+                rendered.contains("security finding write failed"),
+                "unexpected client-facing error: {rendered}"
+            );
+            assert!(
+                !rendered.contains(&raw_detail),
+                "internal detail crossed the service boundary: {rendered}"
+            );
+        }
     }
 }

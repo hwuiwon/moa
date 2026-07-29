@@ -946,7 +946,7 @@ mod tests {
         // the stream waiting on a turn whose completion is not the user's answer, and
         // would report an internal turn as the reply.
         use moa_core::types::action_policy::{
-            ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt, ActionReviewTerminalEvent,
+            ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt,
         };
         use moa_core::types::identifiers::{SessionId, ToolCallId};
 
@@ -956,17 +956,16 @@ mod tests {
             review_id,
             owner,
             tool_name: "bash".to_string(),
-            requested_tool_call_id: ToolCallId::new(),
             executed_tool_call_id: Some(ToolCallId::new()),
-            outcome: ActionReviewOutcome::ClearedSuccess {
-                summary: "ok".to_string(),
-                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
-                capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
-            },
-            terminal_events: vec![
-                ActionReviewTerminalEvent::Decided,
-                ActionReviewTerminalEvent::ToolResult,
-            ],
+            outcome: ActionReviewOutcome::Cleared(
+                moa_core::types::action_policy::ToolTerminalFact::Result(
+                    moa_core::types::action_policy::ToolResultSecurityMetadata {
+                        success: true,
+                        assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                        capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
+                    },
+                ),
+            ),
         };
 
         let coordinator = Event::ActionReviewContinuationRequested {

@@ -30,7 +30,6 @@ fn tenant_id() -> TenantId {
 fn connection() -> KnowledgeConnection {
     let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
-        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid: Uuid::from_u128(201),
         tenant_id: tenant_id(),
         provider: "merge".to_string(),
@@ -308,7 +307,6 @@ async fn initial_link_sync_fails_closed_on_paused_and_unknown_provider_states() 
 /// Builds a linked Merge connection bound to one product category.
 fn merge_connection(category: &str) -> KnowledgeConnection {
     KnowledgeConnection {
-        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid: Uuid::from_u128(0x2358_0001),
         tenant_id: tenant_id(),
         provider: "merge".to_string(),

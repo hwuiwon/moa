@@ -63,6 +63,123 @@ async fn expired_pending_review_is_failed_closed_db() {
 }
 
 #[tokio::test]
+async fn timeout_release_survives_crash_between_terminalization_and_delivery_db() {
+    // Pins: once timeout is durable, losing the reaper before its Session callback
+    // cannot strand the owner's lifecycle hold. A later sweep records the typed
+    // timeout event before delivering the release, without creating a continuation.
+    let test_db = test_pool().await;
+    let pool = test_db.store().pool().clone();
+    let review_id = insert_review(&pool, "command_execution", "high", ReviewClock::Expired).await;
+
+    assert_eq!(
+        ActionReviewReaper::new(pool.clone())
+            .sweep()
+            .await
+            .expect("timeout should commit without ingress"),
+        1
+    );
+    let delivered_before: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT owner_release_delivered_at FROM tenant_action_reviews WHERE id = $1",
+    )
+    .bind(review_id)
+    .fetch_one(&pool)
+    .await
+    .expect("release state should load");
+    assert!(delivered_before.is_none());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock Restate listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener address should resolve");
+    type DeliveryOrder = Arc<Mutex<Vec<&'static str>>>;
+    let delivery_order = DeliveryOrder::default();
+    let server_state = delivery_order.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/restate/call/SessionStore/append_event",
+                    post(
+                        |State(order): State<DeliveryOrder>,
+                         Json(payload): Json<serde_json::Value>| async move {
+                            assert_eq!(
+                                payload["event"]["type"],
+                                serde_json::Value::String("ActionReviewTimedOut".to_string())
+                            );
+                            order.lock().await.push("timeout_event");
+                            StatusCode::OK
+                        },
+                    ),
+                )
+                .route(
+                    "/restate/call/Session/{session_id}/release_action_review",
+                    post(|State(order): State<DeliveryOrder>| async move {
+                        order.lock().await.push("owner_release");
+                        StatusCode::OK
+                    }),
+                )
+                .with_state(server_state),
+        )
+        .await
+    });
+
+    assert_eq!(
+        ActionReviewReaper::with_restate_ingress(pool.clone(), format!("http://{address}"))
+            .sweep()
+            .await
+            .expect("later sweep should deliver durable release"),
+        0,
+        "the second sweep delivers an existing timeout rather than timing it out again"
+    );
+    let delivered_after: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT owner_release_delivered_at FROM tenant_action_reviews WHERE id = $1",
+    )
+    .bind(review_id)
+    .fetch_one(&pool)
+    .await
+    .expect("release delivery state should load");
+    assert!(delivered_after.is_some());
+    assert_eq!(
+        delivery_order.lock().await.as_slice(),
+        ["timeout_event", "owner_release"],
+        "the terminal event must be durable before lifecycle release"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn decision_and_timeout_wait_for_owner_registration_db() {
+    // Pins: the durable review row is not externally actionable until the Session
+    // or Worker registration acknowledgement is persisted.
+    let test_db = test_pool().await;
+    let pool = test_db.store().pool().clone();
+    let review_id = insert_review(&pool, "command_execution", "high", ReviewClock::Expired).await;
+    sqlx::query("UPDATE tenant_action_reviews SET owner_registered_at = NULL WHERE id = $1")
+        .bind(review_id)
+        .execute(&pool)
+        .await
+        .expect("fixture should model the pre-registration crash window");
+
+    assert_eq!(
+        ActionReviewReaper::new(pool.clone())
+            .sweep()
+            .await
+            .expect("sweep should skip an unregistered owner"),
+        0
+    );
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM tenant_action_reviews WHERE id = $1")
+            .bind(review_id)
+            .fetch_one(&pool)
+            .await
+            .expect("review should remain readable");
+    assert_eq!(status, "pending");
+}
+
+#[tokio::test]
 async fn unexpired_pending_review_survives_sweep_db() {
     // Pins: a pending review that has not reached its expiry is left pending and
     // still counts toward the pending-queue depth the reaper publishes.
@@ -609,11 +726,11 @@ async fn insert_review_with_envelope(
             (id, tenant_id, storage_partition_id, tool_call_id, tool_name,
              action_class, risk_level, input_summary, normalized_input, envelope,
              preview, tool_request, requested_by, status, created_at, expires_at,
-             execution_task_traceparent, execution_task_tracestate)
+             execution_task_traceparent, execution_task_tracestate, owner_registered_at)
         VALUES ($1, $2, $3, $4, 'bash', $5, $6, 'test action', 'printf ok', $7,
                 '{{"fields":[],"file_diffs":[]}}'::JSONB, '{{}}'::JSONB,
                 'anonymous', 'pending', NOW() - INTERVAL '2 minutes', {expires_at_sql},
-                $8, $9)
+                $8, $9, NOW())
         "#
     ))
     .bind(review_id)

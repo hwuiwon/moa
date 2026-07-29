@@ -51,7 +51,11 @@ async fn turbopuffer_live_round_trip() {
         .expect("upsert");
     let matches = store
         .knn(&VectorQuery {
-            embedding: item.embedding,
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                item.embedding,
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,

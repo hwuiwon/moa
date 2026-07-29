@@ -413,6 +413,9 @@ scheduling live in Restate VO state as a derived index; the authoritative facts
 remain the `tenant_action_reviews` row plus the durable `ActionReviewDecided` and
 terminal `ToolResult`/`ToolError` events. An `ExecutionTask` owner is excluded
 from this path and keeps its run/task/generation outbox and ack contract.
+Timed-out Session and Worker reviews use a separate durable release-only
+delivery on the review row; it removes the lifecycle hold but cannot schedule a
+continuation.
 
 Gateway processes never own pending review state. If a gateway restarts, it can
 reconstruct pending tenant action reviews from Postgres.

@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_config::CloudHandsConfig;
-use moa_config::McpServerCredentialScope;
 use moa_config::MoaConfig;
 use moa_config::SandboxProfileConfig;
 use moa_config::SecurityProfile;
@@ -282,7 +281,7 @@ async fn cloud_profile_rejects_the_local_hand_provider() {
     let dir = tempdir().expect("tempdir should be created");
     config.local.sandbox_dir = dir.path().display().to_string();
 
-    let error = match ToolRouter::from_config(&config, None, Some(cloud_rule_store()), None).await {
+    let error = match ToolRouter::from_config(&config, None, Some(cloud_rule_store())).await {
         Ok(_) => panic!("cloud profile must reject a local hand route"),
         Err(error) => error,
     };
@@ -306,7 +305,7 @@ async fn cloud_profile_rejects_an_allow_permission_default() {
     let mut config = cloud_config();
     config.permissions.default_effect = ActionPolicyEffect::Allow;
 
-    let error = match ToolRouter::from_config(&config, None, Some(cloud_rule_store()), None).await {
+    let error = match ToolRouter::from_config(&config, None, Some(cloud_rule_store())).await {
         Ok(_) => panic!("cloud profile must reject an allow permission default"),
         Err(error) => error,
     };
@@ -323,7 +322,7 @@ async fn cloud_profile_rejects_a_missing_rule_store_owner() {
     // Pins: a deny-by-default cloud deployment with no persisted-rule owner
     // could never authorize any action, so construction fails instead of
     // serving a router that denies everything.
-    let error = match ToolRouter::from_config(&cloud_config(), None, None, None).await {
+    let error = match ToolRouter::from_config(&cloud_config(), None, None).await {
         Ok(_) => panic!("cloud profile must reject a missing rule store owner"),
         Err(error) => error,
     };
@@ -346,7 +345,7 @@ async fn cloud_profile_rejects_a_selected_backend_without_credentials() {
         .get_or_insert_with(CloudHandsConfig::default)
         .e2b_api_key = None;
 
-    let error = match ToolRouter::from_config(&config, None, Some(cloud_rule_store()), None).await {
+    let error = match ToolRouter::from_config(&config, None, Some(cloud_rule_store())).await {
         Ok(_) => panic!("cloud profile must reject a backend without credentials"),
         Err(error) => error,
     };
@@ -363,7 +362,7 @@ async fn cloud_profile_constructs_with_deny_default_owner_and_credentialed_backe
     // Pins: the four cloud requirements together are sufficient — a valid cloud
     // deployment builds a router whose hand tools target the cloud backend and
     // never register the local host provider.
-    let router = ToolRouter::from_config(&cloud_config(), None, Some(cloud_rule_store()), None)
+    let router = ToolRouter::from_config(&cloud_config(), None, Some(cloud_rule_store()))
         .await
         .expect("a fully configured cloud profile should construct");
 
@@ -383,7 +382,7 @@ async fn local_route_with_opt_in_registers_local_hands() {
     let dir = tempdir().expect("tempdir should be created");
     config.local.sandbox_dir = dir.path().display().to_string();
 
-    let router = ToolRouter::from_config(&config, None, None, None)
+    let router = ToolRouter::from_config(&config, None, None)
         .await
         .expect("local opt-in should allow router construction");
     assert!(router.has_tool("file_write"));
@@ -517,7 +516,7 @@ async fn local_hand_error_output_spans_redact_bodies_by_default() {
             config.local.docker_enabled = false;
             let dir = tempdir().expect("tempdir should be created");
             config.local.sandbox_dir = dir.path().display().to_string();
-            let router = ToolRouter::from_config(&config, None, None, None)
+            let router = ToolRouter::from_config(&config, None, None)
                 .await
                 .expect("local opt-in should allow router construction");
             let secured_2 = router
@@ -630,11 +629,7 @@ async fn ungranted_mcp_tool_is_denied_under_the_cloud_deny_default() {
     // not execute unattended — and the deployment default owns the decision.
     let mut registry = ToolRegistry::new();
     registry
-        .register_mcp_tool(
-            "external-server",
-            McpServerCredentialScope::DeploymentOwned,
-            discovered_mcp_tool("external_action"),
-        )
+        .register_mcp_tool("external-server", discovered_mcp_tool("external_action"))
         .expect("register mcp tool");
     let mut config = MoaConfig::default();
     config.permissions.default_effect = ActionPolicyEffect::Deny;
@@ -670,11 +665,7 @@ async fn configured_admin_review_still_gates_mcp_tools_that_a_rule_cannot_lift()
     // review fallback that a rule used to be able to downgrade.
     let mut registry = ToolRegistry::new();
     registry
-        .register_mcp_tool(
-            "external-server",
-            McpServerCredentialScope::DeploymentOwned,
-            discovered_mcp_tool("external_action"),
-        )
+        .register_mcp_tool("external-server", discovered_mcp_tool("external_action"))
         .expect("register mcp tool");
     let session = session();
     let mut config = MoaConfig::default();
@@ -749,18 +740,10 @@ async fn tenant_granted_mcp_tool_resolves_to_allow_under_the_cloud_deny_default(
     let session = session();
     let mut registry = ToolRegistry::new();
     registry
-        .register_mcp_tool(
-            "external-server",
-            McpServerCredentialScope::DeploymentOwned,
-            discovered_mcp_tool("external_action"),
-        )
+        .register_mcp_tool("external-server", discovered_mcp_tool("external_action"))
         .expect("register mcp tool");
     registry
-        .register_mcp_tool(
-            "external-server",
-            McpServerCredentialScope::DeploymentOwned,
-            discovered_mcp_tool("external_other"),
-        )
+        .register_mcp_tool("external-server", discovered_mcp_tool("external_other"))
         .expect("register second mcp tool");
     let allow_rule = ActionPolicyRule {
         id: uuid::Uuid::now_v7(),
@@ -819,11 +802,7 @@ async fn a_rule_never_makes_an_unregistered_tool_visible() {
     let session = session();
     let mut registry = ToolRegistry::new();
     registry
-        .register_mcp_tool(
-            "external-server",
-            McpServerCredentialScope::DeploymentOwned,
-            discovered_mcp_tool("external_action"),
-        )
+        .register_mcp_tool("external-server", discovered_mcp_tool("external_action"))
         .expect("register mcp tool");
     registry.retain_only([external_server_tool("external_action")]);
     let router = ToolRouter::new(

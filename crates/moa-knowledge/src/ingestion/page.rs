@@ -11,16 +11,12 @@ where
 {
     /// Creates a knowledge ingestion pipeline from injected dependencies.
     #[must_use]
-    /// The `source_acl` argument is required rather than a builder step: a
-    /// pipeline that could exist without it would be a pipeline that ingests
-    /// provider content while having no opinion about who may read it.
     pub fn new(
         repository: Arc<R>,
         parser: Arc<P>,
         embedder: Arc<E>,
         graph: Arc<G>,
         config: KnowledgeIngestionPipelineConfig,
-        source_acl: KnowledgeSourceAclContext,
     ) -> Self {
         Self {
             repository,
@@ -31,7 +27,6 @@ where
             provider: config.provider,
             parser_label: config.parser_label,
             content_fetcher: None,
-            source_acl,
         }
     }
 

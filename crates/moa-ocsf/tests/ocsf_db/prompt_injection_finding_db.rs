@@ -199,7 +199,7 @@ async fn prompt_injection_finding_persists_a_signed_content_free_detection_findi
         type_uid,
         i64::from(DETECTION_FINDING * 100 + CREATE_ACTIVITY)
     );
-    assert_eq!(target.as_deref(), Some("mcp:external-search:query"));
+    assert_eq!(target.as_deref(), Some("mcp:15:external-search:5:query"));
 
     let payload: serde_json::Value =
         serde_json::from_slice(&event_jcs).expect("the payload should be canonical JSON");
@@ -251,7 +251,7 @@ async fn prompt_injection_finding_persists_a_signed_content_free_detection_findi
         EXPECTED_DESC.to_string(),
         PROMPT_INJECTION_DETECTOR_REVISION.to_string(),
         "coordinator".to_string(),
-        "mcp:external-search:query".to_string(),
+        "mcp:15:external-search:5:query".to_string(),
         transition.tool_call_id.0.to_string(),
         "canary_leak".to_string(),
         PROMPT_INJECTION_DETECTOR_REVISION.to_string(),
@@ -382,7 +382,7 @@ async fn a_replay_after_key_rotation_still_verifies_against_the_stored_key_db() 
 }
 
 #[tokio::test]
-async fn a_conflicting_payload_under_one_identity_is_rejected_as_a_replay_conflict_db() {
+async fn an_inconsistent_transition_key_is_rejected_db() {
     // Pins: identity collision is never absorbed. Two different transitions that
     // somehow share an identity mean the derivation is broken; silently accepting
     // the second would let one finding overwrite or masquerade as another.
@@ -400,19 +400,20 @@ async fn a_conflicting_payload_under_one_identity_is_rejected_as_a_replay_confli
         .await
         .expect("the first write should insert");
 
-    // Same key (therefore the same identity), different reached stage — the exact
-    // drift the conflict check exists to catch.
+    // Keep the old key while changing one of its coordinates. The emitter must
+    // reject the caller's inconsistent identity before trusting it as a UUID or
+    // finding UID.
     let mut conflicting = transition.clone();
     conflicting.reached_stage = SecurityCircuitStage::Disabled;
     conflicting.reached_score = 2;
     let error = emit_prompt_injection_finding(&pool, tenant_id, finding(session_id, conflicting))
         .await
-        .expect_err("a conflicting payload under one identity must be rejected");
+        .expect_err("an inconsistent transition key must be rejected");
 
     assert!(
-        matches!(error, moa_ocsf::EmitError::ReplayConflict(ref message)
-            if message.contains("canonical payload")),
-        "expected a canonical-payload replay conflict, got: {error:?}"
+        matches!(error, moa_ocsf::EmitError::InvalidInput(ref message)
+            if message.contains("transition key")),
+        "expected an invalid transition key, got: {error:?}"
     );
 }
 

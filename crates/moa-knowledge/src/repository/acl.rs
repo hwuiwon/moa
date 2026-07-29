@@ -69,9 +69,9 @@ pub(super) async fn replace_object_acl_snapshot(
                 r#"
                 INSERT INTO moa.knowledge_source_acl_snapshots (
                     snapshot_uid, tenant_id, storage_partition_id, connection_id, object_id,
-                    provider_revision, snapshot_hash, provenance, complete, entry_count, captured_at
+                    provider_revision, snapshot_hash, complete, entry_count, captured_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 "#,
             )
             .bind(snapshot.snapshot_uid)
@@ -81,7 +81,6 @@ pub(super) async fn replace_object_acl_snapshot(
             .bind(snapshot.object_uid)
             .bind(&snapshot.provider_revision)
             .bind(&snapshot.snapshot_hash)
-            .bind(snapshot.provenance.as_str())
             .bind(snapshot.complete)
             .bind(i32::try_from(snapshot.entries.len()).map_err(map_int_error)?)
             .bind(snapshot.captured_at)
@@ -115,6 +114,41 @@ pub(super) async fn replace_object_acl_snapshot(
                 .await
                 .map_err(map_sqlx_error)?;
             }
+
+            if snapshot.complete {
+                for entry in snapshot.entries.iter().filter(|entry| {
+                    entry.entry_kind == SourceAclEntryKind::Allow
+                        && entry.principal_kind == SourcePrincipalKind::Anyone
+                }) {
+                    let binding_uid = crate::graph_delta::stable_uid(&format!(
+                        "source-acl-anyone-binding:{}:{}",
+                        snapshot.connection_uid,
+                        hex::encode(entry.principal.as_bytes())
+                    ));
+                    sqlx::query(
+                        r#"
+                        INSERT INTO moa.knowledge_source_principal_bindings (
+                            binding_uid, tenant_id, storage_partition_id, contact_id, connection_id,
+                            principal_kind, principal_fingerprint, fingerprint_key_version,
+                            verified_at
+                        )
+                        VALUES ($1, $2, $3, $4, $5, 'anyone', $6, $7, $8)
+                        ON CONFLICT DO NOTHING
+                        "#,
+                    )
+                    .bind(binding_uid)
+                    .bind(snapshot.tenant_id.0)
+                    .bind(storage_partition_id(snapshot.tenant_id))
+                    .bind(moa_db::TENANT_WIDE_PRINCIPAL_HOLDER)
+                    .bind(snapshot.connection_uid)
+                    .bind(entry.principal.as_bytes())
+                    .bind(i32::from(entry.principal.key_version()))
+                    .bind(snapshot.captured_at)
+                    .execute(conn.as_mut())
+                    .await
+                    .map_err(map_sqlx_error)?;
+                }
+            }
             snapshot.snapshot_uid
         }
     };
@@ -140,6 +174,8 @@ pub(super) async fn replace_object_acl_snapshot(
             current_acl_snapshot_id = $5,
             updated_at = now()
         WHERE object_uid = $1 AND tenant_id = $2
+          AND (acl_state, acl_revision, current_acl_snapshot_id)
+              IS DISTINCT FROM ($3, $4, $5)
         "#,
     )
     .bind(snapshot.object_uid)
@@ -180,6 +216,12 @@ pub(super) async fn mark_object_acl_stale(
             updated_at = now()
         WHERE object_uid = $1
           AND tenant_id = $3
+          AND (acl_state, acl_revision, current_acl_snapshot_id)
+              IS DISTINCT FROM (
+                  'stale',
+                  COALESCE($2, acl_revision),
+                  NULL::UUID
+              )
         "#,
     )
     .bind(object_uid)
@@ -188,8 +230,29 @@ pub(super) async fn mark_object_acl_stale(
     .execute(conn.as_mut())
     .await
     .map_err(map_sqlx_error)?;
+    if result.rows_affected() == 0 {
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM moa.knowledge_objects
+                WHERE object_uid = $1 AND tenant_id = $2
+            )
+            "#,
+        )
+        .bind(object_uid)
+        .bind(repository.scoped_tenant_id().0)
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        if !exists {
+            return Err(Error::Repository(
+                "cannot mark a missing knowledge object ACL stale".to_string(),
+            ));
+        }
+    }
     conn.commit().await.map_err(map_moa_error)?;
-    ensure_rows_affected(result.rows_affected(), "mark knowledge object ACL stale")
+    Ok(())
 }
 
 /// Reads one object's stored ACL position.
@@ -291,6 +354,13 @@ pub(super) async fn upsert_principal_binding(
             fingerprint_key_version = EXCLUDED.fingerprint_key_version,
             verified_at = EXCLUDED.verified_at,
             updated_at = now()
+        WHERE (
+            knowledge_source_principal_bindings.principal_kind,
+            knowledge_source_principal_bindings.fingerprint_key_version
+        ) IS DISTINCT FROM (
+            EXCLUDED.principal_kind,
+            EXCLUDED.fingerprint_key_version
+        )
         "#,
     )
     .bind(binding.binding_uid)
@@ -337,6 +407,13 @@ pub(super) async fn upsert_group_binding(
             fingerprint_key_version = EXCLUDED.fingerprint_key_version,
             verified_at = EXCLUDED.verified_at,
             updated_at = now()
+        WHERE (
+            knowledge_source_principal_group_bindings.group_kind,
+            knowledge_source_principal_group_bindings.fingerprint_key_version
+        ) IS DISTINCT FROM (
+            EXCLUDED.group_kind,
+            EXCLUDED.fingerprint_key_version
+        )
         "#,
     )
     .bind(binding.binding_uid)
@@ -358,7 +435,7 @@ pub(super) async fn upsert_group_binding(
 /// Removes every principal and group binding for one contact.
 ///
 /// Called on offboarding: the contact keeps existing, but stops holding any
-/// provider principal, so provider-managed content stops being admitted for them
+/// provider principal, so source-governed content stops being admitted for them
 /// on the next request rather than at the next sync.
 pub(super) async fn revoke_contact_principals(
     repository: &PostgresKnowledgeRepository,

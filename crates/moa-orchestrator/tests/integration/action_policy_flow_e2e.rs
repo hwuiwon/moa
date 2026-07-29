@@ -46,12 +46,69 @@ async fn action_policy_flow_covers_auto_review_decision_and_member_authz() -> Re
     tenant_admin_clear_executes_stored_review_action(&fixture).await?;
     tenant_admin_deny_does_not_execute_stored_review_action(&fixture).await?;
     tenant_member_cannot_decide_action_review(&fixture).await?;
+    decision_waits_for_durable_owner_registration(&fixture).await?;
     coordinator_review_clear_resumes_its_owner_exactly_once(&fixture).await?;
     coordinator_review_deny_resumes_without_executing_the_action(&fixture).await?;
     superseded_coordinator_review_produces_no_continuation(&fixture).await?;
     pending_worker_review_holds_its_report_until_the_clear_continues_it(&fixture).await?;
     execution_task_tool_executor_emits_zero_root_tool_events(&fixture).await?;
     claimed_execution_review_exact_replay_resumes_and_conflict_rejects(&fixture).await?;
+    Ok(())
+}
+
+async fn decision_waits_for_durable_owner_registration(
+    fixture: &OrchestratorTestFixture,
+) -> Result<()> {
+    // Pins: the durable review row must not become admin-actionable before the
+    // Session acknowledgement is persisted, even when the review id is known.
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("review-owner-readiness").await?;
+    let meta = test.client().get_session(session_id).await?;
+    initialize_tenant(test.client(), meta.tenant_id).await?;
+    fixture.grant_default_tenant_admin(meta.tenant_id).await?;
+    add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
+    let owner = ActionReviewOwner::Coordinator {
+        session_id,
+        turn_id: "turn-owner-readiness".to_string(),
+        generation: 0,
+    };
+    let (review_id, _) =
+        create_pending_bash_review(&test, session_id, "printf readiness", owner).await?;
+    let pool = sqlx::PgPool::connect(&fixture.postgres_url)
+        .await
+        .context("connect to fixture Postgres")?;
+    sqlx::query("UPDATE tenant_action_reviews SET owner_registered_at = NULL WHERE id = $1")
+        .bind(review_id)
+        .execute(&pool)
+        .await
+        .context("simulate crash before owner registration acknowledgement")?;
+
+    let early = decide_review(
+        test.client(),
+        meta.tenant_id,
+        review_id,
+        ActionReviewDecisionKind::Denied,
+        None,
+    )
+    .await;
+    assert!(
+        early.is_err(),
+        "decision must be rejected until owner registration is durable"
+    );
+
+    sqlx::query("UPDATE tenant_action_reviews SET owner_registered_at = NOW() WHERE id = $1")
+        .bind(review_id)
+        .execute(&pool)
+        .await
+        .context("restore owner readiness so the fixture can release its registration")?;
+    decide_review(
+        test.client(),
+        meta.tenant_id,
+        review_id,
+        ActionReviewDecisionKind::Denied,
+        None,
+    )
+    .await?;
     Ok(())
 }
 
@@ -133,8 +190,10 @@ async fn pending_worker_review_holds_its_report_until_the_clear_continues_it(
     );
     assert!(
         matches!(
-            receipt.outcome,
-            moa_core::types::action_policy::ActionReviewOutcome::ClearedSuccess { .. }
+            &receipt.outcome,
+            moa_core::types::action_policy::ActionReviewOutcome::Cleared(
+                moa_core::types::action_policy::ToolTerminalFact::Result(metadata)
+            ) if metadata.success
         ),
         "unexpected worker receipt outcome: {:?}",
         receipt.outcome
@@ -189,22 +248,46 @@ async fn coordinator_review_clear_resumes_its_owner_exactly_once(
 
     let (origin_turn_id, _events) =
         run_scripted_turn_with_id(&test, session_id, "Start the reviewed work.").await?;
+    let side_effect =
+        tempfile::NamedTempFile::new().context("create action-review concurrency probe")?;
+    let command = format!(
+        "printf 'coordinator-continuation-ok\\n' | tee -a '{}'",
+        side_effect.path().display()
+    );
     let (review_id, requested_tool_id) = create_pending_bash_review(
         &test,
         session_id,
-        "printf coordinator-continuation-ok",
+        &command,
         coordinator_owner_for_turn(session_id, &origin_turn_id),
     )
     .await?;
 
-    decide_review(
-        test.client(),
-        meta.tenant_id,
-        review_id,
-        ActionReviewDecisionKind::Cleared,
-        None,
-    )
-    .await?;
+    let (first_decision, replayed_decision) = tokio::join!(
+        decide_review(
+            test.client(),
+            meta.tenant_id,
+            review_id,
+            ActionReviewDecisionKind::Cleared,
+            None,
+        ),
+        decide_review(
+            test.client(),
+            meta.tenant_id,
+            review_id,
+            ActionReviewDecisionKind::Cleared,
+            None,
+        )
+    );
+    first_decision?;
+    replayed_decision?;
+    assert_eq!(
+        std::fs::read_to_string(side_effect.path())
+            .context("read action-review concurrency probe")?
+            .lines()
+            .count(),
+        1,
+        "concurrent replay must not execute the cleared side effect twice"
+    );
 
     let events = wait_for_events(&test, session_id, |events| {
         !continuation_facts(events, review_id).is_empty()
@@ -225,7 +308,6 @@ async fn coordinator_review_clear_resumes_its_owner_exactly_once(
     );
     assert_eq!(receipt.review_id, review_id);
     assert_eq!(receipt.tool_name, "bash");
-    assert_eq!(receipt.requested_tool_call_id, requested_tool_id);
     let executed = receipt
         .executed_tool_call_id
         .context("a cleared receipt names the tool call that actually ran")?;
@@ -233,18 +315,12 @@ async fn coordinator_review_clear_resumes_its_owner_exactly_once(
         executed, requested_tool_id,
         "the reviewed execution is a new MOA-owned invocation with a fresh id"
     );
-    assert_eq!(
-        receipt.terminal_events,
-        vec![
-            moa_core::types::action_policy::ActionReviewTerminalEvent::Decided,
-            moa_core::types::action_policy::ActionReviewTerminalEvent::ToolResult,
-        ],
-        "the callback waits for the decision AND the tool's terminal event"
-    );
     assert!(
         matches!(
-            receipt.outcome,
-            moa_core::types::action_policy::ActionReviewOutcome::ClearedSuccess { .. }
+            &receipt.outcome,
+            moa_core::types::action_policy::ActionReviewOutcome::Cleared(
+                moa_core::types::action_policy::ToolTerminalFact::Result(metadata)
+            ) if metadata.success
         ),
         "unexpected receipt outcome: {:?}",
         receipt.outcome
@@ -342,16 +418,9 @@ async fn coordinator_review_deny_resumes_without_executing_the_action(
     let (_turn_id, receipt) = facts[0];
     assert_eq!(receipt.executed_tool_call_id, None);
     assert_eq!(
-        receipt.terminal_events,
-        vec![moa_core::types::action_policy::ActionReviewTerminalEvent::Decided],
-        "a denial resolves on the decision alone"
+        receipt.outcome,
+        moa_core::types::action_policy::ActionReviewOutcome::Denied
     );
-    match &receipt.outcome {
-        moa_core::types::action_policy::ActionReviewOutcome::Denied { reason } => {
-            assert_eq!(reason.as_deref(), Some("not approved for production"));
-        }
-        other => anyhow::bail!("expected a denied receipt, got {other:?}"),
-    }
     assert!(
         events.iter().all(|record| !matches!(
             &record.event,
@@ -500,12 +569,13 @@ async fn claimed_execution_review_exact_replay_resumes_and_conflict_rejects(
             id, tenant_id, storage_partition_id, session_id, tool_call_id, tool_name,
             action_class, risk_level, input_summary, normalized_input, envelope,
             preview, tool_request, requested_by, status, created_at, expires_at,
-            decided_by, decided_at, execution_tool_call_id, execution_requested_at
+            decided_by, decided_at, execution_tool_call_id, execution_requested_at,
+            owner_registered_at
         ) VALUES (
             $1, $2, $3, $4, $5, 'bash', 'command_execution', 'high',
             'claimed execution review replay', $6, $7,
             '{"fields":[],"file_diffs":[]}'::JSONB, $8, 'anonymous', 'pending',
-            NOW(), NOW() + INTERVAL '1 day', 'conflicting-claimer', NOW(), $9, NOW()
+            NOW(), NOW() + INTERVAL '1 day', 'conflicting-claimer', NOW(), $9, NOW(), NOW()
         )
         "#,
     )
@@ -895,12 +965,18 @@ async fn tenant_admin_clear_executes_stored_review_action(
         .await
         .context("grant admin before adding and deciding review")?;
     add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
+    let (origin_turn_id, _) = run_scripted_turn_with_id(
+        &test,
+        session_id,
+        "Establish the coordinator owner for the cleared review.",
+    )
+    .await?;
 
     let (review_id, stored_tool_id) = create_pending_bash_review(
         &test,
         session_id,
         "printf clear-review-ok",
-        unowned_coordinator(session_id),
+        coordinator_owner_for_turn(session_id, &origin_turn_id),
     )
     .await?;
     let events = test

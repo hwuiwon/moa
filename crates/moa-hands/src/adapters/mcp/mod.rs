@@ -14,9 +14,11 @@ use moa_core::{
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 const DEFAULT_MCP_TIMEOUT: Duration = Duration::from_secs(60);
+const CANCEL_NOTIFICATION_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// One tool discovered from a connected MCP server.
 #[derive(Debug, Clone, PartialEq)]
@@ -101,10 +103,13 @@ pub struct MCPClient {
 
 impl MCPClient {
     /// Connects to an MCP server and performs the initialize handshake.
-    pub async fn connect(config: &McpServerConfig) -> Result<Self> {
+    pub async fn connect(
+        config: &McpServerConfig,
+        headers: HashMap<String, String>,
+    ) -> Result<Self> {
         let mut client = Self {
             server_name: config.name.clone(),
-            transport: RemoteClient::new(config)?,
+            transport: RemoteClient::new(config, header_map_from_pairs(headers)?)?,
             next_id: AtomicU64::new(1),
             negotiated_protocol_version: String::new(),
             trust_tool_annotations: config.trust_tool_annotations,
@@ -126,9 +131,7 @@ impl MCPClient {
 
     /// Lists all currently exposed tools from the server.
     pub async fn list_tools(&self) -> Result<Vec<McpDiscoveredToolRegistration>> {
-        let response = self
-            .request("tools/list", json!({}), HeaderMap::new())
-            .await?;
+        let response = self.request("tools/list", json!({}), None).await?;
         let parsed: ToolsListResponse = serde_json::from_value(response)?;
         Ok(parsed
             .tools
@@ -148,15 +151,17 @@ impl MCPClient {
             .collect())
     }
 
-    /// Calls one MCP tool with optional extra transport headers.
+    /// Calls one MCP tool, stopping the local wait when `cancel_token` is cancelled.
+    ///
+    /// Cancellation sends a best-effort protocol notification. It does not
+    /// confirm that the remote server stopped work or prevented side effects.
     pub async fn call_tool(
         &self,
         name: &str,
         arguments: Value,
         tool_invocation_id: Option<&str>,
-        extra_headers: HashMap<String, String>,
+        cancel_token: Option<&CancellationToken>,
     ) -> Result<ToolOutput> {
-        let headers = header_map_from_pairs(extra_headers)?;
         let mut params = serde_json::Map::from_iter([
             ("name".to_string(), Value::String(name.to_string())),
             ("arguments".to_string(), arguments),
@@ -168,7 +173,7 @@ impl MCPClient {
             );
         }
         let response = self
-            .request("tools/call", Value::Object(params), headers)
+            .request("tools/call", Value::Object(params), cancel_token)
             .await?;
         Ok(flatten_call_result(response))
     }
@@ -185,7 +190,7 @@ impl MCPClient {
                         "version": env!("CARGO_PKG_VERSION"),
                     }
                 }),
-                HeaderMap::new(),
+                None,
             )
             .await?;
         let initialized: InitializeResponse = serde_json::from_value(response)?;
@@ -207,7 +212,12 @@ impl MCPClient {
         self.transport.notify(message).await
     }
 
-    async fn request(&self, method: &str, params: Value, headers: HeaderMap) -> Result<Value> {
+    async fn request(
+        &self,
+        method: &str,
+        params: Value,
+        cancel_token: Option<&CancellationToken>,
+    ) -> Result<Value> {
         let message_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = json!({
             "jsonrpc": "2.0",
@@ -215,7 +225,35 @@ impl MCPClient {
             "method": method,
             "params": params,
         });
-        let response = self.transport.request(request, headers).await?;
+        let response = if let Some(cancel_token) = cancel_token {
+            tokio::select! {
+                response = self.transport.request(request) => response?,
+                _ = cancel_token.cancelled() => {
+                    let _ = tokio::time::timeout(
+                        CANCEL_NOTIFICATION_TIMEOUT,
+                        self.notify(
+                            "notifications/cancelled",
+                            json!({
+                                "requestId": message_id,
+                                "reason": "MOA stopped waiting after local cancellation",
+                            }),
+                        ),
+                    )
+                    .await;
+                    tracing::debug!(
+                        mcp_server = %self.server_name,
+                        method,
+                        request_id = message_id,
+                        local_outcome = "cancelled",
+                        remote_outcome = "unknown",
+                        "MCP request was cancelled locally; remote side effects may still complete"
+                    );
+                    return Err(MoaError::Cancelled);
+                },
+            }
+        } else {
+            self.transport.request(request).await?
+        };
         parse_jsonrpc_result(response)
     }
 }
@@ -230,21 +268,16 @@ struct RemoteClient {
 }
 
 impl RemoteClient {
-    fn new(config: &McpServerConfig) -> Result<Self> {
-        let url = config.url.clone().ok_or_else(|| {
-            MoaError::ConfigError(format!(
-                "MCP server {} requires a url for remote transport",
-                config.name
-            ))
-        })?;
+    fn new(config: &McpServerConfig, headers: HeaderMap) -> Result<Self> {
         Ok(Self {
             client: reqwest::Client::builder()
                 .timeout(DEFAULT_MCP_TIMEOUT)
+                .default_headers(headers)
                 .build()
                 .map_err(|error| {
                     MoaError::ProviderError(format!("failed to build MCP http client: {error}"))
                 })?,
-            url,
+            url: config.url.clone(),
         })
     }
 
@@ -262,17 +295,14 @@ impl RemoteClient {
             return Err(MoaError::HttpStatus {
                 status: response.status().as_u16(),
                 retry_after: None,
-                message: response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "failed to read MCP notify error".to_string()),
+                message: "MCP server notification failed".to_string(),
             });
         }
         Ok(())
     }
 
-    async fn request(&self, message: Value, headers: HeaderMap) -> Result<Value> {
-        let request = self.client.post(&self.url).headers(headers).json(&message);
+    async fn request(&self, message: Value) -> Result<Value> {
+        let request = self.client.post(&self.url).json(&message);
         let response = request.send().await.map_err(|error| {
             MoaError::ProviderError(format!("failed to call MCP server: {error}"))
         })?;
@@ -280,10 +310,7 @@ impl RemoteClient {
             return Err(MoaError::HttpStatus {
                 status: response.status().as_u16(),
                 retry_after: None,
-                message: response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "failed to read MCP error body".to_string()),
+                message: "MCP server request failed".to_string(),
             });
         }
 
@@ -427,9 +454,10 @@ fn header_map_from_pairs(headers: HashMap<String, String>) -> Result<HeaderMap> 
         let name = HeaderName::from_bytes(key.as_bytes()).map_err(|error| {
             MoaError::ValidationError(format!("invalid MCP header name {key}: {error}"))
         })?;
-        let value = HeaderValue::from_str(&value).map_err(|error| {
+        let mut value = HeaderValue::from_str(&value).map_err(|error| {
             MoaError::ValidationError(format!("invalid MCP header value for {key}: {error}"))
         })?;
+        value.set_sensitive(true);
         map.insert(name, value);
     }
     Ok(map)

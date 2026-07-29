@@ -11,7 +11,6 @@ pub mod normalize;
 pub mod observability;
 pub mod parser;
 pub mod providers;
-pub mod rechunk;
 pub mod repository;
 
 pub use error::{Error, Result};

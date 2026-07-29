@@ -102,7 +102,8 @@ Conversation clients do not resolve blocking tool gates. Admin review returns a 
 Once the review resolves, its conversational owner receives a typed receipt and
 runs one continuation turn, recorded as the deduped
 `ActionReviewContinuationRequested` session event and rendered to the model as a
-system directive (never a fabricated user message). The Session SSE stream
+closed-vocabulary system directive (never a fabricated user message and never a
+copy of tool or admin output). The Session SSE stream
 retargets its terminal turn to that continuation only for a `Coordinator` owner,
 because only that continuation produces the visible answer the stream is waiting
 for; `Worker` and `ExecutionTask` continuations never retarget a contact stream.

@@ -95,21 +95,21 @@ Contact-point lookup hashes use a separate 32-byte key from
 stored in contact lookup columns.
 
 Tenant knowledge content is admitted under the source system's own permissions,
-not merely the tenant boundary. A connection is `TenantPublic` or
-`ProviderManaged`, and the connector's declared `ProviderAclCapability` — never a
-caller or operator choice — decides which; a re-link cannot widen an existing
-`ProviderManaged` connection. `ProviderManaged` content is admitted only through
-an immutable snapshot that is complete and revision-matched, with a matching
-allow entry and no matching deny entry. Missing, incomplete, stale, or
+not merely the tenant boundary. Every connection is governed by source ACLs;
+there is no connection-level or operator override. Content is admitted only through an
+immutable snapshot that is complete and revision-matched, with a matching allow
+entry and no matching deny entry. Missing, incomplete, stale, or
 revision-drifted ACLs deny, an empty caller principal set denies, and tenant role
 or operator status grants no content bypass.
 
-Principals are persisted only as keyed opaque fingerprints (HMAC-SHA256 under a
-KMS-wrapped, versioned per-tenant ACL key, with the key version encoded into the
-value), so no email address, phone number, or provider label reaches a row, log,
-trace, or cache key. The caller's principal set is resolved once per turn from
-authenticated identity plus verified bindings, never from request JSON and never
-re-fetched inside a retrieval leg.
+Principals are persisted only as connection-scoped keyed opaque fingerprints
+(HMAC-SHA256 under a KMS-wrapped, versioned per-tenant ACL key, with the key
+version encoded into the value), so no email address, phone number, or provider
+label reaches a row, log, trace, or cache key. The caller's principal set is
+resolved once per turn from authenticated identity plus verified bindings,
+never from request JSON and never re-fetched inside a retrieval leg. The current
+production bridge binds provider `anyone` grants only; user, group, and domain
+principals remain fail-closed until a verified identity bridge writes them.
 
 One shared SQL predicate enforces this on every path that can surface source
 content — lexical, pgvector, every recursive graph hop, hydration, and each
@@ -155,22 +155,13 @@ event, or persisted on a knowledge row. Deployment-owned operator transport
 secrets are a separate typed source, so a tenant connection can never fall back
 to an operator credential.
 
-Outbound MCP calls carry one owner's credential, decided by the server's
-required `credential_scope`. A deployment-owned server uses one operator secret
-read from deployment environment; a tenant-owned server is served only through a
-forced-RLS connection binding that names the tenant's own connection, the exact
-stored credential version, and a closed operation allowlist. Delegated
-`(Tenant, tenant_id, Operator)` authorization runs before the first binding
-read, the stored version's identity is checked against the binding before
-anything is decrypted, and plaintext is shaped into headers immediately before
-`tools/call` and dropped. No tenant-owned failure falls back to the deployment
-branch, and environment credentials are unreachable from a tenant-owned
-connector.
-
-The proxy mints no grant token: it resolves and consumes the credential inside
-one host function, so an opaque grant would add cache, expiry, and reuse risk
-without crossing an isolation boundary. Reintroduce a single-use grant only when
-a real remote proxy boundary sits between the resolver and the MCP transport.
+Outbound MCP connectors may use one deployment-owned credential read from an
+operator-selected environment variable at router construction. Missing
+configured material fails startup. The MCP client marks authentication headers
+sensitive and applies them to the complete protocol exchange: initialize,
+initialized notification, discovery, and `tools/call`. Non-success response
+bodies are not copied into errors, so an upstream cannot reflect credentials
+into logs.
 
 ## Encryption And Key Management
 
@@ -282,12 +273,13 @@ capability, 3 suspends for user input, 4 or more halts the owner. Only the first
 highest stage reached transitions, so a clear-to-4 canary leak emits one halt
 rather than walking the intermediate stages. The circuit is keyed by the exact
 generation-fenced owner plus the *router-resolved* canonical capability
-(`builtin:<tool>`, `mcp:<server>:<tool>`, or one logical Hand capability
-independent of which sandbox provider served it). State resets only for a
-genuinely new owner generation — never for a new input fingerprint, new tool
-arguments, a fallback Hand provider, or a workflow replay. That is what makes the
-circuit hold while an attacker varies the payload, and why it catches what a
-generic repetition cap does not.
+(`builtin:<byte-length>:<tool>`, `mcp:<server-byte-length>:<server>:<tool-byte-length>:<tool>`,
+or the equivalent framed Hand identity independent of which sandbox provider
+served it). Length framing keeps the identity injective even when names contain
+separators. State resets only for a genuinely new owner generation — never for
+a new input fingerprint, new tool arguments, a fallback Hand provider, or a
+workflow replay. That is what makes the circuit hold while an attacker varies
+the payload, and why it catches what a generic repetition cap does not.
 
 **Neutral, replay-stable facts.** Crossing a stage boundary appends one
 `Event::PromptInjectionCircuitTransition` carrying no output — only the safe
@@ -531,7 +523,8 @@ id, no reused provider tool-use id, and a canary-screened stored request. Its
 conversational owner is resumed only after the decision and the executed tool's
 terminal event are durable, and only through a bounded no-tools continuation turn,
 so an approval cannot silently re-open tool access or planning. A review that
-times out fails closed and produces no continuation.
+times out fails closed and produces no continuation; its durable release delivery
+removes the Session or Worker lifecycle hold without invoking the model.
 
 ## Security Audit
 

@@ -151,7 +151,7 @@ impl PgvectorStore {
         // Over-sample the shortlist so the exact rescore has a healthy candidate pool:
         // the truncated prefix only approximates full-dim distance order.
         let shortlist_limit = limit.saturating_mul(MRL_SHORTLIST_MULTIPLIER);
-        let prefix_probe = HalfVector::from_f32_slice(&query.embedding[..shortlist_dims]);
+        let prefix_probe = HalfVector::from_f32_slice(&query.embedding.vector()[..shortlist_dims]);
 
         let mut builder = QueryBuilder::<Postgres>::new(
             "SELECT ranked.uid, (1.0 - ranked.dist)::float4 AS score FROM (\
@@ -291,7 +291,13 @@ impl VectorStore for PgvectorStore {
         // writes still hard-fail so dimension safety is preserved. A brand-new
         // tenant's first turns run before any memory exists — that must not be
         // a terminal error.
-        match guard_storage_partition_embedder(conn.as_mut(), &storage_partition_id).await {
+        match guard_storage_partition_embedder(
+            conn.as_mut(),
+            &storage_partition_id,
+            query.embedding.model(),
+        )
+        .await
+        {
             Ok(()) => {}
             Err(Error::StoragePartitionEmbedderStateMissing { .. }) => {
                 tracing::debug!(
@@ -302,8 +308,8 @@ impl VectorStore for PgvectorStore {
             }
             Err(error) => return Err(error),
         }
-        validate_dimension(&query.embedding)?;
-        let halfvec = HalfVector::from_f32_slice(&query.embedding);
+        validate_dimension(query.embedding.vector())?;
+        let halfvec = HalfVector::from_f32_slice(query.embedding.vector());
 
         // The MRL cascade is skipped under `exact_search`, which promises a true
         // full-dim exact scan (used for promotion validation and eval ground truth);
@@ -430,9 +436,8 @@ fn knn_ef_search(k: usize) -> usize {
 }
 
 struct StoragePartitionEmbedderState {
-    embedding_model: String,
+    embedding_model: Option<String>,
     embedding_dimension: usize,
-    reembed_state: String,
 }
 
 async fn guard_storage_partition_embedder_for_write(
@@ -445,24 +450,17 @@ async fn guard_storage_partition_embedder_for_write(
     }
 
     let state = load_storage_partition_embedder_state(conn, storage_partition_id).await?;
-    // The re-embed fence covers ordinary writes, not only KNN reads. A rebuild
-    // takes a partition-wide census, reconstructs every input, and activates a
-    // complete generation; a write that lands mid-build either misses the
-    // census (the generation activates without it and the row disappears from
-    // search) or lands in the old model's space and survives activation as a
-    // stray vector nothing can detect. Both are silent, so ordinary writes stop
-    // for the duration and their callers retry after the rebuild finishes.
-    if state.reembed_state == "in_progress" {
-        return Err(Error::ReembedInProgress {
-            storage_partition_id: storage_partition_id.to_string(),
-        });
-    }
     guard_storage_partition_dimension(storage_partition_id, &state)?;
+    let configured_model = state.embedding_model.as_ref().ok_or_else(|| {
+        Error::StoragePartitionEmbedderStateMissing {
+            storage_partition_id: storage_partition_id.to_string(),
+        }
+    })?;
     for item in items {
-        if state.embedding_model != item.embedding_model {
+        if configured_model != &item.embedding_model {
             return Err(Error::EmbedderModelMismatch {
                 storage_partition_id: storage_partition_id.to_string(),
-                configured_model: state.embedding_model.clone(),
+                configured_model: configured_model.clone(),
                 requested_model: item.embedding_model.clone(),
             });
         }
@@ -473,15 +471,11 @@ async fn guard_storage_partition_embedder_for_write(
 async fn guard_storage_partition_embedder(
     conn: &mut PgConnection,
     storage_partition_id: &str,
+    query_embedding_model: &str,
 ) -> Result<()> {
     let state = load_storage_partition_embedder_state(conn, storage_partition_id).await?;
-    if state.reembed_state == "in_progress" {
-        return Err(Error::ReembedInProgress {
-            storage_partition_id: storage_partition_id.to_string(),
-        });
-    }
-
-    guard_storage_partition_dimension(storage_partition_id, &state)
+    guard_storage_partition_dimension(storage_partition_id, &state)?;
+    guard_storage_partition_model(storage_partition_id, &state, query_embedding_model)
 }
 
 async fn load_storage_partition_embedder_state(
@@ -490,7 +484,7 @@ async fn load_storage_partition_embedder_state(
 ) -> Result<StoragePartitionEmbedderState> {
     let row = sqlx::query(
         r#"
-        SELECT embedding_model, embedding_dimension, reembed_state
+        SELECT embedding_model, embedding_dimension
           FROM moa.storage_partition_state
          WHERE storage_partition_id = $1
         "#,
@@ -507,7 +501,6 @@ async fn load_storage_partition_embedder_state(
     Ok(StoragePartitionEmbedderState {
         embedding_model: row.try_get("embedding_model")?,
         embedding_dimension,
-        reembed_state: row.try_get("reembed_state")?,
     })
 }
 
@@ -518,9 +511,32 @@ fn guard_storage_partition_dimension(
     if state.embedding_dimension != VECTOR_DIMENSION {
         return Err(Error::EmbedderMismatch {
             storage_partition_id: storage_partition_id.to_string(),
-            configured_model: state.embedding_model.clone(),
+            configured_model: state
+                .embedding_model
+                .clone()
+                .unwrap_or_else(|| "unprovisioned".to_string()),
             configured_dimension: state.embedding_dimension,
             required_dimension: VECTOR_DIMENSION,
+        });
+    }
+    Ok(())
+}
+
+fn guard_storage_partition_model(
+    storage_partition_id: &str,
+    state: &StoragePartitionEmbedderState,
+    requested_model: &str,
+) -> Result<()> {
+    let configured_model = state.embedding_model.as_ref().ok_or_else(|| {
+        Error::StoragePartitionEmbedderStateMissing {
+            storage_partition_id: storage_partition_id.to_string(),
+        }
+    })?;
+    if configured_model != requested_model {
+        return Err(Error::EmbedderModelMismatch {
+            storage_partition_id: storage_partition_id.to_string(),
+            configured_model: configured_model.clone(),
+            requested_model: requested_model.to_string(),
         });
     }
     Ok(())

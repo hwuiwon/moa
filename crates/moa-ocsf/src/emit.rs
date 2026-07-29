@@ -20,8 +20,11 @@ use crate::signing;
 use chrono::{DateTime, Utc};
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::context::WorkingContext;
-use moa_core::types::identifiers::TenantId;
-use moa_core::types::security::{InjectionSignal, SecurityCircuitStage, SecurityCircuitTransition};
+use moa_core::types::identifiers::{SessionId, TenantId};
+use moa_core::types::security::{
+    InjectionSignal, SecurityCircuitStage, SecurityCircuitTransition, TransitionKeyInput,
+    transition_key,
+};
 use moa_core::types::session::SessionMeta;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -1160,6 +1163,19 @@ pub async fn emit_prompt_injection_finding(
     tenant_id: TenantId,
     finding: PromptInjectionFinding,
 ) -> Result<(Uuid, FindingWrite), EmitError> {
+    let expected_key = transition_key(TransitionKeyInput {
+        session_id: SessionId(finding.session_id),
+        owner: &finding.transition.owner,
+        capability: &finding.transition.capability,
+        tool_call_id: finding.transition.tool_call_id,
+        prior_stage: finding.transition.prior_stage,
+        reached_stage: finding.transition.reached_stage,
+    });
+    if finding.transition.key != expected_key {
+        return Err(EmitError::InvalidInput(
+            "prompt-injection transition key does not match its coordinates".to_string(),
+        ));
+    }
     let event_id = finding.transition.event_uuid();
     let event = detection_finding_event(&finding);
     let value = serde_json::to_value(&event)?;

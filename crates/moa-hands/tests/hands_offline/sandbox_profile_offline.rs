@@ -228,17 +228,11 @@ async fn cloud_profile_refuses_the_built_in_local_development_sandbox_policy_off
         ..CloudHandsConfig::default()
     });
 
-    let error = match ToolRouter::from_config(
-        &config,
-        None,
-        Some(std::sync::Arc::new(NoRules)),
-        None,
-    )
-    .await
-    {
-        Ok(_) => panic!("cloud must refuse the built-in local development sandbox policy"),
-        Err(error) => error,
-    };
+    let error =
+        match ToolRouter::from_config(&config, None, Some(std::sync::Arc::new(NoRules))).await {
+            Ok(_) => panic!("cloud must refuse the built-in local development sandbox policy"),
+            Err(error) => error,
+        };
     let message = error.to_string();
     assert!(
         message.contains("local-development-unbounded"),
@@ -255,7 +249,7 @@ async fn cloud_profile_refuses_the_built_in_local_development_sandbox_policy_off
         idle_timeout: seconds(300),
         max_lifetime: seconds(3600),
     };
-    ToolRouter::from_config(&config, None, Some(std::sync::Arc::new(NoRules)), None)
+    ToolRouter::from_config(&config, None, Some(std::sync::Arc::new(NoRules)))
         .await
         .expect("an authored deployment sandbox policy lets the cloud router construct");
 }

@@ -48,7 +48,11 @@ async fn turbopuffer_offline_round_trip() {
     store.upsert(&[test_item(uid)]).await.expect("upsert");
     let matches = store
         .knn(&VectorQuery {
-            embedding: basis_vector(0),
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                basis_vector(0),
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,
@@ -81,7 +85,11 @@ async fn turbopuffer_as_of_query_returns_unsupported_without_http_request() {
         .with_storage_partition_id(Uuid::now_v7().to_string());
     let error = store
         .knn(&VectorQuery {
-            embedding: basis_vector(0),
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                basis_vector(0),
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Restricted,
@@ -129,7 +137,11 @@ async fn turbopuffer_offline_query_enforces_pii_ceiling_and_excludes_global_scop
 
     store
         .knn(&VectorQuery {
-            embedding: basis_vector(0),
+            embedding: moa_memory_vector::QueryEmbedding::new(
+                basis_vector(0),
+                "test-model".to_string(),
+            )
+            .expect("valid query embedding"),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
             max_pii_class: SensitivityClass::Phi,

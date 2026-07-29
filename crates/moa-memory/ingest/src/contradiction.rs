@@ -10,7 +10,9 @@ use moa_core::types::memory::RlsContext;
 use moa_core::types::security::SensitivityClass;
 use moa_db::ScopedConn;
 use moa_memory_graph::{NodeIndexRow, NodeLabel};
-use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorQuery, VectorStore};
+use moa_memory_vector::{
+    Error as VectorError, QueryEmbedding, VECTOR_DIMENSION, VectorQuery, VectorStore,
+};
 #[cfg(test)]
 use moa_providers::COHERE_DEFAULT_RERANK_MODEL;
 use moa_providers::{ConfiguredReranker, Reranker, build_reranker_from_config};
@@ -101,7 +103,7 @@ pub trait ContradictionDetector: Send + Sync {
     async fn check_one_fast(
         &self,
         fact_text: &str,
-        embedding: &[f32],
+        query_embedding: Option<QueryEmbedding>,
         label: NodeLabel,
         pii_class: SensitivityClass,
         ctx: &ContradictionContext,
@@ -255,13 +257,13 @@ impl RrfPlusJudgeDetector {
     pub async fn candidates(
         &self,
         fact_text: &str,
-        embedding: &[f32],
+        query_embedding: Option<QueryEmbedding>,
         label: NodeLabel,
         pii_class: SensitivityClass,
         ctx: &ContradictionContext,
     ) -> Result<Vec<NodeIndexRow>> {
         let vector_hits =
-            vector_candidate_uids(fact_text, embedding, label, pii_class, ctx).await?;
+            vector_candidate_uids(fact_text, query_embedding, label, pii_class, ctx).await?;
         let (lexical_hits, hydrated) =
             lexical_candidates_and_hydrate(fact_text, label, &vector_hits, ctx).await?;
         let ranked = rrf_fuse(
@@ -341,13 +343,13 @@ impl RrfPlusJudgeDetector {
     async fn run(
         &self,
         fact_text: &str,
-        embedding: &[f32],
+        query_embedding: Option<QueryEmbedding>,
         label: NodeLabel,
         pii_class: SensitivityClass,
         ctx: &ContradictionContext,
     ) -> Result<Conflict> {
         let candidates = self
-            .candidates(fact_text, embedding, label, pii_class, ctx)
+            .candidates(fact_text, query_embedding, label, pii_class, ctx)
             .await?;
         let candidates = self.rerank_top5(fact_text, &candidates).await?;
         self.judge_candidates(fact_text, &candidates).await
@@ -396,14 +398,14 @@ impl ContradictionDetector for RrfPlusJudgeDetector {
     async fn check_one_fast(
         &self,
         fact_text: &str,
-        embedding: &[f32],
+        query_embedding: Option<QueryEmbedding>,
         label: NodeLabel,
         pii_class: SensitivityClass,
         ctx: &ContradictionContext,
     ) -> Result<Conflict> {
         match timeout(
             self.fast_budget,
-            self.run(fact_text, embedding, label, pii_class, ctx),
+            self.run(fact_text, query_embedding, label, pii_class, ctx),
         )
         .await
         {
@@ -418,13 +420,17 @@ impl ContradictionDetector for RrfPlusJudgeDetector {
         ctx: &ContradictionContext,
     ) -> Result<Conflict> {
         let fact_text = &fact.classified.fact.summary;
-        let empty_embedding = [];
-        let embedding = fact.embedding.as_deref().unwrap_or(&empty_embedding);
+        let query_embedding = fact
+            .embedding
+            .as_ref()
+            .zip(fact.embedding_model.as_deref())
+            .map(|(embedding, model)| QueryEmbedding::new(embedding.clone(), model))
+            .transpose()?;
         match timeout(
             self.slow_budget,
             self.run(
                 fact_text,
-                embedding,
+                query_embedding,
                 NodeLabel::Fact,
                 fact.classified.pii_class,
                 ctx,
@@ -474,26 +480,28 @@ pub(crate) fn build_judge_prompt(fact_text: &str, candidates: &[NodeIndexRow]) -
 
 async fn vector_candidate_uids(
     fact_text: &str,
-    embedding: &[f32],
+    query_embedding: Option<QueryEmbedding>,
     label: NodeLabel,
     pii_class: SensitivityClass,
     ctx: &ContradictionContext,
 ) -> Result<Vec<Uuid>> {
     let _ = fact_text;
-    if embedding.is_empty() {
+    let Some(query_embedding) = query_embedding else {
         return Ok(Vec::new());
-    }
-    if embedding.len() != ctx.vector().dimension() || embedding.len() != VECTOR_DIMENSION {
+    };
+    if query_embedding.vector().len() != ctx.vector().dimension()
+        || query_embedding.vector().len() != VECTOR_DIMENSION
+    {
         return Err(Error::Vector(VectorError::DimensionMismatch {
             expected: VECTOR_DIMENSION,
-            actual: embedding.len(),
+            actual: query_embedding.vector().len(),
         }));
     }
 
     let hits = ctx
         .vector()
         .knn(&VectorQuery {
-            embedding: embedding.to_vec(),
+            embedding: query_embedding,
             k: VECTOR_K,
             label_filter: Some(vec![label.as_str().to_string()]),
             max_pii_class: pii_class,

@@ -88,6 +88,7 @@ impl Worker for WorkerImpl {
         let turn_id = if state.active_turn_id.is_none() {
             let turn_id = generate_turn_id(&mut ctx);
             let _started = state.start_workflow_turn(turn_id.clone());
+            activate_worker_security_owner(&mut state, ctx.key(), &turn_id, generation);
             Some(turn_id)
         } else {
             None
@@ -399,6 +400,56 @@ impl Worker for WorkerImpl {
             },
             &request.assessment,
         );
+        let transition = match transition {
+            Ok(transition) => transition,
+            Err(error)
+                if request.allow_superseded_owner_noop
+                    && matches!(
+                        (error.active.as_ref(), &error.received),
+                        (
+                            Some(moa_core::types::security::SecurityCircuitOwner::Worker {
+                                worker_id: active_worker,
+                                generation: active_generation,
+                                ..
+                            }),
+                            moa_core::types::security::SecurityCircuitOwner::Worker {
+                                worker_id: received_worker,
+                                generation: received_generation,
+                                ..
+                            }
+                        ) if active_worker == received_worker
+                            && active_generation > received_generation
+                    ) =>
+            {
+                tracing::info!(
+                    worker_id = %ctx.key(),
+                    active_owner_generation = error.active.as_ref().map(|owner| owner.generation()),
+                    received_owner_generation = error.received.generation(),
+                    "discarded superseded reviewed worker security assessment"
+                );
+                return Ok(Json::from(
+                    moa_wire::turn::ApplySecurityAssessmentResponse {
+                        transition: None,
+                        stage: moa_core::types::security::SecurityCircuitStage::Clear,
+                    },
+                ));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    worker_id = %ctx.key(),
+                    active_owner_kind = error.active.as_ref().map(|owner| owner.kind()),
+                    active_owner_generation = error.active.as_ref().map(|owner| owner.generation()),
+                    received_owner_kind = error.received.kind(),
+                    received_owner_generation = error.received.generation(),
+                    "rejected stale worker security assessment"
+                );
+                return Err(TerminalError::new_with_code(
+                    409,
+                    "security assessment owner is no longer active",
+                )
+                .into());
+            }
+        };
         let stage = state
             .security_circuit
             .stage(&request.owner, &request.capability);
@@ -590,10 +641,11 @@ impl Worker for WorkerImpl {
             (None, true) => Some((generate_turn_id(&mut ctx), None)),
             (None, false) => None,
         };
+        let generation = state.generation;
         if let Some((turn_id, _)) = next_turn.as_ref() {
             let _started = state.start_workflow_turn(turn_id.clone());
+            activate_worker_security_owner(&mut state, ctx.key(), turn_id, generation);
         }
-        let generation = state.generation;
         let max_turns = state.max_turns;
         let identity = state
             .identity
@@ -729,10 +781,7 @@ impl Worker for WorkerImpl {
         // when the worker is busy and the turn starts later.
         let continuation_turn_id = generate_turn_id(&mut ctx);
         let entry = QueuedActionReviewContinuation {
-            continuation: ActionReviewContinuation {
-                review_id: receipt.review_id,
-                receipt,
-            },
+            continuation: ActionReviewContinuation { receipt },
             turn_id: continuation_turn_id,
             generation: registered.generation,
             ordinal: registered.ordinal,
@@ -755,10 +804,11 @@ impl Worker for WorkerImpl {
         } else {
             state.take_action_review_continuation()
         };
+        let generation = state.generation;
         if let Some(dispatch) = dispatch.as_ref() {
             let _started = state.start_workflow_turn(dispatch.turn_id.clone());
+            activate_worker_security_owner(&mut state, ctx.key(), &dispatch.turn_id, generation);
         }
-        let generation = state.generation;
         let identity = state
             .identity
             .clone()
@@ -790,6 +840,83 @@ impl Worker for WorkerImpl {
             );
         }
         Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, release))]
+    // SAFETY: internal control-plane release from the action-review reaper or
+    // security circuit. It removes only the matching review registration owned by
+    // this worker and does not create a continuation for that review.
+    async fn release_action_review(
+        &self,
+        ctx: ObjectContext<'_>,
+        release: Json<moa_core::types::action_policy::ActionReviewRelease>,
+    ) -> Result<(), HandlerError> {
+        crate::ctx::adopt_incoming_trace_parent(&ctx);
+        annotate_restate_handler_span("Worker", "release_action_review");
+        let release = release.into_inner();
+        if !matches!(
+            &release.owner,
+            moa_core::types::action_policy::ActionReviewOwner::Worker { worker_id, .. }
+                if worker_id.as_str() == ctx.key()
+        ) {
+            return Err(
+                TerminalError::new("action review release does not belong to this worker").into(),
+            );
+        }
+        let mut state = Tracked::<WorkerVoState>::load(&ctx).await?;
+        if state.resolve_action_review(release.review_id).is_none() {
+            return Ok(());
+        }
+        let terminal_status = matches!(
+            state.current_status(),
+            WorkerState::Failed | WorkerState::Cancelled
+        );
+        let dispatch =
+            if release.resume_queued && state.active_turn_id.is_none() && !terminal_status {
+                state.take_action_review_continuation()
+            } else {
+                None
+            };
+        let generation = state.generation;
+        if let Some(dispatch) = dispatch.as_ref() {
+            let _started = state.start_workflow_turn(dispatch.turn_id.clone());
+            activate_worker_security_owner(&mut state, ctx.key(), &dispatch.turn_id, generation);
+        }
+        let dispatch_context = if dispatch.is_some() {
+            Some((
+                required_parent_session(&state)?,
+                generation,
+                state.identity.clone().ok_or_else(|| {
+                    TerminalError::new("worker is missing its admitted caller identity")
+                })?,
+                state.max_turns,
+                state.trusted_sandbox_manifest.clone(),
+            ))
+        } else {
+            None
+        };
+        state.persist(&ctx);
+        if let (
+            Some(dispatch),
+            Some((parent_session, generation, identity, max_turns, trusted_sandbox_manifest)),
+        ) = (dispatch, dispatch_context)
+        {
+            start_worker_turn_execution(
+                &ctx,
+                WorkerTurnDispatch {
+                    turn_id: dispatch.turn_id,
+                    identity,
+                    parent_session,
+                    generation,
+                    max_turns,
+                    trusted_sandbox_manifest,
+                    action_review: Some(dispatch.continuation),
+                },
+            );
+            Ok(())
+        } else {
+            maybe_resolve_parent_awakeable(&ctx, &self.session_limits).await
+        }
     }
 
     #[tracing::instrument(skip(self, ctx))]
@@ -1375,12 +1502,12 @@ async fn append_action_review_continuation_fact(
             .append_event(Json(AppendEventRequest {
                 session_id,
                 event: Event::ActionReviewContinuationRequested {
-                    review_id: continuation.review_id,
+                    review_id: continuation.receipt.review_id,
                     turn_id: turn_id.to_string(),
                     receipt: continuation.receipt.clone(),
                 },
                 dedupe_key: Some(action_review_continuation_dedupe_key(
-                    continuation.review_id,
+                    continuation.receipt.review_id,
                 )),
             })),
     )
@@ -1583,18 +1710,55 @@ async fn cache_parent_terminal_result(
     Ok(())
 }
 
+/// Installs the worker circuit owner as part of admitting a turn.
+fn activate_worker_security_owner(
+    state: &mut WorkerVoState,
+    worker_id: &str,
+    turn_id: &str,
+    generation: u64,
+) {
+    state
+        .security_circuit
+        .adopt_owner(&moa_core::types::security::SecurityCircuitOwner::Worker {
+            worker_id: worker_id.to_string(),
+            turn_id: turn_id.to_string(),
+            generation,
+        });
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CleanupDecision, decide_cleanup, release_worker_hands_request};
+    use super::{
+        CleanupDecision, activate_worker_security_owner, decide_cleanup,
+        release_worker_hands_request,
+    };
     use crate::action_reviews::scheduling::QueuedActionReviewContinuation;
     use crate::objects::worker::WorkerVoState;
     use moa_core::types::action_policy::{
         ActionReviewContinuation, ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt,
-        ActionReviewTerminalEvent,
     };
     use moa_core::types::identifiers::{SessionId, ToolCallId};
+    use moa_core::types::security::SecurityCircuitOwner;
     use moa_core::types::worker::state::WorkerState;
     use uuid::Uuid;
+
+    #[test]
+    fn worker_turn_admission_installs_the_security_owner() {
+        // Pins: a worker assessment can only mutate the exact owner installed
+        // before its turn workflow was dispatched.
+        let mut state = WorkerVoState::default();
+
+        activate_worker_security_owner(&mut state, "worker-3", "turn-9", 4);
+
+        assert_eq!(
+            state.security_circuit.owner,
+            Some(SecurityCircuitOwner::Worker {
+                worker_id: "worker-3".to_string(),
+                turn_id: "turn-9".to_string(),
+                generation: 4,
+            })
+        );
+    }
 
     fn continuation_for(
         review_id: Uuid,
@@ -1603,7 +1767,6 @@ mod tests {
         generation: u64,
     ) -> ActionReviewContinuation {
         ActionReviewContinuation {
-            review_id,
             receipt: ActionReviewReceipt {
                 review_id,
                 owner: ActionReviewOwner::Worker {
@@ -1613,17 +1776,18 @@ mod tests {
                     generation,
                 },
                 tool_name: "bash".to_string(),
-                requested_tool_call_id: ToolCallId::new(),
                 executed_tool_call_id: Some(ToolCallId::new()),
-                outcome: ActionReviewOutcome::ClearedSuccess {
-                    summary: "ok".to_string(),
-                    assessment: moa_core::types::security::ToolOutputAssessment::safe(),
-                    capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
-                },
-                terminal_events: vec![
-                    ActionReviewTerminalEvent::Decided,
-                    ActionReviewTerminalEvent::ToolResult,
-                ],
+                outcome: ActionReviewOutcome::Cleared(
+                    moa_core::types::action_policy::ToolTerminalFact::Result(
+                        moa_core::types::action_policy::ToolResultSecurityMetadata {
+                            success: true,
+                            assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                            capability: moa_core::types::security::ToolCapabilityId::builtin(
+                                "bash",
+                            ),
+                        },
+                    ),
+                ),
             },
         }
     }
@@ -1705,7 +1869,7 @@ mod tests {
         assert_eq!(
             state
                 .take_action_review_continuation()
-                .map(|entry| entry.continuation.review_id),
+                .map(|entry| entry.continuation.receipt.review_id),
             Some(first_review),
             "continuations run in durable registration order"
         );
@@ -1713,7 +1877,7 @@ mod tests {
         assert_eq!(
             state
                 .take_action_review_continuation()
-                .map(|entry| entry.continuation.review_id),
+                .map(|entry| entry.continuation.receipt.review_id),
             Some(second_review)
         );
 

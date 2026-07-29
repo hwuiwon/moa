@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{ConnectionAclMode, SyncRunStatus};
+use super::SyncRunStatus;
 
 /// One linked external account for one tenant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,13 +26,6 @@ pub struct KnowledgeConnection {
     pub credential_ref: String,
     /// Current connection status.
     pub status: ConnectionStatus,
-    /// How this connection's records are admitted to retrieval.
-    ///
-    /// Derived from the adapter's declared [`ProviderAclCapability`], never from
-    /// caller or operator input, and never widened on re-link. There is no serde
-    /// default: a stored or transmitted connection without a mode is a decode
-    /// error rather than a silently tenant-public one.
-    pub acl_mode: ConnectionAclMode,
     /// Safe provider metadata.
     #[serde(default)]
     pub metadata: Value,

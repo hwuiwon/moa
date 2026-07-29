@@ -552,7 +552,19 @@ impl GraphMemoryRetriever {
                 // retrieval rather than abort the turn: an empty embedding makes
                 // the vector leg return nothing while the lexical leg still runs.
                 Some(embedder) => match embed_query(embedder, query_str).await {
-                    Ok(embedding) => embedding,
+                    Ok(embedding) => {
+                        match moa_memory_vector::QueryEmbedding::new(embedding, embedder.model_id())
+                        {
+                            Ok(embedding) => Some(embedding),
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    "query embedding was invalid; degrading to lexical-only retrieval"
+                                );
+                                None
+                            }
+                        }
+                    }
                     Err(error) => {
                         tracing::warn!(
                             error = %error,
@@ -564,34 +576,36 @@ impl GraphMemoryRetriever {
                             "reason" => "error",
                         )
                         .increment(1);
-                        Vec::new()
+                        None
                     }
                 },
-                None => Vec::new(),
+                None => None,
             }
         } else {
-            Vec::new()
+            None
         };
 
         // Resolve the missed scopes against the backend in parallel; cached
         // scopes reuse their probe result and carry no fresh provenance.
-        let query_embedding = query_embedding.as_slice();
-        let scope_results = try_join_all(probes.iter().map(|probe| async move {
-            match &probe.cached_hits {
-                Some(hits) => Ok::<_, MoaError>((hits.clone(), RetrievalProvenance::default())),
-                None => {
-                    let output = self
-                        .retrieve_scope_backend(
-                            ctx,
-                            query_str,
-                            probe,
-                            policy,
-                            query_embedding,
-                            max_pii_class,
-                            result_limit,
-                        )
-                        .await?;
-                    Ok(provenance_from_output(output))
+        let scope_results = try_join_all(probes.iter().map(|probe| {
+            let query_embedding = query_embedding.clone();
+            async move {
+                match &probe.cached_hits {
+                    Some(hits) => Ok::<_, MoaError>((hits.clone(), RetrievalProvenance::default())),
+                    None => {
+                        let output = self
+                            .retrieve_scope_backend(
+                                ctx,
+                                query_str,
+                                probe,
+                                policy,
+                                query_embedding,
+                                max_pii_class,
+                                result_limit,
+                            )
+                            .await?;
+                        Ok(provenance_from_output(output))
+                    }
                 }
             }
         }))
@@ -685,7 +699,7 @@ impl GraphMemoryRetriever {
         let probe_request = self.build_scope_request(
             ctx,
             query,
-            Vec::new(),
+            None,
             scope_plan,
             policy,
             &planned,
@@ -719,14 +733,14 @@ impl GraphMemoryRetriever {
         query: &str,
         probe: &ScopeProbe<'_>,
         policy: &MemoryAdmissionPolicy,
-        query_embedding: &[f32],
+        query_embedding: Option<moa_memory_vector::QueryEmbedding>,
         max_pii_class: SensitivityClass,
         result_limit: usize,
     ) -> Result<RetrievalOutput> {
         let request = self.build_scope_request(
             ctx,
             query,
-            query_embedding.to_vec(),
+            query_embedding,
             probe.scope_plan,
             policy,
             &probe.planned,
@@ -750,7 +764,7 @@ impl GraphMemoryRetriever {
         &self,
         ctx: &WorkingContext,
         query: &str,
-        query_embedding: Vec<f32>,
+        query_embedding: Option<moa_memory_vector::QueryEmbedding>,
         scope_plan: &RetrievalScopePlan,
         policy: &MemoryAdmissionPolicy,
         planned: &PlannedQuery,

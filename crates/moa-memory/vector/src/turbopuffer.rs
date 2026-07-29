@@ -402,7 +402,7 @@ impl VectorStore for TurbopufferStore {
                 feature: "as_of",
             });
         }
-        validate_dimension(&query.embedding)?;
+        validate_dimension(query.embedding.vector())?;
         if query.k == 0 {
             return Ok(Vec::new());
         }
@@ -414,7 +414,7 @@ impl VectorStore for TurbopufferStore {
         self.ensure_namespace(&namespace).await?;
 
         let mut body = json!({
-            "rank_by": ["vector", "ANN", query.embedding],
+            "rank_by": ["vector", "ANN", query.embedding.vector()],
             "top_k": query.k,
             "include_attributes": ["id"],
         });
@@ -714,7 +714,8 @@ mod tests {
         .with_storage_partition_id(Uuid::now_v7().to_string());
         let matches = store
             .knn(&VectorQuery {
-                embedding: basis_vector(0),
+                embedding: crate::QueryEmbedding::new(basis_vector(0), "test-model")
+                    .expect("valid query embedding"),
                 k: 1,
                 label_filter: None,
                 max_pii_class: SensitivityClass::Restricted,

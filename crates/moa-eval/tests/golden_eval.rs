@@ -123,7 +123,7 @@ impl ContradictionDetector for InsertOnlyDetector {
     async fn check_one_fast(
         &self,
         _fact_text: &str,
-        _embedding: &[f32],
+        _query_embedding: Option<moa_memory_vector::QueryEmbedding>,
         _label: NodeLabel,
         _pii_class: SensitivityClass,
         _ctx: &ContradictionContext,
@@ -247,8 +247,7 @@ async fn seed_tenant_embedder_state(
         ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
-                embedding_dimension = EXCLUDED.embedding_dimension,
-                reembed_state = 'steady'
+                embedding_dimension = EXCLUDED.embedding_dimension
         "#,
     )
     .bind(storage_partition_id.to_string())
@@ -480,7 +479,7 @@ impl RetrievalHarness {
         // old vector row, so this path exercises temporal lexical retrieval and hydration.
         let request = planned.clone().into_retrieval_request(
             query,
-            Vec::new(),
+            None,
             SensitivityClass::Restricted,
             5,
             false,

@@ -31,14 +31,10 @@ async fn ingestion_preserves_chunk_structure_for_bounded_neighbor_context_db_mem
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
-        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
-            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
-        ),
     );
 
     repository
         .upsert_connection(KnowledgeConnection {
-            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),

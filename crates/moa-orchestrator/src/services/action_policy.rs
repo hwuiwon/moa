@@ -386,7 +386,6 @@ mod tests {
         registry
             .register_mcp_tool(
                 "github",
-                moa_config::McpServerCredentialScope::DeploymentOwned,
                 McpDiscoveredTool {
                     name: "github_issue_create".to_string(),
                     description: "create an issue".to_string(),
@@ -430,7 +429,6 @@ mod tests {
         registry
             .register_mcp_tool(
                 "github",
-                moa_config::McpServerCredentialScope::DeploymentOwned,
                 McpDiscoveredTool {
                     name: "github_issue_create".to_string(),
                     description: "create an issue".to_string(),

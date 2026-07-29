@@ -373,8 +373,7 @@ async fn set_workspace_embedder_state(pool: &PgPool, storage_partition_id: &str,
         ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
-                embedding_dimension = EXCLUDED.embedding_dimension,
-                reembed_state = 'steady'
+                embedding_dimension = EXCLUDED.embedding_dimension
         "#,
     )
     .bind(storage_partition_id)
@@ -400,15 +399,16 @@ async fn seed_knowledge_document_chunks(
     let connection_uid = Uuid::now_v7();
     let object_uid = Uuid::now_v7();
     let version_uid = Uuid::now_v7();
+    let snapshot_uid = Uuid::now_v7();
 
     sqlx::query(
         r#"
         INSERT INTO moa.knowledge_connections (
             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
-            provider_connection_id, connector, credential_ref, status, acl_mode, metadata
+            provider_connection_id, connector, credential_ref, status, metadata
         )
         VALUES ($1, $2, $3, 'merge', $4, $5, 'drive',
-                'vault://hybrid-duplicate-test', 'active', 'tenant_public', '{}'::jsonb)
+                'vault://hybrid-duplicate-test', 'active', '{}'::jsonb)
         "#,
     )
     .bind(connection_uid)
@@ -440,6 +440,57 @@ async fn seed_knowledge_document_chunks(
     .execute(pool)
     .await
     .expect("insert duplicate-crowding knowledge object");
+
+    let acl_principal = knowledge_fixture_principal();
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_source_acl_snapshots (
+            snapshot_uid, tenant_id, storage_partition_id, connection_id, object_id,
+            provider_revision, snapshot_hash, complete, entry_count, captured_at
+        )
+        VALUES ($1, $2, $3, $4, $5, 'fixture-rev', $6, TRUE, 1, now())
+        "#,
+    )
+    .bind(snapshot_uid)
+    .bind(tenant_id.0)
+    .bind(storage_partition_id)
+    .bind(connection_uid)
+    .bind(object_uid)
+    .bind(format!("fixture-hash-{object_slug}"))
+    .execute(pool)
+    .await
+    .expect("insert complete fixture ACL");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_source_acl_entries (
+            entry_uid, tenant_id, storage_partition_id, snapshot_id, entry_kind,
+            principal_kind, principal_fingerprint, fingerprint_key_version
+        )
+        VALUES ($1, $2, $3, $4, 'allow', 'user', $5, 1)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant_id.0)
+    .bind(storage_partition_id)
+    .bind(snapshot_uid)
+    .bind(acl_principal.as_bytes())
+    .execute(pool)
+    .await
+    .expect("insert fixture ACL principal");
+    sqlx::query(
+        r#"
+        UPDATE moa.knowledge_objects
+        SET acl_state = 'current',
+            acl_revision = 'fixture-rev',
+            current_acl_snapshot_id = $2
+        WHERE object_uid = $1
+        "#,
+    )
+    .bind(object_uid)
+    .bind(snapshot_uid)
+    .execute(pool)
+    .await
+    .expect("make fixture ACL current");
 
     sqlx::query(
         r#"
@@ -493,6 +544,14 @@ async fn seed_knowledge_document_chunks(
         .execute(pool)
         .await
         .expect("insert duplicate-crowding knowledge chunks");
+}
+
+fn knowledge_fixture_principal() -> moa_core::types::memory::SourcePrincipalFingerprint {
+    moa_core::types::memory::SourcePrincipalFingerprint::from_digest(1, [0xAC; 32])
+}
+
+fn knowledge_fixture_acl() -> moa_core::types::memory::SourceAclContext {
+    moa_core::types::memory::SourceAclContext::new([knowledge_fixture_principal()], 0)
 }
 
 #[tokio::test]
@@ -569,7 +628,10 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
         cleared_barriers: Default::default(),
         seeds: vec![seed_uid],
         query_text: exact_text.to_string(),
-        query_embedding: deterministic_vector(exact_text),
+        query_embedding: Some(
+            moa_memory_vector::QueryEmbedding::new(deterministic_vector(exact_text), "test-model")
+                .expect("valid query embedding"),
+        ),
         scope,
         label_filter: Some(vec![NodeLabel::Fact]),
         label_boost: None,
@@ -620,7 +682,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
             cleared_barriers: Default::default(),
             seeds: vec![seed_uid],
             query_text: String::new(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,
@@ -651,7 +713,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
             cleared_barriers: Default::default(),
             seeds: vec![seed_uid],
             query_text: String::new(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,
@@ -749,7 +811,13 @@ async fn barrier_cleared_agent_retrieves_node_uncleared_fails_closed_db_memory()
             .collect(),
         seeds: Vec::new(),
         query_text: barriered_text.to_string(),
-        query_embedding: deterministic_vector(barriered_text),
+        query_embedding: Some(
+            moa_memory_vector::QueryEmbedding::new(
+                deterministic_vector(barriered_text),
+                "test-model",
+            )
+            .expect("valid query embedding"),
+        ),
         scope: scope.clone(),
         label_filter: Some(vec![NodeLabel::Fact]),
         label_boost: None,
@@ -882,11 +950,14 @@ async fn duplicate_crowding_keeps_distinct_supporting_knowledge_chunk() {
         .with_assume_app_role(true);
     let hits = retriever
         .retrieve(RetrievalRequest {
-            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
+            source_acl: knowledge_fixture_acl(),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: query.to_string(),
-            query_embedding: deterministic_vector(query),
+            query_embedding: Some(
+                moa_memory_vector::QueryEmbedding::new(deterministic_vector(query), "test-model")
+                    .expect("valid query embedding"),
+            ),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -987,11 +1058,14 @@ async fn identical_text_in_two_documents_hydrates_each_source_occurrence_db_memo
         .with_assume_app_role(true);
     let hits = retriever
         .retrieve(RetrievalRequest {
-            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
+            source_acl: knowledge_fixture_acl(),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: query.to_string(),
-            query_embedding: deterministic_vector(query),
+            query_embedding: Some(
+                moa_memory_vector::QueryEmbedding::new(deterministic_vector(query), "test-model")
+                    .expect("valid query embedding"),
+            ),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -1113,11 +1187,14 @@ async fn parent_document_retrieval_hydrates_ordinal_adjacent_neighbors() {
         .with_assume_app_role(true);
     let hits = retriever
         .retrieve(RetrievalRequest {
-            source_acl: moa_core::types::memory::SourceAclContext::empty(0),
+            source_acl: knowledge_fixture_acl(),
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: query.to_string(),
-            query_embedding: deterministic_vector(query),
+            query_embedding: Some(
+                moa_memory_vector::QueryEmbedding::new(deterministic_vector(query), "test-model")
+                    .expect("valid query embedding"),
+            ),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -1310,7 +1387,13 @@ async fn reinforced_fact_survives_consolidation_while_idle_one_off_expires_from_
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: query.to_string(),
-        query_embedding: deterministic_vector(query),
+        query_embedding: Some(
+            moa_memory_vector::QueryEmbedding::new(
+                deterministic_vector(query),
+                "reranker-default-test",
+            )
+            .expect("valid query embedding"),
+        ),
         scope: contact_memory_scope(&storage_partition_id, user),
         label_filter: Some(vec![NodeLabel::Fact]),
         label_boost: None,
@@ -1447,7 +1530,13 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
                 cleared_barriers: Default::default(),
                 seeds: Vec::new(),
                 query_text: summary.to_string(),
-                query_embedding: deterministic_vector(summary),
+                query_embedding: Some(
+                    moa_memory_vector::QueryEmbedding::new(
+                        deterministic_vector(summary),
+                        "test-model",
+                    )
+                    .expect("valid query embedding"),
+                ),
                 scope: contact_memory_scope(&storage_partition_id, user_a),
                 label_filter: Some(vec![NodeLabel::Fact]),
                 label_boost: None,
@@ -1482,7 +1571,13 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
                 cleared_barriers: Default::default(),
                 seeds: Vec::new(),
                 query_text: summary.to_string(),
-                query_embedding: deterministic_vector(summary),
+                query_embedding: Some(
+                    moa_memory_vector::QueryEmbedding::new(
+                        deterministic_vector(summary),
+                        "test-model",
+                    )
+                    .expect("valid query embedding"),
+                ),
                 scope: contact_memory_scope(&storage_partition_id, user_b),
                 label_filter: Some(vec![NodeLabel::Fact]),
                 label_boost: None,
@@ -1555,7 +1650,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: old_name.to_string(),
-        query_embedding: Vec::new(),
+        query_embedding: None,
         scope: scope.clone(),
         label_filter: Some(vec![NodeLabel::Fact]),
         label_boost: None,
@@ -1588,7 +1683,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: old_name.to_string(),
-        query_embedding: Vec::new(),
+        query_embedding: None,
         scope,
         label_filter: Some(vec![NodeLabel::Fact]),
         label_boost: None,
@@ -1677,7 +1772,10 @@ async fn temporal_turbopuffer_as_of_uses_pgvector_without_calling_turbopuffer() 
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: String::new(),
-            query_embedding: deterministic_vector(fact),
+            query_embedding: Some(
+                moa_memory_vector::QueryEmbedding::new(deterministic_vector(fact), "test-model")
+                    .expect("valid query embedding"),
+            ),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,
@@ -1771,7 +1869,10 @@ async fn temporal_dual_read_as_of_uses_pgvector_without_calling_turbopuffer() {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: String::new(),
-            query_embedding: deterministic_vector(fact),
+            query_embedding: Some(
+                moa_memory_vector::QueryEmbedding::new(deterministic_vector(fact), "test-model")
+                    .expect("valid query embedding"),
+            ),
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,
@@ -1872,7 +1973,7 @@ async fn turbopuffer_backend_uses_bm25_for_lexical_candidates_db_memory() {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "abc-123".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -1965,7 +2066,7 @@ async fn turbopuffer_backend_keeps_postgres_lexical_for_fact_candidates_db_memor
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "fact-456".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,
@@ -2063,7 +2164,7 @@ async fn turbopuffer_bm25_error_falls_back_to_postgres_lexical_db_memory() {
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "xyz-987".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -2140,7 +2241,7 @@ async fn lexical_prefix_fallback_matches_word_prefix_when_primary_misses_db_memo
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "auth".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Chunk]),
             label_boost: None,
@@ -2238,7 +2339,7 @@ async fn lexical_fallback_matches_structured_predicate_in_properties_db_memory()
             cleared_barriers: Default::default(),
             seeds: Vec::new(),
             query_text: "Which private work repository should you use for me?".to_string(),
-            query_embedding: Vec::new(),
+            query_embedding: None,
             scope: tenant_memory_scope(&storage_partition_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             label_boost: None,
@@ -2274,14 +2375,14 @@ async fn lexical_fallback_matches_structured_predicate_in_properties_db_memory()
         .expect("drop isolated schema");
 }
 
-/// Seeds one `provider_managed` knowledge object with a complete ACL snapshot,
+/// Seeds one source-governed knowledge object with a complete ACL snapshot,
 /// returning `(chunk uid, document node uid)`.
 ///
 /// Written through raw SQL rather than the ingestion pipeline so the test states
 /// the exact stored ACL position it is asserting against, with no dependence on
 /// how ingestion happened to normalize a provider payload.
 #[allow(clippy::too_many_arguments)]
-async fn seed_provider_managed_chunk(
+async fn seed_source_acl_chunk(
     pool: &PgPool,
     storage_partition_id: &str,
     object_slug: &str,
@@ -2302,10 +2403,10 @@ async fn seed_provider_managed_chunk(
         r#"
         INSERT INTO moa.knowledge_connections (
             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
-            provider_connection_id, connector, credential_ref, status, acl_mode, metadata
+            provider_connection_id, connector, credential_ref, status, metadata
         )
         VALUES ($1, $2, $3, 'nango', $4, $5, 'google-drive',
-                'vault://source-acl-test', 'active', 'provider_managed', '{}'::jsonb)
+                'vault://source-acl-test', 'active', '{}'::jsonb)
         "#,
     )
     .bind(connection_uid)
@@ -2315,7 +2416,7 @@ async fn seed_provider_managed_chunk(
     .bind(format!("acct-{object_slug}"))
     .execute(pool)
     .await
-    .expect("insert provider-managed connection");
+    .expect("insert source-governed connection");
 
     sqlx::query(
         r#"
@@ -2335,15 +2436,15 @@ async fn seed_provider_managed_chunk(
     .bind(format!("{object_slug} memo"))
     .execute(pool)
     .await
-    .expect("insert provider-managed object");
+    .expect("insert source-governed object");
 
     sqlx::query(
         r#"
         INSERT INTO moa.knowledge_source_acl_snapshots (
             snapshot_uid, tenant_id, storage_partition_id, connection_id, object_id,
-            provider_revision, snapshot_hash, provenance, complete, entry_count, captured_at
+            provider_revision, snapshot_hash, complete, entry_count, captured_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, 'hash-' || $6, 'provider_listing', TRUE, $7, now())
+        VALUES ($1, $2, $3, $4, $5, $6, 'hash-' || $6, TRUE, $7, now())
         "#,
     )
     .bind(snapshot_uid)
@@ -2437,7 +2538,7 @@ async fn seed_provider_managed_chunk(
 }
 
 #[tokio::test]
-async fn provider_managed_chunk_is_admitted_only_for_its_own_principals_db_memory() {
+async fn source_acl_chunk_is_admitted_only_for_its_own_principals_db_memory() {
     // Pins the security claim end to end, through the PRODUCTION `retrieve`
     // path: two colleagues in one tenant issue the same query against the same
     // document, and only the one the source shared it with gets it back. The
@@ -2468,7 +2569,7 @@ async fn provider_managed_chunk_is_admitted_only_for_its_own_principals_db_memor
     let chunk_uid = Uuid::now_v7();
     let document_node_uid = Uuid::now_v7();
 
-    seed_provider_managed_chunk(
+    seed_source_acl_chunk(
         &pool,
         &storage_partition_id,
         "restricted",
@@ -2524,7 +2625,10 @@ async fn provider_managed_chunk_is_admitted_only_for_its_own_principals_db_memor
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: SHARED_TEXT.to_string(),
-        query_embedding: deterministic_vector(SHARED_TEXT),
+        query_embedding: Some(
+            moa_memory_vector::QueryEmbedding::new(deterministic_vector(SHARED_TEXT), "test-model")
+                .expect("valid query embedding"),
+        ),
         scope: scope.clone(),
         label_filter: Some(vec![NodeLabel::Chunk, NodeLabel::Document]),
         label_boost: None,

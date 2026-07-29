@@ -8,7 +8,12 @@
 
 use std::time::Duration;
 
-use moa_core::types::action_policy::ActionReviewStatus;
+use moa_core::{
+    events::Event,
+    types::action_policy::{
+        ActionReviewOwner, ActionReviewStatus, action_review_timed_out_dedupe_key,
+    },
+};
 use moa_execution::wire::ExecutionActionReviewAcknowledgement;
 use moa_observability::propagation::{
     ValidatedTraceContext, with_reqwest_validated_trace_headers,
@@ -24,8 +29,10 @@ use tokio::sync::oneshot;
 use tokio::time::interval;
 
 use crate::action_reviews::store as action_review_store;
+use moa_wire::session_store::AppendEventRequest;
 
 const EXECUTION_REVIEW_DISPATCH_BATCH_SIZE: i64 = 32;
+const OWNER_RELEASE_DISPATCH_BATCH_SIZE: i64 = 32;
 
 /// Action-review reaper failures.
 #[derive(Debug, Error)]
@@ -116,6 +123,10 @@ impl ActionReviewReaper {
             );
         }
         if self.restate_ingress_url.is_some() {
+            let released = self.dispatch_action_review_releases().await?;
+            if released > 0 {
+                tracing::info!(count = released, "action-review owner releases dispatched");
+            }
             let dispatched = self.dispatch_execution_review_resolutions().await?;
             if dispatched > 0 {
                 tracing::info!(
@@ -125,6 +136,109 @@ impl ActionReviewReaper {
             }
         }
         Ok(timed_out.len())
+    }
+
+    /// Attempts one bounded batch of persisted owner releases.
+    pub async fn dispatch_action_review_releases(&self) -> Result<usize, ActionReviewReaperError> {
+        let Some(ingress_url) = self.restate_ingress_url.as_deref() else {
+            return Ok(0);
+        };
+        let pending = action_review_store::pending_action_review_releases(
+            &self.pool,
+            OWNER_RELEASE_DISPATCH_BATCH_SIZE,
+        )
+        .await?;
+        let pending_count = pending.len();
+        let dispatch_trace_context = current_trace_context();
+        for delivery in pending {
+            let event_request = AppendEventRequest {
+                session_id: delivery.release.owner.session_id(),
+                event: Event::ActionReviewTimedOut {
+                    review_id: delivery.release.review_id,
+                    timed_out_at: delivery.timed_out_at,
+                },
+                dedupe_key: Some(action_review_timed_out_dedupe_key(
+                    delivery.release.review_id,
+                )),
+            };
+            let event_response = with_reqwest_validated_trace_headers(
+                self.client
+                    .post(format!(
+                        "{ingress_url}/restate/call/SessionStore/append_event"
+                    ))
+                    .header(
+                        "idempotency-key",
+                        format!("action-review-timeout-event:{}", delivery.release.review_id),
+                    )
+                    .json(&event_request),
+                dispatch_trace_context.as_ref(),
+            )
+            .send()
+            .await;
+            match event_response {
+                Ok(response) if response.status().is_success() => {}
+                Ok(response) => {
+                    tracing::warn!(
+                        review_id = %delivery.release.review_id,
+                        status = %response.status(),
+                        "action-review timeout event append failed; owner release deferred"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        review_id = %delivery.release.review_id,
+                        error = %error,
+                        "action-review timeout event append failed; owner release deferred"
+                    );
+                    continue;
+                }
+            }
+            let endpoint = match &delivery.release.owner {
+                ActionReviewOwner::Coordinator { session_id, .. } => {
+                    format!("{ingress_url}/restate/call/Session/{session_id}/release_action_review")
+                }
+                ActionReviewOwner::Worker { worker_id, .. } => {
+                    format!("{ingress_url}/restate/call/Worker/{worker_id}/release_action_review")
+                }
+                ActionReviewOwner::ExecutionTask { .. } => {
+                    tracing::error!(
+                        review_id = %delivery.release.review_id,
+                        "execution action review reached conversational release dispatch"
+                    );
+                    continue;
+                }
+            };
+            let request = with_reqwest_validated_trace_headers(
+                self.client
+                    .post(endpoint)
+                    .header("idempotency-key", delivery.release.review_id.to_string())
+                    .json(&delivery.release),
+                dispatch_trace_context.as_ref(),
+            );
+            match request.send().await {
+                Ok(response) if response.status().is_success() => {
+                    action_review_store::mark_action_review_release_delivered(
+                        &self.pool,
+                        delivery.release.review_id,
+                    )
+                    .await?;
+                }
+                Ok(response) => {
+                    tracing::warn!(
+                        review_id = %delivery.release.review_id,
+                        status = %response.status(),
+                        "action-review owner release failed; retry remains pending"
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    review_id = %delivery.release.review_id,
+                    error = %error,
+                    "action-review owner release failed; retry remains pending"
+                ),
+            }
+        }
+        Ok(pending_count)
     }
 
     /// Claims and attempts one bounded persisted execution-review outbox batch.

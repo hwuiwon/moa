@@ -264,22 +264,7 @@ async fn purge_credential_state(
         }
         claims = claims.saturating_add(removed);
     }
-    // MCP connection bindings carry credential references only, so they drain
-    // in this stage too, after the credential owner, under their own scoped
-    // `moa_app` transactions (their forced-RLS policy hides them from the
-    // relational purge transaction's role).
-    let bindings_store = moa_hands::core::PostgresTenantMcpConnectionBindings::new(pool.clone());
-    let mut bindings = 0_u64;
-    loop {
-        let removed = bindings_store
-            .purge_tenant_bindings(tenant_id, CREDENTIAL_PURGE_BATCH_SIZE)
-            .await
-            .map_err(|error| format!("tenant MCP binding purge: {error}"))?;
-        if removed == 0 {
-            return Ok(credentials.saturating_add(claims).saturating_add(bindings));
-        }
-        bindings = bindings.saturating_add(removed);
-    }
+    Ok(credentials.saturating_add(claims))
 }
 
 async fn purge_credentials(

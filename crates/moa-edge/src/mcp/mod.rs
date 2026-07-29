@@ -13,7 +13,6 @@ mod evals;
 mod execution_runs;
 mod experiments;
 mod http;
-mod index_rebuild;
 mod result;
 
 use axum::http::HeaderMap;
@@ -262,8 +261,7 @@ fn all_tools() -> ToolRouter<Server> {
         + agents::router()
         + execution_runs::router()
         + evals::router()
-        + experiments::router()
-        + index_rebuild::router();
+        + experiments::router();
     contract::enrich(&mut router);
     router
 }
@@ -467,11 +465,6 @@ mod tests {
             "experiment_trial_status",
             "experiment_trials_list",
             "experiments_list",
-            "index_rebuild_cancel",
-            "index_rebuild_finalize",
-            "index_rebuild_rollback",
-            "index_rebuild_start",
-            "index_rebuild_status",
             "learning_candidate_accept_rollback",
             "learning_candidate_accept_skill",
             "learning_candidate_dismiss",
@@ -496,11 +489,23 @@ mod tests {
         assert_eq!(actual, expected, "MCP tool discovery allowlist drifted");
         assert_eq!(
             actual.len(),
-            61,
-            "expected exactly 61 tenant-operation tools"
+            56,
+            "expected exactly 56 tenant-operation tools"
         );
         assert!(!actual.contains("execute_run"));
         assert!(!actual.contains("replay"));
+        for retired in [
+            "index_rebuild_start",
+            "index_rebuild_status",
+            "index_rebuild_cancel",
+            "index_rebuild_rollback",
+            "index_rebuild_finalize",
+        ] {
+            assert!(
+                !actual.contains(retired),
+                "{retired} must not be advertised until model-aware retrieval exists"
+            );
+        }
     }
 
     #[test]

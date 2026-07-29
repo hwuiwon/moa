@@ -36,6 +36,12 @@ const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         name: "V000346__tenant_credential_vault.sql",
         sql: include_str!("../migrations/postgres/V000346__tenant_credential_vault.sql"),
     },
+    SchemaMigration {
+        name: "V000367__drop_tenant_mcp_connection_bindings.sql",
+        sql: include_str!(
+            "../migrations/postgres/V000367__drop_tenant_mcp_connection_bindings.sql"
+        ),
+    },
 ];
 
 const ORCHESTRATOR_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {
@@ -180,16 +186,6 @@ pub async fn run_orchestrator_schema(pool: &PgPool, schema_name: &str) -> Result
 /// Runs the OCSF baseline inside an isolated schema.
 pub async fn run_ocsf_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
     run_schema_migrations(pool, schema_name, OCSF_SCHEMA_MIGRATIONS).await
-}
-
-const HANDS_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {
-    name: "V000349__tenant_mcp_connection_bindings.sql",
-    sql: include_str!("../migrations/postgres/V000349__tenant_mcp_connection_bindings.sql"),
-}];
-
-/// Runs the tool-routing tables inside an isolated schema.
-pub async fn run_hands_schema(pool: &PgPool, schema_name: &str) -> Result<()> {
-    run_schema_migrations(pool, schema_name, HANDS_SCHEMA_MIGRATIONS).await
 }
 
 /// Ensures the standalone lineage schema exists.

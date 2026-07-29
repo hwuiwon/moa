@@ -20,11 +20,7 @@ fn redacted_secret_debug_never_renders_plaintext() {
 fn credential_kind_names_round_trip_and_reject_unknown() {
     // Pins: stored kind names are a closed set, so an unknown row value fails
     // closed instead of resolving as some default kind.
-    for kind in [
-        CredentialKind::ProviderApiKey,
-        CredentialKind::OAuth,
-        CredentialKind::McpBearer,
-    ] {
+    for kind in [CredentialKind::ProviderApiKey, CredentialKind::OAuth] {
         assert_eq!(CredentialKind::from_str_exact(kind.as_str()), Some(kind));
     }
     // A retired address-style value and an empty value both fail closed. The

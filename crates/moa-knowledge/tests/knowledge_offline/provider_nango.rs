@@ -10,7 +10,8 @@ use moa_knowledge::{
     domain::{
         ApplySourceSelectionRequest, ConnectionStatus, CreateLinkTokenRequest,
         FetchRecordContentRequest, KnowledgeConnection, ListChangedRecordsRequest,
-        ProviderIntegration, ProviderRecord, StartInitialSyncRequest, TriggerSyncRequest,
+        ProviderIntegration, ProviderRecord, ProviderRecordAcl, StartInitialSyncRequest,
+        TriggerSyncRequest,
     },
     providers::{LinkedIntegrationProvider, nango::NangoProvider},
 };
@@ -26,7 +27,6 @@ use wiremock::{
 fn connection() -> KnowledgeConnection {
     let now = moa_test_support::fixtures::pg_now();
     KnowledgeConnection {
-        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid: Uuid::from_u128(101),
         tenant_id: TenantId::from(Uuid::from_u128(102)),
         provider: "nango".to_string(),
@@ -42,6 +42,14 @@ fn connection() -> KnowledgeConnection {
         created_at: now,
         updated_at: now,
         last_synced_at: None,
+    }
+}
+
+fn provider_record_acl() -> ProviderRecordAcl {
+    ProviderRecordAcl {
+        provider_revision: "fixture-acl-rev".to_string(),
+        complete: true,
+        entries: Vec::new(),
     }
 }
 
@@ -593,7 +601,7 @@ async fn list_integrations_surfaces_upstream_errors() {
 
 fn drive_record(source_id: &str, mime_type: &str) -> ProviderRecord {
     ProviderRecord {
-        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
+        acl: provider_record_acl(),
         source_id: source_id.to_string(),
         object_type: "drive_file".to_string(),
         title: Some(format!("{source_id} title")),

@@ -724,6 +724,23 @@ async fn record_execution_task_transition(
         .await?
         .into_inner();
 
+    let dedupe_key = transition.key.clone();
+    crate::restate_identity::replay_safe_request(
+        ctx.service_client::<crate::services::session_store::RestateSessionStoreClient>()
+            .append_event(Json::from(moa_wire::session_store::AppendEventRequest {
+                session_id,
+                event: moa_core::events::Event::PromptInjectionCircuitTransition {
+                    transition: transition.clone(),
+                    signals: assessment.signals.clone(),
+                    redacted_spans: assessment.redacted_spans,
+                    deduplicated_carriers: assessment.deduplicated_carriers,
+                },
+                dedupe_key: Some(dedupe_key),
+            })),
+    )
+    .call()
+    .await?;
+
     crate::restate_identity::replay_safe_request(
         ctx.service_client::<crate::services::security_events::SecurityEventsClient>()
             .record_circuit_transition(Json::from(
@@ -806,16 +823,27 @@ async fn execute_agent(
     // shared circuit alternate between the coordinator owner and each detached
     // task owner, and each switch would clear the other's accumulated score.
     let mut circuit = moa_core::types::security::SecurityCircuitState::default();
+    let mut disabled_capabilities =
+        std::collections::BTreeMap::<String, moa_core::types::security::ToolCapabilityId>::new();
     let circuit_owner = moa_core::types::security::SecurityCircuitOwner::ExecutionTask {
         run_uid: run.run_uid,
         task_uid: task.task_id.as_uuid(),
         generation: task.generation,
     };
+    circuit.adopt_owner(&circuit_owner);
     for turn in 0..max_turns {
         let mut request = CompletionRequest {
             model: None,
             messages: messages.clone(),
-            tools: tools.clone(),
+            tools: tools
+                .iter()
+                .filter(|tool| {
+                    tool.get("name")
+                        .and_then(Value::as_str)
+                        .is_none_or(|name| !disabled_capabilities.contains_key(name))
+                })
+                .cloned()
+                .collect(),
             max_output_tokens: None,
             temperature: None,
             response_format: None,
@@ -870,6 +898,22 @@ async fn execute_agent(
                         .is_ok_and(|name| name == tool_call.invocation.name)
                 })
                 .ok_or_else(|| TerminalError::new("agent emitted an undeclared capability"))?;
+            if disabled_capabilities.contains_key(&tool_call.invocation.name) {
+                let tool_use_id =
+                    tool_call.invocation.id.clone().unwrap_or_else(|| {
+                        format!("execution-{}-{turn}-{call_index}", task.task_id)
+                    });
+                messages.push(ContextMessage::assistant_tool_call(
+                    tool_call.invocation,
+                    "",
+                ));
+                messages.push(ContextMessage::tool_result(
+                    tool_use_id,
+                    EXECUTION_TASK_DISABLED_CAPABILITY_MESSAGE,
+                    None,
+                ));
+                continue;
+            }
             let invocation = invoke_capability_tool(
                 workflow,
                 ctx,
@@ -920,7 +964,18 @@ async fn execute_agent(
                         ),
                     },
                     &output.assessment,
-                );
+                )
+                .map_err(|error| {
+                    tracing::error!(
+                        active_owner_kind = error.active.as_ref().map(|owner| owner.kind()),
+                        active_owner_generation =
+                            error.active.as_ref().map(|owner| owner.generation()),
+                        received_owner_kind = error.received.kind(),
+                        received_owner_generation = error.received.generation(),
+                        "execution task security assessment owner mismatch"
+                    );
+                    TerminalError::new("security assessment owner mismatch")
+                })?;
                 if let Some(transition) = applied {
                     record_execution_task_transition(
                         ctx,
@@ -931,7 +986,12 @@ async fn execute_agent(
                     )
                     .await?;
                 }
-                match circuit.stage(&circuit_owner, &output.capability) {
+                let stage = circuit.stage(&circuit_owner, &output.capability);
+                if !stage.permits_dispatch() {
+                    disabled_capabilities
+                        .insert(tool_call.invocation.name.clone(), output.capability.clone());
+                }
+                match stage {
                     moa_core::types::security::SecurityCircuitStage::Halted => {
                         return Ok(failed_outcome(
                             ExecutionFailureClass::Terminal,
@@ -975,6 +1035,9 @@ async fn execute_agent(
         usage,
     ))
 }
+
+/// Fixed model-facing refusal for a capability disabled by the task circuit.
+const EXECUTION_TASK_DISABLED_CAPABILITY_MESSAGE: &str = "This tool capability is disabled for the current task because its prior output triggered the security circuit.";
 
 struct CapabilityInvocationContext<'a> {
     identity: &'a moa_core::traits::Identity,
@@ -1852,7 +1915,7 @@ mod tests {
             OutputAssessmentClass::CanaryLeak,
             "a capability echoing the turn's canary is a leak, not merely suspicious"
         );
-        assert!(secured.assessment.cleared_raw_carriers);
+        assert!(secured.assessment.class.clears_raw_carriers());
         assert!(
             !serde_json::to_string(&secured)
                 .expect("serialize secured output")
@@ -1877,6 +1940,7 @@ mod tests {
             },
             &secured.assessment,
         )
+        .expect("the admitted owner matches")
         .expect("a first-strike canary leak must produce one transition");
 
         assert_eq!(transition.prior_stage, SecurityCircuitStage::Clear);

@@ -296,7 +296,7 @@ async fn daytona_router_reuses_and_isolates() {
     let temp = tempdir().expect("tempdir");
     config.local.sandbox_dir = temp.path().join("sandbox").display().to_string();
 
-    let router = ToolRouter::from_config(&config, None, None, None)
+    let router = ToolRouter::from_config(&config, None, None)
         .await
         .expect("router should load Daytona from config");
     let provider = DaytonaHandProvider::from_config(&config).expect("provider from config");

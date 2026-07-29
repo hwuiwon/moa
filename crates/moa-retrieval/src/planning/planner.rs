@@ -29,6 +29,9 @@ pub enum PlanError {
     /// Query embedding returned no vector.
     #[error("query embedding returned no vector")]
     EmptyQueryEmbedding,
+    /// Query embedding vector or model identity was invalid.
+    #[error("query embedding is invalid: {0}")]
+    InvalidQueryEmbedding(#[from] moa_memory_vector::Error),
     /// Hybrid retrieval failed.
     #[error("hybrid retrieval failed: {0}")]
     Retrieval(#[from] RetrievalError),
@@ -75,7 +78,7 @@ impl PlannedQuery {
     pub fn into_retrieval_request(
         self,
         query_text: impl Into<String>,
-        query_embedding: Vec<f32>,
+        query_embedding: Option<moa_memory_vector::QueryEmbedding>,
         max_pii_class: SensitivityClass,
         k_final: usize,
         use_reranker: bool,
@@ -90,9 +93,9 @@ impl PlannedQuery {
             // sets this before the request reaches a scoped leg.
             cleared_barriers: Default::default(),
             // Same fail-closed default: an unattached admission context admits
-            // only tenant-public sources, and its unresolved epoch keeps the
-            // result out of any cache. The retrieval entry point resolves the
-            // caller's real principal set before the request reaches a leg.
+            // no governed source, and its unresolved epoch keeps the result out
+            // of any cache. The retrieval entry point resolves the caller's
+            // real principal set before the request reaches a leg.
             source_acl: moa_core::types::memory::SourceAclContext::empty(
                 moa_core::types::memory::SOURCE_ACL_EPOCH_UNRESOLVED,
             ),
@@ -281,9 +284,11 @@ pub async fn retrieve_for_query(
     metrics::histogram!("moa_retrieval_embedder_seconds")
         .record(embed_started.elapsed().as_secs_f64());
     let embedding = embeddings.pop().ok_or(PlanError::EmptyQueryEmbedding)?;
+    let query_embedding =
+        moa_memory_vector::QueryEmbedding::new(embedding, ctx.embedder.model_id())?;
     let mut request = planned.clone().into_retrieval_request(
         query_text,
-        embedding,
+        Some(query_embedding),
         ctx.max_pii_class,
         ctx.k_final,
         ctx.use_reranker,
@@ -648,7 +653,10 @@ mod tests {
 
         let request = planned.into_retrieval_request(
             "what did we learn from the auth outage?",
-            vec![0.0_f32; 4],
+            Some(
+                moa_memory_vector::QueryEmbedding::new(vec![0.0_f32; 4], "test-embed")
+                    .expect("valid query embedding"),
+            ),
             SensitivityClass::None,
             5,
             false,

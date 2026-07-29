@@ -29,7 +29,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::retrieval::{MemoryServiceDeps, neighbors_for_tool, search_hits_for_tool};
+use super::retrieval::{
+    MemoryServiceDeps, neighbors_for_tool, resolved_policy, search_hits_for_tool,
+};
 
 /// Number of hits `memory_search` returns.
 ///
@@ -77,13 +79,15 @@ impl OrchestratorMemoryRetrievalExecutor {
         input: &Value,
     ) -> Result<ToolOutput> {
         let started = Instant::now();
-        let policy = MemoryAdmissionPolicy::from_session(session)?;
-        let clearances = session_clearances(session)?;
         if caller_identity.tenant_id != session.tenant_id {
             return Err(MoaError::PermissionDenied(
                 "memory retrieval identity does not match the pinned session tenant".to_string(),
             ));
         }
+        let clearances = session_clearances(session)?;
+        let policy = resolved_policy(&self.pool, session)
+            .await
+            .map_err(handler_error_to_tool_error)?;
         let context = MemoryToolInvocation {
             pool: &self.pool,
             kms: &self.kms,

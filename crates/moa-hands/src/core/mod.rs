@@ -5,7 +5,6 @@ mod dispatch;
 pub mod leases;
 mod lifecycle;
 pub mod mcp_catalog;
-pub mod mcp_connections;
 mod normalization;
 mod output_budget;
 mod policy;
@@ -29,7 +28,7 @@ use moa_core::{
     types::hands::SandboxPolicySnapshot, types::identifiers::TenantId,
 };
 use moa_security::{
-    ActionPolicies, ActionPolicyRuleStore, MCPCredentialProxy, McpEgressGuard,
+    ActionPolicies, ActionPolicyRuleStore, McpDeploymentCredentials, McpEgressGuard,
     UnmatchedPermissionPattern,
 };
 use tokio::sync::RwLock;
@@ -39,11 +38,6 @@ use crate::adapters::mcp::MCPClient;
 
 use leases::HandLeaseStore;
 pub use mcp_catalog::{McpCatalogRefresh, McpConnectorHealth, spawn_mcp_catalog_refresh};
-pub use mcp_connections::{
-    PostgresTenantMcpConnectionBindings, TenantMcpAuthorizer, TenantMcpBindingStatus,
-    TenantMcpConnectionBinding, TenantMcpConnectionBindingStore, TenantMcpCredentialOwners,
-    ToolCredentialScope,
-};
 pub use policy::{ActionOrigin, PreparedActionInvocation};
 pub use profile::TenantSandboxPolicyStore;
 pub use profile::{
@@ -95,14 +89,7 @@ pub struct ToolRouter {
     /// unaffected, while a required connector that is down never reaches this
     /// map because startup fails with the same typed value.
     mcp_health: RwLock<std::collections::BTreeMap<String, McpConnectorHealth>>,
-    mcp_proxy: Option<Arc<MCPCredentialProxy>>,
-    /// Owners required to serve tenant-owned MCP servers: the durable credential
-    /// vault behind [`MCPCredentialProxy`], the connection binding owner, and the
-    /// delegated tenant-operator authorizer. `None` is valid only for a
-    /// deployment that configures no tenant-owned MCP server — construction
-    /// rejects the combination, and dispatch fails closed rather than falling
-    /// back to the deployment credential.
-    tenant_mcp: Option<Arc<TenantMcpCredentialOwners>>,
+    mcp_credentials: McpDeploymentCredentials,
     /// Optional data-class egress guard for outbound MCP tool calls. When
     /// present, each call's serialized arguments are classified against the
     /// destination server's `allowed_data_classes` allowlist and blocked (fail
@@ -110,8 +97,6 @@ pub struct ToolRouter {
     /// permitted to receive. Absence is valid only when no MCP servers are
     /// configured: configured construction rejects it, and manually assembled
     /// routers fail closed at dispatch. The guard is held here rather than on
-    /// [`MCPCredentialProxy`] so it governs every external MCP server, including
-    /// credential-less ones for which no proxy is built.
     mcp_egress_guard: Option<Arc<McpEgressGuard>>,
     active_hands: RwLock<HashMap<String, HandHandle>>,
     preferred_hand_routes: RwLock<HashMap<String, String>>,

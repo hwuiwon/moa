@@ -486,6 +486,9 @@ fn redacted_event_summary(event: &Event) -> String {
         Event::ActionReviewDecided { review_id, .. } => {
             format!("action review decided: {review_id}")
         }
+        Event::ActionReviewTimedOut { review_id, .. } => {
+            format!("action review timed out: {review_id}")
+        }
         // Redacted by construction: only the review and continuation turn identifiers
         // reach the dashboard summary. The receipt's outcome summary can quote tool
         // output, so it stays out of this operator-facing projection.

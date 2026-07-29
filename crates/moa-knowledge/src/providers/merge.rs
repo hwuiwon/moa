@@ -12,14 +12,14 @@ use crate::acl_key::SourceAclKey;
 use crate::{
     domain::{
         CreateLinkTokenRequest, ExchangePublicTokenRequest, InitialSyncStarted, LinkToken,
-        LinkedAccount, ListChangedRecordsRequest, ProviderAclCapability, ProviderIntegration,
-        ProviderRecord, RecordPage, StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync,
-        WebhookEvent,
+        LinkedAccount, ListChangedRecordsRequest, ProviderIntegration, ProviderRecord, RecordPage,
+        StartInitialSyncRequest, TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
     providers::{
         LinkedIntegrationProvider,
+        acl_normalize::principal_namespace,
         http::{self, string_field, trim_base_url},
     },
 };
@@ -97,14 +97,6 @@ const MERGE_KNOWLEDGE_CATEGORIES: &[(&str, &str)] = &[
 
 #[async_trait::async_trait]
 impl LinkedIntegrationProvider for MergeProvider {
-    /// Every Merge category MOA syncs (knowledge bases, file storage, ticketing)
-    /// is permission-bearing at the source, so Merge always returns native ACLs.
-    /// A record whose category does not expose a permission listing normalizes to
-    /// an INCOMPLETE ACL and stays hidden rather than becoming tenant-readable.
-    fn acl_capability(&self) -> ProviderAclCapability {
-        ProviderAclCapability::NativeSnapshots
-    }
-
     async fn list_integrations(&self) -> Result<Vec<ProviderIntegration>> {
         // Static category list: Merge exposes integrations as unified-API product
         // categories, and the category id is what the link flow passes as
@@ -291,10 +283,13 @@ impl LinkedIntegrationProvider for MergeProvider {
             .await
             .map_err(|error| Error::provider("merge", format!("record listing failed: {error}")))?;
         let value: Value = http::json_response(response).await?;
-        // Principals are scoped to the linked category, so a person in a Merge
-        // knowledge base and the same person in a ticketing account are distinct
-        // principals unless a verified binding says otherwise.
-        let namespace = format!("merge:{}", req.connection.connector);
+        // Connection identity is part of the namespace because provider-local
+        // principal ids may be reused by two linked accounts in one category.
+        let namespace = principal_namespace(
+            "merge",
+            &req.connection.connector,
+            req.connection.connection_uid,
+        );
         Ok(RecordPage {
             next_cursor: string_field(&value, &["next", "next_cursor", "cursor"]),
             records: value
@@ -445,12 +440,8 @@ fn value_to_provider_record(
     value: &Value,
 ) -> ProviderRecord {
     let payload = redact_provider_metadata(value.clone());
-    let acl = crate::providers::acl_normalize::record_acl_from_payload(
-        namespace,
-        &payload,
-        crate::domain::ProviderAclProvenance::ProviderListing,
-        acl_key,
-    );
+    let acl =
+        crate::providers::acl_normalize::record_acl_from_payload(namespace, &payload, acl_key);
     ProviderRecord {
         source_id: string_field(&payload, &["id", "remote_id"])
             .unwrap_or_else(|| stable_id(&payload.to_string())),
@@ -471,7 +462,7 @@ fn value_to_provider_record(
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
             .map(|value| value.with_timezone(&chrono::Utc)),
         metadata: Value::Null,
-        payload,
+        payload: crate::providers::acl_normalize::strip_acl_principal_carriers(payload),
         acl,
     }
 }
@@ -498,4 +489,37 @@ fn append_path_segment(url: &mut reqwest::Url, segment: &str) -> Result<()> {
         .map_err(|_| Error::provider("merge", "URL cannot accept path segments"))?
         .push(segment);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::value_to_provider_record;
+    use crate::acl_key::SourceAclKey;
+    use serde_json::json;
+
+    #[test]
+    fn converted_record_contains_only_fingerprinted_acl_principals() {
+        // Pins: Merge's production conversion strips readable ACL identities
+        // after deriving the opaque snapshot.
+        let converted = value_to_provider_record(
+            "merge:knowledge:connection-1",
+            &SourceAclKey::new(1, vec![9; 32]),
+            &json!({
+                "id": "article-1",
+                "version": "4",
+                "content": "Support guide",
+                "access_control_list": [{
+                    "principal_type": "group",
+                    "email": "support@example.com",
+                    "access": "read"
+                }]
+            }),
+        );
+
+        assert!(converted.acl.complete);
+        assert_eq!(converted.acl.entries.len(), 1);
+        let serialized = serde_json::to_string(&converted).expect("record serializes");
+        assert!(!serialized.contains("support@example.com"));
+        assert!(serialized.contains("Support guide"));
+    }
 }

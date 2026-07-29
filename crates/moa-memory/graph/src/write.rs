@@ -1589,7 +1589,12 @@ async fn ensure_storage_partition_embedder_state(
         INSERT INTO moa.storage_partition_state
             (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
         VALUES ($1, $2, $3, $4)
-        ON CONFLICT (storage_partition_id) DO NOTHING
+        ON CONFLICT (storage_partition_id) DO UPDATE
+            SET embedding_model = EXCLUDED.embedding_model,
+                embedding_model_version = EXCLUDED.embedding_model_version,
+                embedding_dimension = EXCLUDED.embedding_dimension,
+                updated_at = now()
+            WHERE moa.storage_partition_state.embedding_model IS NULL
         "#,
     )
     .bind(storage_partition_id)

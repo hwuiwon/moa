@@ -9,7 +9,6 @@ mod steps;
 
 pub use graph_writer::{GraphWriteReport, KnowledgeGraphWriter, MemoryKnowledgeGraphWriter};
 pub use record::parse_input_from_record;
-pub use source_acl::KnowledgeSourceAclContext;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -81,7 +80,6 @@ pub struct KnowledgeIngestionPipeline<R, P, E, G> {
     provider: String,
     parser_label: String,
     content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
-    source_acl: KnowledgeSourceAclContext,
 }
 
 /// Static pipeline settings used for chunking and observability labels.

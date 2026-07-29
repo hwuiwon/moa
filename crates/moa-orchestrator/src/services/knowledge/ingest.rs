@@ -12,10 +12,10 @@ use moa_core::{
 use moa_crypto::KeyManagementProvider;
 use moa_knowledge::{
     chunking::ChunkingConfig,
-    domain::{KnowledgeSyncRun, ParseInput, ParsedDocument, ProviderAclCapability, RecordPage},
+    domain::{KnowledgeSyncRun, ParseInput, ParsedDocument, RecordPage},
     ingestion::{
-        KnowledgeIngestionPipeline, KnowledgeIngestionPipelineConfig, KnowledgeSourceAclContext,
-        MemoryKnowledgeGraphWriter, PageIngestionReport,
+        KnowledgeIngestionPipeline, KnowledgeIngestionPipelineConfig, MemoryKnowledgeGraphWriter,
+        PageIngestionReport,
     },
     parser::{
         DocumentParser, llamaparse::LlamaParseParser, native::NativeDocumentParser,
@@ -181,12 +181,6 @@ async fn build_ingestion_pipeline(
         pool.clone(),
         scope.clone(),
     ));
-    // The connector's declared capability, not an operator preference, decides
-    // whether this run's records are tenant-public or provider-managed. An
-    // unrecognized provider is a typed error rather than a guess. No fingerprint
-    // key is needed here: principals were keyed by the adapter during listing.
-    let source_acl =
-        KnowledgeSourceAclContext::for_capability(ProviderAclCapability::for_provider(&provider)?);
     let parser = Arc::new(build_document_parser(config, &parser_label)?);
     let embedder = Arc::new(SharedEmbeddingProvider::new(
         build_embedder_from_config(
@@ -221,7 +215,6 @@ async fn build_ingestion_pipeline(
             provider,
             parser_label,
         },
-        source_acl,
     )
     .with_content_fetcher(content_fetcher))
 }

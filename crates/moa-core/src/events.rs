@@ -538,6 +538,13 @@ pub enum Event {
         /// Decision timestamp.
         decided_at: DateTime<Utc>,
     },
+    /// A tenant-admin action review expired without a decision.
+    ActionReviewTimedOut {
+        /// Tenant-admin review identifier.
+        review_id: Uuid,
+        /// Timestamp the review became terminal.
+        timed_out_at: DateTime<Utc>,
+    },
     /// A resolved action review dispatched its owner's continuation turn.
     ///
     /// Appended with the durable dedupe key
@@ -863,6 +870,7 @@ impl Event {
             // re-reading the tail, so neither review event resumes the loop itself.
             | Self::ActionReviewRequested { .. }
             | Self::ActionReviewDecided { .. }
+            | Self::ActionReviewTimedOut { .. }
             | Self::ExecutionInputRequired(_) => ProcessingEffect::Terminal,
 
             // A canonical turn failure is scheduling-relevant only for the actor
@@ -1226,6 +1234,24 @@ mod tests {
     }
 
     #[test]
+    fn action_review_timeout_event_round_trips_as_terminal_fact() {
+        // Pins: timeout is a typed, closed-vocabulary terminal fact rather than
+        // an unstructured denial reason inferred from the review table.
+        let event = Event::ActionReviewTimedOut {
+            review_id: Uuid::now_v7(),
+            timed_out_at: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&event).expect("serialize action review timeout");
+        assert!(json.contains("\"type\":\"ActionReviewTimedOut\""));
+        let decoded: Event =
+            serde_json::from_str(&json).expect("deserialize action review timeout");
+        assert_eq!(decoded, event);
+        assert_eq!(decoded.event_type(), EventType::ActionReviewTimedOut);
+        assert_eq!(decoded.processing_effect(), ProcessingEffect::Terminal);
+    }
+
+    #[test]
     fn action_policy_review_event_round_trips_separate_execution_origin() {
         // Pins: review persistence never conflates capability provenance with the typed
         // owner. Capability provenance says which artifact surface produced the call;
@@ -1276,11 +1302,10 @@ mod tests {
         // ids, and the ordered terminal facts the callback waited on — so a replay can
         // reconstruct the continuation without re-reading the review row.
         use crate::types::action_policy::{
-            ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt, ActionReviewTerminalEvent,
+            ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt,
         };
 
         let review_id = Uuid::from_u128(31);
-        let requested_tool_call_id = ToolCallId::from(review_id);
         let executed_tool_call_id = ToolCallId::from(Uuid::from_u128(32));
         let receipt = ActionReviewReceipt {
             review_id,
@@ -1291,17 +1316,16 @@ mod tests {
                 generation: 4,
             },
             tool_name: "bash".to_string(),
-            requested_tool_call_id,
             executed_tool_call_id: Some(executed_tool_call_id),
-            outcome: ActionReviewOutcome::ClearedSuccess {
-                summary: "reviewed".to_string(),
-                assessment: crate::types::security::ToolOutputAssessment::safe(),
-                capability: crate::types::security::ToolCapabilityId::builtin("bash"),
-            },
-            terminal_events: vec![
-                ActionReviewTerminalEvent::Decided,
-                ActionReviewTerminalEvent::ToolResult,
-            ],
+            outcome: ActionReviewOutcome::Cleared(
+                crate::types::action_policy::ToolTerminalFact::Result(
+                    crate::types::action_policy::ToolResultSecurityMetadata {
+                        success: true,
+                        assessment: crate::types::security::ToolOutputAssessment::safe(),
+                        capability: crate::types::security::ToolCapabilityId::builtin("bash"),
+                    },
+                ),
+            ),
         };
         let event = Event::ActionReviewContinuationRequested {
             review_id,
@@ -1322,14 +1346,6 @@ mod tests {
             "the continuation turn is dispatched durably by its owner, so the fact itself \
              is not unaddressed work the tail scan should re-trigger"
         );
-        assert_eq!(
-            receipt.terminal_events,
-            vec![
-                ActionReviewTerminalEvent::Decided,
-                ActionReviewTerminalEvent::ToolResult
-            ]
-        );
-        assert_ne!(receipt.requested_tool_call_id, executed_tool_call_id);
     }
 
     #[test]

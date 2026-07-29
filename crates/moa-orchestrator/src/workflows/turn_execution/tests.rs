@@ -33,12 +33,10 @@ fn run_turn_request(trigger: TurnTrigger) -> RunTurnRequest {
 fn action_review_continuation() -> moa_core::types::action_policy::ActionReviewContinuation {
     use moa_core::types::action_policy::{
         ActionReviewContinuation, ActionReviewOutcome, ActionReviewOwner, ActionReviewReceipt,
-        ActionReviewTerminalEvent,
     };
 
     let review_id = uuid::Uuid::from_u128(0x13_0001);
     ActionReviewContinuation {
-        review_id,
         receipt: ActionReviewReceipt {
             review_id,
             owner: ActionReviewOwner::Coordinator {
@@ -47,17 +45,16 @@ fn action_review_continuation() -> moa_core::types::action_policy::ActionReviewC
                 generation: 1,
             },
             tool_name: "bash".to_string(),
-            requested_tool_call_id: moa_core::types::identifiers::ToolCallId::new(),
             executed_tool_call_id: Some(moa_core::types::identifiers::ToolCallId::new()),
-            outcome: ActionReviewOutcome::ClearedSuccess {
-                summary: "reviewed".to_string(),
-                assessment: moa_core::types::security::ToolOutputAssessment::safe(),
-                capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
-            },
-            terminal_events: vec![
-                ActionReviewTerminalEvent::Decided,
-                ActionReviewTerminalEvent::ToolResult,
-            ],
+            outcome: ActionReviewOutcome::Cleared(
+                moa_core::types::action_policy::ToolTerminalFact::Result(
+                    moa_core::types::action_policy::ToolResultSecurityMetadata {
+                        success: true,
+                        assessment: moa_core::types::security::ToolOutputAssessment::safe(),
+                        capability: moa_core::types::security::ToolCapabilityId::builtin("bash"),
+                    },
+                ),
+            ),
         },
     }
 }

@@ -40,8 +40,9 @@ use moa_knowledge::{
         KnowledgeObjectProjection, KnowledgeProviderEventRecord, KnowledgeSyncCounters,
         KnowledgeSyncRun, LinkClaim, LinkClaimReservation, LinkClaimState, LinkClaimTransition,
         LinkToken, LinkedAccount, ListChangedRecordsRequest, NewLinkClaim, ObjectStatus,
-        ParseInput, ParsedDocument, ProviderIntegration, ProviderRecord, RecordPage,
-        StartInitialSyncRequest, SyncRunStatus, TriggerSyncRequest, TriggeredSync, WebhookEvent,
+        ParseInput, ParsedDocument, ProviderIntegration, ProviderRecord, ProviderRecordAcl,
+        RecordPage, StartInitialSyncRequest, SyncRunStatus, TriggerSyncRequest, TriggeredSync,
+        WebhookEvent,
     },
     ingestion::{
         KnowledgeIngestionPipeline, KnowledgeIngestionPipelineConfig, MemoryKnowledgeGraphWriter,
@@ -89,6 +90,14 @@ const CONNECTOR: &str = "drive";
 const SECRET_TOKEN: &str = "provider-secret-token-123";
 const SECRET_BEARER: &str = "Bearer provider-secret-token-456";
 const RAW_DOCUMENT_TAIL: &str = "RAW_FULL_DOCUMENT_TAIL_SHOULD_NOT_APPEAR";
+
+fn provider_record_acl() -> ProviderRecordAcl {
+    ProviderRecordAcl {
+        provider_revision: "fixture-acl-rev".to_string(),
+        complete: true,
+        entries: Vec::new(),
+    }
+}
 
 fn fixture_service(
     repository: Arc<InMemoryKnowledgeRepository>,
@@ -360,7 +369,6 @@ fn fake_prepared_sync_run(
             provider_trigger_completed_at: None,
         },
         connection: KnowledgeConnection {
-            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: PROVIDER.to_string(),
@@ -387,7 +395,7 @@ fn fake_record_page(source_ids: &[&str], next_cursor: Option<&str>) -> RecordPag
         records: source_ids
             .iter()
             .map(|source_id| ProviderRecord {
-                acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
+                acl: provider_record_acl(),
                 source_id: (*source_id).to_string(),
                 object_type: "document".to_string(),
                 title: Some((*source_id).to_string()),
@@ -684,9 +692,6 @@ fn task14_ingestion_pipeline(
             provider: provider.to_string(),
             parser_label: "task14".to_string(),
         },
-        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
-            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
-        ),
     ))
 }
 
@@ -770,7 +775,6 @@ impl KnowledgeIngestionRunner for FakeKnowledgeIngestionRunner {
 
 fn fixture_connection(tenant_id: TenantId) -> KnowledgeConnection {
     KnowledgeConnection {
-        acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
         connection_uid: Uuid::now_v7(),
         tenant_id,
         provider: PROVIDER.to_string(),
@@ -992,8 +996,7 @@ async fn seed_task14_embedder_state(pool: &sqlx::PgPool, tenant_id: TenantId) {
         ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
-                embedding_dimension = EXCLUDED.embedding_dimension,
-                reembed_state = 'steady'
+                embedding_dimension = EXCLUDED.embedding_dimension
         "#,
     )
     .bind(StoragePartitionId::for_tenant(tenant_id).to_string())
@@ -1217,12 +1220,6 @@ impl Task14LinkedIntegrationProvider {
 
 #[async_trait]
 impl LinkedIntegrationProvider for Task14LinkedIntegrationProvider {
-    /// The fake connector has no per-record permissions of its own, so it is
-    /// honestly uniformly public inside the tenant.
-    fn acl_capability(&self) -> moa_knowledge::domain::ProviderAclCapability {
-        moa_knowledge::domain::ProviderAclCapability::UniformlyPublic
-    }
-
     async fn create_link_token(
         &self,
         _req: CreateLinkTokenRequest,
@@ -1673,7 +1670,7 @@ fn provider_record(
     metadata: Value,
 ) -> ProviderRecord {
     ProviderRecord {
-        acl: moa_knowledge::domain::RecordAcl::UniformlyPublic,
+        acl: provider_record_acl(),
         source_id: source_id.to_string(),
         object_type: object_type.to_string(),
         title: Some(title.to_string()),
@@ -1856,12 +1853,6 @@ impl KnowledgeWebhookVerifier for FixedWebhookVerifier {
 
 #[async_trait]
 impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
-    /// The fake connector has no per-record permissions of its own, so it is
-    /// honestly uniformly public inside the tenant.
-    fn acl_capability(&self) -> moa_knowledge::domain::ProviderAclCapability {
-        moa_knowledge::domain::ProviderAclCapability::UniformlyPublic
-    }
-
     async fn list_integrations(&self) -> moa_knowledge::Result<Vec<ProviderIntegration>> {
         if let Some(message) = &self.integrations_error {
             return Err(KnowledgeError::Provider {

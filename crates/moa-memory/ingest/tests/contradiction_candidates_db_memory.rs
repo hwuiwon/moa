@@ -145,12 +145,14 @@ async fn candidates_merge_hydrates_lexical_and_vector_hits_excluding_inactive_db
     let detector = RrfPlusJudgeDetector::default();
     let vector = Arc::new(StubVectorStore { hit: vector_uid });
     let ctx = ContradictionContext::for_app_role(store.pool().clone(), scope, vector);
-    let embedding = vec![0.0_f32; VECTOR_DIMENSION];
+    let embedding =
+        moa_memory_vector::QueryEmbedding::new(vec![0.0_f32; VECTOR_DIMENSION], "test-embed")
+            .expect("valid query embedding");
 
     let candidates = detector
         .candidates(
             "checkout deploys railway",
-            &embedding,
+            Some(embedding),
             NodeLabel::Fact,
             SensitivityClass::None,
             &ctx,

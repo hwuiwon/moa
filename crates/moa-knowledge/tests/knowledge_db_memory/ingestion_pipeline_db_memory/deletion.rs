@@ -35,14 +35,10 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
-        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
-            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
-        ),
     );
 
     repository
         .upsert_connection(KnowledgeConnection {
-            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -263,13 +259,9 @@ async fn deletion_writes_terminal_status_last_and_stays_retryable_on_invalidatio
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
-        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
-            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
-        ),
     );
     repository
         .upsert_connection(KnowledgeConnection {
-            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),
@@ -391,14 +383,10 @@ async fn ingestion_pipeline_prunes_unseen_objects_after_full_selection_refresh()
             provider: "test_provider".to_string(),
             parser_label: "test_parser".to_string(),
         },
-        moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
-            moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
-        ),
     );
 
     repository
         .upsert_connection(KnowledgeConnection {
-            acl_mode: moa_knowledge::domain::ConnectionAclMode::TenantPublic,
             connection_uid,
             tenant_id,
             provider: "test_provider".to_string(),

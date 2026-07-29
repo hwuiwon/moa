@@ -563,6 +563,7 @@ async fn fast_remember_inner(
             embedding.len()
         )));
     }
+    let query_embedding = moa_memory_vector::QueryEmbedding::new(embedding, embedder.model_id())?;
 
     let conflict = if let Some(old_uid) = req.supersedes_specific {
         Conflict::Supersede(old_uid)
@@ -572,7 +573,7 @@ async fn fast_remember_inner(
             JUDGE_TIMEOUT,
             ctx.contradict.check_one_fast(
                 &redacted_text,
-                &embedding,
+                Some(query_embedding.clone()),
                 req.label,
                 pii.class,
                 &contradiction_ctx,
@@ -616,10 +617,10 @@ async fn fast_remember_inner(
     };
     let intent = build_intent(
         &req,
-        &embedding,
+        query_embedding.vector(),
         pii.class,
         confidence,
-        embedder.model_id(),
+        query_embedding.model(),
         embedder.model_version(),
         &redacted_text,
     );

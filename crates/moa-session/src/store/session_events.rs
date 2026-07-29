@@ -3,7 +3,10 @@
 use std::{collections::HashMap, time::Instant};
 
 use super::*;
-use moa_core::types::security::{ToolCapabilityId, ToolOutputAssessment};
+use moa_core::types::{
+    action_policy::{ToolResultSecurityMetadata, ToolTerminalFact},
+    security::{ToolCapabilityId, ToolOutputAssessment},
+};
 
 /// One event prepared for insertion: blobs already offloaded, metadata computed.
 struct PreparedAppend {
@@ -293,10 +296,11 @@ impl PostgresSessionStore {
         storage_partition_id: &StoragePartitionId,
         session_id: moa_core::types::identifiers::SessionId,
         tool_call_id: ToolCallId,
-    ) -> Result<Option<(ToolOutputAssessment, ToolCapabilityId)>> {
+    ) -> Result<Option<ToolResultSecurityMetadata>> {
         let events = self.table_name("events");
         let row = sqlx::query_scalar::<_, serde_json::Value>(&format!(
             "SELECT jsonb_build_object(\
+                 'success', payload -> 'data' -> 'success', \
                  'assessment', payload -> 'data' -> 'assessment', \
                  'capability', payload -> 'data' -> 'capability'\
              ) \
@@ -327,9 +331,13 @@ impl PostgresSessionStore {
             .get("capability")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        let success = row.get("success").and_then(serde_json::Value::as_bool);
         if assessment.is_null() || capability.is_null() {
             return Ok(None);
         }
+        let Some(success) = success else {
+            return Ok(None);
+        };
         let assessment: ToolOutputAssessment =
             serde_json::from_value(assessment).map_err(|error| {
                 MoaError::ValidationError(format!(
@@ -341,36 +349,62 @@ impl PostgresSessionStore {
                 "durable tool result carries an undecodable capability: {error}"
             ))
         })?;
-        Ok(Some((assessment, capability)))
+        Ok(Some(ToolResultSecurityMetadata {
+            success,
+            assessment,
+            capability,
+        }))
     }
 
-    /// Returns whether a persisted action-review event exists without decoding matching payloads.
-    pub async fn action_review_event_exists(
+    /// Loads one tool call's terminal result or error in a single query.
+    pub async fn tool_terminal_fact(
         &self,
         storage_partition_id: &StoragePartitionId,
         session_id: moa_core::types::identifiers::SessionId,
-        event_type: EventType,
-        review_id: Uuid,
-    ) -> Result<bool> {
+        tool_call_id: ToolCallId,
+    ) -> Result<Option<ToolTerminalFact>> {
         let events = self.table_name("events");
-        sqlx::query_scalar::<_, bool>(&format!(
-            "SELECT EXISTS (\
-                 SELECT 1 \
-                 FROM {events} \
-                 WHERE storage_partition_id = $1 \
-                   AND event_type = $2 \
-                   AND payload -> 'data' ? 'review_id' \
-                   AND payload -> 'data' ->> 'review_id' = $3 \
-                   AND session_id = $4\
-             )"
+        let row = sqlx::query(&format!(
+            "SELECT event_type, payload \
+             FROM {events} \
+             WHERE storage_partition_id = $1 \
+               AND event_type IN ($2, $3) \
+               AND payload -> 'data' ->> 'tool_id' = $4 \
+               AND session_id = $5 \
+             ORDER BY CASE event_type WHEN $2 THEN 0 ELSE 1 END, sequence_num DESC \
+             LIMIT 1"
         ))
         .bind(storage_partition_id.as_str())
-        .bind(event_type.as_str())
-        .bind(review_id.to_string())
+        .bind(EventType::ToolResult.as_str())
+        .bind(EventType::ToolError.as_str())
+        .bind(tool_call_id.to_string())
         .bind(session_id.0)
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await
-        .map_err(map_sqlx_error)
+        .map_err(map_sqlx_error)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let event_type: String = row.try_get("event_type").map_err(map_sqlx_error)?;
+        if event_type == EventType::ToolError.as_str() {
+            return Ok(Some(ToolTerminalFact::Error));
+        }
+        let payload: serde_json::Value = row.try_get("payload").map_err(map_sqlx_error)?;
+        let data = payload
+            .get("data")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let metadata = serde_json::from_value::<ToolResultSecurityMetadata>(serde_json::json!({
+            "success": data.get("success"),
+            "assessment": data.get("assessment"),
+            "capability": data.get("capability"),
+        }))
+        .map_err(|error| {
+            MoaError::ValidationError(format!(
+                "durable tool result carries undecodable security metadata: {error}"
+            ))
+        })?;
+        Ok(Some(ToolTerminalFact::Result(metadata)))
     }
 
     /// Appends a batch of events to one session in a single transaction.
@@ -756,7 +790,7 @@ impl SessionEventLookupStore for PostgresSessionStore {
         storage_partition_id: &StoragePartitionId,
         session_id: moa_core::types::identifiers::SessionId,
         tool_call_id: ToolCallId,
-    ) -> Result<Option<(ToolOutputAssessment, ToolCapabilityId)>> {
+    ) -> Result<Option<ToolResultSecurityMetadata>> {
         PostgresSessionStore::tool_result_security_metadata(
             self,
             storage_partition_id,
@@ -766,19 +800,17 @@ impl SessionEventLookupStore for PostgresSessionStore {
         .await
     }
 
-    async fn action_review_event_exists(
+    async fn tool_terminal_fact(
         &self,
         storage_partition_id: &StoragePartitionId,
         session_id: moa_core::types::identifiers::SessionId,
-        event_type: EventType,
-        review_id: Uuid,
-    ) -> Result<bool> {
-        PostgresSessionStore::action_review_event_exists(
+        tool_call_id: ToolCallId,
+    ) -> Result<Option<ToolTerminalFact>> {
+        PostgresSessionStore::tool_terminal_fact(
             self,
             storage_partition_id,
             session_id,
-            event_type,
-            review_id,
+            tool_call_id,
         )
         .await
     }

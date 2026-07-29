@@ -1131,7 +1131,9 @@ CREATE TABLE IF NOT EXISTS moa.storage_partition_state (
     vector_backend_state TEXT NOT NULL DEFAULT 'steady'
         CHECK (vector_backend_state IN ('steady', 'migrating', 'dual_read')),
     dual_read_until TIMESTAMPTZ,
-    embedding_model TEXT NOT NULL DEFAULT 'embed-v4.0',
+    -- Set by the first real vector write. A graph-only partition has no vector
+    -- model yet and must not claim a legacy default.
+    embedding_model TEXT,
     embedding_model_version INT NOT NULL DEFAULT 1,
     embedding_dimension INT NOT NULL DEFAULT 1024 CHECK (embedding_dimension > 0),
     reembed_state TEXT NOT NULL DEFAULT 'steady'
@@ -1144,7 +1146,7 @@ CREATE TABLE IF NOT EXISTS moa.storage_partition_state (
 );
 
 ALTER TABLE moa.storage_partition_state
-    ADD COLUMN IF NOT EXISTS embedding_model TEXT NOT NULL DEFAULT 'embed-v4.0',
+    ADD COLUMN IF NOT EXISTS embedding_model TEXT,
     ADD COLUMN IF NOT EXISTS embedding_model_version INT NOT NULL DEFAULT 1,
     ADD COLUMN IF NOT EXISTS embedding_dimension INT NOT NULL DEFAULT 1024 CHECK (embedding_dimension > 0),
     ADD COLUMN IF NOT EXISTS reembed_state TEXT NOT NULL DEFAULT 'steady'

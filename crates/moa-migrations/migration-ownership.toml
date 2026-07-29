@@ -677,40 +677,37 @@ readers = ["moa-db"]
 name = "tenant_mcp_connection_bindings"
 schema = "public"
 owner = "moa-hands"
+notes = "Historical ownership record for V000358; V000367 drops this unsupported tenant-owned MCP table."
 
 [[table]]
 name = "knowledge_rebuild_operation"
 schema = "moa"
 owner = "moa-memory-vector"
-readers = ["moa-orchestrator"]
-notes = "Durable re-embed/rechunk operation state; the orchestrator workflow drives transitions through the vector repository."
+notes = "Historical ownership record for V000351; V000366 drops the unsupported online rebuild schema."
 
 [[table]]
 name = "knowledge_rebuild_generation"
 schema = "moa"
 owner = "moa-memory-vector"
-readers = ["moa-retrieval", "moa-orchestrator"]
-notes = "Per-generation embedding identity and external namespace. Retrieval reads it to route production queries at the active generation."
+notes = "Historical ownership record for V000351; V000366 drops the unsupported online rebuild schema."
 
 [[table]]
 name = "knowledge_active_generation"
 schema = "moa"
 owner = "moa-memory-vector"
-readers = ["moa-retrieval", "moa-orchestrator"]
-notes = "Single compare-and-swap pointer naming the production read generation for one storage partition."
+notes = "Historical ownership record for V000351; V000366 drops the unsupported online rebuild schema."
 
 [[table]]
 name = "knowledge_rebuild_candidate_vector"
 schema = "moa"
 owner = "moa-memory-vector"
-notes = "Candidate embeddings for an unactivated generation. Deliberately has no production reader: shadow results are excluded structurally, not by predicate."
+notes = "Historical ownership record for V000351; V000366 drops the unsupported online rebuild schema."
 
 [[table]]
 name = "knowledge_rechunk_staging"
 schema = "moa"
 owner = "moa-knowledge"
-readers = ["moa-orchestrator"]
-notes = "Staged rechunk members awaiting one atomic activation boundary."
+notes = "Historical ownership record for V000351; V000366 drops the unsupported rechunk schema."
 
 [[table]]
 name = "learning_candidate_source"

@@ -914,15 +914,13 @@ async fn seed_storage_partition_embedder_state(
             storage_partition_id,
             embedding_model,
             embedding_model_version,
-            embedding_dimension,
-            reembed_state
+            embedding_dimension
         )
-        VALUES ($1, 'embed-v4.0', 1, $2, 'steady')
+        VALUES ($1, 'embed-v4.0', 1, $2)
         ON CONFLICT (storage_partition_id) DO UPDATE
         SET embedding_model = EXCLUDED.embedding_model,
             embedding_model_version = EXCLUDED.embedding_model_version,
-            embedding_dimension = EXCLUDED.embedding_dimension,
-            reembed_state = EXCLUDED.reembed_state
+            embedding_dimension = EXCLUDED.embedding_dimension
         "#,
     )
     .bind(tenant_id.to_string())
@@ -1053,6 +1051,7 @@ async fn seed_knowledge_chunk_with_text(
     let connection_uid = Uuid::now_v7();
     let object_uid = Uuid::now_v7();
     let version_uid = Uuid::now_v7();
+    let snapshot_uid = Uuid::now_v7();
     // The chunk row IS the graph occurrence, so its uid is the graph node uid.
     let chunk_uid = graph_node_uid;
     let storage_partition_id = tenant_id.to_string();
@@ -1060,10 +1059,10 @@ async fn seed_knowledge_chunk_with_text(
         r#"
         INSERT INTO moa.knowledge_connections (
             connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
-            provider_connection_id, connector, credential_ref, status, acl_mode, metadata
+            provider_connection_id, connector, credential_ref, status, metadata
         )
         VALUES ($1, $2, $3, 'merge', 'test-config', $4, 'drive',
-                'vault://tenant-contact-test', 'active', 'tenant_public', '{}'::jsonb)
+                'vault://tenant-contact-test', 'active', '{}'::jsonb)
         "#,
     )
     .bind(connection_uid)
@@ -1088,6 +1087,53 @@ async fn seed_knowledge_chunk_with_text(
     .bind(connection_uid)
     .bind(external_id)
     .bind(format!("https://example.test/{external_id}"))
+    .execute(pool)
+    .await?;
+    let acl_principal = knowledge_fixture_principal();
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_source_acl_snapshots (
+            snapshot_uid, tenant_id, storage_partition_id, connection_id, object_id,
+            provider_revision, snapshot_hash, complete, entry_count, captured_at
+        )
+        VALUES ($1, $2, $3, $4, $5, 'fixture-rev', $6, TRUE, 1, now())
+        "#,
+    )
+    .bind(snapshot_uid)
+    .bind(tenant_id.0)
+    .bind(&storage_partition_id)
+    .bind(connection_uid)
+    .bind(object_uid)
+    .bind(format!("fixture-hash-{external_id}"))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.knowledge_source_acl_entries (
+            entry_uid, tenant_id, storage_partition_id, snapshot_id, entry_kind,
+            principal_kind, principal_fingerprint, fingerprint_key_version
+        )
+        VALUES ($1, $2, $3, $4, 'allow', 'user', $5, 1)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant_id.0)
+    .bind(&storage_partition_id)
+    .bind(snapshot_uid)
+    .bind(acl_principal.as_bytes())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE moa.knowledge_objects
+        SET acl_state = 'current',
+            acl_revision = 'fixture-rev',
+            current_acl_snapshot_id = $2
+        WHERE object_uid = $1
+        "#,
+    )
+    .bind(object_uid)
+    .bind(snapshot_uid)
     .execute(pool)
     .await?;
     sqlx::query(
@@ -1172,11 +1218,17 @@ fn planned_chunk_query(tenant_id: TenantId, _query: &str) -> PlannedQuery {
 
 fn tenant_chunk_request(tenant_id: TenantId, query: &str) -> RetrievalRequest {
     RetrievalRequest {
-        source_acl: moa_core::types::memory::SourceAclContext::empty(0),
+        source_acl: moa_core::types::memory::SourceAclContext::new(
+            [knowledge_fixture_principal()],
+            0,
+        ),
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: query.to_string(),
-        query_embedding: test_embedding(query),
+        query_embedding: Some(
+            moa_memory_vector::QueryEmbedding::new(test_embedding(query), "embed-v4.0")
+                .expect("valid query embedding"),
+        ),
         scope: tenant_memory_scope(tenant_id),
         label_filter: Some(vec![NodeLabel::Chunk]),
         label_boost: None,
@@ -1191,6 +1243,10 @@ fn tenant_chunk_request(tenant_id: TenantId, query: &str) -> RetrievalRequest {
         disable_graph_expansion: false,
         window_policy: moa_retrieval::retrieval::EvidenceWindowPolicy::default(),
     }
+}
+
+fn knowledge_fixture_principal() -> moa_core::types::memory::SourcePrincipalFingerprint {
+    moa_core::types::memory::SourcePrincipalFingerprint::from_digest(1, [0xAC; 32])
 }
 
 fn tenant_memory_scope(tenant_id: TenantId) -> MemoryScope {

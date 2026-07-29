@@ -188,7 +188,10 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         cleared_barriers: Default::default(),
         seeds: Vec::new(),
         query_text: query_text.to_string(),
-        query_embedding,
+        query_embedding: Some(
+            moa_memory_vector::QueryEmbedding::new(query_embedding, retrieval_embedder.model_id())
+                .expect("valid query embedding"),
+        ),
         scope: MemoryScope::Contact {
             tenant_id,
             contact_id,
@@ -247,8 +250,7 @@ async fn seed_workspace_embedder_state(
         ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
-                embedding_dimension = EXCLUDED.embedding_dimension,
-                reembed_state = 'steady'
+                embedding_dimension = EXCLUDED.embedding_dimension
         "#,
     )
     .bind(storage_partition_id)

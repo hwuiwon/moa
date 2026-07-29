@@ -766,13 +766,11 @@ async fn wrong_kind_reference_does_not_open_material_db() {
         .await
         .expect("create credential");
 
-    sqlx::query(
-        "UPDATE tenant_credential_versions SET kind = 'mcp_bearer' WHERE credential_uid = $1",
-    )
-    .bind(created.reference.as_uuid())
-    .execute(database.raw_pool())
-    .await
-    .expect("relabel the stored kind");
+    sqlx::query("UPDATE tenant_credential_versions SET kind = 'oauth' WHERE credential_uid = $1")
+        .bind(created.reference.as_uuid())
+        .execute(database.raw_pool())
+        .await
+        .expect("relabel the stored kind");
 
     let error = vault
         .resolve(

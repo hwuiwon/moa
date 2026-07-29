@@ -912,6 +912,15 @@ async fn postgres_tool_event_exists_matches_session_workspace_type_and_tool_id()
             .await
             .expect("wrong workspace query")
     );
+    assert!(matches!(
+        store
+            .tool_terminal_fact(&storage_partition_id, session_id, tool_id)
+            .await
+            .expect("terminal fact query"),
+        Some(moa_core::types::action_policy::ToolTerminalFact::Result(
+            moa_core::types::action_policy::ToolResultSecurityMetadata { success: true, .. }
+        ))
+    ));
 
     drop(store);
     cleanup_schema(&database_url, &schema_name).await;

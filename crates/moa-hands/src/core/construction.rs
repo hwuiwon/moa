@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use moa_config::CloudHandsConfig;
 use moa_config::LOCAL_DEVELOPMENT_SANDBOX_REVISION;
-use moa_config::McpServerCredentialScope;
 use moa_config::MoaConfig;
 use moa_config::ToolBudgetConfig;
 use moa_config::ToolOutputConfig;
@@ -17,11 +16,10 @@ use moa_core::{
     types::hands::SandboxTier,
 };
 use moa_security::{
-    ActionPolicies, ActionPolicyRuleStore, MCPCredentialProxy, McpDeploymentCredentials,
-    McpEgressGuard, UnmatchedPermissionPattern,
+    ActionPolicies, ActionPolicyRuleStore, McpDeploymentCredentials, McpEgressGuard,
+    UnmatchedPermissionPattern,
 };
 
-use super::mcp_connections::TenantMcpCredentialOwners;
 use super::normalization::expand_local_path;
 use super::profile::{deployment_sandbox_policy, route_sandbox_policy};
 use super::{
@@ -55,8 +53,7 @@ impl ToolRouter {
             mcp_clients: tokio::sync::RwLock::new(HashMap::new()),
             mcp_servers: HashMap::new(),
             mcp_health: tokio::sync::RwLock::new(std::collections::BTreeMap::new()),
-            mcp_proxy: None,
-            tenant_mcp: None,
+            mcp_credentials: McpDeploymentCredentials::default(),
             mcp_egress_guard: None,
             active_hands: tokio::sync::RwLock::new(HashMap::new()),
             preferred_hand_routes: tokio::sync::RwLock::new(HashMap::new()),
@@ -129,15 +126,10 @@ impl ToolRouter {
     /// with no persisted-rule owner could never authorize any action. Under the
     /// `local` profile `rule_store` may be `None` and local hands are used.
     ///
-    /// `tenant_mcp` carries the owners a tenant-owned MCP server needs. Passing
-    /// `None` while any configured server is tenant-owned is a configuration
-    /// error raised here, so a deployment can never reach dispatch and discover
-    /// that it has no way to resolve a tenant's credential.
     pub async fn from_config(
         config: &MoaConfig,
         mcp_egress_guard: Option<Arc<McpEgressGuard>>,
         rule_store: Option<Arc<dyn ActionPolicyRuleStore>>,
-        tenant_mcp: Option<TenantMcpCredentialOwners>,
     ) -> Result<Self> {
         if !config.mcp_servers.is_empty() && mcp_egress_guard.is_none() {
             return Err(MoaError::ConfigError(
@@ -145,7 +137,6 @@ impl ToolRouter {
             ));
         }
         validate_mcp_server_configuration(config)?;
-        validate_tenant_mcp_owners(config, tenant_mcp.as_ref())?;
 
         let hand_routes = configured_hand_routes(config)?;
         validate_security_profile(config, &hand_routes, rule_store.as_ref())?;
@@ -206,7 +197,6 @@ impl ToolRouter {
             local_provider,
             mcp_egress_guard,
             rule_store,
-            tenant_mcp: tenant_mcp.map(Arc::new),
             ..Self::new(registry, providers, deployment_sandbox_policy(config)?)
         }
         .with_tool_output_config(config.tool_output.clone())
@@ -494,19 +484,9 @@ impl ToolRouter {
         self
     }
 
-    /// Installs the MCP credential proxy and discovers the configured connectors.
+    /// Loads MCP credentials and discovers the configured connectors.
     async fn load_mcp_servers(&mut self, config: &MoaConfig) -> Result<()> {
-        // Deployment-owned servers have their operator credential read once here
-        // and never again; tenant-owned servers contribute nothing to this set,
-        // so no environment material is reachable from a tenant connector. The
-        // call also validates that every server's declared ownership and its
-        // credential configuration agree before any connection is attempted.
-        let deployment = McpDeploymentCredentials::from_mcp_servers(&config.mcp_servers)?;
-        self.mcp_proxy = Some(Arc::new(match self.tenant_mcp.as_ref() {
-            Some(owners) => MCPCredentialProxy::new(Arc::clone(&owners.vault))
-                .with_deployment_credentials(deployment),
-            None => MCPCredentialProxy::deployment_only(deployment),
-        }));
+        self.mcp_credentials = McpDeploymentCredentials::from_mcp_servers(&config.mcp_servers)?;
 
         for server in &config.mcp_servers {
             self.mcp_servers.insert(server.name.clone(), server.clone());
@@ -539,40 +519,6 @@ fn validate_mcp_server_configuration(config: &MoaConfig) -> Result<()> {
             )));
         }
     }
-    Ok(())
-}
-
-/// Requires the tenant-owned MCP owners whenever any configured server declares
-/// tenant ownership, and rejects owners a deployment cannot use.
-///
-/// Both directions fail closed at construction rather than at dispatch: a
-/// tenant-owned server without owners could only ever deny, and a vault that
-/// cannot serve tenant material would turn every tenant call into a runtime
-/// configuration error long after startup validated.
-fn validate_tenant_mcp_owners(
-    config: &MoaConfig,
-    tenant_mcp: Option<&TenantMcpCredentialOwners>,
-) -> Result<()> {
-    let tenant_owned = config
-        .mcp_servers
-        .iter()
-        .filter(|server| server.credential_scope == McpServerCredentialScope::TenantOwned)
-        .map(|server| server.name.as_str())
-        .collect::<Vec<_>>();
-    if tenant_owned.is_empty() {
-        return Ok(());
-    }
-    if tenant_mcp.is_none() {
-        return Err(MoaError::ConfigError(format!(
-            "tenant-owned MCP servers [{}] require the tenant credential vault, connection \
-             binding owner, and tenant-operator authorizer",
-            tenant_owned.join(", ")
-        )));
-    }
-    tracing::info!(
-        tenant_owned_servers = tenant_owned.len(),
-        "tool router constructed with tenant-owned MCP credential resolution"
-    );
     Ok(())
 }
 
