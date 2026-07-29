@@ -32,7 +32,6 @@ use restate_sdk::prelude::*;
 use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 
-use crate::services::eval::{Eval, EvalImpl};
 use crate::services::experiments::{Experiments, ExperimentsImpl};
 use crate::workflows::experiment_run::{ExperimentRun, ExperimentRunImpl};
 use crate::workflows::experiment_trial_run::{ExperimentTrialRun, ExperimentTrialRunImpl};
@@ -198,7 +197,6 @@ pub fn build_endpoint(
             )
             .serve(),
         )
-        .bind(EvalImpl::new(pool.clone(), config.clone()).serve())
         .bind(ExperimentsImpl::new(pool.clone(), providers.clone(), session_store.clone()).serve());
 
     builder = builder
@@ -388,7 +386,6 @@ fn action_review_timeout_secs(config: &MoaConfig) -> i64 {
 pub fn expected_service_names() -> Vec<&'static str> {
     let mut names = Vec::new();
     names.extend(CORE_HEAD_SERVICE_NAMES.iter().copied());
-    names.push("Eval");
     names.push("Experiments");
     names.extend(CORE_BODY_SERVICE_NAMES.iter().copied());
     names.push("SkillLearning");
@@ -450,10 +447,13 @@ mod tests {
     }
 
     #[test]
-    fn product_expected_services_include_eval_and_experiments() {
+    fn product_expected_services_include_experiments() {
         let names = expected_service_names();
 
-        assert_eq!(names.iter().filter(|name| **name == "Eval").count(), 1);
+        assert!(
+            !names.contains(&"Eval"),
+            "the hosted tenant Eval service must not be registered"
+        );
         assert_eq!(
             names.iter().filter(|name| **name == "Experiments").count(),
             1
@@ -504,10 +504,10 @@ mod tests {
     #[test]
     fn registration_check_rejects_deployment_missing_product_services() {
         let names = expected_service_names();
-        let deployment_without_eval = names
+        let deployment_without_experiments = names
             .iter()
             .copied()
-            .filter(|name| *name != "Eval")
+            .filter(|name| *name != "Experiments")
             .collect::<Vec<_>>();
         let deployment_without_experiment = names
             .iter()
@@ -517,10 +517,10 @@ mod tests {
 
         assert!(
             !services_registered_with_expected(
-                &[deployment_with_services(&deployment_without_eval)],
+                &[deployment_with_services(&deployment_without_experiments)],
                 &names
             ),
-            "readiness must reject a deployment missing Eval"
+            "readiness must reject a deployment missing Experiments"
         );
         assert!(
             !services_registered_with_expected(

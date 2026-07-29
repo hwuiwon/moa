@@ -1,7 +1,20 @@
 //! Pure helpers for expanding behavior-lab experiment plans.
+//!
+//! Expansion is the path that actually mints trials, so it is also the path
+//! that has to bound them. A plan's per-dimension limits do not bound the
+//! matrix: the trial count is the product of scenarios, personas, profiles,
+//! target variants, and repetitions, and each factor can be individually legal
+//! while the product is not. [`plan_matrix_shape`] resolves that product with
+//! checked arithmetic before anything is allocated, and [`PlanTrialPager`]
+//! hands the resulting trials back one page at a time.
 
 use moa_artifacts::simulation::{
-    ExperimentPlanDefinition, ExperimentTargetKind, ExperimentTargetVariant,
+    ExperimentPlanDefinition, ExperimentTargetKind, ExperimentTargetVariant, MAX_PLAN_BLOCK_BYTES,
+    MAX_PLAN_DATA_BUNDLES, MAX_PLAN_DEFINITION_BYTES, MAX_PLAN_FIELD_BYTES, MAX_PLAN_PARALLELISM,
+    MAX_PLAN_PERSONAS, MAX_PLAN_PROFILES, MAX_PLAN_PROVIDER_CALL_QPS, MAX_PLAN_SCENARIOS,
+    MAX_PLAN_TARGET_VARIANTS, MAX_PLAN_TOTAL_COST_CENTS, MAX_PLAN_TOTAL_TOKENS,
+    MAX_PLAN_TOTAL_TRIALS, MAX_PLAN_TRIAL_COST_CENTS, MAX_PLAN_TRIAL_TOKENS,
+    MAX_PLAN_TRIALS_PER_COMBINATION, MAX_SCENARIO_TURNS, PLAN_PROVIDER_CALLS_PER_TRIAL_TURN,
     SimulationDataBundleDefinition, SimulationPersonaDefinition, SimulationProfileDefinition,
     SimulationScenarioDefinition,
 };
@@ -33,6 +46,57 @@ pub enum PlanExpansionError {
     MissingPlanDimension {
         /// Empty matrix dimension.
         dimension: &'static str,
+    },
+    /// A plan matrix dimension declares more blocks than the platform accepts.
+    #[error("experiment plan declares {actual} {dimension}s, over the limit of {limit}")]
+    PlanDimensionTooLarge {
+        /// Matrix dimension that is too wide.
+        dimension: &'static str,
+        /// Declared block count.
+        actual: u64,
+        /// Highest accepted block count.
+        limit: u64,
+    },
+    /// A plan declared a scalar outside its accepted range.
+    #[error("experiment plan {field} must be between {min} and {max}, got {actual}")]
+    PlanValueOutOfRange {
+        /// Plan field that is out of range.
+        field: &'static str,
+        /// Declared value.
+        actual: u64,
+        /// Lowest accepted value.
+        min: u64,
+        /// Highest accepted value.
+        max: u64,
+    },
+    /// A serialized plan, block, or field is larger than the platform accepts.
+    #[error("experiment plan {field} is {actual} bytes, over the limit of {limit} bytes")]
+    PlanTooLarge {
+        /// Path of the oversized plan element.
+        field: String,
+        /// Serialized size.
+        actual: usize,
+        /// Highest accepted serialized size.
+        limit: usize,
+    },
+    /// A plan could not be serialized to measure its size.
+    #[error("experiment plan {field} could not be measured: {message}")]
+    UnmeasurablePlan {
+        /// Path of the element that could not be measured.
+        field: String,
+        /// Serialization error message.
+        message: String,
+    },
+    /// The declared trial matrix overflowed before it could be counted.
+    #[error("experiment plan trial matrix size overflowed before it could be counted")]
+    TrialMatrixOverflow,
+    /// The declared trial matrix is larger than one run may mint.
+    #[error("experiment plan expands to {actual} trials, over the limit of {limit}")]
+    TrialMatrixTooLarge {
+        /// Trials the declared matrix would mint.
+        actual: u64,
+        /// Highest accepted trial count for one run.
+        limit: u64,
     },
     /// A plan declared no evidence requirements.
     #[error("experiment plan must declare a scorecard")]
@@ -130,6 +194,7 @@ pub fn project_plan_run(
     plan_name: &str,
     run_name: &str,
 ) -> Result<PlanRunProjection, PlanExpansionError> {
+    plan_matrix_shape(definition)?;
     let first_variant = definition
         .target_variants
         .first()
@@ -174,24 +239,220 @@ pub fn plan_scorecard(
     Ok(scorecard)
 }
 
-/// Expands a plan into deterministic trial rows and target payloads.
-pub fn expand_plan_trials(
+/// Bounded shape of a plan's trial matrix, resolved before any trial exists.
+///
+/// Every field is the result of a checked computation over a plan that already
+/// passed its per-dimension, per-byte, and per-scalar limits, so a value here
+/// is safe to allocate against and safe to reserve against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanMatrixShape {
+    /// Scenarios the plan declares.
+    pub scenarios: u32,
+    /// Personas the plan declares.
+    pub personas: u32,
+    /// Profiles the plan declares.
+    pub profiles: u32,
+    /// Target variants the plan declares.
+    pub target_variants: u32,
+    /// Repetitions of every matrix combination.
+    pub trials_per_combination: u32,
+    /// Total trials the matrix expands to.
+    pub total_trials: u32,
+    /// Trials the plan may execute concurrently.
+    pub parallel_trials: u32,
+    /// Provider calls per second the declared parallelism implies.
+    pub provider_call_qps: u32,
+    /// Cost in cents the plan declares it may spend.
+    ///
+    /// This is a *declared* number. It is checked at admission and is not, on
+    /// its own, evidence of what a run actually spent; a runtime cost ledger
+    /// reconciles actual spend against it.
+    pub declared_total_cost_cents: u32,
+}
+
+/// Trials one [`PlanTrialPager`] page may contain.
+pub const PLAN_TRIAL_PAGE_TRIALS: usize = 256;
+
+/// Resolves and bounds a plan's trial matrix without expanding it.
+///
+/// Checks, in order: matrix dimensions are present and within their block
+/// limits; the serialized plan, each block, and each free-form field are within
+/// their byte limits; repetitions, parallelism, scenario turn caps, and budgets
+/// are inside their accepted ranges; and the product of every matrix dimension
+/// fits both `u64` arithmetic and the total-trial ceiling.
+///
+/// Over-limit plans are refused, never clamped, so a tenant never silently gets
+/// a smaller matrix than the one it declared.
+///
+/// # Errors
+///
+/// Returns the first [`PlanExpansionError`] the plan violates.
+pub fn plan_matrix_shape(
+    definition: &ExperimentPlanDefinition,
+) -> Result<PlanMatrixShape, PlanExpansionError> {
+    let scenarios = plan_dimension(
+        "scenario",
+        definition.simulation.scenarios.len(),
+        MAX_PLAN_SCENARIOS,
+    )?;
+    let personas = plan_dimension(
+        "persona",
+        definition.simulation.personas.len(),
+        MAX_PLAN_PERSONAS,
+    )?;
+    let profiles = plan_dimension(
+        "profile",
+        definition.simulation.profiles.len(),
+        MAX_PLAN_PROFILES,
+    )?;
+    let target_variants = plan_dimension(
+        "target variant",
+        definition.target_variants.len(),
+        MAX_PLAN_TARGET_VARIANTS,
+    )?;
+    if definition.simulation.data_bundles.len() > MAX_PLAN_DATA_BUNDLES as usize {
+        return Err(PlanExpansionError::PlanDimensionTooLarge {
+            dimension: "data bundle",
+            actual: definition.simulation.data_bundles.len() as u64,
+            limit: u64::from(MAX_PLAN_DATA_BUNDLES),
+        });
+    }
+
+    require_plan_bytes(definition)?;
+    require_plan_scalars(definition)?;
+
+    let total_trials = plan_trial_count(
+        u64::from(scenarios),
+        u64::from(personas),
+        u64::from(profiles),
+        u64::from(target_variants),
+        u64::from(definition.trials_per_combination),
+    )?;
+    let total_trials =
+        u32::try_from(total_trials).map_err(|_| PlanExpansionError::TrialMatrixTooLarge {
+            actual: total_trials,
+            limit: u64::from(MAX_PLAN_TOTAL_TRIALS),
+        })?;
+
+    let provider_call_qps = definition
+        .parallelism
+        .checked_mul(PLAN_PROVIDER_CALLS_PER_TRIAL_TURN)
+        .ok_or(PlanExpansionError::TrialMatrixOverflow)?;
+    if provider_call_qps > MAX_PLAN_PROVIDER_CALL_QPS {
+        return Err(PlanExpansionError::PlanValueOutOfRange {
+            field: "implied provider call qps",
+            actual: u64::from(provider_call_qps),
+            min: u64::from(PLAN_PROVIDER_CALLS_PER_TRIAL_TURN),
+            max: u64::from(MAX_PLAN_PROVIDER_CALL_QPS),
+        });
+    }
+
+    Ok(PlanMatrixShape {
+        scenarios,
+        personas,
+        profiles,
+        target_variants,
+        trials_per_combination: definition.trials_per_combination,
+        total_trials,
+        parallel_trials: definition.parallelism.min(total_trials),
+        provider_call_qps,
+        declared_total_cost_cents: definition.budget.max_total_cents,
+    })
+}
+
+/// Multiplies a plan's matrix dimensions with checked arithmetic.
+///
+/// Returns the trial count only when every multiplication fits in `u64` and the
+/// product is within [`MAX_PLAN_TOTAL_TRIALS`]. Nothing is allocated on the way,
+/// so an over-large or overflowing matrix is refused before a single trial
+/// exists.
+///
+/// # Errors
+///
+/// Returns [`PlanExpansionError::TrialMatrixOverflow`] when the product does not
+/// fit in `u64` and [`PlanExpansionError::TrialMatrixTooLarge`] when it exceeds
+/// the total-trial ceiling.
+pub fn plan_trial_count(
+    scenarios: u64,
+    personas: u64,
+    profiles: u64,
+    target_variants: u64,
+    trials_per_combination: u64,
+) -> Result<u64, PlanExpansionError> {
+    let total = scenarios
+        .checked_mul(personas)
+        .and_then(|value| value.checked_mul(profiles))
+        .and_then(|value| value.checked_mul(target_variants))
+        .and_then(|value| value.checked_mul(trials_per_combination))
+        .ok_or(PlanExpansionError::TrialMatrixOverflow)?;
+    if total > u64::from(MAX_PLAN_TOTAL_TRIALS) {
+        return Err(PlanExpansionError::TrialMatrixTooLarge {
+            actual: total,
+            limit: u64::from(MAX_PLAN_TOTAL_TRIALS),
+        });
+    }
+    Ok(total)
+}
+
+/// Pages a bounded plan matrix into deterministic trial rows.
+///
+/// The pager resolves every fallible decision up front — matrix bounds, target
+/// payloads, variant payloads, and per-scenario data bundles — so iteration
+/// itself cannot fail and never holds more than one page of trials. Trials are
+/// emitted in scenario, persona, profile, variant, repetition order.
+pub struct PlanTrialPager<'a> {
+    definition: &'a ExperimentPlanDefinition,
     run_uid: Uuid,
     plan_revision_uid: Uuid,
-    definition: &ExperimentPlanDefinition,
-) -> Result<Vec<ExpandedPlanTrial>, PlanExpansionError> {
-    require_plan_dimension("scenario", !definition.simulation.scenarios.is_empty())?;
-    require_plan_dimension("persona", !definition.simulation.personas.is_empty())?;
-    require_plan_dimension("profile", !definition.simulation.profiles.is_empty())?;
-    require_plan_dimension("target variant", !definition.target_variants.is_empty())?;
+    shape: PlanMatrixShape,
+    variants: Vec<PreparedVariant>,
+    scenario_data_bundle_ids: Vec<Vec<String>>,
+    cursor: MatrixCursor,
+    emitted: u32,
+}
 
-    let mut trials = Vec::new();
-    for (scenario_index, scenario) in definition.simulation.scenarios.iter().enumerate() {
-        for (persona_index, persona) in definition.simulation.personas.iter().enumerate() {
-            for (profile_index, profile) in definition.simulation.profiles.iter().enumerate() {
-                for variant in &definition.target_variants {
-                    let target = target_for_plan_variant(definition, variant)?;
-                    let variant_payload = variant_payload_for_plan(
+/// One target variant resolved once for the whole matrix.
+struct PreparedVariant {
+    key: String,
+    kind: ExperimentTargetKind,
+    temperature: Option<f32>,
+    target: ExperimentTarget,
+    payload: ExperimentVariant,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct MatrixCursor {
+    scenario: usize,
+    persona: usize,
+    profile: usize,
+    variant: usize,
+    trial: u32,
+}
+
+impl<'a> PlanTrialPager<'a> {
+    /// Bounds a plan and prepares its per-variant and per-scenario payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`PlanExpansionError`] the plan violates, including
+    /// every matrix bound checked by [`plan_matrix_shape`] and every malformed
+    /// target variant. No trial is allocated when this fails.
+    pub fn new(
+        run_uid: Uuid,
+        plan_revision_uid: Uuid,
+        definition: &'a ExperimentPlanDefinition,
+    ) -> Result<Self, PlanExpansionError> {
+        let shape = plan_matrix_shape(definition)?;
+        let variants = definition
+            .target_variants
+            .iter()
+            .map(|variant| {
+                Ok(PreparedVariant {
+                    key: variant.key.clone(),
+                    kind: variant.kind,
+                    temperature: simulator_temperature(variant)?,
+                    target: target_for_plan_variant(definition, variant)?,
+                    payload: variant_payload_for_plan(
                         plan_revision_uid,
                         definition,
                         variant,
@@ -201,59 +462,329 @@ pub fn expand_plan_trials(
                                 "variant_config": variant.config,
                             })
                         },
-                    )?;
-                    let data_bundle_ids = data_bundle_ids_for_scenario(definition, scenario);
-                    for trial_index in 0..definition.trials_per_combination.max(1) {
-                        let trial_key = stable_trial_key(
-                            (scenario_index, &scenario.id),
-                            (persona_index, &persona.id),
-                            (profile_index, &profile.id),
-                            &variant.key,
-                            trial_index,
-                        );
-                        trials.push(ExpandedPlanTrial {
-                            trial: NewExperimentTrial {
-                                run_uid,
-                                trial_key: trial_key.clone(),
-                                target_kind: variant.kind,
-                                variant_key: variant.key.clone(),
-                                plan_revision_uid,
-                                scenario_id: Some(scenario.id.clone()),
-                                persona_id: Some(persona.id.clone()),
-                                profile_id: Some(profile.id.clone()),
-                                data_bundle_ids: data_bundle_ids.clone(),
-                                artifact_revision_uids: Vec::new(),
-                                simulator: ExperimentSimulatorConfig {
-                                    model: ModelId::new(definition.simulator_model.clone()),
-                                    temperature: simulator_temperature(variant)?,
-                                    max_turns: DEFAULT_PLAN_TRIAL_MAX_TURNS,
-                                    token_budget: definition.budget.max_trial_tokens,
-                                    metadata: json!({}),
-                                },
-                                target_model: definition.target_model.as_ref().map(ModelId::new),
-                                seed: Some(format!("{trial_key}:{plan_revision_uid}")),
-                                score_run_id: deterministic_score_run_id(run_uid, &trial_key),
-                            },
-                            target: target.clone(),
-                            variant: variant_payload.clone(),
-                        });
-                    }
-                }
-            }
-        }
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, PlanExpansionError>>()?;
+        let scenario_data_bundle_ids = definition
+            .simulation
+            .scenarios
+            .iter()
+            .map(|scenario| data_bundle_ids_for_scenario(definition, scenario))
+            .collect();
+        Ok(Self {
+            definition,
+            run_uid,
+            plan_revision_uid,
+            shape,
+            variants,
+            scenario_data_bundle_ids,
+            cursor: MatrixCursor::default(),
+            emitted: 0,
+        })
     }
-    Ok(trials)
+
+    /// Returns the bounded shape of the matrix being paged.
+    #[must_use]
+    pub const fn shape(&self) -> PlanMatrixShape {
+        self.shape
+    }
+
+    /// Returns how many trials the pager has not emitted yet.
+    #[must_use]
+    pub const fn remaining(&self) -> u32 {
+        self.shape.total_trials - self.emitted
+    }
+
+    /// Returns the next page of at most [`PLAN_TRIAL_PAGE_TRIALS`] trials.
+    ///
+    /// An empty page means the matrix is exhausted.
+    pub fn next_page(&mut self) -> Vec<ExpandedPlanTrial> {
+        let page = PLAN_TRIAL_PAGE_TRIALS.min(self.remaining() as usize);
+        self.by_ref().take(page).collect()
+    }
+
+    fn advance(&mut self) {
+        self.cursor.trial += 1;
+        if self.cursor.trial < self.shape.trials_per_combination {
+            return;
+        }
+        self.cursor.trial = 0;
+        self.cursor.variant += 1;
+        if self.cursor.variant < self.variants.len() {
+            return;
+        }
+        self.cursor.variant = 0;
+        self.cursor.profile += 1;
+        if self.cursor.profile < self.definition.simulation.profiles.len() {
+            return;
+        }
+        self.cursor.profile = 0;
+        self.cursor.persona += 1;
+        if self.cursor.persona < self.definition.simulation.personas.len() {
+            return;
+        }
+        self.cursor.persona = 0;
+        self.cursor.scenario += 1;
+    }
 }
 
-fn require_plan_dimension(
-    dimension: &'static str,
-    present: bool,
-) -> Result<(), PlanExpansionError> {
-    if present {
-        Ok(())
-    } else {
-        Err(PlanExpansionError::MissingPlanDimension { dimension })
+impl Iterator for PlanTrialPager<'_> {
+    type Item = ExpandedPlanTrial;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.emitted >= self.shape.total_trials {
+            return None;
+        }
+        let cursor = self.cursor;
+        let scenario = self.definition.simulation.scenarios.get(cursor.scenario)?;
+        let persona = self.definition.simulation.personas.get(cursor.persona)?;
+        let profile = self.definition.simulation.profiles.get(cursor.profile)?;
+        let variant = self.variants.get(cursor.variant)?;
+        let trial_key = stable_trial_key(
+            (cursor.scenario, &scenario.id),
+            (cursor.persona, &persona.id),
+            (cursor.profile, &profile.id),
+            &variant.key,
+            cursor.trial,
+        );
+        let plan_revision_uid = self.plan_revision_uid;
+        let expanded = ExpandedPlanTrial {
+            trial: NewExperimentTrial {
+                run_uid: self.run_uid,
+                trial_key: trial_key.clone(),
+                target_kind: variant.kind,
+                variant_key: variant.key.clone(),
+                plan_revision_uid,
+                scenario_id: Some(scenario.id.clone()),
+                persona_id: Some(persona.id.clone()),
+                profile_id: Some(profile.id.clone()),
+                data_bundle_ids: self
+                    .scenario_data_bundle_ids
+                    .get(cursor.scenario)
+                    .cloned()
+                    .unwrap_or_default(),
+                artifact_revision_uids: Vec::new(),
+                simulator: ExperimentSimulatorConfig {
+                    model: ModelId::new(self.definition.simulator_model.clone()),
+                    temperature: variant.temperature,
+                    max_turns: DEFAULT_PLAN_TRIAL_MAX_TURNS,
+                    token_budget: self.definition.budget.max_trial_tokens,
+                    metadata: json!({}),
+                },
+                target_model: self.definition.target_model.as_ref().map(ModelId::new),
+                seed: Some(format!("{trial_key}:{plan_revision_uid}")),
+                score_run_id: deterministic_score_run_id(self.run_uid, &trial_key),
+            },
+            target: variant.target.clone(),
+            variant: variant.payload.clone(),
+        };
+        self.emitted += 1;
+        self.advance();
+        Some(expanded)
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.remaining() as usize;
+        (remaining, Some(remaining))
+    }
+}
+
+/// Expands a plan into every deterministic trial row it declares.
+///
+/// Collects [`PlanTrialPager`] pages, so the returned vector is bounded by
+/// [`MAX_PLAN_TOTAL_TRIALS`]. Callers that persist or dispatch trials should
+/// drive the pager directly and keep only one page resident.
+///
+/// # Errors
+///
+/// Returns the first [`PlanExpansionError`] the plan violates.
+pub fn expand_plan_trials(
+    run_uid: Uuid,
+    plan_revision_uid: Uuid,
+    definition: &ExperimentPlanDefinition,
+) -> Result<Vec<ExpandedPlanTrial>, PlanExpansionError> {
+    let mut pager = PlanTrialPager::new(run_uid, plan_revision_uid, definition)?;
+    let mut trials = Vec::with_capacity(pager.remaining() as usize);
+    loop {
+        let page = pager.next_page();
+        if page.is_empty() {
+            return Ok(trials);
+        }
+        trials.extend(page);
+    }
+}
+
+fn plan_dimension(
+    dimension: &'static str,
+    declared: usize,
+    limit: u32,
+) -> Result<u32, PlanExpansionError> {
+    if declared == 0 {
+        return Err(PlanExpansionError::MissingPlanDimension { dimension });
+    }
+    u32::try_from(declared)
+        .ok()
+        .filter(|declared| *declared <= limit)
+        .ok_or(PlanExpansionError::PlanDimensionTooLarge {
+            dimension,
+            actual: declared as u64,
+            limit: u64::from(limit),
+        })
+}
+
+fn require_plan_bytes(definition: &ExperimentPlanDefinition) -> Result<(), PlanExpansionError> {
+    require_bytes("definition", definition, MAX_PLAN_DEFINITION_BYTES)?;
+    for (index, scenario) in definition.simulation.scenarios.iter().enumerate() {
+        require_bytes(
+            &format!("simulation.scenarios[{index}]"),
+            scenario,
+            MAX_PLAN_BLOCK_BYTES,
+        )?;
+    }
+    for (index, persona) in definition.simulation.personas.iter().enumerate() {
+        require_bytes(
+            &format!("simulation.personas[{index}]"),
+            persona,
+            MAX_PLAN_BLOCK_BYTES,
+        )?;
+    }
+    for (index, profile) in definition.simulation.profiles.iter().enumerate() {
+        require_bytes(
+            &format!("simulation.profiles[{index}]"),
+            profile,
+            MAX_PLAN_BLOCK_BYTES,
+        )?;
+        require_bytes(
+            &format!("simulation.profiles[{index}].facts"),
+            &profile.facts,
+            MAX_PLAN_FIELD_BYTES,
+        )?;
+    }
+    for (index, data_bundle) in definition.simulation.data_bundles.iter().enumerate() {
+        require_bytes(
+            &format!("simulation.data_bundles[{index}]"),
+            data_bundle,
+            MAX_PLAN_BLOCK_BYTES,
+        )?;
+        for (source_index, source) in data_bundle.sources.iter().enumerate() {
+            require_bytes(
+                &format!("simulation.data_bundles[{index}].sources[{source_index}].fixture"),
+                &source.fixture,
+                MAX_PLAN_FIELD_BYTES,
+            )?;
+        }
+    }
+    for (index, variant) in definition.target_variants.iter().enumerate() {
+        require_bytes(
+            &format!("target_variants[{index}]"),
+            variant,
+            MAX_PLAN_BLOCK_BYTES,
+        )?;
+        require_bytes(
+            &format!("target_variants[{index}].config"),
+            &variant.config,
+            MAX_PLAN_FIELD_BYTES,
+        )?;
+    }
+    Ok(())
+}
+
+fn require_bytes<T: Serialize>(
+    field: &str,
+    value: &T,
+    limit: usize,
+) -> Result<(), PlanExpansionError> {
+    let actual = serde_json::to_vec(value)
+        .map_err(|error| PlanExpansionError::UnmeasurablePlan {
+            field: field.to_string(),
+            message: error.to_string(),
+        })?
+        .len();
+    if actual > limit {
+        return Err(PlanExpansionError::PlanTooLarge {
+            field: field.to_string(),
+            actual,
+            limit,
+        });
+    }
+    Ok(())
+}
+
+fn require_plan_scalars(definition: &ExperimentPlanDefinition) -> Result<(), PlanExpansionError> {
+    require_range(
+        "trials_per_combination",
+        definition.trials_per_combination,
+        1,
+        MAX_PLAN_TRIALS_PER_COMBINATION,
+    )?;
+    require_range(
+        "parallelism",
+        definition.parallelism,
+        1,
+        MAX_PLAN_PARALLELISM,
+    )?;
+    require_range(
+        "budget.max_total_cents",
+        definition.budget.max_total_cents,
+        1,
+        MAX_PLAN_TOTAL_COST_CENTS,
+    )?;
+    if let Some(max_trial_cents) = definition.budget.max_trial_cents {
+        require_range(
+            "budget.max_trial_cents",
+            max_trial_cents,
+            1,
+            MAX_PLAN_TRIAL_COST_CENTS.min(definition.budget.max_total_cents),
+        )?;
+    }
+    if let Some(max_total_tokens) = definition.budget.max_total_tokens {
+        require_range(
+            "budget.max_total_tokens",
+            max_total_tokens,
+            1,
+            MAX_PLAN_TOTAL_TOKENS,
+        )?;
+    }
+    if let Some(max_trial_tokens) = definition.budget.max_trial_tokens {
+        require_range(
+            "budget.max_trial_tokens",
+            max_trial_tokens,
+            1,
+            MAX_PLAN_TRIAL_TOKENS.min(
+                definition
+                    .budget
+                    .max_total_tokens
+                    .unwrap_or(MAX_PLAN_TRIAL_TOKENS),
+            ),
+        )?;
+    }
+    for scenario in &definition.simulation.scenarios {
+        require_range(
+            "scenario max_turns",
+            scenario.max_turns,
+            1,
+            MAX_SCENARIO_TURNS,
+        )?;
+    }
+    Ok(())
+}
+
+fn require_range(
+    field: &'static str,
+    actual: u32,
+    min: u32,
+    max: u32,
+) -> Result<(), PlanExpansionError> {
+    if actual < min || actual > max {
+        return Err(PlanExpansionError::PlanValueOutOfRange {
+            field,
+            actual: u64::from(actual),
+            min: u64::from(min),
+            max: u64::from(max),
+        });
+    }
+    Ok(())
 }
 
 fn simulator_temperature(
@@ -339,7 +870,6 @@ pub(crate) fn target_for_plan_variant(
                 .and_then(Value::as_str)
                 .unwrap_or("Start behavior-lab simulation.")
                 .to_string(),
-            session_id: None,
             agent: agent_selection_for_variant(variant)?,
             model: definition
                 .target_model
@@ -721,6 +1251,27 @@ mod tests {
     }
 
     #[test]
+    fn plan_variant_config_cannot_inject_an_agent_loop_session_offline() {
+        // Pins: a published plan artifact cannot make an expanded trial target
+        // attach to a caller-owned session. The agent-loop target carries no
+        // session field, so a `session_id` key in the authored variant config is
+        // not readable into anything the run can act on.
+        let mut definition = fixture_plan();
+        definition.target_variants[0].config =
+            json!({"prompt": "start", "session_id": fixture_uuid(42)});
+
+        let target = target_for_plan_variant(&definition, &definition.target_variants[0])
+            .expect("an agent-loop plan variant projects");
+
+        let encoded = serde_json::to_value(&target).expect("target serializes");
+        assert_eq!(
+            encoded.get("session_id"),
+            None,
+            "an expanded agent-loop target must not carry a session: {encoded}"
+        );
+    }
+
+    #[test]
     fn target_for_plan_variant_preserves_agent_revision_selector_offline() {
         // Pins: behavior-lab plans can run the same simulation matrix against exact agent revisions.
         let mut definition = fixture_plan();
@@ -872,6 +1423,330 @@ mod tests {
             error,
             PlanExpansionError::InvalidAgentSelector { .. }
         ));
+    }
+
+    #[test]
+    fn plan_trial_count_refuses_an_overflowing_matrix_before_allocating_offline() {
+        // Pins the checked multiplication itself. The dimension ceilings make an
+        // overflowing product unreachable through a real plan, which is exactly
+        // why the arithmetic has to be proven here: if this ever wraps, a plan
+        // whose dimensions are individually legal could report a tiny trial
+        // count and then expand forever. Nothing is allocated on this path.
+        let error = plan_trial_count(u64::MAX, 2, 1, 1, 1)
+            .expect_err("an overflowing matrix must not produce a trial count");
+        assert!(
+            matches!(error, PlanExpansionError::TrialMatrixOverflow),
+            "unexpected error: {error:?}"
+        );
+
+        let error = plan_trial_count(u64::MAX, 1, 1, 1, u64::MAX)
+            .expect_err("an overflowing repetition factor must not produce a trial count");
+        assert!(
+            matches!(error, PlanExpansionError::TrialMatrixOverflow),
+            "unexpected error: {error:?}"
+        );
+
+        // A product that fits in u64 but not in the ceiling is a different,
+        // equally refused, outcome.
+        let error = plan_trial_count(u64::from(MAX_PLAN_TOTAL_TRIALS) + 1, 1, 1, 1, 1)
+            .expect_err("one trial over the ceiling must be refused");
+        assert!(
+            matches!(
+                error,
+                PlanExpansionError::TrialMatrixTooLarge { actual, limit }
+                    if actual == u64::from(MAX_PLAN_TOTAL_TRIALS) + 1
+                        && limit == u64::from(MAX_PLAN_TOTAL_TRIALS)
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            plan_trial_count(u64::from(MAX_PLAN_TOTAL_TRIALS), 1, 1, 1, 1)
+                .expect("a matrix exactly at the ceiling is legal"),
+            u64::from(MAX_PLAN_TOTAL_TRIALS)
+        );
+    }
+
+    #[test]
+    fn plan_matrix_shape_refuses_a_legal_product_one_trial_over_the_ceiling_offline() {
+        // Pins the defect the per-dimension limits do not cover: 50 scenarios
+        // and 100 repetitions are each far inside their own ceilings, and their
+        // product is exactly at the total-trial ceiling. One more scenario is a
+        // 5_100-trial run that no per-dimension check would ever see.
+        let at_ceiling = fixture_matrix(50, 1, 1, 1, MAX_PLAN_TRIALS_PER_COMBINATION);
+        let shape = plan_matrix_shape(&at_ceiling).expect("a matrix at the ceiling is legal");
+        assert_eq!(shape.total_trials, MAX_PLAN_TOTAL_TRIALS);
+
+        let over_ceiling = fixture_matrix(51, 1, 1, 1, MAX_PLAN_TRIALS_PER_COMBINATION);
+        let error = plan_matrix_shape(&over_ceiling)
+            .expect_err("a matrix over the ceiling must be refused");
+
+        assert!(
+            matches!(
+                error,
+                PlanExpansionError::TrialMatrixTooLarge { actual: 5_100, .. }
+            ),
+            "unexpected error: {error:?}"
+        );
+        let projection_error = project_plan_run(&over_ceiling, fixture_uuid(1), "plan", "run")
+            .expect_err("run admission must reject the same oversized matrix");
+        assert!(matches!(
+            projection_error,
+            PlanExpansionError::TrialMatrixTooLarge { actual: 5_100, .. }
+        ));
+    }
+
+    #[test]
+    fn plan_matrix_shape_refuses_every_dimension_one_block_over_its_limit_offline() {
+        // Pins each matrix dimension's exact upper bound, and that the plan is
+        // refused rather than truncated to the limit.
+        for (dimension, limit) in [
+            ("scenario", MAX_PLAN_SCENARIOS),
+            ("persona", MAX_PLAN_PERSONAS),
+            ("profile", MAX_PLAN_PROFILES),
+            ("target variant", MAX_PLAN_TARGET_VARIANTS),
+        ] {
+            let at_limit = fixture_dimension(dimension, limit);
+            plan_matrix_shape(&at_limit)
+                .unwrap_or_else(|error| panic!("{dimension} at its limit must pass: {error}"));
+
+            let over_limit = fixture_dimension(dimension, limit + 1);
+            let Err(error) = plan_matrix_shape(&over_limit) else {
+                panic!("{dimension} one over its limit must be refused");
+            };
+            assert!(
+                matches!(
+                    error,
+                    PlanExpansionError::PlanDimensionTooLarge { dimension: named, actual, limit: reported }
+                        if named == dimension
+                            && actual == u64::from(limit) + 1
+                            && reported == u64::from(limit)
+                ),
+                "unexpected {dimension} error: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_matrix_shape_refuses_zero_and_over_limit_scalars_offline() {
+        // Pins that repetitions, parallelism, scenario turn caps, and declared
+        // budget are all rejected at zero and at one over their ceiling. Zero
+        // used to be silently clamped to one repetition, which hid the fact
+        // that a plan had declared no usable value at all.
+        /// Builds a plan with one scalar field set to `value`.
+        type ScalarCase = (
+            &'static str,
+            Box<dyn Fn(u32) -> ExperimentPlanDefinition>,
+            u32,
+        );
+
+        let cases: Vec<ScalarCase> = vec![
+            (
+                "trials_per_combination",
+                Box::new(|value| {
+                    let mut definition = fixture_plan();
+                    definition.trials_per_combination = value;
+                    definition
+                }),
+                MAX_PLAN_TRIALS_PER_COMBINATION,
+            ),
+            (
+                "parallelism",
+                Box::new(|value| {
+                    let mut definition = fixture_plan();
+                    definition.parallelism = value;
+                    definition
+                }),
+                MAX_PLAN_PARALLELISM,
+            ),
+            (
+                "scenario max_turns",
+                Box::new(|value| {
+                    let mut definition = fixture_plan();
+                    definition.simulation.scenarios[0].max_turns = value;
+                    definition
+                }),
+                MAX_SCENARIO_TURNS,
+            ),
+            (
+                "budget.max_total_cents",
+                Box::new(|value| {
+                    let mut definition = fixture_plan();
+                    definition.budget.max_total_cents = value;
+                    definition.budget.max_trial_cents = None;
+                    definition
+                }),
+                MAX_PLAN_TOTAL_COST_CENTS,
+            ),
+        ];
+
+        for (field, build, limit) in cases {
+            plan_matrix_shape(&build(limit))
+                .unwrap_or_else(|error| panic!("{field} at its limit must pass: {error}"));
+
+            for value in [0, limit + 1] {
+                let Err(error) = plan_matrix_shape(&build(value)) else {
+                    panic!("{field} = {value} must be refused");
+                };
+                assert!(
+                    matches!(
+                        error,
+                        PlanExpansionError::PlanValueOutOfRange { field: named, actual, .. }
+                            if named == field && actual == u64::from(value)
+                    ),
+                    "unexpected {field} error: {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plan_matrix_shape_refuses_oversized_plan_bytes_offline() {
+        // Pins that a plan staying inside every count limit cannot smuggle
+        // unbounded bytes through one free-form field, one block, or the
+        // document as a whole.
+        let mut definition = fixture_plan();
+        definition.target_variants[0].config = json!({
+            "prompt": "x".repeat(MAX_PLAN_FIELD_BYTES + 1),
+        });
+
+        let error = plan_matrix_shape(&definition)
+            .expect_err("an oversized variant config must be refused");
+
+        assert!(
+            matches!(
+                error,
+                PlanExpansionError::PlanTooLarge { ref field, limit, .. }
+                    if field == "target_variants[0].config" && limit == MAX_PLAN_FIELD_BYTES
+            ),
+            "unexpected error: {error:?}"
+        );
+
+        let mut definition = fixture_plan();
+        definition.simulation.scenarios[0].initial_situation = "x".repeat(MAX_PLAN_BLOCK_BYTES + 1);
+        let error = plan_matrix_shape(&definition)
+            .expect_err("an oversized scenario block must be refused");
+        assert!(
+            matches!(
+                error,
+                PlanExpansionError::PlanTooLarge { ref field, limit, .. }
+                    if field == "simulation.scenarios[0]" && limit == MAX_PLAN_BLOCK_BYTES
+            ),
+            "unexpected error: {error:?}"
+        );
+
+        let mut definition = fixture_plan();
+        definition.simulation.personas = (0..64)
+            .map(|index| SimulationPersonaDefinition {
+                id: format!("persona-{index}"),
+                voice: "x".repeat(MAX_PLAN_BLOCK_BYTES - 1_024),
+                ..SimulationPersonaDefinition::default()
+            })
+            .collect();
+        let error =
+            plan_matrix_shape(&definition).expect_err("an oversized plan document must be refused");
+        assert!(
+            matches!(
+                error,
+                PlanExpansionError::PlanTooLarge { ref field, limit, .. }
+                    if field == "definition" && limit == MAX_PLAN_DEFINITION_BYTES
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn plan_trial_pager_emits_the_whole_matrix_one_bounded_page_at_a_time_offline() {
+        // Pins that paging is equivalent to the full expansion it replaces and
+        // that no page ever exceeds the page bound, so a maximal matrix is
+        // dispatched without ever holding 5_000 trials at once.
+        let definition = fixture_matrix(50, 1, 1, 1, MAX_PLAN_TRIALS_PER_COMBINATION);
+        let mut pager = PlanTrialPager::new(fixture_uuid(2), fixture_uuid(1), &definition)
+            .expect("a matrix at the ceiling pages");
+        assert_eq!(pager.remaining(), MAX_PLAN_TOTAL_TRIALS);
+
+        let mut pages = 0_usize;
+        let mut keys = Vec::new();
+        loop {
+            let page = pager.next_page();
+            if page.is_empty() {
+                break;
+            }
+            assert!(
+                page.len() <= PLAN_TRIAL_PAGE_TRIALS,
+                "page of {} trials exceeds the page bound",
+                page.len()
+            );
+            pages += 1;
+            keys.extend(page.into_iter().map(|trial| trial.trial.trial_key));
+        }
+
+        assert_eq!(keys.len(), MAX_PLAN_TOTAL_TRIALS as usize);
+        assert_eq!(
+            pages,
+            MAX_PLAN_TOTAL_TRIALS as usize / PLAN_TRIAL_PAGE_TRIALS + 1
+        );
+        assert_eq!(pager.remaining(), 0);
+        let unique = keys.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), keys.len(), "trial keys must stay unique");
+
+        let eager = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
+            .expect("the same matrix expands eagerly")
+            .into_iter()
+            .map(|trial| trial.trial.trial_key)
+            .collect::<Vec<_>>();
+        assert_eq!(eager, keys, "paged order must match expanded order");
+    }
+
+    /// Builds a plan whose matrix has the requested dimensions.
+    fn fixture_matrix(
+        scenarios: u32,
+        personas: u32,
+        profiles: u32,
+        target_variants: u32,
+        trials_per_combination: u32,
+    ) -> ExperimentPlanDefinition {
+        let mut definition = fixture_plan();
+        definition.simulation.data_bundles.clear();
+        definition.simulation.scenarios = (0..scenarios)
+            .map(|index| SimulationScenarioDefinition {
+                id: format!("scenario-{index}"),
+                max_turns: 2,
+                ..SimulationScenarioDefinition::default()
+            })
+            .collect();
+        definition.simulation.personas = (0..personas)
+            .map(|index| SimulationPersonaDefinition {
+                id: format!("persona-{index}"),
+                ..SimulationPersonaDefinition::default()
+            })
+            .collect();
+        definition.simulation.profiles = (0..profiles)
+            .map(|index| SimulationProfileDefinition {
+                id: format!("profile-{index}"),
+                ..SimulationProfileDefinition::default()
+            })
+            .collect();
+        definition.target_variants = (0..target_variants)
+            .map(|index| ExperimentTargetVariant {
+                key: format!("variant-{index}"),
+                kind: ExperimentTargetKind::AgentLoop,
+                config: json!({"prompt": "start"}),
+                ui: json!({}),
+            })
+            .collect();
+        definition.trials_per_combination = trials_per_combination;
+        definition
+    }
+
+    /// Builds a plan with `count` blocks in `dimension` and one block everywhere else.
+    fn fixture_dimension(dimension: &str, count: u32) -> ExperimentPlanDefinition {
+        match dimension {
+            "scenario" => fixture_matrix(count, 1, 1, 1, 1),
+            "persona" => fixture_matrix(1, count, 1, 1, 1),
+            "profile" => fixture_matrix(1, 1, count, 1, 1),
+            "target variant" => fixture_matrix(1, 1, 1, count, 1),
+            other => panic!("unknown matrix dimension {other}"),
+        }
     }
 
     fn fixture_plan() -> ExperimentPlanDefinition {

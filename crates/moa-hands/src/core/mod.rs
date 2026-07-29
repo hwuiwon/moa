@@ -24,8 +24,8 @@ use moa_config::ToolBudgetConfig;
 use moa_config::ToolOutputConfig;
 use moa_core::{
     traits::HandProvider, traits::MemoryRetrievalExecutor, traits::MemoryToolExecutor,
-    traits::SessionStore, types::hands::HandHandle, types::hands::SandboxFile,
-    types::hands::SandboxPolicySnapshot, types::identifiers::TenantId,
+    traits::SessionStore, types::action_policy::CallOrigin, types::hands::HandHandle,
+    types::hands::SandboxFile, types::hands::SandboxPolicySnapshot, types::identifiers::TenantId,
 };
 use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, McpDeploymentCredentials, McpEgressGuard,
@@ -121,6 +121,12 @@ pub struct ToolRouter {
     installed_files: RwLock<HashMap<String, Vec<SandboxFile>>>,
     workspace_roots: RwLock<HashMap<TenantId, PathBuf>>,
     policies: ActionPolicies,
+    /// Provenance class of the runtime this router serves.
+    ///
+    /// Stated at construction as a deployment-level ceiling and composed with
+    /// each session's durable origin. No tenant rule, deployment default, or
+    /// tool effect can hand back a capability either origin refuses.
+    call_origin: CallOrigin,
     /// Configured permission patterns that govern no registered tool.
     ///
     /// Recomputed whenever the tool catalog changes rather than once at startup,

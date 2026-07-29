@@ -1,9 +1,56 @@
 ---
 name: moa-100-session-sweep
-description: Run and baseline MOA's live 100-session realistic persona sweep. Use when Codex needs to evaluate coordinator/worker behavior, skill activation, worker delegation, WorkerResultBundle fan-in, final-response quality, durable errors, or regressions across the standard 100-session MOA persona suite.
+description: Run and baseline MOA's live 100-session realistic persona sweep. Use when Codex needs to evaluate coordinator/worker behavior, skill activation, worker delegation, worker fan-in, final-response quality, durable errors, or regressions across the standard 100-session MOA persona suite. The sweep is billed and requires explicit authorization plus a budget.
 ---
 
 # MOA 100-Session Sweep
+
+## Case Source (canonical)
+
+The 100 persona cases live in a versioned, hashed fixture:
+
+- `.agents/skills/moa-100-session-sweep/fixtures/cases.v1.json`
+- `.agents/skills/moa-100-session-sweep/fixtures/cases.v1.sha256`
+
+Markdown sweep reports are **outputs**, never case input. The fixture is the only
+input the runner reads. Every run and every baseline records the fixture's
+`content_sha256`; **baselines are comparable only across runs with the same case
+content hash.**
+
+Schema (`schema_version: 1`), enforced on every load:
+
+| Field | Rule |
+|---|---|
+| envelope | `schema_version == 1`, `case_count` equals the number of cases, exactly 100 cases, `content_sha256` matches the canonical serialization of `cases` |
+| `id` | `S###`, unique, contiguous, and in order: exactly `S001..S100` |
+| `persona` | non-empty string |
+| `scenario` | integer equal to the numeric part of `id` |
+| `expected_skills` | list of non-empty, unique strings (may be empty) |
+| `expected_worker`, `interrupt`, `cancel` | strict booleans |
+| `request` | whitespace-normalized string, >= 20 chars |
+
+Unknown or missing per-case fields are rejected.
+
+### Validating and editing the fixture
+
+```bash
+# unbilled: schema + contiguous ids + exact count + both hashes. This is what CI runs.
+python3 .agents/skills/moa-100-session-sweep/scripts/run_100_session_sweep.py --validate-cases
+
+# validator's own negative coverage
+python3 -m unittest discover -s .agents/skills/moa-100-session-sweep/tests
+
+# after an intentional fixture edit, refresh both hashes (validates first)
+python3 .agents/skills/moa-100-session-sweep/scripts/sweep_cases.py --rehash
+```
+
+CI (`.github/workflows/ci.yml`, job `eval-fixtures`) runs the validator and the
+validator tests on every PR. **Editing the fixture without refreshing both hashes
+fails CI.** CI never runs the billed sweep.
+
+Load-bearing planner-anchor request tokens (` reconcile `, ` summarize `,
+` categorize `, per `project_planner_anchor_live_coverage`) are preserved in the
+fixture and pinned by a test. Do not paraphrase them away.
 
 ## Workflow
 
@@ -12,22 +59,58 @@ description: Run and baseline MOA's live 100-session realistic persona sweep. Us
    - `git status --short`
    - latest reports under `docs/engineering-discipline/live-runs/`
    - Restate/Redis/Postgres availability if the run fails early.
-3. Use the bundled runner:
-   - `.agents/skills/moa-100-session-sweep/scripts/run_100_session_sweep.py`
-4. Run the full baseline unless the user asks for a focused lane:
-   - `MOA_SWEEP_WRITE_REPO=1 MOA_SWEEP_MODEL=gpt-5.4-mini .agents/skills/moa-100-session-sweep/scripts/run_100_session_sweep.py`
-5. For a focused lane, set `MOA_SWEEP_IDS` (the repo baseline is not written unless you add `MOA_SWEEP_WRITE_REPO=1`):
-   - `MOA_SWEEP_IDS=S002,S004,S008 .agents/skills/moa-100-session-sweep/scripts/run_100_session_sweep.py`
+3. Validate the fixture first (free, instant):
+   - `.../run_100_session_sweep.py --validate-cases`
+4. Use the bundled runner. The sweep is billed, so it needs explicit
+   authorization and a budget (see Authorization and Budget below):
+   - `MOA_RUN_LIVE_100_SESSION_SWEEP=1 MOA_SWEEP_BUDGET_USD=5 MOA_SWEEP_WRITE_REPO=1 MOA_SWEEP_MODEL=gpt-5.4-mini .agents/skills/moa-100-session-sweep/scripts/run_100_session_sweep.py`
+5. For a focused lane, set `MOA_SWEEP_IDS`. Focused lanes skip the canary and can
+   never write the baseline (they are not 100 attempted cases):
+   - `MOA_RUN_LIVE_100_SESSION_SWEEP=1 MOA_SWEEP_BUDGET_USD=1 MOA_SWEEP_IDS=S002,S004,S008 .agents/skills/moa-100-session-sweep/scripts/run_100_session_sweep.py`
 6. After the run, report:
+   - case fixture content hash
+   - canary outcomes
+   - sessions attempted (and any skipped for budget)
    - aggregate outcomes
    - failure tags (see Failure Tags below)
    - expected-worker coverage
-   - total `WorkerSpawned`, `WorkerNotificationDelivered`, and `WorkerResultBundle`
+   - total `WorkerSpawned` and `WorkerNotificationDelivered`
    - skill evidence coverage
    - durable error events
+   - budget: forecast, spent, remaining
    - cost cents (total and max per session)
    - model turns (total and max per session)
    - report path and run directory
+
+## Authorization and Budget
+
+The billed run refuses to start unless **all** of these hold, and it names every
+missing requirement instead of silently doing nothing:
+
+- `MOA_RUN_LIVE_100_SESSION_SWEEP=1`
+- a live provider credential (`MOA_ANTHROPIC_API_KEY`, `MOA_OPENAI_API_KEY`, or
+  `MOA_GOOGLE_API_KEY`), `MOA_DATABASE_URL`, and a `.env.fga` file
+- `MOA_SWEEP_BUDGET_USD` set to a positive number that covers the pre-computed
+  forecast for the whole run, canary included
+
+Forecast is `MOA_SWEEP_COST_PER_CASE_USD` (default `0.02`, deliberately above the
+observed ~0.005/session on `gpt-5.4-mini`) times the number of cases plus canary
+cases. **A budget below the forecast dispatches zero sessions.**
+
+During the run a reservation ledger holds one case's forecast before each
+session is dispatched and reconciles it against that session's actual provider
+cost when it finishes. When no reservation is available the runner stops
+dispatching and marks the remaining cases `skipped` rather than spending past the
+authorized budget. The canary and the full run share one ledger.
+
+## Canary
+
+Before the 100-case job the runner executes a three-case canary
+(`MOA_SWEEP_CANARY_IDS`, default `S001,S002,S003` — S002 exercises delegation,
+S003 carries the ` reconcile ` planner anchor). Any canary `fail` or `skipped`
+aborts before the billed 100 are dispatched, and canary results are written to
+`canary.json` in the run directory. Focused lanes (`MOA_SWEEP_IDS` /
+`MOA_SWEEP_LIMIT`) and `MOA_SWEEP_SKIP_CANARY=1` skip it.
 
 ## Failure Tags
 
@@ -45,9 +128,12 @@ pass at current HEAD and should fire only on a regression.
 - `F-DELEGATE` (partial): an expected-worker case spawned no workers.
 - `F-QUALITY` (partial): a spawned worker never delivered a terminal
   `WorkerNotificationDelivered` back to the parent (fan-in dropped a worker), regardless of
-  whether delegation was expected. The pre-2026-07-14 `WorkerResultBundle` event was removed with
-  the dynamic-execution rework — the coordinator now synthesizes from terminal notifications, so
-  bundle counts in reports are expected to be zero at current HEAD.
+  whether delegation was expected.
+- `F-LEGACY-BUNDLE` (fail): a `WorkerResultBundle` event was observed. That event was removed
+  with the dynamic-execution rework — the coordinator synthesizes from terminal
+  `WorkerNotificationDelivered` events. Seeing one is an immediate fan-in contract failure, never
+  a flake, and is never eligible for a re-run marker. There is no expected-zero bundle counter in
+  reports; the contract is enforced, not tallied.
 - `F-SKILL-INJECT` (partial): an expected-skill case had no persisted segment skill evidence.
 
 ## Re-run Candidates (flaky signatures)
@@ -89,18 +175,24 @@ Every run writes a temp report, summary, logs, and per-session JSON under the pr
 
 The committed repo baseline report
 (`docs/engineering-discipline/live-runs/<date>-moa-100-persona-baseline.md`) is written **only** when
-`MOA_SWEEP_WRITE_REPO=1` is set explicitly (as the full-baseline command does). This is off by
-default so a focused lane run can never clobber the committed baseline.
+`MOA_SWEEP_WRITE_REPO=1` is set explicitly **and** the run reached `attempted == 100`. Both
+conditions are enforced by the runner, so a focused lane, a budget-truncated run, or a crash can
+never clobber the committed baseline. The summary JSON records `baseline_written`.
 
 Useful env overrides:
 
-- `MOA_SWEEP_CASE_SOURCE`: source report to parse the 100 persona cases from
+- `MOA_RUN_LIVE_100_SESSION_SWEEP=1`: required to dispatch any billed session
+- `MOA_SWEEP_BUDGET_USD`: required positive USD budget for the run
+- `MOA_SWEEP_COST_PER_CASE_USD`: per-case forecast used for the pre-run budget check, default `0.02`
+- `MOA_SWEEP_CANARY_IDS`: canary case ids, default `S001,S002,S003`
+- `MOA_SWEEP_SKIP_CANARY=1`: skip the pre-flight canary
+- `MOA_SWEEP_CASE_SOURCE`: alternate case fixture path (must satisfy the same schema and hashes)
 - `MOA_SWEEP_REPORT_REPO`: exact repo report path to write
 - `MOA_SWEEP_WRITE_REPO=1`: also overwrite the committed repo baseline report (default off: temp run directory only)
 - `MOA_SWEEP_CONCURRENCY`: default `4`
 - `MOA_SWEEP_SESSION_TIMEOUT_S`: default `260`
 - `MOA_SWEEP_MAX_TURNS`: default `6`
-- `MOA_SWEEP_LIMIT`: run first N parsed cases
+- `MOA_SWEEP_LIMIT`: run first N cases
 - `MOA_SWEEP_IDS`: comma-separated session ids for focused lanes
 - `MOA_SWEEP_MODEL`: pinned model, usually `gpt-5.4-mini`
 - `MOA_SWEEP_REDIS_URL`: runtime-cache Redis URL, default `redis://127.0.0.1:10051/0`
@@ -130,11 +222,18 @@ Interpretation guidance for sweeps at or after the 2026-07-10 defaults changes:
 
 ## Baseline Rules
 
-Treat the repo report as the current baseline only after the full 100-session run
-finishes and the summary JSON reports `attempted=100`.
+Treat the repo report as the current baseline only when all of these hold:
+
+- the summary JSON reports `attempted=100` and `baseline_written=true`;
+- the canary passed;
+- the baseline's case `content_sha256` matches the fixture you are comparing against.
+
+Runs seeded from a different case content hash are **not comparable**. The
+2026-07-08 fixture recovery started a new baseline; pre-2026-07-08 reports are not
+comparable to it.
 
 Do not treat focused lanes as baselines. Focused lanes are for quick regression
-checks and should normally use `MOA_SWEEP_WRITE_REPO=0`.
+checks and can never write the baseline.
 
 If the run fails before session execution, preserve the run directory and report
 the setup failure instead of editing baseline reports by hand.

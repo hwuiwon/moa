@@ -104,6 +104,8 @@ impl SessionTarget for RemoteTarget {
             }),
             contact_promoted_from_id: None,
             agent_context: Some(moa_core::types::agent::AgentContext::system_default()),
+            // A load-test session drives the ordinary production path on purpose.
+            call_origin: moa_core::types::action_policy::CallOrigin::Production,
             total_input_tokens: 0,
             total_input_tokens_uncached: 0,
             total_input_tokens_cache_write: 0,

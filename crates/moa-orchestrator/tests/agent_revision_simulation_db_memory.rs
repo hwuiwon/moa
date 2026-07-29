@@ -291,7 +291,6 @@ fn new_experiment(
         name: name.to_string(),
         target: ExperimentTarget::AgentLoop {
             prompt: "Measure this behavior.".to_string(),
-            session_id: None,
             agent: None,
             model: ModelId::new("gpt-5.1"),
             attachments: Vec::new(),

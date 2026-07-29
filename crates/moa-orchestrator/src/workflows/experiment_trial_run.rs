@@ -11,7 +11,7 @@ use moa_config::MoaConfig;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::{
     events::Event, events::EventType, traits::SessionStore, types::action_policy::ActionRuleScope,
-    types::agent::AgentSessionSelection, types::channel::Channel,
+    types::action_policy::CallOrigin, types::agent::AgentSessionSelection, types::channel::Channel,
     types::completion::CompletionRequest, types::contact::SessionActorRef,
     types::context::ContextMessage, types::events_stream::EventRange,
     types::events_stream::EventRecord, types::identifiers::ModelId, types::identifiers::SessionId,
@@ -385,10 +385,19 @@ async fn run_trial(
     .await
 }
 
+/// Builds the metadata for one agent-loop trial's own session.
+///
+/// The session is stamped with the owning trial's [`CallOrigin`] at creation.
+/// That stamp is the only thing separating this session's tool calls from
+/// production traffic: the trial drives an ordinary Session virtual object on
+/// the ordinary process-wide tool router, so by the time a tool name reaches
+/// policy evaluation the session record is the sole evidence that this is eval
+/// traffic.
 fn new_session_meta(
     tenant_id: TenantId,
     model: ModelId,
     identity: &Identity,
+    call_origin: CallOrigin,
 ) -> Result<SessionMeta, HandlerError> {
     let now = Utc::now();
     Ok(SessionMeta {
@@ -401,6 +410,7 @@ fn new_session_meta(
         created_at: now,
         updated_at: now,
         created_by: Some(session_actor_ref(identity)?),
+        call_origin,
         ..SessionMeta::default()
     })
 }

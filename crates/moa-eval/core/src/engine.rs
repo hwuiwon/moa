@@ -5,10 +5,17 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::admission::EvalAdmissionLimits;
+use crate::resource_report::RunResourceReport;
 use crate::{EvalResult, EvalStatus};
 
 /// Options that control eval execution behavior.
+///
+/// `parallel` is not a hint: it is checked against
+/// [`EvalAdmissionLimits::max_parallel_cases`] and a request above the bound is
+/// rejected rather than reduced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EngineOptions {
     /// Maximum number of cases to execute concurrently.
     pub parallel: usize,
@@ -20,6 +27,8 @@ pub struct EngineOptions {
     pub capture_content: bool,
     /// Maximum bytes captured for any text payload.
     pub content_max_bytes: usize,
+    /// Hard maximums enforced before any case is dispatched.
+    pub admission: EvalAdmissionLimits,
 }
 
 impl Default for EngineOptions {
@@ -30,6 +39,7 @@ impl Default for EngineOptions {
             dry_run: false,
             capture_content: true,
             content_max_bytes: 32 * 1024,
+            admission: EvalAdmissionLimits::default(),
         }
     }
 }
@@ -47,6 +57,9 @@ pub struct EvalRun {
     pub results: Vec<EvalResult>,
     /// Aggregate summary across all results.
     pub summary: RunSummary,
+    /// Reservation accounting for the run, when the engine enforced an envelope.
+    #[serde(default)]
+    pub resources: Option<RunResourceReport>,
 }
 
 /// Aggregate counters and resource usage across a suite run.

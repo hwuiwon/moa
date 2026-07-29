@@ -27,7 +27,7 @@ use crate::tools::sandbox_descriptor::{
     SandboxToolCapability, supported_capability_for_tool, unsupported_tool,
 };
 use crate::tools::str_replace::plan_str_replace;
-use crate::tools::{file_outline, file_read, grep};
+use crate::tools::{bash, file_outline, file_read, grep};
 
 const DAYTONA_SUPPORTED_CAPABILITIES: &[SandboxToolCapability] = &SandboxToolCapability::ALL;
 const DEFAULT_DAYTONA_API_URL: &str = "https://app.daytona.io/api";
@@ -139,8 +139,9 @@ impl DaytonaHandProvider {
         workspace_id: &str,
         command: &str,
         cwd: Option<&str>,
-        timeout_secs: Option<u64>,
+        timeout: Option<Duration>,
     ) -> Result<ToolOutput> {
+        let timeout_secs = timeout.map(|timeout| timeout.as_secs());
         let started_at = Instant::now();
         let response = self
             .client
@@ -250,7 +251,7 @@ impl DaytonaHandProvider {
     async fn chmod_file(&self, workspace_id: &str, path: &str) -> Result<()> {
         let command = format!("chmod 755 {}", shell_quote(path));
         let output = self
-            .execute_command(workspace_id, &command, None, Some(30))
+            .execute_command(workspace_id, &command, None, Some(Duration::from_secs(30)))
             .await?;
         if output.is_error {
             return Err(MoaError::ProviderError(format!(
@@ -312,11 +313,16 @@ impl DaytonaHandProvider {
     ) -> Result<ToolOutput> {
         match supported_capability_for_tool(tool, DAYTONA_SUPPORTED_CAPABILITIES) {
             Some(SandboxToolCapability::Bash) => {
+                // Parsed through the shared validated input rather than read
+                // out of the raw payload: the remote toolbox honours whatever
+                // `timeout` it is handed, so an unvalidated read here would
+                // reinstate the unbounded timeout on the Daytona route alone.
+                let params = bash::BashToolInput::parse(input)?;
                 self.execute_command(
                     workspace_id,
-                    required_string_field(payload, "cmd")?,
+                    &params.cmd,
                     None,
-                    payload.get("timeout_secs").and_then(Value::as_u64),
+                    params.timeout_secs.map(|timeout| timeout.duration()),
                 )
                 .await
             }

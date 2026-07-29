@@ -140,6 +140,30 @@ jobs:
           git diff --exit-code -- k8s/schemas \
             || { echo "Vendored CRD schemas differ from the pinned upstream. Run k8s/schemas/refresh.sh and commit the result." >&2; exit 1; }
 
+  # Canonical eval-fixture contracts.
+  #
+  # CI validates the committed input without running the live, billed sweep.
+  #
+  # This runs the parser/schema/hash validator only. It dispatches no sessions,
+  # needs no credentials, and spends nothing.
+  eval-fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      # Schema, contiguous S001..S100, exact count of 100, embedded content
+      # hash, and the sha256 sidecar over the fixture bytes. Editing the
+      # fixture without refreshing both hashes fails this step.
+      - name: Validate 100-session sweep case fixture
+        run: python3 .agents/skills/moa-100-session-sweep/scripts/run_100_session_sweep.py --validate-cases
+
+      # Negative coverage for the validator itself: duplicate/missing/reordered
+      # ids, malformed required fields, wrong counts, and stale hashes.
+      - name: Run sweep fixture validator tests
+        run: python3 -m unittest discover -s .agents/skills/moa-100-session-sweep/tests -v
+
   db-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 45

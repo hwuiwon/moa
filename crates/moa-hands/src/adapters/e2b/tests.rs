@@ -1,4 +1,6 @@
-use moa_core::{traits::HandProvider, types::hands::EgressPolicy, types::hands::SandboxTier};
+use moa_core::{
+    error::MoaError, traits::HandProvider, types::hands::EgressPolicy, types::hands::SandboxTier,
+};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -105,6 +107,21 @@ async fn provisions_executes_and_destroys_sandbox() {
     assert_eq!(
         create_request.get("timeout").and_then(Value::as_u64),
         Some(300)
+    );
+
+    // Pins: direct provider calls use the shared BashToolInput validator, so an
+    // oversized timeout cannot bypass the router and reach E2B.
+    let error = provider
+        .execute(
+            &handle,
+            "bash",
+            r#"{"cmd":"echo bypass","timeout_secs":301}"#,
+        )
+        .await
+        .expect_err("an out-of-policy timeout must be rejected before dispatch");
+    assert!(
+        matches!(&error, MoaError::ValidationError(message) if message.contains("301") && message.contains("300")),
+        "unexpected validation error: {error}"
     );
 
     let output = provider

@@ -443,7 +443,6 @@ async fn delete_tenant_rows(
         "DELETE FROM oauth_authorization_codes WHERE tenant_id = $1",
         "DELETE FROM oauth_authorization_transactions WHERE tenant_id = $1",
         "DELETE FROM token_vault_connections WHERE tenant_id = $1",
-        "DELETE FROM analytics.eval_run_status WHERE tenant_id = $1",
         "DELETE FROM moa.dual_control_request WHERE tenant_id = $1",
         "DELETE FROM moa.audit_jti_used WHERE tenant_id = $1",
         "DELETE FROM moa.erasure_jobs WHERE tenant_id = $1",
@@ -526,7 +525,6 @@ async fn delete_tenant_rows(
         "DELETE FROM users WHERE tenant_id = $1",
     ];
     let storage_deletes = [
-        "DELETE FROM analytics.eval_dataset_items WHERE storage_partition_id = $1",
         "DELETE FROM moa.agent_deployment WHERE storage_partition_id = $1",
         "DELETE FROM moa.agent_installation WHERE storage_partition_id = $1",
         // Behavior Lab score provenance goes before the trials it references.

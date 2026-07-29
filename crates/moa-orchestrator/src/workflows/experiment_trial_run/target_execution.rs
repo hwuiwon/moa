@@ -158,6 +158,15 @@ pub(super) async fn run_agent_loop_trial(
     session_store: &Arc<PostgresSessionStore>,
     providers: &Arc<ProviderRegistry>,
 ) -> Result<TrialTargetOutcome, HandlerError> {
+    // Scope mismatch is decided before the target payload is used for any
+    // session read, session write, or simulator provider call.
+    if trial.scope.tenant_id() != request.tenant_id {
+        return Err(TerminalError::new_with_code(
+            409,
+            "experiment trial scope does not match the workflow tenant",
+        )
+        .into());
+    }
     let target = parse_payload::<ExperimentTarget>("target", request.target.clone())?;
     let variant = parse_payload::<ExperimentVariant>("variant", request.variant.clone())?;
     let (session_id, target_model) =
@@ -323,6 +332,105 @@ fn terminal_status_error(status: ExperimentTrialStatus, session_id: SessionId) -
         .then(|| format!("target session {session_id} reached a failed state"))
 }
 
+/// Agent and model selection for one agent-loop trial target.
+#[derive(Debug, Clone, PartialEq)]
+struct AgentLoopTargetSelection {
+    /// Agent selector used when the trial creates its own session.
+    agent: Option<AgentSessionSelection>,
+    /// Effective target model, most specific source first.
+    model: Option<ModelId>,
+}
+
+/// Validates an agent-loop trial target and resolves its agent and model.
+///
+/// A simulator trial never continues a caller-named session: it would submit
+/// live turns into a production conversation and read that conversation's
+/// durable event log. The target type carries no session field, so the trial
+/// always runs in the eval-owned session it creates for itself.
+fn agent_loop_target_selection(
+    target: ExperimentTarget,
+    trial_model: Option<ModelId>,
+    variant_model: Option<ModelId>,
+) -> Result<AgentLoopTargetSelection, HandlerError> {
+    let ExperimentTarget::AgentLoop {
+        agent,
+        model,
+        attachments,
+        ..
+    } = target
+    else {
+        return Err(bad_request(
+            "agent-loop trial received a workflow experiment target",
+        ));
+    };
+    if !attachments.is_empty() {
+        return Err(bad_request(
+            "simulator trials do not copy target prompt attachments into simulator turns",
+        ));
+    }
+    Ok(AgentLoopTargetSelection {
+        agent,
+        model: trial_model.or(variant_model).or(Some(model)),
+    })
+}
+
+/// Refuses a resumed trial session that does not belong to the trial's scope.
+fn require_trial_session_ownership(
+    meta: &SessionMeta,
+    tenant_id: TenantId,
+    scope: ActionRuleScope,
+) -> Result<(), HandlerError> {
+    let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
+    // Agent-loop trial sessions are created without a contact, so a contact is
+    // only compared when the resumed session actually declares one.
+    if meta.tenant_id != tenant_id
+        || (contact_id.is_some() && contact_id != scope.contact_id())
+        || meta.tenant_id != scope.tenant_id()
+    {
+        return Err(TerminalError::new_with_code(
+            409,
+            "agent-loop trial session does not match the experiment trial scope",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Authorizes and verifies a resumed trial session before its first event read.
+///
+/// `Session/status` performs `require_authz_with_delegation(Session, id,
+/// Participant)`. Calling it here puts the authorization and the ownership
+/// check ahead of every durable event read the trial performs, instead of
+/// leaving the first read in front of the first authorized call.
+async fn authorize_resumed_trial_session(
+    ctx: &WorkflowContext<'_>,
+    request: &ExperimentTrialRunWorkflowRequest,
+    trial: &ExperimentTrialRecord,
+    session_id: SessionId,
+    session_store: &Arc<PostgresSessionStore>,
+) -> Result<(), HandlerError> {
+    with_identity_headers(
+        ctx.object_client::<SessionClient>(session_id.to_string())
+            .status(),
+        &request.identity,
+    )
+    .call()
+    .await?;
+    let store = session_store.clone();
+    let meta = ctx
+        .run(|| async move {
+            store
+                .get_session(session_id)
+                .await
+                .map(Json::from)
+                .map_err(moa_error_to_handler_error)
+        })
+        .name("experiment_trial_load_agent_loop_session")
+        .await?
+        .into_inner();
+    require_trial_session_ownership(&meta, request.tenant_id, trial.scope)
+}
+
 async fn ensure_agent_loop_session(
     ctx: &WorkflowContext<'_>,
     request: &ExperimentTrialRunWorkflowRequest,
@@ -332,39 +440,23 @@ async fn ensure_agent_loop_session(
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<(SessionId, Option<ModelId>), HandlerError> {
-    let (target_session_id, target_agent, target_model, attachments_empty) = match target {
-        ExperimentTarget::AgentLoop {
-            session_id,
-            agent,
-            model,
-            attachments,
-            ..
-        } => (
-            session_id,
-            agent,
-            trial.target_model.clone().or(variant.model).or(Some(model)),
-            attachments.is_empty(),
-        ),
-        ExperimentTarget::ExecutionTemplate { .. } => {
-            return Err(bad_request(
-                "agent-loop trial received a workflow experiment target",
-            ));
-        }
-    };
-    if !attachments_empty {
-        return Err(bad_request(
-            "simulator trials do not copy target prompt attachments into simulator turns",
-        ));
-    }
+    let selection = agent_loop_target_selection(target, trial.target_model.clone(), variant.model)?;
+    let target_model = selection.model;
 
     let scope = trial.scope;
-    let session_id = match trial.session_id.or(target_session_id) {
-        Some(session_id) => session_id,
+    let session_id = match trial.session_id {
+        // A trial that already attached a session is resuming its own eval-owned
+        // session. It is still authorized and ownership-checked before this
+        // workflow reads or writes anything through it.
+        Some(session_id) => {
+            authorize_resumed_trial_session(ctx, request, trial, session_id, session_store).await?;
+            session_id
+        }
         None => {
             let model = target_model
                 .clone()
                 .ok_or_else(|| bad_request("agent-loop trial requires a target model"))?;
-            let agent = target_agent.ok_or_else(|| {
+            let agent = selection.agent.ok_or_else(|| {
                 bad_request("agent-loop simulator target requires an agent selector")
             })?;
             let (session_id, meta) = create_new_session(
@@ -372,6 +464,7 @@ async fn ensure_agent_loop_session(
                 request.tenant_id,
                 model,
                 &request.identity,
+                trial_call_origin(trial),
                 agent,
                 pool,
                 session_store,
@@ -625,14 +718,12 @@ async fn ensure_execution_session(
             .name("experiment_trial_load_execution_session")
             .await?
             .into_inner();
-        let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
-        if meta.tenant_id != request.tenant_id || contact_id != trial.scope.contact_id() {
-            return Err(TerminalError::new_with_code(
-                409,
-                "execution-template target Session does not match experiment scope",
-            )
-            .into());
-        }
+        let contact_id = admit_caller_named_execution_session(
+            &meta,
+            request.tenant_id,
+            trial.scope,
+            trial_call_origin(trial),
+        )?;
         return Ok(EffectiveExecutionSession {
             session_id,
             contact_id,
@@ -652,8 +743,14 @@ async fn ensure_execution_session(
         .or_else(|| variant.model.clone())
         .unwrap_or_else(|| ModelId::new(config.models.main.clone()));
     let now = durable_utc_now(ctx, "experiment_trial_internal_session_now").await?;
-    let meta =
-        internal_execution_session_meta(session_id, trial.scope, model, now, &request.identity)?;
+    let meta = internal_execution_session_meta(
+        session_id,
+        trial.scope,
+        model,
+        now,
+        &request.identity,
+        trial_call_origin(trial),
+    )?;
     let store = session_store.clone();
     let init_pool = pool.clone();
     let init_meta = meta.clone();
@@ -700,12 +797,80 @@ async fn ensure_execution_session(
     })
 }
 
+/// Admits one caller-named execution Session, or refuses it before it is used.
+///
+/// A caller names this Session in the experiment target, so nothing about it is
+/// derived from the trial. Tenant and contact scope alone are not enough: an
+/// ordinary production Session of the same tenant would pass them, and a
+/// production [`CallOrigin`] composes with the process-wide router's own
+/// production origin to leave every tool this trial's tasks issue holding the
+/// full production capability set — production connectors and side-effecting
+/// host tools included.
+///
+/// So the named Session must carry exactly the origin this trial stamps on the
+/// Session it would otherwise create for itself: the same run uid, and this
+/// trial's own uid. Requiring the run uid stops one eval run from borrowing
+/// another's Session; requiring this trial's uid stops a sibling trial's
+/// Session — or the run's own trial-less Session — from hosting this trial,
+/// which would attribute its refusals to a unit that is not executing.
+///
+/// Returns the contact the admitted Session is scoped to.
+fn admit_caller_named_execution_session(
+    meta: &SessionMeta,
+    tenant_id: TenantId,
+    scope: ActionRuleScope,
+    expected_origin: CallOrigin,
+) -> Result<Option<ContactId>, HandlerError> {
+    let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
+    if meta.tenant_id != tenant_id
+        || meta.tenant_id != scope.tenant_id()
+        || contact_id != scope.contact_id()
+    {
+        return Err(TerminalError::new_with_code(
+            409,
+            "execution-template target Session does not match experiment scope",
+        )
+        .into());
+    }
+    if meta.call_origin != expected_origin {
+        return Err(TerminalError::new_with_code(
+            409,
+            format!(
+                "execution-template target Session carries a {} call origin instead of this \
+                 experiment trial's own eval-owned origin",
+                meta.call_origin.as_str()
+            ),
+        )
+        .into());
+    }
+    Ok(contact_id)
+}
+
+/// Returns the eval-owned call origin of one trial.
+///
+/// Both trial target kinds are stamped from here, so an execution-template
+/// trial and an agent-loop trial cannot end up with different ceilings. The
+/// trial uid is always present because a trial exists.
+fn trial_call_origin(trial: &ExperimentTrialRecord) -> CallOrigin {
+    CallOrigin::Experiment {
+        run_uid: trial.run_uid,
+        trial_uid: Some(trial.trial_uid),
+    }
+}
+
+/// Builds the metadata for one execution-template trial's internal session.
+///
+/// Stamped with the same eval-owned [`CallOrigin`] as the agent-loop path: the
+/// execution run this session hosts dispatches its task tools through the same
+/// process-wide router, and the tool executor reloads this record to decide
+/// what those tasks may hold.
 fn internal_execution_session_meta(
     session_id: SessionId,
     scope: ActionRuleScope,
     model: ModelId,
     now: chrono::DateTime<Utc>,
     identity: &Identity,
+    call_origin: CallOrigin,
 ) -> Result<SessionMeta, HandlerError> {
     let contact = scope.contact_id().map(|contact_id| ContactRef {
         contact_id,
@@ -731,6 +896,7 @@ fn internal_execution_session_meta(
         created_by: Some(session_actor_ref(identity)?),
         contact,
         agent_context: Some(AgentContext::system_default()),
+        call_origin,
         ..SessionMeta::default()
     })
 }
@@ -1144,11 +1310,16 @@ fn execution_failure_stop() -> WorkflowTrialStop {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the workflow target keeps durable input and concrete stores explicit instead of hiding them in a dependency bag"
+)]
 async fn create_new_session(
     ctx: &WorkflowContext<'_>,
     tenant_id: TenantId,
     model: ModelId,
     identity: &Identity,
+    call_origin: CallOrigin,
     agent: AgentSessionSelection,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
@@ -1157,7 +1328,7 @@ async fn create_new_session(
     let prepare_pool = pool.clone();
     let meta = ctx
         .run(|| async move {
-            let mut meta = new_session_meta(tenant_id, model, &prepare_identity)?;
+            let mut meta = new_session_meta(tenant_id, model, &prepare_identity, call_origin)?;
             let agent_context =
                 resolve_agent_context_for_session(prepare_pool, &meta, &agent).await?;
             apply_agent_model_policy(&mut meta, &agent_context)?;
@@ -1446,6 +1617,367 @@ mod tests {
         types::context::MessageRole, types::events_stream::EventRecord, types::provider::ModelTier,
     };
 
+    const TRIAL_CONNECTOR: &str = "crm";
+    const TRIAL_CONNECTOR_TOOL: &str = "create_deal";
+
+    /// Spawns a connector that answers discovery and flags any `tools/call`.
+    ///
+    /// The flag is the proof a refusal happened before the network, not after a
+    /// side effect the trial already caused.
+    async fn spawn_recording_connector() -> (String, Arc<std::sync::atomic::AtomicBool>) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake connector");
+        let addr = listener.local_addr().expect("fake connector address");
+        let tool_calls = Arc::new(AtomicBool::new(false));
+        let seen_calls = Arc::clone(&tool_calls);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buffer = vec![0_u8; 8192];
+                let bytes = match socket.read(&mut buffer).await {
+                    Ok(0) | Err(_) => continue,
+                    Ok(read) => read,
+                };
+                let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                let method = request
+                    .split_once("\r\n\r\n")
+                    .and_then(|(_, body)| serde_json::from_str::<Value>(body).ok())
+                    .and_then(|value| {
+                        value
+                            .get("method")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    });
+                let body = match method.as_deref() {
+                    Some("initialize") => {
+                        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{}}}"#
+                            .to_string()
+                    }
+                    Some("tools/list") => format!(
+                        r#"{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"{TRIAL_CONNECTOR_TOOL}","description":"Create a CRM deal","inputSchema":{{"type":"object","properties":{{"account":{{"type":"string"}}}},"required":["account"],"additionalProperties":false}}}}]}}}}"#
+                    ),
+                    Some("tools/call") => {
+                        seen_calls.store(true, Ordering::SeqCst);
+                        r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"deal created"}]}}"#
+                            .to_string()
+                    }
+                    _ => "{}".to_string(),
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (format!("http://{addr}"), tool_calls)
+    }
+
+    /// Builds the same shape of router the orchestrator builds once per process.
+    ///
+    /// Deliberately left at the default [`CallOrigin::Production`]: the shared
+    /// router serves production sessions and trial sessions alike, which is the
+    /// exact condition that made the origin ceiling a no-op for trials.
+    async fn shared_production_router(
+        url: &str,
+        sandbox_root: &std::path::Path,
+    ) -> moa_hands::ToolRouter {
+        let mut config = MoaConfig::default();
+        config.local.sandbox_dir = sandbox_root.display().to_string();
+        config.local.docker_enabled = false;
+        config.security_profile = moa_config::SecurityProfile::Local;
+        config.mcp_servers = vec![moa_config::McpServerConfig {
+            required: true,
+            discovery: moa_config::McpDiscoveryMode::Eager,
+            name: TRIAL_CONNECTOR.to_string(),
+            url: url.to_string(),
+            credentials: None,
+            trust_tool_annotations: false,
+            allowed_data_classes: Vec::new(),
+        }];
+        let guard = Arc::new(moa_security::McpEgressGuard::new(Arc::new(
+            moa_memory_pii::MockClassifier {
+                fixed: moa_memory_pii::PiiResult {
+                    class: moa_core::types::security::SensitivityClass::None,
+                    spans: Vec::new(),
+                    model_version: "experiment-call-origin-test".to_string(),
+                    abstained: false,
+                },
+            },
+        )));
+        moa_hands::ToolRouter::from_config(&config, Some(guard), None)
+            .await
+            .expect("router with a discovered connector")
+    }
+
+    fn connector_invocation() -> moa_core::types::completion::ToolInvocation {
+        moa_core::types::completion::ToolInvocation {
+            id: None,
+            name: moa_hands::mcp_tool_reference(TRIAL_CONNECTOR, TRIAL_CONNECTOR_TOOL),
+            input: serde_json::json!({ "account": "acme" }),
+        }
+    }
+
+    fn trial_operator_identity(tenant_id: TenantId) -> Identity {
+        Identity {
+            identity_type: IdentityType::Operator,
+            id: Uuid::from_u128(0x0f01),
+            tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        }
+    }
+
+    fn call_origin_trial_record() -> ExperimentTrialRecord {
+        ExperimentTrialRecord {
+            scope: ActionRuleScope::Tenant {
+                tenant_id: TenantId(Uuid::from_u128(0x0a01)),
+            },
+            trial_uid: Uuid::from_u128(0x0e02),
+            run_uid: Uuid::from_u128(0x0e01),
+            trial_key: "scenario/persona/profile/variant/0".to_string(),
+            status: ExperimentTrialStatus::Running,
+            target_kind: ExperimentTargetKind::AgentLoop,
+            variant_key: "baseline".to_string(),
+            plan_revision_uid: Uuid::from_u128(0x0e03),
+            persona_id: None,
+            profile_id: None,
+            scenario_id: None,
+            data_bundle_ids: Vec::new(),
+            artifact_revision_uids: Vec::new(),
+            simulator: moa_experiments::model::ExperimentSimulatorConfig {
+                model: ModelId::new("sim"),
+                temperature: None,
+                max_turns: 1,
+                token_budget: None,
+                metadata: Value::Null,
+            },
+            target_model: None,
+            seed: None,
+            session_id: None,
+            execution_run_uid: None,
+            score_run_id: Uuid::from_u128(0x0e04),
+            final_evidence_hash: None,
+            turn_count: 0,
+            stop_reason: None,
+            error: None,
+            trace_id: None,
+            started_at: None,
+            completed_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_caller_named_trial_session_is_admitted_only_with_this_trial_s_own_eval_origin_offline() {
+        // Pins: the execution-template target lets a caller name any Session it can
+        // reach, so tenant and contact scope alone would hand an eval trial a
+        // production Session — and a production origin composes with the
+        // process-wide production router into the full production capability set.
+        // Only a Session carrying exactly this trial's eval-owned origin is
+        // admitted: a sibling trial's Session, the run's own trial-less Session,
+        // another run's Session, a sandbox origin, and an ordinary production
+        // Session are all refused before the trial reads or writes through them.
+        let trial = call_origin_trial_record();
+        let tenant_id = trial.scope.tenant_id();
+        let identity = trial_operator_identity(tenant_id);
+        let expected = trial_call_origin(&trial);
+        let owned = internal_execution_session_meta(
+            SessionId::new(),
+            trial.scope,
+            ModelId::new("claude-sonnet-4-6"),
+            Utc::now(),
+            &identity,
+            expected,
+        )
+        .expect("execution-template trial session metadata");
+
+        assert_eq!(
+            admit_caller_named_execution_session(&owned, tenant_id, trial.scope, expected)
+                .expect("a Session carrying this trial's own origin is the supported target"),
+            None
+        );
+
+        let production = SessionMeta {
+            call_origin: CallOrigin::Production,
+            ..owned.clone()
+        };
+        let refusal = handler_error_message(
+            &admit_caller_named_execution_session(&production, tenant_id, trial.scope, expected)
+                .expect_err("a production-origin Session must never host an experiment trial"),
+        );
+        assert!(
+            refusal.contains("production") && refusal.contains("call origin"),
+            "the refusal must name the origin that was rejected: {refusal}"
+        );
+
+        for (label, origin) in [
+            (
+                "a sibling trial of the same run",
+                CallOrigin::Experiment {
+                    run_uid: trial.run_uid,
+                    trial_uid: Some(Uuid::from_u128(0x0e77)),
+                },
+            ),
+            (
+                "the run's own trial-less session",
+                CallOrigin::Experiment {
+                    run_uid: trial.run_uid,
+                    trial_uid: None,
+                },
+            ),
+            (
+                "another eval run's session",
+                CallOrigin::Experiment {
+                    run_uid: Uuid::from_u128(0x0e78),
+                    trial_uid: Some(trial.trial_uid),
+                },
+            ),
+            ("a sandbox origin", CallOrigin::GeneratedCode),
+        ] {
+            let foreign = SessionMeta {
+                call_origin: origin,
+                ..owned.clone()
+            };
+            assert!(
+                admit_caller_named_execution_session(&foreign, tenant_id, trial.scope, expected)
+                    .is_err(),
+                "{label} is not the unit being executed and must be refused"
+            );
+        }
+
+        let foreign_tenant = SessionMeta {
+            tenant_id: TenantId::new(),
+            ..owned
+        };
+        assert!(
+            admit_caller_named_execution_session(&foreign_tenant, tenant_id, trial.scope, expected)
+                .is_err(),
+            "a cross-tenant Session stays refused whatever origin it carries"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_trial_session_of_either_target_kind_cannot_reach_a_production_connector_offline() {
+        // Pins: both trial target kinds create their session through a constructor
+        // that stamps the trial's eval-owned origin, and that stamp alone stops a
+        // trial from holding a production connector on the shared, production-origin
+        // router every governed tool call actually goes through. The refusal is
+        // asserted on the policy path AND on the durable recovery path the tool
+        // executor takes, the connector never receives a tools/call, and the exact
+        // same invocation on the exact same router succeeds for a production-origin
+        // session — so what changed is the origin, not a broken connector, a failed
+        // discovery, or a rejected input.
+        use std::sync::atomic::Ordering;
+
+        let (connector_url, tool_calls) = spawn_recording_connector().await;
+        let dir = tempfile::tempdir().expect("sandbox dir");
+        let router = shared_production_router(&connector_url, dir.path()).await;
+        assert!(
+            router.call_origin().is_production(),
+            "the shared orchestrator router is production-origin, so the session has to carry the trial ceiling"
+        );
+
+        let trial = call_origin_trial_record();
+        let tenant_id = trial.scope.tenant_id();
+        let identity = trial_operator_identity(tenant_id);
+        let model = ModelId::new("claude-sonnet-4-6");
+        let expected_origin = CallOrigin::Experiment {
+            run_uid: trial.run_uid,
+            trial_uid: Some(trial.trial_uid),
+        };
+
+        let agent_loop = new_session_meta(
+            tenant_id,
+            model.clone(),
+            &identity,
+            trial_call_origin(&trial),
+        )
+        .expect("agent-loop trial session metadata");
+        let execution_template = internal_execution_session_meta(
+            SessionId::new(),
+            trial.scope,
+            model.clone(),
+            Utc::now(),
+            &identity,
+            trial_call_origin(&trial),
+        )
+        .expect("execution-template trial session metadata");
+
+        for (target_kind, session) in [
+            ("agent_loop", agent_loop),
+            ("execution_template", execution_template),
+        ] {
+            assert_eq!(
+                session.call_origin, expected_origin,
+                "the {target_kind} trial session must name the owning run and trial"
+            );
+
+            let policy_error = router
+                .check_policy(&session, &connector_invocation())
+                .await
+                .expect_err("a trial session must not hold a connector capability");
+            assert!(
+                matches!(&policy_error, moa_core::error::MoaError::PermissionDenied(message)
+                    if message.contains("production connectors")
+                        && message.contains(TRIAL_CONNECTOR)),
+                "the {target_kind} refusal must name the connector and the reason: {policy_error:?}"
+            );
+
+            let durable_error = router
+                .execute_authorized_with_recovery(
+                    &session,
+                    &identity,
+                    None,
+                    &connector_invocation(),
+                    moa_core::types::identifiers::ToolCallId::new(),
+                    None,
+                )
+                .await
+                .expect_err("the durable path must refuse the same capability");
+            assert!(
+                matches!(
+                    durable_error,
+                    moa_core::error::MoaError::PermissionDenied(_)
+                ),
+                "the {target_kind} durable path skips action policy, so it must carry its own admission: {durable_error:?}"
+            );
+        }
+
+        assert!(
+            !tool_calls.load(Ordering::SeqCst),
+            "no refused trial path may reach the connector"
+        );
+
+        let production = SessionMeta {
+            tenant_id,
+            model,
+            ..SessionMeta::default()
+        };
+        assert!(production.call_origin.is_production());
+        let secured = router
+            .execute_authorized_with_recovery(
+                &production,
+                &identity,
+                None,
+                &connector_invocation(),
+                moa_core::types::identifiers::ToolCallId::new(),
+                None,
+            )
+            .await
+            .expect("production traffic keeps the same connector on the same router");
+        assert_eq!(secured.safe_output.to_text(), "deal created");
+        assert!(tool_calls.load(Ordering::SeqCst));
+    }
+
     #[test]
     fn transcript_from_events_reconstructs_target_conversation_offline() {
         // Pins: a resumed simulator keeps prior target context from the durable session log.
@@ -1518,6 +2050,125 @@ mod tests {
 
         assert_eq!(target_usage_from_events_after(&events, 1), (42, 3));
         assert_eq!(target_usage_from_events_after(&events, 3), (0, 0));
+    }
+
+    #[test]
+    fn agent_loop_trial_target_cannot_name_a_caller_session_offline() {
+        // Pins: an agent-loop trial target payload has no way to name a session,
+        // so a wire payload carrying one still resolves to an eval-owned run,
+        // and simulator trials still refuse to inherit target attachments.
+        let smuggled = serde_json::json!({
+            "kind": "agent_loop",
+            "prompt": "measure this behavior",
+            "session_id": SessionId::new(),
+            "model": "target-model",
+            "attachments": [],
+        });
+        let target = serde_json::from_value::<ExperimentTarget>(smuggled)
+            .expect("an agent-loop target payload parses without a session field");
+        assert_eq!(target, agent_loop_target(Vec::new()));
+
+        let attachment_error =
+            agent_loop_target_selection(agent_loop_target(vec![test_attachment()]), None, None)
+                .expect_err("simulator trials must not accept target attachments");
+        assert!(
+            format!("{attachment_error:?}").contains("attachments"),
+            "unexpected rejection: {attachment_error:?}"
+        );
+
+        let selection = agent_loop_target_selection(
+            agent_loop_target(Vec::new()),
+            Some(ModelId::new("trial-model")),
+            Some(ModelId::new("variant-model")),
+        )
+        .expect("an eval-owned agent-loop target resolves");
+        assert_eq!(selection.model, Some(ModelId::new("trial-model")));
+        let selection = agent_loop_target_selection(agent_loop_target(Vec::new()), None, None)
+            .expect("an eval-owned agent-loop target resolves");
+        assert_eq!(selection.model, Some(ModelId::new("target-model")));
+    }
+
+    #[test]
+    fn resumed_trial_session_must_belong_to_the_trial_scope_offline() {
+        // Pins: the ownership check a resumed trial runs before its first event
+        // read rejects a session from another tenant or another contact.
+        let tenant_id = TenantId::new();
+        let scope = ActionRuleScope::Tenant { tenant_id };
+        let owned = SessionMeta {
+            tenant_id,
+            ..SessionMeta::default()
+        };
+        require_trial_session_ownership(&owned, tenant_id, scope)
+            .expect("the trial's own session passes ownership");
+
+        let foreign = SessionMeta {
+            tenant_id: TenantId::new(),
+            ..SessionMeta::default()
+        };
+        let error = require_trial_session_ownership(&foreign, tenant_id, scope)
+            .expect_err("a session owned by another tenant must be rejected");
+        assert!(
+            format!("{error:?}").contains("does not match the experiment trial scope"),
+            "unexpected rejection: {error:?}"
+        );
+
+        let contact_id = ContactId::new();
+        let contact_scope = ActionRuleScope::Contact {
+            tenant_id,
+            contact_id,
+        };
+        let other_contact = SessionMeta {
+            tenant_id,
+            contact: Some(contact_ref(tenant_id, ContactId::new())),
+            ..SessionMeta::default()
+        };
+        require_trial_session_ownership(&other_contact, tenant_id, contact_scope)
+            .expect_err("a session owned by another contact must be rejected");
+        let same_contact = SessionMeta {
+            tenant_id,
+            contact: Some(contact_ref(tenant_id, contact_id)),
+            ..SessionMeta::default()
+        };
+        require_trial_session_ownership(&same_contact, tenant_id, contact_scope)
+            .expect("the scoped contact session passes ownership");
+    }
+
+    fn agent_loop_target(
+        attachments: Vec<moa_core::types::channel::Attachment>,
+    ) -> ExperimentTarget {
+        ExperimentTarget::AgentLoop {
+            prompt: "measure this behavior".to_string(),
+            agent: None,
+            model: ModelId::new("target-model"),
+            attachments,
+        }
+    }
+
+    fn test_attachment() -> moa_core::types::channel::Attachment {
+        moa_core::types::channel::Attachment {
+            id: None,
+            name: "receipt.png".to_string(),
+            mime_type: Some("image/png".to_string()),
+            sha256: None,
+            url: None,
+            path: None,
+            size_bytes: None,
+        }
+    }
+
+    fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
+        ContactRef {
+            contact_id,
+            tenant_id,
+            state: ContactVerificationState::Unverified,
+            canonical_contact_id: None,
+            linked_contact_ids: Vec::new(),
+            scopes: Vec::new(),
+            permissions: Value::Null,
+            agent_ids: Vec::new(),
+            session_ids: Vec::new(),
+            verified_contact_point_ids: Vec::new(),
+        }
     }
 
     #[test]

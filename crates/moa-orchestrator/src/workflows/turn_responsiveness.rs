@@ -16,24 +16,28 @@ pub(crate) enum ModelLoopClass {
     WorkerInline,
 }
 
+/// Returns the hard per-turn model-loop ceiling.
+///
+/// `session_limits.max_turns` is rejected at configuration validation when it is
+/// zero, so this never reads a zero as "unlimited". The `max(1)` is a fail-closed
+/// floor for a hand-built config that never went through the loader: one turn,
+/// not an unbounded loop.
+fn hard_turn_cap(session_limits: &SessionLimitsConfig) -> usize {
+    (session_limits.max_turns as usize).max(1)
+}
+
 /// Returns the effective model-loop cap for a selected turn class.
+///
+/// Every result is finite and bounded by [`hard_turn_cap`], including one
+/// derived from a caller-supplied `request_max_turns`.
 pub(crate) fn effective_turn_cap(
     request_max_turns: Option<u32>,
     class: ModelLoopClass,
     session_limits: &SessionLimitsConfig,
 ) -> usize {
-    let hard_cap = session_limits.max_turns as usize;
+    let hard_cap = hard_turn_cap(session_limits);
     if let Some(request_cap) = request_max_turns {
-        let request_cap = (request_cap as usize).max(1);
-        return if hard_cap == 0 {
-            request_cap
-        } else {
-            request_cap.min(hard_cap)
-        };
-    }
-
-    if hard_cap == 0 {
-        return usize::MAX;
+        return (request_cap as usize).max(1).min(hard_cap);
     }
 
     let class_cap = match class {
@@ -58,13 +62,10 @@ pub(crate) fn effective_delegation_turn_cap(
     session_limits: &SessionLimitsConfig,
 ) -> usize {
     let base = effective_turn_cap(request_max_turns, class, session_limits);
-    let hard_cap = session_limits.max_turns as usize;
-    let delegation = (session_limits.max_model_turns_delegation as usize).max(1);
-    let delegation = if hard_cap == 0 {
-        delegation
-    } else {
-        delegation.min(hard_cap)
-    };
+    let hard_cap = hard_turn_cap(session_limits);
+    let delegation = (session_limits.max_model_turns_delegation as usize)
+        .max(1)
+        .min(hard_cap);
     base.max(delegation)
 }
 
@@ -82,12 +83,11 @@ pub(crate) fn effective_tool_cap(
 }
 
 /// Converts an internal cap into the progress DTO representation.
+///
+/// Every internal cap is finite, so this always reports a number: the DTO has no
+/// "unlimited" rendering left to select.
 pub(crate) fn progress_cap(cap: usize) -> Option<u32> {
-    if cap == usize::MAX {
-        None
-    } else {
-        Some(cap.min(u32::MAX as usize) as u32)
-    }
+    Some(cap.min(u32::MAX as usize) as u32)
 }
 
 /// Converts an internal counter into the progress DTO representation.
@@ -721,8 +721,12 @@ mod tests {
     }
 
     #[test]
-    fn effective_turn_cap_preserves_unlimited_global_semantics() {
-        // Pins: max_turns=0 keeps existing unlimited semantics for uncapped requests.
+    fn zero_hard_cap_never_selects_an_unbounded_turn_loop() {
+        // Pins: a zero max_turns (rejected by config validation, so only reachable
+        // from a hand-built config) fails closed to a single turn instead of the
+        // former usize::MAX "unlimited" reading, and it still bounds an explicit
+        // request cap. No selected cap is ever unbounded, so the progress DTO has
+        // no "unlimited" rendering to report.
         let limits = SessionLimitsConfig {
             max_turns: 0,
             simple_max_turns: 1,
@@ -731,20 +735,25 @@ mod tests {
         };
         assert_eq!(
             effective_turn_cap(None, ModelLoopClass::InlineExecute, &limits),
-            usize::MAX
+            1
         );
         assert_eq!(
             effective_turn_cap(Some(5), ModelLoopClass::InlineExecute, &limits),
-            5
+            1
         );
-        assert_eq!(progress_cap(usize::MAX), None);
+        assert_eq!(
+            effective_delegation_turn_cap(None, ModelLoopClass::InlineExecute, &limits),
+            1
+        );
+        assert_eq!(progress_cap(usize::MAX), Some(u32::MAX));
+        assert_eq!(progress_cap(8), Some(8));
     }
 
     #[test]
     fn delegation_turn_cap_raises_base_without_lowering() {
         // Pins: once a turn delegates, the loop budget escalates to
-        // max_model_turns_delegation (bounded by the hard cap), never drops below a
-        // larger base cap, and preserves unlimited global semantics.
+        // max_model_turns_delegation (bounded by the hard cap) and never drops below
+        // a larger base cap, while the hard cap still bounds every escalated result.
         let limits = SessionLimitsConfig {
             max_turns: 50,
             simple_max_turns: 1,
@@ -781,14 +790,10 @@ mod tests {
             effective_delegation_turn_cap(Some(20), ModelLoopClass::InlineExecute, &limits),
             20
         );
-        // Unlimited global semantics survive delegation.
-        let unlimited = SessionLimitsConfig {
-            max_turns: 0,
-            ..limits
-        };
+        // ...and is still bounded by the hard cap it escalates within.
         assert_eq!(
-            effective_delegation_turn_cap(None, ModelLoopClass::InlineExecute, &unlimited),
-            usize::MAX
+            effective_delegation_turn_cap(Some(20), ModelLoopClass::InlineExecute, &tight),
+            8
         );
     }
 

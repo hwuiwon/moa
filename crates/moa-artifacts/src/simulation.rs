@@ -7,19 +7,59 @@ use serde_json::{Value, json};
 use crate::{document::empty_object, reference::ArtifactRef};
 
 /// Highest scenario turn limit accepted by artifact validation.
-pub(crate) const MAX_SCENARIO_TURNS: u32 = 100;
+pub const MAX_SCENARIO_TURNS: u32 = 100;
 /// Highest experiment-plan parallelism accepted by artifact validation.
-pub(crate) const MAX_PLAN_PARALLELISM: u32 = 64;
+pub const MAX_PLAN_PARALLELISM: u32 = 64;
 /// Highest number of trials per matrix combination accepted by artifact validation.
-pub(crate) const MAX_PLAN_TRIALS_PER_COMBINATION: u32 = 100;
+pub const MAX_PLAN_TRIALS_PER_COMBINATION: u32 = 100;
 /// Highest total plan cost in cents accepted by artifact validation.
-pub(crate) const MAX_PLAN_TOTAL_COST_CENTS: u32 = 1_000_000;
+pub const MAX_PLAN_TOTAL_COST_CENTS: u32 = 1_000_000;
 /// Highest per-trial plan cost in cents accepted by artifact validation.
-pub(crate) const MAX_PLAN_TRIAL_COST_CENTS: u32 = 100_000;
+pub const MAX_PLAN_TRIAL_COST_CENTS: u32 = 100_000;
 /// Highest total plan token budget accepted by artifact validation.
-pub(crate) const MAX_PLAN_TOTAL_TOKENS: u32 = 10_000_000;
+pub const MAX_PLAN_TOTAL_TOKENS: u32 = 10_000_000;
 /// Highest per-trial token budget accepted by artifact validation.
-pub(crate) const MAX_PLAN_TRIAL_TOKENS: u32 = 1_000_000;
+pub const MAX_PLAN_TRIAL_TOKENS: u32 = 1_000_000;
+
+/// Highest serialized size accepted for one whole experiment-plan definition.
+///
+/// The per-dimension limits below bound how many blocks a plan may declare;
+/// this bounds how much memory one plan document may occupy regardless of how
+/// that size is distributed across those blocks.
+pub const MAX_PLAN_DEFINITION_BYTES: usize = 1_048_576;
+/// Highest serialized size accepted for one scenario, persona, profile, data
+/// bundle, or target variant block.
+pub const MAX_PLAN_BLOCK_BYTES: usize = 65_536;
+/// Highest serialized size accepted for one free-form plan field.
+///
+/// Applies to caller-authored JSON that the platform never interprets
+/// structurally: target-variant config, profile facts, and data-source fixtures.
+pub const MAX_PLAN_FIELD_BYTES: usize = 16_384;
+/// Highest number of simulation scenarios accepted in one experiment plan.
+pub const MAX_PLAN_SCENARIOS: u32 = 200;
+/// Highest number of simulation personas accepted in one experiment plan.
+pub const MAX_PLAN_PERSONAS: u32 = 100;
+/// Highest number of simulation profiles accepted in one experiment plan.
+pub const MAX_PLAN_PROFILES: u32 = 100;
+/// Highest number of simulation data bundles accepted in one experiment plan.
+pub const MAX_PLAN_DATA_BUNDLES: u32 = 100;
+/// Highest number of target variants accepted in one experiment plan.
+pub const MAX_PLAN_TARGET_VARIANTS: u32 = 16;
+/// Highest number of trials one experiment plan run may mint.
+///
+/// This is the bound the per-dimension limits do not provide: the trial matrix
+/// is the product of every dimension, so each dimension can be individually
+/// legal while their product is not.
+pub const MAX_PLAN_TOTAL_TRIALS: u32 = 5_000;
+/// Provider calls one trial turn may issue: one simulator turn plus one target turn.
+///
+/// Used to derive the provider-call rate a plan's declared parallelism implies.
+pub const PLAN_PROVIDER_CALLS_PER_TRIAL_TURN: u32 = 2;
+/// Highest provider-call rate one experiment plan run may imply.
+///
+/// Derived as `parallelism * PLAN_PROVIDER_CALLS_PER_TRIAL_TURN`, treating one
+/// trial turn per second per parallel trial as the worst case.
+pub const MAX_PLAN_PROVIDER_CALL_QPS: u32 = 128;
 
 /// Simulated user persona used by behavior-lab trials.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]

@@ -37,8 +37,8 @@ bounded to `1..=1000`, and session/event cursors are opaque URL-safe tokens.
 - JSON Schema enums for closed choices, including analytics aggregations,
   filter operators and sort directions, artifact kind/status/source format,
   and execution review decisions;
-- numeric schema bounds matching runtime behavior, including list pagination,
-  analytics row limits, and positive eval parallelism; and
+- numeric schema bounds matching runtime behavior, including list pagination
+  and analytics row limits; and
 - an `outputSchema` for the stable success envelope and a tool-specific
   description of the typed response under `data`.
 
@@ -94,11 +94,9 @@ reserved/actual budget, plan revision/provenance, aggregate progress, completion
 checks, and explicit terminal gaps. Full task results use a separate bounded
 listing response.
 
-Internal eval tools are `eval_suites_summarize`, `eval_plan`,
-`eval_datasets_list`, `eval_dataset_register`, `eval_run`, `eval_run_status`,
-`eval_scores`, and `eval_compare`. Suite and config definitions are inline TOML
-documents in v1; datasets and run status are persistent. Internal dispatch
-tokens, `Eval/execute_run`, and synchronous replay are not exposed.
+There are no eval tools. The platform regression harness (`moa-eval`) is a
+CI/CLI/`xtask` surface and is not reachable from `/mcp`. Behavior Lab is the
+only tenant evaluation product exposed here.
 
 Experiment tools are `experiment_plan_generate`, `experiments_list`,
 `experiment_run`, `experiment_status`, `experiment_trials_list`,
@@ -130,18 +128,17 @@ clients do not need a second hard-coded schema catalog.
 |---|---|---|---|
 | Understand aggregate performance | `analytics_catalog` → `analytics_query` | — | Narrow with `sessions_list` |
 | Diagnose one session | `sessions_list` → `session_get` → `session_events_list` | — | `lineage_explain` |
-| Edit a skill, execution-plan template, agent, connector, action, or experiment plan | `artifacts_list` → `artifact_export` → `artifact_validate` | `artifact_import` → `artifact_publish` | Run the relevant eval or experiment |
-| Review learned improvements | `learning_candidates_list` → `learning_candidate_get` | `learning_candidate_accept_skill` or `learning_candidate_reject` | `artifacts_list` plus an eval/experiment |
+| Edit a skill, execution-plan template, agent, connector, action, or experiment plan | `artifacts_list` → `artifact_export` → `artifact_validate` | `artifact_import` → `artifact_publish` | Run the relevant experiment |
+| Review learned improvements | `learning_candidates_list` → `learning_candidate_get` | `learning_candidate_accept_skill` or `learning_candidate_reject` | `artifacts_list` plus an experiment |
 | Run durable typed work | `capabilities_list` and `execution_runs_list` | `execution_run_start`; when waiting, `execution_review_decide` or `execution_signal`; if necessary, `execution_run_cancel` | Poll `execution_run_status` |
-| Run an eval | `eval_suites_summarize` → `eval_plan`; inspect/register data with `eval_datasets_list` and `eval_dataset_register` | `eval_run` | Poll `eval_run_status`, then `eval_scores` → `eval_compare` |
 | Run a Behavior Lab experiment | `experiment_plan_generate` or artifact authoring | `experiment_run`; if necessary, `experiment_cancel` | `experiment_status`, `experiment_trials_list`, `experiment_trial_status`, `experiment_scores`, `experiment_compare` |
 | Turn experiment evidence into proposals | `experiment_compare` | `experiment_propose_improvements` | Review through the learning-candidate tools |
 | Install or upgrade a configurable agent | `agent_definitions_list`, `agent_installations_list`, `agent_deployments_list`, `agent_revision_compare` | `agent_definition_install` or `agent_definition_deploy` | `agent_revision_simulate` → `agent_revision_simulation_compare` before deployment when risk warrants it |
 | Manage agent identities | `agent_principals_list` → `agent_principal_get` | `agent_principal_register`, `agent_principal_grant_act_as`, `agent_principal_revoke_act_as`, or `agent_principal_deactivate` | Re-read the principal/list; delegation checks remain service-owned |
 
 Long-running calls return domain IDs, not MCP task IDs. Poll with the paired
-status tool: eval `run_id` with `eval_run_status`; experiment or simulation
-`run_uid` with `experiment_status`; execution `run_uid` with
+status tool: experiment or simulation `run_uid` with `experiment_status`;
+execution `run_uid` with
 `execution_run_status`. Read scores only after a terminal completed status;
 partial, blocked, and unsupported runs remain terminal but are not completed.
 
@@ -155,11 +152,9 @@ partial, blocked, and unsupported runs remain terminal but are not completed.
    publish only after review.
 4. Inspect capabilities, start an execution run, poll status, and deliver review,
    signal, or cancellation input when required.
-5. Summarize and plan inline eval TOML, register datasets as needed, start a
-   run, poll it, then read or compare scores.
-6. Generate or import an experiment plan draft, publish it, run trials, compare
+5. Generate or import an experiment plan draft, publish it, run trials, compare
    evidence, and separately propose reviewable improvements.
-7. Author agents as generic artifacts, compare exact revisions, optionally
+6. Author agents as generic artifacts, compare exact revisions, optionally
    simulate them, then explicitly install or deploy; manage agent principals
    through the distinct principal tools.
 

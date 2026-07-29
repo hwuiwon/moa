@@ -12,6 +12,7 @@ use moa_artifacts::{
 use moa_core::{
     events::Event,
     types::{
+        action_policy::CallOrigin,
         agent::AgentContext,
         contact::{ClientMessageId, ContactId, ContactRef, ContactVerificationState},
         events_stream::EventRecord,
@@ -69,7 +70,6 @@ pub(super) async fn run_agent_loop_target(
     request: ExperimentRunWorkflowRequest,
     scope: ActionRuleScope,
     prompt: String,
-    session_id: Option<SessionId>,
     agent: Option<AgentSessionSelection>,
     model: ModelId,
     attachments: Vec<moa_core::types::channel::Attachment>,
@@ -77,6 +77,13 @@ pub(super) async fn run_agent_loop_target(
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     let variant = parse_payload::<ExperimentVariant>("variant", request.variant.clone())?;
+    if scope.tenant_id() != request.tenant_id {
+        return Err(TerminalError::new_with_code(
+            409,
+            "experiment run scope does not match the workflow tenant",
+        )
+        .into());
+    }
     persist_run_status(
         ctx,
         scope,
@@ -89,32 +96,27 @@ pub(super) async fn run_agent_loop_target(
     .await?;
 
     let model = variant.model.unwrap_or(model);
-    let session_id = match session_id {
-        Some(session_id) => session_id,
-        None => {
-            let agent = agent.ok_or_else(|| {
-                bad_request("agent-loop experiment target requires an agent selector")
-            })?;
-            let (session_id, meta) = create_new_session(
-                ctx,
-                request.tenant_id,
-                model.clone(),
-                &request,
-                agent,
-                pool,
-                session_store,
-            )
-            .await?;
-            with_identity_headers(
-                ctx.object_client::<SessionClient>(session_id.to_string())
-                    .set_meta(Json::from(meta)),
-                &request.identity,
-            )
-            .call()
-            .await?;
-            session_id
-        }
-    };
+    // The run always executes in a session created for it; a caller-named
+    // session was already refused before this target started.
+    let agent = agent
+        .ok_or_else(|| bad_request("agent-loop experiment target requires an agent selector"))?;
+    let (session_id, meta) = create_new_session(
+        ctx,
+        request.tenant_id,
+        model.clone(),
+        &request,
+        agent,
+        pool,
+        session_store,
+    )
+    .await?;
+    with_identity_headers(
+        ctx.object_client::<SessionClient>(session_id.to_string())
+            .set_meta(Json::from(meta)),
+        &request.identity,
+    )
+    .call()
+    .await?;
 
     ctx.set(K_SESSION_ID, Json(session_id));
     tracing::Span::current().set_attribute("moa.experiment.session_id", session_id.to_string());
@@ -195,6 +197,13 @@ pub(super) async fn run_execution_template_target(
         return Err(TerminalError::new_with_code(
             409,
             "execution-template target and variant do not pin the same revision",
+        )
+        .into());
+    }
+    if scope.tenant_id() != request.tenant_id {
+        return Err(TerminalError::new_with_code(
+            409,
+            "experiment run scope does not match the workflow tenant",
         )
         .into());
     }
@@ -376,14 +385,12 @@ async fn ensure_execution_session(
             .name("experiment_load_execution_session")
             .await?
             .into_inner();
-        let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
-        if meta.tenant_id != scope.tenant_id() || contact_id != scope.contact_id() {
-            return Err(TerminalError::new_with_code(
-                409,
-                "execution-template target Session does not match experiment scope",
-            )
-            .into());
-        }
+        let contact_id = admit_caller_named_execution_session(
+            &meta,
+            request.tenant_id,
+            scope,
+            run_call_origin(request.run_uid),
+        )?;
         return Ok(EffectiveExecutionSession {
             session_id,
             contact_id,
@@ -395,7 +402,14 @@ async fn ensure_execution_session(
         experiment_execution_session_id(request.tenant_id, request.run_uid, request.score_run_id)?;
     let model = variant_model.unwrap_or_else(|| ModelId::new(config.models.main.clone()));
     let now = durable_utc_now(ctx, "experiment_internal_execution_session_now").await?;
-    let meta = internal_execution_session_meta(session_id, scope, model, now, &request.identity)?;
+    let meta = internal_execution_session_meta(
+        session_id,
+        scope,
+        model,
+        now,
+        &request.identity,
+        run_call_origin(request.run_uid),
+    )?;
     let store = session_store.clone();
     let init_pool = pool.clone();
     let init_meta = meta.clone();
@@ -442,6 +456,55 @@ async fn ensure_execution_session(
     })
 }
 
+/// Admits one caller-named execution Session, or refuses it before it is used.
+///
+/// A caller names this Session in the experiment target, so nothing about it is
+/// derived from the run. Tenant and contact scope alone are not enough: an
+/// ordinary production Session of the same tenant would pass them, and a
+/// production [`CallOrigin`] composes with the process-wide router's own
+/// production origin to leave every tool this run's tasks issue holding the full
+/// production capability set — production connectors and side-effecting host
+/// tools included.
+///
+/// So the named Session must carry exactly the origin this run stamps on the
+/// Session it would otherwise create for itself: the same run uid, and the same
+/// explicit null trial uid. Requiring the run uid stops one eval run from
+/// borrowing another's Session, and requiring the null trial uid stops an
+/// unplanned run target from executing inside a Session owned by some trial,
+/// which would attribute this run's refusals to a trial that is not running.
+///
+/// Returns the contact the admitted Session is scoped to.
+fn admit_caller_named_execution_session(
+    meta: &SessionMeta,
+    tenant_id: TenantId,
+    scope: ActionRuleScope,
+    expected_origin: CallOrigin,
+) -> Result<Option<ContactId>, HandlerError> {
+    let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
+    if meta.tenant_id != tenant_id
+        || meta.tenant_id != scope.tenant_id()
+        || contact_id != scope.contact_id()
+    {
+        return Err(TerminalError::new_with_code(
+            409,
+            "execution-template target Session does not match experiment scope",
+        )
+        .into());
+    }
+    if meta.call_origin != expected_origin {
+        return Err(TerminalError::new_with_code(
+            409,
+            format!(
+                "execution-template target Session carries a {} call origin instead of this \
+                 experiment run's own eval-owned origin",
+                meta.call_origin.as_str()
+            ),
+        )
+        .into());
+    }
+    Ok(contact_id)
+}
+
 async fn finalize_run_status(
     ctx: &WorkflowContext<'_>,
     scope: ActionRuleScope,
@@ -465,9 +528,10 @@ async fn create_new_session(
 ) -> Result<(SessionId, SessionMeta), HandlerError> {
     let prepare_identity = request.identity.clone();
     let prepare_pool = pool.clone();
+    let call_origin = run_call_origin(request.run_uid);
     let meta = ctx
         .run(|| async move {
-            let mut meta = new_session_meta(tenant_id, model, &prepare_identity)?;
+            let mut meta = new_session_meta(tenant_id, model, &prepare_identity, call_origin)?;
             let agent_context =
                 resolve_agent_context_for_session(prepare_pool, &meta, &agent).await?;
             apply_agent_model_policy(&mut meta, &agent_context)?;
@@ -498,10 +562,29 @@ async fn create_new_session(
         .into_inner())
 }
 
+/// Returns the eval-owned call origin of one unplanned run target.
+///
+/// A run that executes its target directly never expands a plan, so it has no
+/// trial uid — the same "explicit null for a run target" shape
+/// [`ExecutionSourceProvenance::ExperimentTemplate`] already uses. It is exactly
+/// as eval-owned as a trial, and is fenced identically.
+fn run_call_origin(run_uid: Uuid) -> CallOrigin {
+    CallOrigin::Experiment {
+        run_uid,
+        trial_uid: None,
+    }
+}
+
+/// Builds the metadata for one agent-loop run's own session.
+///
+/// The eval-owned [`CallOrigin`] stamped here is the only thing that separates
+/// this session's tool calls from production traffic: the run drives an ordinary
+/// Session virtual object on the ordinary process-wide tool router.
 fn new_session_meta(
     tenant_id: TenantId,
     model: ModelId,
     identity: &Identity,
+    call_origin: CallOrigin,
 ) -> Result<SessionMeta, HandlerError> {
     let now = Utc::now();
     Ok(SessionMeta {
@@ -514,16 +597,24 @@ fn new_session_meta(
         created_at: now,
         updated_at: now,
         created_by: Some(session_actor_ref(identity)?),
+        call_origin,
         ..SessionMeta::default()
     })
 }
 
+/// Builds the metadata for one execution-template run's internal session.
+///
+/// Stamped with the same eval-owned [`CallOrigin`] as the agent-loop path: the
+/// execution run this session hosts dispatches its task tools through the same
+/// process-wide router, and the tool executor reloads this record to decide what
+/// those tasks may hold.
 fn internal_execution_session_meta(
     session_id: SessionId,
     scope: ActionRuleScope,
     model: ModelId,
     now: chrono::DateTime<Utc>,
     identity: &Identity,
+    call_origin: CallOrigin,
 ) -> Result<SessionMeta, HandlerError> {
     let contact = scope.contact_id().map(|contact_id| ContactRef {
         contact_id,
@@ -549,6 +640,7 @@ fn internal_execution_session_meta(
         created_by: Some(session_actor_ref(identity)?),
         contact,
         agent_context: Some(AgentContext::system_default()),
+        call_origin,
         ..SessionMeta::default()
     })
 }
@@ -989,6 +1081,149 @@ fn experiment_run_status_for_execution_run_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unplanned_run_target_owns_an_eval_session_for_either_target_kind_offline() {
+        // Pins: a run that executes its target without expanding a plan creates its
+        // session through the same two constructors a trial does, and both stamp the
+        // eval-owned origin that refuses production connectors. The trial uid is an
+        // explicit null rather than a missing origin — an unplanned run is not
+        // production traffic just because it has no trial to name.
+        let tenant_id = TenantId::new();
+        let run_uid = Uuid::from_u128(0x0e11);
+        let identity = Identity {
+            identity_type: moa_core::traits::IdentityType::Operator,
+            id: Uuid::from_u128(0x0f01),
+            tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        };
+        let scope = ActionRuleScope::Tenant { tenant_id };
+        let model = ModelId::new("claude-sonnet-4-6");
+        let expected = CallOrigin::Experiment {
+            run_uid,
+            trial_uid: None,
+        };
+
+        let agent_loop = new_session_meta(
+            tenant_id,
+            model.clone(),
+            &identity,
+            run_call_origin(run_uid),
+        )
+        .expect("agent-loop run session metadata");
+        let execution_template = internal_execution_session_meta(
+            SessionId::new(),
+            scope,
+            model,
+            Utc::now(),
+            &identity,
+            run_call_origin(run_uid),
+        )
+        .expect("execution-template run session metadata");
+
+        for (target_kind, session) in [
+            ("agent_loop", agent_loop),
+            ("execution_template", execution_template),
+        ] {
+            assert_eq!(
+                session.call_origin, expected,
+                "the {target_kind} run session must name its owning run with a null trial"
+            );
+            assert!(
+                !session.call_origin.is_production(),
+                "the {target_kind} run session must not reach production capabilities"
+            );
+        }
+    }
+
+    #[test]
+    fn a_caller_named_run_session_is_admitted_only_with_this_run_s_own_eval_origin_offline() {
+        // Pins: the execution-template target lets a caller name any Session it can
+        // reach, so tenant and contact scope alone would hand an eval run a
+        // production Session — and a production origin composes with the
+        // process-wide production router into the full production capability set.
+        // Only a Session carrying exactly this run's eval-owned origin is admitted:
+        // another run's eval Session, one of this run's own trials' Sessions, a
+        // sandbox origin, and an ordinary production Session are all refused before
+        // the run reads or writes anything through them.
+        let tenant_id = TenantId::new();
+        let run_uid = Uuid::from_u128(0x0e21);
+        let scope = ActionRuleScope::Tenant { tenant_id };
+        let identity = Identity {
+            identity_type: moa_core::traits::IdentityType::Operator,
+            id: Uuid::from_u128(0x0f01),
+            tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        };
+        let expected = run_call_origin(run_uid);
+        let owned = internal_execution_session_meta(
+            SessionId::new(),
+            scope,
+            ModelId::new("claude-sonnet-4-6"),
+            Utc::now(),
+            &identity,
+            expected,
+        )
+        .expect("execution-template run session metadata");
+
+        assert_eq!(
+            admit_caller_named_execution_session(&owned, tenant_id, scope, expected)
+                .expect("a Session carrying this run's own origin is the supported target"),
+            None
+        );
+
+        let production = SessionMeta {
+            call_origin: CallOrigin::Production,
+            ..owned.clone()
+        };
+        let refusal = handler_error_message(
+            &admit_caller_named_execution_session(&production, tenant_id, scope, expected)
+                .expect_err("a production-origin Session must never host an experiment run"),
+        );
+        assert!(
+            refusal.contains("production") && refusal.contains("call origin"),
+            "the refusal must name the origin that was rejected: {refusal}"
+        );
+
+        for (label, origin) in [
+            (
+                "another eval run's session",
+                CallOrigin::Experiment {
+                    run_uid: Uuid::from_u128(0x0e22),
+                    trial_uid: None,
+                },
+            ),
+            (
+                "a trial session of this same run",
+                CallOrigin::Experiment {
+                    run_uid,
+                    trial_uid: Some(Uuid::from_u128(0x0e23)),
+                },
+            ),
+            ("a sandbox origin", CallOrigin::GeneratedCode),
+        ] {
+            let foreign = SessionMeta {
+                call_origin: origin,
+                ..owned.clone()
+            };
+            assert!(
+                admit_caller_named_execution_session(&foreign, tenant_id, scope, expected).is_err(),
+                "{label} is not the unit being executed and must be refused"
+            );
+        }
+
+        let foreign_tenant = SessionMeta {
+            tenant_id: TenantId::new(),
+            ..owned
+        };
+        assert!(
+            admit_caller_named_execution_session(&foreign_tenant, tenant_id, scope, expected)
+                .is_err(),
+            "a cross-tenant Session stays refused whatever origin it carries"
+        );
+    }
 
     #[test]
     fn internal_execution_session_and_run_keys_are_replay_stable_offline() {

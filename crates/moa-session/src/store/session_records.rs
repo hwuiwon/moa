@@ -60,7 +60,7 @@ impl PostgresSessionStore {
         let sessions = self.table_name("sessions");
         let insert_result = sqlx::query(&format!(
             "INSERT INTO {sessions} ({SESSION_INSERT_COLUMNS}) VALUES \
-             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30) \
+             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31) \
              ON CONFLICT (id) DO NOTHING"
         ))
         .bind(session_id.0)
@@ -105,6 +105,10 @@ impl PostgresSessionStore {
         .bind(meta.created_by.as_ref().map(session_actor_type))
         .bind(meta.created_by.as_ref().and_then(session_actor_id))
         .bind(meta.contact_promoted_from_id.map(|id| id.0))
+        // The call origin is durable session identity, not a counter: every
+        // later tool dispatch reloads this row to decide what the session may
+        // hold, so it is written exactly once, here, at creation.
+        .bind(call_origin_json(meta.call_origin)?)
         .bind(meta.total_input_tokens_uncached as i64)
         .bind(meta.total_input_tokens_cache_write as i64)
         .bind(meta.total_input_tokens_cache_read as i64)

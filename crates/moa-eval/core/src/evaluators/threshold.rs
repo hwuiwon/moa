@@ -1,19 +1,29 @@
-//! Threshold-based evaluator for cost, latency, token, turn, and tool-call limits.
+//! Post-hoc threshold assertions on cost, latency, token, turn, and tool-call
+//! counts observed by a completed eval run.
+//!
+//! These are score assertions, not admission control. The work has already been
+//! dispatched and paid for by the time an evaluator runs; hard limits are
+//! enforced before dispatch by
+//! [`crate::admission::EvalAdmissionPolicy`] and the reservation ledger in
+//! [`moa_core::types::resource`].
 
 use crate::{EvalResult, EvalScore, EvalScoreValue, Evaluator, Result, TestCase};
 
-/// Enforces resource thresholds on a completed eval result.
+/// Scores a completed eval result against expected resource thresholds.
+///
+/// Every field is an assertion boundary used to emit a pass/fail score. None of
+/// them can prevent work from happening.
 #[derive(Debug, Clone, Default)]
 pub struct ThresholdEvaluator {
-    /// Maximum allowed dollar cost per result.
+    /// Dollar cost above which the result is scored as failing.
     pub max_cost_dollars: Option<f64>,
-    /// Maximum allowed latency in milliseconds.
+    /// Latency in milliseconds above which the result is scored as failing.
     pub max_latency_ms: Option<u64>,
-    /// Maximum allowed total tokens.
+    /// Total tokens above which the result is scored as failing.
     pub max_tokens: Option<usize>,
-    /// Maximum allowed tool calls.
+    /// Tool calls above which the result is scored as failing.
     pub max_tool_calls: Option<usize>,
-    /// Maximum allowed turns.
+    /// Turns above which the result is scored as failing.
     pub max_turns: Option<usize>,
 }
 

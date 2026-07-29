@@ -34,7 +34,7 @@ use crate::tools::sandbox_descriptor::{
     SandboxToolCapability, supported_capability_for_tool, unsupported_tool,
 };
 use crate::tools::str_replace::plan_str_replace;
-use crate::tools::{file_outline, file_read, grep};
+use crate::tools::{bash, file_outline, file_read, grep};
 
 use client::{
     default_headers, encode_connect_request, envd_headers, parse_e2b_connect_stream, shell_escape,
@@ -228,38 +228,48 @@ impl E2BHandProvider {
         sandbox_id: &str,
         sandbox: &ConnectedSandbox,
         cmd: &str,
+        timeout: Duration,
     ) -> Result<ToolOutput> {
         let started_at = Instant::now();
         let url = format!(
             "{}/process.Process/Start",
             self.envd_url(sandbox_id, sandbox)
         );
-        let response = self
-            .client
-            .post(url)
-            .headers(envd_headers(sandbox_id, sandbox)?)
-            .header(CONTENT_TYPE, "application/connect+json")
-            .header("Connect-Protocol-Version", CONNECT_PROTOCOL_VERSION)
-            .body(encode_connect_request(&json!({
-                "process": {
-                    "cmd": "/bin/bash",
-                    "args": ["-l", "-c", cmd],
-                    "envs": {},
-                },
-                "stdin": false,
-            }))?)
-            .send()
-            .await
-            .map_err(|error| {
-                MoaError::ProviderError(format!("failed to start E2B command: {error}"))
+        tokio::time::timeout(timeout, async {
+            let response = self
+                .client
+                .post(url)
+                .headers(envd_headers(sandbox_id, sandbox)?)
+                .header(CONTENT_TYPE, "application/connect+json")
+                .header("Connect-Protocol-Version", CONNECT_PROTOCOL_VERSION)
+                .body(encode_connect_request(&json!({
+                    "process": {
+                        "cmd": "/bin/bash",
+                        "args": ["-l", "-c", cmd],
+                        "envs": {},
+                    },
+                    "stdin": false,
+                }))?)
+                .send()
+                .await
+                .map_err(|error| {
+                    MoaError::ProviderError(format!("failed to start E2B command: {error}"))
+                })?;
+            if !response.status().is_success() {
+                return Err(http_error(response).await);
+            }
+            let body = response.bytes().await.map_err(|error| {
+                MoaError::ProviderError(format!("failed to read E2B command body: {error}"))
             })?;
-        if !response.status().is_success() {
-            return Err(http_error(response).await);
-        }
-        let body = response.bytes().await.map_err(|error| {
-            MoaError::ProviderError(format!("failed to read E2B command body: {error}"))
-        })?;
-        parse_e2b_connect_stream(&body, started_at.elapsed())
+            parse_e2b_connect_stream(&body, started_at.elapsed())
+        })
+        .await
+        .map_err(|_| {
+            MoaError::ToolError(format!(
+                "E2B command timed out after {}s",
+                timeout.as_secs()
+            ))
+        })?
     }
 
     async fn read_file(
@@ -351,6 +361,7 @@ impl E2BHandProvider {
                 sandbox_id,
                 sandbox,
                 &format!("chmod 755 {}", shell_escape(path)),
+                DEFAULT_COMMAND_TIMEOUT,
             )
             .await?;
         if output.is_error {
@@ -516,16 +527,15 @@ impl HandProvider for E2BHandProvider {
         let payload: Value = serde_json::from_str(input)?;
         match supported_capability_for_tool(tool, E2B_SUPPORTED_CAPABILITIES) {
             Some(SandboxToolCapability::Bash) => {
-                self.execute_bash(
-                    sandbox_id,
-                    &sandbox,
-                    required_string_field(&payload, "cmd")?,
-                )
-                .await
+                let params = bash::BashToolInput::parse(input)?;
+                let timeout = params.timeout(DEFAULT_COMMAND_TIMEOUT, None);
+                self.execute_bash(sandbox_id, &sandbox, &params.cmd, timeout)
+                    .await
             }
             Some(SandboxToolCapability::Grep) => {
                 let command = grep::remote_shell_command(input, "/")?;
-                self.execute_bash(sandbox_id, &sandbox, &command).await
+                self.execute_bash(sandbox_id, &sandbox, &command, DEFAULT_COMMAND_TIMEOUT)
+                    .await
             }
             Some(SandboxToolCapability::FileOutline) => {
                 let path = required_string_field(&payload, "path")?;
@@ -561,6 +571,7 @@ impl HandProvider for E2BHandProvider {
                     sandbox_id,
                     &sandbox,
                     &format!("find / -name {pattern} -print 2>/dev/null || true"),
+                    DEFAULT_COMMAND_TIMEOUT,
                 )
                 .await
             }

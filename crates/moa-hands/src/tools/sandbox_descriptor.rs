@@ -317,11 +317,24 @@ static SANDBOX_TOOL_DESCRIPTORS: &[SandboxToolDescriptor] = &[
 ];
 
 fn bash_schema() -> Value {
+    // The advertised `maximum` is the same constant the executor enforces, so
+    // the two cannot drift into a schema that promises a bound nothing applies.
+    // The schema is what the model is told; `MAX_BASH_TIMEOUT_SECS` is what
+    // actually stops a runaway call, on every path including the ones that
+    // never see this schema.
     json!({
         "type": "object",
         "properties": {
             "cmd": { "type": "string", "description": "Shell command to execute." },
-            "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 300, "description": "Optional timeout override in seconds." }
+            "timeout_secs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": crate::tools::bash::MAX_BASH_TIMEOUT_SECS,
+                "description": format!(
+                    "Optional timeout override in seconds. Values above {} are rejected.",
+                    crate::tools::bash::MAX_BASH_TIMEOUT_SECS
+                ),
+            }
         },
         "required": ["cmd"],
         "additionalProperties": false

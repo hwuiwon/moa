@@ -1,10 +1,12 @@
 //! Tool action policies and rule storage abstractions.
 
+pub mod call_origin;
 pub mod injection;
 pub mod mcp_credentials;
 pub mod mcp_egress;
 pub mod policies;
 
+pub use call_origin::admit_capability_for_origin;
 pub use injection::{
     AssessmentApplication, CircuitTarget, OutputClassification, SecurityCircuitOwnerMismatch,
     ToolInputCanaryLeak, ToolInputCanaryScreening, apply_assessment, apply_owner_assessment,

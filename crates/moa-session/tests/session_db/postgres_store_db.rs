@@ -279,6 +279,55 @@ async fn learning_candidate_summaries_project_contact_scope_and_redact_payload_d
 
 #[tokio::test]
 #[ignore]
+async fn session_call_origin_survives_the_store_round_trip_db() {
+    // Pins: the eval-owned call origin is durable session identity, not something
+    // the creating workflow keeps in memory. Every tool dispatch reloads the
+    // session row to decide what the caller may hold, so an origin that did not
+    // survive the round trip would silently hand an experiment trial the full
+    // production capability set. Asserted against a production session in the
+    // same store, so the round trip is proven to carry a value and not a
+    // constant.
+    with_test_store(|store| async move {
+        let trial_origin = moa_core::types::action_policy::CallOrigin::Experiment {
+            run_uid: Uuid::from_u128(0x0e01),
+            trial_uid: Some(Uuid::from_u128(0x0e02)),
+        };
+        let trial_session_id = store
+            .create_session(SessionMeta {
+                call_origin: trial_origin,
+                ..test_session_meta("tenant-call-origin", "test-model")
+            })
+            .await
+            .expect("create a trial-owned session");
+        let production_session_id = store
+            .create_session(test_session_meta("tenant-call-origin", "test-model"))
+            .await
+            .expect("create a production session");
+
+        let trial = store
+            .get_session(trial_session_id)
+            .await
+            .expect("reload the trial-owned session");
+        assert_eq!(
+            trial.call_origin, trial_origin,
+            "a reloaded trial session must still name its owning run and trial"
+        );
+        assert!(!trial.call_origin.is_production());
+
+        let production = store
+            .get_session(production_session_id)
+            .await
+            .expect("reload the production session");
+        assert!(
+            production.call_origin.is_production(),
+            "an ordinary session must not inherit another session's origin"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
 async fn learning_log_round_trips_skill_entry() {
     with_test_store(|store| async move {
         let batch_id = Uuid::now_v7();

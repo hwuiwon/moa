@@ -118,6 +118,97 @@ impl ActionPolicyEffect {
     }
 }
 
+/// Provenance class of the runtime that issued one tool call.
+///
+/// Origin is stated, never inferred: the runtime that assembles a tool router
+/// states the router's origin, and the runtime that creates a session states
+/// that session's origin, exactly like [`ActionReviewOwner`] is stated by the
+/// runtime that issues the call. A production session and an experiment trial
+/// can otherwise look identical by the time a tool name reaches policy
+/// evaluation, which is how an evaluation run ends up holding a production
+/// connector.
+///
+/// Both statements apply to the same call, and they compose with
+/// [`CallOrigin::most_restrictive`] rather than overriding each other, because
+/// the origin is a ceiling and never a grant. It can only remove capabilities a
+/// tenant rule or deployment default would otherwise have permitted, so no
+/// second statement can widen the first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "origin", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CallOrigin {
+    /// Ordinary tenant traffic serving a real contact, operator, or connector.
+    #[default]
+    Production,
+    /// One experiment trial executing under an eval-owned run.
+    ///
+    /// Only run-scoped fixture capabilities are admitted: production connectors
+    /// and side-effecting host tools are refused whatever the tenant's rules
+    /// say, because a trial's blast radius must stop at its own fixtures.
+    Experiment {
+        /// Experiment run that owns the trial.
+        run_uid: Uuid,
+        /// Trial whose fixture environment scopes every admitted capability, or
+        /// explicit null for a run that executes its target without a plan.
+        ///
+        /// An unplanned run target is exactly as eval-owned as a trial, so the
+        /// admitted set does not depend on this field; it is the identity a
+        /// refusal is attributed to.
+        trial_uid: Option<Uuid>,
+    },
+    /// Model-generated code executing inside a sandbox.
+    ///
+    /// Generated code is deny-all: it may compute inside its sandbox, and it
+    /// invokes no MOA capability at all.
+    GeneratedCode,
+}
+
+impl CallOrigin {
+    /// Returns the stable metrics, log, and audit representation.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::Experiment { .. } => "experiment",
+            Self::GeneratedCode => "generated_code",
+        }
+    }
+
+    /// Returns whether this origin may reach production capabilities at all.
+    #[must_use]
+    pub fn is_production(self) -> bool {
+        matches!(self, Self::Production)
+    }
+
+    /// Returns the stricter of two origins that both apply to one call.
+    ///
+    /// The origins are totally ordered by what they admit — each one's admitted
+    /// set is a subset of the one before it — so two ceilings compose by taking
+    /// the stricter. That direction is the whole point: a router assembled for a
+    /// trial runtime cannot be widened by the session it is handed, and a
+    /// process-wide production router cannot leave a trial-owned session
+    /// unfenced.
+    ///
+    /// A tie keeps `self`, so the caller decides which of two equally
+    /// restrictive origins supplies the identifiers a refusal is attributed to.
+    #[must_use]
+    pub fn most_restrictive(self, other: Self) -> Self {
+        if other.restriction_rank() > self.restriction_rank() {
+            other
+        } else {
+            self
+        }
+    }
+
+    /// Ranks origins by how little they admit; a higher rank admits strictly less.
+    fn restriction_rank(self) -> u8 {
+        match self {
+            Self::Production => 0,
+            Self::Experiment { .. } => 1,
+            Self::GeneratedCode => 2,
+        }
+    }
+}
+
 /// Scope an action-policy rule applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -782,6 +873,107 @@ mod tests {
         assert!(failed_directive.contains("outcome=\"cleared_tool_error\""));
         assert!(failed_directive.contains("execution_error"));
         assert!(!failed_directive.contains("successfully"));
+    }
+
+    #[test]
+    fn call_origin_wire_shape_is_the_shape_the_session_column_stores() {
+        // Pins: the persisted `sessions.call_origin` column defaults to
+        // `{"origin": "production"}` and constrains the tag to this closed set,
+        // so the encoding is a storage contract and not an internal detail. A
+        // renamed tag or a restructured variant would leave every existing row
+        // decoding into a different origin than it was written with.
+        assert_eq!(
+            serde_json::to_value(CallOrigin::Production).expect("encode production"),
+            serde_json::json!({ "origin": "production" })
+        );
+        assert_eq!(
+            serde_json::to_value(CallOrigin::GeneratedCode).expect("encode generated code"),
+            serde_json::json!({ "origin": "generated_code" })
+        );
+        let run_uid = Uuid::from_u128(0x0e01);
+        let trial_uid = Uuid::from_u128(0x0e02);
+        assert_eq!(
+            serde_json::to_value(CallOrigin::Experiment {
+                run_uid,
+                trial_uid: Some(trial_uid)
+            })
+            .expect("encode trial origin"),
+            serde_json::json!({
+                "origin": "experiment",
+                "run_uid": run_uid,
+                "trial_uid": trial_uid,
+            })
+        );
+        // A run target keeps the key with an explicit null rather than dropping
+        // it, which is what the column's presence check relies on.
+        assert_eq!(
+            serde_json::to_value(CallOrigin::Experiment {
+                run_uid,
+                trial_uid: None
+            })
+            .expect("encode run origin"),
+            serde_json::json!({
+                "origin": "experiment",
+                "run_uid": run_uid,
+                "trial_uid": serde_json::Value::Null,
+            })
+        );
+        // An unreadable origin is a decode error, never a silent widening to
+        // production.
+        assert!(
+            serde_json::from_value::<CallOrigin>(serde_json::json!({ "origin": "trial" })).is_err()
+        );
+        assert!(
+            serde_json::from_value::<CallOrigin>(
+                serde_json::json!({ "origin": "experiment", "trial_uid": trial_uid })
+            )
+            .is_err(),
+            "an experiment origin that names no run is not decodable"
+        );
+        assert!(
+            serde_json::from_value::<CallOrigin>(serde_json::json!({
+                "origin": "experiment",
+                "run_uid": run_uid,
+                "trial_uid": trial_uid,
+                "tenant_id": Uuid::nil(),
+            }))
+            .is_err(),
+            "an origin carrying an unknown field is not decodable"
+        );
+    }
+
+    #[test]
+    fn composing_two_origins_can_only_remove_capabilities() {
+        // Pins: two ceilings apply to one call — the router's and the session's —
+        // and composing them never widens either. The order they are composed in
+        // does not change what is admitted, so no caller can recover a capability
+        // by stating its own origin second.
+        let trial = CallOrigin::Experiment {
+            run_uid: Uuid::from_u128(1),
+            trial_uid: Some(Uuid::from_u128(2)),
+        };
+        for (left, right, expected_rank) in [
+            (CallOrigin::Production, trial, 1_u8),
+            (trial, CallOrigin::Production, 1),
+            (CallOrigin::Production, CallOrigin::Production, 0),
+            (trial, CallOrigin::GeneratedCode, 2),
+            (CallOrigin::GeneratedCode, trial, 2),
+            (CallOrigin::Production, CallOrigin::GeneratedCode, 2),
+        ] {
+            let composed = left.most_restrictive(right);
+            assert_eq!(
+                composed.restriction_rank(),
+                expected_rank,
+                "{left:?} composed with {right:?} must admit no more than either"
+            );
+            assert_eq!(
+                composed.restriction_rank(),
+                right.most_restrictive(left).restriction_rank(),
+                "composition order must not change what is admitted"
+            );
+        }
+        // A tie keeps the stated identifiers rather than inventing new ones.
+        assert_eq!(trial.most_restrictive(trial), trial);
     }
 
     #[test]

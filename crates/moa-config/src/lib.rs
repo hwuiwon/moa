@@ -204,6 +204,23 @@ pub fn optional_config_secret(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
+/// Rejects a configured work limit whose zero value would either disable
+/// enforcement or admit no work at all.
+///
+/// Zero is never a meaningful value for a turn, call, or task limit: a limit
+/// that a deployment can set to zero either fails open (the ceiling stops being
+/// applied) or fails closed (no work is admissible). Both are misconfigurations,
+/// and the fail-open reading is a runaway path, so the loader refuses the value
+/// instead of letting each consumer invent its own zero semantics.
+fn require_positive_limit(name: &str, value: u64) -> Result<()> {
+    if value == 0 {
+        return Err(MoaError::ConfigError(format!(
+            "{name} must be greater than zero; zero is not a valid limit"
+        )));
+    }
+    Ok(())
+}
+
 impl MoaConfig {
     fn validate(&self) -> Result<()> {
         if self.database.url.trim().is_empty() {
@@ -213,32 +230,121 @@ impl MoaConfig {
             ));
         }
 
-        if self.database.max_connections == 0 {
-            return Err(MoaError::ConfigError(
-                "database.max_connections must be greater than zero".to_string(),
-            ));
-        }
-        if self.database.background_max_connections == 0 {
-            return Err(MoaError::ConfigError(
-                "database.background_max_connections must be greater than zero".to_string(),
-            ));
+        require_positive_limit(
+            "database.max_connections",
+            u64::from(self.database.max_connections),
+        )?;
+        require_positive_limit(
+            "database.background_max_connections",
+            u64::from(self.database.background_max_connections),
+        )?;
+
+        // Every configured turn, call, and task ceiling. A zero here previously
+        // meant "unlimited" for `session_limits.max_turns` and "no work at all"
+        // for the others; neither reading is a legal configuration.
+        let session_limits = &self.session_limits;
+        for (name, value) in [
+            (
+                "session_limits.turn_admission_fleet_limit",
+                u64::from(session_limits.turn_admission_fleet_limit),
+            ),
+            (
+                "session_limits.turn_admission_tenant_limit",
+                u64::from(session_limits.turn_admission_tenant_limit),
+            ),
+            (
+                "session_limits.turn_admission_lease_ttl_ms",
+                session_limits.turn_admission_lease_ttl_ms,
+            ),
+            (
+                "session_limits.turn_admission_retry_after_ms",
+                session_limits.turn_admission_retry_after_ms,
+            ),
+            (
+                "session_limits.max_pending_messages",
+                u64::from(session_limits.max_pending_messages),
+            ),
+            (
+                "session_limits.max_turns",
+                u64::from(session_limits.max_turns),
+            ),
+            (
+                "session_limits.simple_max_turns",
+                u64::from(session_limits.simple_max_turns),
+            ),
+            (
+                "session_limits.standard_max_turns",
+                u64::from(session_limits.standard_max_turns),
+            ),
+            (
+                "session_limits.max_model_turns_delegation",
+                u64::from(session_limits.max_model_turns_delegation),
+            ),
+            (
+                "session_limits.max_tool_calls",
+                u64::from(session_limits.max_tool_calls),
+            ),
+            (
+                "session_limits.loop_detection_threshold",
+                u64::from(session_limits.loop_detection_threshold),
+            ),
+        ] {
+            require_positive_limit(name, value)?;
         }
 
-        if self.session_limits.turn_admission_fleet_limit == 0
-            || self.session_limits.turn_admission_tenant_limit == 0
-        {
-            return Err(MoaError::ConfigError(
-                "session_limits turn admission fleet and tenant limits must be greater than zero"
-                    .to_string(),
-            ));
-        }
-        if self.session_limits.turn_admission_lease_ttl_ms == 0
-            || self.session_limits.turn_admission_retry_after_ms == 0
-        {
-            return Err(MoaError::ConfigError(
-                "session_limits turn admission lease TTL and retry delay must be greater than zero"
-                    .to_string(),
-            ));
+        require_positive_limit(
+            "budgets.daily_tenant_cents",
+            u64::from(self.budgets.daily_tenant_cents),
+        )?;
+
+        // Execution-run ceilings and the per-turn reservation estimates that
+        // consume them. A zero estimate reserves nothing, so it would let an
+        // unbounded number of turns run inside a bounded run budget.
+        let execution = &self.execution;
+        for (name, value) in [
+            (
+                "execution.repeated_failure_limit",
+                u64::from(execution.repeated_failure_limit),
+            ),
+            ("execution.max_tasks", execution.max_tasks),
+            ("execution.max_tokens", execution.max_tokens),
+            ("execution.max_tool_calls", execution.max_tool_calls),
+            (
+                "execution.max_retrieved_bytes",
+                execution.max_retrieved_bytes,
+            ),
+            ("execution.max_cost_microusd", execution.max_cost_microusd),
+            (
+                "execution.agent_turn_cost_microusd",
+                execution.agent_turn_cost_microusd,
+            ),
+            ("execution.agent_turn_tokens", execution.agent_turn_tokens),
+            (
+                "execution.agent_turn_tool_calls",
+                execution.agent_turn_tool_calls,
+            ),
+            (
+                "execution.agent_turn_retrieved_bytes",
+                execution.agent_turn_retrieved_bytes,
+            ),
+            (
+                "execution.verifier_turn_cost_microusd",
+                execution.verifier_turn_cost_microusd,
+            ),
+            (
+                "execution.verifier_turn_tokens",
+                execution.verifier_turn_tokens,
+            ),
+            (
+                "execution.verifier_turn_tool_calls",
+                execution.verifier_turn_tool_calls,
+            ),
+            (
+                "execution.verifier_turn_retrieved_bytes",
+                execution.verifier_turn_retrieved_bytes,
+            ),
+        ] {
+            require_positive_limit(name, value)?;
         }
 
         if self.database.uses_builtin_dev_url() {
@@ -263,11 +369,12 @@ impl MoaConfig {
             ));
         }
 
-        if self.database.neon.enabled && self.database.neon.max_checkpoints == 0 {
-            return Err(MoaError::ConfigError(
-                "database.neon.max_checkpoints must be greater than zero when Neon checkpointing is enabled"
-                    .to_string(),
-            ));
+        if self.database.neon.enabled {
+            let max_checkpoints =
+                u64::try_from(self.database.neon.max_checkpoints).map_err(|_| {
+                    MoaError::ConfigError("database.neon.max_checkpoints is too large".to_string())
+                })?;
+            require_positive_limit("database.neon.max_checkpoints", max_checkpoints)?;
         }
 
         self.session.validate()?;
@@ -393,6 +500,10 @@ mod tests {
         "MOA_EXECUTION_VERIFIER_TURN_TOOL_CALLS",
         "MOA_EXECUTION_VERIFIER_TURN_RETRIEVED_BYTES",
         "MOA_ORCHESTRATOR_ENDPOINT",
+        "MOA_SESSION_LIMITS_MAX_TURNS",
+        "MOA_SESSION_LIMITS_MAX_TOOL_CALLS",
+        "MOA_SESSION_LIMITS_LOOP_DETECTION_THRESHOLD",
+        "MOA_BUDGETS_DAILY_TENANT_CENTS",
     ];
 
     struct EnvRestore {
@@ -494,6 +605,179 @@ mod tests {
                 .to_string()
                 .contains("database.neon.max_checkpoints must be greater than zero")
         );
+    }
+
+    #[test]
+    fn env_only_loader_rejects_a_zero_turn_ceiling() {
+        // Pins: MOA_SESSION_LIMITS_MAX_TURNS=0 is a configuration failure, not the
+        // "unlimited turns" escape hatch it used to be, so the runaway loop is
+        // unreachable from the deployment environment surface.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _env = EnvRestore::clear(CONFIG_ENV_KEYS);
+        unsafe {
+            std::env::set_var("MOA_DATABASE_URL", "postgres://env.example/moa");
+            std::env::set_var("MOA_SESSION_LIMITS_MAX_TURNS", "0");
+        }
+
+        let error = MoaConfig::load_from_env().expect_err("zero max_turns must not load");
+        assert!(
+            error
+                .to_string()
+                .contains("session_limits.max_turns must be greater than zero"),
+            "unexpected error: {error}"
+        );
+
+        // The same surface still accepts a real ceiling.
+        unsafe {
+            std::env::set_var("MOA_SESSION_LIMITS_MAX_TURNS", "12");
+        }
+        let config = MoaConfig::load_from_env().expect("positive max_turns must load");
+        assert_eq!(config.session_limits.max_turns, 12);
+    }
+
+    #[test]
+    fn env_only_loader_rejects_zero_tool_call_and_loop_detection_limits() {
+        // Pins: the sibling per-turn call limits are rejected at zero too, so no
+        // deployment can silently select "no tool budget" or "loop detection off".
+        for (key, field) in [
+            (
+                "MOA_SESSION_LIMITS_MAX_TOOL_CALLS",
+                "session_limits.max_tool_calls",
+            ),
+            (
+                "MOA_SESSION_LIMITS_LOOP_DETECTION_THRESHOLD",
+                "session_limits.loop_detection_threshold",
+            ),
+            (
+                "MOA_BUDGETS_DAILY_TENANT_CENTS",
+                "budgets.daily_tenant_cents",
+            ),
+        ] {
+            let _guard = ENV_LOCK.lock().expect("env test lock");
+            let _env = EnvRestore::clear(CONFIG_ENV_KEYS);
+            unsafe {
+                std::env::set_var("MOA_DATABASE_URL", "postgres://env.example/moa");
+                std::env::set_var(key, "0");
+            }
+
+            let error = MoaConfig::load_from_env().expect_err("zero limit must not load");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{field} must be greater than zero")),
+                "unexpected error for {key}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_every_zero_turn_call_and_task_limit() {
+        // Pins: the exact set of configured turn/call/task ceilings that reject zero,
+        // reached by direct construction rather than the environment surface. Each
+        // entry is a limit whose zero value would otherwise be read as "unlimited"
+        // by one consumer or "admit nothing" by another.
+        /// One named limit and the mutation that zeroes it.
+        type ZeroedLimit = (&'static str, fn(&mut MoaConfig));
+
+        let mutations: Vec<ZeroedLimit> = vec![
+            ("session_limits.turn_admission_fleet_limit", |config| {
+                config.session_limits.turn_admission_fleet_limit = 0
+            }),
+            ("session_limits.turn_admission_tenant_limit", |config| {
+                config.session_limits.turn_admission_tenant_limit = 0
+            }),
+            ("session_limits.turn_admission_lease_ttl_ms", |config| {
+                config.session_limits.turn_admission_lease_ttl_ms = 0
+            }),
+            ("session_limits.turn_admission_retry_after_ms", |config| {
+                config.session_limits.turn_admission_retry_after_ms = 0
+            }),
+            ("session_limits.max_pending_messages", |config| {
+                config.session_limits.max_pending_messages = 0
+            }),
+            ("session_limits.max_turns", |config| {
+                config.session_limits.max_turns = 0
+            }),
+            ("session_limits.simple_max_turns", |config| {
+                config.session_limits.simple_max_turns = 0
+            }),
+            ("session_limits.standard_max_turns", |config| {
+                config.session_limits.standard_max_turns = 0
+            }),
+            ("session_limits.max_model_turns_delegation", |config| {
+                config.session_limits.max_model_turns_delegation = 0
+            }),
+            ("session_limits.max_tool_calls", |config| {
+                config.session_limits.max_tool_calls = 0
+            }),
+            ("session_limits.loop_detection_threshold", |config| {
+                config.session_limits.loop_detection_threshold = 0
+            }),
+            ("budgets.daily_tenant_cents", |config| {
+                config.budgets.daily_tenant_cents = 0
+            }),
+            ("execution.repeated_failure_limit", |config| {
+                config.execution.repeated_failure_limit = 0
+            }),
+            ("execution.max_tasks", |config| {
+                config.execution.max_tasks = 0
+            }),
+            ("execution.max_tokens", |config| {
+                config.execution.max_tokens = 0
+            }),
+            ("execution.max_tool_calls", |config| {
+                config.execution.max_tool_calls = 0
+            }),
+            ("execution.max_retrieved_bytes", |config| {
+                config.execution.max_retrieved_bytes = 0
+            }),
+            ("execution.max_cost_microusd", |config| {
+                config.execution.max_cost_microusd = 0
+            }),
+            ("execution.agent_turn_cost_microusd", |config| {
+                config.execution.agent_turn_cost_microusd = 0
+            }),
+            ("execution.agent_turn_tokens", |config| {
+                config.execution.agent_turn_tokens = 0
+            }),
+            ("execution.agent_turn_tool_calls", |config| {
+                config.execution.agent_turn_tool_calls = 0
+            }),
+            ("execution.agent_turn_retrieved_bytes", |config| {
+                config.execution.agent_turn_retrieved_bytes = 0
+            }),
+            ("execution.verifier_turn_cost_microusd", |config| {
+                config.execution.verifier_turn_cost_microusd = 0
+            }),
+            ("execution.verifier_turn_tokens", |config| {
+                config.execution.verifier_turn_tokens = 0
+            }),
+            ("execution.verifier_turn_tool_calls", |config| {
+                config.execution.verifier_turn_tool_calls = 0
+            }),
+            ("execution.verifier_turn_retrieved_bytes", |config| {
+                config.execution.verifier_turn_retrieved_bytes = 0
+            }),
+        ];
+
+        let baseline = MoaConfig::default();
+        baseline
+            .validate()
+            .expect("default limits must be a valid configuration");
+
+        for (field, mutate) in mutations {
+            let mut config = MoaConfig::default();
+            mutate(&mut config);
+            let error = config
+                .validate()
+                .expect_err(&format!("zero {field} must fail validation"));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{field} must be greater than zero")),
+                "unexpected error for {field}: {error}"
+            );
+        }
     }
 
     #[test]

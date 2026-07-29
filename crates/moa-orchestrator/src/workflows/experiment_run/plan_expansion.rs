@@ -39,32 +39,19 @@ pub(super) async fn run_experiment_plan(
         pool,
     )
     .await?;
-    let trials = create_plan_trial_rows(ctx, scope, expansion.trials, pool).await?;
-    dispatch_plan_trials(
-        ctx,
-        request,
-        scope,
-        expansion.parallelism,
-        trials,
-        pool,
-        session_store,
-    )
-    .await
+    dispatch_plan_trials(ctx, request, scope, expansion, pool, session_store).await
 }
 
 async fn dispatch_plan_trials(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
     scope: ActionRuleScope,
-    parallelism: usize,
-    trials: Vec<PlanTrialDispatch>,
+    expansion: PlanExpansion,
     pool: &sqlx::PgPool,
     session_store: &Arc<PostgresSessionStore>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let dispatch_index = trials
-        .into_iter()
-        .map(|trial| (trial.trial.trial_key.clone(), trial))
-        .collect::<BTreeMap<_, _>>();
+    let parallelism = expansion.parallelism;
+    let variants = expansion.variants;
     let mut active_waits = Vec::new();
     let mut last_progress = None;
 
@@ -145,7 +132,7 @@ async fn dispatch_plan_trials(
             .iter()
             .filter(|trial| {
                 trial.status == ExperimentTrialStatus::Accepted
-                    && dispatch_index.contains_key(&trial.trial_key)
+                    && variants.contains_key(&trial.variant_key)
             })
             .take(available_slots)
             .map(|trial| trial.trial_key.clone())
@@ -161,22 +148,26 @@ async fn dispatch_plan_trials(
         .await?;
         let claimed_any_trials = !claimed_trials.is_empty();
         for claimed_trial in claimed_trials {
-            let Some(trial) = dispatch_index.get(&claimed_trial.trial_key) else {
-                continue;
-            };
-            let key = trial_workflow_key(request.run_uid, &trial.trial.trial_key);
+            let payload = variants.get(&claimed_trial.variant_key).ok_or_else(|| {
+                bad_request(format!(
+                    "experiment plan variant `{}` is missing its dispatch payload",
+                    claimed_trial.variant_key
+                ))
+            })?;
+            let trial = NewExperimentTrial::from(&claimed_trial);
+            let key = trial_workflow_key(request.run_uid, &trial.trial_key);
             let (awakeable_id, completion) = ctx.awakeable::<String>();
             active_waits.push(ActivePlanTrialWait {
-                trial_key: trial.trial.trial_key.clone(),
+                trial_key: trial.trial_key.clone(),
                 future: completion,
             });
             crate::restate_identity::replay_safe_request(
                 ctx.workflow_client::<ExperimentTrialRunClient>(key)
                     .run(Json::from(ExperimentTrialRunWorkflowRequest {
                         tenant_id: request.tenant_id,
-                        trial: trial.trial.clone(),
-                        target: trial.target.clone(),
-                        variant: trial.variant.clone(),
+                        trial,
+                        target: payload.target.clone(),
+                        variant: payload.variant.clone(),
                         identity: request.identity.clone(),
                         completion_awakeable_id: Some(awakeable_id),
                     })),
@@ -218,13 +209,11 @@ async fn dispatch_plan_trials(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PlanExpansion {
     parallelism: usize,
-    trials: Vec<ExpandedPlanTrial>,
+    variants: BTreeMap<String, PlanVariantDispatch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct PlanTrialDispatch {
-    trial: NewExperimentTrial,
-    record: ExperimentTrialRecord,
+struct PlanVariantDispatch {
     target: Value,
     variant: Value,
 }
@@ -270,7 +259,7 @@ async fn expand_plan(
     plan_revision_uid: Uuid,
     agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
 ) -> Result<PlanExpansion, HandlerError> {
-    let registry = ArtifactRegistry::new(pool);
+    let registry = ArtifactRegistry::new(pool.clone());
     let plan_revision = load_required_published_revision(
         &registry,
         &scope,
@@ -284,12 +273,35 @@ async fn expand_plan(
         ));
     };
     let definition = definition_with_agent_revision_variants(definition, &agent_revision_variants)?;
-    let trials = expand_plan_trials(run_uid, plan_revision_uid, &definition)
+    let mut pager = PlanTrialPager::new(run_uid, plan_revision_uid, &definition)
         .map_err(plan_expansion_error_to_handler_error)?;
+    let store = ExperimentStore::new(pool);
+    let mut variants = BTreeMap::new();
+    loop {
+        let page = pager.next_page();
+        if page.is_empty() {
+            break;
+        }
+        for trial in page {
+            if !variants.contains_key(&trial.trial.variant_key) {
+                variants.insert(
+                    trial.trial.variant_key.clone(),
+                    PlanVariantDispatch {
+                        target: serialized_payload("target", &trial.target)?,
+                        variant: serialized_payload("variant", &trial.variant)?,
+                    },
+                );
+            }
+            store
+                .insert_trial(&scope, trial.trial)
+                .await
+                .map_err(moa_error_to_handler_error)?;
+        }
+    }
     Ok(PlanExpansion {
         parallelism: usize::try_from(definition.parallelism.max(1))
             .map_err(|_| bad_request("experiment plan parallelism is too large"))?,
-        trials,
+        variants,
     })
 }
 
@@ -362,36 +374,6 @@ async fn load_required_published_revision(
         )));
     }
     Ok(revision)
-}
-
-async fn create_plan_trial_rows(
-    ctx: &WorkflowContext<'_>,
-    scope: ActionRuleScope,
-    trials: Vec<ExpandedPlanTrial>,
-    pool: &sqlx::PgPool,
-) -> Result<Vec<PlanTrialDispatch>, HandlerError> {
-    let pool = pool.clone();
-    Ok(ctx
-        .run(|| async move {
-            let store = ExperimentStore::new(pool);
-            let mut dispatch = Vec::with_capacity(trials.len());
-            for trial in trials {
-                let record = store
-                    .insert_trial(&scope, trial.trial.clone())
-                    .await
-                    .map_err(moa_error_to_handler_error)?;
-                dispatch.push(PlanTrialDispatch {
-                    trial: trial.trial,
-                    record,
-                    target: serialized_payload("target", &trial.target)?,
-                    variant: serialized_payload("variant", &trial.variant)?,
-                });
-            }
-            Ok::<_, HandlerError>(Json::from(dispatch))
-        })
-        .name("experiment_plan_create_trials")
-        .await?
-        .into_inner())
 }
 
 async fn aggregate_plan_status(

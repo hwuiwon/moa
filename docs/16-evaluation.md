@@ -2,6 +2,19 @@
 
 _Long-conversation harness, score cards, budgets, and triage._
 
+## Scope
+
+`moa-eval` is a platform-only regression harness: a library, CLI, and `xtask`
+surface driven by CI, nightly jobs, explicit live lanes, and the internal
+skill-regression gate. It is not a tenant product. There is no hosted `Eval`
+Restate service, no tenant eval MCP tool, and no public `/v1/evals/*` route.
+Tenant-facing evaluation is Behavior Lab (`moa-experiments`), documented in
+[Behavior Lab](product/behavior-lab.md).
+
+Behavior Lab persists score lineage through `analytics.score_run` and
+`analytics.scores`. The platform harness produces the same typed `ScoreRecord`
+contract for comparison, but leaves persistence to its caller.
+
 ## Purpose
 
 The long-conversation harness extends `moa-eval` from single-turn checks to

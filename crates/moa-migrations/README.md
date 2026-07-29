@@ -19,6 +19,24 @@ below plus forward migrations (`V000302__...` onward). Key entry points:
 - `sql/pgaudit.sql` for focused pgaudit smoke coverage
 - `migration-ownership.toml` for table ownership
 
+## Numbering
+
+Version numbers are allocated, not compacted. The sequence is intentionally
+sparse: the four baselines sit on `1 / 101 / 201 / 301` block boundaries, and
+individual numbers are retired when a migration is deleted or when a
+pre-allocated slot never ships.
+
+Retired or never-allocated numbers: **332, 350, 352–357**.
+
+Do not renumber to close a gap. Refinery records applied versions in its history
+table, so renumbering invalidates recorded history in every environment that has
+applied the sequence. For the same reason, never reuse a retired number that sits
+below the current maximum — refinery does not back-apply a lower-numbered
+migration, so it would silently never run on an existing database.
+
+Take the next number above the current maximum. Gaps are expected and
+`check-migrations` does not flag them.
+
 ## Rules
 
 - New DDL goes through this crate.

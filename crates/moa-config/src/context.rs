@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BudgetConfig {
-    /// Maximum daily spend per tenant in cents. `0` disables budget enforcement.
+    /// Maximum daily spend per tenant in cents. Must be greater than zero;
+    /// configuration validation rejects `0` rather than reading it as
+    /// "enforcement disabled".
     pub daily_tenant_cents: u32,
 }
 
@@ -32,7 +34,11 @@ pub struct SessionLimitsConfig {
     pub turn_admission_retry_after_ms: u64,
     /// Maximum messages retained behind one already-active session turn.
     pub max_pending_messages: u32,
-    /// Maximum completed turns per session before pausing. `0` disables the limit.
+    /// Hard ceiling on model loop iterations for one turn, and on completed
+    /// turns per session before pausing.
+    ///
+    /// There is no "unlimited" setting: every other turn cap is bounded by this
+    /// one, so configuration validation rejects `0`.
     pub max_turns: u32,
     /// Maximum model loop iterations for requests classified as simple.
     pub simple_max_turns: u32,
@@ -45,9 +51,13 @@ pub struct SessionLimitsConfig {
     /// the remainder of that turn. Escalation is one-way and never lowers the base
     /// cap. Bounded by `max_turns`.
     pub max_model_turns_delegation: u32,
-    /// Maximum tool calls allowed within one turn. `0` disables tool calls.
+    /// Maximum tool calls allowed within one turn. Must be greater than zero;
+    /// a turn class that may not call tools selects a zero budget at runtime,
+    /// which is not something a deployment configures.
     pub max_tool_calls: u32,
-    /// Number of identical consecutive turn fingerprints that triggers a loop pause. `0` disables detection.
+    /// Number of identical consecutive turn fingerprints that triggers a loop
+    /// pause. Must be greater than zero; loop detection is not disableable by
+    /// configuration.
     pub loop_detection_threshold: u32,
     /// Delay before the first durable progress update is eligible, in milliseconds.
     pub progress_first_delay_ms: u64,
@@ -403,6 +413,66 @@ mod tests {
         assert_eq!(limits.turn_admission_lease_ttl_ms, 120_000);
         assert_eq!(limits.turn_admission_retry_after_ms, 2_500);
         assert_eq!(limits.max_pending_messages, 3);
+    }
+
+    #[test]
+    fn turn_limit_env_overlay_refuses_to_apply_a_zero_ceiling() {
+        // Pins: the overlay application path validates the merged config, so a
+        // MOA_SESSION_LIMITS_* zero for any turn ceiling fails instead of leaving
+        // the process running with an unbounded or unusable per-turn budget.
+        for (field, overlay) in [
+            (
+                "session_limits.max_turns",
+                EnvOverlay {
+                    session_limits_max_turns: Some(0),
+                    ..EnvOverlay::default()
+                },
+            ),
+            (
+                "session_limits.simple_max_turns",
+                EnvOverlay {
+                    session_limits_simple_max_turns: Some(0),
+                    ..EnvOverlay::default()
+                },
+            ),
+            (
+                "session_limits.standard_max_turns",
+                EnvOverlay {
+                    session_limits_standard_max_turns: Some(0),
+                    ..EnvOverlay::default()
+                },
+            ),
+            (
+                "session_limits.max_model_turns_delegation",
+                EnvOverlay {
+                    session_limits_max_model_turns_delegation: Some(0),
+                    ..EnvOverlay::default()
+                },
+            ),
+            (
+                "session_limits.max_pending_messages",
+                EnvOverlay {
+                    session_limits_max_pending_messages: Some(0),
+                    ..EnvOverlay::default()
+                },
+            ),
+        ] {
+            let mut config = MoaConfig::default();
+            let error = overlay
+                .apply_to(&mut config)
+                .expect_err("a zero turn ceiling must not apply");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{field} must be greater than zero")),
+                "unexpected error for {field}: {error}"
+            );
+            assert_eq!(
+                config,
+                MoaConfig::default(),
+                "a rejected overlay must leave the config untouched"
+            );
+        }
     }
 
     #[test]

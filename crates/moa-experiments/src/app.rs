@@ -237,7 +237,7 @@ pub async fn admit_run(
             &scope,
             NewExperimentRun {
                 name: request.name,
-                session_id: session_id_from_target(&run_inputs.target),
+                session_id: run_inputs.target.attached_session_id(),
                 execution_run_uid: None,
                 artifact_revision_uids: run_inputs.artifact_revision_uids.clone(),
                 score_run_id,
@@ -1355,15 +1355,6 @@ fn parse_trial_status(status: &str) -> Result<ExperimentTrialStatus> {
         .ok_or_else(|| bad_request(format!("invalid experiment trial status `{status}`")))
 }
 
-fn session_id_from_target(
-    target: &ExperimentTarget,
-) -> Option<moa_core::types::identifiers::SessionId> {
-    match target {
-        ExperimentTarget::AgentLoop { session_id, .. }
-        | ExperimentTarget::ExecutionTemplate { session_id, .. } => *session_id,
-    }
-}
-
 fn identity_payload(identity: Identity) -> Result<Value> {
     serde_json::to_value(identity)
         .map_err(|error| serialization_error(format!("serialize identity failed: {error}")))
@@ -1739,7 +1730,6 @@ mod tests {
             status: ExperimentRunStatus::Completed,
             target: ExperimentTarget::AgentLoop {
                 prompt: "Handle the damaged order.".to_string(),
-                session_id: Some(SessionId(fixture_uuid(2))),
                 agent: None,
                 model: ModelId::new("gpt-fixture"),
                 attachments: Vec::new(),

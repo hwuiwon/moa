@@ -131,6 +131,7 @@ impl WorkingContextFixture {
             created_by: Some(SessionActorRef::Contact { id: contact_id }),
             contact_promoted_from_id: None,
             agent_context: Some(moa_core::types::agent::AgentContext::system_default()),
+            call_origin: moa_core::types::action_policy::CallOrigin::Production,
             total_input_tokens: 0,
             total_input_tokens_uncached: 0,
             total_input_tokens_cache_write: 0,

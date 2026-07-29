@@ -16,8 +16,6 @@ mod authz_challenges_db;
 mod backfill_cli_db;
 #[path = "orchestrator_db/contacts_db.rs"]
 mod contacts_db;
-#[path = "orchestrator_db/eval_run_status_db.rs"]
-mod eval_run_status_db;
 #[path = "orchestrator_db/execution_service_db.rs"]
 mod execution_service_db;
 #[path = "orchestrator_db/guardrail_hourly_db.rs"]

@@ -152,28 +152,6 @@ CREATE INDEX IF NOT EXISTS ix_scores_run
     ON analytics.scores (run_id)
     WHERE run_id IS NOT NULL;
 
-CREATE TABLE IF NOT EXISTS analytics.eval_datasets (
-    dataset_id  UUID        PRIMARY KEY,
-    name        TEXT        NOT NULL UNIQUE,
-    source_path TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS analytics.eval_dataset_items (
-    item_id         UUID        PRIMARY KEY,
-    dataset_id      UUID        NOT NULL REFERENCES analytics.eval_datasets(dataset_id) ON DELETE CASCADE,
-    storage_partition_id    TEXT        NOT NULL,
-    scope           JSONB       NOT NULL,
-    query           TEXT        NOT NULL,
-    expected_answer TEXT,
-    expected_chunk_ids UUID[]   NOT NULL DEFAULT '{}',
-    metadata        JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS ix_eval_dataset_items_dataset
-    ON analytics.eval_dataset_items (dataset_id, created_at ASC);
-
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN

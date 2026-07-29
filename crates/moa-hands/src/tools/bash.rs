@@ -1,9 +1,11 @@
 //! `bash` tool execution helpers.
 
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use moa_core::{error::MoaError, error::Result, types::tools::ToolOutput};
 use serde::Deserialize;
 use tokio::process::Command;
@@ -77,14 +79,20 @@ fn process_output(
 }
 
 /// Executes the `bash` tool in a local sandbox directory.
+///
+/// `remaining_lifetime` is the time left on the sandbox this call runs inside,
+/// or `None` when the sandbox was provisioned with a deliberately unbounded
+/// maximum lifetime.
 pub async fn execute_local(
     sandbox_dir: &Path,
     input: &str,
     default_timeout: Duration,
+    remaining_lifetime: Option<Duration>,
     hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<ToolOutput> {
-    let params: BashToolInput = serde_json::from_str(input)?;
-    let timeout = params.timeout(default_timeout);
+    let params = BashToolInput::parse(input)?;
+    let timeout = params.timeout(default_timeout, remaining_lifetime);
+    reject_exhausted_lifetime(timeout)?;
     let started_at = Instant::now();
 
     let mut command = Command::new(&*LOGIN_SHELL);
@@ -130,15 +138,21 @@ pub async fn execute_local(
 }
 
 /// Executes the `bash` tool inside an existing Docker sandbox.
+///
+/// `remaining_lifetime` is the time left on the container this call runs
+/// inside, or `None` when it was provisioned with a deliberately unbounded
+/// maximum lifetime.
 pub async fn execute_docker(
     container_id: &str,
     workspace_root: &str,
     input: &str,
     default_timeout: Duration,
+    remaining_lifetime: Option<Duration>,
     hard_cancel_token: Option<&CancellationToken>,
 ) -> Result<ToolOutput> {
-    let params: BashToolInput = serde_json::from_str(input)?;
-    let timeout = params.timeout(default_timeout);
+    let params = BashToolInput::parse(input)?;
+    let timeout = params.timeout(default_timeout, remaining_lifetime);
+    reject_exhausted_lifetime(timeout)?;
     let started_at = Instant::now();
 
     let mut command = Command::new("docker");
@@ -183,28 +197,213 @@ pub async fn execute_docker(
     ))
 }
 
+/// Largest caller-supplied `timeout_secs` any bash execution path accepts.
+///
+/// This is the enforced policy bound, not a hint. The published input schema
+/// advertises the same `maximum`, but a JSON-Schema annotation is only checked
+/// on the router's policy path — `serde` ignores it entirely, and a hand
+/// provider invoked directly never sees the schema. A model emitting
+/// `timeout_secs: 86400` would otherwise hold a sandbox for a day.
+pub const MAX_BASH_TIMEOUT_SECS: u64 = 300;
+
+/// A caller-supplied bash timeout that has already cleared tool policy.
+///
+/// Validation lives in the type's own deserialization rather than in each
+/// executor, so an out-of-policy value cannot reach a `Command` through a path
+/// that forgot to check. There is no clamping: silently rewriting 86400 into
+/// 300 would tell the model its instruction was honoured when it was not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "u64")]
+pub struct BashTimeoutSecs(NonZeroU64);
+
+impl BashTimeoutSecs {
+    /// Returns the validated timeout as a duration.
+    #[must_use]
+    pub fn duration(self) -> Duration {
+        Duration::from_secs(self.0.get())
+    }
+}
+
+impl TryFrom<u64> for BashTimeoutSecs {
+    type Error = String;
+
+    fn try_from(value: u64) -> std::result::Result<Self, Self::Error> {
+        let seconds = NonZeroU64::new(value)
+            .ok_or_else(|| "timeout_secs must be at least 1 second".to_string())?;
+        if seconds.get() > MAX_BASH_TIMEOUT_SECS {
+            return Err(format!(
+                "timeout_secs {seconds} exceeds the maximum of {MAX_BASH_TIMEOUT_SECS} seconds"
+            ));
+        }
+        Ok(Self(seconds))
+    }
+}
+
+/// Parsed `bash` arguments whose timeout is already within policy.
 #[derive(Debug, Deserialize)]
-struct BashToolInput {
-    cmd: String,
+pub struct BashToolInput {
+    /// Shell command to execute.
+    pub cmd: String,
+    /// Optional caller-supplied timeout override, already validated.
     #[serde(default)]
-    timeout_secs: Option<u64>,
+    pub timeout_secs: Option<BashTimeoutSecs>,
 }
 
 impl BashToolInput {
-    fn timeout(&self, default_timeout: Duration) -> Duration {
-        self.timeout_secs
-            .map(Duration::from_secs)
-            .unwrap_or(default_timeout)
+    /// Parses and validates one `bash` invocation payload.
+    ///
+    /// An out-of-policy `timeout_secs` is rejected here, before any process is
+    /// spawned and before any remote sandbox is asked to run a command.
+    pub fn parse(input: &str) -> Result<Self> {
+        serde_json::from_str(input)
+            .map_err(|error| MoaError::ValidationError(format!("invalid bash tool input: {error}")))
     }
+
+    /// Returns the duration this call may run for.
+    ///
+    /// Three bounds apply and the smallest wins: the caller's own request, the
+    /// deployment's default tool timeout, and `remaining_lifetime` — the time
+    /// left on the sandbox this call runs inside. The third is what stops an
+    /// in-policy 300-second command from outliving the sandbox that a reaper is
+    /// about to destroy underneath it, leaving a process nothing owns.
+    #[must_use]
+    pub fn timeout(
+        &self,
+        default_timeout: Duration,
+        remaining_lifetime: Option<Duration>,
+    ) -> Duration {
+        let requested = self
+            .timeout_secs
+            .map_or(default_timeout, BashTimeoutSecs::duration);
+        match remaining_lifetime {
+            Some(remaining) => requested.min(remaining),
+            None => requested,
+        }
+    }
+}
+
+/// Returns the time left before `deadline`, or `None` when there is no deadline.
+///
+/// An already-passed deadline yields `Some(Duration::ZERO)` rather than `None`:
+/// "the sandbox is out of time" and "the sandbox has no deadline" must not
+/// collapse into the same value, or an expired sandbox would run unbounded.
+#[must_use]
+pub fn remaining_lifetime(deadline: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<Duration> {
+    let deadline = deadline?;
+    Some((deadline - now).to_std().unwrap_or(Duration::ZERO))
+}
+
+/// Refuses a call that has no sandbox lifetime left to run inside.
+///
+/// Starting a command with a zero budget would report a `timed out after 0s`
+/// failure that reads like the command's own fault. The sandbox being out of
+/// time is a different fact and is named as one.
+fn reject_exhausted_lifetime(timeout: Duration) -> Result<()> {
+    if timeout.is_zero() {
+        return Err(MoaError::ToolError(
+            "sandbox lifetime is exhausted; no time remains to run a command".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
+    use chrono::{TimeDelta, Utc};
+    use moa_core::error::MoaError;
     use moa_core::types::tools::ToolOutput;
 
-    use super::{MAX_CAPTURED_STREAM_BYTES, process_output};
+    use super::{
+        BashToolInput, MAX_BASH_TIMEOUT_SECS, MAX_CAPTURED_STREAM_BYTES, process_output,
+        remaining_lifetime,
+    };
+
+    #[test]
+    fn a_timeout_above_policy_is_rejected_rather_than_clamped() {
+        // Pins: the schema's `maximum` is an advertisement; this is the bound.
+        // A caller asking for a day gets a typed validation error naming the
+        // limit, and — critically — no `BashToolInput` at all, so no executor
+        // downstream can be handed a clamped-but-accepted value.
+        let error = BashToolInput::parse(r#"{"cmd":"sleep 100000","timeout_secs":86400}"#)
+            .expect_err("an out-of-policy timeout must not parse");
+        match error {
+            MoaError::ValidationError(message) => {
+                assert!(message.contains("86400"), "names the request: {message}");
+                assert!(
+                    message.contains(&MAX_BASH_TIMEOUT_SECS.to_string()),
+                    "names the limit: {message}"
+                );
+            }
+            other => panic!("expected ValidationError, got {other:?}"),
+        }
+
+        // Exactly the bound is accepted; one second past it is not.
+        assert_eq!(
+            BashToolInput::parse(r#"{"cmd":"true","timeout_secs":300}"#)
+                .expect("the exact bound is in policy")
+                .timeout(Duration::from_secs(300), None),
+            Duration::from_secs(300)
+        );
+        assert!(BashToolInput::parse(r#"{"cmd":"true","timeout_secs":301}"#).is_err());
+
+        // Zero is not "no timeout": it would make every command fail instantly
+        // while reading like a deliberate setting.
+        assert!(BashToolInput::parse(r#"{"cmd":"true","timeout_secs":0}"#).is_err());
+    }
+
+    #[test]
+    fn the_effective_timeout_is_the_smallest_of_request_default_and_sandbox_lifetime() {
+        // Pins: an in-policy request still cannot outlive the sandbox it runs
+        // in. A command started 30 seconds before the sandbox's hard deadline
+        // gets 30 seconds, not the 300 it asked for, so the reaper never
+        // destroys a sandbox out from under a running process.
+        let params = BashToolInput::parse(r#"{"cmd":"true","timeout_secs":300}"#)
+            .expect("an in-policy timeout parses");
+
+        assert_eq!(
+            params.timeout(Duration::from_secs(300), Some(Duration::from_secs(30))),
+            Duration::from_secs(30),
+            "the sandbox lifetime is the binding constraint"
+        );
+        assert_eq!(
+            params.timeout(Duration::from_secs(300), None),
+            Duration::from_secs(300),
+            "an unbounded-lifetime sandbox leaves the request in force"
+        );
+
+        // With no caller request the deployment default applies, and the
+        // sandbox lifetime still caps it.
+        let defaulted =
+            BashToolInput::parse(r#"{"cmd":"true"}"#).expect("an absent timeout parses");
+        assert_eq!(
+            defaulted.timeout(Duration::from_secs(120), Some(Duration::from_secs(5))),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            defaulted.timeout(Duration::from_secs(120), None),
+            Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn an_expired_sandbox_reports_zero_remaining_rather_than_no_deadline() {
+        // Pins: the two absent-looking states stay distinct. A sandbox past its
+        // deadline yields `Some(ZERO)` — which `reject_exhausted_lifetime`
+        // refuses — while an unbounded sandbox yields `None`, which does not.
+        let now = Utc::now();
+        assert_eq!(remaining_lifetime(None, now), None);
+        assert_eq!(
+            remaining_lifetime(Some(now - TimeDelta::seconds(5)), now),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            remaining_lifetime(Some(now + TimeDelta::seconds(45)), now),
+            Some(Duration::from_secs(45)),
+            "a future deadline yields exactly the time left"
+        );
+    }
 
     #[test]
     fn bash_output_preserves_full_process_streams() {

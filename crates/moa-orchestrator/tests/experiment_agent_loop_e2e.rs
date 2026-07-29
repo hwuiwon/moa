@@ -25,8 +25,8 @@ use moa_wire::artifacts::{
     ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
 };
 use moa_wire::experiments::{
-    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
-    ExperimentRunStatusResponse,
+    ExperimentListRequest, ExperimentListResponse, ExperimentRunRequest, ExperimentRunResponse,
+    ExperimentRunStatusRequest, ExperimentRunStatusResponse,
 };
 use moa_wire::skills::{
     SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
@@ -250,6 +250,130 @@ async fn experiments_run_denies_caller_without_tenant_operator() -> Result<()> {
     let _ = orchestrator.wait();
 
     result
+}
+
+#[tokio::test]
+#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
+async fn experiments_run_rejects_unreachable_execution_template_session_before_admission()
+-> Result<()> {
+    // Pins: an execution-template session the caller cannot reach is refused by
+    // the Session participant check, and the refusal lands before any admission
+    // write, dispatch, or durable event read. Agent-loop targets are not covered
+    // here because they carry no session field at all — that is pinned at the
+    // type level by the `Experiments` service and plan-expansion unit tests.
+    let _guard = RESTATE_E2E_LOCK.lock().await;
+    if !cfg!(feature = "provider-overrides") {
+        return Ok(());
+    }
+
+    let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
+    let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
+    let fixture_path = memory_dir
+        .path()
+        .join("target-session-experiment-script.json");
+    write_scripted_fixture(&fixture_path, "unreachable")?;
+
+    let ports = reserve_orchestrator_ports()?;
+    let endpoint_url = deployment_endpoint_url(ports.restate);
+    let ingress = restate_ingress_url();
+    let ingress = ingress.as_str();
+    let client = reqwest::Client::new();
+    let tenant_id = TenantId::new();
+    let mut identity = test_user_identity();
+    identity.tenant_id = tenant_id;
+    grant_tenant_admin(&identity, tenant_id).await?;
+    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
+
+    let result = async {
+        register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
+
+        let foreign_session_id = Uuid::now_v7();
+        let template_revision_uid = Uuid::now_v7();
+        let unreachable_session = run_request_with_target(
+            tenant_id,
+            "execution-template-foreign-session",
+            json!({
+                "kind": "execution_template",
+                "template": {
+                    "skill_ref": "skill://durable-report",
+                    "revision_uid": template_revision_uid,
+                },
+                "objective": "produce the durable report",
+                "input": {},
+                "session_id": foreign_session_id,
+                "idempotency_key": null
+            }),
+            json!({
+                "name": "execution-template-foreign-session",
+                "model": "scripted-loadtest",
+                "artifact_revision_uids": [],
+                "skill_refs": [],
+                "execution_template": {
+                    "skill_ref": "skill://durable-report",
+                    "revision_uid": template_revision_uid,
+                },
+                "metadata": {}
+            }),
+        );
+        let response = with_identity(
+            client.post(service_url(ingress, "Experiments", "run")),
+            &identity,
+        )
+        .json(&unreachable_session)
+        .send()
+        .await
+        .context("call Experiments/run with an unreachable execution-template session")?;
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let listed = post_json_with_identity(
+            &client,
+            ingress,
+            "Experiments",
+            "list",
+            &identity,
+            &ExperimentListRequest {
+                tenant_id,
+                status: None,
+                limit: Some(10),
+            },
+        )
+        .await?
+        .json::<ExperimentListResponse>()
+        .await
+        .context("deserialize experiment list response")?;
+        assert!(
+            listed.runs.is_empty(),
+            "rejected target sessions must not persist an experiment run: {:?}",
+            listed.runs
+        );
+
+        Ok(())
+    }
+    .await;
+
+    let _ = orchestrator.kill();
+    let _ = orchestrator.wait();
+
+    result
+}
+
+fn run_request_with_target(
+    tenant_id: TenantId,
+    name: &str,
+    target: Value,
+    variant: Value,
+) -> ExperimentRunRequest {
+    ExperimentRunRequest {
+        tenant_id,
+        name: name.to_string(),
+        plan_revision_uid: None,
+        target: Some(target),
+        variant: Some(variant),
+        scorecard: Some(fixture_scorecard()),
+        score_run_id: None,
+        idempotency_key: Some(format!("{name}-{}", Uuid::now_v7())),
+        agent_revision_variants: Vec::new(),
+    }
 }
 
 async fn import_support_skill(

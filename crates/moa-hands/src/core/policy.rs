@@ -134,10 +134,13 @@ impl ToolRouter {
         invocation: &ToolInvocation,
     ) -> Result<PreparedActionInvocation> {
         let registry = self.registry();
-        let tool_definition = registry
+        let registered_tool = registry
+            .tools
             .get(&invocation.name)
             .ok_or_else(|| registry.unknown_tool_error(&invocation.name))?;
+        let tool_definition = &registered_tool.definition;
         validate_tool_invocation(tool_definition, invocation)?;
+        let capability = registered_tool.execution.capability_id(&invocation.name);
         let policy_input = self.describe_invocation(tool_definition, invocation)?;
         let rules = if let Some(rule_store) = &self.rule_store {
             let policy_actor = identity_actor_for_policy_lookup(session);
@@ -153,7 +156,9 @@ impl ToolRouter {
         };
         let policy = self.policies.check(
             &policy_input,
-            &moa_security::ActionPolicyContext::from_session(session),
+            &capability,
+            &moa_security::ActionPolicyContext::from_session(session)
+                .with_origin(self.call_origin()),
             &rules,
         )?;
         let needs_review_preview = matches!(policy.effect, ActionPolicyEffect::AdminReview);

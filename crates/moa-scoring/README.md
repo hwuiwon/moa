@@ -15,7 +15,6 @@ summarizing one run, and comparing numeric scores between two runs.
   and a new run
 - `ScoreRunRef`, `ScoreCompareRef`, `ScoreSummary`, `ScoreCompare` —
   request/response DTOs
-- `SCORE_RUN_SOURCE_EVAL_REPLAY` — source label for hosted eval replay parents
 
 ## Rules
 

@@ -4,9 +4,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    agent::AgentContext, channel::Attachment, channel::Channel, channel::SessionChannelBindingId,
-    contact::ContactId, contact::ContactRef, contact::SessionActorRef, events_stream::SequenceNum,
-    identifiers::ModelId, identifiers::SessionId, identifiers::TenantId,
+    action_policy::CallOrigin, agent::AgentContext, channel::Attachment, channel::Channel,
+    channel::SessionChannelBindingId, contact::ContactId, contact::ContactRef,
+    contact::SessionActorRef, events_stream::SequenceNum, identifiers::ModelId,
+    identifiers::SessionId, identifiers::TenantId,
 };
 
 /// Session lifecycle status.
@@ -170,6 +171,16 @@ pub struct SessionMeta {
     /// Configured agent revision and policy snapshot pinned to this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_context: Option<AgentContext>,
+    /// Provenance class of the runtime this session was created for.
+    ///
+    /// Stated once at creation and durable from then on, because every tool
+    /// dispatch — the immediate path, the durable recovery path, a worker turn,
+    /// an execution task, and a cleared action review — reloads this record
+    /// rather than carrying the origin in its request. An eval-owned session
+    /// therefore cannot lose its ceiling by taking a different path, and no
+    /// request field can restore what the session gave up.
+    #[serde(default)]
+    pub call_origin: CallOrigin,
     /// Aggregate input token usage across all cache states.
     pub total_input_tokens: usize,
     /// Aggregate uncached input token usage.
@@ -221,6 +232,7 @@ impl Default for SessionMeta {
             created_by: None,
             contact_promoted_from_id: None,
             agent_context: Some(AgentContext::system_default()),
+            call_origin: CallOrigin::Production,
             total_input_tokens: 0,
             total_input_tokens_uncached: 0,
             total_input_tokens_cache_write: 0,

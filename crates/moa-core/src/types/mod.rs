@@ -22,6 +22,7 @@ pub mod memory;
 pub mod model;
 pub mod observability;
 pub mod provider;
+pub mod resource;
 pub mod security;
 pub mod segment_assessment;
 pub mod segments;

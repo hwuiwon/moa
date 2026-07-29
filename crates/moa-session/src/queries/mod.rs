@@ -2,8 +2,8 @@
 use chrono::{DateTime, Utc};
 use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionPolicyRule,
-    types::action_policy::ActionRuleScope, types::channel::SessionChannelBindingId,
-    types::contact::ContactId, types::contact::ContactRef,
+    types::action_policy::ActionRuleScope, types::action_policy::CallOrigin,
+    types::channel::SessionChannelBindingId, types::contact::ContactId, types::contact::ContactRef,
     types::contact::ContactVerificationState, types::contact::SessionActorRef,
     types::experience::ExperienceAttribution, types::experience::ExperienceRecord,
     types::experience::LearningCandidate, types::experience::TaskFingerprint,

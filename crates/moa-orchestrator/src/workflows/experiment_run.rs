@@ -20,7 +20,7 @@ use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentTarget, ExperimentTrialRecord,
     ExperimentTrialStatus, ExperimentVariant, NewExperimentTrial,
 };
-use moa_experiments::plan::{ExpandedPlanTrial, expand_plan_trials};
+use moa_experiments::plan::PlanTrialPager;
 use moa_experiments::store::ExperimentStore;
 use moa_observability::record_experiment_run;
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -343,7 +343,6 @@ async fn run_experiment_target(
     match parse_payload::<ExperimentTarget>("target", request.target.clone())? {
         ExperimentTarget::AgentLoop {
             prompt,
-            session_id,
             agent,
             model,
             attachments,
@@ -354,7 +353,6 @@ async fn run_experiment_target(
                 request,
                 scope,
                 prompt,
-                session_id,
                 agent,
                 model,
                 attachments,

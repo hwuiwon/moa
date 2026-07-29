@@ -14,21 +14,23 @@ use moa_artifacts::execution_plan::{
 };
 use moa_artifacts::reference::ArtifactRef;
 use moa_core::events::Event;
-use moa_core::types::action_policy::ActionRuleScope;
+use moa_core::types::action_policy::{ActionRuleScope, CallOrigin};
 use moa_core::types::execution_planning::{
     ExecutionAuditReport, ExecutionCompileOutcome, ExecutionCompileSource,
     ExecutionPlanningAuditPayload, ExecutionRunAdmissionStatus, ExecutionSourceProvenance,
     PinnedExecutionTemplateRef,
 };
-use moa_core::types::identifiers::ModelId;
+use moa_core::types::identifiers::{ModelId, SessionId};
 use moa_core::types::session::SessionStatus;
 use moa_execution::state::{ExecutionTaskId, ExecutionTaskStatus};
 use moa_execution::wire::{
     ExecutionPlanningContextSnapshot, ExecutionRunRequest, planning_context_hash,
 };
 use moa_experiments::model::{
-    ExperimentRunRecord, ExperimentRunStatus, ExperimentTarget, ExperimentVariant,
+    ExperimentRunRecord, ExperimentRunStatus, ExperimentTarget, ExperimentVariant, NewExperimentRun,
 };
+use moa_experiments::store::ExperimentStore;
+use moa_orchestrator::workflows::experiment_run::ExperimentRunWorkflowRequest;
 use moa_test_support::{FixtureCapabilityOptions, OrchestratorTestFixture, TestApiClient};
 use moa_wire::experiments::{
     ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
@@ -63,27 +65,23 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
     // Pins: an API-imported and published exact skill revision admitted through Experiments/run
     // must use Execution/planning_context and Execution/start, persist ExperimentTemplate
     // provenance, export stable ExperimentRun -> execution-run correlation, finish its canonical
-    // task, and register no removed procedure workflow or data.
+    // task, run inside a session stamped with the run's own eval-owned call origin, and register
+    // no removed procedure workflow or data.
     if !cfg!(feature = "provider-overrides") {
         return Ok(());
     }
 
     let fixture = OrchestratorTestFixture::with_execution_fixture(
-        json!({
-            "default": {
-                "completion": {
-                    "content": FINAL_RESPONSE,
-                    "tool_calls": []
-                }
-            }
-        }),
+        script(),
         FixtureCapabilityOptions::default(),
     )
     .await?;
     let test = fixture.isolated().await;
-    let session_id = test.create_session("canonical-experiment-template").await?;
-    let session = test.client().get_session(session_id).await?;
-    let tenant_id = session.tenant_id;
+    let tenant_id = test
+        .client()
+        .identity()
+        .context("fixture test client must carry identity headers")?
+        .tenant_id;
     let published = publish_skill(
         &fixture,
         test.client(),
@@ -101,28 +99,18 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
         "case_id": "EXP-500",
         "resolution": "canonical-execution"
     });
+    // The run owns the session it executes in. A caller-named session is only
+    // admitted when it already carries this run's own eval-owned origin, which
+    // no caller can mint before admission returns the run uid.
     let target = ExperimentTarget::ExecutionTemplate {
         template: exact_template.clone(),
         objective: OBJECTIVE.to_string(),
         input: run_input.clone(),
-        session_id: Some(session_id),
+        session_id: None,
         idempotency_key: Some(format!("execution-template-{}", Uuid::now_v7())),
     };
-    let variant = ExperimentVariant {
-        name: "exact-published-template".to_string(),
-        model: Some(ModelId::new("scripted-loadtest")),
-        artifact_revision_uids: vec![published.revision_uid],
-        skill_refs: Vec::new(),
-        execution_template: Some(exact_template.clone()),
-        metadata: json!({"lane": "experiment_execution_service_e2e"}),
-    };
-    let scorecard = ExperimentScorecard::new(vec![ScorecardRequirement {
-        evaluator_id: "target_completed".to_string(),
-        evaluator_version: "v1".to_string(),
-        config: json!({}),
-        effect: ScorecardEffect::Blocking,
-    }])
-    .expect("fixture scorecard is valid");
+    let variant = template_variant(&exact_template, published.revision_uid);
+    let scorecard = template_scorecard();
     let score_run_id = Uuid::now_v7();
     let experiment_idempotency_key = format!("experiment-execution-{}", Uuid::now_v7());
     let request = ExperimentRunRequest {
@@ -149,7 +137,7 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
     assert_eq!(admitted.tenant_id, tenant_id);
     assert_eq!(admitted.status, ExperimentRunStatus::Accepted.as_str());
     assert_eq!(admitted.score_run_id, score_run_id);
-    assert_eq!(admitted.session_id, Some(session_id));
+    assert_eq!(admitted.session_id, None);
     assert_eq!(admitted.execution_run_uid, None);
 
     let terminal_experiment =
@@ -164,8 +152,23 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
         Some("execution_template")
     );
     assert_eq!(terminal_experiment.score_run_id, Some(score_run_id));
-    assert_eq!(terminal_experiment.session_id, Some(session_id));
+    let session_id = terminal_experiment
+        .session_id
+        .context("completed experiment omitted the session it attached")?;
     assert_eq!(terminal_experiment.error, None);
+    // The origin on this session is the whole containment boundary: it is what
+    // refuses production connectors and side-effecting host tools to every tool
+    // call the run's execution tasks issue on the shared production router.
+    assert_persisted_call_origin(
+        &fixture.postgres_url,
+        session_id,
+        &json!({
+            "origin": "experiment",
+            "run_uid": admitted.run_uid,
+            "trial_uid": Value::Null,
+        }),
+    )
+    .await?;
     let execution_run_uid = terminal_experiment
         .execution_run_uid
         .context("completed experiment omitted its canonical execution-run link")?;
@@ -506,6 +509,292 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
         );
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the local Restate/Postgres/OpenFGA/Redis service fixture"]
+async fn experiment_execution_template_admits_only_its_own_eval_session_service_e2e() -> Result<()>
+{
+    // Pins: an execution-template target that names an existing session is admitted
+    // on the session's call origin and nothing else. Two runs of the identical
+    // template, objective, input, and variant differ only in the origin of the
+    // session they name: the production-origin session a caller can always reach is
+    // refused before the run appends its objective, writes a compile audit, or
+    // starts an execution run — the refusal names the origin — while a session
+    // carrying that run's own eval-owned origin executes the template to completion
+    // inside the named session.
+    if !cfg!(feature = "provider-overrides") {
+        return Ok(());
+    }
+
+    let fixture = OrchestratorTestFixture::with_execution_fixture(
+        script(),
+        FixtureCapabilityOptions::default(),
+    )
+    .await?;
+    let test = fixture.isolated().await;
+    let identity = test
+        .client()
+        .identity()
+        .context("fixture test client must carry identity headers")?
+        .clone();
+    let tenant_id = identity.tenant_id;
+    let published = publish_skill(
+        &fixture,
+        test.client(),
+        tenant_id,
+        TEMPLATE_SKILL_NAME,
+        template_skill_source(),
+        template_skill_markdown(),
+    )
+    .await?;
+    let exact_template = PinnedExecutionTemplateRef {
+        skill_ref: published.skill_ref.clone(),
+        revision_uid: published.revision_uid,
+    };
+    let run_input = json!({
+        "case_id": "EXP-501",
+        "resolution": "caller-named-session"
+    });
+    let variant = template_variant(&exact_template, published.revision_uid);
+    let scorecard = template_scorecard();
+
+    // A production session is exactly what an ordinary caller can create and
+    // reach, and it is the session that would hand this run the full production
+    // capability set for the whole execution.
+    let production_session = test.create_session("production-experiment-target").await?;
+    assert!(
+        test.client()
+            .get_session(production_session)
+            .await?
+            .call_origin
+            .is_production(),
+        "the fixture session must be ordinary production traffic for this to mean anything"
+    );
+    let refused: ExperimentRunResponse = test
+        .client()
+        .post_call(
+            "/Experiments/run",
+            &ExperimentRunRequest {
+                tenant_id,
+                name: "production-session execution-template experiment".to_string(),
+                plan_revision_uid: None,
+                target: Some(serde_json::to_value(
+                    &ExperimentTarget::ExecutionTemplate {
+                        template: exact_template.clone(),
+                        objective: OBJECTIVE.to_string(),
+                        input: run_input.clone(),
+                        session_id: Some(production_session),
+                        idempotency_key: Some(format!("production-session-{}", Uuid::now_v7())),
+                    },
+                )?),
+                variant: Some(serde_json::to_value(&variant)?),
+                scorecard: Some(scorecard.clone()),
+                score_run_id: Some(Uuid::now_v7()),
+                idempotency_key: Some(format!("production-session-experiment-{}", Uuid::now_v7())),
+                agent_revision_variants: Vec::new(),
+            },
+        )
+        .await
+        .context("admit production-session execution-template experiment")?;
+    assert_eq!(refused.session_id, Some(production_session));
+
+    let refused_terminal =
+        await_experiment_terminal(test.client(), tenant_id, refused.run_uid).await?;
+    assert_eq!(
+        refused_terminal.status,
+        ExperimentRunStatus::Failed.as_str(),
+        "a production-origin target session must not execute: {refused_terminal:#?}"
+    );
+    let refusal = refused_terminal
+        .error
+        .clone()
+        .context("refused experiment omitted its failure reason")?;
+    assert!(
+        refusal.contains("call origin") && refusal.contains("production"),
+        "the refusal must name the origin it rejected: {refusal}"
+    );
+    assert_eq!(refused_terminal.execution_run_uid, None);
+    let production_events = raw_events(test.client(), production_session).await?;
+    assert_eq!(
+        event_count(&production_events, |event| matches!(
+            event,
+            Event::UserMessage { .. }
+        )),
+        0,
+        "the refused run must not have appended its objective: {production_events:#?}"
+    );
+    assert_eq!(
+        event_count(&production_events, |event| matches!(
+            event,
+            Event::ExecutionRunStarted(_)
+        )),
+        0
+    );
+    assert!(
+        planning_audits(&fixture.postgres_url, production_session)
+            .await?
+            .is_empty(),
+        "the refused run must not have compiled anything against the production session"
+    );
+
+    // The supported path: a session stamped with this run's own eval-owned origin.
+    // Only the run uid the admission mints identifies that origin, so the run row
+    // is seeded first and its workflow is then invoked with the caller-named
+    // target, the same payload `Experiments/run` forwards after admission.
+    let pool = PgPool::connect(&fixture.postgres_url)
+        .await
+        .context("connect to seed the eval-owned target run")?;
+    let score_run_id = Uuid::now_v7();
+    let seeded = ExperimentStore::new(pool.clone())
+        .insert_run(
+            &ActionRuleScope::Tenant { tenant_id },
+            NewExperimentRun {
+                name: "eval-owned-session execution-template experiment".to_string(),
+                target: ExperimentTarget::ExecutionTemplate {
+                    template: exact_template.clone(),
+                    objective: OBJECTIVE.to_string(),
+                    input: run_input.clone(),
+                    session_id: None,
+                    idempotency_key: None,
+                },
+                variant: variant.clone(),
+                scorecard: scorecard.clone(),
+                score_run_id,
+                session_id: None,
+                execution_run_uid: None,
+                artifact_revision_uids: vec![published.revision_uid],
+                idempotency_key: Some(format!("eval-owned-session-{}", Uuid::now_v7())),
+                created_by_identity: serde_json::to_value(&identity)?,
+            },
+        )
+        .await
+        .context("seed the eval-owned target experiment run")?;
+    pool.close().await;
+
+    let eval_session = test
+        .create_session_with_call_origin(
+            "eval-owned-experiment-target",
+            ModelId::new("scripted-loadtest"),
+            CallOrigin::Experiment {
+                run_uid: seeded.run_uid,
+                trial_uid: None,
+            },
+        )
+        .await?;
+    let accepted: ExperimentRunStatusResponse = test
+        .client()
+        .post_call(
+            &format!("/ExperimentRun/{}/run", seeded.run_uid),
+            &ExperimentRunWorkflowRequest {
+                tenant_id,
+                run_uid: seeded.run_uid,
+                target: serde_json::to_value(&ExperimentTarget::ExecutionTemplate {
+                    template: exact_template.clone(),
+                    objective: OBJECTIVE.to_string(),
+                    input: run_input.clone(),
+                    session_id: Some(eval_session),
+                    idempotency_key: Some(format!("eval-owned-session-{}", Uuid::now_v7())),
+                })?,
+                variant: serde_json::to_value(&variant)?,
+                plan_revision_uid: None,
+                identity: identity.clone(),
+                score_run_id,
+                agent_revision_variants: Vec::new(),
+            },
+        )
+        .await
+        .context("run the eval-owned target experiment workflow")?;
+    assert_eq!(
+        accepted.status,
+        ExperimentRunStatus::Completed.as_str(),
+        "a session carrying this run's own origin is the supported target: {accepted:#?}"
+    );
+    assert_eq!(accepted.session_id, Some(eval_session));
+    assert_eq!(accepted.error, None);
+    let execution_run_uid = accepted
+        .execution_run_uid
+        .context("completed experiment omitted its execution-run link")?;
+
+    let eval_events = raw_events(test.client(), eval_session).await?;
+    let objective_sequence = sole_event_sequence(
+        &eval_events,
+        "experiment objective",
+        |event| matches!(event, Event::UserMessage { text, .. } if text == OBJECTIVE),
+    );
+    let started_sequence = sole_event_sequence(&eval_events, "execution run start", |event| {
+        matches!(
+            event,
+            Event::ExecutionRunStarted(started) if started.run_uid == execution_run_uid
+        )
+    });
+    assert_strict_event_order(&[
+        ("objective", objective_sequence),
+        ("execution start", started_sequence),
+    ]);
+
+    Ok(())
+}
+
+/// Returns the scripted provider fixture used by both execution-template runs.
+fn script() -> Value {
+    json!({
+        "default": {
+            "completion": {
+                "content": FINAL_RESPONSE,
+                "tool_calls": []
+            }
+        }
+    })
+}
+
+/// Builds the variant that pins the exact published template revision.
+fn template_variant(
+    exact_template: &PinnedExecutionTemplateRef,
+    revision_uid: Uuid,
+) -> ExperimentVariant {
+    ExperimentVariant {
+        name: "exact-published-template".to_string(),
+        model: Some(ModelId::new("scripted-loadtest")),
+        artifact_revision_uids: vec![revision_uid],
+        skill_refs: Vec::new(),
+        execution_template: Some(exact_template.clone()),
+        metadata: json!({"lane": "experiment_execution_service_e2e"}),
+    }
+}
+
+/// Builds the blocking scorecard every run in this lane is admitted with.
+fn template_scorecard() -> ExperimentScorecard {
+    ExperimentScorecard::new(vec![ScorecardRequirement {
+        evaluator_id: "target_completed".to_string(),
+        evaluator_version: "v1".to_string(),
+        config: json!({}),
+        effect: ScorecardEffect::Blocking,
+    }])
+    .expect("fixture scorecard is valid")
+}
+
+/// Asserts the exact call origin persisted on one session row.
+async fn assert_persisted_call_origin(
+    postgres_url: &str,
+    session_id: SessionId,
+    expected: &Value,
+) -> Result<()> {
+    let pool = PgPool::connect(postgres_url)
+        .await
+        .context("connect for persisted session call-origin assertion")?;
+    let persisted =
+        sqlx::query_scalar::<_, Value>("SELECT call_origin FROM sessions WHERE id = $1")
+            .bind(session_id.0)
+            .fetch_one(&pool)
+            .await
+            .context("load persisted session call origin")?;
+    pool.close().await;
+    assert_eq!(
+        &persisted, expected,
+        "session {session_id} carries the wrong capability ceiling"
+    );
     Ok(())
 }
 

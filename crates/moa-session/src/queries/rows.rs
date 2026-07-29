@@ -19,6 +19,29 @@ impl RowExt for PgRow {
     }
 }
 
+/// Encodes a session's call origin for the `sessions.call_origin` column.
+///
+/// The tagged JSON form is the same one the type serializes to everywhere else,
+/// so the column cannot drift into a second spelling of the same fact.
+pub(crate) fn call_origin_json(origin: CallOrigin) -> Result<serde_json::Value> {
+    serde_json::to_value(origin).map_err(|error| {
+        MoaError::StorageError(format!("session call origin could not be encoded: {error}"))
+    })
+}
+
+/// Decodes a session's call origin, failing closed on an unreadable value.
+///
+/// A row whose origin cannot be decoded is not defaulted to
+/// [`CallOrigin::Production`]: the column is what stops an eval-owned session
+/// from holding production capabilities, so silently widening it on a decode
+/// error would turn corruption into permission.
+fn call_origin_from_row(row: &PgRow) -> Result<CallOrigin> {
+    let raw = row.col::<serde_json::Value>("call_origin")?;
+    serde_json::from_value(raw).map_err(|error| {
+        MoaError::StorageError(format!("session call origin could not be decoded: {error}"))
+    })
+}
+
 pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
     let id = row.col::<Uuid>("id")?;
     let tenant_id = row.col::<Uuid>("tenant_id")?;
@@ -64,6 +87,7 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
             .col::<Option<Uuid>>("contact_promoted_from_id")?
             .map(ContactId),
         agent_context: None,
+        call_origin: call_origin_from_row(row)?,
         total_input_tokens: row.col::<i64>("total_input_tokens")? as usize,
         total_input_tokens_uncached: row.col::<i64>("total_input_tokens_uncached")? as usize,
         total_input_tokens_cache_write: row.col::<i64>("total_input_tokens_cache_write")? as usize,

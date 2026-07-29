@@ -832,6 +832,26 @@ impl IsolatedTest<'_> {
         suffix: &str,
         model: ModelId,
     ) -> Result<SessionId> {
+        self.create_session_with_call_origin(
+            suffix,
+            model,
+            moa_core::types::action_policy::CallOrigin::Production,
+        )
+        .await
+    }
+
+    /// Creates, persists, and initializes a real session with an explicit call origin.
+    ///
+    /// An experiment run or trial stamps its own eval-owned origin on every
+    /// session it creates, and a workflow that accepts a caller-named session
+    /// admits only that exact origin. A fixture that could mint production
+    /// sessions alone could therefore only ever reach the refusal.
+    pub async fn create_session_with_call_origin(
+        &self,
+        suffix: &str,
+        model: ModelId,
+        call_origin: moa_core::types::action_policy::CallOrigin,
+    ) -> Result<SessionId> {
         let session_id = SessionId::new();
         let now = Utc::now();
         let identity = self
@@ -859,6 +879,7 @@ impl IsolatedTest<'_> {
             created_by: Some(SessionActorRef::Identity { id: identity.id }),
             contact_promoted_from_id: None,
             agent_context: Some(fixture_agent_context()),
+            call_origin,
             total_input_tokens: 0,
             total_input_tokens_uncached: 0,
             total_input_tokens_cache_write: 0,

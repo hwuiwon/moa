@@ -12,6 +12,10 @@ use tokio::sync::broadcast;
 use super::context_build::append_event;
 use crate::runtime_events::RuntimeEvent;
 
+/// Fails the turn when the tenant has already spent its daily budget.
+///
+/// `budget_cents` is always enforced: there is no value that disables the
+/// check. A zero budget means zero allowed spend, not "unlimited".
 pub(super) async fn enforce_tenant_budget(
     session_store: &Arc<dyn SessionStore>,
     session_id: &SessionId,
@@ -20,10 +24,6 @@ pub(super) async fn enforce_tenant_budget(
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
 ) -> Result<()> {
-    if budget_cents == 0 {
-        return Ok(());
-    }
-
     let now = Utc::now();
     let day_start = now
         .date_naive()

@@ -12,8 +12,8 @@ use moa_config::ToolOutputConfig;
 use moa_core::{
     error::MoaError, error::Result, traits::HandProvider, traits::LineageHandle,
     traits::NullLineageHandle, traits::SessionStore, types::action_policy::ActionPolicyEffect,
-    types::hands::BuiltinPolicyRevision, types::hands::SandboxPolicySnapshot,
-    types::hands::SandboxTier,
+    types::action_policy::CallOrigin, types::hands::BuiltinPolicyRevision,
+    types::hands::SandboxPolicySnapshot, types::hands::SandboxTier,
 };
 use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, McpDeploymentCredentials, McpEgressGuard,
@@ -62,6 +62,7 @@ impl ToolRouter {
             installed_files: tokio::sync::RwLock::new(HashMap::new()),
             workspace_roots: tokio::sync::RwLock::new(HashMap::new()),
             policies: ActionPolicies::default(),
+            call_origin: CallOrigin::Production,
             unmatched_permission_patterns: std::sync::RwLock::new(Vec::new()),
             rule_store: None,
             session_store: None,
@@ -356,6 +357,46 @@ impl ToolRouter {
     pub fn with_policies(mut self, policies: ActionPolicies) -> Self {
         self.policies = policies;
         self
+    }
+
+    /// Declares the provenance class of the runtime this router serves.
+    ///
+    /// This is a deployment-level ceiling on the whole router, for a router
+    /// assembled to serve nothing but trials or generated code. The default is
+    /// [`CallOrigin::Production`], which admits everything, and it is correct
+    /// for the shared router the orchestrator builds once per process: that
+    /// router serves production sessions and trial-owned sessions alike, so the
+    /// per-call ceiling comes from the session instead — see
+    /// [`ToolRouter::effective_call_origin`].
+    #[must_use]
+    pub fn with_call_origin(mut self, call_origin: CallOrigin) -> Self {
+        self.call_origin = call_origin;
+        self
+    }
+
+    /// Returns the provenance class of the runtime this router serves.
+    #[must_use]
+    pub fn call_origin(&self) -> CallOrigin {
+        self.call_origin
+    }
+
+    /// Returns the origin governing one call, composing both ceilings.
+    ///
+    /// A tool call has two independent statements of provenance: the runtime
+    /// that assembled the router, and the runtime that created the session being
+    /// served. Both are ceilings, so the governing origin is the stricter of the
+    /// two — a shared production-origin router still fences a trial-owned
+    /// session, and a trial-origin router still fences a session that was
+    /// created for production.
+    ///
+    /// Every admission decision in this crate goes through here rather than
+    /// reading either ceiling alone.
+    #[must_use]
+    pub fn effective_call_origin(
+        &self,
+        session: &moa_core::types::session::SessionMeta,
+    ) -> CallOrigin {
+        self.call_origin.most_restrictive(session.call_origin)
     }
 
     /// Returns the live catalog snapshot.

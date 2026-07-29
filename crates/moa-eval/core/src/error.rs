@@ -50,4 +50,10 @@ pub enum Error {
     /// A config or fixture path was invalid for eval execution.
     #[error("invalid eval configuration: {0}")]
     InvalidConfig(String),
+    /// The run was refused before any case was dispatched.
+    #[error(transparent)]
+    Admission(#[from] crate::admission::AdmissionError),
+    /// A resource reservation, reconciliation, or deadline failed.
+    #[error(transparent)]
+    Resource(#[from] moa_core::types::resource::ResourceError),
 }

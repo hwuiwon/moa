@@ -301,6 +301,11 @@ pub(crate) async fn initialize_internal_execution_session_atomic(
         || persisted.created_by != expected.created_by
         || persisted.model != expected.model
         || persisted.agent_context != expected.agent_context
+        // The session id is derived from the owning run/trial, so a row that
+        // already exists under that id but claims a different origin is not this
+        // run's session. Accepting it would let a pre-created production-origin
+        // row hand an eval-owned run the full production capability set.
+        || persisted.call_origin != expected.call_origin
     {
         return Err(TerminalError::new_with_code(
             409,

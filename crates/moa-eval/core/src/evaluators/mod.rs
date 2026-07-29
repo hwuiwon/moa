@@ -13,18 +13,21 @@ pub use threshold::ThresholdEvaluator;
 pub use tool_success::ToolSuccessEvaluator;
 pub use trajectory_match::TrajectoryMatchEvaluator;
 
-/// Threshold configuration passed into the built-in evaluator factory.
+/// Post-hoc threshold configuration passed into the built-in evaluator factory.
+///
+/// These bounds only score an already-completed result; admission limits and
+/// reservations are what actually stop work from being dispatched.
 #[derive(Debug, Clone, Default)]
 pub struct EvaluatorOptions {
-    /// Maximum allowed dollar cost per result.
+    /// Dollar cost above which a result is scored as failing.
     pub max_cost_dollars: Option<f64>,
-    /// Maximum allowed latency per result, in milliseconds.
+    /// Latency per result, in milliseconds, above which it is scored as failing.
     pub max_latency_ms: Option<u64>,
-    /// Maximum allowed total tokens per result.
+    /// Total tokens above which a result is scored as failing.
     pub max_tokens: Option<usize>,
-    /// Maximum allowed tool calls per result.
+    /// Tool calls above which a result is scored as failing.
     pub max_tool_calls: Option<usize>,
-    /// Maximum allowed turns per result.
+    /// Turns above which a result is scored as failing.
     pub max_turns: Option<usize>,
 }
 

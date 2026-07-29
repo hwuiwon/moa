@@ -18,12 +18,13 @@ use moa_core::{
     types::experiments::ScorecardValueType, types::identifiers::TenantId,
 };
 use moa_scoring::{
-    Error, SCORE_RUN_SOURCE_EVAL_REPLAY, ScoreCompareRef, ScoreRunRef,
-    compare_score_runs_for_tenant, ensure_score_run_parent, score_summaries_for_tenant,
+    Error, ScoreCompareRef, ScoreRunRef, compare_score_runs_for_tenant, ensure_score_run_parent,
+    score_summaries_for_tenant,
 };
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+const SCORE_RUN_SOURCE_EXPERIMENT_RUN: &str = "experiment_run";
 const SCORE_RUN_SOURCE_OTHER: &str = "other";
 
 fn approx(actual: Option<f64>, expected: f64) {
@@ -190,10 +191,10 @@ async fn ensure_score_run_parent_is_idempotent_and_rejects_source_mismatch_db_me
 
     let mut conn = pool.acquire().await.expect("acquire connection");
 
-    ensure_score_run_parent(&mut conn, &scope, run_id, SCORE_RUN_SOURCE_EVAL_REPLAY)
+    ensure_score_run_parent(&mut conn, &scope, run_id, SCORE_RUN_SOURCE_EXPERIMENT_RUN)
         .await
         .expect("first ensure inserts parent");
-    ensure_score_run_parent(&mut conn, &scope, run_id, SCORE_RUN_SOURCE_EVAL_REPLAY)
+    ensure_score_run_parent(&mut conn, &scope, run_id, SCORE_RUN_SOURCE_EXPERIMENT_RUN)
         .await
         .expect("second ensure is idempotent");
 
@@ -245,7 +246,7 @@ async fn ensure_score_run_parent_preserves_contact_scope_db_memory() {
         &mut conn,
         &contact_scope,
         run_id,
-        SCORE_RUN_SOURCE_EVAL_REPLAY,
+        SCORE_RUN_SOURCE_EXPERIMENT_RUN,
     )
     .await
     .expect("contact scope inserts parent");
@@ -253,7 +254,7 @@ async fn ensure_score_run_parent_preserves_contact_scope_db_memory() {
         &mut conn,
         &contact_scope,
         run_id,
-        SCORE_RUN_SOURCE_EVAL_REPLAY,
+        SCORE_RUN_SOURCE_EXPERIMENT_RUN,
     )
     .await
     .expect("same contact scope is idempotent");
@@ -280,7 +281,7 @@ async fn ensure_score_run_parent_preserves_contact_scope_db_memory() {
         &mut conn,
         &other_contact_scope,
         run_id,
-        SCORE_RUN_SOURCE_EVAL_REPLAY,
+        SCORE_RUN_SOURCE_EXPERIMENT_RUN,
     )
     .await
     .expect_err("other contact must not reuse the score-run parent");
@@ -290,7 +291,7 @@ async fn ensure_score_run_parent_preserves_contact_scope_db_memory() {
             Error::ScoreRunMismatch {
                 score_run_id,
                 expected_source
-            } if score_run_id == run_id && expected_source == SCORE_RUN_SOURCE_EVAL_REPLAY
+            } if score_run_id == run_id && expected_source == SCORE_RUN_SOURCE_EXPERIMENT_RUN
         ),
         "expected contact scope mismatch, got {error:?}"
     );

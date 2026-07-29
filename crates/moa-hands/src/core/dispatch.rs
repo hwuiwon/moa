@@ -203,6 +203,19 @@ impl ToolRouter {
                 .get(&invocation.name)
                 .ok_or_else(|| registry.unknown_tool_error(&invocation.name))?;
             validate_tool_invocation(&registered_tool.definition, invocation)?;
+            // The durable path deliberately does not re-run action policy: the
+            // caller cleared it before enqueuing the call. Origin admission is
+            // not part of that clearance — it is a property of the runtime this
+            // router serves and of the session it serves it for, not of the
+            // decision the caller made — so it is enforced here too. Without it,
+            // an experiment trial would reach every production capability simply
+            // by taking the recovery path, which is the path every orchestrated
+            // tool call takes.
+            moa_security::admit_capability_for_origin(
+                self.effective_call_origin(session),
+                &registered_tool.execution.capability_id(&invocation.name),
+                registered_tool.definition.policy.action_class,
+            )?;
             record_tool_invocation_metadata(
                 &tool_span,
                 session,

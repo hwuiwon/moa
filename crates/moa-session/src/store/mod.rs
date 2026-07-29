@@ -57,7 +57,7 @@ use crate::queries::{
     EVENT_COLUMNS, EXPERIENCE_ATTRIBUTION_COLUMNS, EXPERIENCE_RECORD_COLUMNS,
     LEARNING_CANDIDATE_COLUMNS, LEARNING_ENTRY_COLUMNS, RowExt, SESSION_INSERT_COLUMNS,
     SESSION_SELECT_COLUMNS, SESSION_SUMMARY_COLUMNS, TASK_SEGMENT_COLUMNS,
-    TASK_STRATEGY_SUCCESS_RATE_COLUMNS, action_policy_rule_from_row,
+    TASK_STRATEGY_SUCCESS_RATE_COLUMNS, action_policy_rule_from_row, call_origin_json,
     experience_attribution_from_row, experience_record_from_row, from_db,
     learning_candidate_from_row, learning_entry_from_row, map_sqlx_error, session_meta_from_row,
     session_summary_from_row, task_segment_from_row, task_strategy_success_rate_from_row,

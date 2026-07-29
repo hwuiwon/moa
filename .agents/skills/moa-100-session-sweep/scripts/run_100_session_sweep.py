@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""Live 100-session persona sweep runner for MOA.
+
+Cases come from the versioned, hashed fixture in `sweep_cases`; Markdown sweep
+reports are outputs only. The paid run is gated: it requires an explicit run
+flag, credentials, and a positive budget that covers the pre-computed forecast,
+and it reserves budget before every dispatch. `--validate-cases` runs the
+fixture parser/schema/hash check alone and is the form CI executes.
+"""
+
+import argparse
 import base64
 import concurrent.futures
 import contextlib
@@ -9,6 +19,7 @@ import re
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -19,15 +30,17 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import sweep_cases  # noqa: E402
+
 ROOT = Path(
     os.environ.get("MOA_REPO_ROOT", Path(__file__).resolve().parents[4])
 ).resolve()
+# Canonical machine-readable case input. The previous default pointed at a
+# Markdown sweep report that was never committed; reports are outputs.
 CASE_SOURCE = Path(
-    os.environ.get(
-        "MOA_SWEEP_CASE_SOURCE",
-        ROOT
-        / "docs/engineering-discipline/live-runs/2026-07-01-moa-100-persona-delegation-scheduler-sweep.md",
-    )
+    os.environ.get("MOA_SWEEP_CASE_SOURCE", sweep_cases.DEFAULT_FIXTURE)
 )
 RUN_DATE = (
     os.environ.get("MOA_SWEEP_DATE")
@@ -55,6 +68,22 @@ CASE_IDS = {
 # Default OFF: only overwrite the repo baseline report when explicitly opted in with =1, so a
 # focused lane run can never clobber the committed baseline.
 WRITE_REPO_REPORT = os.environ.get("MOA_SWEEP_WRITE_REPO", "0") == "1"
+# Explicit authorization for the billed run. Absent this, the runner does
+# nothing but validate the fixture.
+RUN_FLAG_ENV = "MOA_RUN_LIVE_100_SESSION_SWEEP"
+BUDGET_ENV = "MOA_SWEEP_BUDGET_USD"
+# Conservative per-session forecast. The 2026-07 baselines observed ~0.5 cents
+# per session on `gpt-5.4-mini`; forecasting at 2 cents leaves headroom for a
+# more expensive pinned model without letting an unbounded run through.
+PER_CASE_FORECAST_USD = float(os.environ.get("MOA_SWEEP_COST_PER_CASE_USD", "0.02"))
+# Three cheap, representative cases proving the stack before the billed 100.
+# S002 is the delegation case, S003 carries the ' reconcile ' planner anchor.
+CANARY_IDS = [
+    case_id.strip().upper()
+    for case_id in os.environ.get("MOA_SWEEP_CANARY_IDS", "S001,S002,S003").split(",")
+    if case_id.strip()
+]
+SKIP_CANARY = os.environ.get("MOA_SWEEP_SKIP_CANARY", "0") == "1"
 SWEEP_MODEL = (
     os.environ.get("MOA_SWEEP_MODEL")
     or ("claude-sonnet-4-6" if os.environ.get("MOA_ANTHROPIC_API_KEY") else None)
@@ -63,13 +92,15 @@ SWEEP_MODEL = (
     or "gpt-5.4-mini"
 )
 RUN_TAG = dt.datetime.now().strftime("%Y%m%d%H%M%S")
-RUN_DIR = Path(tempfile.mkdtemp(prefix=f"moa_sweep_fanin_{RUN_TAG}_"))
-BATCH_DIR = RUN_DIR / "batches"
-BATCH_DIR.mkdir(parents=True, exist_ok=True)
-LOG = RUN_DIR / "orchestrator-live.log"
-SUMMARY_JSON = RUN_DIR / "summary.json"
-ALL_JSON = BATCH_DIR / "all_sessions.json"
-REPORT_TMP = RUN_DIR / "report.md"
+# Run-directory state is created lazily by `init_run_dir()` so `--validate-cases`
+# (the CI form) leaves no temp directories behind.
+RUN_DIR = None
+BATCH_DIR = None
+LOG = None
+SUMMARY_JSON = None
+ALL_JSON = None
+CANARY_JSON = None
+REPORT_TMP = None
 REPORT_REPO = Path(
     os.environ.get(
         "MOA_SWEEP_REPORT_REPO",
@@ -80,6 +111,20 @@ REPORT_REPO = Path(
 )
 
 print_lock = threading.Lock()
+
+
+def init_run_dir():
+    """Create the run directory and its derived artifact paths."""
+    global RUN_DIR, BATCH_DIR, LOG, SUMMARY_JSON, ALL_JSON, CANARY_JSON, REPORT_TMP
+    RUN_DIR = Path(tempfile.mkdtemp(prefix=f"moa_sweep_fanin_{RUN_TAG}_"))
+    BATCH_DIR = RUN_DIR / "batches"
+    BATCH_DIR.mkdir(parents=True, exist_ok=True)
+    LOG = RUN_DIR / "orchestrator-live.log"
+    SUMMARY_JSON = RUN_DIR / "summary.json"
+    ALL_JSON = BATCH_DIR / "all_sessions.json"
+    CANARY_JSON = RUN_DIR / "canary.json"
+    REPORT_TMP = RUN_DIR / "report.md"
+    return RUN_DIR
 
 
 def log(msg):
@@ -349,50 +394,164 @@ def stop_proc(proc, log_f):
 
 
 def parse_cases():
-    text = CASE_SOURCE.read_text()
-    sections = re.split(r"(?m)^### S(\d{3}) - (.+?) - Scenario (\d+)\n", text)
-    cases = []
-    for i in range(1, len(sections), 4):
-        sid = f"S{sections[i]}"
-        persona = sections[i + 1].strip()
-        scenario = int(sections[i + 2])
-        body = sections[i + 3]
+    """Load the canonical case fixture, fully validated.
 
-        def m(pattern, default=""):
-            mm = re.search(pattern, body, re.S)
-            return mm.group(1).strip() if mm else default
+    The exact-100 hard failure is preserved: `sweep_cases.validate_document`
+    rejects any fixture that is not exactly `S001..S100`.
+    """
+    return sweep_cases.load_cases(CASE_SOURCE)
 
-        expected_skills_raw = m(r"- Expected skills: ([^\n]+)", "")
-        expected_skills = (
-            []
-            if expected_skills_raw in ("", "none")
-            else [x.strip() for x in expected_skills_raw.split(",") if x.strip()]
-        )
-        expected_worker = (
-            m(r"- Expected worker delegation: `([^`]+)`", "false").lower() == "true"
-        )
-        ic = re.search(
-            r"- Interrupt/cancel path: interrupt=`([^`]+)`, cancel=`([^`]+)`", body
-        )
-        interrupt = ic.group(1).lower() == "true" if ic else False
-        cancel = ic.group(2).lower() == "true" if ic else False
-        req = m(r"- User request: (.*?)(?:\n- Final response preview:|\n### |\Z)", "")
-        req = " ".join(req.split())
-        cases.append(
-            {
-                "id": sid,
-                "persona": persona,
-                "scenario": scenario,
-                "expected_skills": expected_skills,
-                "expected_worker": expected_worker,
-                "interrupt": interrupt,
-                "cancel": cancel,
-                "request": req,
+
+class BudgetLedger:
+    """Reservation ledger bounding what a sweep is allowed to spend.
+
+    Budget is reserved at the pessimistic per-case forecast *before* a session
+    is dispatched and reconciled against the session's actual provider cost once
+    it finishes. When no reservation is available the runner stops dispatching
+    instead of spending past the authorized budget, and the run is then short of
+    100 attempted cases, which blocks the baseline write.
+    """
+
+    def __init__(self, budget_usd, per_case_usd):
+        self.budget_usd = float(budget_usd)
+        self.per_case_usd = float(per_case_usd)
+        self.reserved_usd = 0.0
+        self.spent_usd = 0.0
+        self.reservations = {}
+        self.denied_case_ids = []
+        self._lock = threading.Lock()
+
+    def forecast_usd(self, case_count):
+        """Forecast cost of dispatching `case_count` sessions."""
+        return self.per_case_usd * case_count
+
+    def available_usd(self):
+        """Budget not yet spent or held by an outstanding reservation."""
+        return self.budget_usd - self.spent_usd - self.reserved_usd
+
+    def reserve(self, case_id):
+        """Hold one case's forecast. False means: do not dispatch this case."""
+        with self._lock:
+            if self.available_usd() < self.per_case_usd:
+                self.denied_case_ids.append(case_id)
+                return False
+            self.reservations[case_id] = self.per_case_usd
+            self.reserved_usd += self.per_case_usd
+            return True
+
+    def reconcile(self, case_id, actual_usd):
+        """Release a reservation and charge the observed provider cost."""
+        with self._lock:
+            held = self.reservations.pop(case_id, 0.0)
+            self.reserved_usd -= held
+            self.spent_usd += float(actual_usd or 0.0)
+
+    def snapshot(self):
+        """Return a JSON-serializable view of the ledger for reports."""
+        with self._lock:
+            return {
+                "budget_usd": round(self.budget_usd, 6),
+                "per_case_forecast_usd": round(self.per_case_usd, 6),
+                "reserved_usd": round(self.reserved_usd, 6),
+                "spent_usd": round(self.spent_usd, 6),
+                "remaining_usd": round(self.available_usd(), 6),
+                "denied_case_ids": list(self.denied_case_ids),
             }
+
+
+def preflight_gate(case_count, canary_count):
+    """Authorize the billed run, or fail loudly with every missing requirement.
+
+    A paid sweep needs three independent things: explicit intent
+    (`MOA_RUN_LIVE_100_SESSION_SWEEP=1`), live credentials and local
+    infrastructure, and a positive `MOA_SWEEP_BUDGET_USD` that covers the
+    full-run forecast (canary included). Anything missing is reported as an
+    error naming what to set -- never a silent no-op or a partial run.
+    """
+    if os.environ.get(RUN_FLAG_ENV) != "1":
+        raise RuntimeError(
+            f"the 100-session sweep is billed and runs only when {RUN_FLAG_ENV}=1. "
+            f"Use --validate-cases for the unbilled fixture check."
         )
-    if len(cases) != 100:
-        raise RuntimeError(f"expected 100 cases, parsed {len(cases)}")
-    return cases
+    problems = []
+    provider_keys = [
+        name
+        for name in (
+            "MOA_ANTHROPIC_API_KEY",
+            "MOA_OPENAI_API_KEY",
+            "MOA_GOOGLE_API_KEY",
+        )
+        if os.environ.get(name)
+    ]
+    if not provider_keys:
+        problems.append(
+            "no live provider credential: set one of MOA_ANTHROPIC_API_KEY, "
+            "MOA_OPENAI_API_KEY, or MOA_GOOGLE_API_KEY"
+        )
+    if not os.environ.get("MOA_DATABASE_URL"):
+        problems.append("MOA_DATABASE_URL is not set")
+    fga_env = ROOT / ".env.fga"
+    if not fga_env.exists():
+        problems.append(f"missing OpenFGA env file at {fga_env}")
+
+    raw_budget = os.environ.get(BUDGET_ENV, "").strip()
+    budget = None
+    if not raw_budget:
+        problems.append(f"{BUDGET_ENV} is not set; a positive USD budget is required")
+    else:
+        try:
+            budget = float(raw_budget)
+        except ValueError:
+            problems.append(f"{BUDGET_ENV}={raw_budget!r} is not a number")
+        else:
+            if budget <= 0:
+                problems.append(f"{BUDGET_ENV}={budget} must be greater than zero")
+
+    ledger = BudgetLedger(budget or 0.0, PER_CASE_FORECAST_USD)
+    forecast = ledger.forecast_usd(case_count + canary_count)
+    if budget is not None and budget > 0 and budget < forecast:
+        problems.append(
+            f"{BUDGET_ENV}={budget:.4f} is below the run forecast "
+            f"{forecast:.4f} USD ({case_count} cases + {canary_count} canary at "
+            f"{PER_CASE_FORECAST_USD:.4f} USD each); zero sessions will be dispatched"
+        )
+    if problems:
+        raise RuntimeError(
+            "the 100-session sweep is authorized but not runnable:\n  - "
+            + "\n  - ".join(problems)
+        )
+    return ledger, forecast
+
+
+def skipped_case(case, reason):
+    """Build a result record for a case that was never dispatched."""
+    return {
+        **case,
+        "tenant_id": TENANT_ID,
+        "session_id": None,
+        "status": None,
+        "outcome": "skipped",
+        "skip_reason": reason,
+        "elapsed_ms": 0,
+        "failure_tags": [],
+        "event_counts": {},
+        "tools": [],
+        "persisted_segment_skills": [],
+        "workers_spawned": 0,
+        "terminal_notifications": 0,
+        "errors": [],
+        "warnings": [],
+        "final_response_preview": "",
+        "token_totals": {"input": 0, "output": 0, "cost_cents": 0},
+        "model_turns": 0,
+        "rerun_candidate": None,
+        "start": None,
+        "queued": None,
+        "cancel_response": None,
+        "worker_spawns_sample": [],
+        "worker_states_sample": [],
+        "worker_signals_sample": [],
+    }
 
 
 SKILLS = [
@@ -687,7 +846,7 @@ def analyze(
     # Raw (un-truncated) worker terminal/result payloads, used to detect the final reply leaking a
     # long contiguous chunk of a worker's output verbatim.
     worker_payloads = []
-    bundles = []
+    legacy_bundle_events = 0
     token_totals = {"input": 0, "output": 0, "cost_cents": 0}
     for ev in events or []:
         typ = event_type(ev)
@@ -748,19 +907,22 @@ def analyze(
             )
             worker_payloads.append(data.get("summary"))
         elif typ == "WorkerResultBundle":
+            # Contract failure, not a counter. `WorkerResultBundle` was removed
+            # with the dynamic-execution rework; the coordinator synthesizes from
+            # terminal `WorkerNotificationDelivered` events. Emitting one again
+            # means the fan-in contract regressed, so it fails the session
+            # immediately rather than incrementing an expected-zero total.
+            legacy_bundle_events += 1
             results = data.get("results") or []
-            bundles.append(
+            errors.append(
                 {
-                    "user_sequence_num": data.get("user_sequence_num"),
-                    "results_count": len(results),
-                    "results": [
-                        {
-                            "worker_id": r.get("worker_id"),
-                            "state": r.get("state"),
-                            "summary": compact(r.get("summary"), 220),
-                        }
-                        for r in results[:5]
-                    ],
+                    "type": "LegacyWorkerResultBundle",
+                    "data": compact(
+                        "legacy WorkerResultBundle event observed with "
+                        f"{len(results)} results; fan-in must deliver terminal "
+                        "WorkerNotificationDelivered events instead",
+                        500,
+                    ),
                 }
             )
             worker_payloads.extend(r.get("summary") for r in results)
@@ -777,6 +939,9 @@ def analyze(
                 skills.append(s)
     failure_tags = []
     failed = False
+    if legacy_bundle_events:
+        failure_tags.append("F-LEGACY-BUNDLE")
+        failed = True
     if exception is not None:
         failed = True
         errors.append({"type": "RunnerException", "data": compact(str(exception), 800)})
@@ -798,8 +963,7 @@ def analyze(
     # synthesizes from terminal notifications), so the guard is: every spawned worker must deliver
     # a terminal WorkerNotificationDelivered back to the parent. A spawn without a terminal
     # notification means fan-in silently dropped a worker — fires regardless of whether the
-    # harness expected delegation for this case. (Bundle counters remain in the report for
-    # comparison against pre-rework baselines; they are expected to be zero at current HEAD.)
+    # harness expected delegation for this case.
     if len(worker_spawns) > len(worker_terminal) and not case.get("cancel"):
         failure_tags.append("F-QUALITY")
     if case.get("expected_skills") and len(skills) == 0 and not case.get("cancel"):
@@ -827,7 +991,9 @@ def analyze(
         outcome = "pass"
     # Flag (do not auto-pass) fails whose evidence matches a known flaky, non-regression signature.
     rerun_candidate = None
-    if outcome == "fail":
+    # A legacy-bundle contract failure is never a flake, so it is never eligible
+    # for a re-run marker.
+    if outcome == "fail" and not legacy_bundle_events:
         searchable = " ".join(
             [
                 json.dumps(errors, default=str),
@@ -857,13 +1023,10 @@ def analyze(
         "tools": tools,
         "persisted_segment_skills": skills,
         "workers_spawned": len(worker_spawns),
-        "worker_result_bundles": len(bundles),
-        "worker_result_bundle_results": sum(b["results_count"] for b in bundles),
         "terminal_notifications": len(worker_terminal),
         "worker_spawns_sample": worker_spawns[:5],
         "worker_states_sample": worker_states[:6],
         "worker_signals_sample": worker_signals[:6],
-        "worker_bundles_sample": bundles[:3],
         "errors": errors,
         "warnings": warnings,
         "failure_tags": failure_tags,
@@ -918,6 +1081,15 @@ def wait_session(case, session_id, tenant_id, identity_id):
 
 
 def run_case(case):
+    # Reserve before dispatch: a session that cannot be paid for is never
+    # started, and the run ends short of 100 attempted cases so no baseline is
+    # written from a truncated sweep.
+    if LEDGER is not None and not LEDGER.reserve(case["id"]):
+        log(
+            f"{case['id']} skipped: no budget reservation available "
+            f"(remaining {LEDGER.available_usd():.4f} USD)"
+        )
+        return skipped_case(case, "budget-exhausted")
     session_id = str(uuid.uuid4())
     created_at = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
     start = time.time()
@@ -1041,21 +1213,29 @@ def run_case(case):
         cancel_resp,
         exception,
     )
+    if LEDGER is not None:
+        # Reconcile the reservation against the session's observed provider cost
+        # so the remaining budget reflects reality, not the forecast.
+        LEDGER.reconcile(
+            case["id"], result.get("token_totals", {}).get("cost_cents", 0) / 100.0
+        )
     log(
-        f"{case['id']} {result['outcome']} status={status} workers={result['workers_spawned']} bundles={result['worker_result_bundles']} tags={','.join(result['failure_tags']) or 'none'} ms={elapsed_ms}"
+        f"{case['id']} {result['outcome']} status={status} workers={result['workers_spawned']} tags={','.join(result['failure_tags']) or 'none'} ms={elapsed_ms}"
     )
     return result
 
 
 def aggregate(results):
     out = {
-        "attempted": len(results),
+        # `attempted` counts dispatched sessions only. Cases the ledger refused
+        # to fund are `skipped` and must not look like a completed suite.
+        "attempted": sum(1 for r in results if r["outcome"] != "skipped"),
+        "selected": len(results),
+        "skipped": sum(1 for r in results if r["outcome"] == "skipped"),
         "outcomes": {},
         "failure_tags": {},
         "sessions_with_worker_events": 0,
         "total_worker_spawns": 0,
-        "total_worker_result_bundles": 0,
-        "total_worker_result_bundle_results": 0,
         "expected_worker_sessions": 0,
         "expected_worker_with_workers": 0,
         "expected_skill_sessions": 0,
@@ -1072,17 +1252,14 @@ def aggregate(results):
     }
     for r in results:
         out["outcomes"][r["outcome"]] = out["outcomes"].get(r["outcome"], 0) + 1
+        if r["outcome"] == "skipped":
+            # An undispatched case contributes no coverage, cost, or evidence.
+            continue
         for tag in r["failure_tags"]:
             out["failure_tags"][tag] = out["failure_tags"].get(tag, 0) + 1
-        if (
-            r["workers_spawned"]
-            or r["terminal_notifications"]
-            or r["worker_result_bundles"]
-        ):
+        if r["workers_spawned"] or r["terminal_notifications"]:
             out["sessions_with_worker_events"] += 1
         out["total_worker_spawns"] += r["workers_spawned"]
-        out["total_worker_result_bundles"] += r["worker_result_bundles"]
-        out["total_worker_result_bundle_results"] += r["worker_result_bundle_results"]
         if r["expected_worker"]:
             out["expected_worker_sessions"] += 1
             if r["workers_spawned"] > 0:
@@ -1123,31 +1300,55 @@ def fmt_map(m):
     return ", ".join(f"{k}={m[k]}" for k in sorted(m))
 
 
-def write_reports(results, env_info, imported, skill_list):
+def write_reports(results, env_info, imported, skill_list, provenance, canary):
     agg = aggregate(results)
     partials = [r for r in results if r["outcome"] != "pass"]
-    old = {
-        "pass": 94,
-        "partial": 6,
-        "fail": 0,
-        "F-DELEGATE": 5,
-        "F-QUALITY": 1,
-        "expected_worker_with_workers": 16,
-        "expected_worker_sessions": 21,
-        "worker_spawns": 53,
-        "worker_sessions": 17,
-        "skill_evidence": 100,
-        "durable_errors": 1,
-        "cost_cents": 44,
-    }
     lines = []
     lines.append("# MOA 100-Session Baseline Sweep")
     lines.append("")
     lines.append(f"Date: {RUN_DATE}")
     lines.append("")
     lines.append(
-        "This report records the current live 100-session baseline for MOA persona evaluation. It reuses the 100 realistic persona prompts from the delegation scheduler sweep and records outcomes, worker coverage, bundle evidence, skill evidence, durable errors, and cost."
+        "This report records the current live 100-session baseline for MOA persona evaluation. It runs the canonical persona case fixture and records outcomes, worker coverage, skill evidence, durable errors, and cost."
     )
+    lines.append("")
+    lines.append("## Case Provenance")
+    lines.append("")
+    lines.append(f"- Fixture: `{provenance.get('fixture')}`")
+    lines.append(f"- Schema version: `{provenance.get('schema_version')}`")
+    lines.append(f"- Cases: `{provenance.get('case_count')}`")
+    lines.append(f"- Case content sha256: `{provenance.get('content_sha256')}`")
+    lines.append(f"- Fixture file sha256: `{provenance.get('file_sha256')}`")
+    lines.append(f"- Recovered from: `{provenance.get('recovered_from', 'n/a')}`")
+    lines.append(
+        "- Baselines are comparable only across runs with the same case content sha256."
+    )
+    lines.append("")
+    lines.append("## Budget")
+    lines.append("")
+    ledger_snapshot = LEDGER.snapshot() if LEDGER is not None else {}
+    for key in (
+        "budget_usd",
+        "per_case_forecast_usd",
+        "spent_usd",
+        "remaining_usd",
+    ):
+        if key in ledger_snapshot:
+            lines.append(f"- {key}: `{ledger_snapshot[key]}`")
+    denied = ledger_snapshot.get("denied_case_ids") or []
+    lines.append(
+        f"- Cases denied a reservation (never dispatched): {', '.join(denied) if denied else 'none'}"
+    )
+    lines.append("")
+    lines.append("## Canary")
+    lines.append("")
+    if canary:
+        lines.append(
+            "- Pre-flight canary: "
+            + ", ".join(f"{c['id']}=`{c['outcome']}`" for c in canary)
+        )
+    else:
+        lines.append("- Pre-flight canary: skipped.")
     lines.append("")
     lines.append("## Runtime")
     lines.append("")
@@ -1170,14 +1371,14 @@ def write_reports(results, env_info, imported, skill_list):
     lines.append("")
     lines.append("## Aggregate Summary")
     lines.append("")
-    lines.append(f"- Sessions attempted: {agg['attempted']}/100")
+    lines.append(
+        f"- Sessions attempted: {agg['attempted']}/{sweep_cases.EXPECTED_CASE_COUNT}"
+        + (f" (skipped: {agg['skipped']})" if agg["skipped"] else "")
+    )
     lines.append(f"- Outcomes: {fmt_map(agg['outcomes'])}")
     lines.append(f"- Failure tags: {fmt_map(agg['failure_tags'])}")
     lines.append(
         f"- Sessions with worker events: {agg['sessions_with_worker_events']}; total `WorkerSpawned` events: {agg['total_worker_spawns']}"
-    )
-    lines.append(
-        f"- `WorkerResultBundle` events: {agg['total_worker_result_bundles']}; bundled worker results: {agg['total_worker_result_bundle_results']}"
     )
     lines.append(
         f"- Expected-worker coverage: {agg['expected_worker_with_workers']}/{agg['expected_worker_sessions']}"
@@ -1207,43 +1408,6 @@ def write_reports(results, env_info, imported, skill_list):
         )
     )
     lines.append("")
-    lines.append("## Historical Scheduler Sweep Comparison")
-    lines.append("")
-    lines.append(
-        "| Metric | 2026-07-01 scheduler sweep | 2026-07-01 fan-in sweep | Delta |"
-    )
-    lines.append("|---|---:|---:|---:|")
-    for label, oldv, newv in [
-        ("Pass", old["pass"], agg["outcomes"].get("pass", 0)),
-        ("Partial", old["partial"], agg["outcomes"].get("partial", 0)),
-        ("Fail", old["fail"], agg["outcomes"].get("fail", 0)),
-        ("`F-DELEGATE`", old["F-DELEGATE"], agg["failure_tags"].get("F-DELEGATE", 0)),
-        ("`F-QUALITY`", old["F-QUALITY"], agg["failure_tags"].get("F-QUALITY", 0)),
-        (
-            "Expected-worker sessions with workers",
-            old["expected_worker_with_workers"],
-            agg["expected_worker_with_workers"],
-        ),
-        (
-            "Sessions with any worker events",
-            old["worker_sessions"],
-            agg["sessions_with_worker_events"],
-        ),
-        (
-            "Total `WorkerSpawned` events",
-            old["worker_spawns"],
-            agg["total_worker_spawns"],
-        ),
-        (
-            "Skill evidence coverage",
-            old["skill_evidence"],
-            agg["skill_evidence_sessions"],
-        ),
-        ("Durable error events", old["durable_errors"], agg["durable_error_events"]),
-        ("Cost cents", old["cost_cents"], agg["cost"]["cost_cents"]),
-    ]:
-        lines.append(f"| {label} | {oldv} | {newv} | {newv - oldv:+d} |")
-    lines.append("")
     lines.append("## Non-Pass Sessions")
     lines.append("")
     if not partials:
@@ -1256,7 +1420,7 @@ def write_reports(results, env_info, imported, skill_list):
                 else ""
             )
             lines.append(
-                f"- {r['id']} `{r['outcome']}` tags={','.join(r['failure_tags']) or 'none'}{rerun} expected_worker={str(r['expected_worker']).lower()} workers={r['workers_spawned']} bundles={r['worker_result_bundles']} model_turns={r.get('model_turns', 0)} cost_cents={r.get('token_totals', {}).get('cost_cents', 0)} status=`{r['status']}` request={r['request']}"
+                f"- {r['id']} `{r['outcome']}` tags={','.join(r['failure_tags']) or 'none'}{rerun} expected_worker={str(r['expected_worker']).lower()} workers={r['workers_spawned']} model_turns={r.get('model_turns', 0)} cost_cents={r.get('token_totals', {}).get('cost_cents', 0)} status=`{r['status']}` request={r['request']}"
             )
     lines.append("")
     lines.append("## Session Notes")
@@ -1277,7 +1441,7 @@ def write_reports(results, env_info, imported, skill_list):
             f"- Persisted segment skills: {', '.join(r['persisted_segment_skills']) or 'none'}"
         )
         lines.append(
-            f"- Expected worker delegation: `{str(r['expected_worker']).lower()}`; workers spawned: `{r['workers_spawned']}`; terminal notifications: `{r['terminal_notifications']}`; bundles: `{r['worker_result_bundles']}`; bundled results: `{r['worker_result_bundle_results']}`"
+            f"- Expected worker delegation: `{str(r['expected_worker']).lower()}`; workers spawned: `{r['workers_spawned']}`; terminal notifications: `{r['terminal_notifications']}`"
         )
         lines.append(
             f"- Interrupt/cancel path: interrupt=`{str(r['interrupt']).lower()}`, cancel=`{str(r['cancel']).lower()}`, start={r['start']}, queued={r['queued']}, cancel_response={r['cancel_response']}"
@@ -1290,9 +1454,6 @@ def write_reports(results, env_info, imported, skill_list):
         lines.append(
             f"- Worker states sample: `{json.dumps(r['worker_states_sample'], ensure_ascii=False)}`"
         )
-        lines.append(
-            f"- Worker bundles sample: `{json.dumps(r['worker_bundles_sample'], ensure_ascii=False)}`"
-        )
         lines.append(f"- Errors: `{json.dumps(r['errors'], ensure_ascii=False)}`")
         lines.append(f"- Failure tags: {', '.join(r['failure_tags']) or 'none'}")
         if r.get("rerun_candidate"):
@@ -1303,15 +1464,32 @@ def write_reports(results, env_info, imported, skill_list):
         lines.append(f"- Final response preview: {r['final_response_preview']}")
     report = "\n".join(lines) + "\n"
     REPORT_TMP.write_text(report)
-    if WRITE_REPO_REPORT:
+    # A committed baseline is only meaningful for a complete suite. A run cut
+    # short by the budget ledger, a focused lane, or a crash must never
+    # overwrite the baseline, whatever MOA_SWEEP_WRITE_REPO says.
+    complete = agg["attempted"] == sweep_cases.EXPECTED_CASE_COUNT
+    baseline_written = False
+    if WRITE_REPO_REPORT and complete:
         REPORT_REPO.write_text(report)
+        baseline_written = True
+    elif WRITE_REPO_REPORT:
+        log(
+            f"refusing to write the repo baseline: attempted={agg['attempted']}, "
+            f"need exactly {sweep_cases.EXPECTED_CASE_COUNT}"
+        )
     SUMMARY_JSON.write_text(
         json.dumps(
             {
                 "aggregate": agg,
                 "run_dir": str(RUN_DIR),
                 "repo_report": str(REPORT_REPO),
+                "baseline_written": baseline_written,
                 "case_source": str(CASE_SOURCE),
+                "case_provenance": provenance,
+                "budget": ledger_snapshot,
+                "canary": [
+                    {"id": c["id"], "outcome": c["outcome"]} for c in (canary or [])
+                ],
                 "env": env_info,
             },
             indent=2,
@@ -1329,21 +1507,93 @@ def write_reports(results, env_info, imported, skill_list):
 # Globals set after tenant setup.
 TENANT_ID = None
 IDENTITY_ID = None
+# Reservation ledger, installed by `main()` once the run is authorized.
+LEDGER = None
+
+
+def dispatch(cases, label):
+    """Run `cases` through the pool, returning results sorted by case id."""
+    results = []
+    start_all = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        future_map = {pool.submit(run_case, case): case for case in cases}
+        for fut in concurrent.futures.as_completed(future_map):
+            case = future_map[fut]
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                log(f"{case['id']} runner hard failure: {e}")
+                traceback.print_exc()
+                failed = skipped_case(case, None)
+                failed.pop("skip_reason", None)
+                failed.update(
+                    {
+                        "outcome": "fail",
+                        "failure_tags": ["F-ERROR"],
+                        "errors": [{"type": "RunnerException", "data": str(e)}],
+                    }
+                )
+                results.append(failed)
+    results.sort(key=lambda r: r["id"])
+    log(f"{label}: {len(results)} sessions in {int((time.time() - start_all) * 1000)} ms")
+    return results
+
+
+def run_canary(all_cases):
+    """Run a small canary suite and abort the billed run if it does not pass.
+
+    Three cheap sessions prove credentials, orchestration, skill import, and
+    delegation before the runner spends the remaining budget on 100.
+    """
+    by_id = {case["id"]: case for case in all_cases}
+    missing = [cid for cid in CANARY_IDS if cid not in by_id]
+    if missing:
+        raise RuntimeError(f"canary ids not present in the fixture: {','.join(missing)}")
+    canary_cases = [by_id[cid] for cid in CANARY_IDS]
+    log(f"running {len(canary_cases)} canary cases: {','.join(CANARY_IDS)}")
+    results = dispatch(canary_cases, "canary")
+    CANARY_JSON.write_text(json.dumps(results, indent=2, sort_keys=True))
+    bad = [r for r in results if r["outcome"] in ("fail", "skipped")]
+    if bad:
+        detail = ", ".join(
+            f"{r['id']}={r['outcome']}({','.join(r['failure_tags']) or r.get('skip_reason') or 'n/a'})"
+            for r in bad
+        )
+        raise RuntimeError(
+            f"canary failed; refusing to dispatch the 100-case run: {detail}. "
+            f"Canary artifacts: {CANARY_JSON}"
+        )
+    log("canary passed")
+    return results
 
 
 def main():
-    global TENANT_ID, IDENTITY_ID
-    log(f"run dir {RUN_DIR}")
-    cases = parse_cases()
-    log(f"parsed {len(cases)} cases from {CASE_SOURCE.name}")
+    global TENANT_ID, IDENTITY_ID, LEDGER
+    cases, provenance = parse_cases()
+    selected = list(cases)
     if CASE_IDS:
-        cases = [case for case in cases if case["id"] in CASE_IDS]
+        selected = [case for case in selected if case["id"] in CASE_IDS]
+    if CASE_LIMIT:
+        selected = selected[:CASE_LIMIT]
+    focused = bool(CASE_IDS or CASE_LIMIT)
+    canary_count = 0 if (focused or SKIP_CANARY) else len(CANARY_IDS)
+    LEDGER, forecast = preflight_gate(len(selected), canary_count)
+    init_run_dir()
+    log(f"run dir {RUN_DIR}")
+    log(
+        f"loaded {len(cases)} cases from {CASE_SOURCE.name} "
+        f"(content sha256 {provenance['content_sha256'][:16]}...)"
+    )
+    if CASE_IDS:
         log(
-            f"filtered run to {len(cases)} selected cases: {','.join(sorted(CASE_IDS))}"
+            f"filtered run to {len(selected)} selected cases: {','.join(sorted(CASE_IDS))}"
         )
     if CASE_LIMIT:
-        cases = cases[:CASE_LIMIT]
-        log(f"limited run to first {len(cases)} cases")
+        log(f"limited run to first {len(selected)} cases")
+    log(
+        f"budget {LEDGER.budget_usd:.4f} USD covers forecast {forecast:.4f} USD "
+        f"for {len(selected)} cases + {canary_count} canary"
+    )
     log("checking services")
     http_json("GET", f"{ADMIN}/health", timeout=10, allow_empty=True)
     # build is intentionally outside if already done; ensure binary is current enough for this checkout.
@@ -1401,55 +1651,17 @@ def main():
             else 0
         )
         log(f"imported skills; list count approx={skill_count}")
-        results = []
-        start_all = time.time()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            future_map = {pool.submit(run_case, case): case for case in cases}
-            for fut in concurrent.futures.as_completed(future_map):
-                case = future_map[fut]
-                try:
-                    results.append(fut.result())
-                except Exception as e:
-                    log(f"{case['id']} runner hard failure: {e}")
-                    traceback.print_exc()
-                    results.append(
-                        {
-                            **case,
-                            "tenant_id": TENANT_ID,
-                            "session_id": None,
-                            "status": None,
-                            "outcome": "fail",
-                            "elapsed_ms": 0,
-                            "failure_tags": ["F-ERROR"],
-                            "event_counts": {},
-                            "tools": [],
-                            "persisted_segment_skills": [],
-                            "workers_spawned": 0,
-                            "worker_result_bundles": 0,
-                            "worker_result_bundle_results": 0,
-                            "terminal_notifications": 0,
-                            "errors": [{"type": "RunnerException", "data": str(e)}],
-                            "warnings": [],
-                            "final_response_preview": "",
-                            "token_totals": {"input": 0, "output": 0, "cost_cents": 0},
-                            "model_turns": 0,
-                            "rerun_candidate": None,
-                            "start": None,
-                            "queued": None,
-                            "cancel_response": None,
-                            "worker_spawns_sample": [],
-                            "worker_states_sample": [],
-                            "worker_signals_sample": [],
-                            "worker_bundles_sample": [],
-                        }
-                    )
-        results.sort(key=lambda r: r["id"])
-        elapsed_all = int((time.time() - start_all) * 1000)
-        log(f"all sessions finished in {elapsed_all} ms")
-        agg = write_reports(results, env_info, imported, skill_list)
-        log(
-            f"aggregate outcomes={agg['outcomes']} failure_tags={agg['failure_tags']} workers={agg['total_worker_spawns']} bundles={agg['total_worker_result_bundles']} cost_cents={agg['cost']['cost_cents']}"
+        canary = []
+        if canary_count:
+            canary = run_canary(cases)
+        results = dispatch(selected, "full run")
+        agg = write_reports(
+            results, env_info, imported, skill_list, provenance, canary
         )
+        log(
+            f"aggregate outcomes={agg['outcomes']} failure_tags={agg['failure_tags']} workers={agg['total_worker_spawns']} cost_cents={agg['cost']['cost_cents']}"
+        )
+        log(f"budget {json.dumps(LEDGER.snapshot(), sort_keys=True)}")
         log(f"report {REPORT_REPO}")
         log(f"artifacts {RUN_DIR}")
     finally:
@@ -1461,5 +1673,35 @@ def main():
             log(f"dropped isolated database {db_name}")
 
 
-if __name__ == "__main__":
+def cli(argv=None):
+    """Parse arguments and either validate the fixture or run the billed sweep."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "MOA 100-session persona sweep. The sweep is billed and requires "
+            f"{RUN_FLAG_ENV}=1, live credentials, and a positive {BUDGET_ENV}."
+        )
+    )
+    parser.add_argument(
+        "--validate-cases",
+        action="store_true",
+        help=(
+            "validate the canonical case fixture (schema, contiguous S001..S100, "
+            "exact count, content and file hashes) and exit. Runs no sessions, "
+            "needs no credentials, and spends nothing. This is the CI form."
+        ),
+    )
+    args = parser.parse_args(argv)
+    if args.validate_cases:
+        try:
+            summary = sweep_cases.validate_fixture(CASE_SOURCE)
+        except sweep_cases.CaseFixtureError as e:
+            print(f"case fixture validation FAILED: {e}", file=sys.stderr)
+            return 1
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
     main()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())

@@ -174,12 +174,16 @@ impl ExperimentTrialStopReason {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExperimentTarget {
     /// Run an agent loop prompt through the session execution path.
+    ///
+    /// An agent-loop experiment never continues a caller-owned session: the
+    /// simulator drives live turns into the target and reads its durable event
+    /// log, so every run gets an eval-owned session created for it. There is no
+    /// field to name an existing session, which makes that unreachable rather
+    /// than merely rejected.
     AgentLoop {
-        /// User-facing prompt used to start or continue the agent loop.
+        /// User-facing prompt used to start the agent loop.
         prompt: String,
-        /// Existing session to continue, or `None` for a new session.
-        session_id: Option<SessionId>,
-        /// Installed deployment or exact agent revision to pin when creating a new session.
+        /// Installed deployment or exact agent revision to pin when creating the session.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<AgentSessionSelection>,
         /// Model requested for the agent loop.
@@ -209,6 +213,15 @@ impl ExperimentTarget {
         match self {
             Self::AgentLoop { .. } => ExperimentTargetKind::AgentLoop,
             Self::ExecutionTemplate { .. } => ExperimentTargetKind::ExecutionTemplate,
+        }
+    }
+
+    /// Returns the caller-owned session this target attaches to, when present.
+    #[must_use]
+    pub const fn attached_session_id(&self) -> Option<SessionId> {
+        match self {
+            Self::AgentLoop { .. } => None,
+            Self::ExecutionTemplate { session_id, .. } => *session_id,
         }
     }
 }
@@ -426,4 +439,25 @@ pub struct ExperimentTrialRecord {
     pub created_at: DateTime<Utc>,
     /// Timestamp when the record was last updated.
     pub updated_at: DateTime<Utc>,
+}
+
+impl From<&ExperimentTrialRecord> for NewExperimentTrial {
+    fn from(record: &ExperimentTrialRecord) -> Self {
+        Self {
+            run_uid: record.run_uid,
+            trial_key: record.trial_key.clone(),
+            target_kind: record.target_kind,
+            variant_key: record.variant_key.clone(),
+            plan_revision_uid: record.plan_revision_uid,
+            scenario_id: record.scenario_id.clone(),
+            persona_id: record.persona_id.clone(),
+            profile_id: record.profile_id.clone(),
+            data_bundle_ids: record.data_bundle_ids.clone(),
+            artifact_revision_uids: record.artifact_revision_uids.clone(),
+            simulator: record.simulator.clone(),
+            target_model: record.target_model.clone(),
+            seed: record.seed.clone(),
+            score_run_id: record.score_run_id,
+        }
+    }
 }

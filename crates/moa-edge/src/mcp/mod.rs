@@ -9,7 +9,6 @@ mod analytics_sessions;
 mod artifacts_learning;
 mod command;
 mod contract;
-mod evals;
 mod execution_runs;
 mod experiments;
 mod http;
@@ -260,7 +259,6 @@ fn all_tools() -> ToolRouter<Server> {
         + artifacts_learning::router()
         + agents::router()
         + execution_runs::router()
-        + evals::router()
         + experiments::router();
     contract::enrich(&mut router);
     router
@@ -360,7 +358,7 @@ impl ServerHandler for Server {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("moa-edge", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "MOA tenant operations. Tenant scope is always the authenticated tenant; never invent or supply a tenant ID. Each tool description states when to use it, side effects, its structured result, and the recommended next tool. Successful structuredContent is always {summary, data}; execution failures set isError and return {error}. Inspect before mutating, validate drafts before publishing, and poll accepted eval, experiment, simulation, or execution runs by their returned ID.",
+                "MOA tenant operations. Tenant scope is always the authenticated tenant; never invent or supply a tenant ID. Each tool description states when to use it, side effects, its structured result, and the recommended next tool. Successful structuredContent is always {summary, data}; execution failures set isError and return {error}. Inspect before mutating, validate drafts before publishing, and poll accepted experiment, simulation, or execution runs by their returned ID.",
             )
     }
 }
@@ -447,14 +445,6 @@ mod tests {
             "artifact_validate",
             "artifacts_list",
             "capabilities_list",
-            "eval_compare",
-            "eval_dataset_register",
-            "eval_datasets_list",
-            "eval_plan",
-            "eval_run",
-            "eval_run_status",
-            "eval_scores",
-            "eval_suites_summarize",
             "experiment_cancel",
             "experiment_compare",
             "experiment_plan_generate",
@@ -489,11 +479,26 @@ mod tests {
         assert_eq!(actual, expected, "MCP tool discovery allowlist drifted");
         assert_eq!(
             actual.len(),
-            56,
-            "expected exactly 56 tenant-operation tools"
+            48,
+            "expected exactly 48 tenant-operation tools"
         );
         assert!(!actual.contains("execute_run"));
         assert!(!actual.contains("replay"));
+        for removed in [
+            "eval_compare",
+            "eval_dataset_register",
+            "eval_datasets_list",
+            "eval_plan",
+            "eval_run",
+            "eval_run_status",
+            "eval_scores",
+            "eval_suites_summarize",
+        ] {
+            assert!(
+                !actual.contains(removed),
+                "{removed} was removed: Behavior Lab is the only tenant evaluation product"
+            );
+        }
         for retired in [
             "index_rebuild_start",
             "index_rebuild_status",
@@ -738,12 +743,6 @@ mod tests {
             review["$defs"]["ExecutionReviewDecisionInput"]["enum"],
             serde_json::json!(["approved", "rejected"]),
             "execution review decision schema drifted: {review:#?}"
-        );
-
-        let eval_run = &router.map["eval_run"].attr.input_schema;
-        assert_eq!(
-            find_schema_keyword(&eval_run["properties"]["parallel"], "minimum"),
-            Some(&serde_json::json!(1))
         );
     }
 }

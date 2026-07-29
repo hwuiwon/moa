@@ -9,6 +9,7 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use moa_core::{
     error::MoaError, error::Result, error::ToolFailureClass, error::classify_tool_error,
     traits::HandProvider, types::hands::CpuLimit, types::hands::DeadlineEnforcement,
@@ -136,6 +137,11 @@ fn docker_memory_support() -> ResourceSupport {
 struct LocalSandbox {
     execution_root: PathBuf,
     extra_search_skips: Vec<String>,
+    /// Absolute instant this sandbox's maximum lifetime expires.
+    ///
+    /// `None` means the resolved profile declared an explicitly unbounded
+    /// maximum lifetime, which is a statement, not a missing value.
+    hard_deadline: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +149,43 @@ struct DockerSandbox {
     sandbox_dir: PathBuf,
     workspace_mount: String,
     extra_search_skips: Vec<String>,
+    /// Absolute instant this container's maximum lifetime expires.
+    hard_deadline: Option<DateTime<Utc>>,
+}
+
+/// Returns the absolute instant a profile's maximum lifetime expires.
+///
+/// Recorded as wall-clock rather than a monotonic instant so it survives the
+/// durable lease round trip: a sandbox recovered by another replica has to
+/// honour the deadline the original provisioning established, not restart it.
+/// Recovers a persisted sandbox deadline from durable lease metadata.
+///
+/// An absent field means the sandbox was provisioned unbounded. A present but
+/// unparseable field is treated as already expired rather than unbounded: a
+/// deadline nobody can read is not a licence to run forever.
+fn hard_deadline_from_metadata(metadata: &serde_json::Value) -> Option<DateTime<Utc>> {
+    let value = metadata.get("hard_deadline")?;
+    if value.is_null() {
+        return None;
+    }
+    match serde_json::from_value::<DateTime<Utc>>(value.clone()) {
+        Ok(deadline) => Some(deadline),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "unreadable hand lease deadline; treating the sandbox as expired"
+            );
+            Some(DateTime::<Utc>::UNIX_EPOCH)
+        }
+    }
+}
+
+fn hard_deadline_for(profile: &SandboxProfile) -> Option<DateTime<Utc>> {
+    profile
+        .max_lifetime
+        .bounded_seconds()
+        .and_then(|seconds| i64::try_from(seconds.get()).ok())
+        .and_then(|seconds| Utc::now().checked_add_signed(chrono::TimeDelta::seconds(seconds)))
 }
 
 /// Local zero-setup hand provider used by interactive clients and test harnesses.
@@ -262,6 +305,7 @@ impl LocalHandProvider {
                 sandbox_dir: sandbox_dir.to_path_buf(),
                 workspace_mount: workspace_mount.to_string_lossy().into_owned(),
                 extra_search_skips,
+                hard_deadline: hard_deadline_for(spec.effective_profile.profile()),
             },
         );
         Ok(HandHandle::docker(container_id))
@@ -279,6 +323,7 @@ impl LocalHandProvider {
             LocalSandbox {
                 execution_root,
                 extra_search_skips,
+                hard_deadline: hard_deadline_for(spec.effective_profile.profile()),
             },
         );
         Ok(HandHandle::local(sandbox_dir))
@@ -293,6 +338,7 @@ impl LocalHandProvider {
             .unwrap_or_else(|| LocalSandbox {
                 execution_root: sandbox_dir.to_path_buf(),
                 extra_search_skips: Vec::new(),
+                hard_deadline: None,
             })
     }
 
@@ -310,6 +356,7 @@ impl LocalHandProvider {
                     &sandbox.execution_root,
                     input,
                     self.command_timeout,
+                    bash::remaining_lifetime(sandbox.hard_deadline, Utc::now()),
                     hard_cancel_token,
                 )
                 .await
@@ -363,6 +410,7 @@ impl LocalHandProvider {
                     &sandbox.workspace_mount,
                     input,
                     self.command_timeout,
+                    bash::remaining_lifetime(sandbox.hard_deadline, Utc::now()),
                     hard_cancel_token,
                 )
                 .await
@@ -467,6 +515,7 @@ impl LocalHandProvider {
                         "kind": "local",
                         "execution_root": sandbox.execution_root,
                         "extra_search_skips": sandbox.extra_search_skips,
+                        "hard_deadline": sandbox.hard_deadline,
                     }),
                 ))
             }
@@ -489,6 +538,7 @@ impl LocalHandProvider {
                         "sandbox_dir": sandbox.sandbox_dir,
                         "workspace_mount": sandbox.workspace_mount,
                         "extra_search_skips": sandbox.extra_search_skips,
+                        "hard_deadline": sandbox.hard_deadline,
                     }),
                 ))
             }
@@ -520,6 +570,7 @@ impl LocalHandProvider {
                     LocalSandbox {
                         execution_root,
                         extra_search_skips,
+                        hard_deadline: hard_deadline_from_metadata(metadata),
                     },
                 );
                 Ok(lease_handle.handle.clone())
@@ -555,6 +606,7 @@ impl LocalHandProvider {
                         sandbox_dir,
                         workspace_mount,
                         extra_search_skips,
+                        hard_deadline: hard_deadline_from_metadata(metadata),
                     },
                 );
                 Ok(lease_handle.handle.clone())

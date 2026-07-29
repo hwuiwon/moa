@@ -10,13 +10,19 @@ use moa_core::{
     types::action_policy::ActionClass, types::action_policy::ActionPolicyEffect,
     types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
     types::action_policy::RiskLevel, types::identifiers::ModelId, types::identifiers::TenantId,
-    types::identifiers::UserId, types::session::SessionMeta, types::tools::ToolPolicyInput,
+    types::identifiers::UserId, types::security::ToolCapabilityId, types::session::SessionMeta,
+    types::tools::ToolPolicyInput,
 };
 use moa_security::{ActionPolicies, ActionPolicyContext};
 use uuid::Uuid;
 
 fn tenant_id() -> TenantId {
     TenantId::from(Uuid::from_u128(7))
+}
+
+/// The sandbox capability `bash` is registered under.
+fn hand_capability() -> ToolCapabilityId {
+    ToolCapabilityId::hand("bash")
 }
 
 fn bash_allow_rule() -> ActionPolicyRule {
@@ -73,6 +79,7 @@ fn check_allows_clean_bash_command_matching_rule() {
     let check = policies
         .check(
             &bash_input("npm test -- --watch"),
+            &hand_capability(),
             &ctx(),
             std::slice::from_ref(&rule),
         )
@@ -94,6 +101,7 @@ fn check_rejects_chained_command_smuggled_past_bash_allow_rule() {
     let check = policies
         .check(
             &bash_input("npm test && rm -rf /"),
+            &hand_capability(),
             &ctx(),
             std::slice::from_ref(&rule),
         )
@@ -118,7 +126,12 @@ fn check_rejects_unsafe_shell_syntax_smuggled_past_bash_allow_rule() {
         "npm test < /tmp/in",
     ] {
         let check = policies
-            .check(&bash_input(command), &ctx(), std::slice::from_ref(&rule))
+            .check(
+                &bash_input(command),
+                &hand_capability(),
+                &ctx(),
+                std::slice::from_ref(&rule),
+            )
             .expect("policy evaluation");
 
         assert_eq!(

@@ -1,5 +1,6 @@
 //! Production-safe evaluation contracts and scoring helpers.
 
+pub mod admission;
 pub mod conversation_cost;
 pub mod engine;
 pub mod error;
@@ -8,9 +9,13 @@ pub mod evaluators;
 pub mod loader;
 pub mod plan;
 pub mod replay;
+pub mod resource_report;
 pub mod results;
 pub mod types;
 
+pub use admission::{
+    AdmissionError, AdmittedRun, EVAL_ADMISSION_VERSION, EvalAdmissionLimits, EvalAdmissionPolicy,
+};
 pub use conversation_cost::{ConversationCost, TurnCost};
 pub use engine::{EngineOptions, EvalRun, RunSummary};
 pub use error::{Error, Result};
@@ -22,6 +27,7 @@ pub use evaluators::{
 pub use loader::{load_agent_config, load_suite};
 pub use plan::{EvalPlan, build_eval_plan_with_estimator, estimate_run_cost_range};
 pub use replay::{ReplayConfig, token_f1};
+pub use resource_report::{RunResourceReport, usage_from_metrics};
 pub use results::{EvalMetrics, EvalResult, EvalScore, EvalScoreValue, EvalStatus, TrajectoryStep};
 pub use types::{
     ActionPolicyOverride, ActionPolicyRuleOverride, AgentConfig, ExpectedOutput,

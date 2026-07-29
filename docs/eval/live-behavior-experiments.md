@@ -26,21 +26,21 @@ The product-facing Behavior Lab artifact model is documented in
 
 ## Target Kinds
 
-`agent_loop` targets contain a prompt, model, optional session ID, and
-attachments. A run without a session ID creates a normal API session for the
-authorized user or delegated agent identity, initializes the session virtual
+`agent_loop` targets contain a prompt, model, optional agent selector, and
+attachments. They carry no session ID: an experiment never continues a
+caller-owned conversation, so every run creates its own eval-owned session for
+the authorized user or delegated agent identity, initializes the session virtual
 object, and queues the prompt through `Session/queue_message`. Tool routing,
 skills, memory, approvals, event logging, and learning emission are the same
 production path used by user sessions.
 
-`execution_run` targets identify either a published skill's pinned
-`execution_plan` template or a compiled plan ID, plus input JSON, an optional
-session ID, and an idempotency key. Raw plan JSON is not accepted. Starting a
-run validates its input, immutable goal contract, current capability catalog,
+`execution_run` targets identify a published skill's exact pinned
+`execution_plan` template, plus input JSON, an optional session ID, and an
+idempotency key. Raw plan JSON and compiled plan IDs are not accepted. Starting
+a run validates its input, immutable goal contract, current capability catalog,
 and worst-case budget before any task is created. Missing input or unsupported
 capability returns a typed result. The experiment starts the common execution
-runtime and stores `execution_run_uid`; skill-template and compiled-plan
-provenance remain distinguishable on that run.
+runtime and stores `execution_run_uid`.
 
 ## Artifact Revisions
 

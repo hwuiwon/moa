@@ -1,0 +1,1205 @@
+{
+  "schema_version": 1,
+  "fixture_id": "moa-100-persona-sweep",
+  "case_count": 100,
+  "content_sha256": "1b6e2ab6147774a89a4ef508e728b9b285166159e649611a147cdeefd03f254e",
+  "provenance": {
+    "recovered_from": "git show 66557952^:docs/engineering-discipline/live-runs/2026-07-08-moa-100-persona-cases.md",
+    "converted_on": "2026-07-29",
+    "notes": "Canonical machine-readable input for the MOA 100-session persona sweep. Markdown sweep reports are outputs, never case input. Runs seeded from this fixture start a new baseline; pre-2026-07-08 reports are not comparable. Load-bearing planner-anchor request tokens are preserved verbatim: ' reconcile ', ' summarize ', ' categorize '."
+  },
+  "cases": [
+    {
+      "id": "S001",
+      "persona": "Startup CFO",
+      "scenario": 1,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Draft a board-ready runway summary for Q3: cash on hand is $4.2M, monthly burn $310K, and we expect a $500K enterprise payment in August. Call out the runway with and without that payment."
+    },
+    {
+      "id": "S002",
+      "persona": "Startup CFO",
+      "scenario": 2,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": true,
+      "interrupt": false,
+      "cancel": false,
+      "request": "In parallel, delegate three independent workstreams: a revenue variance analysis vs plan for Q2, a vendor spend diligence pass on our top ten vendors, and a churn-adjusted forecast comparison. Then combine them into one board narrative."
+    },
+    {
+      "id": "S003",
+      "persona": "Finance Analyst",
+      "scenario": 3,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Please reconcile the June credit-card ledger against the exported expense report: flag duplicate charges, missing receipts, and anything over $2,000 without an approval note."
+    },
+    {
+      "id": "S004",
+      "persona": "Finance Analyst",
+      "scenario": 4,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Summarize our AWS, GCP, and Snowflake spend trends over the last two quarters and recommend where to negotiate committed-use discounts."
+    },
+    {
+      "id": "S005",
+      "persona": "Controller",
+      "scenario": 5,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Build a month-end close plan for a five-person finance team: sequence the reconciliation steps, owners, and a two-day close target."
+    },
+    {
+      "id": "S006",
+      "persona": "Controller",
+      "scenario": 6,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": true,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Delegate two parallel analyses: one worker prepares a variance analysis of marketing spend vs budget, another prepares a headcount cost forecast through year end. Merge both into a single summary for the CFO."
+    },
+    {
+      "id": "S007",
+      "persona": "FP&A Lead",
+      "scenario": 7,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "We missed revenue plan by 12% last quarter. Draft a variance narrative for the board that separates pipeline slippage, churn, and pricing pressure, with one chart suggestion per section."
+    },
+    {
+      "id": "S008",
+      "persona": "FP&A Lead",
+      "scenario": 8,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Compare three forecast scenarios for next year (conservative, base, aggressive) given 8% MoM growth, 5% churn, and a hiring freeze in scenario one. Present as a table."
+    },
+    {
+      "id": "S009",
+      "persona": "Bookkeeper",
+      "scenario": 9,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Categorize these transactions into our chart of accounts: $1,250 Figma annual, $89 team lunch, $4,400 contractor invoice for landing-page work, $230 Delta ticket, and $12,000 Q3 office rent."
+    },
+    {
+      "id": "S010",
+      "persona": "Startup CEO",
+      "scenario": 10,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Give me a one-page cash summary I can paste into the investor update: burn, runway, top three cost drivers, and what changed since last month."
+    },
+    {
+      "id": "S011",
+      "persona": "Finance Ops",
+      "scenario": 11,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "A vendor invoiced us twice for the same SOW milestone. Draft the dispute email and a short internal note on how to reconcile the duplicate in the AP ledger."
+    },
+    {
+      "id": "S012",
+      "persona": "FP&A Lead",
+      "scenario": 12,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": true,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Run these in parallel as separate workers: (1) a cohort revenue retention table description for 2025 signups, (2) a vendor spend categorization by department, (3) a runway sensitivity analysis at ±15% burn. Then synthesize the three into one memo."
+    },
+    {
+      "id": "S013",
+      "persona": "Startup CFO",
+      "scenario": 13,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": false,
+      "interrupt": true,
+      "cancel": false,
+      "request": "Our Series B data room needs a revenue recognition summary. Explain how we should present annual prepaid contracts vs monthly plans, and list the schedules we need."
+    },
+    {
+      "id": "S014",
+      "persona": "Controller",
+      "scenario": 14,
+      "expected_skills": [
+        "finance-reporting"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Write the quarter-close checklist email to the team: bank reconciliation, accrual review, deferred revenue schedule, and flux analysis, each with an owner placeholder and due date."
+    },
+    {
+      "id": "S015",
+      "persona": "Support Lead",
+      "scenario": 15,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "A customer on the $499/year plan was double-charged at renewal and is threatening a chargeback. Draft the apology email, the refund plan, and a note for the billing team."
+    },
+    {
+      "id": "S016",
+      "persona": "Support Lead",
+      "scenario": 16,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Summarize our refund policy into five plain-language bullets a new support agent can quote directly in tickets."
+    },
+    {
+      "id": "S017",
+      "persona": "Support Agent",
+      "scenario": 17,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Customer bought a damaged espresso machine 40 days ago; our return window is 30 days but the damage claim has photos from day two. Recommend refund vs replacement and draft the reply."
+    },
+    {
+      "id": "S018",
+      "persona": "Support Agent",
+      "scenario": 18,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Categorize these five open billing tickets by refund eligibility and urgency: late-renewal dispute, duplicate charge, buyer's remorse day 3, failed delivery, and a chargeback already filed."
+    },
+    {
+      "id": "S019",
+      "persona": "CX Manager",
+      "scenario": 19,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": true,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Delegate in parallel: one worker drafts a refund-decision tree for agents, a second drafts macros for the top four refund scenarios, a third summarizes last month's refund reasons from the notes I paste next. Combine into one enablement doc."
+    },
+    {
+      "id": "S020",
+      "persona": "CX Manager",
+      "scenario": 20,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "A VIP customer wants an exception to the return window for a gift purchase. Write the exception approval note with conditions, and the customer reply."
+    },
+    {
+      "id": "S021",
+      "persona": "Support Lead",
+      "scenario": 21,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Our chargeback rate hit 1.2% last month. List the top likely causes for a subscription business and a remediation plan with owners."
+    },
+    {
+      "id": "S022",
+      "persona": "Billing Specialist",
+      "scenario": 22,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Draft the response to a bank's chargeback evidence request for a $1,900 annual subscription: what evidence we should attach and a cover summary."
+    },
+    {
+      "id": "S023",
+      "persona": "Support Agent",
+      "scenario": 23,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Customer claims they cancelled before renewal but our logs show the cancellation happened two hours after the charge. Draft a goodwill resolution and the internal policy note."
+    },
+    {
+      "id": "S024",
+      "persona": "CX Manager",
+      "scenario": 24,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Write a short SOP for partial refunds on annual plans: proration rules, approval thresholds, and the exact fields to record in the ticket."
+    },
+    {
+      "id": "S025",
+      "persona": "Support Lead",
+      "scenario": 25,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": true,
+      "interrupt": false,
+      "cancel": true,
+      "request": "Split this into two parallel worker tasks: draft the customer-facing apology for this weekend's failed deliveries, and separately prepare the make-good matrix (credit vs redelivery vs refund) by order value. Then give me both in one reply."
+    },
+    {
+      "id": "S026",
+      "persona": "Billing Specialist",
+      "scenario": 26,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "A customer paid by wire for an enterprise plan and wants a refund to a different entity. Flag the compliance concerns and draft the finance handoff note."
+    },
+    {
+      "id": "S027",
+      "persona": "Support Agent",
+      "scenario": 27,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Summarize this dispute thread for escalation in six lines: customer ordered two units, one arrived, courier says delivered, customer disputes, replacement is out of stock until next month."
+    },
+    {
+      "id": "S028",
+      "persona": "CX Manager",
+      "scenario": 28,
+      "expected_skills": [
+        "refund-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Create the weekly refund report template: volume, top reasons, average resolution time, chargebacks opened, and one narrative paragraph."
+    },
+    {
+      "id": "S029",
+      "persona": "SRE On-call",
+      "scenario": 29,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "We had a 40-minute checkout outage this morning caused by an expired TLS cert on the payments proxy. Draft the incident summary: impact, root cause, timeline, and three mitigations."
+    },
+    {
+      "id": "S030",
+      "persona": "SRE On-call",
+      "scenario": 30,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": true,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Delegate three parallel workers: one drafts the customer status-page update for the ongoing API latency incident, one prepares the internal timeline from the notes I provide, one lists probable root causes for elevated p99 after a deploy. Combine into an incident packet."
+    },
+    {
+      "id": "S031",
+      "persona": "Ops Manager",
+      "scenario": 31,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Three cold-chain shipments arrived above temperature this week. Triage: likely causes, immediate containment, who owns the carrier escalation, and the customer comms plan."
+    },
+    {
+      "id": "S032",
+      "persona": "Engineering Manager",
+      "scenario": 32,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Write the postmortem skeleton for last night's database failover that dropped 2% of writes: sections, prompts for each, and the five whys starter."
+    },
+    {
+      "id": "S033",
+      "persona": "SRE On-call",
+      "scenario": 33,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Alert fatigue: we get ~120 pages a week and act on maybe ten. Propose an alert triage and pruning plan with a categorize-then-prune workflow for the top offenders."
+    },
+    {
+      "id": "S034",
+      "persona": "Ops Manager",
+      "scenario": 34,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Summarize this ops spike for the exec channel in five bullets: order volume 3x from a promo, warehouse backlog 9 hours, two carriers missed pickup, support queue at 400."
+    },
+    {
+      "id": "S035",
+      "persona": "Engineering Manager",
+      "scenario": 35,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "A customer reported data missing from their dashboard; we traced it to a silent ETL failure over the weekend. Draft the customer notification and the internal action-item list."
+    },
+    {
+      "id": "S036",
+      "persona": "SRE On-call",
+      "scenario": 36,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Create a severity matrix (SEV1-SEV4) for our delivery platform with concrete examples, response times, and who gets paged for each."
+    },
+    {
+      "id": "S037",
+      "persona": "Ops Manager",
+      "scenario": 37,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": true,
+      "interrupt": true,
+      "cancel": false,
+      "request": "Run two workers in parallel: one triages the warehouse scanner outage (impact, workaround, owner), the other drafts the shift-handoff status update. Merge into one operations bulletin."
+    },
+    {
+      "id": "S038",
+      "persona": "Engineering Manager",
+      "scenario": 38,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Our error budget for the month is nearly burned after two incidents. Recommend what to freeze, what to fast-track, and how to message the tradeoff to product."
+    },
+    {
+      "id": "S039",
+      "persona": "SRE On-call",
+      "scenario": 39,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Draft the status update sequence for a partial outage that is degrading but not down: initial, 30-minute update, and resolution templates."
+    },
+    {
+      "id": "S040",
+      "persona": "Ops Manager",
+      "scenario": 40,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "A driver app bug sent 60 deliveries to a depot address. Triage the blast radius, the redelivery plan, and the customer apology template."
+    },
+    {
+      "id": "S041",
+      "persona": "Engineering Manager",
+      "scenario": 41,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Turn these raw notes into a crisp incident review doc: deploy at 14:02, feature flag mis-scoped, checkout errors 14:05-14:31, rollback 14:28, no data loss."
+    },
+    {
+      "id": "S042",
+      "persona": "SRE On-call",
+      "scenario": 42,
+      "expected_skills": [
+        "incident-triage"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "List the top eight leading indicators we should monitor to catch payment-provider degradation before customers do, each with a suggested threshold."
+    },
+    {
+      "id": "S043",
+      "persona": "CISO",
+      "scenario": 43,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "A vendor wants read access to our production customer table for analytics. Draft the risk assessment: data classes exposed, alternatives, and the conditions under which we would allow it."
+    },
+    {
+      "id": "S044",
+      "persona": "CISO",
+      "scenario": 44,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": true,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Delegate three parallel reviews: one worker assesses the SOC 2 evidence gaps from the list I share, one drafts the vendor security questionnaire for a new payroll provider, one summarizes our data-retention exceptions. Combine into a quarterly security memo."
+    },
+    {
+      "id": "S045",
+      "persona": "Security Engineer",
+      "scenario": 45,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Review this access pattern: contractors get owner-level access to the analytics workspace by default. Recommend the least-privilege redesign and the migration steps."
+    },
+    {
+      "id": "S046",
+      "persona": "Privacy Officer",
+      "scenario": 46,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "We want to store support-call transcripts for model training. Outline the privacy review: lawful basis, retention limits, redaction requirements, and opt-out handling."
+    },
+    {
+      "id": "S047",
+      "persona": "Security Engineer",
+      "scenario": 47,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "An auditor asked for evidence of quarterly access reviews. Draft the evidence-request response and a checklist to make the next review painless."
+    },
+    {
+      "id": "S048",
+      "persona": "CISO",
+      "scenario": 48,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Summarize the security implications of enabling a browser extension for all employees that reads page content, and give a conditional-approval policy."
+    },
+    {
+      "id": "S049",
+      "persona": "Privacy Officer",
+      "scenario": 49,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": true,
+      "request": "A customer filed a deletion request but has an open invoice dispute. Explain what we must delete now, what we can retain, and draft the response."
+    },
+    {
+      "id": "S050",
+      "persona": "Security Engineer",
+      "scenario": 50,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Categorize these findings from the pentest report by severity and exploitability, and propose the fix order: exposed staging bucket, weak JWT expiry, verbose error pages, missing rate limit on login, and stale admin account."
+    },
+    {
+      "id": "S051",
+      "persona": "CISO",
+      "scenario": 51,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Draft a data-retention policy table for tickets, logs, analytics events, and backups: retention period, legal hold handling, and deletion mechanism for each."
+    },
+    {
+      "id": "S052",
+      "persona": "Privacy Officer",
+      "scenario": 52,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": true,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Two parallel worker tasks: draft the DPIA outline for our new location-tracking feature, and separately review the marketing team's plan to upload customer emails to an ad platform. Return one combined recommendation."
+    },
+    {
+      "id": "S053",
+      "persona": "Security Engineer",
+      "scenario": 53,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Our on-call engineers share a single admin account for the payments console. Write the risk statement and a two-week remediation plan."
+    },
+    {
+      "id": "S054",
+      "persona": "CISO",
+      "scenario": 54,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "A prospective enterprise customer sent a 40-question security questionnaire. Draft answers for the five hardest topics: encryption at rest, key rotation, subprocessor list, incident SLAs, and data residency."
+    },
+    {
+      "id": "S055",
+      "persona": "Privacy Officer",
+      "scenario": 55,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Review whether we can use production data in the staging environment if we pseudonymize emails and names, and list the controls required."
+    },
+    {
+      "id": "S056",
+      "persona": "Security Engineer",
+      "scenario": 56,
+      "expected_skills": [
+        "security-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Write the access-review SOP: scope, frequency, evidence capture, revocation deadlines, and the escalation path for unowned accounts."
+    },
+    {
+      "id": "S057",
+      "persona": "Product Manager",
+      "scenario": 57,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Break the Q4 checkout-redesign launch into a sequenced plan with milestones, owners by role, dependencies, and a go/no-go checklist two weeks before launch."
+    },
+    {
+      "id": "S058",
+      "persona": "Product Manager",
+      "scenario": 58,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": true,
+      "interrupt": true,
+      "cancel": false,
+      "request": "Delegate three parallel planning workers: one drafts the engineering milestone plan for the mobile app rewrite, one drafts the marketing launch plan, one drafts the support-readiness plan. Merge into a single cross-functional roadmap."
+    },
+    {
+      "id": "S059",
+      "persona": "Operations Director",
+      "scenario": 59,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Plan our warehouse migration to the new facility over six weeks with zero order-processing downtime: phases, decision points, and rollback options."
+    },
+    {
+      "id": "S060",
+      "persona": "Engineering Manager",
+      "scenario": 60,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Sequence the Postgres 15 to 17 upgrade across twelve services: pre-checks, canary order, freeze windows, and the abort criteria."
+    },
+    {
+      "id": "S061",
+      "persona": "Head of People",
+      "scenario": 61,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Draft a hiring plan to grow support from six to fifteen people in two quarters: role mix, sourcing milestones, interviewer load, and onboarding waves."
+    },
+    {
+      "id": "S062",
+      "persona": "Product Manager",
+      "scenario": 62,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Summarize this messy planning thread into a decision log: we chose usage-based pricing, deferred the enterprise tier, and moved the beta to November; capture owners and open questions."
+    },
+    {
+      "id": "S063",
+      "persona": "Founder",
+      "scenario": 63,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "I have four goals for next quarter and capacity for two: expand to Canada, launch referrals, rebuild onboarding, achieve SOC 2. Force-rank with rationale and a plan for the top two."
+    },
+    {
+      "id": "S064",
+      "persona": "Operations Director",
+      "scenario": 64,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Create the rollout plan for the new inventory system across three warehouses: pilot criteria, training, parallel-run period, and cutover checklist."
+    },
+    {
+      "id": "S065",
+      "persona": "Engineering Manager",
+      "scenario": 65,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": true,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Two workers in parallel: one plans the API deprecation timeline (comms, versioning, sunset dates), the other plans the internal migration off the old endpoints. Combine into one deprecation program plan."
+    },
+    {
+      "id": "S066",
+      "persona": "Head of People",
+      "scenario": 66,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Plan the offsite for 40 people in October: workstream owners, budget lines, agenda skeleton, and the decisions we need six weeks out."
+    },
+    {
+      "id": "S067",
+      "persona": "Product Manager",
+      "scenario": 67,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Turn this goal into milestones: reduce onboarding time from 14 days to 5 by Q1, covering product changes, docs, and CS process, with a measurable checkpoint each month."
+    },
+    {
+      "id": "S068",
+      "persona": "Founder",
+      "scenario": 68,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Draft a 30-60-90 plan for the incoming VP of Operations, focused on delivery reliability, vendor consolidation, and team structure."
+    },
+    {
+      "id": "S069",
+      "persona": "Operations Director",
+      "scenario": 69,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "We keep missing weekly ship goals by ~20%. Propose a planning-process fix: estimation, buffer policy, mid-week checkpoint, and the metric to track."
+    },
+    {
+      "id": "S070",
+      "persona": "Engineering Manager",
+      "scenario": 70,
+      "expected_skills": [
+        "project-planning"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Lay out the dependency map and sequencing for replacing our auth provider: data export, dual-run, cutover, and the customer-facing changes."
+    },
+    {
+      "id": "S071",
+      "persona": "Ops Lead",
+      "scenario": 71,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": false,
+      "interrupt": true,
+      "cancel": false,
+      "request": "Review our ticket intake flow: everything lands in one inbox and agents self-assign. Propose a queue design with routing rules, SLAs by category, and a categorize step at intake."
+    },
+    {
+      "id": "S072",
+      "persona": "Ops Lead",
+      "scenario": 72,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": true,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Delegate in parallel: one worker maps the current order-to-fulfillment handoffs from my notes, another drafts the improved SOP with approval gates removed where safe. Return a before/after comparison."
+    },
+    {
+      "id": "S073",
+      "persona": "COO",
+      "scenario": 73,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Our expense approvals take nine days on average. Diagnose the likely bottlenecks in a three-step approval chain and propose a redesign with a 48-hour target."
+    },
+    {
+      "id": "S074",
+      "persona": "Support Manager",
+      "scenario": 74,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Write the SOP for escalating bugs from support to engineering: what evidence to attach, severity mapping, response-time expectations, and the feedback loop."
+    },
+    {
+      "id": "S075",
+      "persona": "Ops Lead",
+      "scenario": 75,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Summarize the differences between our two regional fulfillment SOPs and recommend the unified version, keeping the stricter QA step."
+    },
+    {
+      "id": "S076",
+      "persona": "COO",
+      "scenario": 76,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "We have eleven weekly status meetings. Categorize them by decision vs broadcast vs coordination, and propose which to kill, merge, or convert to async."
+    },
+    {
+      "id": "S077",
+      "persona": "Support Manager",
+      "scenario": 77,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": true,
+      "request": "Design the intake form for the new professional-services request queue: required fields, auto-routing rules, and the rejection criteria with canned responses."
+    },
+    {
+      "id": "S078",
+      "persona": "Ops Lead",
+      "scenario": 78,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Our returns process has six handoffs and takes 12 days. Map the ideal five-day version: steps, owners, systems touched, and the metrics to prove it works."
+    },
+    {
+      "id": "S079",
+      "persona": "COO",
+      "scenario": 79,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": true,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Two parallel workers: one reviews the vendor onboarding workflow for redundant approvals, the other drafts the metrics dashboard spec (cycle time, first-pass yield, queue age). Combine recommendations."
+    },
+    {
+      "id": "S080",
+      "persona": "Support Manager",
+      "scenario": 80,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Draft the QA rubric for support replies: accuracy, tone, policy compliance, and resolution completeness, scored 1-5 with examples."
+    },
+    {
+      "id": "S081",
+      "persona": "Ops Lead",
+      "scenario": 81,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Our warehouse pick-pack error rate doubled after the layout change. Review the likely process causes and design the checkpoint that catches errors before shipping."
+    },
+    {
+      "id": "S082",
+      "persona": "COO",
+      "scenario": 82,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Propose a weekly business review format: the six metrics on page one, owner commentary rules, and the escalation trigger for off-track items."
+    },
+    {
+      "id": "S083",
+      "persona": "Support Manager",
+      "scenario": 83,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Turn this tribal knowledge into an SOP: refunds over $500 need lead approval, fraud flags go to trust, VIPs get callbacks within two hours, everything logged in the tracker."
+    },
+    {
+      "id": "S084",
+      "persona": "Ops Lead",
+      "scenario": 84,
+      "expected_skills": [
+        "workflow-review"
+      ],
+      "expected_worker": false,
+      "interrupt": true,
+      "cancel": false,
+      "request": "Review our on-call handoff process between shifts and draft the handoff template: open incidents, pending decisions, watch items, and links."
+    },
+    {
+      "id": "S085",
+      "persona": "Executive Assistant",
+      "scenario": 85,
+      "expected_skills": [
+        "memory-privacy-check"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Remember these preferences for future sessions: my exec prefers morning flights before 9am, aisle seats, Marriott properties, and no meetings on Friday afternoons. Confirm what you stored."
+    },
+    {
+      "id": "S086",
+      "persona": "Executive Assistant",
+      "scenario": 86,
+      "expected_skills": [
+        "memory-privacy-check"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "What travel preferences do you have stored for my exec? List them and flag anything that looks stale or sensitive."
+    },
+    {
+      "id": "S087",
+      "persona": "Sales Rep",
+      "scenario": 87,
+      "expected_skills": [
+        "memory-privacy-check"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Remember that Acme's procurement contact is Dana Wu, their fiscal year ends in January, and they require security review before any pilot. Also tell me what you should NOT store from a deal thread."
+    },
+    {
+      "id": "S088",
+      "persona": "Recruiter",
+      "scenario": 88,
+      "expected_skills": [
+        "memory-privacy-check"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "I want to save candidate interview notes in our sessions. Which parts are safe to remember, which are sensitive personal data we should not retain, and how long should notes live?"
+    },
+    {
+      "id": "S089",
+      "persona": "Sales Rep",
+      "scenario": 89,
+      "expected_skills": [
+        "memory-privacy-check"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Retrieve everything you remember about my Q3 pipeline preferences and summarize it in four bullets, then remove anything about the lost Initech deal."
+    },
+    {
+      "id": "S090",
+      "persona": "Customer Success Manager",
+      "scenario": 90,
+      "expected_skills": [
+        "memory-privacy-check"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Remember that Globex prefers monthly check-ins on Tuesdays, their exec sponsor is the CFO, and renewals route through procurement. Confirm storage and retention."
+    },
+    {
+      "id": "S091",
+      "persona": "Executive Assistant",
+      "scenario": 91,
+      "expected_skills": [
+        "memory-privacy-check"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "A teammate pasted a passport number into our chat last week. Should that be stored, and what should we do about it now? Give the privacy-safe cleanup steps."
+    },
+    {
+      "id": "S092",
+      "persona": "Recruiter",
+      "scenario": 92,
+      "expected_skills": [
+        "memory-privacy-check"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": true,
+      "request": "Store my sourcing preferences: prioritize backend engineers with Rust or Go, remote-first, and skip agencies. What retention policy applies to preferences like these?"
+    },
+    {
+      "id": "S093",
+      "persona": "Customer Success Manager",
+      "scenario": 93,
+      "expected_skills": [
+        "memory-privacy-check"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Which of these should you remember long-term vs discard after this session: customer's NPS verbatim, their AWS account ID, the renewal date, and the champion's personal cell number?"
+    },
+    {
+      "id": "S094",
+      "persona": "Sales Rep",
+      "scenario": 94,
+      "expected_skills": [
+        "memory-privacy-check"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Remember my demo script preference: start with the reporting module, skip the admin console, always end with pricing ranges. Then retrieve and confirm it back to me."
+    },
+    {
+      "id": "S095",
+      "persona": "Executive Assistant",
+      "scenario": 95,
+      "expected_skills": [
+        "memory-privacy-check"
+      ],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Summarize what you currently remember about my scheduling preferences and mark each item keep, update, or delete."
+    },
+    {
+      "id": "S096",
+      "persona": "Recruiter",
+      "scenario": 96,
+      "expected_skills": [
+        "memory-privacy-check"
+      ],
+      "expected_worker": false,
+      "interrupt": true,
+      "cancel": false,
+      "request": "We're doing a privacy cleanup: list the categories of candidate data that should never persist in session memory and why, in a table I can share."
+    },
+    {
+      "id": "S097",
+      "persona": "Office Manager",
+      "scenario": 97,
+      "expected_skills": [],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Draft a friendly all-hands announcement: the office moves to the 4th floor next month, badge access changes Friday, and plants need adopting."
+    },
+    {
+      "id": "S098",
+      "persona": "Founder",
+      "scenario": 98,
+      "expected_skills": [],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Give me three options for a two-day team offsite within driving distance of Austin, with rough per-person costs and one signature activity each."
+    },
+    {
+      "id": "S099",
+      "persona": "Marketing Lead",
+      "scenario": 99,
+      "expected_skills": [],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Rewrite this product blurb to be half the length and twice as concrete: 'Our platform leverages synergies to holistically empower modern teams to do their best work.'"
+    },
+    {
+      "id": "S100",
+      "persona": "Office Manager",
+      "scenario": 100,
+      "expected_skills": [],
+      "expected_worker": false,
+      "interrupt": false,
+      "cancel": false,
+      "request": "Create a simple rotating snack-and-coffee duty roster for eight people over eight weeks, with a swap rule."
+    }
+  ]
+}

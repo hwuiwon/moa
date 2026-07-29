@@ -4,13 +4,18 @@ use moa_agents::{AgentResolver, AgentRuntimePolicy};
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::ArtifactRegistry;
 use moa_core::traits::{Identity, LearningCandidateStore};
-use moa_core::{types::action_policy::ActionRuleScope, types::identifiers::TenantId};
+use moa_core::{
+    types::action_policy::ActionRuleScope, types::identifiers::SessionId,
+    types::identifiers::TenantId,
+};
 use moa_experiments::app::{
     ExperimentAppError, admit_run, cancel_run, compare_runs, list_runs, list_trials,
     plan_generation_repair_request, plan_generation_request, propose_improvement_candidate, scores,
     store_generated_plan, trial_status,
 };
-use moa_experiments::model::{ExperimentRunStatus, ExperimentTrialStatus, ExperimentVariant};
+use moa_experiments::model::{
+    ExperimentRunStatus, ExperimentTarget, ExperimentTrialStatus, ExperimentVariant,
+};
 use moa_experiments::scores::{
     ExperimentRunScoreRef, TrialScoreSummary, experiment_score_breakdown_for_tenant,
 };
@@ -40,7 +45,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::handlers::authz_shim::authorize_tenant_operator_or_admin;
+use crate::handlers::authz_shim::{
+    authorize_session_participant, authorize_tenant_operator_or_admin,
+};
 use crate::services::llm_gateway::LLMGatewayImpl;
 use crate::workflows::errors::moa_error_to_handler_error;
 use crate::workflows::experiment_run::{ExperimentRunClient, ExperimentRunWorkflowRequest};
@@ -179,6 +186,10 @@ impl Experiments for ExperimentsImpl {
         annotate_restate_handler_span("Experiments", "run");
         let request = request.into_inner();
         let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        // A caller-named target session is authorized as a Session participant
+        // before admission, so a session the caller cannot reach never reaches
+        // the admission write, a provider call, or a durable event read.
+        let authorized_session = authorize_target_session(&ctx, request.target.as_ref()).await?;
         let pool = self.pool.clone();
 
         let accepted = ctx
@@ -186,6 +197,14 @@ impl Experiments for ExperimentsImpl {
             .name("experiments_run")
             .await?
             .into_inner();
+        // Plan-backed runs build their target during admission, so the admitted
+        // payload is held to the same rule before any workflow is dispatched.
+        let admitted_session = target_session_requiring_authorization(Some(&accepted.target));
+        if admitted_session != authorized_session
+            && let Some(session_id) = admitted_session
+        {
+            authorize_session_participant(&ctx, session_id).await?;
+        }
         let workflow_request = ExperimentRunWorkflowRequest {
             tenant_id: accepted.response.tenant_id,
             run_uid: accepted.run_uid,
@@ -504,6 +523,35 @@ async fn generate_plan_inner(
         }
         Err(error) => Err(experiment_app_error_to_handler_error(error)),
     }
+}
+
+/// Authorizes a caller-named experiment target session before admission.
+///
+/// A wrong-tenant or otherwise unreachable session id fails here rather than
+/// after a run row, a provider call, or a durable event read.
+async fn authorize_target_session(
+    ctx: &Context<'_>,
+    target: Option<&serde_json::Value>,
+) -> Result<Option<SessionId>, HandlerError> {
+    let session_id = target_session_requiring_authorization(target);
+    if let Some(session_id) = session_id {
+        authorize_session_participant(ctx, session_id).await?;
+    }
+    Ok(session_id)
+}
+
+/// Returns the caller-named session an experiment target may attach to.
+///
+/// Only an execution-template target can name one, and naming it is what
+/// requires the authorization. Agent-loop targets carry no session field at
+/// all — the simulator drives live turns and reads the durable event log, so
+/// every agent-loop run gets an eval-owned session created for it — which is
+/// why this returns `None` for them without needing a rejection.
+fn target_session_requiring_authorization(target: Option<&serde_json::Value>) -> Option<SessionId> {
+    // A target that does not parse is rejected by admission with the same code;
+    // parsing here only decides whether a session must be authorized first.
+    let target = serde_json::from_value::<ExperimentTarget>(target?.clone()).ok()?;
+    target.attached_session_id()
 }
 
 async fn run_inner(
@@ -1151,7 +1199,46 @@ mod tests {
     use moa_wire::experiments::AgentDependencyChange;
     use uuid::Uuid;
 
-    use super::{compare_artifact_dependencies, compare_tool_dependencies};
+    use super::{
+        compare_artifact_dependencies, compare_tool_dependencies,
+        target_session_requiring_authorization,
+    };
+
+    #[test]
+    fn run_admission_never_attaches_an_agent_loop_target_to_a_named_session() {
+        // Pins: an agent-loop target payload cannot carry a session at all, so a
+        // wire payload naming one attaches nothing, while an execution-template
+        // session is still surfaced for authorization before the admission write.
+        let session_id = uuid::Uuid::now_v7();
+        assert_eq!(
+            target_session_requiring_authorization(Some(&serde_json::json!({
+                "kind": "agent_loop",
+                "prompt": "continue this production conversation",
+                "session_id": session_id,
+                "model": "gpt-5.1",
+                "attachments": [],
+            }))),
+            None,
+            "an agent-loop target must never resolve a caller-named session"
+        );
+
+        assert_eq!(
+            target_session_requiring_authorization(Some(&serde_json::json!({
+                "kind": "execution_template",
+                "template": {
+                    "skill_ref": "skill://durable-report",
+                    "revision_uid": uuid::Uuid::now_v7(),
+                },
+                "objective": "produce the durable report",
+                "input": {},
+                "session_id": session_id,
+                "idempotency_key": serde_json::Value::Null,
+            }))),
+            Some(moa_core::types::identifiers::SessionId(session_id))
+        );
+
+        assert_eq!(target_session_requiring_authorization(None), None);
+    }
 
     #[test]
     fn agent_revision_compare_reports_exact_dependency_deltas() {

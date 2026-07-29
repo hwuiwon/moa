@@ -20,10 +20,6 @@ name = "moa-orchestrator-bin"
 path = "src/main.rs"
 
 [[test]]
-name = "eval_service"
-path = "tests/eval_service.rs"
-
-[[test]]
 name = "agent_revision_simulation_db_memory"
 path = "tests/agent_revision_simulation_db_memory.rs"
 

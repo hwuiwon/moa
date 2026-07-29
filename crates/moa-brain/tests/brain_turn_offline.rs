@@ -1133,7 +1133,10 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
 }
 
 #[tokio::test]
-async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
+async fn run_brain_turn_treats_zero_budget_as_no_spend_allowed() {
+    // Pins: a zero daily tenant budget is never "unlimited". Configuration
+    // validation rejects zero, and if a zero ever reaches the runtime it must
+    // stop the turn instead of disabling enforcement.
     let session = SessionMeta {
         id: SessionId::new(),
         tenant_id: test_tenant_id(),
@@ -1175,9 +1178,9 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
     let mut config = MoaConfig::default();
     config.budgets.daily_tenant_cents = 0;
     let pipeline = build_no_memory_test_pipeline(&config, store.clone());
-    let llm = Arc::new(CapturingTextLlmProvider::new("still runs"));
+    let llm = Arc::new(CapturingTextLlmProvider::new("should not run"));
 
-    let result = run_brain_turn(BrainTurnRequest {
+    let error = run_brain_turn(BrainTurnRequest {
         identity: test_identity(session.tenant_id),
         session_id: session.id,
         session_store: store.clone(),
@@ -1186,10 +1189,15 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
         tool_router: None,
     })
     .await
-    .expect("unlimited budget should allow the turn");
+    .expect_err("zero budget must stop the turn");
+    match error {
+        moa_core::error::MoaError::BudgetExhausted(message) => {
+            assert!(message.contains("Daily tenant budget exhausted"));
+        }
+        other => panic!("expected budget exhaustion, got {other:?}"),
+    }
 
-    assert_eq!(result, TurnResult::Complete);
-    assert_eq!(llm.requests.lock().await.len(), 1);
+    assert!(llm.requests.lock().await.is_empty());
 }
 
 #[tokio::test]

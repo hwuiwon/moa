@@ -7,10 +7,12 @@ use moa_core::shell::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 use moa_core::{
     error::MoaError, error::Result, types::action_policy::ActionPolicyEffect,
     types::action_policy::ActionPolicyRule, types::action_policy::ActionRuleScope,
-    types::contact::ContactId, types::identifiers::TenantId, types::identifiers::UserId,
-    types::session::SessionMeta, types::tools::ActionPolicyDecisionSource,
-    types::tools::ToolPolicyInput,
+    types::action_policy::CallOrigin, types::contact::ContactId, types::identifiers::TenantId,
+    types::identifiers::UserId, types::security::ToolCapabilityId, types::session::SessionMeta,
+    types::tools::ActionPolicyDecisionSource, types::tools::ToolPolicyInput,
 };
+
+use crate::call_origin::admit_capability_for_origin;
 
 /// Persistent action-policy rule storage used by policy-aware tool routing.
 #[async_trait]
@@ -43,6 +45,14 @@ pub struct ActionPolicyContext {
     pub tenant_id: TenantId,
     /// Contact-associated storage key for contact-local rules.
     pub contact_id: Option<ContactId>,
+    /// Provenance class of the runtime that issued the call.
+    ///
+    /// Seeded from the session that owns the call, because a trial-owned session
+    /// is the durable statement that its traffic is eval traffic — the router
+    /// that dispatches it is shared process-wide and cannot tell the two apart
+    /// on its own. A caller that also serves a non-production runtime narrows
+    /// this further with [`Self::with_origin`], which can only tighten.
+    pub origin: CallOrigin,
 }
 
 impl ActionPolicyContext {
@@ -51,7 +61,20 @@ impl ActionPolicyContext {
         Self {
             tenant_id: session.tenant_id,
             contact_id: session.contact.as_ref().map(|contact| contact.contact_id),
+            origin: session.call_origin,
         }
+    }
+
+    /// Narrows the provenance class of the runtime issuing these calls.
+    ///
+    /// The supplied origin composes with the session's own via
+    /// [`CallOrigin::most_restrictive`], so a production-origin router leaves a
+    /// trial-owned session fenced and a trial-origin router fences an ordinary
+    /// session. Neither can hand back a capability the other refused.
+    #[must_use]
+    pub fn with_origin(mut self, origin: CallOrigin) -> Self {
+        self.origin = self.origin.most_restrictive(origin);
+        self
     }
 }
 
@@ -138,12 +161,23 @@ impl ActionPolicies {
     }
 
     /// Evaluates a tool invocation using persistent rules, config defaults, and tool metadata.
+    ///
+    /// `capability` is the invoked tool's canonical capability identity, taken
+    /// from the registry rather than from the caller. It is required because the
+    /// first thing this evaluates is not a rule at all: a capability the calling
+    /// origin may not hold is refused outright with
+    /// [`MoaError::PermissionDenied`], before any rule, deployment default, or
+    /// tool effect is consulted. Nothing below can grant it back, which is the
+    /// point — an experiment trial must not be able to acquire a production
+    /// connector through a tenant rule that predates the trial.
     pub fn check(
         &self,
         input: &ToolPolicyInput,
+        capability: &ToolCapabilityId,
         ctx: &ActionPolicyContext,
         rules: &[ActionPolicyRule],
     ) -> Result<ActionPolicyCheck> {
+        admit_capability_for_origin(ctx.origin, capability, input.action_class)?;
         validate_action_policy_rules(rules)?;
 
         let mut matched_rule: Option<ActionPolicyRule> = None;
@@ -429,9 +463,18 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ActionPolicies, ActionPolicyContext, ActionPolicyDecisionSource, glob_match,
-        parse_and_match_command, validate_action_policy_rule,
+        ActionPolicies, ActionPolicyContext, ActionPolicyDecisionSource, ToolCapabilityId,
+        glob_match, parse_and_match_command, validate_action_policy_rule,
     };
+
+    /// A sandbox capability identity for cases about rules rather than origin.
+    ///
+    /// Every case in this module evaluates production traffic, where origin
+    /// admission is a no-op; the capability kind only decides admission for a
+    /// non-production origin, which `call_origin` covers directly.
+    fn hand_capability() -> ToolCapabilityId {
+        ToolCapabilityId::hand("tool")
+    }
 
     fn tenant_id() -> TenantId {
         TenantId::from(Uuid::from_u128(42))
@@ -491,6 +534,7 @@ mod tests {
                     default_effect: ActionPolicyEffect::Allow,
                     action_class: moa_core::types::action_policy::ActionClass::Read,
                 },
+                &hand_capability(),
                 &ctx,
                 &[],
             )
@@ -505,6 +549,7 @@ mod tests {
                     default_effect: ActionPolicyEffect::Allow,
                     action_class: moa_core::types::action_policy::ActionClass::CommandExecution,
                 },
+                &hand_capability(),
                 &ctx,
                 &[],
             )
@@ -542,6 +587,7 @@ mod tests {
                     default_effect: ActionPolicyEffect::Allow,
                     action_class: moa_core::types::action_policy::ActionClass::LocalWrite,
                 },
+                &hand_capability(),
                 &ctx,
                 &rules,
             )
@@ -596,6 +642,7 @@ mod tests {
                     default_effect: ActionPolicyEffect::Allow,
                     action_class: moa_core::types::action_policy::ActionClass::LocalWrite,
                 },
+                &hand_capability(),
                 &ctx,
                 &[rule],
             )
@@ -639,6 +686,7 @@ mod tests {
                     default_effect: ActionPolicyEffect::Allow,
                     action_class: moa_core::types::action_policy::ActionClass::CommandExecution,
                 },
+                &hand_capability(),
                 &ctx,
                 &[rule],
             )
@@ -696,6 +744,7 @@ mod tests {
                     default_effect: ActionPolicyEffect::Allow,
                     action_class: moa_core::types::action_policy::ActionClass::LocalWrite,
                 },
+                &hand_capability(),
                 &ctx,
                 &[],
             )
@@ -751,6 +800,7 @@ mod tests {
                     default_effect: ActionPolicyEffect::Allow,
                     action_class: moa_core::types::action_policy::ActionClass::CommandExecution,
                 },
+                &hand_capability(),
                 &ctx,
                 &rules,
             )
@@ -797,6 +847,7 @@ mod tests {
         let other_check = policies
             .check(
                 &input,
+                &hand_capability(),
                 &ActionPolicyContext::from_session(&other_session),
                 std::slice::from_ref(&rule),
             )
@@ -812,6 +863,7 @@ mod tests {
         let target_check = policies
             .check(
                 &input,
+                &hand_capability(),
                 &ActionPolicyContext::from_session(&target_session),
                 &[rule],
             )
@@ -849,6 +901,7 @@ mod tests {
         let peer_check = policies
             .check(
                 &input,
+                &hand_capability(),
                 &ActionPolicyContext::from_session(&contact_session(other_contact_id())),
                 std::slice::from_ref(&rule),
             )
@@ -859,6 +912,7 @@ mod tests {
         let target_check = policies
             .check(
                 &input,
+                &hand_capability(),
                 &ActionPolicyContext::from_session(&contact_session(contact_id())),
                 &[rule],
             )
@@ -887,7 +941,7 @@ mod tests {
         };
         assert_eq!(
             admin_review_policy
-                .check(&input, &ctx, &[])
+                .check(&input, &hand_capability(), &ctx, &[])
                 .expect("policy check")
                 .effect,
             ActionPolicyEffect::AdminReview
@@ -904,7 +958,7 @@ mod tests {
         };
         assert_eq!(
             deny_policy
-                .check(&tool_admin_review, &ctx, &[])
+                .check(&tool_admin_review, &hand_capability(), &ctx, &[])
                 .expect("policy check")
                 .effect,
             ActionPolicyEffect::Deny
@@ -942,6 +996,7 @@ mod tests {
                     default_effect: ActionPolicyEffect::Allow,
                     action_class: moa_core::types::action_policy::ActionClass::CommandExecution,
                 },
+                &hand_capability(),
                 &ctx,
                 &[allow_rule],
             )
@@ -996,6 +1051,7 @@ mod tests {
         let check = deny_default_policies()
             .check(
                 &bash_input("git status", ActionPolicyEffect::Allow),
+                &hand_capability(),
                 &ActionPolicyContext::from_session(&session()),
                 &[],
             )
@@ -1017,6 +1073,7 @@ mod tests {
         let granted = policies
             .check(
                 &bash_input("git status", ActionPolicyEffect::Allow),
+                &hand_capability(),
                 &ActionPolicyContext::from_session(&session()),
                 std::slice::from_ref(&rule),
             )
@@ -1027,6 +1084,7 @@ mod tests {
         let other_operation = policies
             .check(
                 &bash_input("git push", ActionPolicyEffect::Allow),
+                &hand_capability(),
                 &ActionPolicyContext::from_session(&session()),
                 std::slice::from_ref(&rule),
             )
@@ -1045,6 +1103,7 @@ mod tests {
         let other_tenant = policies
             .check(
                 &bash_input("git status", ActionPolicyEffect::Allow),
+                &hand_capability(),
                 &ActionPolicyContext::from_session(&other_tenant_session),
                 &[rule],
             )
@@ -1067,6 +1126,7 @@ mod tests {
         let check = policies
             .check(
                 &bash_input("deploy production", ActionPolicyEffect::Deny),
+                &hand_capability(),
                 &ActionPolicyContext::from_session(&session()),
                 std::slice::from_ref(&rule),
             )
@@ -1090,6 +1150,7 @@ mod tests {
         let check = policies
             .check(
                 &bash_input("deploy production", ActionPolicyEffect::AdminReview),
+                &hand_capability(),
                 &ActionPolicyContext::from_session(&session()),
                 std::slice::from_ref(&rule),
             )
@@ -1104,6 +1165,7 @@ mod tests {
         let ungranted = policies
             .check(
                 &bash_input("publish production", ActionPolicyEffect::AdminReview),
+                &hand_capability(),
                 &ActionPolicyContext::from_session(&session()),
                 &[rule],
             )
@@ -1127,6 +1189,7 @@ mod tests {
         let check = policies
             .check(
                 &bash_input("git status", ActionPolicyEffect::Allow),
+                &hand_capability(),
                 &ActionPolicyContext::from_session(&session()),
                 &[bash_rule(
                     tenant_id(),

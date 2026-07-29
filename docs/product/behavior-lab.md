@@ -4,9 +4,10 @@ _Product boundary for behavior-lab artifacts, experiments, analytics, and live s
 
 Behavior Lab is the product surface for testing how target agents or execution
 runs behave under simulated users, profiles, data bundles, and scenarios.
-It is not the regression-eval system. Regression evals remain in `moa-eval`;
-the `Eval` service is compiled into the orchestrator as an internal-only
-control-plane surface, with hosted run status persisted in Postgres.
+Behavior Lab is the only tenant evaluation product. It is not the
+regression-eval system: regression evals remain in `moa-eval`, which is a
+platform-only library, CLI, and `xtask` surface with no hosted service, no
+tenant MCP tool, and no public route.
 
 ## Product Boundary
 
@@ -39,16 +40,13 @@ The public edge routes are:
 | `POST /v1/agent-simulations` | `Experiments/run_agent_revision_simulation` |
 | `POST /v1/agent-simulations/{run_uid}/compare` | `Experiments/compare_agent_revision_simulation` |
 
-There is no default public `/v1/evals/*` product route and no public
+There is no public `/v1/evals/*` product route and no public
 `/v1/experiments/run` alias.
 
 Experiment execution is gated by the tenant operator/admin relation. Workspace
 admins are represented in OpenFGA as `workspace#admin`, inherited into each
 linked tenant's `tenant#admin`; the tenant `operator` relation includes tenant
-admins. Internal hosted eval execution uses the same tenant operator/admin
-admission check for `Eval/run`, and the detached `Eval/execute_run` worker
-entrypoint additionally requires the server-issued dispatch token created during
-that admission step.
+admins.
 Behavior Lab dashboards use `POST /v1/artifacts/list` and
 `POST /v1/artifacts/export` for experiment plan artifact inspection, and direct
 analytics reads through `GET /v1/analytics/catalog` and
@@ -105,11 +103,9 @@ stop reason, and trace ID.
 
 Targets are `agent_loop` or `execution_run`. Agent-loop targets enter normal
 `respond`/`act`/`run` routing through `TurnExecution`. Execution-run targets pin
-either a published skill's `execution_plan` template or a compiled plan ID and
-use the same `ExecutionRun`/`ExecutionTask` runtime as user work. Trials retain
-the source kind/reference and canonical plan hash so a template and a one-off
-compiled snapshot remain distinguishable. Live trials never publish generated
-plans or mutate skill revisions.
+a published skill's exact `execution_plan` template revision and use the same
+`ExecutionRun`/`ExecutionTask` runtime as user work. Live trials never publish
+generated plans or mutate skill revisions.
 
 Score rows land in `analytics.scores`. `Experiments/scores` returns run score
 summaries plus trial rollups and scenario breakdowns. `Experiments/compare`
@@ -130,9 +126,9 @@ as live behavior.
 The `/mcp` protected resource is a thin adapter over `Artifacts`,
 `Experiments`, direct edge analytics reads, `Skills`, and other typed services.
 It does not own Behavior Lab domain logic, bypass service authorization, or
-publish public `/v1/evals/*` semantics. Its eval tools are explicitly internal
-and operator/admin-authorized. Eval suites remain caller-supplied inline TOML;
-persistent Behavior Lab plans remain generic `experiment_plan` artifacts.
+publish `/v1/evals/*` semantics. It advertises no eval tools at all; the
+regression harness is unreachable from `/mcp`. Persistent Behavior Lab plans
+remain generic `experiment_plan` artifacts.
 
 ## Verification Commands
 

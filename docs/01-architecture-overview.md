@@ -348,7 +348,7 @@ Core production bindings:
   scheduling index for the action reviews their own turns raise.
 - Services: `ActionReviews`, `AgentDefinitions`, `Agents`,
   `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`,
-  `Contacts`, `Eval`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`,
+  `Contacts`, `Execution`, `Experiments`, `GraphMemoryMaint`, `Knowledge`,
   `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`,
   `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `ActionPolicy`
 - Workflows: `ExecutionRun`, `ExecutionTask`, `KnowledgeIndexRebuild`,
@@ -561,9 +561,12 @@ without a durable record of why. Operational setup is documented in
 ## Eval, Experiments, And Insights
 
 Lineage records are captured through the hot-path `LineageHandle` bridge and
-written asynchronously to `analytics.turn_lineage`. Eval, online-judge, and
-human-review scores use the same sink via `LineageEvent::Eval(ScoreRecord)` and
-land in `analytics.scores`, keyed by turn, session, or dataset replay item.
+written asynchronously to `analytics.turn_lineage`. Experiment, online-judge,
+and human-review scores use the same sink via `LineageEvent::Eval(ScoreRecord)`
+and land in `analytics.scores`, keyed by turn, session, or dataset replay item.
+`analytics.score_run` and `analytics.scores` are the durable score lineage used
+by Behavior Lab. The platform regression harness produces the same typed
+`ScoreRecord` contract for comparison, but does not itself persist those rows.
 
 Acceptance is owned by Postgres. `record_durable_batch` commits the whole batch
 to `analytics.lineage_journal` and returns only after that commit, so a record
@@ -591,23 +594,19 @@ configuration of such a path was ever correct.
 Regression evals, live behavior experiments, and analytics insights are
 separate surfaces:
 
-- Regression eval: `moa-eval` owns deterministic datasets, replay plans,
-  CI/nightly regression runs, and score comparisons. In default cloud builds
-  the public edge does not translate `/v1/evals/*`. The `Eval` service is
-  compiled into the orchestrator as an internal control-plane surface; hosted
-  run status is stored in `analytics.eval_run_status` so it is not a Restate
-  workflow-state mirror. Tenant-owned plan, run, replay, dataset, score, and
-  compare handlers require the tenant operator relation, which includes tenant
-  admins in the OpenFGA model. The detached `Eval/execute_run` worker entrypoint
-  is not caller-authorized directly; it must carry the dispatch token created
-  by the authorized `Eval/run` admission path before it can return or mutate run
-  data. Durable execution honesty is evaluated from the runtime's own typed
-  projection and task rows as documented in
+- Regression eval: `moa-eval` is a platform-only library, CLI, and `xtask`
+  surface used by CI, nightly jobs, explicit live lanes, and the internal
+  skill-regression gate. It owns deterministic datasets, replay plans,
+  regression runs, and score comparisons. It is not a tenant product: there is
+  no `Eval` Restate service, no tenant eval MCP tool, and the public edge does
+  not translate `/v1/evals/*`. Durable execution honesty is evaluated from the
+  runtime's own typed projection and task rows as documented in
   [Execution Honesty Evaluation](eval/execution-honesty.md).
 - Live behavior experiments: `moa-experiments` owns the typed domain model and
   storage repository; the `Experiments` service accepts and tracks runs against
-  production execution paths. Agent-loop targets create or reuse `Session`
-  state and queue messages through normal `Session` and `TurnExecution` routing.
+  production execution paths. Agent-loop targets always create eval-owned
+  `Session` state and queue messages through normal `Session` and
+  `TurnExecution` routing.
   Execution targets invoke a published skill's exact pinned `execution_plan`
   through the same origin-bound planning/admission path, start the common
   `ExecutionRun`, and link its `execution_run_uid`. The `moa.experiment_run` row is the experiment ledger and
@@ -674,8 +673,7 @@ candidate admits; nothing on this surface can promote one.
 
 Future MCP support is a transport adapter over product/default services such as
 `Experiments`, direct edge analytics/lineage reads, `Skills`, and other typed
-surfaces. If internal eval is exposed through MCP, it must remain explicitly
-internal and operator/admin-authorized. MCP must not publish public
+surfaces. Regression eval is never exposed through MCP: MCP must not publish
 `/v1/evals/*` semantics, own experiment, eval, analytics, learning, or lineage
 domain models, or bypass service-level authorization.
 

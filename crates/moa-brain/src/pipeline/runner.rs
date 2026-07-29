@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use moa_config::ContextSnapshotConfig;
+use moa_config::{BudgetConfig, ContextSnapshotConfig};
 use moa_core::{
     error::Result, traits::ContextProcessor, types::context::MessageRole,
     types::context::ProcessorOutput, types::context::WorkingContext,
@@ -31,12 +31,21 @@ pub struct ContextPipeline {
 }
 
 impl ContextPipeline {
-    /// Creates a pipeline from an ordered list of processors.
+    /// Creates a pipeline from an ordered list of processors, using the default
+    /// daily tenant budget. Zero is never a valid budget, so the default budget
+    /// is used rather than a sentinel that would disable enforcement.
     pub fn new(stages: Vec<Box<dyn ContextProcessor>>) -> Self {
-        Self::with_runtime_limits(stages, 0, ContextSnapshotConfig::default())
+        Self::with_runtime_limits(
+            stages,
+            BudgetConfig::default().daily_tenant_cents,
+            ContextSnapshotConfig::default(),
+        )
     }
 
     /// Creates a pipeline from an ordered list of processors and runtime limits.
+    ///
+    /// `daily_tenant_budget_cents` is enforced verbatim; configuration
+    /// validation rejects `0`, and `0` here means "no spend allowed".
     pub fn with_runtime_limits(
         stages: Vec<Box<dyn ContextProcessor>>,
         daily_tenant_budget_cents: u32,

@@ -19,7 +19,6 @@ fn agent_loop_target_round_trips_through_public_model_offline() {
     let session_id = SessionId::new();
     let target = ExperimentTarget::AgentLoop {
         prompt: "Check whether the answer cites the provided source.".to_string(),
-        session_id: Some(session_id),
         agent: None,
         model: ModelId::new("gpt-5.1"),
         attachments: vec![Attachment {

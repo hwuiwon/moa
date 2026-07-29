@@ -8,9 +8,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
-/// Score-run source label for hosted eval replay parents.
-pub const SCORE_RUN_SOURCE_EVAL_REPLAY: &str = "eval_replay";
-
 /// Tenant-scoped score summary SQL used by score-reader services.
 pub(crate) const SCORES_BY_RUN_SQL: &str = r#"
 SELECT name,
