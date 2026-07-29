@@ -1339,9 +1339,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_buffered_propagates_reviewed_provider_identity_to_mcp_request() {
-        // Pins: after action-review reconstruction preserves provider_tool_use_id, the real
-        // ToolExecutor -> ToolInvocation -> MCP dispatch path emits that identity in `_meta`.
+    async fn execute_buffered_uses_durable_moa_identity_for_reviewed_mcp_request() {
+        // Pins: reviewed execution emits its fresh durable MOA tool-call identity in MCP
+        // `_meta`; the provider transcript identity is not reused for the new invocation.
+        const TOOL_CALL_ID: &str = "00000000-0000-0000-0000-00000000beef";
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind fake MCP server");
@@ -1377,7 +1378,7 @@ mod tests {
                                 "name": "reviewed_lookup",
                                 "arguments": {"item_key": "AAPL-10K"},
                                 "_meta": {
-                                    "moa/toolInvocationId": "provider-reviewed-call-1"
+                                    "moa/toolInvocationId": TOOL_CALL_ID
                                 }
                             })
                         );
@@ -1429,6 +1430,9 @@ mod tests {
             "reviewed-mcp",
             "reviewed_lookup",
         ));
+        request.tool_call_id = ToolCallId(
+            Uuid::parse_str(TOOL_CALL_ID).expect("reviewed tool-call fixture UUID should parse"),
+        );
         request.provider_tool_use_id = Some("provider-reviewed-call-1".to_string());
         request.input = serde_json::json!({"item_key": "AAPL-10K"});
 

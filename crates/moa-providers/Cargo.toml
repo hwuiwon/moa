@@ -19,6 +19,7 @@ moa-core = { workspace = true }
 moa-config = { workspace = true }
 moa-dlp = { workspace = true }
 moa-memory-pii = { workspace = true }
+moa-runtime-store.workspace = true
 moa-observability = { workspace = true }
 eventsource-stream.workspace = true
 futures-util.workspace = true

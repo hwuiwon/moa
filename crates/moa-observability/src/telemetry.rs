@@ -148,7 +148,13 @@ pub fn init_observability(
             }
             _ => &config.metrics,
         };
-        let meter_provider = init_metrics(metrics, otlp_base, otlp_protocol, resource)?;
+        let meter_provider = init_metrics(
+            metrics,
+            otlp_base,
+            otlp_protocol,
+            &config.observability.otlp_headers,
+            resource,
+        )?;
         return Ok(TelemetryGuard {
             provider: None,
             meter_provider,
@@ -170,7 +176,13 @@ pub fn init_observability(
         .with(console_layer)
         .with(otel_layer)
         .try_init();
-    let meter_provider = init_metrics(&config.metrics, otlp_base, otlp_protocol, resource)?;
+    let meter_provider = init_metrics(
+        &config.metrics,
+        otlp_base,
+        otlp_protocol,
+        &config.observability.otlp_headers,
+        resource,
+    )?;
 
     Ok(TelemetryGuard {
         provider: Some(provider),
@@ -231,6 +243,18 @@ fn build_span_exporter(config: &ObservabilityConfig) -> Result<SpanExporter> {
 }
 
 fn build_resource(config: &ObservabilityConfig) -> Resource {
+    build_resource_with_instance(
+        config,
+        std::env::var("MOA_SERVICE_INSTANCE_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+    )
+}
+
+fn build_resource_with_instance(
+    config: &ObservabilityConfig,
+    service_instance_id: Option<String>,
+) -> Resource {
     let mut attributes = Vec::new();
 
     if let Some(environment) = &config.environment {
@@ -238,6 +262,9 @@ fn build_resource(config: &ObservabilityConfig) -> Resource {
     }
     if let Some(release) = &config.release {
         attributes.push(KeyValue::new("service.version", release.clone()));
+    }
+    if let Some(service_instance_id) = service_instance_id {
+        attributes.push(KeyValue::new("service.instance.id", service_instance_id));
     }
 
     Resource::builder()
@@ -262,7 +289,10 @@ fn build_sampler(sample_rate: f64) -> Sampler {
     }
 }
 
-fn build_grpc_metadata(headers: &std::collections::HashMap<String, String>) -> Result<MetadataMap> {
+/// Builds validated gRPC metadata shared by trace and metric OTLP exporters.
+pub(crate) fn build_grpc_metadata(
+    headers: &std::collections::HashMap<String, String>,
+) -> Result<MetadataMap> {
     Ok(MetadataMap::from_headers(build_http_headers(headers)?))
 }
 
@@ -287,13 +317,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resource_includes_environment_and_release() {
-        let resource = build_resource(&ObservabilityConfig {
-            service_name: "moa".to_string(),
-            environment: Some("production".to_string()),
-            release: Some("v1.2.3".to_string()),
-            ..ObservabilityConfig::default()
-        });
+    fn resource_shares_environment_release_and_instance_identity() {
+        // Pins: traces and metrics clone one resource whose instance identity
+        // separates otherwise identical replicas in the telemetry backend.
+        let resource = build_resource_with_instance(
+            &ObservabilityConfig {
+                service_name: "moa".to_string(),
+                environment: Some("production".to_string()),
+                release: Some("v1.2.3".to_string()),
+                ..ObservabilityConfig::default()
+            },
+            Some("pod-uid-a".to_string()),
+        );
 
         assert_eq!(
             resource.get(&Key::new("service.name")),
@@ -306,6 +341,10 @@ mod tests {
         assert_eq!(
             resource.get(&Key::new("service.version")),
             Some(Value::from("v1.2.3"))
+        );
+        assert_eq!(
+            resource.get(&Key::new("service.instance.id")),
+            Some(Value::from("pod-uid-a"))
         );
     }
 

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use moa_config::MoaConfig;
-use moa_core::{error::MoaError, error::Result};
+use moa_core::{error::MoaError, error::Result, traits::RuntimeCacheStore};
 
 use super::cohere::COHERE_DEFAULT_RERANK_MODEL;
 #[cfg(test)]
@@ -73,12 +73,23 @@ impl RerankerProviderKind {
 }
 
 /// Builds the configured reranker for graph-memory retrieval.
-pub fn build_reranker_from_config(config: &MoaConfig) -> Result<ConfiguredReranker> {
+pub fn build_reranker_from_config(
+    config: &MoaConfig,
+    runtime_cache: Option<Arc<dyn RuntimeCacheStore>>,
+) -> Result<ConfiguredReranker> {
+    let coordination = ProviderCoordination::from_config(config, runtime_cache)?;
+    build_reranker(config, &coordination)
+}
+
+fn build_reranker(
+    config: &MoaConfig,
+    coordination: &ProviderCoordination,
+) -> Result<ConfiguredReranker> {
     let Some(resolved) = resolve_reranker_model(&config.memory.retrieval.reranker_model)? else {
         return Ok(ConfiguredReranker::noop());
     };
 
-    match build_provider(resolved.provider, config) {
+    match build_provider(resolved.provider, config, coordination) {
         Ok(reranker) => Ok(ConfiguredReranker {
             reranker,
             model: resolved.model,
@@ -118,7 +129,11 @@ fn resolve_reranker_model(model_name: &str) -> Result<Option<ResolvedRerankerPro
     )))
 }
 
-fn build_provider(provider: RerankerProviderKind, config: &MoaConfig) -> Result<Arc<dyn Reranker>> {
+fn build_provider(
+    provider: RerankerProviderKind,
+    config: &MoaConfig,
+    coordination: &ProviderCoordination,
+) -> Result<Arc<dyn Reranker>> {
     match provider {
         RerankerProviderKind::Cohere => {
             ensure_no_zeroentropy_latency(config, provider)?;
@@ -126,7 +141,6 @@ fn build_provider(provider: RerankerProviderKind, config: &MoaConfig) -> Result<
                 "MOA_COHERE_API_KEY",
                 &config.providers.cohere.api_key,
             )?;
-            let coordination = ProviderCoordination::from_config(config)?;
             let mut reranker = CohereReranker::new(api_key.clone())?;
             if let Some(pacer) = rerank_pacer_override(config.providers.cohere.max_requests_per_min)
             {
@@ -134,7 +148,7 @@ fn build_provider(provider: RerankerProviderKind, config: &MoaConfig) -> Result<
             }
             // Shared pacing is attached after any override so the coordinated
             // limits are the effective ones.
-            reranker = reranker.with_shared_pacing(&coordination, COHERE_PROVIDER_NAME, &api_key);
+            reranker = reranker.with_shared_pacing(coordination, COHERE_PROVIDER_NAME, &api_key);
             reranker = reranker.with_limiter(coordination.limiter(
                 CallKind::Rerank,
                 COHERE_PROVIDER_NAME,
@@ -156,7 +170,6 @@ fn build_provider(provider: RerankerProviderKind, config: &MoaConfig) -> Result<
                 .filter(|value| !value.trim().is_empty())
                 .map(ZeroEntropyRerankLatency::parse)
                 .transpose()?;
-            let coordination = ProviderCoordination::from_config(config)?;
             let mut reranker = ZeroEntropyReranker::new(api_key.clone())?.with_latency(latency);
             if let Some(pacer) =
                 rerank_pacer_override(config.providers.zeroentropy.max_requests_per_min)
@@ -166,7 +179,7 @@ fn build_provider(provider: RerankerProviderKind, config: &MoaConfig) -> Result<
             // Shared pacing is attached after any override so the coordinated
             // limits are the effective ones.
             reranker =
-                reranker.with_shared_pacing(&coordination, ZEROENTROPY_PROVIDER_NAME, &api_key);
+                reranker.with_shared_pacing(coordination, ZEROENTROPY_PROVIDER_NAME, &api_key);
             reranker = reranker.with_limiter(coordination.limiter(
                 CallKind::Rerank,
                 ZEROENTROPY_PROVIDER_NAME,
@@ -247,7 +260,7 @@ mod tests {
         config.providers.cohere.api_key = "test-key".to_string();
 
         let configured =
-            build_reranker_from_config(&config).expect("cohere reranker config should build");
+            build_reranker_from_config(&config, None).expect("cohere reranker config should build");
 
         assert_eq!(configured.provider, "cohere");
         assert_eq!(configured.model, COHERE_DEFAULT_RERANK_MODEL);
@@ -261,8 +274,8 @@ mod tests {
         config.memory.retrieval.reranker_latency = Some("fast".to_string());
         config.providers.zeroentropy.api_key = "test-key".to_string();
 
-        let configured =
-            build_reranker_from_config(&config).expect("zeroentropy reranker config should build");
+        let configured = build_reranker_from_config(&config, None)
+            .expect("zeroentropy reranker config should build");
 
         assert_eq!(configured.provider, "zeroentropy");
         assert_eq!(configured.model, ZEROENTROPY_DEFAULT_RERANK_MODEL);
@@ -274,7 +287,7 @@ mod tests {
         let mut config = MoaConfig::default();
         config.memory.retrieval.reranker_model = "zeroentropy:zerank-2".to_string();
 
-        let configured = build_reranker_from_config(&config)
+        let configured = build_reranker_from_config(&config, None)
             .expect("missing credential should not fail startup");
 
         assert_eq!(configured.provider, "noop");
@@ -286,7 +299,8 @@ mod tests {
         // Pins: the runtime always enables the reranker slot, so the default backend must be no-op.
         let config = MoaConfig::default();
 
-        let configured = build_reranker_from_config(&config).expect("noop config should build");
+        let configured =
+            build_reranker_from_config(&config, None).expect("noop config should build");
 
         assert_eq!(configured.provider, "noop");
         assert_eq!(configured.model, "noop");
@@ -300,7 +314,7 @@ mod tests {
         config.memory.retrieval.reranker_latency = Some("fast".to_string());
         config.providers.cohere.api_key = "test-key".to_string();
 
-        let error = match build_reranker_from_config(&config) {
+        let error = match build_reranker_from_config(&config, None) {
             Ok(_) => panic!("latency should be rejected"),
             Err(error) => error,
         };

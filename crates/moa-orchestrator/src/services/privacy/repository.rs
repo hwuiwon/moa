@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use chrono::{TimeZone, Utc};
 use moa_core::{
     types::contact::ContactId, types::identifiers::StoragePartitionId, types::identifiers::UserId,
+    types::memory::RlsContext,
 };
+use moa_db::ScopedConn;
 use moa_wire::privacy::{ParsedPrivacySubjectId, contact_privacy_subject_string};
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use serde_json::Value;
@@ -511,22 +513,18 @@ pub async fn collect_privacy_export_data_sections(
     );
     counts.insert("embeddings", collect_embeddings(ctx, export_dir).await?);
     counts.insert("skills", collect_skills(ctx, export_dir).await?);
-    counts.insert(
-        "learning_candidates",
-        collect_learning_candidates(ctx, export_dir).await?,
-    );
-    counts.insert(
-        "learning_entries",
-        collect_learning_entries(ctx, export_dir).await?,
-    );
-    counts.insert(
-        "learning_decisions",
-        collect_learning_decisions(ctx, export_dir).await?,
-    );
-    counts.insert(
-        "erasure_decisions",
-        collect_erasure_decisions(ctx, export_dir).await?,
-    );
+    let (learning_candidates, learning_entries, learning_decisions, erasure_decisions) = tokio::try_join!(
+        collect_learning_candidates(ctx, export_dir),
+        collect_learning_entries(ctx, export_dir),
+        collect_learning_decisions(ctx, export_dir),
+        collect_erasure_decisions(ctx, export_dir),
+    )?;
+    counts.extend([
+        ("learning_candidates", learning_candidates),
+        ("learning_entries", learning_entries),
+        ("learning_decisions", learning_decisions),
+        ("erasure_decisions", erasure_decisions),
+    ]);
     Ok(counts)
 }
 
@@ -764,11 +762,18 @@ async fn collect_erasure_decisions(
     ctx: &PrivacyExportContext,
     export_dir: &Path,
 ) -> Result<usize, HandlerError> {
-    let mut tx = begin_audited_read(&ctx.pool).await?;
+    let mut tx = ScopedConn::begin_as_app(&ctx.pool, &RlsContext::tenant(ctx.tenant_id), true)
+        .await
+        .map_err(handler_error)?;
+    let subject_user_ids = ctx
+        .subjects
+        .iter()
+        .map(|subject| subject.user_id.clone())
+        .collect::<Vec<_>>();
     let rows = sqlx::query_scalar::<_, Value>(
         r#"
         SELECT jsonb_build_object(
-            'operation_ref', operation_ref,
+            'subject_user_id', subject_user_id,
             'attempt_id', attempt_id,
             'record_kind', record_kind,
             'record_id', record_id,
@@ -779,11 +784,13 @@ async fn collect_erasure_decisions(
         )
         FROM moa.privacy_erasure_record_decision
         WHERE tenant_id = $1
+          AND subject_user_id = ANY($2)
         ORDER BY decided_at, decision_uid
         "#,
     )
     .bind(ctx.tenant_id.0)
-    .fetch_all(&mut *tx)
+    .bind(&subject_user_ids)
+    .fetch_all(tx.as_mut())
     .await
     .map_err(handler_error)?;
     tx.commit().await.map_err(handler_error)?;

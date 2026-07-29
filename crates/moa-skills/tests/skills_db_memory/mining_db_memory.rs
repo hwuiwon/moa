@@ -80,20 +80,33 @@ async fn below_threshold_failures_file_nothing_db() {
 }
 
 #[tokio::test]
-async fn remining_bumps_open_candidate_instead_of_duplicating_db() {
-    // Pins: a later session re-observing the same pattern bumps the open candidate's
-    // occurrence evidence instead of filing a second review item.
+async fn concurrent_and_later_remining_keep_the_filed_candidate_immutable_db() {
+    // Pins: concurrent first filing creates exactly one immutable candidate, and
+    // a later re-observation neither duplicates nor rewrites it with evidence its
+    // typed sources do not name.
     let test_db = bootstrap_test_db().await.expect("bootstrap mining test db");
     let tenant_id = TenantId::new();
 
-    mine_and_file_session_failures(
-        test_db.store(),
-        tenant_id,
-        &durable_errors(&test_db, tenant_id, "bash", 3).await,
-        moa_test_support::fixtures::pg_now(),
-    )
-    .await
-    .expect("first mining pass");
+    let first_events = durable_errors(&test_db, tenant_id, "bash", 3).await;
+    let (left, right) = tokio::join!(
+        mine_and_file_session_failures(
+            test_db.store(),
+            tenant_id,
+            &first_events,
+            moa_test_support::fixtures::pg_now(),
+        ),
+        mine_and_file_session_failures(
+            test_db.store(),
+            tenant_id,
+            &first_events,
+            moa_test_support::fixtures::pg_now(),
+        ),
+    );
+    assert_eq!(
+        left.expect("left concurrent mining pass") + right.expect("right concurrent mining pass"),
+        1,
+        "the insert-only filing seam accepts exactly one concurrent writer"
+    );
     let applied = mine_and_file_session_failures(
         test_db.store(),
         tenant_id,
@@ -103,34 +116,22 @@ async fn remining_bumps_open_candidate_instead_of_duplicating_db() {
     .await
     .expect("second mining pass");
 
-    assert_eq!(applied, 1, "re-observation bumps the open candidate");
+    assert_eq!(applied, 0, "re-observation files no candidate mutation");
     let candidates = open_candidates(&test_db, tenant_id).await;
     assert_eq!(candidates.len(), 1, "no duplicate candidate rows");
-    let evaluation = candidates[0]
-        .evaluation_payload
-        .as_ref()
-        .expect("bump records fresh evidence");
-    assert_eq!(evaluation["occurrence_count"], 4);
+    assert_eq!(candidates[0].evaluation_payload, None);
+    assert_eq!(candidates[0].payload["pattern_occurrences"], 3);
+    assert_eq!(
+        candidates[0].sources.len(),
+        3,
+        "the candidate keeps exactly the typed sources it was filed with"
+    );
 }
 
 #[tokio::test]
 async fn a_dismissed_pattern_keeps_its_dismissal_when_the_failure_recurs_db() {
-    // Pins the boundary of what dismissal protects, as production actually behaves.
-    //
-    // A mined candidate's id is DETERMINISTIC in the tenant and pattern key, so a later
-    // pass over the same failure re-upserts the same row rather than creating a second
-    // one. The upsert deliberately omits `status` from its update set, so the reviewer's
-    // DISMISSAL SURVIVES — that is the load-bearing guarantee, and the reason the mining
-    // path can run unattended.
-    //
-    // Two things it does NOT protect, pinned here so a future change to either is
-    // visible rather than discovered: the reviewer's `status_reason` is overwritten by
-    // the pass's own description, and the pass reports the row as applied even though
-    // nothing reopened. Both are recorded as current behavior, not endorsed as design.
-    //
-    // (This replaces a test that claimed a mined candidate into `Evaluating`. That
-    // state is no longer reachable for an authoring kind — the database refuses the
-    // transition — so the old test asserted a shape production cannot produce.)
+    // Pins: recurrence never re-upserts a dismissed candidate. Both the terminal
+    // status and the reviewer's rationale remain immutable.
     let test_db = bootstrap_test_db().await.expect("bootstrap mining test db");
     let tenant_id = TenantId::new();
 
@@ -169,8 +170,8 @@ async fn a_dismissed_pattern_keeps_its_dismissal_when_the_failure_recurs_db() {
     .expect("re-mine after dismissal");
 
     assert_eq!(
-        applied, 1,
-        "the recurring failure is re-upserted and counted, though nothing reopens"
+        applied, 0,
+        "the recurring failure does not rewrite the candidate"
     );
     let reloaded = test_db
         .store()
@@ -187,11 +188,10 @@ async fn a_dismissed_pattern_keeps_its_dismissal_when_the_failure_recurs_db() {
         open_candidates(&test_db, tenant_id).await.is_empty(),
         "nothing returns to the authoring queue"
     );
-    assert_ne!(
+    assert_eq!(
         reloaded.status_reason.as_deref(),
         Some("not worth authoring"),
-        "current behavior: the pass overwrites the reviewer's reason with its own \
-         description, so the dismissal survives but the rationale for it does not"
+        "the recurrence pass preserves the reviewer's rationale"
     );
 }
 

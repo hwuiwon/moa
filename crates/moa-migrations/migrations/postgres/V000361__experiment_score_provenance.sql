@@ -45,8 +45,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS experiment_trial_score_identity_idx
 CREATE UNIQUE INDEX IF NOT EXISTS score_run_partition_identity_idx
     ON analytics.score_run (run_id, storage_partition_id);
 
+ALTER TABLE moa.experiment_trial
+    ADD COLUMN IF NOT EXISTS final_evidence_hash BYTEA;
+
+ALTER TABLE moa.experiment_run
+    ADD COLUMN IF NOT EXISTS cancel_signal JSONB;
+
+ALTER TABLE moa.experiment_trial
+    DROP CONSTRAINT IF EXISTS experiment_trial_final_evidence_hash_len;
+ALTER TABLE moa.experiment_trial
+    ADD CONSTRAINT experiment_trial_final_evidence_hash_len CHECK (
+        final_evidence_hash IS NULL OR octet_length(final_evidence_hash) = 32
+    );
+
 CREATE TABLE IF NOT EXISTS moa.experiment_score_provenance (
     score_id UUID PRIMARY KEY,
+    score_ts TIMESTAMPTZ NOT NULL,
     storage_partition_id TEXT NOT NULL,
     user_id TEXT,
     scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
@@ -91,6 +105,12 @@ CREATE TABLE IF NOT EXISTS moa.experiment_score_provenance (
     CONSTRAINT experiment_score_provenance_score_run_fkey
         FOREIGN KEY (score_run_id, storage_partition_id)
         REFERENCES analytics.score_run (run_id, storage_partition_id)
+        ON DELETE RESTRICT,
+    -- Bind provenance to the exact append-only score row. `score_id` alone is
+    -- not enough because analytics scores are keyed by `(score_id, ts)`.
+    CONSTRAINT experiment_score_provenance_score_fkey
+        FOREIGN KEY (score_id, score_ts)
+        REFERENCES analytics.scores (score_id, ts)
         ON DELETE RESTRICT
 );
 

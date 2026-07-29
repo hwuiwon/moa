@@ -1,8 +1,8 @@
 //! Shared score-run storage and score summary queries.
 
 use moa_core::{
-    types::action_policy::ActionRuleScope, types::identifiers::StoragePartitionId,
-    types::identifiers::TenantId,
+    types::action_policy::ActionRuleScope, types::experiments::ScorecardValueType,
+    types::identifiers::StoragePartitionId, types::identifiers::TenantId,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
@@ -76,6 +76,7 @@ SELECT score.score_id,
 FROM analytics.scores AS score
 JOIN moa.experiment_score_provenance AS provenance
   ON provenance.score_id = score.score_id
+ AND provenance.score_ts = score.ts
  AND provenance.storage_partition_id = score.storage_partition_id
 WHERE score.run_id = $1
   AND score.storage_partition_id = $2
@@ -110,6 +111,7 @@ SELECT score.score_id,
 FROM analytics.scores AS score
 JOIN moa.experiment_score_provenance AS provenance
   ON provenance.score_id = score.score_id
+ AND provenance.score_ts = score.ts
  AND provenance.storage_partition_id = score.storage_partition_id
  AND provenance.score_run_id = score.run_id
 WHERE provenance.experiment_run_uid = $1
@@ -125,6 +127,12 @@ pub enum Error {
     IntegerTooLarge {
         /// Field that overflowed.
         field: &'static str,
+    },
+    /// Durable storage contained an unknown score value type.
+    #[error("invalid score value type `{value}`")]
+    InvalidScoreValueType {
+        /// Unknown stored value.
+        value: String,
     },
     /// A score-run parent already exists with a different scope or source.
     #[error(
@@ -167,7 +175,7 @@ pub struct ScoreSummaryRow {
     /// Score name.
     pub name: String,
     /// Score value type.
-    pub value_type: String,
+    pub value_type: ScorecardValueType,
     /// Number of rows summarized.
     pub n: u64,
     /// Numeric mean or boolean true-rate, or `None` when every summarized value is NULL.
@@ -438,9 +446,11 @@ fn score_summary_row_from_row(row: &PgRow) -> Result<ScoreSummaryRow, Error> {
     let n: i64 = row.try_get("n")?;
     let numeric_mean: Option<f64> = row.try_get("numeric_mean")?;
     let boolean_rate: Option<f64> = row.try_get("boolean_rate")?;
+    let value_type: String = row.try_get("value_type")?;
     Ok(ScoreSummaryRow {
         name: row.try_get("name")?,
-        value_type: row.try_get("value_type")?,
+        value_type: ScorecardValueType::from_db(&value_type)
+            .ok_or(Error::InvalidScoreValueType { value: value_type })?,
         n: u64::try_from(n).map_err(|_| Error::IntegerTooLarge { field: "n" })?,
         mean_or_rate: numeric_mean.or(boolean_rate),
     })

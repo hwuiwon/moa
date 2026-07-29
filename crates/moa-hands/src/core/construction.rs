@@ -24,7 +24,10 @@ use moa_security::{
 use super::mcp_connections::TenantMcpCredentialOwners;
 use super::normalization::expand_local_path;
 use super::profile::{deployment_sandbox_policy, route_sandbox_policy};
-use super::{DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, HandRoute, ToolRegistry, ToolRouter};
+use super::{
+    DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, HandRoute, ToolCatalogSnapshot, ToolRegistry,
+    ToolRouter,
+};
 use crate::adapters::daytona::DaytonaHandProvider;
 use crate::adapters::e2b::E2BHandProvider;
 use crate::adapters::local::LocalHandProvider;
@@ -42,10 +45,8 @@ impl ToolRouter {
         providers: HashMap<String, Arc<dyn HandProvider>>,
         deployment_sandbox_policy: SandboxPolicySnapshot,
     ) -> Self {
-        let tool_schema_snapshot = Arc::new(registry.default_tool_schemas());
         Self {
-            registry: std::sync::RwLock::new(Arc::new(registry)),
-            tool_schema_snapshot: std::sync::RwLock::new(tool_schema_snapshot),
+            catalog: std::sync::RwLock::new(Arc::new(ToolCatalogSnapshot::new(registry))),
             providers,
             deployment_sandbox_policy,
             tenant_sandbox_policy: None,
@@ -375,9 +376,10 @@ impl ToolRouter {
     pub(super) fn registry(&self) -> Arc<ToolRegistry> {
         Arc::clone(
             &self
-                .registry
+                .catalog
                 .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .registry,
         )
     }
 
@@ -386,15 +388,11 @@ impl ToolRouter {
     /// Both are replaced under the same publication so no caller can compile a
     /// prompt from one catalog revision and dispatch against another.
     pub(super) fn publish_registry(&self, registry: ToolRegistry) {
-        let schemas = Arc::new(registry.default_tool_schemas());
         *self
-            .registry
+            .catalog
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(registry);
-        *self
-            .tool_schema_snapshot
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = schemas;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Arc::new(ToolCatalogSnapshot::new(registry));
     }
 
     /// Returns the ordered tool schemas for prompt compilation.
@@ -414,9 +412,10 @@ impl ToolRouter {
     pub fn tool_schema_snapshot(&self) -> Arc<Vec<serde_json::Value>> {
         Arc::clone(
             &self
-                .tool_schema_snapshot
+                .catalog
                 .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .tool_schemas,
         )
     }
 
@@ -457,6 +456,17 @@ impl ToolRouter {
             .tools
             .get(name)
             .map(|registered| registered.definition.clone())
+    }
+
+    /// Returns the live schema revision of one registered MCP tool.
+    ///
+    /// Durable execution compares this with the revision pinned in its immutable
+    /// capability catalog immediately before governed dispatch.
+    #[must_use]
+    pub fn mcp_schema_revision(&self, name: &str) -> Option<String> {
+        self.registry()
+            .mcp_schema_revision(name)
+            .map(ToOwned::to_owned)
     }
 
     /// Returns every registered tool definition in stable name order.

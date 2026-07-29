@@ -2,7 +2,10 @@
 
 use crate::artifacts::ArtifactSummary;
 use moa_core::types::action_policy::ActionRuleScope;
-use moa_core::types::experiments::ExperimentScorecard;
+use moa_core::types::experiments::{
+    ExperimentScorecard, ScorecardEligibility, ScorecardFinding, ScorecardGroupRollup,
+    ScorecardValueType,
+};
 use moa_core::types::identifiers::{SessionId, TenantId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -346,7 +349,7 @@ pub struct ExperimentScoreSummaryRow {
     /// Score name.
     pub name: String,
     /// Score value type.
-    pub value_type: String,
+    pub value_type: ScorecardValueType,
     /// Number of rows summarized.
     pub n: u64,
     /// Numeric mean or boolean true-rate, or `None` when every summarized value is NULL.
@@ -370,21 +373,10 @@ pub struct ExperimentTrialScoreSummary {
     #[serde(default)]
     pub rows: Vec<ExperimentScoreSummaryRow>,
     /// Scorecard eligibility computed from this trial's exact score rows.
-    pub eligibility: String,
+    pub eligibility: ScorecardEligibility,
     /// Reasons this trial is not eligible, in requirement order.
     #[serde(default)]
-    pub eligibility_findings: Vec<String>,
-}
-
-/// Scorecard eligibility for one group of trials.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExperimentScorecardRollup {
-    /// Group key: a scenario ID, a variant key, or the run itself.
-    pub key: String,
-    /// Worst eligibility across the group's trials.
-    pub eligibility: String,
-    /// Number of trials in the group.
-    pub trials: u64,
+    pub eligibility_findings: Vec<ScorecardFinding>,
 }
 
 /// Per-scenario score summary for one experiment run.
@@ -416,13 +408,13 @@ pub struct ExperimentScoresResponse {
     #[serde(default)]
     pub scenarios: Vec<ExperimentScenarioScoreSummary>,
     /// Run-level scorecard eligibility, computed from trial rows only.
-    pub run_scorecard: ExperimentScorecardRollup,
+    pub run_scorecard: ScorecardGroupRollup,
     /// Per-scenario scorecard eligibility.
     #[serde(default)]
-    pub scenario_scorecards: Vec<ExperimentScorecardRollup>,
+    pub scenario_scorecards: Vec<ScorecardGroupRollup>,
     /// Per-variant scorecard eligibility.
     #[serde(default)]
-    pub variant_scorecards: Vec<ExperimentScorecardRollup>,
+    pub variant_scorecards: Vec<ScorecardGroupRollup>,
 }
 
 /// Request payload for comparing two experiment score runs.

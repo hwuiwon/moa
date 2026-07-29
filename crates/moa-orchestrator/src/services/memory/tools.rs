@@ -16,7 +16,7 @@ use moa_config::MoaConfig;
 use moa_core::{
     error::MoaError,
     error::Result,
-    traits::{Identity, MemoryRetrievalExecutor},
+    traits::{Identity, MemoryRetrievalExecutor, RuntimeCacheStore},
     types::memory::InformationBarrierClearances,
     types::session::SessionMeta,
     types::tools::ToolOutput,
@@ -29,7 +29,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::retrieval::{neighbors_for_tool, search_hits_for_tool};
+use super::retrieval::{MemoryServiceDeps, neighbors_for_tool, search_hits_for_tool};
 
 /// Number of hits `memory_search` returns.
 ///
@@ -48,6 +48,7 @@ pub struct OrchestratorMemoryRetrievalExecutor {
     pool: sqlx::PgPool,
     kms: Arc<dyn KeyManagementProvider>,
     config: Arc<MoaConfig>,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
 }
 
 impl OrchestratorMemoryRetrievalExecutor {
@@ -57,8 +58,14 @@ impl OrchestratorMemoryRetrievalExecutor {
         pool: sqlx::PgPool,
         kms: Arc<dyn KeyManagementProvider>,
         config: Arc<MoaConfig>,
+        runtime_cache: Arc<dyn RuntimeCacheStore>,
     ) -> Self {
-        Self { pool, kms, config }
+        Self {
+            pool,
+            kms,
+            config,
+            runtime_cache,
+        }
     }
 
     async fn run_retrieval_tool(
@@ -81,6 +88,7 @@ impl OrchestratorMemoryRetrievalExecutor {
             pool: &self.pool,
             kms: &self.kms,
             config: self.config.as_ref(),
+            runtime_cache: &self.runtime_cache,
             session,
             identity: caller_identity,
             retrieval_operation_id,
@@ -123,6 +131,7 @@ struct MemoryToolInvocation<'a> {
     pool: &'a sqlx::PgPool,
     kms: &'a Arc<dyn KeyManagementProvider>,
     config: &'a MoaConfig,
+    runtime_cache: &'a Arc<dyn RuntimeCacheStore>,
     session: &'a SessionMeta,
     identity: &'a Identity,
     retrieval_operation_id: &'a str,
@@ -171,9 +180,13 @@ async fn memory_search_tool(
         ));
     }
 
+    let deps = MemoryServiceDeps {
+        pool: context.pool,
+        kms: context.kms,
+        runtime_cache: context.runtime_cache,
+    };
     let hits = search_hits_for_tool(
-        context.pool,
-        context.kms,
+        &deps,
         context.config,
         context.policy,
         query,

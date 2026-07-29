@@ -2006,8 +2006,6 @@ mod tests {
                 moa_core::types::experiments::ScorecardRequirement {
                     evaluator_id: "target_completed".to_string(),
                     evaluator_version: "v1".to_string(),
-                    score_name: "target_completed".to_string(),
-                    value_type: moa_core::types::experiments::ScorecardValueType::Boolean,
                     config: serde_json::json!({}),
                     effect: moa_core::types::experiments::ScorecardEffect::Blocking,
                 },

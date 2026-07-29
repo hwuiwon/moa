@@ -12,7 +12,7 @@ use std::sync::Arc;
 use moa_config::{ConcurrencyScope, CoordinationFailurePolicy, MoaConfig};
 use moa_core::traits::RuntimeCacheStore;
 use moa_providers::{
-    AnthropicProvider, EmbedderConstructionRole, build_embedder_from_config,
+    AnthropicProvider, EmbedderConstructionRole, ProviderRegistry, build_embedder_from_config,
     build_reranker_from_config,
 };
 use moa_runtime_store::MemoryRuntimeCacheStore;
@@ -32,9 +32,8 @@ fn fail_closed_global_config() -> MoaConfig {
     config
 }
 
-fn with_store(config: MoaConfig) -> MoaConfig {
-    let store: Arc<dyn RuntimeCacheStore> = Arc::new(MemoryRuntimeCacheStore::new());
-    config.with_runtime_coordination(store)
+fn runtime_store() -> Arc<dyn RuntimeCacheStore> {
+    Arc::new(MemoryRuntimeCacheStore::new())
 }
 
 #[test]
@@ -50,13 +49,14 @@ fn chat_provider_construction_fails_closed_without_a_coordination_store_offline(
         Err(error) => error,
     };
     assert!(
-        error.to_string().contains("with_runtime_coordination"),
+        error.to_string().contains("composition root"),
         "the error must name the injection point: {error}"
     );
 
-    AnthropicProvider::from_config(&with_store(config))
-        .map(|_| ())
-        .expect("the same config constructs once the coordination store is injected");
+    ProviderRegistry::from_config(&config, Some(runtime_store()))
+        .expect("registry constructs with an explicit runtime cache")
+        .provider_for_model(Some("claude-sonnet-4-6"))
+        .expect("the real model client constructs from the shared coordination runtime");
 }
 
 #[test]
@@ -65,18 +65,23 @@ fn embedder_construction_fails_closed_without_a_coordination_store_offline() {
     // path, so an embedder cannot be built with uncoordinated pacing under a
     // fail-closed global config.
     let config = fail_closed_global_config();
-    let error = match build_embedder_from_config(&config, EmbedderConstructionRole::Retrieval) {
+    let error = match build_embedder_from_config(&config, None, EmbedderConstructionRole::Retrieval)
+    {
         Ok(_) => panic!("the embedder factory must apply the coordination-failure policy"),
         Err(error) => error,
     };
     assert!(
-        error.to_string().contains("with_runtime_coordination"),
+        error.to_string().contains("composition root"),
         "the error must name the injection point: {error}"
     );
 
-    build_embedder_from_config(&with_store(config), EmbedderConstructionRole::Retrieval)
-        .map(|_| ())
-        .expect("the embedder builds once the coordination store is injected");
+    build_embedder_from_config(
+        &config,
+        Some(runtime_store()),
+        EmbedderConstructionRole::Retrieval,
+    )
+    .map(|_| ())
+    .expect("the embedder builds once the coordination store is injected");
 }
 
 #[test]
@@ -84,16 +89,16 @@ fn reranker_construction_fails_closed_without_a_coordination_store_offline() {
     // Pins: the rerank factory resolves coordination too — rerank shares the same
     // credential quota as embed on one Cohere key, so it cannot opt out.
     let config = fail_closed_global_config();
-    let error = match build_reranker_from_config(&config) {
+    let error = match build_reranker_from_config(&config, None) {
         Ok(_) => panic!("the rerank factory must apply the coordination-failure policy"),
         Err(error) => error,
     };
     assert!(
-        error.to_string().contains("with_runtime_coordination"),
+        error.to_string().contains("composition root"),
         "the error must name the injection point: {error}"
     );
 
-    build_reranker_from_config(&with_store(config))
+    build_reranker_from_config(&config, Some(runtime_store()))
         .map(|_| ())
         .expect("the reranker builds once the coordination store is injected");
 }
@@ -111,10 +116,10 @@ fn a_local_scope_deployment_needs_no_coordination_store_offline() {
     AnthropicProvider::from_config(&config)
         .map(|_| ())
         .expect("local scope needs no coordination store");
-    build_embedder_from_config(&config, EmbedderConstructionRole::Retrieval)
+    build_embedder_from_config(&config, None, EmbedderConstructionRole::Retrieval)
         .map(|_| ())
         .expect("local scope needs no coordination store");
-    build_reranker_from_config(&config)
+    build_reranker_from_config(&config, None)
         .map(|_| ())
         .expect("local scope needs no coordination store");
 }
@@ -132,60 +137,21 @@ fn bounded_degraded_keeps_building_without_a_coordination_store_offline() {
     AnthropicProvider::from_config(&config)
         .map(|_| ())
         .expect("bounded_degraded must not block startup");
-    build_embedder_from_config(&config, EmbedderConstructionRole::Retrieval)
+    build_embedder_from_config(&config, None, EmbedderConstructionRole::Retrieval)
         .map(|_| ())
         .expect("bounded_degraded must not block startup");
-    build_reranker_from_config(&config)
+    build_reranker_from_config(&config, None)
         .map(|_| ())
         .expect("bounded_degraded must not block startup");
 }
 
 #[test]
-fn the_injected_handle_stays_out_of_configuration_identity_offline() {
-    // Pins the safety property behind carrying a live runtime handle on the
-    // config tree: it must not leak into what "the same configuration" means. A
-    // `#[serde(skip)]` field that changed equality or broke a round-trip would
-    // quietly invalidate config tests across the workspace, so this checks
-    // serialization, deserialization, and equality all ignore it — while
-    // `is_installed` still reports it, which is what provider construction
-    // branches on, and Debug distinguishes presence without rendering a handle.
-    let bare = MoaConfig::default();
-    let wired = with_store(MoaConfig::default());
-
-    assert!(!bare.runtime_coordination.is_installed());
-    assert!(wired.runtime_coordination.is_installed());
-    assert!(
-        wired.runtime_coordination.store().is_some(),
-        "provider construction must be able to retrieve the injected store"
-    );
-
-    assert_eq!(
-        bare, wired,
-        "wiring a live store must not change what configuration this is"
-    );
-
-    let serialized = serde_json::to_value(&wired).expect("serialize wired config");
-    assert_eq!(
-        serialized,
-        serde_json::to_value(&bare).expect("serialize bare config"),
-        "the handle must never reach the serialized form"
-    );
+fn runtime_wiring_is_not_part_of_serializable_configuration_offline() {
+    // Pins: live service handles belong to composition, not the MoaConfig data
+    // model. This catches a future service-locator field being smuggled back in.
+    let serialized = serde_json::to_value(MoaConfig::default()).expect("serialize config");
     assert!(
         serialized.get("runtime_coordination").is_none(),
-        "the handle must not appear as a config key"
+        "a live provider coordination handle must not appear as a config key"
     );
-
-    let round_tripped: MoaConfig =
-        serde_json::from_value(serialized).expect("deserialize round trip");
-    assert_eq!(
-        round_tripped, wired,
-        "a serde round trip must stay equal to the config it came from"
-    );
-    assert!(
-        !round_tripped.runtime_coordination.is_installed(),
-        "deserialization cannot resurrect a live handle"
-    );
-
-    assert!(format!("{:?}", wired.runtime_coordination).contains("installed"));
-    assert!(format!("{:?}", bare.runtime_coordination).contains("absent"));
 }

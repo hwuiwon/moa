@@ -303,7 +303,7 @@ mod skill_learning {
         );
         let sibling_suites =
             moa_artifacts::registry::ArtifactRegistry::new(test_db.store().pool().clone())
-                .list_suite_contributions(candidate_id)
+                .list_suite_contributions(&ActionRuleScope::Tenant { tenant_id }, candidate_id)
                 .await
                 .expect("load suite contributions")
                 .into_iter()

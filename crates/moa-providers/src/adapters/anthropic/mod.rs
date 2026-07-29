@@ -120,6 +120,15 @@ impl AnthropicProvider {
         config: &MoaConfig,
         default_model: impl Into<String>,
     ) -> Result<Self> {
+        let coordination = ProviderCoordination::from_config(config, None)?;
+        Self::from_config_with_model_and_coordination(config, default_model, &coordination)
+    }
+
+    pub(crate) fn from_config_with_model_and_coordination(
+        config: &MoaConfig,
+        default_model: impl Into<String>,
+        coordination: &ProviderCoordination,
+    ) -> Result<Self> {
         let api_key = moa_config::required_config_secret(
             "MOA_ANTHROPIC_API_KEY",
             &config.providers.anthropic.api_key,
@@ -130,7 +139,6 @@ impl AnthropicProvider {
         // One coordination handle builds every distributed control for this
         // credential, so concurrency, pacing, cooldown, and retry budget cannot
         // disagree about whether they are fleet-wide.
-        let coordination = ProviderCoordination::from_config(config)?;
         let pacing = config
             .providers
             .anthropic
@@ -203,7 +211,7 @@ impl LLMProvider for AnthropicProvider {
         let resolved_model = canonical_model_id(&requested_model)?;
         // Cooldown and retry budget are scoped to the resolved model, so a 429 on
         // one model does not stall calls to another model on the same credential.
-        let guard = self.guard.for_model(&resolved_model);
+        let guard = self.guard.clone();
         // Cooperative 429 short-circuit: while paused, return a typed rate-limit
         // error immediately without an HTTP round trip so callers can fail over.
         if let Some(remaining) = guard.pause_remaining().await? {
@@ -248,12 +256,7 @@ impl LLMProvider for AnthropicProvider {
                 return Err(error);
             }
         };
-        // Chat completions are request-rate limited; pace after taking the
-        // in-flight slot so queued callers do not consume rate budget early.
-        if let Err(error) = self.pacer.acquire(&resolved_model, 1, 0).await {
-            span_recorder.fail_at_stage("transport", &error);
-            return Err(error);
-        }
+        let pacer = self.pacer.clone();
         let client = self.client.clone();
         let api_key = Arc::clone(&self.api_key);
         let messages_url = Arc::clone(&self.messages_url);
@@ -268,8 +271,13 @@ impl LLMProvider for AnthropicProvider {
                 // the streamed completion finishes.
                 let _permit = permit;
                 let started_at = Instant::now();
-                let response =
-                    send_with_transport_phase(&span_recorder, &retry_policy, &guard, || {
+                let response = send_with_transport_phase(
+                    &span_recorder,
+                    &retry_policy,
+                    &guard,
+                    &pacer,
+                    &resolved_model,
+                    || {
                         client
                             .post(&*messages_url)
                             .header("x-api-key", &*api_key)
@@ -277,8 +285,9 @@ impl LLMProvider for AnthropicProvider {
                             .header(ACCEPT, "text/event-stream")
                             .header(CONTENT_TYPE, "application/json")
                             .json(&request_body)
-                    })
-                    .await?;
+                    },
+                )
+                .await?;
 
                 span_recorder.set_phase("stream");
                 let consumed = consume_sse_events(

@@ -33,7 +33,10 @@ before serving a single request:
 Checked-in Kubernetes renders exactly one posture per overlay: base and local
 render `local` with a permissive default and the local hand provider;
 production renders `cloud` with a deny default and the E2B backend, and is the
-only overlay that references the cloud sandbox credential Secret.
+only overlay that references the cloud sandbox credential Secret. Production
+also authors the `production-e2b-v1` sandbox policy: deny-all egress, 900-second
+idle expiry, 3600-second hard lifetime, and otherwise explicit unbounded
+resources.
 
 ## Identity And Authorization
 
@@ -380,12 +383,14 @@ enumerate a derivation, so nothing could reverse one.
 Provenance is now normalized and typed. Each referent kind has its own column
 with a composite foreign key that carries the partition, so a cross-tenant
 source is rejected by the constraint rather than by a query someone has to
-remember to write. The closure runs
+remember to write. The privacy-erasure decision and provenance tables force
+tenant RLS in addition to these scoped joins. The closure runs
 `contact/session/event/task_segment -> experience/attribution -> candidate ->
 learning_log -> artifact revision/file -> generated or accumulated suite
-contribution`, and erasure walks it in reverse through typed joins — never JSON
-containment, array membership, or `LIKE`, all of which silently both over- and
-under-match.
+contribution`, recursively following promoted-candidate dependencies and
+artifact-revision contributions into dependent candidates. Erasure walks it in
+reverse through typed joins — never JSON containment, array membership, or
+`LIKE`, all of which silently both over- and under-match.
 
 Four rules decide dispositions, and each exists because its absence produces a
 confident lie:
@@ -395,19 +400,26 @@ confident lie:
   database refuses to mark such a decision `applied`, so "the hold was honored"
   is a checkable per-record fact rather than an absence of evidence.
 - **A dry run is a plan.** Dispositions persist with `applied = false`. A dry run
-  that recorded deletions would later be read as proof the data is gone.
+  that recorded deletions would later be read as proof the data is gone. Ledger
+  identity includes tenant, subject, erase attempt, record kind, and record id,
+  so a dry run or legal-hold attempt cannot mask a later applied attempt.
 - **Fused model output is non-subtractable.** A revision's `definition` and
-  `source_text` were written from several people's transcripts at once, so a
-  shared revision whose definition drew on erased evidence is invalidated whole
-  rather than partially rewritten. `retained_shared` is reserved for bytes with
-  an independent contributor and a shape that can actually be separated. See the
-  doc comment on `RevisionContributionKind::GeneratedDefinition` for why the
-  softer reading is unfalsifiable.
+  `source_text` may have been written from several people's transcripts at
+  once, so every attributable revision is archived and cleared in place:
+  definition, source, files, and serving state are removed while the revision
+  identity remains for pinned foreign keys. It is never partially rewritten or
+  deleted.
 - **Concurrent learning is fenced before enumeration.** The erase claims its
   operation and destruction fence *before* it enumerates, and contribution
   inserts are refused while a fence is in progress. Without that, a turn
-  completing mid-erase could file derived learning between enumeration and
-  deletion and survive the run.
+completing mid-erase could file derived learning between enumeration and
+deletion and survive the run.
+
+The public decision vocabulary is closed. Record kinds are
+`learning_candidate`, `learning_log`, `artifact_revision`,
+`artifact_suite_contribution`, `experience_record`, and
+`experience_attribution`; dispositions are `erased`, `invalidated_revision`,
+and `retained_legal_hold`.
 
 Ordering is load-bearing: the reverse-derived learning and artifact stages run
 **before** the vault, graph, digest, and lineage stages, because the closure walk

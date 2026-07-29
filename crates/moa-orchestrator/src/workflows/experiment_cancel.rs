@@ -1,18 +1,19 @@
 //! Shared cancellation fan-out for experiment run and trial workflows.
 
 use moa_core::traits::Identity;
+use moa_core::types::action_policy::ActionRuleScope;
 use moa_core::types::contact::ContactId;
+use moa_core::types::experiments::ExperimentCancelSignal;
 use moa_core::types::identifiers::{SessionId, TenantId};
 use moa_execution::wire::{ExecutionCancelRequest, ExecutionRunRequest};
-use restate_sdk::context::Request;
+use moa_experiments::store::ExperimentStore;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::objects::session::SessionClient;
+use crate::restate_identity::with_identity_headers;
 use crate::services::execution::ExecutionClient;
 
-/// Durable state key holding the identity that created the experiment child work.
-pub(crate) const K_CANCEL_IDENTITY: &str = "cancel_identity";
 /// Durable state key holding the effective execution contact scope.
 pub(crate) const K_EXECUTION_CONTACT_ID: &str = "execution_contact_id";
 /// Durable state key holding the linked execution run.
@@ -65,7 +66,7 @@ pub(crate) fn child_cancel_target(
 /// Forwards cancellation from an experiment workflow to its live child.
 pub(crate) async fn forward_child_cancellation(
     ctx: &SharedWorkflowContext<'_>,
-    reason: String,
+    signal: ExperimentCancelSignal,
 ) -> Result<(), HandlerError> {
     let session_id = ctx
         .get::<Json<SessionId>>(K_SESSION_ID)
@@ -79,24 +80,20 @@ pub(crate) async fn forward_child_cancellation(
         .get::<Json<ContactId>>(K_EXECUTION_CONTACT_ID)
         .await?
         .map(Json::into_inner);
-    let identity = ctx
-        .get::<Json<Identity>>(K_CANCEL_IDENTITY)
-        .await?
-        .map(Json::into_inner);
-    let Some(target) =
-        child_cancel_target(identity.as_ref(), contact_id, session_id, execution_run_uid)
-    else {
+    let Some(target) = child_cancel_target(
+        Some(&signal.identity),
+        contact_id,
+        session_id,
+        execution_run_uid,
+    ) else {
         return Ok(());
     };
     match target {
         ChildCancelTarget::Session(session_id) => {
             let request = ctx
                 .object_client::<SessionClient>(session_id.to_string())
-                .request_cancel(Json::from(reason));
-            match identity.as_ref() {
-                Some(identity) => with_identity_headers(request, identity).send(),
-                None => crate::restate_identity::replay_safe_request(request).send(),
-            };
+                .request_cancel(Json::from(signal.reason));
+            with_identity_headers(request, &signal.identity).send();
         }
         ChildCancelTarget::Execution {
             tenant_id,
@@ -112,43 +109,114 @@ pub(crate) async fn forward_child_cancellation(
                         session_id,
                         run_uid,
                     },
-                    reason,
+                    reason: signal.reason,
                 },
             ));
-            if let Some(identity) = identity.as_ref() {
-                with_identity_headers(request, identity).send();
-            } else {
-                crate::restate_identity::replay_safe_request(request).send();
-            };
+            with_identity_headers(request, &signal.identity).send();
         }
     }
     Ok(())
 }
 
-fn with_identity_headers<'a, Req, Res>(
-    request: Request<'a, Req, Res>,
-    identity: &Identity,
-) -> Request<'a, Req, Res> {
-    let request = request
-        .header(
-            "x-moa-identity-type".to_string(),
-            identity.identity_type.as_str().to_string(),
-        )
-        .header("x-moa-identity-id".to_string(), identity.id.to_string())
-        .header(
-            "x-moa-tenant-id".to_string(),
-            identity.tenant_id.to_string(),
-        );
-    let request = if let Some(api_key_id) = identity.api_key_id {
-        request.header("x-moa-api-key-id".to_string(), api_key_id.to_string())
-    } else {
-        request
+/// Returns whether an authorized cancellation was durably recorded.
+pub(crate) async fn has_pending_cancellation(
+    ctx: &WorkflowContext<'_>,
+    scope: &ActionRuleScope,
+    run_uid: Uuid,
+    pool: &sqlx::PgPool,
+) -> Result<bool, HandlerError> {
+    Ok(load_cancel_signal(ctx, scope, run_uid, pool)
+        .await?
+        .is_some())
+}
+
+/// Forwards a previously recorded cancellation after a child link becomes known.
+///
+/// Returns `true` when a cancellation fence exists, including before a child is
+/// linked. Callers use that result to avoid starting paid child work.
+pub(crate) async fn forward_pending_child_cancellation(
+    ctx: &WorkflowContext<'_>,
+    scope: &ActionRuleScope,
+    run_uid: Uuid,
+    pool: &sqlx::PgPool,
+) -> Result<bool, HandlerError> {
+    let Some(signal) = load_cancel_signal(ctx, scope, run_uid, pool).await? else {
+        return Ok(false);
     };
-    if let Some(user_id) = identity.acting_on_behalf_of {
-        request.header("x-moa-acting-on-behalf-of".to_string(), user_id.to_string())
-    } else {
-        request
+    let session_id = ctx
+        .get::<Json<SessionId>>(K_SESSION_ID)
+        .await?
+        .map(Json::into_inner);
+    let execution_run_uid = ctx
+        .get::<Json<Uuid>>(K_EXECUTION_RUN_UID)
+        .await?
+        .map(Json::into_inner);
+    let contact_id = ctx
+        .get::<Json<ContactId>>(K_EXECUTION_CONTACT_ID)
+        .await?
+        .map(Json::into_inner);
+    let Some(target) = child_cancel_target(
+        Some(&signal.identity),
+        contact_id,
+        session_id,
+        execution_run_uid,
+    ) else {
+        return Ok(true);
+    };
+    match target {
+        ChildCancelTarget::Session(session_id) => {
+            with_identity_headers(
+                ctx.object_client::<SessionClient>(session_id.to_string())
+                    .request_cancel(Json::from(signal.reason)),
+                &signal.identity,
+            )
+            .send();
+        }
+        ChildCancelTarget::Execution {
+            tenant_id,
+            contact_id,
+            session_id,
+            run_uid,
+        } => {
+            with_identity_headers(
+                ctx.service_client::<ExecutionClient>().cancel(Json::from(
+                    ExecutionCancelRequest {
+                        run: ExecutionRunRequest {
+                            tenant_id,
+                            contact_id,
+                            session_id,
+                            run_uid,
+                        },
+                        reason: signal.reason,
+                    },
+                )),
+                &signal.identity,
+            )
+            .send();
+        }
     }
+    Ok(true)
+}
+
+async fn load_cancel_signal(
+    ctx: &WorkflowContext<'_>,
+    scope: &ActionRuleScope,
+    run_uid: Uuid,
+    pool: &sqlx::PgPool,
+) -> Result<Option<ExperimentCancelSignal>, HandlerError> {
+    let pool = pool.clone();
+    let scope = *scope;
+    Ok(ctx
+        .run(|| async move {
+            ExperimentStore::new(pool)
+                .load_run_cancel_signal(&scope, run_uid)
+                .await
+                .map(Json::from)
+                .map_err(crate::workflows::errors::moa_error_to_handler_error)
+        })
+        .name("experiment_load_cancel_signal")
+        .await?
+        .into_inner())
 }
 
 #[cfg(test)]

@@ -1011,6 +1011,8 @@ async fn invoke_capability_tool(
         active_canary,
     } = invocation;
     let tool_name = capability_tool_name(capability)?;
+    let live_schema_revision = workflow.router.mcp_schema_revision(&tool_name);
+    require_current_mcp_schema(&capability.source, live_schema_revision.as_deref())?;
     let tool_id = ToolCallId(uuid::Uuid::new_v5(
         &task.task_id.as_uuid(),
         format!("{}:{call_index}", task.generation).as_bytes(),
@@ -1075,6 +1077,37 @@ async fn invoke_capability_tool(
         return action_review_invocation_result(resolution);
     }
     Ok(CapabilityInvocationResult::Output(Box::new(result.output)))
+}
+
+/// Refuses a durable MCP invocation when live discovery no longer matches the
+/// schema revision pinned in the run's immutable capability catalog.
+fn require_current_mcp_schema(
+    source: &CapabilitySource,
+    live_schema_revision: Option<&str>,
+) -> Result<(), HandlerError> {
+    let CapabilitySource::McpTool {
+        tool_name,
+        schema_revision,
+        ..
+    } = source
+    else {
+        return Ok(());
+    };
+    match live_schema_revision {
+        Some(live) if live == schema_revision => Ok(()),
+        Some(live) => Err(TerminalError::new_with_code(
+            409,
+            format!(
+                "MCP tool {tool_name} schema revision drifted from {schema_revision} to {live}"
+            ),
+        )
+        .into()),
+        None => Err(TerminalError::new_with_code(
+            409,
+            format!("MCP tool {tool_name} is no longer registered at its pinned schema revision"),
+        )
+        .into()),
+    }
 }
 
 async fn persist_task_outcome(
@@ -1653,7 +1686,7 @@ mod tests {
 
     use super::{
         CapabilityInvocationResult, action_review_invocation_result, capability_invocation_outcome,
-        task_output_schema,
+        require_current_mcp_schema, task_output_schema,
     };
 
     #[test]
@@ -1690,6 +1723,29 @@ mod tests {
         };
 
         assert_eq!(task_output_schema(&node), &item_schema);
+    }
+
+    #[test]
+    fn durable_mcp_dispatch_requires_the_pinned_schema_revision() {
+        // Pins: an immutable execution catalog cannot invoke an MCP tool after
+        // connector refresh changed or removed the schema it authorized.
+        let source = moa_execution::capability::CapabilitySource::McpTool {
+            server: "github".to_string(),
+            tool_name: "mcp__6_github__search".to_string(),
+            remote_name: "search".to_string(),
+            schema_revision: "schema-v1".to_string(),
+        };
+
+        require_current_mcp_schema(&source, Some("schema-v1"))
+            .expect("the exact pinned schema remains dispatchable");
+        assert!(
+            require_current_mcp_schema(&source, Some("schema-v2")).is_err(),
+            "a changed live schema must be refused before governed dispatch"
+        );
+        assert!(
+            require_current_mcp_schema(&source, None).is_err(),
+            "a withdrawn MCP tool must be refused before governed dispatch"
+        );
     }
 
     #[test]

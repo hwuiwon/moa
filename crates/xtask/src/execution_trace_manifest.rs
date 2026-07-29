@@ -870,7 +870,21 @@ const SENDERS: &[SenderManifestEntry] = &[
     sender!(
         "crates/moa-orchestrator/src/workflows/experiment_cancel.rs",
         "forward_child_cancellation",
-        TRACE_HELPER,
+        IDENTITY_TRACE_HELPER,
+        "ExecutionClient",
+        "cancel"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/experiment_cancel.rs",
+        "forward_pending_child_cancellation",
+        IDENTITY_TRACE_HELPER,
+        "SessionClient",
+        "request_cancel"
+    ),
+    sender!(
+        "crates/moa-orchestrator/src/workflows/experiment_cancel.rs",
+        "forward_pending_child_cancellation",
+        IDENTITY_TRACE_HELPER,
         "ExecutionClient",
         "cancel"
     ),

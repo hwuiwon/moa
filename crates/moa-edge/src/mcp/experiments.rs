@@ -66,8 +66,8 @@ struct ExperimentRunInput {
     target: Option<Value>,
     /// Optional JSON behavior variant for an ad hoc run.
     variant: Option<Value>,
-    /// Typed scorecard for an ad hoc run: `{"requirements": [{"evaluator_id", "evaluator_version",
-    /// "score_name", "value_type", "config", "effect"}]}` with at least one `blocking` requirement.
+    /// Typed scorecard for an ad hoc run: `{"requirements": [{"evaluator_id",
+    /// "evaluator_version", "config", "effect"}]}` with at least one `blocking` requirement.
     /// Omit it entirely when `plan_revision_uid` is supplied; the pinned plan owns the scorecard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scorecard: Option<Value>,

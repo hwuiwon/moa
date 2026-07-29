@@ -2,6 +2,7 @@
 
 use super::session_records::{agent_context_from_row, session_actor_id, session_actor_type};
 use super::*;
+use crate::archive::is_terminal_status;
 
 #[async_trait]
 impl SessionStore for PostgresSessionStore {
@@ -95,28 +96,17 @@ impl SessionStore for PostgresSessionStore {
         if matches!(range.event_types, Some(ref types) if types.is_empty()) {
             return Ok(Vec::new());
         }
-        // Which store holds this session's history is a fact recorded on the
-        // session row, not something inferred from the live table coming back
-        // empty. An empty result is also what a range past the last sequence
-        // returns for a perfectly live session, and a stray row written after
-        // archival would hide the archive entirely -- so the branch reads
-        // `events_archived_at` and believes it.
-        if let Some(archived_at) = self.session_events_archived_at(session_id).await? {
-            let Some(hydrated) = self.hydrate_archived_events(session_id, &range).await? else {
-                return Err(MoaError::StorageError(format!(
-                    "session {session_id} is marked archived at {archived_at} but has no archive row"
-                )));
-            };
-            return Ok(hydrated);
-        }
         let started_at = std::time::Instant::now();
+        let sessions = self.table_name("sessions");
         let events = self.table_name("events");
-
         let use_recent_order =
             range.limit.is_some() && range.from_seq.is_none() && range.to_seq.is_none();
-
         let mut query = QueryBuilder::<Postgres>::new(format!(
-            "SELECT {EVENT_COLUMNS} FROM {events} WHERE session_id = "
+            "SELECT s.events_archived_at, e.* \
+             FROM {sessions} AS s \
+             LEFT JOIN LATERAL ( \
+                 SELECT {EVENT_COLUMNS}, pg_column_size(payload)::bigint AS payload_bytes \
+                 FROM {events} WHERE session_id = "
         ));
         query.push_bind(session_id.0);
 
@@ -128,7 +118,7 @@ impl SessionStore for PostgresSessionStore {
             query.push(" AND sequence_num <= ");
             query.push_bind(to_seq as i64);
         }
-        if let Some(event_types) = range.event_types {
+        if let Some(event_types) = &range.event_types {
             query.push(" AND event_type IN (");
             let mut separated = query.separated(", ");
             for event_type in event_types {
@@ -146,29 +136,46 @@ impl SessionStore for PostgresSessionStore {
             query.push(" LIMIT ");
             query.push_bind(limit as i64);
         }
+        query.push(") AS e ON TRUE WHERE s.id = ");
+        query.push_bind(session_id.0);
 
         let rows = query
             .build()
             .fetch_all(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
-        let decoded_bytes = rows.iter().try_fold(0_u64, |total, row| {
-            let payload_bytes = row
-                .try_get_raw("payload")
-                .map_err(map_sqlx_error)?
-                .as_bytes()
-                .map_err(|error| {
-                    MoaError::StorageError(format!("failed to read event payload bytes: {error}"))
-                })?;
-            Ok::<_, MoaError>(total + payload_bytes.len() as u64)
-        })?;
+
+        let archived_at = rows
+            .first()
+            .map(|row| row.col::<Option<DateTime<Utc>>>("events_archived_at"))
+            .transpose()?
+            .flatten();
+        if let Some(archived_at) = archived_at {
+            let Some(hydrated) = self.hydrate_archived_events(session_id, &range).await? else {
+                return Err(MoaError::StorageError(format!(
+                    "session {session_id} is marked archived at {archived_at} but has no archive row"
+                )));
+            };
+            return Ok(hydrated);
+        }
+
         // Collect the distinct claim-checked blob ids across all rows and fetch
         // them once, instead of one blob `get` per event during decode.
         let mut payloads = Vec::with_capacity(rows.len());
+        let mut event_rows = Vec::with_capacity(rows.len());
         let mut blob_ids: Vec<String> = Vec::new();
         let mut seen_blob_ids = std::collections::HashSet::new();
+        let mut decoded_bytes = 0_u64;
         for row in &rows {
+            if row.col::<Option<Uuid>>("id")?.is_none() {
+                continue;
+            }
             let payload = row.col::<serde_json::Value>("payload")?;
+            decoded_bytes = decoded_bytes.saturating_add(
+                row.col::<Option<i64>>("payload_bytes")?
+                    .unwrap_or_default()
+                    .max(0) as u64,
+            );
             let mut ids = Vec::new();
             crate::blob::collect_claim_check_blob_ids(&payload, &mut ids)?;
             for id in ids {
@@ -177,10 +184,11 @@ impl SessionStore for PostgresSessionStore {
                 }
             }
             payloads.push(payload);
+            event_rows.push(row);
         }
         let blob_cache = self.blob_store.get_many(&session_id, &blob_ids).await?;
-        let mut events = Vec::with_capacity(rows.len());
-        for (row, payload) in rows.iter().zip(payloads) {
+        let mut events = Vec::with_capacity(payloads.len());
+        for (row, payload) in event_rows.into_iter().zip(payloads) {
             let event = crate::blob::decode_event_from_cache(payload, &blob_cache)?;
             events.push(Self::event_record_from_row_parts(row, event)?);
         }
@@ -249,21 +257,41 @@ impl SessionStore for PostgresSessionStore {
         } else {
             None
         };
+        let may_update_archived_session = is_terminal_status(&status);
 
         let affected = sqlx::query(&format!(
-            "UPDATE {sessions} SET status = $1, updated_at = $2, completed_at = $3 WHERE id = $4"
+            "UPDATE {sessions} SET status = $1, updated_at = $2, completed_at = $3 \
+             WHERE id = $4 AND (events_archived_at IS NULL OR $5)"
         ))
         .bind(status.as_str())
         .bind(now)
         .bind(completed_at)
         .bind(session_id.0)
+        .bind(may_update_archived_session)
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?
         .rows_affected();
 
         if affected == 0 {
-            return Err(MoaError::SessionNotFound(session_id));
+            let archived_at = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(&format!(
+                "SELECT events_archived_at FROM {sessions} WHERE id = $1"
+            ))
+            .bind(session_id.0)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+            return match archived_at {
+                None => Err(MoaError::SessionNotFound(session_id)),
+                Some(Some(archived_at)) => Err(MoaError::ValidationError(format!(
+                    "session {session_id} history was archived at {archived_at}; \
+                     status cannot transition to {}",
+                    status.as_str()
+                ))),
+                Some(None) => Err(MoaError::StorageError(format!(
+                    "session {session_id} status update affected no rows"
+                ))),
+            };
         }
         // Active-session gauge is refreshed off the write path on a timer.
 

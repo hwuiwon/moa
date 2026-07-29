@@ -26,6 +26,16 @@
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
+    name: MOA_PROVIDERS_PACING_SCOPE
+    value: global
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_PROVIDERS_CONCURRENCY_ON_COORDINATION_FAILURE
+    value: fail_closed
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
     name: MOA_PROVIDERS_STREAM_TIMEOUTS_FIRST_BYTE_MS
     value: "30000"
 - op: add

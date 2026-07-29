@@ -182,43 +182,7 @@ where
         .await?;
 
         let chunks = blocks_to_chunks(version.version_uid, &blocks, self.chunking);
-        let semantic_report = match self
-            .semantic_graph_extractions(object.tenant_id, &object, &chunks)
-            .await
-        {
-            Ok(report) => report,
-            Err(error) => {
-                self.record_failure_step(
-                    sync_run_uid,
-                    Some(object.object_uid),
-                    "semantic_graph_extracted",
-                    &error,
-                )
-                .await?;
-                return Err(error);
-            }
-        };
-        self.record_step(
-            sync_run_uid,
-            Some(object.object_uid),
-            "semantic_graph_extracted",
-            StepOutcome::completed_with_counters(json!({
-                "chunks_total": chunks.len(),
-                "cache_hits": semantic_report.cache_hits,
-                "cache_misses": semantic_report.cache_misses,
-                "entities_extracted": semantic_report.entities_extracted,
-                "relations_extracted": semantic_report.relations_extracted,
-                "semantic_chunk_links": semantic_report.semantic_chunk_links,
-                "failures": 0,
-            })),
-        )
-        .await?;
-        let delta = document_chunk_delta_with_semantics(
-            &object,
-            &version,
-            &chunks,
-            &semantic_report.extractions,
-        );
+        let delta = document_chunk_delta(&object, &version, &chunks);
         // Fold the `active` retrieval marker into the rows before the batch
         // insert. Graph identity needs no folding: `chunk_uid` is the occurrence
         // node uid, and `replace_chunks` persists it into `graph_node_uid`.
@@ -494,102 +458,6 @@ where
             delta,
             embeddings_created: embeddings.len() as u64,
             ingested: true,
-        })
-    }
-
-    pub(super) async fn semantic_graph_extractions(
-        &self,
-        tenant_id: moa_core::types::identifiers::TenantId,
-        object: &KnowledgeObject,
-        chunks: &[KnowledgeChunk],
-    ) -> Result<SemanticGraphExtractionReport> {
-        // A disabled policy performs no extraction, writes no cache rows, and
-        // emits no semantic nodes or edges. This is the single gate: because the
-        // same policy value also decides whether retrieval may read the graph,
-        // there is no configuration in which this work is done for nothing.
-        if !self.semantic_policy.writes_semantic_graph() {
-            metrics::counter!(
-                "moa_knowledge_semantic_extraction_chunks_total",
-                "policy" => self.semantic_policy.as_str(),
-                "outcome" => "skipped"
-            )
-            .increment(chunks.len() as u64);
-            return Ok(SemanticGraphExtractionReport::default());
-        }
-        let extraction_started = std::time::Instant::now();
-        let chunk_hashes = chunks
-            .iter()
-            .map(|chunk| chunk.chunk_hash.clone())
-            .collect::<Vec<_>>();
-        let identity = SemanticExtractionCacheIdentity::deterministic();
-        let cached = self
-            .repository
-            .cached_semantic_graph_extractions(
-                tenant_id,
-                &chunk_hashes,
-                identity.schema_version,
-                identity.model,
-                identity.prompt_version,
-            )
-            .await?;
-        let mut cached_by_hash = cached
-            .into_iter()
-            .map(|extraction| (extraction.chunk_hash.clone(), extraction))
-            .collect::<HashMap<_, _>>();
-        let mut cache_hits = 0_u64;
-        let mut cache_misses = 0_u64;
-        let mut extracted = Vec::with_capacity(chunks.len());
-        let mut new_extractions = Vec::new();
-
-        for chunk in chunks {
-            if let Some(extraction) = cached_by_hash.remove(&chunk.chunk_hash) {
-                cache_hits = cache_hits.saturating_add(1);
-                extracted.push(extraction);
-            } else {
-                cache_misses = cache_misses.saturating_add(1);
-                let extraction = extract_chunk_semantics(object, chunk, true);
-                new_extractions.push(extraction.clone());
-                extracted.push(extraction);
-            }
-        }
-        self.repository
-            .upsert_semantic_graph_extractions(tenant_id, new_extractions)
-            .await?;
-
-        // Extraction cost telemetry. Cache hits are free; misses are the work
-        // actually paid for, and the duration is the wall-clock cost of paying it.
-        // Without this the only record of extraction cost was per-object step rows
-        // in Postgres, which no dashboard aggregates.
-        let policy = self.semantic_policy.as_str();
-        metrics::counter!(
-            "moa_knowledge_semantic_extraction_chunks_total",
-            "policy" => policy, "outcome" => "cache_hit"
-        )
-        .increment(cache_hits);
-        metrics::counter!(
-            "moa_knowledge_semantic_extraction_chunks_total",
-            "policy" => policy, "outcome" => "extracted"
-        )
-        .increment(cache_misses);
-        metrics::histogram!(
-            "moa_knowledge_semantic_extraction_seconds",
-            "policy" => policy
-        )
-        .record(extraction_started.elapsed().as_secs_f64());
-
-        Ok(SemanticGraphExtractionReport {
-            cache_hits,
-            cache_misses,
-            entities_extracted: extracted
-                .iter()
-                .map(|extraction| extraction.entities.len() as u64)
-                .sum(),
-            relations_extracted: extracted
-                .iter()
-                .map(|extraction| extraction.relations.len() as u64)
-                .sum(),
-            semantic_chunk_links: semantic_chunk_link_count(chunks, &extracted) as u64,
-            extractions: extracted,
         })
     }
 }

@@ -4,8 +4,9 @@
 //! A scorecard is the list of evaluator results a Behavior Lab trial must
 //! produce before its evidence is considered complete. Every requirement names
 //! the evaluator that produces it, the exact version of that evaluator, the
-//! exact score name and value type it emits, the deterministic configuration it
-//! runs under, and whether a missing or failing result blocks eligibility.
+//! deterministic configuration it runs under, and whether a missing or failing
+//! result blocks eligibility. Score names and value types come from the
+//! evaluator registry instead of being duplicated in every plan.
 //!
 //! This module owns only the structural contract. Evaluator existence, version
 //! validity, configuration schemas, and determinism are owned by the evaluator
@@ -15,6 +16,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use thiserror::Error;
+
+use crate::traits::Identity;
+
+/// Authorized cancellation request persisted with an experiment run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentCancelSignal {
+    /// Stable reason forwarded to live child work.
+    pub reason: String,
+    /// Caller that passed the experiment cancellation authorization check.
+    pub identity: Identity,
+}
 
 /// Value type an evaluator writes into its score row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -86,15 +98,64 @@ pub struct ScorecardRequirement {
     /// Exact evaluator version. Part of score identity, so a version bump
     /// produces a different score row rather than overwriting the old one.
     pub evaluator_version: String,
-    /// Exact score name this evaluator writes.
-    pub score_name: String,
-    /// Exact score value type this evaluator writes.
-    pub value_type: ScorecardValueType,
     /// Deterministic evaluator configuration, validated by the registry.
     #[serde(default)]
     pub config: Value,
     /// Whether a missing or failing result blocks eligibility.
     pub effect: ScorecardEffect,
+}
+
+/// Whether one trial's evidence satisfies its scorecard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScorecardEligibility {
+    /// Every blocking requirement has exactly one correct, passing row.
+    Eligible,
+    /// Every present row is correct, but at least one blocking result failed.
+    Ineligible,
+    /// At least one blocking requirement has no row yet.
+    Incomplete,
+    /// The scorecard or its rows are structurally invalid.
+    Invalid,
+}
+
+impl ScorecardEligibility {
+    /// Returns the persisted representation for this eligibility.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eligible => "eligible",
+            Self::Ineligible => "ineligible",
+            Self::Incomplete => "incomplete",
+            Self::Invalid => "invalid",
+        }
+    }
+
+    /// Combines two eligibilities, keeping the more severe one.
+    #[must_use]
+    pub fn worst(self, other: Self) -> Self {
+        self.max(other)
+    }
+}
+
+/// Structured reason one scorecard is not eligible.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScorecardFinding {
+    /// Score name the finding concerns.
+    pub score_name: String,
+    /// Human-readable explanation.
+    pub detail: String,
+}
+
+/// One group of trials rolled up into a single eligibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScorecardGroupRollup {
+    /// Group key, such as a scenario ID or variant key.
+    pub key: String,
+    /// Worst eligibility across the group's trials.
+    pub eligibility: ScorecardEligibility,
+    /// Number of trials in the group.
+    pub trials: usize,
 }
 
 /// Reasons a scorecard is structurally invalid.
@@ -107,11 +168,13 @@ pub enum ScorecardError {
     /// A scorecard with no requirements can never prove anything.
     #[error("experiment scorecard must declare at least one requirement")]
     Empty,
-    /// Two requirements claim the same score name.
-    #[error("experiment scorecard declares duplicate score name `{score_name}`")]
-    DuplicateScoreName {
-        /// Score name declared more than once.
-        score_name: String,
+    /// Two requirements claim the same evaluator version.
+    #[error("experiment scorecard declares duplicate evaluator `{evaluator_id}@{version}`")]
+    DuplicateEvaluator {
+        /// Evaluator ID declared more than once.
+        evaluator_id: String,
+        /// Evaluator version declared more than once.
+        version: String,
     },
     /// A required identity field is blank.
     #[error("experiment scorecard requirement `{field}` must not be blank")]
@@ -147,7 +210,7 @@ impl ExperimentScorecard {
     /// # Errors
     ///
     /// Returns [`ScorecardError`] when the requirement set is empty, declares a
-    /// duplicate score name, leaves an identity field blank, or declares no
+    /// duplicate evaluator version, leaves an identity field blank, or declares no
     /// blocking requirement.
     pub fn new(requirements: Vec<ScorecardRequirement>) -> Result<Self, ScorecardError> {
         if requirements.is_empty() {
@@ -158,15 +221,18 @@ impl ExperimentScorecard {
             for (field, value) in [
                 ("evaluator_id", requirement.evaluator_id.as_str()),
                 ("evaluator_version", requirement.evaluator_version.as_str()),
-                ("score_name", requirement.score_name.as_str()),
             ] {
                 if value.trim().is_empty() {
                     return Err(ScorecardError::BlankField { field });
                 }
             }
-            if !seen.insert(requirement.score_name.as_str()) {
-                return Err(ScorecardError::DuplicateScoreName {
-                    score_name: requirement.score_name.clone(),
+            if !seen.insert((
+                requirement.evaluator_id.as_str(),
+                requirement.evaluator_version.as_str(),
+            )) {
+                return Err(ScorecardError::DuplicateEvaluator {
+                    evaluator_id: requirement.evaluator_id.clone(),
+                    version: requirement.evaluator_version.clone(),
                 });
             }
         }
@@ -192,12 +258,17 @@ impl ExperimentScorecard {
             .filter(|requirement| requirement.effect.is_blocking())
     }
 
-    /// Returns the requirement that declares `score_name`, when one exists.
+    /// Returns the requirement for one exact evaluator version, when present.
     #[must_use]
-    pub fn requirement_for(&self, score_name: &str) -> Option<&ScorecardRequirement> {
-        self.requirements
-            .iter()
-            .find(|requirement| requirement.score_name == score_name)
+    pub fn requirement_for(
+        &self,
+        evaluator_id: &str,
+        evaluator_version: &str,
+    ) -> Option<&ScorecardRequirement> {
+        self.requirements.iter().find(|requirement| {
+            requirement.evaluator_id == evaluator_id
+                && requirement.evaluator_version == evaluator_version
+        })
     }
 }
 
@@ -222,12 +293,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn requirement(score_name: &str, effect: ScorecardEffect) -> ScorecardRequirement {
+    fn requirement(evaluator_id: &str, effect: ScorecardEffect) -> ScorecardRequirement {
         ScorecardRequirement {
-            evaluator_id: "target_completed".to_string(),
+            evaluator_id: evaluator_id.to_string(),
             evaluator_version: "v1".to_string(),
-            score_name: score_name.to_string(),
-            value_type: ScorecardValueType::Boolean,
             config: json!({}),
             effect,
         }
@@ -244,19 +313,20 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_score_names_are_rejected_offline() {
-        // Pins: exactly one requirement owns each score name, which is what makes
+    fn duplicate_evaluator_versions_are_rejected_offline() {
+        // Pins: exactly one requirement owns each evaluator version, which makes
         // "exactly one row per blocking requirement" a decidable gate.
         let error = ExperimentScorecard::new(vec![
             requirement("target_completed", ScorecardEffect::Blocking),
             requirement("target_completed", ScorecardEffect::Informational),
         ])
-        .expect_err("duplicate score name must be rejected");
+        .expect_err("duplicate evaluator version must be rejected");
 
         assert_eq!(
             error,
-            ScorecardError::DuplicateScoreName {
-                score_name: "target_completed".to_string(),
+            ScorecardError::DuplicateEvaluator {
+                evaluator_id: "target_completed".to_string(),
+                version: "v1".to_string(),
             }
         );
     }
@@ -277,7 +347,7 @@ mod tests {
 
     #[test]
     fn blank_identity_fields_are_rejected_offline() {
-        // Pins: score identity is derived from evaluator id/version/name, so a
+        // Pins: score identity is derived from evaluator id/version, so a
         // blank component would collapse two distinct scores onto one row.
         for (field, mutate) in [
             (
@@ -288,9 +358,6 @@ mod tests {
             ),
             ("evaluator_version", |requirement| {
                 requirement.evaluator_version = String::new();
-            }),
-            ("score_name", |requirement| {
-                requirement.score_name = "\t".to_string();
             }),
         ] {
             let mut candidate = requirement("target_completed", ScorecardEffect::Blocking);
@@ -319,8 +386,6 @@ mod tests {
             "requirements": [{
                 "evaluator_id": "target_completed",
                 "evaluator_version": "v1",
-                "score_name": "target_completed",
-                "value_type": "boolean",
                 "config": {},
                 "effect": "blocking"
             }]
@@ -335,8 +400,6 @@ mod tests {
                 "requirements": [{
                     "evaluator_id": "target_completed",
                     "evaluator_version": "v1",
-                    "score_name": "target_completed",
-                    "value_type": "boolean",
                     "config": {},
                     "effect": "blocking"
                 }]

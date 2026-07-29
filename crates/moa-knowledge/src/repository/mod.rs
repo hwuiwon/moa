@@ -35,7 +35,6 @@ use crate::{
     },
     error::{Error, Result},
     normalize::{normalize_source_selection, redact_provider_metadata},
-    semantic_graph::SemanticGraphExtraction,
 };
 
 const LIST_CONNECTIONS_LIMIT: i64 = 100;
@@ -388,27 +387,6 @@ pub trait KnowledgeRepository: Send + Sync {
 
     /// Saves normalized chunks for a document version.
     async fn replace_chunks(&self, version_uid: Uuid, chunks: Vec<KnowledgeChunk>) -> Result<()>;
-
-    /// Loads cached semantic graph extractions for chunk hashes.
-    async fn cached_semantic_graph_extractions(
-        &self,
-        _tenant_id: TenantId,
-        _chunk_hashes: &[String],
-        _schema_version: &str,
-        _model: &str,
-        _prompt_version: &str,
-    ) -> Result<Vec<SemanticGraphExtraction>> {
-        Ok(Vec::new())
-    }
-
-    /// Saves completed semantic graph extractions.
-    async fn upsert_semantic_graph_extractions(
-        &self,
-        _tenant_id: TenantId,
-        _extractions: Vec<SemanticGraphExtraction>,
-    ) -> Result<()> {
-        Ok(())
-    }
 
     /// Tombstones chunks in knowledge storage and removes them from active retrieval.
     async fn tombstone_chunks(&self, chunk_uids: &[Uuid]) -> Result<()>;
@@ -905,33 +883,6 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
 
     async fn replace_chunks(&self, version_uid: Uuid, chunks: Vec<KnowledgeChunk>) -> Result<()> {
         document::replace_chunks(self, version_uid, chunks).await
-    }
-
-    async fn cached_semantic_graph_extractions(
-        &self,
-        tenant_id: TenantId,
-        chunk_hashes: &[String],
-        schema_version: &str,
-        model: &str,
-        prompt_version: &str,
-    ) -> Result<Vec<SemanticGraphExtraction>> {
-        document::cached_semantic_graph_extractions(
-            self,
-            tenant_id,
-            chunk_hashes,
-            schema_version,
-            model,
-            prompt_version,
-        )
-        .await
-    }
-
-    async fn upsert_semantic_graph_extractions(
-        &self,
-        tenant_id: TenantId,
-        extractions: Vec<SemanticGraphExtraction>,
-    ) -> Result<()> {
-        document::upsert_semantic_graph_extractions(self, tenant_id, extractions).await
     }
 
     async fn tombstone_chunks(&self, chunk_uids: &[Uuid]) -> Result<()> {

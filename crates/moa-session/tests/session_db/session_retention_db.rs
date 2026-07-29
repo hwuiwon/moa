@@ -11,13 +11,14 @@ use crate::shared::qualified;
 use chrono::{DateTime, Duration, Utc};
 use moa_core::{
     events::Event,
-    traits::SessionStore,
+    traits::{BlobStore, SessionStore},
     types::contact::SessionActorRef,
     types::events_stream::{EventRange, EventRecord},
     types::identifiers::{ModelId, SessionId, TenantId},
     types::session::{SessionMeta, SessionStatus},
 };
 use moa_session::archive::{ArchiveOutcome, ArchiveRefusal};
+use moa_session::blob::FileBlobStore;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use uuid::Uuid;
 
@@ -109,6 +110,42 @@ async fn live_event_count(test_db: &TestDb, session_id: SessionId) -> i64 {
     .expect("count live session events")
 }
 
+/// Waits until another transaction holds the target session row lock.
+async fn wait_for_session_row_lock(test_db: &TestDb, session_id: SessionId) {
+    let sessions = qualified(test_db.schema_name(), "sessions");
+    for _ in 0..1_000 {
+        let mut tx = test_db
+            .store()
+            .pool()
+            .begin()
+            .await
+            .expect("begin row-lock probe transaction");
+        let probe = sqlx::query(&format!(
+            "SELECT id FROM {sessions} WHERE id = $1 FOR UPDATE NOWAIT"
+        ))
+        .bind(session_id.0)
+        .execute(&mut *tx)
+        .await;
+        tx.rollback()
+            .await
+            .expect("roll back row-lock probe transaction");
+        match probe {
+            Ok(_) => tokio::task::yield_now().await,
+            Err(error)
+                if error
+                    .as_database_error()
+                    .and_then(|database_error| database_error.code())
+                    .as_deref()
+                    == Some("55P03") =>
+            {
+                return;
+            }
+            Err(error) => panic!("unexpected row-lock probe failure: {error}"),
+        }
+    }
+    panic!("archive transaction did not acquire the session row lock");
+}
+
 fn texts(records: &[EventRecord]) -> Vec<String> {
     records
         .iter()
@@ -195,6 +232,61 @@ async fn archived_terminal_session_hydrates_its_history_unchanged_db() {
     );
 }
 
+// Pins: a read racing the archival commit sees either the live snapshot or the
+// archive, never the empty interval between separate marker and event queries.
+#[tokio::test]
+async fn concurrent_reads_never_see_an_empty_history_while_archival_commits_db() {
+    let test_db = test_db().await;
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let session_id = new_session(&test_db, tenant_id).await;
+    seed_history(&test_db, session_id).await;
+    let expected = test_db
+        .store()
+        .get_events(session_id, EventRange::all())
+        .await
+        .expect("read seeded history");
+    let terminal_at = complete_session(&test_db, session_id, SessionStatus::Completed).await;
+    let boundary = terminal_at + Duration::seconds(1);
+
+    let start = std::sync::Arc::new(tokio::sync::Barrier::new(33));
+    let mut readers = Vec::with_capacity(32);
+    for _ in 0..32 {
+        let store = test_db.store().clone();
+        let start = start.clone();
+        readers.push(tokio::spawn(async move {
+            start.wait().await;
+            store.get_events(session_id, EventRange::all()).await
+        }));
+    }
+    let archive_store = test_db.store().clone();
+    let archive_start = start.clone();
+    let archive = tokio::spawn(async move {
+        archive_start.wait().await;
+        archive_store
+            .archive_terminal_session(session_id, boundary, boundary)
+            .await
+    });
+
+    let outcome = archive
+        .await
+        .expect("archive task should not panic")
+        .expect("archive should commit");
+    assert!(
+        matches!(outcome, ArchiveOutcome::Archived(_)),
+        "the concurrent archive must commit, observed {outcome:?}"
+    );
+    for reader in readers {
+        let observed = reader
+            .await
+            .expect("reader task should not panic")
+            .expect("concurrent history read should succeed");
+        assert_eq!(
+            observed, expected,
+            "a racing read must see the complete live snapshot or complete archive"
+        );
+    }
+}
+
 // Pins: a range read of archived history applies the same filters and limits the
 // live query would have. A replay that asks for the last two turns of an
 // archived session must not receive the first two.
@@ -268,6 +360,61 @@ async fn archived_history_honours_range_filters_db() {
         "a sequence-bounded read must return the same events before and after archival; observed {:?} against {:?}",
         texts(&archived_bounded),
         texts(&live_bounded)
+    );
+}
+
+// Pins: range selection happens before claim-check lookup and decoding. A
+// missing blob belonging only to an unrequested event must not make a narrow
+// archived-history read fail.
+#[tokio::test]
+async fn archived_range_does_not_fetch_unrequested_claim_check_blobs_db() {
+    let test_db = test_db().await;
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let session_id = new_session(&test_db, tenant_id).await;
+    seed_history(&test_db, session_id).await;
+    let terminal_at = complete_session(&test_db, session_id, SessionStatus::Completed).await;
+    let boundary = terminal_at + Duration::seconds(1);
+    let outcome = test_db
+        .store()
+        .archive_terminal_session(session_id, boundary, boundary)
+        .await
+        .expect("archive terminal session");
+    assert!(
+        matches!(outcome, ArchiveOutcome::Archived(_)),
+        "expected the session to be archived, observed {outcome:?}"
+    );
+
+    FileBlobStore::new(std::env::temp_dir().join("moa-blobs"))
+        .delete_session(&session_id)
+        .await
+        .expect("remove the claim-check blob for the unrequested event");
+
+    let records = test_db
+        .store()
+        .get_events(
+            session_id,
+            EventRange {
+                from_seq: Some(0),
+                to_seq: Some(0),
+                event_types: None,
+                limit: None,
+            },
+        )
+        .await
+        .expect("a narrow range must not resolve blobs belonging to later events");
+    assert_eq!(
+        texts(&records),
+        vec!["0:10".to_string()],
+        "the narrow range must return exactly the first inline event"
+    );
+    let error = test_db
+        .store()
+        .get_events(session_id, EventRange::all())
+        .await
+        .expect_err("the full range must still require the deleted claim-check blob");
+    assert!(
+        matches!(error, moa_core::error::MoaError::BlobNotFound(_)),
+        "the full range must prove the claim-check blob was removed, observed {error:?}"
     );
 }
 
@@ -505,6 +652,112 @@ async fn a_second_retention_pass_is_a_no_op_and_appends_stay_refused_db() {
         live_event_count(&test_db, session_id).await,
         0,
         "a refused append must not resurrect rows for an archived session"
+    );
+}
+
+// Pins: once archival commits, the lifecycle cannot reopen the session to a
+// state that may append. The archived marker and terminal status must remain a
+// coherent pair.
+#[tokio::test]
+async fn an_archived_session_cannot_transition_back_to_running_db() {
+    let test_db = test_db().await;
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let session_id = new_session(&test_db, tenant_id).await;
+    seed_history(&test_db, session_id).await;
+    let terminal_at = complete_session(&test_db, session_id, SessionStatus::Completed).await;
+    let boundary = terminal_at + Duration::seconds(1);
+    let outcome = test_db
+        .store()
+        .archive_terminal_session(session_id, boundary, boundary)
+        .await
+        .expect("archive terminal session");
+    assert!(
+        matches!(outcome, ArchiveOutcome::Archived(_)),
+        "expected the session to be archived, observed {outcome:?}"
+    );
+
+    let error = test_db
+        .store()
+        .update_status(session_id, SessionStatus::Running)
+        .await
+        .expect_err("an archived session must not transition to an appendable status");
+    assert!(
+        matches!(error, moa_core::error::MoaError::ValidationError(_)),
+        "the refused lifecycle transition must be validation, observed {error:?}"
+    );
+    let session = test_db
+        .store()
+        .get_session(session_id)
+        .await
+        .expect("reload the archived session");
+    assert_eq!(
+        session.status,
+        SessionStatus::Completed,
+        "a refused reopen must leave the terminal status unchanged"
+    );
+}
+
+// Pins: archival holds the session row lock while it commits the archive,
+// delete, and marker. A concurrent reopen queued behind that lock must observe
+// the committed marker and fail rather than producing an archived/running row.
+#[tokio::test]
+async fn archive_commit_fences_a_concurrent_reopen_db() {
+    let test_db = test_db().await;
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let session_id = new_session(&test_db, tenant_id).await;
+    seed_history(&test_db, session_id).await;
+    let terminal_at = complete_session(&test_db, session_id, SessionStatus::Completed).await;
+    let boundary = terminal_at + Duration::seconds(1);
+
+    let mut blocker = test_db
+        .store()
+        .pool()
+        .begin()
+        .await
+        .expect("begin destruction-lock blocker");
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(\
+         hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+    )
+    .bind(tenant_id.0)
+    .execute(&mut *blocker)
+    .await
+    .expect("hold the tenant destruction advisory lock");
+
+    let archive_store = test_db.store().clone();
+    let archive = tokio::spawn(async move {
+        archive_store
+            .archive_terminal_session(session_id, boundary, boundary)
+            .await
+    });
+    wait_for_session_row_lock(&test_db, session_id).await;
+
+    let status_store = test_db.store().clone();
+    let reopen = tokio::spawn(async move {
+        status_store
+            .update_status(session_id, SessionStatus::Running)
+            .await
+    });
+    blocker
+        .rollback()
+        .await
+        .expect("release the tenant destruction advisory lock");
+
+    let outcome = archive
+        .await
+        .expect("archive task should not panic")
+        .expect("archive should commit");
+    assert!(
+        matches!(outcome, ArchiveOutcome::Archived(_)),
+        "the archive must win once it owns the session row, observed {outcome:?}"
+    );
+    let error = reopen
+        .await
+        .expect("reopen task should not panic")
+        .expect_err("the queued reopen must observe the archive marker");
+    assert!(
+        matches!(error, moa_core::error::MoaError::ValidationError(_)),
+        "the queued reopen must fail validation, observed {error:?}"
     );
 }
 
@@ -769,6 +1022,48 @@ async fn deleting_a_session_that_still_has_an_archive_is_refused_db() {
         .expect("the session deletes once its archive is gone");
 }
 
+// Pins: archive tenant ownership is enforced by the same parent session row,
+// not by a caller-populated UUID column that can drift.
+#[tokio::test]
+async fn an_archive_cannot_claim_a_tenant_other_than_its_sessions_tenant_db() {
+    let test_db = test_db().await;
+    let owner_tenant = TenantId::from(Uuid::now_v7());
+    let other_tenant = TenantId::from(Uuid::now_v7());
+    let archived_session = new_session(&test_db, owner_tenant).await;
+    seed_history(&test_db, archived_session).await;
+    let terminal_at = complete_session(&test_db, archived_session, SessionStatus::Completed).await;
+    let boundary = terminal_at + Duration::seconds(1);
+    test_db
+        .store()
+        .archive_terminal_session(archived_session, boundary, boundary)
+        .await
+        .expect("archive source session");
+
+    let target_session = new_session(&test_db, owner_tenant).await;
+    let archives = qualified(test_db.schema_name(), "session_event_archives");
+    let error = sqlx::query(&format!(
+        "INSERT INTO {archives} \
+             (session_id, tenant_id, format_version, event_count, first_sequence_num, \
+              last_sequence_num, payload, content_digest, archived_at) \
+         SELECT $1, $2, format_version, event_count, first_sequence_num, \
+                last_sequence_num, payload, content_digest, archived_at \
+         FROM {archives} WHERE session_id = $3"
+    ))
+    .bind(target_session.0)
+    .bind(other_tenant.0)
+    .bind(archived_session.0)
+    .execute(test_db.store().pool())
+    .await
+    .expect_err("archive tenant must match the parent session tenant");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("session_event_archives_session_tenant_fkey"),
+        "the composite session/tenant foreign key must reject the drifted tenant"
+    );
+}
+
 // Pins: the `moa.events_maintenance` opt-in does not outlive the archival
 // transaction that set it. Archival is the first user of that escape hatch, and
 // the first user of an escape hatch is also the person who could quietly leave
@@ -851,13 +1146,16 @@ async fn a_failure_after_the_delete_rolls_back_the_whole_archival_db() {
         3,
         "a rolled-back archival must leave every live event row in place"
     );
+    let sessions = qualified(test_db.schema_name(), "sessions");
+    let archived_at = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(&format!(
+        "SELECT events_archived_at FROM {sessions} WHERE id = $1"
+    ))
+    .bind(session_id.0)
+    .fetch_one(test_db.store().pool())
+    .await
+    .expect("read the archived marker after a failed archival");
     assert!(
-        test_db
-            .store()
-            .session_events_archived_at(session_id)
-            .await
-            .expect("read the archived marker after a failed archival")
-            .is_none(),
+        archived_at.is_none(),
         "a rolled-back archival must not mark the session archived"
     );
     assert!(

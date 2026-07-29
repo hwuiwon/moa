@@ -2,9 +2,7 @@
 
 #![cfg(feature = "integration")]
 
-use moa_core::types::experiments::{
-    ExperimentScorecard, ScorecardEffect, ScorecardRequirement, ScorecardValueType,
-};
+use moa_core::types::experiments::{ExperimentScorecard, ScorecardEffect, ScorecardRequirement};
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
@@ -121,8 +119,6 @@ async fn experiment_execution_template_runs_through_execution_run_service_e2e() 
     let scorecard = ExperimentScorecard::new(vec![ScorecardRequirement {
         evaluator_id: "target_completed".to_string(),
         evaluator_version: "v1".to_string(),
-        score_name: "target_completed".to_string(),
-        value_type: ScorecardValueType::Boolean,
         config: json!({}),
         effect: ScorecardEffect::Blocking,
     }])

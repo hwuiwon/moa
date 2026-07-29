@@ -161,13 +161,6 @@ pub fn classify_failure(stage: &str, error: &Error) -> FailureClassification {
             error_code: "embedder_cardinality_mismatch",
             retryable: false,
         },
-        // Model-backed semantic extraction failures are handled inline by falling
-        // back to the deterministic extractor, so this never reaches step
-        // classification; classify defensively as terminal if it ever surfaces.
-        Error::ModelExtraction(_) => FailureClassification {
-            error_code: "semantic_model_extraction_failed",
-            retryable: false,
-        },
         // Incomplete rechunk staging is an operator-visible refusal, not a
         // transient fault: the missing member will still be missing on retry.
         Error::RechunkStagingIncomplete { .. } => FailureClassification {

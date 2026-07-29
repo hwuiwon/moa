@@ -162,7 +162,15 @@ pub fn build_endpoint(
     score_lineage: Option<crate::lineage::ScoreLineageHandle>,
 ) -> Endpoint {
     let mut builder = Endpoint::builder()
-        .bind(SessionStoreImpl::new(session_store.clone(), pool.clone(), config.clone()).serve())
+        .bind(
+            SessionStoreImpl::new(
+                session_store.clone(),
+                pool.clone(),
+                config.clone(),
+                runtime_cache.clone(),
+            )
+            .serve(),
+        )
         .bind(
             LLMGatewayImpl::new(providers.clone())
                 .with_session_limits(session_limits.clone())
@@ -220,6 +228,7 @@ pub fn build_endpoint(
                 kms.clone(),
                 credential_vault.clone(),
                 config.as_ref(),
+                runtime_cache.clone(),
             ))
             .serve(),
         )
@@ -239,6 +248,7 @@ pub fn build_endpoint(
                 kms.clone(),
                 config.clone(),
                 session_store.clone(),
+                runtime_cache.clone(),
             )
             .serve(),
         )
@@ -252,7 +262,7 @@ pub fn build_endpoint(
                 pool.clone(),
                 config.clone(),
                 session_limits.clone(),
-                runtime_cache,
+                runtime_cache.clone(),
             )
             .serve(),
         )
@@ -307,6 +317,7 @@ pub fn build_endpoint(
                 kms.clone(),
                 credential_vault.clone(),
                 config.clone(),
+                runtime_cache.clone(),
             )
             .serve(),
         )
@@ -316,8 +327,13 @@ pub fn build_endpoint(
 
     {
         builder = builder.bind(
-            SkillLearningImpl::new(session_store.clone(), config.clone(), providers.clone())
-                .serve(),
+            SkillLearningImpl::new(
+                session_store.clone(),
+                config.clone(),
+                providers.clone(),
+                runtime_cache,
+            )
+            .serve(),
         );
     }
 

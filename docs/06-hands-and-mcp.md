@@ -24,8 +24,9 @@ six dimensions, each required and typed: CPU millicores, memory mebibytes,
 ephemeral disk mebibytes, an egress posture, an idle timeout, and a hard
 maximum lifetime. Each resource and deadline is a nonzero bound or an explicit
 `Unbounded`; there is no zero-means-unlimited, no `Option`, and no
-`serde(default)`. Egress is `DenyAll`, `AllowList { revision, destinations }`,
-or `Unrestricted`.
+`serde(default)`. Egress is `DenyAll`, `AllowList { destinations }`, or
+`Unrestricted`. Revision identity belongs to the surrounding
+`SandboxPolicySnapshot`; an allowlist does not carry a second revision.
 
 Four layers contribute a `SandboxPolicySnapshot { revision, profile }`:
 
@@ -186,6 +187,12 @@ interpreter never calls a hand, MCP server, datasource, or memory store directly
 Capability availability and authorization restrict what may run; resource
 budgets restrict only how much may run.
 
+The router publishes the executable registry and its model-visible schemas as
+one immutable snapshot. A refresh cannot expose a new executor with stale
+prompt schemas, or the reverse. Durable execution pins each MCP tool's schema
+revision in the compiled capability catalog and refuses dispatch when the live
+router revision no longer matches.
+
 ## Lifecycle
 
 Active hands are keyed by owning session/run scope and provider. Conversational
@@ -208,6 +215,9 @@ the hard deadline (`LEAST(requested, hard_expires_at)`), and a lease already
 past its hard deadline cannot be renewed at all — so a continuously busy sandbox
 still dies on schedule. Reuse and recovery recompute today's policy and compare
 identity hashes; any mismatch fences the lease stale and reprovisions.
+Provisioning uses the same resolved profile that was persisted on the claim.
+When replacing a stale binding, the claimant destroys and clears the old
+durable handle before provisioning a replacement.
 
 ### The durable reaper
 
@@ -217,11 +227,13 @@ never send another request. `HandLeaseReaper` is that owner. It is started by
 `runtime::jobs::start_hand_lease_reaper` before the orchestrator accepts
 traffic — startup fails outright if no hand provider is registered — and sweeps
 independently of traffic. It claims bounded batches with `FOR UPDATE ... SKIP
-LOCKED` so competing replicas take disjoint work, moves each claimed generation
-to `reaping`, destroys through the owning provider, and finalizes only the
-generation it claimed. A failed destroy releases the generation back to `stale`
-behind exponential backoff, never to `active`: a sandbox the reaper decided to
-destroy is not one anyone should get back.
+LOCKED` so competing replicas take disjoint work. Each claim has a UUID owner
+token and expiry, so another replica can reclaim it after a crash. Destruction
+runs with bounded concurrency (four by default); finalize and retry updates
+must match both the claimed generation and owner token. A failed destroy
+releases the generation back to `stale` behind exponential backoff, never to
+`active`: a sandbox the reaper decided to destroy is not one anyone should get
+back.
 
 ### Isolated Sandbox Ownership
 
@@ -308,8 +320,11 @@ a request without depending on a pod-local process.
 
 ### Server-qualified tool references
 
-A discovered connector tool registers under `mcp__{server}__{tool}` — not under
-the name the server publishes. That qualified reference is the tool's identity
+A discovered connector tool registers under
+`mcp__{server_byte_len}_{server}__{remote_tool}` — not under the name the server
+publishes. Including the server byte length makes the encoding injective even
+when server and tool names contain separators. Duplicate qualified insertion is
+rejected. That qualified reference is the tool's identity
 everywhere on MOA's side of the connector boundary: the model-visible schema,
 the registry key, action-policy rules, the persisted `ToolCall` event, and the
 execution capability catalog. Only the outbound `tools/call` and a tenant

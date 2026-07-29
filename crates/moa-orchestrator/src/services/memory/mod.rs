@@ -12,7 +12,7 @@ pub use tools::OrchestratorMemoryRetrievalExecutor;
 
 use moa_authz_schema::Relation;
 use moa_config::MoaConfig;
-use moa_core::traits::{Identity, SessionStore};
+use moa_core::traits::{Identity, RuntimeCacheStore, SessionStore};
 use moa_core::types::identifiers::SessionId;
 use moa_core::types::session::SessionMeta;
 use moa_crypto::KeyManagementProvider;
@@ -64,6 +64,7 @@ pub struct MemoryImpl {
     kms: Arc<dyn KeyManagementProvider>,
     config: Arc<MoaConfig>,
     session_store: Arc<moa_session::PostgresSessionStore>,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
 }
 
 impl MemoryImpl {
@@ -74,12 +75,14 @@ impl MemoryImpl {
         kms: Arc<dyn KeyManagementProvider>,
         config: Arc<MoaConfig>,
         session_store: Arc<moa_session::PostgresSessionStore>,
+        runtime_cache: Arc<dyn RuntimeCacheStore>,
     ) -> Self {
         Self {
             pool,
             kms,
             config,
             session_store,
+            runtime_cache,
         }
     }
 }
@@ -102,6 +105,7 @@ impl Memory for MemoryImpl {
         let pool = self.pool.clone();
         let kms = self.kms.clone();
         let config = self.config.clone();
+        let runtime_cache = Arc::clone(&self.runtime_cache);
         Ok(ctx
             .run(|| async move {
                 search_inner(
@@ -114,6 +118,7 @@ impl Memory for MemoryImpl {
                     MemoryServiceDeps {
                         pool: &pool,
                         kms: &kms,
+                        runtime_cache: &runtime_cache,
                     },
                     config.as_ref(),
                 )
@@ -140,6 +145,7 @@ impl Memory for MemoryImpl {
 
         let pool = self.pool.clone();
         let kms = self.kms.clone();
+        let runtime_cache = Arc::clone(&self.runtime_cache);
         Ok(ctx
             .run(|| async move {
                 show_inner(
@@ -152,6 +158,7 @@ impl Memory for MemoryImpl {
                     MemoryServiceDeps {
                         pool: &pool,
                         kms: &kms,
+                        runtime_cache: &runtime_cache,
                     },
                 )
                 .await
@@ -196,6 +203,7 @@ impl Memory for MemoryImpl {
         let pool = self.pool.clone();
         let kms = self.kms.clone();
         let config = self.config.clone();
+        let runtime_cache = Arc::clone(&self.runtime_cache);
         let response = ctx
             .run(|| async move {
                 retrieve_debug_inner(
@@ -208,6 +216,7 @@ impl Memory for MemoryImpl {
                     MemoryServiceDeps {
                         pool: &pool,
                         kms: &kms,
+                        runtime_cache: &runtime_cache,
                     },
                     config.as_ref(),
                 )

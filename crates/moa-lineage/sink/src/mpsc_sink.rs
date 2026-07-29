@@ -53,6 +53,30 @@ impl Default for MpscSinkConfig {
     }
 }
 
+impl MpscSinkConfig {
+    /// Refuses values that would panic runtime primitives or disable progress.
+    pub fn validate(&self) -> Result<()> {
+        let invalid = [
+            (self.channel_capacity == 0, "channel_capacity"),
+            (self.batch_size == 0, "batch_size"),
+            (self.batch_max_age.is_zero(), "batch_max_age"),
+            (self.claim_batch_size == 0, "claim_batch_size"),
+            (self.lease_ttl.is_zero(), "lease_ttl"),
+            (self.max_pending_age.is_zero(), "max_pending_age"),
+            (self.drain_timeout.is_zero(), "drain_timeout"),
+        ]
+        .into_iter()
+        .find_map(|(is_invalid, field)| is_invalid.then_some(field));
+
+        match invalid {
+            Some(field) => Err(crate::Error::Invalid(format!(
+                "lineage writer {field} must be greater than zero"
+            ))),
+            None => Ok(()),
+        }
+    }
+}
+
 impl From<&moa_config::LineageConfig> for MpscSinkConfig {
     fn from(config: &moa_config::LineageConfig) -> Self {
         Self {
@@ -93,12 +117,12 @@ impl MpscSink {
         config: MpscSinkConfig,
         store: LineageStore,
     ) -> Result<(Self, WriterHandle)> {
-        store.ensure_schema().await?;
+        config.validate()?;
         let (ingress, rx) = mpsc::channel(config.channel_capacity);
         let journal = LineageJournal::new(store.postgres().clone(), config.lease_ttl);
         let wake = Arc::new(Notify::new());
         let writer_handle =
-            spawn_writer_for_sink(rx, wake.clone(), config.clone(), store, journal.clone())?;
+            spawn_writer_for_sink(rx, wake.clone(), config.clone(), journal.clone())?;
         Ok((
             Self {
                 ingress,

@@ -19,24 +19,11 @@
 //! *fleet* request volume rather than a per-replica allowance that the replica
 //! count multiplies.
 //!
-//! # Why the cooldown is not simply per model
-//!
-//! A 429 does not always mean "this model is busy". Providers return it for
-//! account-level quota exhaustion too, and those two cases are not
-//! distinguishable from the shared HTTP path here (see
-//! [`RateLimitScope`]). Narrowing every cooldown to the model that happened to
-//! be called would therefore let the other models on an exhausted credential
-//! keep hammering it. So a cooldown is recorded at the scope the response
-//! actually evidences, defaulting to the broader credential scope, while
-//! admission checks the credential-scope and model-scope deadlines and honours
-//! whichever is longer. An unnecessary short pause costs far less than
-//! continuing to call a credential that is out of quota.
-//!
-//! The retry budget is deliberately credential-wide: it exists to bound retry
-//! volume against one API key, and splitting it per model would hand each model
-//! its own floor — the same multiplication this task removes across replicas.
+//! Both controls are credential-wide. No production adapter can reliably
+//! distinguish a model-only 429 from account exhaustion, so a model-scoped
+//! state machine would add complexity while letting callers escape a real
+//! credential cooldown by selecting another model.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -48,54 +35,6 @@ use tokio::time::Instant;
 use super::concurrency_factory::{
     CoordinatedControl, QuotaIdentity, record_coordination_degraded, record_coordination_rejected,
 };
-
-/// Model label used before a call has resolved its model.
-const UNSCOPED_MODEL: &str = "unscoped";
-
-/// Key label standing for "the whole credential", used by credential-scoped
-/// cooldowns and by the credential-wide retry budget.
-///
-/// `*` cannot collide with a provider model id, so a credential-scoped entry can
-/// never be confused with a model named in a request.
-const CREDENTIAL_SCOPE_LABEL: &str = "*";
-
-/// Which quota a rate-limit response evidences.
-///
-/// Providers use 429 for both "this model is over its per-minute rate" and "this
-/// account is out of quota", and the shared HTTP path that records the cooldown
-/// sees only a status, headers, and an opaque body — it does not parse each
-/// vendor's rate-limit taxonomy. Every caller in the tree therefore records
-/// [`Credential`](Self::Credential) today: it is the conservative answer, and
-/// guessing [`Model`](Self::Model) wrongly is precisely the failure that lets
-/// the rest of an exhausted credential keep calling. An adapter that gains a
-/// reliable signal can record the narrower scope without any other change,
-/// because admission already reads both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RateLimitScope {
-    /// The whole credential/account quota. The default when nothing distinguishes.
-    Credential,
-    /// One model on that credential.
-    Model,
-}
-
-impl RateLimitScope {
-    /// The scope to record for a rate-limit response nothing could classify.
-    ///
-    /// Every production caller goes through this one function rather than
-    /// naming a variant, so the conservative default is a single decision with
-    /// a single test, not a constant repeated at four call sites where one
-    /// could drift.
-    pub(crate) const fn unclassified() -> Self {
-        Self::Credential
-    }
-}
-
-/// Upper bound on per-scope local state kept by one guard.
-///
-/// Model ids come from the fixed provider catalog, so this is generous; it
-/// exists so a caller that somehow passes unbounded model strings cannot grow
-/// the map without limit.
-const MAX_TRACKED_SCOPES: usize = 64;
 
 /// Builds a typed rate-limit error for a provider that is in its 429 cooldown.
 pub(crate) fn rate_limited_paused(remaining: Duration) -> MoaError {
@@ -124,24 +63,18 @@ pub(crate) fn rate_limited_saturated(waited: Duration) -> MoaError {
 pub(crate) struct RateGuard {
     inner: Arc<RateGuardInner>,
     pacing: ProviderPacingConfig,
-    /// Model this handle is scoped to; it selects the model-scope cooldown this
-    /// handle reads and can write. The credential-scope cooldown and the retry
-    /// budget are shared by every model on the credential.
-    model: Arc<str>,
     /// Rate class label for the shared keys (the provider call kind).
     class: &'static str,
     shared: Option<Arc<SharedGuard>>,
 }
 
 struct RateGuardInner {
-    /// Process-local state keyed by model id, plus one entry under
-    /// [`CREDENTIAL_SCOPE_LABEL`] for the credential-wide cooldown and retry
-    /// budget. Used directly under local scope and as the bounded fallback when
-    /// shared coordination degrades.
-    states: Mutex<HashMap<Arc<str>, ScopeState>>,
+    /// Credential-wide local state used directly under local scope and retained
+    /// as the bounded fallback when shared coordination degrades.
+    state: Mutex<ScopeState>,
 }
 
-/// Process-local cooldown and retry-budget state for one scope.
+/// Process-local cooldown and retry-budget state for one credential.
 #[derive(Debug, Clone, Copy)]
 struct ScopeState {
     /// Cooldown deadline; `None` means not paused.
@@ -161,12 +94,6 @@ impl ScopeState {
             retries: 0,
         }
     }
-
-    /// Returns whether this entry still carries state worth keeping.
-    fn is_active(&self, now: Instant, window: Duration) -> bool {
-        self.pause_until.is_some_and(|deadline| deadline > now)
-            || now.saturating_duration_since(self.window_start) < window
-    }
 }
 
 /// Fleet-shared cooldown and retry-budget state for one credential's quota.
@@ -179,12 +106,12 @@ struct SharedGuard {
 impl RateGuard {
     /// Builds a process-local guard.
     pub(crate) fn new(pacing: ProviderPacingConfig) -> Self {
+        let now = Instant::now();
         Self {
             inner: Arc::new(RateGuardInner {
-                states: Mutex::new(HashMap::new()),
+                state: Mutex::new(ScopeState::new(now)),
             }),
             pacing,
-            model: Arc::from(UNSCOPED_MODEL),
             class: "chat",
             shared: None,
         }
@@ -216,27 +143,11 @@ impl RateGuard {
         self
     }
 
-    /// Returns a handle scoped to one resolved model.
-    ///
-    /// The model decides which model-scope cooldown this handle reads and can
-    /// write; the credential-scope cooldown and the retry budget are shared by
-    /// every model on the credential. The returned handle shares this guard's
-    /// process-local state.
-    pub(crate) fn for_model(&self, model: &str) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            pacing: self.pacing.clone(),
-            model: Arc::from(model),
-            class: self.class,
-            shared: self.shared.clone(),
-        }
-    }
-
     /// Returns the remaining 429 cooldown for this quota, or `None` when clear.
     ///
-    /// Honours the longer of the credential-scope and model-scope deadlines, so
-    /// a credential-wide pause cannot be escaped by switching models and a
-    /// model-scoped pause does not stall the rest of the credential.
+    /// Always combines the local and fleet-shared deadlines. Keeping the local
+    /// deadline active even while Redis is healthy makes a later degraded read
+    /// preserve every 429 this process already observed.
     ///
     /// # Errors
     ///
@@ -247,17 +158,20 @@ impl RateGuard {
             return Ok(self.local_pause_remaining());
         };
         let started = Instant::now();
-        // Both scopes are read together so admission pays one round trip's
-        // latency rather than two.
-        let credential_key = self.cooldown_key(shared, RateLimitScope::Credential);
-        let model_key = self.cooldown_key(shared, RateLimitScope::Model);
-        let (credential, model) = tokio::join!(
-            shared.store.cooldown_remaining(&credential_key),
-            shared.store.cooldown_remaining(&model_key),
-        );
-        match credential.and_then(|credential| Ok(credential.max(model?))) {
-            Ok(remaining) if remaining.is_zero() => Ok(None),
-            Ok(remaining) => Ok(Some(remaining)),
+        let local = self.local_pause_remaining().unwrap_or(Duration::ZERO);
+        match shared
+            .store
+            .cooldown_remaining(&self.cooldown_key(shared))
+            .await
+        {
+            Ok(shared) => {
+                let remaining = local.max(shared);
+                if remaining.is_zero() {
+                    Ok(None)
+                } else {
+                    Ok(Some(remaining))
+                }
+            }
             Err(error) => {
                 if shared.on_failure.rejects_admission() {
                     record_coordination_rejected(
@@ -284,27 +198,19 @@ impl RateGuard {
         }
     }
 
-    /// Records a rate-limit response at the scope it evidences.
-    ///
-    /// Callers that cannot tell a model-scoped rate limit from account-level
-    /// quota exhaustion must pass [`RateLimitScope::Credential`]; see that type
-    /// for why that is the safe direction to be wrong in.
+    /// Records a credential-wide rate-limit response.
     ///
     /// A provider-supplied `Retry-After` is capped at the configured maximum, so
     /// one hostile header cannot pause a fleet's access to a credential for an
     /// unbounded time. The local deadline is always recorded too, so a later
     /// coordination failure degrades onto state that is already correct.
-    pub(crate) async fn record_rate_limited(
-        &self,
-        retry_after: Option<Duration>,
-        scope: RateLimitScope,
-    ) {
+    pub(crate) async fn record_rate_limited(&self, retry_after: Option<Duration>) {
         let cooldown = retry_after
             .filter(|delay| !delay.is_zero())
             .unwrap_or_else(|| Duration::from_millis(self.pacing.default_cooldown_ms))
             .min(Duration::from_millis(self.pacing.max_cooldown_ms));
         let now = Instant::now();
-        self.with_state(self.scope_label(scope), now, |state| {
+        self.with_state(|state| {
             let deadline = now + cooldown;
             // Never shorten an active cooldown set by a concurrent call.
             if state.pause_until.is_none_or(|current| current < deadline) {
@@ -319,7 +225,7 @@ impl RateGuard {
         // than turning into a second error.
         if let Err(error) = shared
             .store
-            .extend_cooldown(&self.cooldown_key(shared, scope), cooldown)
+            .extend_cooldown(&self.cooldown_key(shared), cooldown)
             .await
         {
             record_coordination_degraded(
@@ -339,8 +245,8 @@ impl RateGuard {
     /// updated and the policy is `fail_closed`.
     pub(crate) async fn note_request(&self) -> Result<()> {
         let now = Instant::now();
+        self.note_local_request(now);
         let Some(shared) = self.shared.as_ref() else {
-            self.note_local_request(now);
             return Ok(());
         };
         let started = now;
@@ -371,7 +277,6 @@ impl RateGuard {
                     started.elapsed(),
                     &error,
                 );
-                self.note_local_request(now);
                 Ok(())
             }
         }
@@ -388,6 +293,11 @@ impl RateGuard {
             return self.allow_local_retry(Instant::now());
         };
         let started = Instant::now();
+        // Consume local budget too: it remains an up-to-date bounded fallback
+        // if the store fails on this or a later call.
+        if !self.allow_local_retry(started) {
+            return false;
+        }
         match shared
             .store
             .try_consume_retry_budget(
@@ -414,7 +324,7 @@ impl RateGuard {
                     started.elapsed(),
                     &error,
                 );
-                self.allow_local_retry(started)
+                true
             }
         }
     }
@@ -423,46 +333,29 @@ impl RateGuard {
         Duration::from_millis(self.pacing.retry_budget_window_ms)
     }
 
-    /// Returns the state label one cooldown scope is stored under.
-    fn scope_label(&self, scope: RateLimitScope) -> Arc<str> {
-        match scope {
-            RateLimitScope::Credential => Arc::from(CREDENTIAL_SCOPE_LABEL),
-            RateLimitScope::Model => Arc::clone(&self.model),
-        }
-    }
-
-    fn cooldown_key(&self, shared: &SharedGuard, scope: RateLimitScope) -> String {
-        shared
-            .identity
-            .key("cooldown", &self.scope_label(scope), self.class)
+    fn cooldown_key(&self, shared: &SharedGuard) -> String {
+        shared.identity.cooldown_key(self.class)
     }
 
     /// The retry budget is one allowance for the whole credential, so its key
     /// deliberately carries no model.
     fn retry_key(&self, shared: &SharedGuard) -> String {
-        shared
-            .identity
-            .key("retry-budget", CREDENTIAL_SCOPE_LABEL, self.class)
+        shared.identity.retry_budget_key(self.class)
     }
 
     fn local_pause_remaining(&self) -> Option<Duration> {
         let now = Instant::now();
-        let remaining = |scope| {
-            self.with_state(self.scope_label(scope), now, |state| {
-                state
-                    .pause_until
-                    .filter(|deadline| *deadline > now)
-                    .map(|deadline| deadline.saturating_duration_since(now))
-                    .unwrap_or(Duration::ZERO)
-            })
-        };
-        let longest = remaining(RateLimitScope::Credential).max(remaining(RateLimitScope::Model));
-        (!longest.is_zero()).then_some(longest)
+        self.with_state(|state| {
+            state
+                .pause_until
+                .filter(|deadline| *deadline > now)
+                .map(|deadline| deadline.saturating_duration_since(now))
+        })
     }
 
     fn note_local_request(&self, now: Instant) {
         let window = self.retry_window();
-        self.with_state(Arc::from(CREDENTIAL_SCOPE_LABEL), now, |state| {
+        self.with_state(|state| {
             rotate(state, now, window);
             state.requests = state.requests.saturating_add(1);
         });
@@ -472,7 +365,7 @@ impl RateGuard {
         let window = self.retry_window();
         let percent = u64::from(self.pacing.retry_budget_percent);
         let floor = self.pacing.retry_budget_floor;
-        self.with_state(Arc::from(CREDENTIAL_SCOPE_LABEL), now, |state| {
+        self.with_state(|state| {
             rotate(state, now, window);
             let budget = state
                 .requests
@@ -488,28 +381,13 @@ impl RateGuard {
         })
     }
 
-    /// Runs `apply` against the state stored under `label`, creating it on first
-    /// use. `label` is either a model id or [`CREDENTIAL_SCOPE_LABEL`].
-    fn with_state<T>(
-        &self,
-        label: Arc<str>,
-        now: Instant,
-        apply: impl FnOnce(&mut ScopeState) -> T,
-    ) -> T {
-        let window = self.retry_window();
-        let mut states = self
+    fn with_state<T>(&self, apply: impl FnOnce(&mut ScopeState) -> T) -> T {
+        let mut state = self
             .inner
-            .states
+            .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if states.len() >= MAX_TRACKED_SCOPES && !states.contains_key(&label) {
-            states.retain(|_, state| state.is_active(now, window));
-            if states.len() >= MAX_TRACKED_SCOPES {
-                states.clear();
-            }
-        }
-        let state = states.entry(label).or_insert_with(|| ScopeState::new(now));
-        apply(state)
+        apply(&mut state)
     }
 }
 
@@ -530,23 +408,19 @@ mod tests {
 
     use super::*;
 
-    const MODEL: &str = "claude-sonnet-4-6";
-
     fn local_guard() -> RateGuard {
-        RateGuard::new(ProviderPacingConfig::default()).for_model(MODEL)
+        RateGuard::new(ProviderPacingConfig::default())
     }
 
     fn shared_guard(
         store: Arc<dyn RuntimeCacheStore>,
         on_failure: CoordinationFailurePolicy,
     ) -> RateGuard {
-        RateGuard::new(ProviderPacingConfig::default())
-            .with_shared_quota(
-                Some(store),
-                QuotaIdentity::new("anthropic", "shared-credential"),
-                on_failure,
-            )
-            .for_model(MODEL)
+        RateGuard::new(ProviderPacingConfig::default()).with_shared_quota(
+            Some(store),
+            QuotaIdentity::new("anthropic", "shared-credential"),
+            on_failure,
+        )
     }
 
     #[tokio::test(start_paused = true)]
@@ -557,7 +431,7 @@ mod tests {
         assert!(guard.pause_remaining().await.expect("read pause").is_none());
 
         guard
-            .record_rate_limited(Some(Duration::from_secs(10)), RateLimitScope::Credential)
+            .record_rate_limited(Some(Duration::from_secs(10)))
             .await;
         assert!(
             guard.pause_remaining().await.expect("read pause").is_some(),
@@ -575,9 +449,7 @@ mod tests {
     async fn missing_retry_after_uses_the_configured_default_cooldown() {
         // Pins: a 429 with no Retry-After still pauses, for the configured default.
         let guard = local_guard();
-        guard
-            .record_rate_limited(None, RateLimitScope::Credential)
-            .await;
+        guard.record_rate_limited(None).await;
         assert!(guard.pause_remaining().await.expect("read pause").is_some());
 
         let default = Duration::from_millis(ProviderPacingConfig::default().default_cooldown_ms);
@@ -591,10 +463,7 @@ mod tests {
         // time — the cooldown is capped, so the fleet recovers on schedule.
         let guard = local_guard();
         guard
-            .record_rate_limited(
-                Some(Duration::from_secs(86_400)),
-                RateLimitScope::Credential,
-            )
+            .record_rate_limited(Some(Duration::from_secs(86_400)))
             .await;
 
         let cap = Duration::from_millis(ProviderPacingConfig::default().max_cooldown_ms);
@@ -629,14 +498,14 @@ mod tests {
         let (replica_a, replica_b) = shared_replicas(store);
 
         replica_a
-            .for_model("claude-opus-4-6")
-            .record_rate_limited(Some(Duration::from_secs(30)), RateLimitScope::Credential)
+            .clone()
+            .record_rate_limited(Some(Duration::from_secs(30)))
             .await;
 
         for model in ["claude-opus-4-6", "claude-haiku-4-5", "claude-sonnet-4-6"] {
             assert!(
                 replica_b
-                    .for_model(model)
+                    .clone()
                     .pause_remaining()
                     .await
                     .expect("read")
@@ -648,7 +517,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(31)).await;
         assert!(
             replica_b
-                .for_model("claude-haiku-4-5")
+                .clone()
                 .pause_remaining()
                 .await
                 .expect("read")
@@ -658,62 +527,19 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_model_scoped_cooldown_does_not_pause_the_rest_of_the_credential() {
-        // Pins the other half: when a response does evidence a model-scoped
-        // limit, the pause stays on that model — shared across replicas, but not
-        // stalling the credential's other models. Admission reads both scopes,
-        // so this and the credential-wide case coexist.
-        let store: Arc<dyn RuntimeCacheStore> = Arc::new(MemoryRuntimeCacheStore::new());
-        let (replica_a, replica_b) = shared_replicas(store);
-
-        replica_a
-            .for_model("claude-opus-4-6")
-            .record_rate_limited(Some(Duration::from_secs(30)), RateLimitScope::Model)
-            .await;
-
-        assert!(
-            replica_b
-                .for_model("claude-opus-4-6")
-                .pause_remaining()
-                .await
-                .expect("read")
-                .is_some(),
-            "the rate-limited model must be paused fleet-wide"
-        );
-        assert!(
-            replica_b
-                .for_model("claude-haiku-4-5")
-                .pause_remaining()
-                .await
-                .expect("read")
-                .is_none(),
-            "a model-scoped pause must not stall the credential's other models"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn local_cooldowns_honour_both_scopes() {
-        // Pins the same two-scope rule on the process-local path, which is both
-        // the local-scope deployment and the degraded fallback: a credential
-        // 429 pauses every model, a model 429 pauses only its own.
+    async fn local_cooldown_is_shared_by_every_client_clone() {
+        // Pins: switching model clients in one process cannot escape a cooldown
+        // observed on the shared credential guard.
         let guard = RateGuard::new(ProviderPacingConfig::default());
-        let opus = guard.for_model("claude-opus-4-6");
-        let haiku = guard.for_model("claude-haiku-4-5");
+        let opus = guard.clone();
+        let haiku = guard.clone();
 
-        opus.record_rate_limited(Some(Duration::from_secs(30)), RateLimitScope::Model)
+        opus.record_rate_limited(Some(Duration::from_secs(30)))
             .await;
         assert!(opus.pause_remaining().await.expect("read").is_some());
         assert!(
-            haiku.pause_remaining().await.expect("read").is_none(),
-            "a model-scoped cooldown must not leak to another model"
-        );
-
-        haiku
-            .record_rate_limited(Some(Duration::from_secs(30)), RateLimitScope::Credential)
-            .await;
-        assert!(
-            opus.pause_remaining().await.expect("read").is_some(),
-            "a credential-scoped cooldown must pause every model"
+            haiku.pause_remaining().await.expect("read").is_some(),
+            "a second model client must observe the same credential cooldown"
         );
     }
 
@@ -770,7 +596,7 @@ mod tests {
 
         assert!(replica_b.pause_remaining().await.expect("read").is_none());
         replica_a
-            .record_rate_limited(Some(Duration::from_secs(30)), RateLimitScope::Credential)
+            .record_rate_limited(Some(Duration::from_secs(30)))
             .await;
 
         let remaining = replica_b
@@ -791,11 +617,11 @@ mod tests {
     async fn uncoordinated_replicas_do_not_share_a_cooldown() {
         // Pins: the negative control. Without a shared quota, replica A's 429 is
         // invisible to replica B — the exact fleet behavior this task removes.
-        let replica_a = RateGuard::new(ProviderPacingConfig::default()).for_model(MODEL);
-        let replica_b = RateGuard::new(ProviderPacingConfig::default()).for_model(MODEL);
+        let replica_a = RateGuard::new(ProviderPacingConfig::default());
+        let replica_b = RateGuard::new(ProviderPacingConfig::default());
 
         replica_a
-            .record_rate_limited(Some(Duration::from_secs(30)), RateLimitScope::Credential)
+            .record_rate_limited(Some(Duration::from_secs(30)))
             .await;
         assert!(replica_a.pause_remaining().await.expect("read").is_some());
         assert!(
@@ -814,14 +640,14 @@ mod tests {
         let (replica_a, replica_b) = shared_replicas(store);
         let floor = ProviderPacingConfig::default().retry_budget_floor;
 
-        let opus = replica_a.for_model("claude-opus-4-6");
+        let opus = replica_a.clone();
         opus.note_request().await.expect("note request");
         for _ in 0..floor {
             assert!(opus.allow_retry().await, "opus spends the shared floor");
         }
 
         assert!(
-            !replica_b.for_model("claude-haiku-4-5").allow_retry().await,
+            !replica_b.allow_retry().await,
             "a different model on the same credential must find the budget spent"
         );
     }
@@ -856,7 +682,7 @@ mod tests {
             "replica B must find the fleet-wide retry budget already spent"
         );
 
-        let uncoordinated = RateGuard::new(ProviderPacingConfig::default()).for_model(MODEL);
+        let uncoordinated = RateGuard::new(ProviderPacingConfig::default());
         assert!(
             uncoordinated.allow_retry().await,
             "an uncoordinated guard still has its own full budget, proving the \
@@ -878,7 +704,7 @@ mod tests {
             .await
             .expect("degraded note must not fail");
         guard
-            .record_rate_limited(Some(Duration::from_secs(10)), RateLimitScope::Credential)
+            .record_rate_limited(Some(Duration::from_secs(10)))
             .await;
         assert!(
             guard

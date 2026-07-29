@@ -1,10 +1,11 @@
-//! Postgres and ClickHouse batch storage plus COPY rendering.
+//! Postgres batch storage plus COPY rendering.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::Result;
-use crate::store::LineageStore;
 
 use super::compliance::apply_compliance_hashes;
 use super::rows::{ExperimentScoreProvenanceRow, LineageRow, PendingRow, ScoreRow};
@@ -15,14 +16,7 @@ use super::rows::{ExperimentScoreProvenanceRow, LineageRow, PendingRow, ScoreRow
 /// acceptance queue before committing. That is what makes "stored" and "no
 /// longer queued" a single fact rather than two facts a crash can separate.
 ///
-/// On the ClickHouse backend the `turn_lineage` insert cannot join a Postgres
-/// transaction, so it is at-least-once: a crash between the ClickHouse insert
-/// and this transaction's commit replays the same rows, and their
-/// content-addressed identity collapses the duplicate. Scores, dead letters and
-/// compliance state stay in Postgres under both backends, and production is
-/// explicitly Postgres.
 pub(super) async fn write_pending_rows(
-    store: &LineageStore,
     tx: &mut Transaction<'_, Postgres>,
     rows: &[PendingRow],
 ) -> Result<()> {
@@ -39,17 +33,58 @@ pub(super) async fn write_pending_rows(
         }
     }
 
-    match store {
-        LineageStore::Postgres(_) => write_rows(tx, &lineage_rows).await?,
-        // Compliance tenants are refused at startup on the ClickHouse backend
-        // (see `LineageStore::guard_compliance_backend`), so ClickHouse writes
-        // never silently drop hash chaining here.
-        LineageStore::ClickHouse { clickhouse, .. } => {
-            clickhouse.insert_lineage_rows(&lineage_rows).await?;
-        }
-    }
+    lock_destruction_scopes(tx, rows).await?;
+    write_rows(tx, &lineage_rows).await?;
     write_score_rows(tx, &score_rows).await?;
     Ok(())
+}
+
+/// Serializes writes with the canonical tenant/subject destruction fence.
+///
+/// If this transaction wins the lock, a later erasure waits and then deletes
+/// these rows. If erasure wins, its permanent fence is visible to the INSERT
+/// predicates below. Either ordering prevents an in-flight write from
+/// resurrecting destroyed data.
+async fn lock_destruction_scopes(
+    tx: &mut Transaction<'_, Postgres>,
+    rows: &[PendingRow],
+) -> Result<()> {
+    let mut scopes = BTreeMap::<Uuid, BTreeSet<Uuid>>::new();
+    for row in rows {
+        let Ok(tenant_id) = Uuid::parse_str(&row.storage_partition_id()) else {
+            continue;
+        };
+        let subjects = scopes.entry(tenant_id).or_default();
+        if let Some(user_id) = row.user_id()
+            && let Some(subject_id) = privacy_subject_uuid(&user_id)
+        {
+            subjects.insert(subject_id);
+        }
+    }
+
+    for (tenant_id, subjects) in scopes {
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(\
+             hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+        )
+        .bind(tenant_id)
+        .execute(&mut **tx)
+        .await?;
+        for subject_id in subjects {
+            sqlx::query(
+                "SELECT pg_advisory_xact_lock(\
+                 hashtextextended('moa:destruction:subject:' || $1::text, 0))",
+            )
+            .bind(subject_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+fn privacy_subject_uuid(user_id: &str) -> Option<Uuid> {
+    Uuid::parse_str(user_id.strip_prefix("contact:").unwrap_or(user_id)).ok()
 }
 
 async fn write_rows(tx: &mut Transaction<'_, Postgres>, rows: &[LineageRow]) -> Result<()> {
@@ -134,17 +169,18 @@ async fn write_rows(tx: &mut Transaction<'_, Postgres>, rows: &[LineageRow]) -> 
             integrity_hash,
             prev_hash
         FROM lineage_copy AS staged
-        -- Purge fence. A batch accepted before a tenant purge can still be in
-        -- flight when the purge commits, and writing it afterwards would
-        -- resurrect purged data under a tenant that no longer exists. The fence
-        -- row is permanent, so a claim/lease/retry race cannot slip a row past
-        -- it: whichever attempt eventually commits sees the same fence. Making
-        -- the rows invisible to the INSERT is stronger than checking before it,
-        -- because the check and the write are then the same statement.
+        -- Permanent destruction fence, checked after taking the same advisory
+        -- locks as erasure. A tenant fence suppresses every row; a subject fence
+        -- suppresses only that UUID-backed user/contact.
         WHERE NOT EXISTS (
             SELECT 1
             FROM moa.destruction_operation_fence AS fence
             WHERE fence.tenant_id::TEXT = staged.storage_partition_id
+              AND (
+                    fence.subject_id IS NULL
+                    OR staged.user_id = fence.subject_id::TEXT
+                    OR staged.user_id = 'contact:' || fence.subject_id::TEXT
+                  )
         )
         ON CONFLICT (turn_id, record_kind, ts) DO UPDATE
         SET payload = EXCLUDED.payload,
@@ -301,6 +337,11 @@ async fn write_score_rows(tx: &mut Transaction<'_, Postgres>, rows: &[ScoreRow])
             SELECT 1
             FROM moa.destruction_operation_fence AS fence
             WHERE fence.tenant_id::TEXT = staged.storage_partition_id
+              AND (
+                    fence.subject_id IS NULL
+                    OR staged.user_id = fence.subject_id::TEXT
+                    OR staged.user_id = 'contact:' || fence.subject_id::TEXT
+                  )
         )
         -- Replay acceptance, not mutation. A score row is derived from the exact
         -- evidence its provenance names, so a replay that produced the same
@@ -341,6 +382,7 @@ async fn write_experiment_score_provenance(
         r#"
         CREATE TEMP TABLE IF NOT EXISTS experiment_score_provenance_copy (
             score_id                 UUID  NOT NULL,
+            score_ts                 TIMESTAMPTZ NOT NULL,
             storage_partition_id     TEXT  NOT NULL,
             user_id                  TEXT,
             score_run_id             UUID  NOT NULL,
@@ -367,6 +409,7 @@ async fn write_experiment_score_provenance(
             r#"
             COPY experiment_score_provenance_copy (
                 score_id,
+                score_ts,
                 storage_partition_id,
                 user_id,
                 score_run_id,
@@ -396,6 +439,7 @@ async fn write_experiment_score_provenance(
         r#"
         INSERT INTO moa.experiment_score_provenance (
             score_id,
+            score_ts,
             storage_partition_id,
             user_id,
             score_run_id,
@@ -413,6 +457,7 @@ async fn write_experiment_score_provenance(
         )
         SELECT
             score_id,
+            score_ts,
             storage_partition_id,
             user_id,
             score_run_id,
@@ -436,6 +481,11 @@ async fn write_experiment_score_provenance(
             SELECT 1
             FROM moa.destruction_operation_fence AS fence
             WHERE fence.tenant_id::TEXT = staged.storage_partition_id
+              AND (
+                    fence.subject_id IS NULL
+                    OR staged.user_id = fence.subject_id::TEXT
+                    OR staged.user_id = 'contact:' || fence.subject_id::TEXT
+                  )
         )
         -- Provenance is immutable by database trigger, so DO UPDATE is not even
         -- available here. DO NOTHING accepts an identical replay; the comparison
@@ -454,6 +504,7 @@ async fn write_experiment_score_provenance(
           ON stored.score_id = staged.score_id
         WHERE (
                   stored.storage_partition_id,
+                  stored.score_ts,
                   stored.score_run_id,
                   stored.experiment_run_uid,
                   stored.plan_revision_uid,
@@ -466,6 +517,7 @@ async fn write_experiment_score_provenance(
                   stored.evidence_hash
               ) IS DISTINCT FROM (
                   staged.storage_partition_id,
+                  staged.score_ts,
                   staged.score_run_id,
                   staged.experiment_run_uid,
                   staged.plan_revision_uid,
@@ -495,6 +547,7 @@ fn render_provenance_copy_csv(rows: &[&ExperimentScoreProvenanceRow]) -> String 
     for row in rows {
         let fields = [
             csv_field(&row.score_id.to_string()),
+            csv_field(&row.score_ts.to_rfc3339()),
             csv_field(&row.storage_partition_id),
             nullable_csv(row.user_id.as_deref()),
             csv_field(&row.score_run_id.to_string()),

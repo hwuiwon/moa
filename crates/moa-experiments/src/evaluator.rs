@@ -155,16 +155,6 @@ pub enum EvaluatorError {
         /// Requested evaluator version.
         version: String,
     },
-    /// The requirement declares an output the evaluator does not produce.
-    #[error("evaluator `{evaluator_id}` writes {expected} but the requirement declares {declared}")]
-    OutputMismatch {
-        /// Requested evaluator ID.
-        evaluator_id: String,
-        /// Output the registry declares.
-        expected: String,
-        /// Output the scorecard declared.
-        declared: String,
-    },
     /// A stochastic evaluator was marked blocking.
     #[error("evaluator `{evaluator_id}` is stochastic and cannot be a blocking requirement")]
     StochasticBlocking {
@@ -287,28 +277,11 @@ pub fn validate_scorecard(scorecard: &ExperimentScorecard) -> Result<(), Evaluat
 ///
 /// # Errors
 ///
-/// Returns [`EvaluatorError`] when the evaluator is unknown, the declared output
-/// does not match what the evaluator writes, a stochastic evaluator is marked
-/// blocking, or the deterministic configuration is missing or unusable.
+/// Returns [`EvaluatorError`] when the evaluator is unknown, a stochastic
+/// evaluator is marked blocking, or the deterministic configuration is missing
+/// or unusable.
 pub fn validate_requirement(requirement: &ScorecardRequirement) -> Result<(), EvaluatorError> {
     let descriptor = descriptor(&requirement.evaluator_id, &requirement.evaluator_version)?;
-    if descriptor.score_name != requirement.score_name
-        || descriptor.value_type != requirement.value_type
-    {
-        return Err(EvaluatorError::OutputMismatch {
-            evaluator_id: requirement.evaluator_id.clone(),
-            expected: format!(
-                "{} as {}",
-                descriptor.score_name,
-                descriptor.value_type.as_str()
-            ),
-            declared: format!(
-                "{} as {}",
-                requirement.score_name,
-                requirement.value_type.as_str()
-            ),
-        });
-    }
     if requirement.effect.is_blocking() && !descriptor.determinism.permits_blocking() {
         return Err(EvaluatorError::StochasticBlocking {
             evaluator_id: requirement.evaluator_id.clone(),
@@ -420,12 +393,12 @@ pub fn evaluate_trial(
                 score_run_id,
                 &requirement.evaluator_id,
                 &requirement.evaluator_version,
-                &requirement.score_name,
+                descriptor.score_name,
                 evidence.target,
             ),
             evaluator_id: requirement.evaluator_id.clone(),
             evaluator_version: requirement.evaluator_version.clone(),
-            score_name: requirement.score_name.clone(),
+            score_name: descriptor.score_name.to_string(),
             value: EvaluatedValue::Boolean(passed),
             effect: requirement.effect,
             passed,
@@ -501,29 +474,19 @@ mod tests {
 
     fn requirement(
         evaluator_id: &str,
-        score_name: &str,
-        value_type: ScorecardValueType,
         config: Value,
         effect: ScorecardEffect,
     ) -> ScorecardRequirement {
         ScorecardRequirement {
             evaluator_id: evaluator_id.to_string(),
             evaluator_version: "v1".to_string(),
-            score_name: score_name.to_string(),
-            value_type,
             config,
             effect,
         }
     }
 
-    fn blocking(evaluator_id: &str, score_name: &str, config: Value) -> ScorecardRequirement {
-        requirement(
-            evaluator_id,
-            score_name,
-            ScorecardValueType::Boolean,
-            config,
-            ScorecardEffect::Blocking,
-        )
+    fn blocking(evaluator_id: &str, config: Value) -> ScorecardRequirement {
+        requirement(evaluator_id, config, ScorecardEffect::Blocking)
     }
 
     fn evidence() -> TrialTerminalEvidence {
@@ -584,8 +547,6 @@ mod tests {
         // on a model's mood.
         let scorecard = ExperimentScorecard::new(vec![requirement(
             "scenario_quality",
-            "scenario_quality",
-            ScorecardValueType::Numeric,
             json!({}),
             ScorecardEffect::Blocking,
         )])
@@ -600,46 +561,12 @@ mod tests {
     }
 
     #[test]
-    fn declared_output_must_match_what_the_evaluator_writes_offline() {
-        // Pins: a requirement cannot claim an evaluator emits a different score
-        // name or value type than it does; otherwise the eligibility gate would
-        // wait forever for a row nothing writes.
-        let wrong_name = ExperimentScorecard::new(vec![blocking(
-            "target_completed",
-            "completed_maybe",
-            json!({}),
-        )])
-        .expect("structurally valid");
-        assert!(matches!(
-            validate_scorecard(&wrong_name).expect_err("wrong score name must be refused"),
-            EvaluatorError::OutputMismatch { .. }
-        ));
-
-        let wrong_type = ExperimentScorecard::new(vec![requirement(
-            "target_completed",
-            "target_completed",
-            ScorecardValueType::Numeric,
-            json!({}),
-            ScorecardEffect::Blocking,
-        )])
-        .expect("structurally valid");
-        assert!(matches!(
-            validate_scorecard(&wrong_type).expect_err("wrong value type must be refused"),
-            EvaluatorError::OutputMismatch { .. }
-        ));
-    }
-
-    #[test]
     fn budget_evaluators_reject_missing_and_unusable_thresholds_offline() {
         // Pins: a budget evaluator with no threshold, a zero threshold, or a
         // non-integer threshold is refused rather than silently passing every trial.
         assert_eq!(
-            validate_requirement(&blocking(
-                "token_budget",
-                "token_budget_respected",
-                json!({})
-            ))
-            .expect_err("missing threshold"),
+            validate_requirement(&blocking("token_budget", json!({})))
+                .expect_err("missing threshold"),
             EvaluatorError::MissingConfigKey {
                 evaluator_id: "token_budget".to_string(),
                 key: "max_tokens",
@@ -647,7 +574,7 @@ mod tests {
         );
         for bad in [json!({"max_tokens": 0}), json!({"max_tokens": "lots"})] {
             assert_eq!(
-                validate_requirement(&blocking("token_budget", "token_budget_respected", bad))
+                validate_requirement(&blocking("token_budget", bad))
                     .expect_err("unusable threshold"),
                 EvaluatorError::InvalidConfigValue {
                     evaluator_id: "token_budget".to_string(),
@@ -658,7 +585,6 @@ mod tests {
         }
         assert_eq!(
             validate_requirement(&blocking(
-                "privacy_safe_output",
                 "privacy_safe_output",
                 json!({"max_sensitivity": "whatever"})
             ))
@@ -677,24 +603,12 @@ mod tests {
         // completion, result production, the three budgets, and privacy — so a
         // trial that blew its token budget cannot pass the token requirement.
         let scorecard = ExperimentScorecard::new(vec![
-            blocking("target_completed", "target_completed", json!({})),
-            blocking("result_produced", "result_produced", json!({})),
-            blocking(
-                "token_budget",
-                "token_budget_respected",
-                json!({"max_tokens": 1000}),
-            ),
-            blocking(
-                "cost_budget",
-                "cost_budget_respected",
-                json!({"max_cost_cents": 5}),
-            ),
-            blocking(
-                "turn_budget",
-                "turn_budget_respected",
-                json!({"max_turns": 8}),
-            ),
-            blocking("privacy_safe_output", "privacy_safe_output", json!({})),
+            blocking("target_completed", json!({})),
+            blocking("result_produced", json!({})),
+            blocking("token_budget", json!({"max_tokens": 1000})),
+            blocking("cost_budget", json!({"max_cost_cents": 5})),
+            blocking("turn_budget", json!({"max_turns": 8})),
+            blocking("privacy_safe_output", json!({})),
         ])
         .expect("structurally valid");
         let score_run_id = Uuid::from_u128(31);
@@ -735,11 +649,9 @@ mod tests {
         // Pins: nightly judging is not faked on the trial path. An informational
         // stochastic requirement is accepted by validation and produces nothing.
         let scorecard = ExperimentScorecard::new(vec![
-            blocking("target_completed", "target_completed", json!({})),
+            blocking("target_completed", json!({})),
             requirement(
                 "scenario_quality",
-                "scenario_quality",
-                ScorecardValueType::Numeric,
                 json!({}),
                 ScorecardEffect::Informational,
             ),
@@ -848,12 +760,8 @@ mod tests {
 
         let mut secret = evidence();
         secret.visible_output = Some("token sk-live-abcdefghijklmnop".to_string());
-        let scorecard = ExperimentScorecard::new(vec![blocking(
-            "privacy_safe_output",
-            "privacy_safe_output",
-            json!({}),
-        )])
-        .expect("structurally valid");
+        let scorecard = ExperimentScorecard::new(vec![blocking("privacy_safe_output", json!({}))])
+            .expect("structurally valid");
 
         let scores = evaluate_trial(&scorecard, Uuid::from_u128(51), &secret).expect("evaluates");
 

@@ -113,7 +113,12 @@ async fn search_and_navigation_share_the_contact_memory_admission_boundary() {
     };
     let mut config = MoaConfig::default();
     config.memory.vector.embedder.name = "disabled".to_string();
-    let executor = OrchestratorMemoryRetrievalExecutor::new(pool.clone(), kms, Arc::new(config));
+    let executor = OrchestratorMemoryRetrievalExecutor::new(
+        pool.clone(),
+        kms,
+        Arc::new(config),
+        Arc::new(moa_runtime_store::MemoryRuntimeCacheStore::new()),
+    );
     let search = executor
         .execute_retrieval_tool(
             &session,

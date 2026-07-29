@@ -21,10 +21,10 @@ use moa_core::{
     error::MoaError, events::Event, traits::LLMProvider, traits::SessionStore,
     types::completion::CompletionRequest, types::completion::CompletionStream,
     types::events_stream::EventRange, types::events_stream::EventRecord,
-    types::experience::AttributionSubjectType, types::experience::LearningCandidateStatus,
-    types::identifiers::SessionId, types::model::ModelCapabilities,
-    types::segment_assessment::AssessmentPhase, types::segment_assessment::SegmentAssessment,
-    types::segment_assessment::SegmentEvidence, types::segment_assessment::SegmentEvidenceKind,
+    types::experience::AttributionSubjectType, types::identifiers::SessionId,
+    types::model::ModelCapabilities, types::segment_assessment::AssessmentPhase,
+    types::segment_assessment::SegmentAssessment, types::segment_assessment::SegmentEvidence,
+    types::segment_assessment::SegmentEvidenceKind,
     types::segment_assessment::SegmentEvidencePolarity, types::segment_assessment::SegmentOutcome,
     types::segments::TaskSegment, types::segments::deterministic_segment_id,
     types::session::SessionMeta,
@@ -84,8 +84,8 @@ pub struct LearningRunSummary {
     pub experience_count: usize,
     /// Number of experience attribution rows linked to the scenario sessions.
     pub attribution_count: usize,
-    /// Number of proposed learning candidates for the scenario tenant.
-    pub proposed_candidate_count: usize,
+    /// Number of learning candidates for the scenario tenant.
+    pub candidate_count: usize,
     /// Skill subject IDs present in task-conditioned strategy-rate rows.
     pub task_strategy_skill_subjects: Vec<String>,
 }
@@ -924,17 +924,13 @@ async fn collect_learning_summary(
 
     let candidates = environment
         .learning_candidate_store
-        .list_learning_candidates(
-            environment.storage_partition_id.as_str(),
-            Some(LearningCandidateStatus::Proposed),
-            256,
-        )
+        .list_learning_candidates(environment.storage_partition_id.as_str(), None, 256)
         .await?;
 
     Ok(LearningRunSummary {
         experience_count,
         attribution_count,
-        proposed_candidate_count: candidates.len(),
+        candidate_count: candidates.len(),
         task_strategy_skill_subjects: skill_subjects.into_iter().collect(),
     })
 }

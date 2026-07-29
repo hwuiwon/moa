@@ -58,22 +58,31 @@ pub use registration::{
 const DEFAULT_PROVIDER_NAME: &str = "local";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// One immutable publication of the executable registry and its prompt schemas.
+struct ToolCatalogSnapshot {
+    registry: Arc<ToolRegistry>,
+    tool_schemas: Arc<Vec<serde_json::Value>>,
+}
+
+impl ToolCatalogSnapshot {
+    fn new(registry: ToolRegistry) -> Self {
+        let tool_schemas = Arc::new(registry.default_tool_schemas());
+        Self {
+            registry: Arc::new(registry),
+            tool_schemas,
+        }
+    }
+}
+
 /// Routes tool invocations to built-ins, local hands, or MCP backends.
 pub struct ToolRouter {
-    /// Live tool catalog, published as a whole snapshot.
+    /// Live executable registry and prompt schemas, published as one snapshot.
     ///
     /// Held as an immutable `Arc` behind a lock rather than as a mutable
     /// registry so a background catalog refresh publishes atomically: every
     /// reader takes one snapshot and works from it, and no prompt compilation,
     /// capability listing, or dispatch can observe a half-refreshed connector.
-    registry: std::sync::RwLock<Arc<ToolRegistry>>,
-    /// Prompt-facing schemas for the live catalog, rebuilt on every publish.
-    ///
-    /// Derived from `registry` and republished with it, so a turn compiled from
-    /// this snapshot and a dispatch resolved from the registry always agree —
-    /// and so per-turn compilation costs a pointer clone rather than
-    /// re-serializing the whole loadout.
-    tool_schema_snapshot: std::sync::RwLock<Arc<Vec<serde_json::Value>>>,
+    catalog: std::sync::RwLock<Arc<ToolCatalogSnapshot>>,
     providers: HashMap<String, Arc<dyn HandProvider>>,
     local_provider: Option<Arc<LocalHandProvider>>,
     mcp_clients: RwLock<HashMap<String, Arc<MCPClient>>>,

@@ -228,15 +228,7 @@ async fn mock_connector_end_to_end_db_memory() {
         moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
             moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
         ),
-    )
-    // Opts into the semantic-enabled policy for the same reason
-    // `task14_ingestion_pipeline` does: this test pins the graph node/edge
-    // counters, and the full write set is the interesting one to pin. Under the
-    // default (off) policy the same three records per connector produce 16/13
-    // and 15/12 — no semantic entity or edge at all — which is pinned separately
-    // by `disabled_semantic_policy_writes_no_semantic_rows_nodes_or_edges_db_memory`
-    // in moa-knowledge.
-    .with_semantic_policy(moa_core::types::memory::SemanticGraphPolicy::Deterministic);
+    );
 
     let merge_connection_row = repository
         .get_connection(merge_connection.connection_uid)
@@ -415,8 +407,8 @@ async fn mock_connector_end_to_end_db_memory() {
     // span: merge's "PTO Policy PTO" (+1 node/+1 edge), and nango's
     // "Finance Controls Finance" and "Support Guide Support" (+2 nodes/+2 edges).
     // The reducto/warehouse chunk carries no heading line so it stays unchanged.
-    assert_sync_status_counters(&merge_status, 3, 21, 18);
-    assert_sync_status_counters(&nango_status, 3, 20, 17);
+    assert_sync_status_counters(&merge_status, 3, 16, 13);
+    assert_sync_status_counters(&nango_status, 3, 15, 12);
     assert_eq!(
         merge_status
             .steps
@@ -735,10 +727,9 @@ async fn mock_connector_end_to_end_db_memory() {
     assert_eq!(label_counts.get("Document"), Some(&6));
     assert_eq!(label_counts.get("Chunk"), Some(&6));
     assert_eq!(label_counts.get("Fact"), Some(&6));
-    // 14 curated title/heading/domain entities plus 3 generic proper-noun spans
-    // from the heading-into-body fallback ("PTO Policy PTO", "Finance Controls
-    // Finance", "Support Guide Support").
-    assert_eq!(label_counts.get("Entity"), Some(&17));
+    // Structural graph materialization emits each object's title plus distinct
+    // headings. These fixtures have six titles and one distinct PTO heading.
+    assert_eq!(label_counts.get("Entity"), Some(&7));
     assert_eq!(label_counts.get("ContactGroup"), Some(&1));
     assert_eq!(chunk_vector_row_count(&pool, tenant_id).await, 6);
 

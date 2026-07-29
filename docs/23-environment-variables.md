@@ -73,7 +73,7 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 
 | Variable | Config path | Default | Description |
 |---|---|---|---|
-| `MOA_SANDBOX_POLICY_JSON` | `sandbox_policy` | built-in local development policy | JSON object with a required `deployment` layer and an optional `routes` map keyed by hand provider (`local`, `daytona`, `e2b`). Each layer states a `revision` plus all six dimensions — `cpu` (`{"mode":"bounded","millicores":N}` or `{"mode":"unbounded"}`), `memory` and `ephemeral_disk` (`mebibytes`), `egress` (`{"mode":"deny_all"}`, `{"mode":"unrestricted"}`, or `{"mode":"allow_list","revision":"...","destinations":["host","host:port"]}`), `idle_timeout`, and `max_lifetime` (`seconds`). There is no zero-means-unlimited: a bound must be nonzero and unlimited must be stated as `unbounded`. The default is the named `local-development-unbounded` revision, which `MOA_SECURITY_PROFILE=cloud` refuses to start on — a cloud deployment must author its own `deployment` layer. |
+| `MOA_SANDBOX_POLICY_JSON` | `sandbox_policy` | built-in local development policy | JSON object with a required `deployment` layer and an optional `routes` map keyed by hand provider (`local`, `daytona`, `e2b`). Each layer states a `revision` plus all six dimensions — `cpu` (`{"mode":"bounded","millicores":N}` or `{"mode":"unbounded"}`), `memory` and `ephemeral_disk` (`mebibytes`), `egress` (`{"mode":"deny_all"}`, `{"mode":"unrestricted"}`, or `{"mode":"allow_list","destinations":["host","host:port"]}`), `idle_timeout`, and `max_lifetime` (`seconds`). There is no zero-means-unlimited: a bound must be nonzero and unlimited must be stated as `unbounded`. The default is the named `local-development-unbounded` revision, which `MOA_SECURITY_PROFILE=cloud` refuses to start on. The production overlay supplies `production-e2b-v1`: deny-all egress, 900-second idle timeout, 3600-second hard lifetime, and explicit unbounded CPU, memory, and disk. |
 
 ### `execution`
 
@@ -158,6 +158,12 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_ZEROENTROPY_MAX_CONCURRENT_REQUESTS` | `providers.zeroentropy.max_concurrent_requests` | _unset_ | In-flight concurrency ceiling for this provider account — the natural place to express the credential's tier |
 | `MOA_ZEROENTROPY_MAX_INPUTS_PER_MIN` | `providers.zeroentropy.max_inputs_per_min` | _unset_ | Optional per-minute input-rate cap; `None` keeps the provider default |
 | `MOA_ZEROENTROPY_MAX_REQUESTS_PER_MIN` | `providers.zeroentropy.max_requests_per_min` | _unset_ | Optional per-minute request-rate cap; `None` keeps the provider default |
+
+The production overlay sets both scopes to `global` and coordination failure to
+`fail_closed`. Shared cooldown and retry-budget keys are credential-wide, so
+changing models does not bypass provider-account backpressure. Runtime-cache
+operations have a fixed 250ms deadline; there is intentionally no separate
+operator knob for it.
 
 ### `database`
 
@@ -415,14 +421,17 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_OBSERVABILITY_LINEAGE_LEASE_TTL_SECS` | `observability.lineage.lease_ttl_secs` | 60 | Claim lease lifetime, and so the worst-case recovery delay after an ungraceful pod termination |
 | `MOA_OBSERVABILITY_LINEAGE_MAX_PENDING_AGE_SECS` | `observability.lineage.max_pending_age_secs` | 300 | Oldest accepted-but-unstored row age tolerated before readiness fails |
 | `MOA_OBSERVABILITY_LINEAGE_CHANNEL_CAPACITY` | `observability.lineage.channel_capacity` | 8192 | Bounded hot-path channel capacity |
-| `MOA_OBSERVABILITY_LINEAGE_ENABLED` | `observability.lineage.enabled` | false | Whether durable lineage capture is enabled |
 | `MOA_OBSERVABILITY_LINEAGE_SAMPLE_PGVECTOR_EXPLAIN` | `observability.lineage.sample_pgvector_explain` | 0.01 | Fraction of pgvector queries that run full EXPLAIN ANALYZE |
 | `MOA_OBSERVABILITY_OTLP_ENDPOINT` | `observability.otlp_endpoint` | _none_ | OTLP **collector base URL**. Traces and metrics are derived from it as `/v1/traces` and `/v1/metrics`; a value already naming a signal path is refused at startup |
-| `MOA_OBSERVABILITY_OTLP_HEADERS` | `observability.otlp_headers` | {} | Additional OTLP headers for exporter auth and routing |
+| `MOA_OBSERVABILITY_OTLP_HEADERS` | `observability.otlp_headers` | {} | Additional OTLP headers for trace and metric exporter auth and routing |
 | `MOA_OBSERVABILITY_OTLP_PROTOCOL` | `observability.otlp_protocol` | grpc | OTLP transport protocol |
 | `MOA_OBSERVABILITY_RELEASE` | `observability.release` | _none_ | Application release or version resource attribute |
 | `MOA_OBSERVABILITY_SAMPLE_RATE` | `observability.sample_rate` | 0.01 | Trace sampling ratio from 0.0 to 1.0 |
-| `MOA_OBSERVABILITY_SERVICE_NAME` | `observability.service_name` | moa | Logical service name for traces |
+| `MOA_OBSERVABILITY_SERVICE_NAME` | `observability.service_name` | moa | Logical OpenTelemetry service name for traces and metrics |
+
+Every lineage channel, batch, lease, age, and drain value must be greater than
+zero. Durable lineage enablement is selected only by `MOA_LINEAGE_SINK`; there
+is no second observability enable flag.
 
 ### `metrics`
 
@@ -559,7 +568,6 @@ Grouped by top-level config section. `_unset_`/`_none_` means the field is
 | `MOA_CLICKHOUSE_DATABASE` | `clickhouse.database` | moa | Target database; created at startup when missing |
 | `MOA_CLICKHOUSE_EXPORT_BATCH_ROWS` | `clickhouse.export_batch_rows` | 5000 | Maximum rows pulled from Postgres and inserted into ClickHouse per analytics-export batch |
 | `MOA_CLICKHOUSE_EXPORT_POLL_SECS` | `clickhouse.export_poll_secs` | 15 | Poll interval in seconds for the analytics exporter loop; also sets the cursor rewind overlap (`2 × export_poll_secs`) |
-| `MOA_CLICKHOUSE_LINEAGE_TTL_DAYS` | `clickhouse.lineage_ttl_days` | 30 | Row TTL in days for `turn_lineage`, mirroring the Postgres/Timescale 30-day retention drop |
 | `MOA_CLICKHOUSE_PASSWORD` | `clickhouse.password` | _none_ | Optional password for HTTP basic auth **(secret)** |
 | `MOA_CLICKHOUSE_URL` | `clickhouse.url` | _empty_ | HTTP interface endpoint, for example `http://localhost:8123` |
 | `MOA_CLICKHOUSE_USER` | `clickhouse.user` | _none_ | Optional user for HTTP basic auth |
@@ -619,13 +627,14 @@ not trip the unknown-variable audit. They do not affect application config.
 | `MOA_AUDIT_BUCKET` / `MOA_AUDIT_OBJECT_LOCK_MODE` / `MOA_AUDIT_RETENTION_YEARS` | Audit Object Lock bucket bootstrap script |
 | `MOA_AUTH_HEADER_TRUST` | Trusted auth-header mode toggle |
 | `MOA_AUTH0_CLIENT_ID` | Auth0 client id (compose/test) |
-| `MOA_LINEAGE_SINK` | Lineage sink selection |
+| `MOA_LINEAGE_SINK` | Lineage sink selection: unset/`null`, `otel`, or `postgres`; ClickHouse is analytics-only |
 | `MOA_PERSIST_TURN_METRICS` | Persist per-turn metrics rows |
 | `MOA_PROVIDERS_OVERRIDE` | Provider-catalog override (tests/tools) |
 | `MOA_SCIM_BASE_URL` | SCIM base URL |
 | `MOA_TOXIPROXY_URL` | Toxiproxy control URL (chaos tests) |
 | `MOA_TURBOPUFFER_LIVE_NEWS_FACTS` | Live Turbopuffer news-facts eval fixture |
 | `MOA_DOCKER_SECCOMP_PROFILE` | Docker seccomp profile path for sandbox runs |
+| `MOA_SERVICE_INSTANCE_ID` | Non-empty OpenTelemetry `service.instance.id`; Kubernetes injects the pod UID for edge and orchestrator |
 | `MOA_VENDOR_NAME` | Vendor label surfaced in metadata |
 
 ## Provider concurrency
@@ -699,14 +708,15 @@ convention for live-test gates.
 | `SMOKE_KUBE_CONTEXT` | Explicitly named kube context. Required: the smoke rotates workloads, and a current context is routinely some unrelated cluster |
 | `SMOKE_MIMIR_QUERY_URL` / `SMOKE_MIMIR_RULER_URL` | Mimir query and ruler endpoints the smoke asserts against |
 | `SMOKE_MIMIR_USER` / `SMOKE_MIMIR_KEY` | Mimir credentials, passed to `curl` through a `0600` config file and never on a command line |
-| `SMOKE_DATABASE_URL` | Postgres URL for the final-lineage and drained-journal assertions |
+| `SMOKE_DATABASE_URL` | Postgres URL used to create temporary `0600` libpq service and pgpass files; only the service name appears in process arguments |
 | `SMOKE_MODEL` / `SMOKE_PROMPT` / `SMOKE_INGRESS_PORT` / `SMOKE_*_BUDGET_SECONDS` | Smoke traffic and timing budgets |
 | `OBSERVABILITY_TOOLS_ALLOW_UNPINNED` | Accepts a non-pinned `kubeconform`/`alloy`/`promtool`, acknowledging that a local pass may not predict CI |
 
 ### Connector tool names changed to server-qualified references
 
-Discovered MCP tools now register as `mcp__{server}__{tool}` rather than under
-the name the server publishes. **Any persisted action-policy rule or
+Discovered MCP tools now register as
+`mcp__{server_byte_len}_{server}__{remote_tool}` rather than under the name the
+server publishes. **Any persisted action-policy rule or
 `permissions.always_deny` / `permissions.admin_review` pattern targeting a
 connector tool by its unqualified name stops matching after upgrade**, and for
 an `admin_review` pattern that fails open: a tool that was review-gated becomes

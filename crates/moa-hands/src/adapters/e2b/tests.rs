@@ -154,9 +154,7 @@ async fn e2b_egress_posture_comes_from_the_effective_profile() {
     let allow_list = provider
         .provision(crate::core::profile::test_support::hand_spec(
             SandboxTier::MicroVM,
-            e2b_test_profile(
-                EgressPolicy::allow_list("rev-a", ["a.example.com"]).expect("allowlist"),
-            ),
+            e2b_test_profile(EgressPolicy::allow_list(["a.example.com"]).expect("allowlist")),
         ))
         .await;
     assert!(

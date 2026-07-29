@@ -758,12 +758,12 @@ FOR EACH ROW EXECUTE FUNCTION moa.reject_learning_contribution_during_destructio
 CREATE TABLE IF NOT EXISTS moa.privacy_erasure_record_decision (
     decision_uid  UUID        PRIMARY KEY,
     tenant_id     UUID        NOT NULL,
-    -- Stable identity of the erasure request, not of one attempt: a resumed job
-    -- reuses it so replay cannot duplicate a decision.
-    operation_ref TEXT        NOT NULL,
-    -- Identity of the attempt that wrote the row, retained so a later
-    -- post-hold request is visibly a different attempt rather than an
-    -- overwrite of the held decision.
+    -- Direct subject ownership is what makes a subject export scoped without
+    -- reconstructing a derivation after the source rows have been erased.
+    subject_user_id TEXT      NOT NULL,
+    -- Approval JTI plus outcome mode (`dry_run`, `legal_hold`, or `applied`).
+    -- A replay reuses it; a later applied use of an unconsumed JTI does not
+    -- conflict with the earlier unapplied decision.
     attempt_id    TEXT        NOT NULL,
     record_kind   TEXT        NOT NULL,
     record_id     TEXT        NOT NULL,
@@ -777,22 +777,17 @@ CREATE TABLE IF NOT EXISTS moa.privacy_erasure_record_decision (
     CONSTRAINT privacy_erasure_record_decision_kind_valid
         CHECK (record_kind IN (
             'learning_candidate',
-            'learning_candidate_source',
             'learning_log',
-            'learning_log_source',
             'artifact_revision',
-            'artifact_file',
-            'artifact_revision_contribution',
             'artifact_suite_contribution',
-            'experience_record'
+            'experience_record',
+            'experience_attribution'
         )),
     CONSTRAINT privacy_erasure_record_decision_disposition_valid
         CHECK (disposition IN (
             'erased',
-            'redacted',
             'invalidated_revision',
-            'retained_legal_hold',
-            'retained_shared'
+            'retained_legal_hold'
         )),
     -- A legal hold must mutate nothing, so its decision can never be `applied`.
     -- This is the constraint that makes "a hold causes zero protected-data
@@ -803,12 +798,13 @@ CREATE TABLE IF NOT EXISTS moa.privacy_erasure_record_decision (
 
 CREATE UNIQUE INDEX IF NOT EXISTS privacy_erasure_record_decision_unique
     ON moa.privacy_erasure_record_decision
-       (tenant_id, operation_ref, record_kind, record_id);
-CREATE INDEX IF NOT EXISTS privacy_erasure_record_decision_operation_idx
-    ON moa.privacy_erasure_record_decision (tenant_id, operation_ref, decided_at);
+       (tenant_id, subject_user_id, attempt_id, record_kind, record_id);
+CREATE INDEX IF NOT EXISTS privacy_erasure_record_decision_subject_idx
+    ON moa.privacy_erasure_record_decision
+       (tenant_id, subject_user_id, decided_at);
 
-GRANT SELECT, INSERT, UPDATE ON moa.privacy_erasure_record_decision TO moa_app, moa_promoter;
-GRANT SELECT ON moa.privacy_erasure_record_decision TO moa_auditor;
+SELECT moa.apply_tenant_rls('moa.privacy_erasure_record_decision'::REGCLASS);
+ALTER TABLE moa.privacy_erasure_record_decision FORCE ROW LEVEL SECURITY;
 
 -- The reverse-derived stages run BEFORE the vault/graph stages, because
 -- learning derived from a memory has to be resolved while the memory it points

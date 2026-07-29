@@ -44,6 +44,7 @@ use crate::handlers::authz_shim::authorize_tenant_operator_or_admin;
 use crate::services::llm_gateway::LLMGatewayImpl;
 use crate::workflows::errors::moa_error_to_handler_error;
 use crate::workflows::experiment_run::{ExperimentRunClient, ExperimentRunWorkflowRequest};
+use moa_core::types::experiments::ExperimentCancelSignal;
 
 /// Restate service surface for live behavior experiment runs.
 #[restate_sdk::service]
@@ -304,12 +305,17 @@ impl Experiments for ExperimentsImpl {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("Experiments", "cancel");
         let request = request.into_inner();
-        authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
+        let identity = authorize_tenant_operator_or_admin(&ctx, request.tenant_id).await?;
         let pool = self.pool.clone();
         let run_uid = request.run_uid;
+        let persist_identity = identity.clone();
 
         let response = ctx
-            .run(|| async move { cancel_inner(pool, request).await.map(Json::from) })
+            .run(|| async move {
+                cancel_inner(pool, request, persist_identity)
+                    .await
+                    .map(Json::from)
+            })
             .name("experiments_cancel")
             .await?
             .into_inner();
@@ -321,7 +327,10 @@ impl Experiments for ExperimentsImpl {
         if response.status == ExperimentRunStatus::Cancelled.as_str() {
             crate::restate_identity::replay_safe_request(
                 ctx.workflow_client::<ExperimentRunClient>(run_uid.to_string())
-                    .request_cancel(Json::from(response.reason.clone())),
+                    .request_cancel(Json::from(ExperimentCancelSignal {
+                        reason: response.reason.clone(),
+                        identity,
+                    })),
             )
             .send();
         }
@@ -583,8 +592,9 @@ async fn trial_status_inner(
 async fn cancel_inner(
     pool: sqlx::PgPool,
     request: ExperimentCancelRequest,
+    identity: Identity,
 ) -> Result<ExperimentCancelResponse, HandlerError> {
-    cancel_run(pool, request)
+    cancel_run(pool, request, identity)
         .await
         .map_err(experiment_app_error_to_handler_error)
 }
@@ -1126,7 +1136,7 @@ fn score_error_to_handler_error(error: Error) -> HandlerError {
         Error::IntegerTooLarge { .. } => {
             TerminalError::new_with_code(400, error.to_string()).into()
         }
-        Error::Sql(_) | Error::ScoreRunMismatch { .. } => {
+        Error::Sql(_) | Error::InvalidScoreValueType { .. } | Error::ScoreRunMismatch { .. } => {
             TerminalError::new(error.to_string()).into()
         }
     }

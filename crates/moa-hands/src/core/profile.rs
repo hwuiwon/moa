@@ -21,8 +21,9 @@ use moa_core::{
     types::hands::BuiltinPolicyRevision, types::hands::EffectiveSandboxProfile,
     types::hands::HandProviderCapabilities, types::hands::SandboxPolicySnapshot,
     types::hands::resolve_effective_sandbox_profile, types::identifiers::TenantId,
-    types::session::SessionMeta,
+    types::memory::RlsContext, types::session::SessionMeta,
 };
+use moa_db::ScopedConn;
 use sqlx::{PgPool, Row, types::Json};
 
 use super::{HandRoute, ToolRouter};
@@ -56,6 +57,8 @@ impl PostgresTenantSandboxPolicyStore {
 #[async_trait]
 impl TenantSandboxPolicyStore for PostgresTenantSandboxPolicyStore {
     async fn current(&self, tenant_id: TenantId) -> Result<Option<SandboxPolicySnapshot>> {
+        let mut conn =
+            ScopedConn::begin_as_app(&self.pool, &RlsContext::tenant(tenant_id), true).await?;
         let row = sqlx::query(
             r#"
             SELECT revision, profile
@@ -64,9 +67,10 @@ impl TenantSandboxPolicyStore for PostgresTenantSandboxPolicyStore {
             "#,
         )
         .bind(tenant_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(conn.as_mut())
         .await
         .map_err(|error| MoaError::StorageError(error.to_string()))?;
+        conn.commit().await?;
 
         let Some(row) = row else {
             return Ok(None);

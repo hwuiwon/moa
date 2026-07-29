@@ -1155,7 +1155,7 @@ async fn replay_dataset_for_tenant(
 
     let (sink, writer) = MpscSink::spawn(
         MpscSinkConfig::from(&config.observability.lineage),
-        moa_lineage_sink::LineageStore::from_config(config.clickhouse.as_ref(), pool.clone()),
+        moa_lineage_sink::LineageStore::new(pool.clone()),
     )
     .await?;
     let report = Box::pin(replay_items_live(
@@ -1473,7 +1473,7 @@ fn eval_scores_response_from_summary(
             .into_iter()
             .map(|row| EvalScoreSummaryRow {
                 name: row.name,
-                value_type: row.value_type,
+                value_type: row.value_type.as_str().to_string(),
                 n: row.n,
                 mean_or_rate: row.mean_or_rate,
             })
@@ -1506,9 +1506,11 @@ fn scoring_error_to_eval_error(error: ScoringError) -> EvalServiceError {
     match error {
         ScoringError::IntegerTooLarge { field } => EvalServiceError::IntegerTooLarge { field },
         ScoringError::Sql(error) => EvalServiceError::Sql(error),
-        ScoringError::ScoreRunMismatch { .. } => EvalServiceError::Runtime {
-            message: error.to_string(),
-        },
+        ScoringError::InvalidScoreValueType { .. } | ScoringError::ScoreRunMismatch { .. } => {
+            EvalServiceError::Runtime {
+                message: error.to_string(),
+            }
+        }
     }
 }
 

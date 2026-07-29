@@ -2,9 +2,9 @@
 //!
 //! Retention here means one thing: a terminal session's history is copied into
 //! one immutable, digest-verified archive row and the live rows are deleted in
-//! the same transaction. Nothing is ever deleted that was not just read back
-//! out of the database, re-digested, decoded, and compared event for event
-//! against the rows about to go.
+//! the same transaction. Nothing is ever deleted unless Postgres returns the
+//! exact bytes written and their digest matches both the returned digest and
+//! the expected digest derived from the source events.
 //!
 //! The delete is always keyed by `session_id`. `events` is HASH-partitioned on
 //! that column, so a whole-session delete prunes to one of sixteen partitions;
@@ -16,7 +16,7 @@ use super::*;
 
 use crate::archive::{
     ArchiveBody, ArchiveOutcome, ArchiveRefusal, ArchivedEvent, SESSION_ARCHIVE_DIGEST_LEN,
-    SESSION_ARCHIVE_FORMAT_VERSION, SessionEventArchive, apply_range, archive_digest,
+    SESSION_ARCHIVE_FORMAT_VERSION, SessionEventArchive, apply_archive_range, archive_digest,
     is_terminal_status, terminal_status_strings,
 };
 
@@ -206,19 +206,20 @@ impl PostgresSessionStore {
         let event_count = archived_events.len() as i64;
         let first_sequence_num = archived_events[0].sequence_num;
         let last_sequence_num = archived_events[archived_events.len() - 1].sequence_num;
-        let body = ArchiveBody {
+        let bytes = ArchiveBody {
             format_version: SESSION_ARCHIVE_FORMAT_VERSION,
             session_id: session_id.0,
             events: archived_events,
-        };
-        let bytes = body.to_bytes()?;
+        }
+        .to_bytes()?;
         let digest = archive_digest(&bytes);
 
-        sqlx::query(&format!(
+        let stored = sqlx::query(&format!(
             "INSERT INTO {archives} \
              (session_id, tenant_id, format_version, event_count, first_sequence_num, \
               last_sequence_num, payload, content_digest, archived_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+             RETURNING {ARCHIVE_COLUMNS}"
         ))
         .bind(session_id.0)
         .bind(locked.tenant_id)
@@ -229,23 +230,15 @@ impl PostgresSessionStore {
         .bind(&bytes)
         .bind(digest.as_slice())
         .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        // Read the archive back out of the database and prove it before any
-        // delete. The bytes handed to `INSERT` are not evidence; the bytes the
-        // database is holding are. A mismatch aborts the transaction, so the
-        // live history survives an archive that cannot be trusted.
-        let stored = sqlx::query(&format!(
-            "SELECT {ARCHIVE_COLUMNS} FROM {archives} WHERE session_id = $1"
-        ))
-        .bind(session_id.0)
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
-        let archive = Self::archive_metadata_from_row(&stored)?;
+
+        // Prove the row returned by Postgres before deleting live history. A
+        // mismatch aborts the transaction, so an untrusted archive never
+        // replaces the source events.
         let stored_bytes = stored.col::<Vec<u8>>("payload")?;
+        let archive = Self::archive_metadata_from_row(&stored, stored_bytes.len() as i64)?;
         let stored_digest = archive_digest(&stored_bytes);
         if stored_digest != archive.content_digest || stored_digest != digest {
             return Err(MoaError::StorageError(format!(
@@ -253,14 +246,6 @@ impl PostgresSessionStore {
                 hex::encode(archive.content_digest),
                 hex::encode(stored_digest),
                 hex::encode(digest)
-            )));
-        }
-        let decoded = ArchiveBody::from_bytes(&stored_bytes)?;
-        if decoded != body {
-            return Err(MoaError::StorageError(format!(
-                "session {session_id} archive did not decode back to the history it captured: {} events stored, {} decoded",
-                body.events.len(),
-                decoded.events.len()
             )));
         }
 
@@ -307,27 +292,6 @@ impl PostgresSessionStore {
         Ok(ArchiveOutcome::Archived(Box::new(archive)))
     }
 
-    /// Returns when a session's history was archived, if it was.
-    ///
-    /// This is the fact the read path branches on. `None` covers both "not
-    /// archived" and "no such session", which are the same thing to a reader:
-    /// whatever the live tables hold is the whole answer.
-    pub async fn session_events_archived_at(
-        &self,
-        session_id: moa_core::types::identifiers::SessionId,
-    ) -> Result<Option<DateTime<Utc>>> {
-        let sessions = self.table_name("sessions");
-        let archived_at = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(&format!(
-            "SELECT events_archived_at FROM {sessions} WHERE id = $1"
-        ))
-        .bind(session_id.0)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?
-        .flatten();
-        Ok(archived_at)
-    }
-
     /// Verifies a committed archive against its stored digest.
     ///
     /// Returns `None` when the session has no archive. Re-derives the digest
@@ -363,9 +327,10 @@ impl PostgresSessionStore {
         let Some((archive, body)) = self.load_verified_archive(session_id).await? else {
             return Ok(None);
         };
+        let archived_events = apply_archive_range(body.events, range);
         let mut blob_ids: Vec<String> = Vec::new();
         let mut seen_blob_ids = std::collections::HashSet::new();
-        for event in &body.events {
+        for event in &archived_events {
             let mut ids = Vec::new();
             crate::blob::collect_claim_check_blob_ids(&event.payload, &mut ids)?;
             for id in ids {
@@ -375,8 +340,8 @@ impl PostgresSessionStore {
             }
         }
         let blob_cache = self.blob_store.get_many(&session_id, &blob_ids).await?;
-        let mut records = Vec::with_capacity(body.events.len());
-        for archived in body.events {
+        let mut records = Vec::with_capacity(archived_events.len());
+        for archived in archived_events {
             let event = crate::blob::decode_event_from_cache(archived.payload, &blob_cache)?;
             records.push(EventRecord {
                 id: archived.id,
@@ -390,7 +355,6 @@ impl PostgresSessionStore {
                 token_count: archived.token_count.map(|count| count as usize),
             });
         }
-        let records = apply_range(records, range);
         record_session_event_load(records.len() as u64);
         record_session_event_replay(
             records.len(),
@@ -416,8 +380,8 @@ impl PostgresSessionStore {
         else {
             return Ok(None);
         };
-        let archive = Self::archive_metadata_from_row(&row)?;
         let bytes = row.col::<Vec<u8>>("payload")?;
+        let archive = Self::archive_metadata_from_row(&row, bytes.len() as i64)?;
         let recomputed = archive_digest(&bytes);
         if recomputed != archive.content_digest {
             return Err(MoaError::StorageError(format!(
@@ -444,7 +408,10 @@ impl PostgresSessionStore {
     }
 
     /// Builds archive metadata from a `session_event_archives` row.
-    fn archive_metadata_from_row(row: &sqlx::postgres::PgRow) -> Result<SessionEventArchive> {
+    fn archive_metadata_from_row(
+        row: &sqlx::postgres::PgRow,
+        payload_bytes: i64,
+    ) -> Result<SessionEventArchive> {
         let digest_bytes = row.col::<Vec<u8>>("content_digest")?;
         let content_digest: [u8; SESSION_ARCHIVE_DIGEST_LEN] =
             digest_bytes.as_slice().try_into().map_err(|_| {
@@ -453,7 +420,6 @@ impl PostgresSessionStore {
                     digest_bytes.len()
                 ))
             })?;
-        let payload_bytes = row.col::<Vec<u8>>("payload")?.len() as i64;
         Ok(SessionEventArchive {
             session_id: moa_core::types::identifiers::SessionId(row.col::<Uuid>("session_id")?),
             tenant_id: TenantId::from(row.col::<Uuid>("tenant_id")?),

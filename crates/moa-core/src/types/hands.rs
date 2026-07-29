@@ -344,8 +344,6 @@ pub enum EgressPolicy {
     DenyAll,
     /// Outbound network restricted to a canonical destination allowlist.
     AllowList {
-        /// Revision identifying the authored allowlist, part of policy identity.
-        revision: String,
         /// Sorted, deduplicated canonical destinations.
         destinations: Vec<EgressDestination>,
     },
@@ -360,16 +358,11 @@ impl EgressPolicy {
     /// that names nothing permits nothing, so it collapses to
     /// [`EgressPolicy::DenyAll`] rather than becoming a policy that says
     /// "restricted" while enforcing nothing.
-    pub fn allow_list<I, S>(revision: &str, destinations: I) -> Result<Self>
+    pub fn allow_list<I, S>(destinations: I) -> Result<Self>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        if revision.trim().is_empty() {
-            return Err(MoaError::ValidationError(
-                "egress allowlist revision must not be empty".to_string(),
-            ));
-        }
         let mut parsed = destinations
             .into_iter()
             .map(|destination| EgressDestination::parse(destination.as_ref()))
@@ -380,7 +373,6 @@ impl EgressPolicy {
             return Ok(Self::DenyAll);
         }
         Ok(Self::AllowList {
-            revision: revision.trim().to_string(),
             destinations: parsed,
         })
     }
@@ -392,15 +384,6 @@ impl EgressPolicy {
             Self::DenyAll => EgressMode::DenyAll,
             Self::AllowList { .. } => EgressMode::AllowList,
             Self::Unrestricted => EgressMode::Unrestricted,
-        }
-    }
-
-    /// Returns the allowlist revision when this policy is an allowlist.
-    #[must_use]
-    pub fn allow_list_revision(&self) -> Option<&str> {
-        match self {
-            Self::AllowList { revision, .. } => Some(revision.as_str()),
-            Self::DenyAll | Self::Unrestricted => None,
         }
     }
 
@@ -416,22 +399,17 @@ impl EgressPolicy {
     /// Returns the more restrictive of two egress policies.
     ///
     /// `DenyAll` dominates, `Unrestricted` is the identity element, and two
-    /// allowlists intersect. The resolved allowlist revision is the sorted,
-    /// `+`-joined set of contributing revisions, so a resolved policy names
-    /// every authored allowlist that shaped it. An empty intersection permits
-    /// nothing and therefore becomes `DenyAll`.
+    /// allowlists intersect. The surrounding policy snapshots already name
+    /// every authored layer that shaped the result. An empty intersection
+    /// permits nothing and therefore becomes `DenyAll`.
     #[must_use]
     pub fn restrict(self, other: Self) -> Self {
         match (self, other) {
             (Self::DenyAll, _) | (_, Self::DenyAll) => Self::DenyAll,
             (Self::Unrestricted, keep) | (keep, Self::Unrestricted) => keep,
             (
+                Self::AllowList { destinations: left },
                 Self::AllowList {
-                    revision: left_revision,
-                    destinations: left,
-                },
-                Self::AllowList {
-                    revision: right_revision,
                     destinations: right,
                 },
             ) => {
@@ -442,17 +420,7 @@ impl EgressPolicy {
                 if destinations.is_empty() {
                     return Self::DenyAll;
                 }
-                let mut revisions = [left_revision, right_revision];
-                revisions.sort();
-                let revision = if revisions[0] == revisions[1] {
-                    revisions[0].clone()
-                } else {
-                    format!("{}+{}", revisions[0], revisions[1])
-                };
-                Self::AllowList {
-                    revision,
-                    destinations,
-                }
+                Self::AllowList { destinations }
             }
         }
     }
@@ -460,13 +428,10 @@ impl EgressPolicy {
 
 /// Deserialization mirror for [`EgressPolicy`] that runs canonicalization.
 #[derive(Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 enum EgressPolicyFields {
     DenyAll,
-    AllowList {
-        revision: String,
-        destinations: Vec<String>,
-    },
+    AllowList { destinations: Vec<String> },
     Unrestricted,
 }
 
@@ -478,10 +443,9 @@ impl<'de> Deserialize<'de> for EgressPolicy {
         match EgressPolicyFields::deserialize(deserializer)? {
             EgressPolicyFields::DenyAll => Ok(Self::DenyAll),
             EgressPolicyFields::Unrestricted => Ok(Self::Unrestricted),
-            EgressPolicyFields::AllowList {
-                revision,
-                destinations,
-            } => Self::allow_list(&revision, destinations).map_err(serde::de::Error::custom),
+            EgressPolicyFields::AllowList { destinations } => {
+                Self::allow_list(destinations).map_err(serde::de::Error::custom)
+            }
         }
     }
 }
@@ -1353,11 +1317,9 @@ mod tests {
         // Pins: allowlists canonicalize (lowercase, sorted, deduplicated) and an
         // allowlist that names nothing becomes DenyAll rather than a policy that
         // claims to restrict while permitting an empty set.
-        let policy = EgressPolicy::allow_list(
-            "rev-1",
-            ["B.example.com:443", "a.example.com", "A.EXAMPLE.COM"],
-        )
-        .expect("allowlist should canonicalize");
+        let policy =
+            EgressPolicy::allow_list(["B.example.com:443", "a.example.com", "A.EXAMPLE.COM"])
+                .expect("allowlist should canonicalize");
         let destinations = policy
             .destinations()
             .iter()
@@ -1366,13 +1328,21 @@ mod tests {
         assert_eq!(destinations, vec!["a.example.com", "b.example.com:443"]);
 
         assert_eq!(
-            EgressPolicy::allow_list("rev-1", Vec::<String>::new()).expect("empty allowlist"),
+            EgressPolicy::allow_list(Vec::<String>::new()).expect("empty allowlist"),
             EgressPolicy::DenyAll
         );
-        assert!(EgressPolicy::allow_list("", ["a.example.com"]).is_err());
-        assert!(EgressPolicy::allow_list("rev-1", ["https://a.example.com/x"]).is_err());
-        assert!(EgressPolicy::allow_list("rev-1", ["a.example.com:0"]).is_err());
-        assert!(EgressPolicy::allow_list("rev-1", ["a.example.com:http"]).is_err());
+        assert!(EgressPolicy::allow_list(["https://a.example.com/x"]).is_err());
+        assert!(EgressPolicy::allow_list(["a.example.com:0"]).is_err());
+        assert!(EgressPolicy::allow_list(["a.example.com:http"]).is_err());
+        assert!(
+            serde_json::from_value::<EgressPolicy>(serde_json::json!({
+                "mode": "allow_list",
+                "revision": "obsolete-inner-revision",
+                "destinations": ["a.example.com"]
+            }))
+            .is_err(),
+            "allowlist revision belongs to the surrounding policy snapshot and is not accepted here"
+        );
     }
 
     #[test]
@@ -1396,7 +1366,7 @@ mod tests {
             cpu(500),
             memory(1024),
             disk(2048),
-            EgressPolicy::allow_list("rev-a", ["a.example.com"]).expect("allowlist"),
+            EgressPolicy::allow_list(["a.example.com"]).expect("allowlist"),
             seconds(300),
             seconds(1800),
         )
@@ -1436,7 +1406,7 @@ mod tests {
                 CpuLimit::Unbounded,
                 MemoryLimit::Unbounded,
                 DiskLimit::Unbounded,
-                EgressPolicy::allow_list("rev-b", ["b.example.com"]).expect("allowlist"),
+                EgressPolicy::allow_list(["b.example.com"]).expect("allowlist"),
                 LifetimeLimit::Unbounded,
                 LifetimeLimit::Unbounded,
             )
@@ -1685,7 +1655,7 @@ mod tests {
             cpu(1000),
             memory(1024),
             DiskLimit::Unbounded,
-            EgressPolicy::allow_list("rev-a", ["a.example.com"]).expect("allowlist"),
+            EgressPolicy::allow_list(["a.example.com"]).expect("allowlist"),
             seconds(300),
             seconds(3600),
         )

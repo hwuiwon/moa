@@ -52,8 +52,12 @@
 -- delete on a foreign-key violation instead of leaving a purged tenant's
 -- conversation history sitting in the archive.
 
+ALTER TABLE sessions
+    DROP CONSTRAINT IF EXISTS sessions_id_tenant_key,
+    ADD CONSTRAINT sessions_id_tenant_key UNIQUE (id, tenant_id);
+
 CREATE TABLE IF NOT EXISTS session_event_archives (
-    session_id UUID PRIMARY KEY REFERENCES sessions(id) ON DELETE RESTRICT,
+    session_id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
     format_version INTEGER NOT NULL,
     event_count BIGINT NOT NULL,
@@ -77,7 +81,11 @@ CREATE TABLE IF NOT EXISTS session_event_archives (
         first_sequence_num >= 0
         AND last_sequence_num >= first_sequence_num
         AND last_sequence_num - first_sequence_num + 1 >= event_count
-    )
+    ),
+    CONSTRAINT session_event_archives_session_tenant_fkey
+        FOREIGN KEY (session_id, tenant_id)
+        REFERENCES sessions (id, tenant_id)
+        ON DELETE RESTRICT
 );
 
 COMMENT ON TABLE session_event_archives IS

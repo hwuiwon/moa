@@ -361,11 +361,6 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
             ("parse_completed", IngestionStepStatus::Completed, None),
             ("normalized", IngestionStepStatus::Completed, None),
             ("blocks_diffed", IngestionStepStatus::Completed, None),
-            (
-                "semantic_graph_extracted",
-                IngestionStepStatus::Completed,
-                None,
-            ),
             ("chunks_diffed", IngestionStepStatus::Completed, None),
             (
                 "embedded",
@@ -409,11 +404,6 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
             ("parse_completed", IngestionStepStatus::Completed, None),
             ("normalized", IngestionStepStatus::Completed, None),
             ("blocks_diffed", IngestionStepStatus::Completed, None),
-            (
-                "semantic_graph_extracted",
-                IngestionStepStatus::Completed,
-                None,
-            ),
             ("chunks_diffed", IngestionStepStatus::Completed, None),
             ("embedded", IngestionStepStatus::Completed, None),
             (

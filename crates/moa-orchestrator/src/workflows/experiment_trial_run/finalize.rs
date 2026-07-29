@@ -86,6 +86,7 @@ pub(super) async fn finalize_trial(
         Ok(scorecard) => scorecard,
         Err(response) => return Ok(response),
     };
+    persist_final_evidence_hash(ctx, trial, evidence.hash(), pool).await?;
 
     // One timestamp for the whole batch, journaled so a replay reuses it. A
     // fresh `Utc::now()` per attempt would insert a second `analytics.scores`
@@ -152,6 +153,39 @@ pub(super) async fn finalize_trial(
         pool,
     )
     .await
+}
+
+/// Persists the final evidence identity independently of the score rows.
+///
+/// Eligibility reads this digest from the trial ledger. Deriving the expected
+/// digest from the first score row would let that row authenticate itself.
+async fn persist_final_evidence_hash(
+    ctx: &WorkflowContext<'_>,
+    trial: &ExperimentTrialRecord,
+    evidence_hash: [u8; 32],
+    pool: &sqlx::PgPool,
+) -> Result<(), HandlerError> {
+    let persist_pool = pool.clone();
+    let scope = trial.scope;
+    let trial_uid = trial.trial_uid;
+    let persisted = ctx
+        .run(|| async move {
+            let trial = ExperimentStore::new(persist_pool)
+                .set_trial_final_evidence_hash(&scope, trial_uid, &evidence_hash)
+                .await
+                .map_err(moa_error_to_handler_error)?;
+            Ok::<_, HandlerError>(Json::from(trial.is_some()))
+        })
+        .name("experiment_trial_persist_final_evidence_hash")
+        .await?
+        .into_inner();
+    if !persisted {
+        return Err(TerminalError::new(
+            "experiment trial final evidence hash conflicts with durable evidence",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Polls Postgres until every derived score row is query-visible.
@@ -398,6 +432,7 @@ mod tests {
             session_id: None,
             execution_run_uid: None,
             score_run_id: Uuid::from_u128(5),
+            final_evidence_hash: None,
             turn_count: 1,
             stop_reason: None,
             error: None,

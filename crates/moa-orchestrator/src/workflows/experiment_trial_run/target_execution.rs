@@ -44,6 +44,7 @@ const EXECUTION_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const EXPERIMENT_EXECUTION_SESSION_NAMESPACE: Uuid =
     Uuid::from_u128(0xc2a6_731c_2d80_5d4a_9d10_2d20_1283_c6ec);
 const EXPERIMENT_EXECUTION_SESSION_DOMAIN: &str = "moa.experiment.execution-session";
+const K_TARGET_USAGE_START_SEQUENCE: &str = "target_usage_start_sequence";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TargetObservation {
@@ -171,15 +172,28 @@ pub(super) async fn run_agent_loop_trial(
     let mut transcript = transcript_from_events(&initial_events);
     let mut transcript_sequence = latest_sequence(&initial_events);
     let mut target_usage_sequence = transcript_sequence;
+    let usage_start_sequence = target_usage_start_sequence(ctx, transcript_sequence).await?;
+    let (prior_tokens, prior_cost_cents) =
+        target_usage_from_events_after(&initial_events, usage_start_sequence);
     // Token and cost observations were previously emitted as telemetry and then
     // discarded. The budget evaluators read them, so they are accumulated here
     // and travel with the evidence instead.
     let mut observations = TargetObservations {
         turns: trial.turn_count.max(0) as u32,
+        total_tokens: prior_tokens,
+        total_cost_cents: prior_cost_cents,
         latest_output: latest_brain_response(&initial_events),
         latest_sequence: transcript_sequence,
-        ..TargetObservations::default()
     };
+    if forward_pending_child_cancellation(ctx, &trial.scope, trial.run_uid, pool).await? {
+        return Ok(observations.into_outcome(
+            score_target,
+            session_id,
+            ExperimentTrialStatus::Cancelled,
+            ExperimentTrialStopReason::Cancelled,
+            None,
+        ));
+    }
     for turn_index in trial.turn_count.max(0) as u32..simulator_context.max_turns {
         let observation = observe_session_after(
             ctx,
@@ -286,6 +300,21 @@ pub(super) async fn run_agent_loop_trial(
         ExperimentTrialStopReason::MaxTurns,
         None,
     ))
+}
+
+async fn target_usage_start_sequence(
+    ctx: &WorkflowContext<'_>,
+    current_sequence: u64,
+) -> Result<u64, HandlerError> {
+    if let Some(sequence) = ctx
+        .get::<Json<u64>>(K_TARGET_USAGE_START_SEQUENCE)
+        .await?
+        .map(Json::into_inner)
+    {
+        return Ok(sequence);
+    }
+    ctx.set(K_TARGET_USAGE_START_SEQUENCE, Json(current_sequence));
+    Ok(current_sequence)
 }
 
 /// Returns a stable, PII-free error string for a non-clean target stop.
@@ -432,6 +461,21 @@ pub(super) async fn run_execution_template_trial(
         pool,
     )
     .await?;
+    if forward_pending_child_cancellation(ctx, &trial.scope, trial.run_uid, pool).await? {
+        return Ok(TargetObservations {
+            turns: trial.turn_count.max(0) as u32,
+            ..TargetObservations::default()
+        }
+        .into_outcome(
+            TrialScoreTarget::Session {
+                session_id: effective.session_id,
+            },
+            effective.session_id,
+            ExperimentTrialStatus::Cancelled,
+            ExperimentTrialStopReason::Cancelled,
+            None,
+        ));
+    }
 
     let origin = append_experiment_objective(
         ctx,
@@ -510,6 +554,7 @@ pub(super) async fn run_execution_template_trial(
     .name("experiment_trial_attach_execution_run")
     .await?;
     ctx.set(K_EXECUTION_RUN_UID, Json(execution_run_uid));
+    forward_pending_child_cancellation(ctx, &trial.scope, trial.run_uid, pool).await?;
     tracing::Span::current().set_attribute(
         "moa.experiment.execution_run_uid",
         execution_run_uid.to_string(),
@@ -1280,6 +1325,18 @@ fn target_usage_from_events(events: &[EventRecord]) -> (u64, u64) {
         })
 }
 
+fn target_usage_from_events_after(events: &[EventRecord], boundary: u64) -> (u64, u64) {
+    events
+        .iter()
+        .filter(|record| record.sequence_num > boundary)
+        .fold((0_u64, 0_u64), |(tokens, cost_cents), record| {
+            (
+                tokens + (record.event.input_tokens() + record.event.output_tokens()) as u64,
+                cost_cents + u64::from(record.event.cost_cents()),
+            )
+        })
+}
+
 fn event_range_after(sequence_num: u64) -> EventRange {
     EventRange {
         from_seq: Some(sequence_num.saturating_add(1)),
@@ -1432,6 +1489,35 @@ mod tests {
             transcript[1].content,
             "Target response: first target response"
         );
+    }
+
+    #[test]
+    fn resumed_trial_usage_counts_only_events_after_its_durable_boundary_offline() {
+        // Pins: resuming a trial includes its earlier target usage without
+        // charging activity that predates the trial on a reused session.
+        let session_id = SessionId::new();
+        let response =
+            |text: &str, input_tokens_uncached, output_tokens, cost_cents| Event::BrainResponse {
+                text: text.to_string(),
+                thought_signature: None,
+                model: ModelId::new("gpt-5.1"),
+                model_tier: ModelTier::Main,
+                input_tokens_uncached,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens,
+                cost_cents,
+                duration_ms: 25,
+                llm_ttft_ms: None,
+            };
+        let events = vec![
+            event_record(session_id, 1, response("before trial", 100, 50, 9)),
+            event_record(session_id, 2, response("trial turn one", 10, 5, 1)),
+            event_record(session_id, 3, response("trial turn two", 20, 7, 2)),
+        ];
+
+        assert_eq!(target_usage_from_events_after(&events, 1), (42, 3));
+        assert_eq!(target_usage_from_events_after(&events, 3), (0, 0));
     }
 
     #[test]

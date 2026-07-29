@@ -1457,21 +1457,41 @@ async fn seed_experiment_score_provenance(
     .await
     .expect("seed experiment trial");
 
+    let score_id = Uuid::new_v4();
+    let score_ts = chrono::Utc::now();
+    let target_session_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO analytics.scores (
+             score_id, ts, storage_partition_id, target_kind, session_id, run_id, name,
+             value_type, value_boolean, source, model_or_evaluator
+         ) VALUES ($1, $2, $3, 'session', $4, $5, 'target_completed', 'boolean',
+                   TRUE, 'product_evaluator', 'target_completed@v1')",
+    )
+    .bind(score_id)
+    .bind(score_ts)
+    .bind(&partition)
+    .bind(target_session_id)
+    .bind(score_run_id)
+    .execute(pool)
+    .await
+    .expect("seed experiment score");
+
     sqlx::query(
         "INSERT INTO moa.experiment_score_provenance (
-             score_id, storage_partition_id, user_id, score_run_id, experiment_run_uid,
+             score_id, score_ts, storage_partition_id, user_id, score_run_id, experiment_run_uid,
              plan_revision_uid, trial_uid, target_session_id, target_execution_run_uid,
              evaluator_id, evaluator_version, score_name, value_type, evidence_ref, evidence_hash
-         ) VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, NULL, 'target_completed', 'v1',
-                   'target_completed', 'boolean', 'session:purge#seq=1', $8)",
+         ) VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, NULL, 'target_completed', 'v1',
+                   'target_completed', 'boolean', 'session:purge#seq=1', $9)",
     )
-    .bind(Uuid::new_v4())
+    .bind(score_id)
+    .bind(score_ts)
     .bind(&partition)
     .bind(score_run_id)
     .bind(run_uid)
     .bind(plan_revision_uid)
     .bind(trial_uid)
-    .bind(Uuid::new_v4())
+    .bind(target_session_id)
     .bind(vec![1_u8; 32])
     .execute(pool)
     .await

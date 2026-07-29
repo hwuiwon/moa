@@ -34,9 +34,9 @@ pub async fn spawn_writer(
     config: MpscSinkConfig,
     store: LineageStore,
 ) -> Result<WriterHandle> {
-    store.ensure_schema().await?;
+    config.validate()?;
     let journal = LineageJournal::new(store.postgres().clone(), config.lease_ttl);
-    spawn_writer_task(rx, Arc::new(Notify::new()), config, store, journal)
+    spawn_writer_task(rx, Arc::new(Notify::new()), config, journal)
 }
 
 /// Spawns the writer behind the production sink, sharing its wake signal.
@@ -44,17 +44,15 @@ pub(crate) fn spawn_writer_for_sink(
     rx: mpsc::Receiver<LineageEvent>,
     wake: Arc<Notify>,
     config: MpscSinkConfig,
-    store: LineageStore,
     journal: LineageJournal,
 ) -> Result<WriterHandle> {
-    spawn_writer_task(rx, wake, config, store, journal)
+    spawn_writer_task(rx, wake, config, journal)
 }
 
 fn spawn_writer_task(
     rx: mpsc::Receiver<LineageEvent>,
     wake: Arc<Notify>,
     config: MpscSinkConfig,
-    store: LineageStore,
     journal: LineageJournal,
 ) -> Result<WriterHandle> {
     let shutdown = CancellationToken::new();
@@ -64,12 +62,12 @@ fn spawn_writer_task(
     let worker_shutdown = shutdown.clone();
     let worker_shared = shared.clone();
     let max_pending_age = config.max_pending_age;
+    let drain_timeout = config.drain_timeout;
     let join = tokio::spawn(async move {
         let outcome = run_writer(
             rx,
             wake,
             config,
-            store,
             journal,
             worker_shutdown,
             worker_shared.clone(),
@@ -87,6 +85,7 @@ fn spawn_writer_task(
         join: Mutex::new(Some(join)),
         shared,
         max_pending_age,
+        drain_timeout,
     })
 }
 
@@ -94,7 +93,6 @@ async fn run_writer(
     mut rx: mpsc::Receiver<LineageEvent>,
     wake: Arc<Notify>,
     config: MpscSinkConfig,
-    store: LineageStore,
     journal: LineageJournal,
     shutdown: CancellationToken,
     shared: Arc<SharedWriterState>,
@@ -122,11 +120,11 @@ async fn run_writer(
                 }
             }
             () = wake.notified() => {
-                drain_once(&store, &journal, &shared, &config).await;
+                drain_once(&journal, &shared, &config).await;
             }
             _ = poll.tick() => {
                 accept_ingress(&journal, &shared, &mut ingress).await;
-                drain_once(&store, &journal, &shared, &config).await;
+                drain_once(&journal, &shared, &config).await;
             }
         }
     }
@@ -138,7 +136,7 @@ async fn run_writer(
         ingress.push(event);
     }
     accept_ingress(&journal, &shared, &mut ingress).await;
-    drain_until_idle(&store, &journal, &shared, &config).await;
+    drain_until_idle(&journal, &shared, &config).await;
     refresh_backlog(&journal, &shared).await;
     Ok(shared.stats())
 }
@@ -185,7 +183,6 @@ async fn accept_ingress(
 
 /// Claims and stores one batch. Returns whether it did any work.
 async fn drain_once(
-    store: &LineageStore,
     journal: &LineageJournal,
     shared: &SharedWriterState,
     config: &MpscSinkConfig,
@@ -207,18 +204,16 @@ async fn drain_once(
         return false;
     }
 
-    store_claimed(store, journal, shared, &claimed).await;
+    store_claimed(journal, shared, &claimed).await;
     refresh_backlog(journal, shared).await;
     true
 }
 
 /// Drains until the queue reports nothing claimable or the drain budget expires.
 ///
-/// The budget is what makes shutdown bounded. Expiring it is not data loss: the
-/// rows are committed and unleased (every claim this writer takes is resolved
-/// before it returns), so a successor claims them on its next poll.
+/// The handle enforces the hard outer bound even when one database operation is
+/// stalled. This loop also stops taking new batches once that budget is spent.
 async fn drain_until_idle(
-    store: &LineageStore,
     journal: &LineageJournal,
     shared: &SharedWriterState,
     config: &MpscSinkConfig,
@@ -233,7 +228,7 @@ async fn drain_until_idle(
             );
             return;
         }
-        if !drain_once(store, journal, shared, config).await {
+        if !drain_once(journal, shared, config).await {
             return;
         }
     }
@@ -241,7 +236,6 @@ async fn drain_until_idle(
 
 /// Stores one claimed batch, dequeuing it in the same transaction.
 async fn store_claimed(
-    store: &LineageStore,
     journal: &LineageJournal,
     shared: &SharedWriterState,
     claimed: &[ClaimedRow],
@@ -267,10 +261,19 @@ async fn store_claimed(
         }
     }
 
-    match commit_batch(store, journal, &rows, &journal_ids).await {
+    match commit_batch(journal, &rows, &journal_ids).await {
         Ok(()) => {
             shared.set_queue_reachable(true);
             shared.record_written(rows.len() as u64);
+        }
+        Err(Error::LeaseLost { expected, owned }) => {
+            // The transaction is rolled back, including any row-store writes.
+            // The new owner now decides the batch's terminal outcome.
+            tracing::debug!(
+                expected,
+                owned,
+                "lineage batch lease expired before commit; reclaimed owner will finish it"
+            );
         }
         Err(error) => match classify_failure(&error, attempts) {
             FailureDisposition::Retry { backoff } => {
@@ -289,11 +292,21 @@ async fn store_claimed(
                     rows = rows.len(),
                     "lineage batch write failed; rows preserved for retry"
                 );
-                if let Err(defer_error) = journal.defer_claim(&journal_ids, backoff).await {
-                    tracing::error!(
-                        error = %defer_error,
-                        "lineage retry deferral failed; the lease will expire instead"
-                    );
+                match journal.defer_claim(&journal_ids, backoff).await {
+                    Ok(()) => {}
+                    Err(Error::LeaseLost { expected, owned }) => {
+                        tracing::debug!(
+                            expected,
+                            owned,
+                            "lineage retry lease expired; reclaimed owner will finish the batch"
+                        );
+                    }
+                    Err(defer_error) => {
+                        tracing::error!(
+                            error = %defer_error,
+                            "lineage retry deferral failed; the lease will expire instead"
+                        );
+                    }
                 }
             }
             FailureDisposition::Permanent => {
@@ -305,24 +318,13 @@ async fn store_claimed(
 
 /// Stores the batch and removes it from the queue in one transaction.
 async fn commit_batch(
-    store: &LineageStore,
     journal: &LineageJournal,
     rows: &[PendingRow],
     journal_ids: &[Uuid],
 ) -> Result<()> {
     let mut tx = journal.begin().await?;
-    write_pending_rows(store, &mut tx, rows).await?;
-    let dequeued = LineageJournal::dequeue_in_tx(&mut tx, journal_ids).await?;
-    if dequeued != journal_ids.len() as u64 {
-        // The claimed rows are leased to this writer, so nothing else should be
-        // removing them. A short count means the queue disagrees with the claim,
-        // and committing anyway would leave rows that are stored but still
-        // queued, which the next claim would store a second time.
-        return Err(Error::Invalid(format!(
-            "lineage dequeue removed {dequeued} of {} claimed rows",
-            journal_ids.len()
-        )));
-    }
+    write_pending_rows(&mut tx, rows).await?;
+    journal.dequeue_claim_in_tx(&mut tx, journal_ids).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -339,7 +341,7 @@ async fn dead_letter_batch(
     let outcome = async {
         let mut tx = journal.begin().await?;
         let dead_letter_id = write_dead_letter_in_tx(&mut tx, rows, error, attempts).await?;
-        LineageJournal::dequeue_in_tx(&mut tx, journal_ids).await?;
+        journal.dequeue_claim_in_tx(&mut tx, journal_ids).await?;
         tx.commit().await?;
         Ok::<Uuid, Error>(dead_letter_id)
     }
@@ -354,6 +356,13 @@ async fn dead_letter_batch(
                 attempts,
                 row_count = rows.len(),
                 "lineage batch moved to dead letter storage"
+            );
+        }
+        Err(Error::LeaseLost { expected, owned }) => {
+            tracing::debug!(
+                expected,
+                owned,
+                "lineage dead-letter lease expired; reclaimed owner will decide the batch"
             );
         }
         Err(dlq_error) => {

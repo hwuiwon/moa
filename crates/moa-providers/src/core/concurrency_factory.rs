@@ -4,8 +4,8 @@
 //! scoped to a **quota identity**: the provider, the opaque fingerprint of the
 //! credential, and — for the per-minute controls — the model and rate class. One
 //! credential's in-flight budget is shared across every call kind it serves (e.g.
-//! Cohere embed + rerank on one key); its per-minute pacing, 429 cooldown, and
-//! retry budget are shared per model and rate class.
+//! Cohere embed + rerank on one key); cooldown and retry budget are shared across
+//! every model client on one credential and rate class.
 //!
 //! # Local versus global
 //!
@@ -20,16 +20,12 @@
 //!
 //! # Where the store comes from
 //!
-//! [`ProviderCoordination::from_config`] reads the store that the composition
-//! root injected into [`MoaConfig::with_runtime_coordination`]. There is no
-//! process-global handle and therefore no install-ordering hazard: a config value
-//! either carries the store or it does not, and a deployment that declares a
-//! distributed scope without one is a *coordination failure* subject to the
-//! configured [`CoordinationFailurePolicy`] — never a silent downgrade to a
-//! per-process ceiling.
+//! The composition root passes the runtime store explicitly when it constructs
+//! [`ProviderCoordination`]. Serializable configuration never carries a live
+//! store handle, and there is no process-global install ordering.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use moa_config::MoaConfig;
@@ -38,6 +34,7 @@ use moa_config::{
 };
 use moa_core::traits::RuntimeCacheStore;
 use moa_core::{error::MoaError, error::Result};
+use moa_runtime_store::DeadlineRuntimeCacheStore;
 use tokio::sync::Semaphore;
 
 use super::concurrency::ConcurrencyLimiter;
@@ -103,6 +100,11 @@ impl CoordinatedControl {
 /// exists so two independently-constructed limiters for one credential share a
 /// ceiling inside this process. Cross-replica coordination never goes through it.
 static LOCAL_BUDGETS: OnceLock<Mutex<HashMap<String, Arc<Semaphore>>>> = OnceLock::new();
+
+/// Redis coordination commands should be short atomic operations. A fixed bound
+/// ensures the configured failure policy decides a hung store instead of waiting
+/// forever, without adding another deployment knob.
+const COORDINATION_OPERATION_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Returns the shared local semaphore for one budget key, creating it once.
 ///
@@ -183,22 +185,25 @@ pub(crate) struct ProviderCoordination {
     concurrency: ProviderConcurrencyConfig,
     pacing: ProviderPacingConfig,
     store: Option<Arc<dyn RuntimeCacheStore>>,
+    guards: Arc<Mutex<HashMap<String, RateGuard>>>,
 }
 
 impl ProviderCoordination {
-    /// Resolves coordination from config and the store injected at the
-    /// composition root.
+    /// Resolves coordination from config and an explicitly injected store.
     ///
     /// # Errors
     ///
     /// Returns a configuration error when a distributed scope is configured, no
     /// coordination store was injected, and the policy is
     /// [`CoordinationFailurePolicy::FailClosed`].
-    pub(crate) fn from_config(config: &MoaConfig) -> Result<Self> {
+    pub(crate) fn from_config(
+        config: &MoaConfig,
+        store: Option<Arc<dyn RuntimeCacheStore>>,
+    ) -> Result<Self> {
         Self::new(
             config.providers.concurrency.clone(),
             config.providers.pacing.clone(),
-            config.runtime_coordination.store(),
+            store,
         )
     }
 
@@ -211,8 +216,8 @@ impl ProviderCoordination {
         if store.is_none() && (concurrency.is_global() || pacing.is_global()) {
             let error = MoaError::ConfigError(
                 "providers coordination declares a global scope but no runtime coordination \
-                 store was injected; pass one through MoaConfig::with_runtime_coordination or \
-                 set the scope to 'local'"
+                 store was injected at the provider composition root; pass the runtime cache \
+                 explicitly or set the scope to 'local'"
                     .to_string(),
             );
             if concurrency.on_coordination_failure.rejects_admission() {
@@ -227,10 +232,17 @@ impl ProviderCoordination {
                 &error,
             );
         }
+        let store = store
+            .map(|store| {
+                DeadlineRuntimeCacheStore::new(store, COORDINATION_OPERATION_TIMEOUT)
+                    .map(|store| Arc::new(store) as Arc<dyn RuntimeCacheStore>)
+            })
+            .transpose()?;
         Ok(Self {
             concurrency,
             pacing,
             store,
+            guards: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -326,13 +338,21 @@ impl ProviderCoordination {
 
     /// Builds the 429-cooldown and retry-budget guard for one credential's quota.
     pub(crate) fn rate_guard(&self, kind: CallKind, provider: &str, credential: &str) -> RateGuard {
-        RateGuard::new(self.pacing.clone())
-            .with_class(kind.label())
-            .with_shared_quota(
-                self.coordinated_store(CoordinatedControl::Cooldown),
-                QuotaIdentity::new(provider, credential),
-                self.failure_policy(),
-            )
+        let identity = QuotaIdentity::new(provider, credential);
+        let key = identity.guard_cache_key(kind.label());
+        let mut guards = self.guards.lock().unwrap_or_else(PoisonError::into_inner);
+        guards
+            .entry(key)
+            .or_insert_with(|| {
+                RateGuard::new(self.pacing.clone())
+                    .with_class(kind.label())
+                    .with_shared_quota(
+                        self.coordinated_store(CoordinatedControl::Cooldown),
+                        identity,
+                        self.failure_policy(),
+                    )
+            })
+            .clone()
     }
 }
 
@@ -373,10 +393,37 @@ impl QuotaIdentity {
         &self.provider
     }
 
-    /// Returns the coordination-store key for one control, model, and rate class.
-    pub(crate) fn key(&self, control: &str, model: &str, class: &str) -> String {
+    /// Returns the fleet pacing key for one model and rate class.
+    pub(crate) fn pacing_key(&self, model: &str, class: &str) -> String {
         format!(
-            "moa:provider-{control}:{}:{model}:{class}:{}",
+            "moa:provider-pacing:{}:{model}:{class}:{}",
+            self.provider,
+            self.credential.as_str()
+        )
+    }
+
+    /// Returns the credential cooldown key for one call class.
+    pub(crate) fn cooldown_key(&self, class: &str) -> String {
+        format!(
+            "moa:provider-cooldown:{}:{class}:{}",
+            self.provider,
+            self.credential.as_str()
+        )
+    }
+
+    /// Returns the credential retry-budget key for one call class.
+    pub(crate) fn retry_budget_key(&self, class: &str) -> String {
+        format!(
+            "moa:provider-retry-budget:{}:{class}:{}",
+            self.provider,
+            self.credential.as_str()
+        )
+    }
+
+    /// Returns the process-local guard-cache key for one call class.
+    pub(crate) fn guard_cache_key(&self, class: &str) -> String {
+        format!(
+            "moa:provider-guard-cache:{}:{class}:{}",
             self.provider,
             self.credential.as_str()
         )
@@ -413,11 +460,8 @@ impl CredentialFingerprint {
     /// Fingerprints one credential value.
     pub(crate) fn of(credential: &str) -> Self {
         let digest = blake3::derive_key(CREDENTIAL_FINGERPRINT_CONTEXT, credential.as_bytes());
-        let mut hex = String::with_capacity(CREDENTIAL_FINGERPRINT_HEX_LEN);
-        for byte in digest.iter().take(CREDENTIAL_FINGERPRINT_HEX_LEN / 2) {
-            hex.push_str(&format!("{byte:02x}"));
-        }
-        Self(hex)
+        let hex = blake3::Hash::from_bytes(digest).to_hex();
+        Self(hex.as_str()[..CREDENTIAL_FINGERPRINT_HEX_LEN].to_owned())
     }
 
     /// Returns the opaque hex identity.
@@ -451,6 +495,8 @@ mod tests {
     use async_trait::async_trait;
     use moa_core::error::Result;
     use tokio::sync::Mutex;
+
+    use crate::core::coordination_test_support::HangingStore;
 
     use super::*;
 
@@ -611,7 +657,7 @@ mod tests {
         .expect_err("fail_closed must reject a global scope with no coordination store");
         let message = error.to_string();
         assert!(
-            message.contains("with_runtime_coordination") && message.contains("local"),
+            message.contains("composition root") && message.contains("local"),
             "the error must tell the operator how to fix it: {message}"
         );
     }
@@ -723,26 +769,93 @@ mod tests {
         drop(held);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn model_clients_on_one_credential_share_the_local_cooldown() {
+        // Pins: the registry-owned coordination object returns one credential
+        // guard to independently constructed model clients. Switching models
+        // cannot escape a 429 when Redis is local or degraded.
+        let policy = coordination(ProviderConcurrencyConfig::default(), None);
+        let first = policy.rate_guard(CallKind::Chat, "anthropic", "shared-key");
+        let second = policy.rate_guard(CallKind::Chat, "anthropic", "shared-key");
+        let other = policy.rate_guard(CallKind::Chat, "anthropic", "other-key");
+
+        first
+            .record_rate_limited(Some(Duration::from_secs(10)))
+            .await;
+
+        assert!(
+            second
+                .pause_remaining()
+                .await
+                .expect("shared credential cooldown read")
+                .is_some(),
+            "a second model client must observe the first client's cooldown"
+        );
+        assert!(
+            other
+                .pause_remaining()
+                .await
+                .expect("other credential cooldown read")
+                .is_none(),
+            "a different credential must keep independent cooldown state"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hung_store_reaches_the_fail_closed_policy_after_the_operation_deadline() {
+        // Pins: a connected-but-hung Redis operation cannot park provider
+        // admission forever. The fixed operation deadline must surface as a
+        // coordination failure that the configured policy can reject.
+        let concurrency = ProviderConcurrencyConfig {
+            on_coordination_failure: CoordinationFailurePolicy::FailClosed,
+            ..ProviderConcurrencyConfig::default()
+        };
+        let pacing = ProviderPacingConfig {
+            scope: ConcurrencyScope::Global,
+            ..ProviderPacingConfig::default()
+        };
+        let coordination =
+            ProviderCoordination::new(concurrency, pacing, Some(Arc::new(HangingStore)))
+                .expect("coordination should construct with an injected store");
+        let guard = coordination.rate_guard(CallKind::Chat, "anthropic", "hung-key");
+
+        let error = guard
+            .pause_remaining()
+            .await
+            .expect_err("fail-closed must reject after the store deadline");
+        assert!(
+            matches!(error, MoaError::RateLimited { retries: 0, .. }),
+            "deadline must reach the typed fail-closed result: {error}"
+        );
+    }
+
     #[test]
-    fn quota_keys_are_stable_opaque_and_separated_by_every_dimension() {
-        // Pins: a quota key is deterministic for one (provider, credential, model,
-        // rate class), differs when any dimension differs, and never contains the
-        // raw credential — the fingerprint is all that reaches the store.
+    fn quota_keys_are_stable_opaque_and_match_each_control_scope() {
+        // Pins: every quota control carries only its actual scope, remains
+        // deterministic, and never exposes the raw credential.
         let cohere = QuotaIdentity::new("cohere", "secret-key");
         let same = QuotaIdentity::new("cohere", "secret-key");
         let other_key = QuotaIdentity::new("cohere", "other-key");
         let other_provider = QuotaIdentity::new("openai", "secret-key");
 
-        let base = cohere.key("pace", "embed-v4.0", "inputs");
-        assert_eq!(base, same.key("pace", "embed-v4.0", "inputs"));
-        assert_ne!(base, other_key.key("pace", "embed-v4.0", "inputs"));
-        assert_ne!(base, other_provider.key("pace", "embed-v4.0", "inputs"));
-        assert_ne!(base, cohere.key("pace", "embed-v3.0", "inputs"));
-        assert_ne!(base, cohere.key("pace", "embed-v4.0", "requests"));
-        assert_ne!(base, cohere.key("cooldown", "embed-v4.0", "inputs"));
+        let pacing = cohere.pacing_key("embed-v4.0", "inputs");
+        assert_eq!(pacing, same.pacing_key("embed-v4.0", "inputs"));
+        assert_ne!(pacing, other_key.pacing_key("embed-v4.0", "inputs"));
+        assert_ne!(pacing, other_provider.pacing_key("embed-v4.0", "inputs"));
+        assert_ne!(pacing, cohere.pacing_key("embed-v3.0", "inputs"));
+        assert_ne!(pacing, cohere.pacing_key("embed-v4.0", "requests"));
+
+        let cooldown = cohere.cooldown_key("embedding");
+        let retry_budget = cohere.retry_budget_key("embedding");
+        let guard_cache = cohere.guard_cache_key("embedding");
+        assert_ne!(cooldown, cohere.cooldown_key("chat"));
+        assert_ne!(cooldown, retry_budget);
+        assert_ne!(cooldown, guard_cache);
 
         assert!(
-            !base.contains("secret-key"),
+            [&pacing, &cooldown, &retry_budget, &guard_cache]
+                .into_iter()
+                .all(|key| !key.contains("secret-key")),
             "raw key material must never reach a store key"
         );
         assert!(

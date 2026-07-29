@@ -113,6 +113,15 @@ impl OpenAIProvider {
         config: &MoaConfig,
         default_model: impl Into<String>,
     ) -> Result<Self> {
+        let coordination = ProviderCoordination::from_config(config, None)?;
+        Self::from_config_with_model_and_coordination(config, default_model, &coordination)
+    }
+
+    pub(crate) fn from_config_with_model_and_coordination(
+        config: &MoaConfig,
+        default_model: impl Into<String>,
+        coordination: &ProviderCoordination,
+    ) -> Result<Self> {
         let api_key = moa_config::required_config_secret(
             "MOA_OPENAI_API_KEY",
             &config.providers.openai.api_key,
@@ -127,7 +136,6 @@ impl OpenAIProvider {
         // One coordination handle builds every distributed control for this
         // credential, so concurrency, pacing, cooldown, and retry budget cannot
         // disagree about whether they are fleet-wide.
-        let coordination = ProviderCoordination::from_config(config)?;
         let pacing = config
             .providers
             .openai
@@ -199,7 +207,7 @@ impl LLMProvider for OpenAIProvider {
         let resolved_model = canonical_model_id(&requested_model)?;
         // Cooldown and retry budget are scoped to the resolved model, so a 429 on
         // one model does not stall calls to another model on the same credential.
-        let guard = self.guard.for_model(&resolved_model);
+        let guard = self.guard.clone();
         // Cooperative 429 short-circuit: while paused, return a typed rate-limit
         // error immediately without an HTTP round trip so callers can fail over.
         if let Some(remaining) = guard.pause_remaining().await? {
@@ -249,12 +257,7 @@ impl LLMProvider for OpenAIProvider {
                 return Err(error);
             }
         };
-        // Chat completions are request-rate limited; pace after taking the
-        // in-flight slot so queued callers do not consume rate budget early.
-        if let Err(error) = self.pacer.acquire(&resolved_model, 1, 0).await {
-            span_recorder.fail_at_stage("transport", &error);
-            return Err(error);
-        }
+        let pacer = self.pacer.clone();
         let client = self.http_client.clone();
         let api_base = self.api_base.clone();
         let api_key = self.api_key.clone();
@@ -274,10 +277,12 @@ impl LLMProvider for OpenAIProvider {
                     &api_key,
                     &request,
                     tx,
-                    ModelId::new(resolved_model),
+                    ModelId::new(resolved_model.clone()),
                     started_at,
                     retry_policy,
                     &guard,
+                    &pacer,
+                    &resolved_model,
                     span_recorder,
                     stream_timeouts,
                     canonical_response_schema,

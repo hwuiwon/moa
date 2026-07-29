@@ -23,6 +23,7 @@ ALLOY_DEPLOYMENT="${REPO_ROOT}/k8s/observability/20-alloy-deployment.yaml"
 ALLOY_PVC="${REPO_ROOT}/k8s/observability/25-alloy-pvc.yaml"
 ALLOY_RBAC="${REPO_ROOT}/k8s/observability/15-alloy-rbac.yaml"
 ALERTS_DIR="${REPO_ROOT}/ops/prometheus/alerts"
+LIVE_SMOKE="${REPO_ROOT}/k8s/scripts/observability-smoke.sh"
 
 # Pinned tool versions. A validator that accepts whatever binary happens to be on
 # PATH cannot tell "this config is valid" from "this version of the checker did
@@ -117,6 +118,16 @@ assert_excludes "${ALLOY_CONFIG_TEXT}" "moa-orchestrator.moa-system.svc.cluster.
   "Alloy still scrapes a MOA orchestrator metrics port that no longer exists"
 assert_excludes "${ALLOY_CONFIG_TEXT}" "moa-edge.moa-system.svc.cluster.local:9090" \
   "Alloy still scrapes a MOA edge metrics port that no longer exists"
+assert_excludes "${ALLOY_CONFIG_TEXT}" "restate.moa-restate.svc.cluster.local:5122" \
+  "Alloy scrapes Restate through a load-balanced Service and blends per-node counters"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'discovery.relabel "restate"' \
+  "Alloy does not derive Restate scrape targets from Kubernetes pod discovery"
+assert_contains "${ALLOY_CONFIG_TEXT}" "__meta_kubernetes_pod_label_moa_hwuiwon_com_restate_cluster" \
+  "Restate pod discovery is not restricted to the labeled MOA cluster"
+assert_contains "${ALLOY_CONFIG_TEXT}" "__meta_kubernetes_pod_container_port_number" \
+  "Restate pod discovery does not select one metrics target per pod"
+assert_contains "${ALLOY_CONFIG_TEXT}" 'replacement   = "$1:5122"' \
+  "Restate pod discovery does not target each pod's metrics port"
 
 echo "Checking the Alloy deployment contract..."
 ALLOY_DEPLOYMENT_TEXT="$(<"${ALLOY_DEPLOYMENT}")"
@@ -142,6 +153,33 @@ assert_contains "${ALLOY_RBAC_TEXT}" "monitoring.coreos.com" \
   "Alloy has no RBAC for PrometheusRule resources, so the rule synchronizer silently syncs nothing"
 assert_contains "${ALLOY_RBAC_TEXT}" "prometheusrules" \
   "Alloy has no RBAC for PrometheusRule resources, so the rule synchronizer silently syncs nothing"
+
+RESTATE_CLUSTER_TEXT="$(<"${REPO_ROOT}/k8s/base/10-restate-cluster.yaml")"
+assert_contains "${RESTATE_CLUSTER_TEXT}" "node:" \
+  "Restate networkPeers does not configure access to the node metrics port"
+assert_contains "${RESTATE_CLUSTER_TEXT}" "kubernetes.io/metadata.name: observability" \
+  "Restate networkPeers blocks Alloy from reaching the discovered pods"
+assert_contains "${RESTATE_CLUSTER_TEXT}" "app.kubernetes.io/name: alloy" \
+  "Restate networkPeers does not select the Alloy collector"
+
+echo "Checking the live smoke contract..."
+LIVE_SMOKE_TEXT="$(<"${LIVE_SMOKE}")"
+assert_contains "${LIVE_SMOKE_TEXT}" \
+  'rotate_workload_pods "app.kubernetes.io/name=moa-edge"' \
+  "the live smoke no longer rotates edge pods"
+assert_contains "${LIVE_SMOKE_TEXT}" \
+  '"app.kubernetes.io/name=moa-orchestrator"' \
+  "the live smoke no longer rotates orchestrator pods"
+assert_contains "${LIVE_SMOKE_TEXT}" '"DELETED"' \
+  "the live smoke does not verify the terminal event of each old pod identity"
+assert_contains "${LIVE_SMOKE_TEXT}" 'count(up{job="restate"} == 1) == 3' \
+  "the live smoke does not require all three Restate pod targets"
+assert_contains "${LIVE_SMOKE_TEXT}" 'PGSERVICEFILE="${DATABASE_SERVICE_FILE}"' \
+  "the live smoke does not use a libpq service file"
+assert_contains "${LIVE_SMOKE_TEXT}" 'PGPASSFILE="${DATABASE_PASSWORD_FILE}"' \
+  "the live smoke does not use a protected pgpass file"
+assert_excludes "${LIVE_SMOKE_TEXT}" 'psql "${SMOKE_DATABASE_URL}"' \
+  "the live smoke exposes the database credential in psql process arguments"
 
 echo "Checking that the exporters and the collector agree on transport..."
 # The link nothing else checks. Production names an OTLP endpoint and protocol in

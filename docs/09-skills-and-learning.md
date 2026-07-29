@@ -184,10 +184,10 @@ is no unreviewed mutation path.
 ### Sanitized learning evidence
 
 Nothing on the automatic learning path reads a raw transcript. Distillation,
-improvement, sibling re-synthesis, recurrence-cluster accumulation,
-regression-suite generation, provider prompt formatting, and task-summary
-embedding all take `moa_skills::evidence::SanitizedLearningEvidence`, and there
-is no overload, wrapper, or deprecated path that takes `EventRecord` instead.
+improvement, sibling regression-suite generation, provider prompt formatting,
+and task-summary embedding all take
+`moa_skills::evidence::SanitizedLearningEvidence`, and there is no overload,
+wrapper, or deprecated path that takes `EventRecord` instead.
 The type has private fields, no raw-string or raw-event constructor, and no
 `Deserialize`, so raw transcript evidence is not merely discouraged at those
 boundaries — it is unrepresentable.
@@ -273,7 +273,8 @@ shared defaults automatically. Current generation flow:
    so every promoted revision carries the suite derived from its own source
    session; nothing runs at generation time. When a recurring task dedupes onto
    an open proposal, the new session's suite accumulates as sibling held-out
-   material instead of being discarded.
+   material instead of being discarded. It never rewrites or re-synthesizes the
+   filed draft.
 8. Append one `LearningCandidateType::Skill` row with status `Proposed` and
    `proposal_kind = SkillDraft`, its typed provenance rows, operation, draft
    artifact revision ID, and an `evidence` payload carrying the assessed
@@ -313,9 +314,11 @@ report a passing held-out split that held nothing out.
 
 `artifact_revision_contribution` answers the same question one level up: which
 candidate's evidence produced a revision's model-written definition and each of
-its package files. Without it an erasure enumerates zero revisions — never
-deleting a sole-source revision and never invalidating a shared one — while every
-count stays truthfully zero.
+its package files. Erasure uses those rows to find every attributable revision,
+archive it, and clear its definition, source, files, and serving state in place;
+the stable revision identity remains for pinned foreign keys. Dependent
+candidates are then followed recursively rather than stopping at the first
+promoted revision.
 
 Proposal filing dedupes twice before creating a draft: an open `Proposed`
 skill candidate for the same skill name, or for the same task fingerprint
@@ -428,14 +431,11 @@ assessed segment, durable tool errors and denied action reviews in the session
 window are clustered deterministically (no model call) and recurring patterns
 file `NeedsAuthoring` candidates naming the implicated editable surface. Mining
 observes that something keeps failing; it does not produce a change anything can
-apply, so its output is authoring work rather than a reviewable proposal.
-Re-observed patterns bump the open candidate's occurrence evidence instead of
-filing duplicates.
-
-A pattern whose only evidence is evaluation probe ids is **not filed at all**. A
-probe id names no row in this database, so the resulting candidate could be
-neither attributed to a data subject nor reached by a privacy erasure. Skipping
-it is the honest outcome; filing an unattributable candidate is not.
+apply, so its output is authoring work rather than a reviewable proposal. Once
+filed, a weakness candidate's JSON and evaluation evidence stay immutable.
+Repeated observations remain attributable source events and do not rewrite the
+candidate. Evaluation-probe clustering is not modeled until a typed,
+attributable producer exists.
 
 `learning_candidates` is not a replacement for `learning_log`. Candidates are
 mutable proposal state with evaluation payloads and explicit status transitions.

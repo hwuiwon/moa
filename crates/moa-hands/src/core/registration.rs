@@ -10,11 +10,19 @@ use crate::tools::{memory, session_search, tool_result};
 use moa_config::McpServerCredentialScope;
 use moa_config::ToolBudgetConfig;
 use moa_core::{
-    error::Result, traits::BuiltInTool, types::action_policy::ActionClass,
-    types::action_policy::ActionPolicyEffect, types::hands::BuiltinPolicyRevision,
-    types::hands::SandboxPolicySnapshot, types::hands::SandboxTier,
-    types::security::ToolCapabilityId, types::tools::IdempotencyClass,
-    types::tools::ToolDefinition, types::tools::ToolDiffStrategy, types::tools::ToolInputShape,
+    error::{MoaError, Result},
+    traits::BuiltInTool,
+    types::action_policy::ActionClass,
+    types::action_policy::ActionPolicyEffect,
+    types::execution_planning::canonical_json_bytes,
+    types::hands::BuiltinPolicyRevision,
+    types::hands::SandboxPolicySnapshot,
+    types::hands::SandboxTier,
+    types::security::ToolCapabilityId,
+    types::tools::IdempotencyClass,
+    types::tools::ToolDefinition,
+    types::tools::ToolDiffStrategy,
+    types::tools::ToolInputShape,
     types::tools::ToolPolicySpec,
 };
 use serde_json::Value;
@@ -125,16 +133,19 @@ impl ToolExecution {
 /// built-in or hand tool name.
 pub const MCP_TOOL_REFERENCE_PREFIX: &str = "mcp__";
 
-/// Builds the stable server-qualified reference a discovered MCP tool registers
-/// under.
+/// Builds the stable, injective server-qualified reference a discovered MCP tool
+/// registers under.
 ///
-/// Registration is keyed by this reference, not by the remote name, so one
-/// connector exposing `search` can never displace another connector's `search`
-/// nor collide with a local tool — the collision that used to fail router
-/// construction outright.
+/// The server byte length frames the two caller-controlled components. Plain
+/// concatenation with `__` is not injective: `(a__b, c)` and `(a, b__c)` would
+/// otherwise produce the same reference. Registration separately rejects a
+/// reference that exceeds provider tool-name constraints.
 #[must_use]
 pub fn mcp_tool_reference(server_name: &str, remote_tool_name: &str) -> String {
-    format!("{MCP_TOOL_REFERENCE_PREFIX}{server_name}__{remote_tool_name}")
+    format!(
+        "{MCP_TOOL_REFERENCE_PREFIX}{}_{server_name}__{remote_tool_name}",
+        server_name.len()
+    )
 }
 
 /// Returns whether a name is model-safe for the provider tool-calling APIs.
@@ -161,47 +172,20 @@ fn mcp_schema_hash(
     reference: &str,
     input_schema: &Value,
     protocol_version: Option<&str>,
-) -> String {
+) -> Result<String> {
     fn absorb(hasher: &mut Sha256, part: &[u8]) {
         hasher.update((part.len() as u64).to_be_bytes());
         hasher.update(part);
     }
 
+    let canonical_schema = canonical_json_bytes(input_schema)
+        .map_err(|error| MoaError::ConfigError(format!("canonicalize MCP tool schema: {error}")))?;
     let mut hasher = Sha256::new();
     hasher.update(b"moa.mcp.tool-schema.v1");
     absorb(&mut hasher, reference.as_bytes());
-    absorb(&mut hasher, canonical_schema_bytes(input_schema).as_bytes());
+    absorb(&mut hasher, &canonical_schema);
     absorb(&mut hasher, protocol_version.unwrap_or_default().as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-/// Serializes a schema with sorted object keys so the hash is order-stable.
-fn canonical_schema_bytes(schema: &Value) -> String {
-    let mut canonical = schema.clone();
-    sort_json_keys(&mut canonical);
-    canonical.to_string()
-}
-
-fn sort_json_keys(value: &mut Value) {
-    match value {
-        Value::Array(items) => items.iter_mut().for_each(sort_json_keys),
-        Value::Object(map) => {
-            let mut ordered = map
-                .iter()
-                .map(|(key, value)| {
-                    let mut value = value.clone();
-                    sort_json_keys(&mut value);
-                    (key.clone(), value)
-                })
-                .collect::<Vec<_>>();
-            ordered.sort_by(|left, right| left.0.cmp(&right.0));
-            map.clear();
-            for (key, value) in ordered {
-                map.insert(key, value);
-            }
-        }
-        _ => {}
-    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 #[derive(Clone)]
@@ -253,7 +237,7 @@ impl RegisteredTool {
         server_name: &str,
         credential_scope: McpServerCredentialScope,
         registration: McpDiscoveredToolRegistration,
-    ) -> Self {
+    ) -> Result<Self> {
         let idempotency_class = if registration.allows_idempotent_retry() {
             IdempotencyClass::Idempotent
         } else {
@@ -265,8 +249,8 @@ impl RegisteredTool {
         let tool = registration.into_tool();
         let remote_tool_name = tool.name;
         let name = mcp_tool_reference(server_name, &remote_tool_name);
-        let schema_hash = mcp_schema_hash(&name, &tool.input_schema, protocol_version.as_deref());
-        Self {
+        let schema_hash = mcp_schema_hash(&name, &tool.input_schema, protocol_version.as_deref())?;
+        Ok(Self {
             definition: ToolDefinition {
                 name: name.clone(),
                 description: tool.description,
@@ -299,7 +283,7 @@ impl RegisteredTool {
                 remote_tool_name,
                 schema_hash,
             },
-        }
+        })
     }
 }
 
@@ -397,11 +381,9 @@ impl ToolRegistry {
     /// credential scope derived from operator configuration rather than from the
     /// call.
     ///
-    /// Returns the reference the tool registered under. The only rejection left
-    /// is a remote name that no provider tool-calling API would accept; a name
-    /// that merely matches a local tool or another connector's tool is qualified
-    /// apart instead of failing, because one connector's naming choice must not
-    /// be able to take down a router serving everyone else's tools.
+    /// Returns the reference the tool registered under. Model-unsafe references
+    /// and duplicate qualified references are rejected rather than overwriting
+    /// an existing executable definition.
     pub fn register_mcp_tool(
         &mut self,
         server_name: &str,
@@ -417,10 +399,13 @@ impl ToolRegistry {
                  {name} is not a model-safe tool name"
             )));
         }
-        self.tools.insert(
-            name.clone(),
-            RegisteredTool::mcp(server_name, credential_scope, registration),
-        );
+        if self.tools.contains_key(&name) {
+            return Err(moa_core::error::MoaError::ConfigError(format!(
+                "MCP server {server_name} discovered duplicate qualified tool reference {name}"
+            )));
+        }
+        let registered = RegisteredTool::mcp(server_name, credential_scope, registration)?;
+        self.tools.insert(name.clone(), registered);
         if !self
             .default_loadout
             .iter()
@@ -607,11 +592,78 @@ fn default_budget_for_tool(tool_name: &str) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use moa_config::McpServerCredentialScope;
+    use serde_json::json;
+
+    use crate::adapters::mcp::McpDiscoveredTool;
     use crate::tools::sandbox_descriptor::{
         default_sandbox_tool_descriptors, sandbox_tool_descriptors,
     };
 
-    use super::ToolRegistry;
+    use super::{ToolRegistry, mcp_tool_reference};
+
+    fn discovered_tool(name: &str, description: &str) -> McpDiscoveredTool {
+        McpDiscoveredTool {
+            name: name.to_string(),
+            description: description.to_string(),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn mcp_references_are_injective_and_duplicate_insertion_is_rejected() {
+        // Pins: caller-controlled `__` delimiters cannot make two
+        // (server, tool) pairs alias, and a repeated qualified identity cannot
+        // silently overwrite the executable definition already registered.
+        assert_ne!(
+            mcp_tool_reference("a__b", "c"),
+            mcp_tool_reference("a", "b__c")
+        );
+
+        let mut registry = ToolRegistry::new();
+        let reference = registry
+            .register_mcp_tool(
+                "github",
+                McpServerCredentialScope::DeploymentOwned,
+                discovered_tool("search", "first"),
+            )
+            .expect("first qualified registration succeeds");
+        let duplicate = registry.register_mcp_tool(
+            "github",
+            McpServerCredentialScope::DeploymentOwned,
+            discovered_tool("search", "replacement"),
+        );
+
+        assert!(
+            duplicate.is_err(),
+            "duplicate qualified registration must not overwrite the first tool"
+        );
+        assert_eq!(
+            registry
+                .get(&reference)
+                .expect("first registration remains")
+                .description,
+            "first"
+        );
+    }
+
+    #[test]
+    fn mcp_references_reject_model_unsafe_components() {
+        // Pins: connector discovery cannot publish a tool name that causes a
+        // provider to reject the entire model tool loadout.
+        let mut registry = ToolRegistry::new();
+        let error = registry
+            .register_mcp_tool(
+                "unsafe.server",
+                McpServerCredentialScope::DeploymentOwned,
+                discovered_tool("search", "search"),
+            )
+            .expect_err("a dot is outside the model tool-name alphabet");
+        assert!(
+            error.to_string().contains("not a model-safe tool name"),
+            "rejection should name the provider-facing contract: {error}"
+        );
+    }
 
     #[test]
     fn default_local_prompt_schemas_keep_structured_hand_tool_guidance() {

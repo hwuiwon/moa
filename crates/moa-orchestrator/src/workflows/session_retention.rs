@@ -47,9 +47,6 @@ pub struct SessionRetentionRequest {
     pub retain_terminal_sessions_for_days: u32,
     /// Maximum number of sessions this pass may archive.
     pub max_sessions: u32,
-    /// Logical UTC date this workflow instance owns; derived when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_date: Option<NaiveDate>,
 }
 
 /// One session a pass declined to archive, and why.
@@ -240,11 +237,7 @@ impl SessionRetentionSteps for RestateSessionRetentionSteps<'_, '_> {
                     .list_session_archival_candidates(tenant_id, boundary, limit)
                     .await
                     .map(Json::from)
-                    .map_err(|error| {
-                        HandlerError::from(TerminalError::new(format!(
-                            "scan session retention candidates: {error}"
-                        )))
-                    })
+                    .map_err(retention_store_error)
             })
             .name("list_session_retention_candidates")
             .await?;
@@ -270,15 +263,24 @@ impl SessionRetentionSteps for RestateSessionRetentionSteps<'_, '_> {
                     .archive_terminal_session(session_id, boundary, now)
                     .await
                     .map(|outcome| Json::from(SessionArchiveOutcome::from(outcome)))
-                    .map_err(|error| {
-                        HandlerError::from(TerminalError::new(format!(
-                            "archive session {session_id}: {error}"
-                        )))
-                    })
+                    .map_err(retention_store_error)
             })
             .name("archive_terminal_session")
             .await?;
         Ok(outcome.into_inner())
+    }
+}
+
+/// Keeps transient retention storage failures retryable while rejecting invalid
+/// requests and impossible identities without replaying them forever.
+fn retention_store_error(error: moa_core::error::MoaError) -> HandlerError {
+    match error {
+        moa_core::error::MoaError::ValidationError(_)
+        | moa_core::error::MoaError::SessionNotFound(_)
+        | moa_core::error::MoaError::SerializationError(_)
+        | moa_core::error::MoaError::SerdeJson(_)
+        | moa_core::error::MoaError::Uuid(_) => TerminalError::new(error.to_string()).into(),
+        other => HandlerError::from(other),
     }
 }
 
@@ -391,8 +393,29 @@ mod tests {
             tenant_id: TenantId::from(uuid::Uuid::from_u128(99)),
             retain_terminal_sessions_for_days: days,
             max_sessions,
-            target_date: None,
         }
+    }
+
+    // Pins: database and integrity failures remain retryable Restate failures,
+    // while invalid input is terminal. Retention must recover from a transient
+    // database outage without replaying a permanently invalid request forever.
+    #[test]
+    fn retention_store_errors_preserve_retryability_offline() {
+        let retryable = retention_store_error(moa_core::error::MoaError::StorageError(
+            "database unavailable".to_string(),
+        ));
+        let terminal = retention_store_error(moa_core::error::MoaError::ValidationError(
+            "invalid retention request".to_string(),
+        ));
+
+        assert!(
+            format!("{retryable:?}").contains("Retryable"),
+            "storage failures must remain retryable, observed {retryable:?}"
+        );
+        assert!(
+            format!("{terminal:?}").contains("Terminal"),
+            "validation failures must be terminal, observed {terminal:?}"
+        );
     }
 
     // Pins: the retention boundary is the captured pass timestamp minus the

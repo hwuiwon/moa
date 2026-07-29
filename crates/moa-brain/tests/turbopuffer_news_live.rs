@@ -80,9 +80,9 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     require_live_turbopuffer()?;
     let config = MoaConfig::load_from_env()?;
     let ingestion_embedder =
-        build_embedder_from_config(&config, EmbedderConstructionRole::Ingestion)?;
+        build_embedder_from_config(&config, None, EmbedderConstructionRole::Ingestion)?;
     let retrieval_embedder =
-        build_embedder_from_config(&config, EmbedderConstructionRole::Retrieval)?;
+        build_embedder_from_config(&config, None, EmbedderConstructionRole::Retrieval)?;
     assert_eq!(ingestion_embedder.model_id(), retrieval_embedder.model_id());
     assert_eq!(
         ingestion_embedder.model_version(),

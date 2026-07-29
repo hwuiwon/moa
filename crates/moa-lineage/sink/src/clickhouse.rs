@@ -1,10 +1,7 @@
-//! ClickHouse-backed store for high-volume `turn_lineage` rows.
+//! ClickHouse read adapter retained for existing lineage query consumers.
 //!
-//! When `[clickhouse]` is configured, the lineage writer lands `turn_lineage`
-//! rows here instead of Postgres/Timescale. Scores, dead letters, and the
-//! compliance chain state stay in Postgres: scores are SQL-joined against
-//! OLTP experiment tables, and the audit hash chain needs transactional
-//! folds that a column store cannot provide.
+//! Durable writes are Postgres-only so storing content and dequeuing its
+//! accepted journal row remain one transaction.
 
 use chrono::{DateTime, Utc};
 use clickhouse::sql::Identifier;
@@ -15,63 +12,23 @@ use moa_core::{
     types::identifiers::TenantId, types::identifiers::UserId,
 };
 use moa_wire::lineage::LineageRecordView;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
-use crate::writer::LineageRow;
 
 /// ClickHouse connection plus the schema knobs needed at startup.
 #[derive(Clone)]
 pub struct ClickHouseStore {
     client: Client,
     database: String,
-    lineage_ttl_days: u32,
 }
 
 impl std::fmt::Debug for ClickHouseStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClickHouseStore")
             .field("database", &self.database)
-            .field("lineage_ttl_days", &self.lineage_ttl_days)
             .finish_non_exhaustive()
-    }
-}
-
-/// Wire row for `turn_lineage`; field names must match the column names.
-#[derive(Debug, Row, Serialize, Deserialize)]
-struct ClickHouseLineageRow {
-    #[serde(with = "clickhouse::serde::uuid")]
-    turn_id: Uuid,
-    #[serde(with = "clickhouse::serde::uuid")]
-    session_id: Uuid,
-    user_id: String,
-    storage_partition_id: String,
-    #[serde(with = "clickhouse::serde::chrono::datetime64::micros")]
-    ts: DateTime<Utc>,
-    tier: i16,
-    record_kind: i16,
-    payload: String,
-    answer_text: Option<String>,
-    integrity_hash: String,
-    prev_hash: Option<String>,
-}
-
-impl ClickHouseLineageRow {
-    fn from_lineage_row(row: &LineageRow) -> Self {
-        Self {
-            turn_id: row.turn_id,
-            session_id: row.session_id,
-            user_id: row.user_id.clone(),
-            storage_partition_id: row.storage_partition_id.clone(),
-            ts: row.ts,
-            tier: row.tier,
-            record_kind: row.record_kind,
-            payload: row.payload.to_string(),
-            answer_text: None,
-            integrity_hash: hex_lower(&row.integrity_hash),
-            prev_hash: row.prev_hash.as_deref().map(hex_lower),
-        }
     }
 }
 
@@ -126,67 +83,7 @@ impl ClickHouseStore {
         Self {
             client,
             database: config.database.trim().to_string(),
-            lineage_ttl_days: config.lineage_ttl_days,
         }
-    }
-
-    /// Creates the database and `turn_lineage` table when missing.
-    ///
-    /// `ReplacingMergeTree` over the Postgres upsert key keeps journal replays
-    /// idempotent; the TTL mirrors the Timescale retention drop. The bloom
-    /// filter skip indexes keep explain/DSAR/trace reads — which filter by
-    /// `session_id`/`turn_id`, neither in the primary key — from scanning a
-    /// tenant's whole retention window.
-    pub async fn ensure_schema(&self) -> Result<()> {
-        self.client
-            .query("CREATE DATABASE IF NOT EXISTS ?")
-            .bind(Identifier(&self.database))
-            .execute()
-            .await?;
-        self.client
-            .query(
-                "CREATE TABLE IF NOT EXISTS ?.turn_lineage (
-                    turn_id UUID,
-                    session_id UUID,
-                    user_id String,
-                    storage_partition_id String,
-                    ts DateTime64(6, 'UTC'),
-                    tier Int16,
-                    record_kind Int16,
-                    payload String,
-                    answer_text Nullable(String),
-                    integrity_hash String,
-                    prev_hash Nullable(String),
-                    INDEX idx_turn_lineage_session session_id TYPE bloom_filter(0.01) GRANULARITY 4,
-                    INDEX idx_turn_lineage_turn turn_id TYPE bloom_filter(0.01) GRANULARITY 4
-                )
-                ENGINE = ReplacingMergeTree
-                PARTITION BY toYYYYMMDD(ts)
-                ORDER BY (storage_partition_id, ts, turn_id, record_kind)
-                TTL toDateTime(ts) + INTERVAL ? DAY",
-            )
-            .bind(Identifier(&self.database))
-            .bind(self.lineage_ttl_days)
-            .execute()
-            .await?;
-        Ok(())
-    }
-
-    /// Appends one flush batch of lineage rows.
-    pub(crate) async fn insert_lineage_rows(&self, rows: &[LineageRow]) -> Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let mut insert = self
-            .client
-            .insert::<ClickHouseLineageRow>(&self.qualified("turn_lineage"))?;
-        for row in rows {
-            insert
-                .write(&ClickHouseLineageRow::from_lineage_row(row))
-                .await?;
-        }
-        insert.end().await?;
-        Ok(())
     }
 
     /// Loads lineage records for one tenant-scoped session or turn id,
@@ -355,10 +252,6 @@ impl ClickHouseStore {
             .await?;
         Ok(())
     }
-
-    fn qualified(&self, table: &str) -> String {
-        format!("{}.{table}", self.database)
-    }
 }
 
 /// Filters for the typed lineage query, matching the edge route's fields.
@@ -464,60 +357,9 @@ impl ClickHouseDsarRow {
     }
 }
 
-/// Whether a ClickHouse write failure is worth retrying.
-pub(crate) fn is_retryable_clickhouse_error(error: &clickhouse::error::Error) -> bool {
-    matches!(
-        error,
-        clickhouse::error::Error::Network(_) | clickhouse::error::Error::TimedOut
-    )
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
-
-    fn lineage_row() -> LineageRow {
-        LineageRow {
-            turn_id: Uuid::now_v7(),
-            session_id: Uuid::now_v7(),
-            user_id: "user-1".to_string(),
-            storage_partition_id: "partition-1".to_string(),
-            ts: Utc.with_ymd_and_hms(2026, 7, 8, 12, 0, 0).unwrap(),
-            tier: 1,
-            record_kind: 1,
-            payload: serde_json::json!({"kind": "retrieval"}),
-            integrity_hash: vec![0xab, 0x01],
-            prev_hash: Some(vec![0xcd, 0xef]),
-        }
-    }
-
-    #[test]
-    fn wire_row_hex_encodes_hashes_and_serializes_payload_as_json_text() {
-        // Pins: the ClickHouse wire row carries the same identity fields as the
-        // Postgres COPY path, with hashes hex-encoded and payload as JSON text.
-        let row = lineage_row();
-
-        let wire = ClickHouseLineageRow::from_lineage_row(&row);
-
-        assert_eq!(wire.turn_id, row.turn_id);
-        assert_eq!(wire.session_id, row.session_id);
-        assert_eq!(wire.storage_partition_id, "partition-1");
-        assert_eq!(wire.payload, "{\"kind\":\"retrieval\"}");
-        assert_eq!(wire.integrity_hash, "ab01");
-        assert_eq!(wire.prev_hash.as_deref(), Some("cdef"));
-        assert_eq!(wire.answer_text, None);
-    }
 
     #[test]
     fn record_row_rejects_non_tenant_partition_ids() {
@@ -535,19 +377,5 @@ mod tests {
 
         let error = row.into_view().expect_err("non-uuid partition should fail");
         assert!(error.to_string().contains("not a tenant id"));
-    }
-
-    #[test]
-    fn clickhouse_retry_classification_is_transport_aware() {
-        // Pins: transient transport failures retry; schema/data mismatches do not.
-        assert!(is_retryable_clickhouse_error(
-            &clickhouse::error::Error::TimedOut
-        ));
-        assert!(!is_retryable_clickhouse_error(
-            &clickhouse::error::Error::NotEnoughData
-        ));
-        assert!(!is_retryable_clickhouse_error(
-            &clickhouse::error::Error::BadResponse("Code: 60".to_string())
-        ));
     }
 }

@@ -195,6 +195,7 @@ pub(crate) struct ScoreRow {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct ExperimentScoreProvenanceRow {
     pub(super) score_id: Uuid,
+    pub(super) score_ts: DateTime<Utc>,
     pub(super) storage_partition_id: String,
     pub(super) user_id: Option<String>,
     pub(super) score_run_id: Uuid,
@@ -237,9 +238,11 @@ impl ScoreRow {
         let storage_partition_id = record.storage_partition_id.to_string();
         let user_id = record.user_id.map(|user_id| user_id.to_string());
         let run_id = record.run_id.or(target_run_id);
+        let score_ts = record.ts;
         let provenance = record.experiment_provenance.map(|provenance| {
             experiment_provenance_row(
                 record.score_id,
+                score_ts,
                 storage_partition_id.clone(),
                 user_id.clone(),
                 run_id,
@@ -249,7 +252,7 @@ impl ScoreRow {
 
         Self {
             score_id: record.score_id,
-            ts: record.ts,
+            ts: score_ts,
             storage_partition_id,
             user_id,
             target_kind,
@@ -273,6 +276,7 @@ impl ScoreRow {
 
 fn experiment_provenance_row(
     score_id: Uuid,
+    score_ts: DateTime<Utc>,
     storage_partition_id: String,
     user_id: Option<String>,
     score_run_id: Option<Uuid>,
@@ -286,6 +290,7 @@ fn experiment_provenance_row(
     };
     ExperimentScoreProvenanceRow {
         score_id,
+        score_ts,
         storage_partition_id,
         user_id,
         // A provenance-bearing score without a run id would violate the score-run

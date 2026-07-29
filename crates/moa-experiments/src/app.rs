@@ -8,12 +8,19 @@ use moa_artifacts::simulation::{ExperimentTargetKind, experiment_plan_response_s
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::traits::Identity;
 use moa_core::{
-    error::MoaError, types::action_policy::ActionRuleScope, types::completion::CompletionRequest,
-    types::completion::JsonResponseFormat, types::context::ContextMessage,
-    types::experience::LearningCandidate, types::experience::LearningCandidateSourceRef,
-    types::experience::LearningCandidateType, types::experience::LearningProposalKind,
-    types::experience::LearningRiskClass, types::experiments::ExperimentScorecard,
-    types::identifiers::ModelId, types::identifiers::TenantId,
+    error::MoaError,
+    types::action_policy::ActionRuleScope,
+    types::completion::CompletionRequest,
+    types::completion::JsonResponseFormat,
+    types::context::ContextMessage,
+    types::experience::LearningCandidate,
+    types::experience::LearningCandidateSourceRef,
+    types::experience::LearningCandidateType,
+    types::experience::LearningProposalKind,
+    types::experience::LearningRiskClass,
+    types::experiments::{ExperimentCancelSignal, ExperimentScorecard},
+    types::identifiers::ModelId,
+    types::identifiers::TenantId,
 };
 use moa_observability::{record_experiment_run, record_experiment_score_rows};
 use moa_scoring::{
@@ -27,10 +34,9 @@ use moa_wire::experiments::{
     ExperimentListResponse, ExperimentProposeImprovementsRequest,
     ExperimentProposeImprovementsResponse, ExperimentRunRequest, ExperimentRunResponse,
     ExperimentScenarioScoreDeltaRow, ExperimentScenarioScoreSummary, ExperimentScoreSummaryRow,
-    ExperimentScorecardRollup, ExperimentScoresRequest, ExperimentScoresResponse,
-    ExperimentTrialScoreSummary, ExperimentTrialStatusRequest, ExperimentTrialStatusResponse,
-    ExperimentTrialSummary, ExperimentTrialsRequest, ExperimentTrialsResponse,
-    ExperimentVariantScoreDeltaRow,
+    ExperimentScoresRequest, ExperimentScoresResponse, ExperimentTrialScoreSummary,
+    ExperimentTrialStatusRequest, ExperimentTrialStatusResponse, ExperimentTrialSummary,
+    ExperimentTrialsRequest, ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -331,6 +337,7 @@ pub async fn trial_status(
 pub async fn cancel_run(
     pool: sqlx::PgPool,
     request: ExperimentCancelRequest,
+    identity: Identity,
 ) -> Result<ExperimentCancelResponse> {
     let scope = tenant_scope(request.tenant_id);
     let reason = request
@@ -358,7 +365,14 @@ pub async fn cancel_run(
     // Cancel the run and reconcile its active trials atomically in one
     // transaction so the parent projection and trial rows can never diverge.
     let (run, _cancelled_trials) = store
-        .cancel_run_and_active_trials(&scope, request.run_uid, reason.clone())
+        .cancel_run_and_active_trials(
+            &scope,
+            request.run_uid,
+            ExperimentCancelSignal {
+                reason: reason.clone(),
+                identity,
+            },
+        )
         .await?;
     let run = run.ok_or_else(|| run_not_found(request.run_uid))?;
     record_experiment_run(run.status.as_str(), run.target_kind.as_str());
@@ -509,17 +523,9 @@ pub async fn scores(
             .into_iter()
             .map(experiment_scenario_score_summary)
             .collect(),
-        run_scorecard: experiment_scorecard_rollup(&scorecards.run),
-        scenario_scorecards: scorecards
-            .scenarios
-            .iter()
-            .map(experiment_scorecard_rollup)
-            .collect(),
-        variant_scorecards: scorecards
-            .variants
-            .iter()
-            .map(experiment_scorecard_rollup)
-            .collect(),
+        run_scorecard: scorecards.run,
+        scenario_scorecards: scorecards.scenarios,
+        variant_scorecards: scorecards.variants,
     })
 }
 
@@ -1025,15 +1031,6 @@ async fn experiment_run_scorecards(
             .get(&trial.trial_uid)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        // The expectation's evidence hash comes from the rows themselves: the
-        // trial finalizer is the only writer, and every row it wrote for one
-        // trial shares one evidence hash. A row carrying a different hash is
-        // therefore a row from a different observation, and the assessment
-        // rejects it below.
-        let evidence_hash = trial_rows
-            .first()
-            .map(|row| row.evidence_hash.clone())
-            .unwrap_or_default();
         let expectation = ScorecardExpectation {
             score_run_id: trial.score_run_id,
             experiment_run_uid: run.run_uid,
@@ -1043,7 +1040,9 @@ async fn experiment_run_scorecards(
             plan_revision_uid: trial.plan_revision_uid,
             trial_uid: trial.trial_uid,
             target,
-            evidence_hash,
+            // This independent trial-ledger value prevents a score row from
+            // supplying both the evidence claim and the value used to verify it.
+            evidence_hash: trial.final_evidence_hash.clone().unwrap_or_default(),
         };
         assessments.push(TrialScorecardAssessment {
             trial_uid: trial.trial_uid,
@@ -1458,21 +1457,8 @@ fn experiment_trial_score_summary(
                     .collect()
             })
             .unwrap_or_default(),
-        eligibility: assessment.assessment.eligibility.as_str().to_string(),
-        eligibility_findings: assessment
-            .assessment
-            .findings
-            .iter()
-            .map(|finding| format!("{}: {}", finding.score_name, finding.detail))
-            .collect(),
-    }
-}
-
-fn experiment_scorecard_rollup(rollup: &ScorecardGroupRollup) -> ExperimentScorecardRollup {
-    ExperimentScorecardRollup {
-        key: rollup.key.clone(),
-        eligibility: rollup.eligibility.as_str().to_string(),
-        trials: rollup.trials as u64,
+        eligibility: assessment.assessment.eligibility,
+        eligibility_findings: assessment.assessment.findings.clone(),
     }
 }
 
@@ -1663,7 +1649,7 @@ mod tests {
         let trials = vec![completed_trial_record(run.run_uid)];
         let summary_rows = vec![ScoreSummaryRow {
             name: "target_completed".to_string(),
-            value_type: "boolean".to_string(),
+            value_type: ScorecardValueType::Boolean,
             n: 1,
             mean_or_rate: Some(1.0),
         }];
@@ -1769,8 +1755,6 @@ mod tests {
             scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
                 evaluator_id: "target_completed".to_string(),
                 evaluator_version: "v1".to_string(),
-                score_name: "target_completed".to_string(),
-                value_type: ScorecardValueType::Boolean,
                 config: json!({}),
                 effect: ScorecardEffect::Blocking,
             }])
@@ -1818,6 +1802,7 @@ mod tests {
             session_id: Some(SessionId(fixture_uuid(31))),
             execution_run_uid: Some(fixture_uuid(32)),
             score_run_id: fixture_uuid(33),
+            final_evidence_hash: Some(vec![7; 32]),
             turn_count: 3,
             stop_reason: Some(ExperimentTrialStopReason::Success),
             error: None,

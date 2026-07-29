@@ -5,7 +5,8 @@ use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_artifacts::validation::validate_for_status;
 use moa_core::types::experiments::{
-    ExperimentScorecard, ScorecardEffect, ScorecardRequirement, ScorecardValueType,
+    ExperimentScorecard, ScorecardEffect, ScorecardFinding, ScorecardGroupRollup,
+    ScorecardRequirement, ScorecardValueType,
 };
 use moa_core::{
     types::action_policy::ActionRuleScope, types::execution_planning::PinnedExecutionTemplateRef,
@@ -30,10 +31,10 @@ use moa_wire::experiments::{
     ExperimentPlanListRequest, ExperimentPlanListResponse, ExperimentProposeImprovementsRequest,
     ExperimentProposeImprovementsResponse, ExperimentRunRequest, ExperimentRunResponse,
     ExperimentRunStatusRequest, ExperimentRunStatusResponse, ExperimentScenarioScoreDeltaRow,
-    ExperimentScenarioScoreSummary, ExperimentScoreSummaryRow, ExperimentScorecardRollup,
-    ExperimentScoresRequest, ExperimentScoresResponse, ExperimentTrialScoreSummary,
-    ExperimentTrialStatusRequest, ExperimentTrialStatusResponse, ExperimentTrialSummary,
-    ExperimentTrialsRequest, ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
+    ExperimentScenarioScoreSummary, ExperimentScoreSummaryRow, ExperimentScoresRequest,
+    ExperimentScoresResponse, ExperimentTrialScoreSummary, ExperimentTrialStatusRequest,
+    ExperimentTrialStatusResponse, ExperimentTrialSummary, ExperimentTrialsRequest,
+    ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -76,8 +77,6 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
             ExperimentScorecard::new(vec![ScorecardRequirement {
                 evaluator_id: "target_completed".to_string(),
                 evaluator_version: "v1".to_string(),
-                score_name: "target_completed".to_string(),
-                value_type: ScorecardValueType::Boolean,
                 config: json!({}),
                 effect: ScorecardEffect::Blocking,
             }])
@@ -243,20 +242,24 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
             variant_key: "baseline".to_string(),
             scenario_id: Some(fixture_uuid(7).to_string()),
             rows: vec![score_row("task.completed", "boolean", 1, 1.0)],
-            eligibility: "eligible".to_string(),
+            eligibility: ScorecardEligibility::Eligible,
             eligibility_findings: Vec::new(),
         }],
         scenarios: vec![ExperimentScenarioScoreSummary {
             scenario_id: Some(fixture_uuid(7).to_string()),
             rows: vec![score_row("task.completed", "boolean", 2, 0.5)],
         }],
-        run_scorecard: scorecard_rollup("run", "eligible", 1),
+        run_scorecard: scorecard_rollup("run", ScorecardEligibility::Eligible, 1),
         scenario_scorecards: vec![scorecard_rollup(
             &fixture_uuid(7).to_string(),
-            "eligible",
+            ScorecardEligibility::Eligible,
             1,
         )],
-        variant_scorecards: vec![scorecard_rollup("baseline", "eligible", 1)],
+        variant_scorecards: vec![scorecard_rollup(
+            "baseline",
+            ScorecardEligibility::Eligible,
+            1,
+        )],
     });
     assert_has_tenant_id(ExperimentCompareRequest {
         tenant_id,
@@ -309,18 +312,27 @@ fn experiment_score_responses_serialize_typed_trial_and_scenario_breakdowns() {
             variant_key: "candidate".to_string(),
             scenario_id: Some(scenario_id.to_string()),
             rows: vec![score_row("quality", "numeric", 1, 0.9)],
-            eligibility: "incomplete".to_string(),
-            eligibility_findings: vec![
-                "target_completed: no provenance-backed score row is visible yet".to_string(),
-            ],
+            eligibility: ScorecardEligibility::Incomplete,
+            eligibility_findings: vec![ScorecardFinding {
+                score_name: "target_completed".to_string(),
+                detail: "no provenance-backed score row is visible yet".to_string(),
+            }],
         }],
         scenarios: vec![ExperimentScenarioScoreSummary {
             scenario_id: Some(scenario_id.to_string()),
             rows: vec![score_row("quality", "numeric", 2, 0.85)],
         }],
-        run_scorecard: scorecard_rollup("run", "incomplete", 1),
-        scenario_scorecards: vec![scorecard_rollup(&scenario_id.to_string(), "incomplete", 1)],
-        variant_scorecards: vec![scorecard_rollup("candidate", "incomplete", 1)],
+        run_scorecard: scorecard_rollup("run", ScorecardEligibility::Incomplete, 1),
+        scenario_scorecards: vec![scorecard_rollup(
+            &scenario_id.to_string(),
+            ScorecardEligibility::Incomplete,
+            1,
+        )],
+        variant_scorecards: vec![scorecard_rollup(
+            "candidate",
+            ScorecardEligibility::Incomplete,
+            1,
+        )],
     };
 
     let encoded = serde_json::to_value(response).expect("scores response should serialize");
@@ -458,7 +470,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
     let trials = vec![completed_trial_record(run.run_uid)];
     let summary_rows = vec![moa_scoring::ScoreSummaryRow {
         name: "target_completed".to_string(),
-        value_type: "boolean".to_string(),
+        value_type: ScorecardValueType::Boolean,
         n: 1,
         mean_or_rate: Some(1.0),
     }];
@@ -622,9 +634,11 @@ fn score_row(
     n: u64,
     mean_or_rate: f64,
 ) -> ExperimentScoreSummaryRow {
+    let value_type = value_type.into();
     ExperimentScoreSummaryRow {
         name: name.into(),
-        value_type: value_type.into(),
+        value_type: ScorecardValueType::from_db(&value_type)
+            .expect("score summary fixture value type should be supported"),
         n,
         mean_or_rate: Some(mean_or_rate),
     }
@@ -658,8 +672,6 @@ fn completed_run_record(storage_partition_id: StoragePartitionId) -> ExperimentR
         scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
             evaluator_id: "target_completed".to_string(),
             evaluator_version: "v1".to_string(),
-            score_name: "target_completed".to_string(),
-            value_type: ScorecardValueType::Boolean,
             config: json!({}),
             effect: ScorecardEffect::Blocking,
         }])
@@ -707,6 +719,7 @@ fn completed_trial_record(run_uid: Uuid) -> ExperimentTrialRecord {
         session_id: Some(SessionId(fixture_uuid(11))),
         execution_run_uid: Some(fixture_uuid(12)),
         score_run_id: fixture_uuid(13),
+        final_evidence_hash: Some(vec![7; 32]),
         turn_count: 2,
         stop_reason: None,
         error: None,
@@ -773,8 +786,6 @@ fn minimal_valid_generated_plan() -> String {
                     "requirements": [{
                         "evaluator_id": "target_completed",
                         "evaluator_version": "v1",
-                        "score_name": "target_completed",
-                        "value_type": "boolean",
                         "config": {},
                         "effect": "blocking"
                     }]
@@ -786,10 +797,14 @@ fn minimal_valid_generated_plan() -> String {
 }
 
 /// Builds one wire scorecard rollup for DTO-shape assertions.
-fn scorecard_rollup(key: &str, eligibility: &str, trials: u64) -> ExperimentScorecardRollup {
-    ExperimentScorecardRollup {
+fn scorecard_rollup(
+    key: &str,
+    eligibility: ScorecardEligibility,
+    trials: usize,
+) -> ScorecardGroupRollup {
+    ScorecardGroupRollup {
         key: key.to_string(),
-        eligibility: eligibility.to_string(),
+        eligibility,
         trials,
     }
 }

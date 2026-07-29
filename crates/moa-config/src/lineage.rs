@@ -1,5 +1,6 @@
 //! Durable lineage capture configuration.
 
+use moa_core::error::{MoaError, Result};
 use serde::{Deserialize, Serialize};
 
 /// Engineering-tier lineage capture configuration.
@@ -11,10 +12,8 @@ use serde::{Deserialize, Serialize};
 /// pod-local one, are both gone: no local directory could have been durable
 /// across a rollout, so no value for that key was ever correct.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LineageConfig {
-    /// Whether durable lineage capture is enabled.
-    pub enabled: bool,
     /// Bounded best-effort ingress channel capacity.
     pub channel_capacity: usize,
     /// Maximum ingress events committed to the queue per batch.
@@ -47,7 +46,6 @@ pub struct LineageConfig {
 impl Default for LineageConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             channel_capacity: 8192,
             batch_size: 512,
             batch_max_age_secs: 2,
@@ -56,6 +54,70 @@ impl Default for LineageConfig {
             max_pending_age_secs: 300,
             drain_timeout_secs: 30,
             sample_pgvector_explain: 0.01,
+        }
+    }
+}
+
+impl LineageConfig {
+    /// Refuses zero-sized queues, batches, polling intervals, leases, or drain budgets.
+    pub fn validate(&self) -> Result<()> {
+        let invalid = [
+            (self.channel_capacity == 0, "channel_capacity"),
+            (self.batch_size == 0, "batch_size"),
+            (self.batch_max_age_secs == 0, "batch_max_age_secs"),
+            (self.claim_batch_size == 0, "claim_batch_size"),
+            (self.lease_ttl_secs == 0, "lease_ttl_secs"),
+            (self.max_pending_age_secs == 0, "max_pending_age_secs"),
+            (self.drain_timeout_secs == 0, "drain_timeout_secs"),
+        ]
+        .into_iter()
+        .find_map(|(is_invalid, field)| is_invalid.then_some(field));
+
+        match invalid {
+            Some(field) => Err(MoaError::ConfigError(format!(
+                "observability.lineage.{field} must be greater than zero"
+            ))),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LineageConfig;
+
+    #[test]
+    fn zero_runtime_knobs_are_rejected() {
+        // Pins: every value passed to `mpsc::channel`, `interval`, queue claims,
+        // leases, readiness, or bounded shutdown is strictly positive.
+        for field in [
+            "channel_capacity",
+            "batch_size",
+            "batch_max_age_secs",
+            "claim_batch_size",
+            "lease_ttl_secs",
+            "max_pending_age_secs",
+            "drain_timeout_secs",
+        ] {
+            let mut config = LineageConfig::default();
+            match field {
+                "channel_capacity" => config.channel_capacity = 0,
+                "batch_size" => config.batch_size = 0,
+                "batch_max_age_secs" => config.batch_max_age_secs = 0,
+                "claim_batch_size" => config.claim_batch_size = 0,
+                "lease_ttl_secs" => config.lease_ttl_secs = 0,
+                "max_pending_age_secs" => config.max_pending_age_secs = 0,
+                "drain_timeout_secs" => config.drain_timeout_secs = 0,
+                _ => unreachable!("the test table contains only known lineage fields"),
+            }
+
+            let error = config.validate().expect_err("zero must be rejected");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "configuration error: observability.lineage.{field} must be greater than zero"
+                )
+            );
         }
     }
 }

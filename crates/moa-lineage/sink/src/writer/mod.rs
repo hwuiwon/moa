@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::Result;
 
 pub(crate) use acceptance::{JournalBacklog, LineageJournal};
-pub(crate) use rows::{LineageRow, PendingRow};
+pub(crate) use rows::PendingRow;
 pub use supervisor::spawn_writer;
 pub(crate) use supervisor::spawn_writer_for_sink;
 
@@ -239,6 +239,7 @@ pub struct WriterHandle {
     join: Mutex<Option<tokio::task::JoinHandle<Result<WriterStats>>>>,
     shared: Arc<SharedWriterState>,
     max_pending_age: Duration,
+    drain_timeout: Duration,
 }
 
 impl WriterHandle {
@@ -251,12 +252,24 @@ impl WriterHandle {
         let Some(join) = self.join.lock().await.take() else {
             return Ok(self.shared.stats());
         };
-        match join.await {
-            Ok(result) => result,
-            Err(error) => {
+        let mut join = join;
+        match tokio::time::timeout(self.drain_timeout, &mut join).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
                 self.shared
                     .set_fatal(format!("lineage writer task ended abnormally: {error}"));
                 Err(error.into())
+            }
+            Err(_) => {
+                join.abort();
+                let _ = join.await;
+                let timeout_ms = u64::try_from(self.drain_timeout.as_millis()).unwrap_or(u64::MAX);
+                metrics::counter!("moa_lineage_drain_timeout_total").increment(1);
+                tracing::warn!(
+                    timeout_ms,
+                    "lineage writer shutdown budget expired; committed rows remain for another replica"
+                );
+                Err(crate::Error::DrainTimeout { timeout_ms })
             }
         }
     }

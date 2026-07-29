@@ -1,6 +1,6 @@
 //! Typed sanitized evidence required at every automatic learning boundary.
 //!
-//! Skill distillation, improvement, sibling re-synthesis, regression-suite
+//! Skill distillation, improvement, held-out regression-suite
 //! generation, and task-summary embedding all read session transcripts. None of
 //! them may read a *raw* one: a raw transcript carries whatever the user, a tool,
 //! or a remote document put in it, and these paths ship their input to a model
@@ -126,15 +126,12 @@ pub struct EvidenceScope {
 pub struct SanitizedEntry {
     source: EvidenceSource,
     event_id: Option<Uuid>,
-    sequence_num: Option<u64>,
     tool_name: Option<String>,
     tool_id: Option<ToolCallId>,
     success: Option<bool>,
     is_error: bool,
     text: String,
     structured: Option<serde_json::Value>,
-    class: SensitivityClass,
-    categories: Vec<PiiCategory>,
 }
 
 impl SanitizedEntry {
@@ -142,18 +139,6 @@ impl SanitizedEntry {
     #[must_use]
     pub const fn source(&self) -> EvidenceSource {
         self.source
-    }
-
-    /// Returns the source event's identifier, when the entry came from an event.
-    #[must_use]
-    pub const fn event_id(&self) -> Option<Uuid> {
-        self.event_id
-    }
-
-    /// Returns the source event's sequence number, when the entry came from an event.
-    #[must_use]
-    pub const fn sequence_num(&self) -> Option<u64> {
-        self.sequence_num
     }
 
     /// Returns the tool this entry belongs to, for tool-derived entries.
@@ -194,18 +179,6 @@ impl SanitizedEntry {
     #[must_use]
     pub const fn structured(&self) -> Option<&serde_json::Value> {
         self.structured.as_ref()
-    }
-
-    /// Returns the class the classifier assigned to this carrier before redaction.
-    #[must_use]
-    pub const fn class(&self) -> SensitivityClass {
-        self.class
-    }
-
-    /// Returns the categories redacted out of this carrier.
-    #[must_use]
-    pub fn categories(&self) -> &[PiiCategory] {
-        &self.categories
     }
 }
 
@@ -451,7 +424,6 @@ struct EvidenceBuilder {
     entries: Vec<SanitizedEntry>,
     class: SensitivityClass,
     detector_version: Option<String>,
-    categories: BTreeSet<&'static str>,
     category_values: Vec<PiiCategory>,
 }
 
@@ -459,11 +431,63 @@ struct EvidenceBuilder {
 #[derive(Debug, Clone, Default)]
 struct EntryContext {
     event_id: Option<Uuid>,
-    sequence_num: Option<u64>,
     tool_id: Option<ToolCallId>,
     success: Option<bool>,
     is_error: bool,
-    structured: Option<serde_json::Value>,
+}
+
+/// One recursively sanitized JSON tree plus the privacy metadata observed in it.
+struct SanitizedJson {
+    value: serde_json::Value,
+    class: SensitivityClass,
+    detector_version: Option<String>,
+    categories: Vec<PiiCategory>,
+}
+
+impl SanitizedJson {
+    fn plain(value: serde_json::Value) -> Self {
+        Self {
+            value,
+            class: SensitivityClass::None,
+            detector_version: None,
+            categories: Vec::new(),
+        }
+    }
+
+    fn absorb_text(&mut self, sanitized: &SanitizedText) {
+        self.absorb_metadata(
+            sanitized.class(),
+            Some(sanitized.detector_version()),
+            sanitized.categories(),
+        );
+    }
+
+    fn absorb_json(&mut self, sanitized: &Self) {
+        self.absorb_metadata(
+            sanitized.class,
+            sanitized.detector_version.as_deref(),
+            &sanitized.categories,
+        );
+    }
+
+    fn absorb_metadata(
+        &mut self,
+        class: SensitivityClass,
+        detector_version: Option<&str>,
+        categories: &[PiiCategory],
+    ) {
+        if class.rank() > self.class.rank() {
+            self.class = class;
+        }
+        if self.detector_version.is_none() {
+            self.detector_version = detector_version.map(str::to_string);
+        }
+        for category in categories {
+            if !self.categories.iter().any(|existing| existing == category) {
+                self.categories.push(*category);
+            }
+        }
+    }
 }
 
 impl EvidenceBuilder {
@@ -473,7 +497,6 @@ impl EvidenceBuilder {
             entries: Vec::new(),
             class: SensitivityClass::None,
             detector_version: None,
-            categories: BTreeSet::new(),
             category_values: Vec::new(),
         }
     }
@@ -516,32 +539,65 @@ impl EvidenceBuilder {
         tool_name: Option<&str>,
         context: EntryContext,
     ) {
-        if sanitized.class().rank() > self.class.rank() {
-            self.class = sanitized.class();
-        }
-        if self.detector_version.is_none() {
-            self.detector_version = Some(sanitized.detector_version().to_string());
-        }
-        for category in sanitized.categories() {
-            if self.categories.insert(category.field_name()) {
-                self.category_values.push(*category);
-            }
-        }
-        let class = sanitized.class();
-        let categories = sanitized.categories().to_vec();
+        self.merge_metadata(
+            sanitized.class(),
+            Some(sanitized.detector_version()),
+            sanitized.categories(),
+        );
         self.entries.push(SanitizedEntry {
             source,
             event_id: context.event_id,
-            sequence_num: context.sequence_num,
             tool_name: tool_name.map(str::to_string),
             tool_id: context.tool_id,
             success: context.success,
             is_error: context.is_error,
             text: sanitized.into_redacted(),
-            structured: context.structured,
-            class,
-            categories,
+            structured: None,
         });
+    }
+
+    fn record_json(
+        &mut self,
+        source: EvidenceSource,
+        sanitized: SanitizedJson,
+        tool_name: Option<&str>,
+        context: EntryContext,
+    ) {
+        self.merge_metadata(
+            sanitized.class,
+            sanitized.detector_version.as_deref(),
+            &sanitized.categories,
+        );
+        let text = sanitized.value.to_string();
+        self.entries.push(SanitizedEntry {
+            source,
+            event_id: context.event_id,
+            tool_name: tool_name.map(str::to_string),
+            tool_id: context.tool_id,
+            success: context.success,
+            is_error: context.is_error,
+            text,
+            structured: Some(sanitized.value),
+        });
+    }
+
+    fn merge_metadata(
+        &mut self,
+        class: SensitivityClass,
+        detector_version: Option<&str>,
+        categories: &[PiiCategory],
+    ) {
+        if class.rank() > self.class.rank() {
+            self.class = class;
+        }
+        if self.detector_version.is_none() {
+            self.detector_version = detector_version.map(str::to_string);
+        }
+        for category in categories {
+            if !self.category_values.contains(category) {
+                self.category_values.push(*category);
+            }
+        }
     }
 
     /// Extracts and sanitizes every text carrier in one event.
@@ -552,7 +608,6 @@ impl EvidenceBuilder {
     ) -> Result<(), EvidenceRejection> {
         let context = EntryContext {
             event_id: Some(record.id),
-            sequence_num: Some(record.sequence_num),
             ..EntryContext::default()
         };
         match &record.event {
@@ -603,19 +658,16 @@ impl EvidenceBuilder {
                             carrier: EvidenceSource::ToolInput,
                             rejection,
                         })?;
-                let rendered = redacted.to_string();
-                self.push_with(
-                    classifier,
+                self.record_json(
                     EvidenceSource::ToolInput,
-                    &rendered,
+                    redacted,
                     Some(tool_name),
                     EntryContext {
                         tool_id: Some(*tool_id),
-                        structured: Some(redacted),
                         ..context.clone()
                     },
-                )
-                .await
+                );
+                Ok(())
             }
             Event::ToolResult {
                 tool_id,
@@ -720,34 +772,42 @@ fn sanitize_json_value<'a>(
     classifier: &'a dyn PiiClassifier,
     input: &'a serde_json::Value,
 ) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<serde_json::Value, SanitizationRejection>>
-            + Send
-            + 'a,
-    >,
+    Box<dyn std::future::Future<Output = Result<SanitizedJson, SanitizationRejection>> + Send + 'a>,
 > {
     Box::pin(async move {
         match input {
             serde_json::Value::String(value) => {
                 let sanitized = sanitize_with(classifier, value).await?;
-                Ok(serde_json::Value::String(sanitized.into_redacted()))
+                let mut result = SanitizedJson::plain(serde_json::Value::Null);
+                result.absorb_text(&sanitized);
+                result.value = serde_json::Value::String(sanitized.into_redacted());
+                Ok(result)
             }
             serde_json::Value::Array(items) => {
-                let mut redacted = Vec::with_capacity(items.len());
+                let mut result = SanitizedJson::plain(serde_json::Value::Null);
+                let mut values = Vec::with_capacity(items.len());
                 for item in items {
-                    redacted.push(sanitize_json_value(classifier, item).await?);
+                    let sanitized = sanitize_json_value(classifier, item).await?;
+                    result.absorb_json(&sanitized);
+                    values.push(sanitized.value);
                 }
-                Ok(serde_json::Value::Array(redacted))
+                result.value = serde_json::Value::Array(values);
+                Ok(result)
             }
             serde_json::Value::Object(map) => {
-                let mut redacted = serde_json::Map::with_capacity(map.len());
+                let mut result = SanitizedJson::plain(serde_json::Value::Null);
+                let mut values = serde_json::Map::with_capacity(map.len());
                 for (key, value) in map {
-                    let sanitized_key = sanitize_with(classifier, key).await?.into_redacted();
-                    redacted.insert(sanitized_key, sanitize_json_value(classifier, value).await?);
+                    let sanitized_key = sanitize_with(classifier, key).await?;
+                    result.absorb_text(&sanitized_key);
+                    let sanitized_value = sanitize_json_value(classifier, value).await?;
+                    result.absorb_json(&sanitized_value);
+                    values.insert(sanitized_key.into_redacted(), sanitized_value.value);
                 }
-                Ok(serde_json::Value::Object(redacted))
+                result.value = serde_json::Value::Object(values);
+                Ok(result)
             }
-            other => Ok(other.clone()),
+            other => Ok(SanitizedJson::plain(other.clone())),
         }
     })
 }
@@ -1059,11 +1119,8 @@ mod tests {
 
         let event_ids = events.iter().map(|record| record.id).collect::<Vec<_>>();
         for entry in evidence.entries() {
-            let id = entry
-                .event_id()
-                .expect("event-derived entry carries its id");
+            let id = entry.event_id.expect("event-derived entry carries its id");
             assert!(event_ids.contains(&id), "unknown event id {id}");
-            assert!(entry.sequence_num().is_some());
         }
 
         let payload = evidence.provenance_payload();
@@ -1120,6 +1177,8 @@ mod tests {
         assert_eq!(structured["retries"], 3);
         assert_eq!(entry.tool_name(), Some("set_env"));
         assert_eq!(entry.tool_id(), Some(tool_id));
+        assert_eq!(evidence.class(), SensitivityClass::Pii);
+        assert_eq!(evidence.redacted_categories(), &[PiiCategory::Email]);
     }
 
     /// A classifier that counts its calls and always returns the same result.
@@ -1134,6 +1193,45 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.result.clone())
         }
+    }
+
+    #[tokio::test]
+    async fn nested_tool_arguments_are_classified_once_per_text_carrier() {
+        // Pins: the recursive tool-input sanitizer classifies each key and string
+        // leaf exactly once through the sanitization gate. It must not serialize
+        // the sanitized tree and classify that rendered JSON a second time.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let classifier = CountingClassifier {
+            result: PiiResult {
+                class: SensitivityClass::None,
+                spans: Vec::new(),
+                model_version: "test:v1".to_string(),
+                abstained: false,
+            },
+            calls: calls.clone(),
+        };
+        let events = vec![record(
+            1,
+            Event::ToolCall {
+                tool_id: moa_core::types::identifiers::ToolCallId::new(),
+                provider_tool_use_id: None,
+                provider_thought_signature: None,
+                tool_name: "nested".to_string(),
+                input: serde_json::json!({
+                    "outer": ["alpha", "beta"],
+                    "retries": 3,
+                }),
+                hand_id: None,
+            },
+        )];
+
+        sanitize_segment_evidence(&classifier, scope(), &events, SegmentNarrative::default())
+            .await
+            .expect("tool arguments sanitize");
+
+        // `sanitize_with` performs the required initial and residual checks for
+        // each of two keys and two string leaves.
+        assert_eq!(calls.load(Ordering::SeqCst), 8);
     }
 
     /// A classifier that always fails.

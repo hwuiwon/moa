@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_config::MoaConfig;
-use moa_core::traits::{EmbeddingProvider, Identity};
+use moa_core::traits::{EmbeddingProvider, Identity, RuntimeCacheStore};
 use moa_core::types::memory::InformationBarrierClearances;
 use moa_core::types::security::SensitivityClass;
 use moa_core::types::session::SessionMeta;
@@ -39,6 +39,7 @@ pub(super) struct MemoryRequestProvenance {
 pub(super) struct MemoryServiceDeps<'a> {
     pub(super) pool: &'a sqlx::PgPool,
     pub(super) kms: &'a Arc<dyn KeyManagementProvider>,
+    pub(super) runtime_cache: &'a Arc<dyn RuntimeCacheStore>,
 }
 
 /// Runs graph-memory search and maps ranked hits into the public response.
@@ -54,8 +55,7 @@ pub(super) async fn search_inner(
     let clearances = session_clearances(&provenance.session)?;
     let scope = policy.traversal_scope();
     let hits = search_hits_for_tool(
-        deps.pool,
-        deps.kms,
+        &deps,
         config,
         &policy,
         &request.query,
@@ -171,8 +171,7 @@ pub(super) async fn retrieve_debug_inner(
     let clearances = session_clearances(&provenance.session)?;
     let scope = policy.traversal_scope();
     let hits = search_hits_for_tool(
-        deps.pool,
-        deps.kms,
+        &deps,
         config,
         &policy,
         &request.query,
@@ -227,8 +226,7 @@ struct RetrievalInputs {
 /// is derived by the caller from the session alone; this function never accepts
 /// a caller-supplied tenant or contact id.
 pub(super) async fn search_hits_for_tool(
-    pool: &sqlx::PgPool,
-    kms: &Arc<dyn KeyManagementProvider>,
+    deps: &MemoryServiceDeps<'_>,
     config: &MoaConfig,
     policy: &MemoryAdmissionPolicy,
     query: &str,
@@ -241,11 +239,13 @@ pub(super) async fn search_hits_for_tool(
     let result_limit = policy.result_limit(limit as usize);
     let retrieval_limit = u32::try_from(result_limit).unwrap_or(u32::MAX);
     let max_pii_class = policy.max_pii_class().map_err(memory_handler_error)?;
-    let query_embedding = debug_query_embedding_with_config(config, query).await?;
+    let query_embedding =
+        debug_query_embedding_with_config(config, Arc::clone(deps.runtime_cache), query).await?;
     let mut admitted = Vec::new();
     for plan in policy.plans() {
         let (graph, retriever) =
-            memory_stack_with_runtime(pool, kms, config, plan.scope(), &clearances).await?;
+            memory_stack_with_runtime(deps.pool, deps.kms, config, plan.scope(), &clearances)
+                .await?;
         let seeds = lookup_seed_uids(graph.as_ref(), query, retrieval_limit).await?;
         let hits = retrieve_hits_with_embedding(
             retriever.as_ref(),
@@ -257,11 +257,7 @@ pub(super) async fn search_hits_for_tool(
                 label_filter: plan.label_filter().map(<[NodeLabel]>::to_vec),
                 max_pii_class,
                 use_reranker: true,
-                // Same rule as the brain context pipeline, read from the same
-                // policy value rather than restated here: tenant-knowledge
-                // expansion is enabled exactly when the semantic graph is written.
-                disable_graph_expansion: plan.source_tier() == SourceTier::TenantKnowledge
-                    && !config.knowledge.semantic.enables_tenant_graph_expansion(),
+                disable_graph_expansion: plan.source_tier() == SourceTier::TenantKnowledge,
                 clearances: clearances.clone(),
             },
             query_embedding.clone(),
@@ -343,12 +339,17 @@ async fn retrieve_hits_with_embedding(
 
 async fn debug_query_embedding_with_config(
     config: &MoaConfig,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
     query: &str,
 ) -> Result<Vec<f32>, HandlerError> {
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let embedder = match build_embedder_from_config(config, EmbedderConstructionRole::Retrieval) {
+    let embedder = match build_embedder_from_config(
+        config,
+        Some(runtime_cache),
+        EmbedderConstructionRole::Retrieval,
+    ) {
         Ok(embedder) => embedder,
         Err(error) => {
             tracing::debug!(

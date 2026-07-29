@@ -19,6 +19,16 @@ CREATE TABLE IF NOT EXISTS moa.tenant_sandbox_policy (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE moa.tenant_sandbox_policy ENABLE ROW LEVEL SECURITY;
+ALTER TABLE moa.tenant_sandbox_policy FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_sandbox_policy_tenant_isolation
+    ON moa.tenant_sandbox_policy FOR ALL TO moa_app
+    USING (tenant_id::TEXT = NULLIF(current_setting('moa.tenant_id', TRUE), ''))
+    WITH CHECK (tenant_id::TEXT = NULLIF(current_setting('moa.tenant_id', TRUE), ''));
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON moa.tenant_sandbox_policy TO moa_app;
+
 -- `reaping` fences a generation the durable reaper has claimed for destruction.
 -- It is deliberately not reachable from provisioning: a claimed generation is
 -- never reactivated, only finalized as destroyed or released back to `stale`.
@@ -43,7 +53,9 @@ ALTER TABLE moa.hand_leases
     ADD COLUMN IF NOT EXISTS source_route_revision TEXT,
     ADD COLUMN IF NOT EXISTS capability_revision TEXT,
     ADD COLUMN IF NOT EXISTS reap_attempts INTEGER NOT NULL DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS reap_not_before TIMESTAMPTZ;
+    ADD COLUMN IF NOT EXISTS reap_not_before TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS reap_claim_token UUID,
+    ADD COLUMN IF NOT EXISTS reap_claim_expires_at TIMESTAMPTZ;
 
 -- Every lease written before this migration was provisioned with no stated
 -- policy. Inventing one would mean inventing a permissive sandbox, so instead
@@ -84,6 +96,21 @@ ALTER TABLE moa.hand_leases
         idle_expires_at IS NULL
         OR hard_expires_at IS NULL
         OR idle_expires_at <= hard_expires_at
+    );
+
+-- A reaper claim is one fenced unit: token and expiry are either both present
+-- or both absent, and only `reaping` rows may carry them.
+ALTER TABLE moa.hand_leases DROP CONSTRAINT IF EXISTS hand_leases_reap_claim_pair_check;
+ALTER TABLE moa.hand_leases
+    ADD CONSTRAINT hand_leases_reap_claim_pair_check
+    CHECK ((reap_claim_token IS NULL) = (reap_claim_expires_at IS NULL));
+
+ALTER TABLE moa.hand_leases DROP CONSTRAINT IF EXISTS hand_leases_reaping_claim_check;
+ALTER TABLE moa.hand_leases
+    ADD CONSTRAINT hand_leases_reaping_claim_check
+    CHECK (
+        (status = 'reaping')
+        = (reap_claim_token IS NOT NULL AND reap_claim_expires_at IS NOT NULL)
     );
 
 -- The old index served lease lookup by the single deadline. The reaper claims

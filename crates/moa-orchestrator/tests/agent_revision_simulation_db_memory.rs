@@ -6,9 +6,7 @@ use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifact
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_artifacts::validation::validate_for_status;
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::types::experiments::{
-    ExperimentScorecard, ScorecardEffect, ScorecardRequirement, ScorecardValueType,
-};
+use moa_core::types::experiments::{ExperimentScorecard, ScorecardEffect, ScorecardRequirement};
 use moa_core::types::memory::RlsContext;
 use moa_core::{
     types::action_policy::ActionRuleScope, types::identifiers::ModelId,
@@ -309,8 +307,6 @@ fn new_experiment(
         scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
             evaluator_id: "target_completed".to_string(),
             evaluator_version: "v1".to_string(),
-            score_name: "target_completed".to_string(),
-            value_type: ScorecardValueType::Boolean,
             config: json!({}),
             effect: ScorecardEffect::Blocking,
         }])

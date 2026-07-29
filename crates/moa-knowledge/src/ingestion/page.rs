@@ -30,22 +30,9 @@ where
             chunking: config.chunking,
             provider: config.provider,
             parser_label: config.parser_label,
-            semantic_policy: SemanticGraphPolicy::default(),
             content_fetcher: None,
             source_acl,
         }
-    }
-
-    /// Sets the tenant-knowledge semantic graph policy.
-    ///
-    /// Defaults to [`SemanticGraphPolicy::Off`], which skips semantic extraction
-    /// and writes entirely. The same policy value decides whether
-    /// tenant-knowledge retrieval reads the graph, so extraction cost is never
-    /// paid for data nothing can read.
-    #[must_use]
-    pub fn with_semantic_policy(mut self, policy: SemanticGraphPolicy) -> Self {
-        self.semantic_policy = policy;
-        self
     }
 
     /// Attaches a per-run content fetcher used to download byte content for

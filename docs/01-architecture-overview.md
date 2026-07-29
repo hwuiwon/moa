@@ -571,11 +571,17 @@ the caller was told is durable survives the pod that accepted it. Replicas claim
 queue rows in acceptance order under an expiring lease with
 `FOR UPDATE SKIP LOCKED`; the store and the dequeue commit in one transaction,
 as do a permanent failure's dead-letter and its dequeue. A recoverable failure
-defers the rows with backoff and preserves them. A claimant that dies needs no
-handoff: its lease expires and any replica takes the work. Rows accepted before
-a tenant purge are made invisible to the write by an anti-join against
-`moa.destruction_operation_fence`, so no ordering of claim, lease, retry and
-commit can write a purged tenant's lineage back.
+defers the rows with backoff and preserves them. Dequeue, defer, and dead-letter
+updates are fenced by the current `lease_owner`; an expired claimant that loses
+ownership rolls back its row-store transaction rather than mutating a
+successor's claim.
+
+Before writing, the drain takes the same ordered tenant-then-subject advisory
+locks as destruction. Tenant fences suppress all matching partition rows;
+subject fences suppress only rows for that user UUID or `contact:<UUID>`.
+Writer-first rows are subsequently erased, while destruction-first fences are
+observed by the writer in the same transaction, so no ordering can restore
+purged lineage.
 
 The local channel in front of this is best-effort ingress and a payload-free
 wake signal, never durability. There is no pod-local journal: acceptance that

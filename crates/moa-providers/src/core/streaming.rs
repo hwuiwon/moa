@@ -10,6 +10,7 @@ use reqwest::{RequestBuilder, Response};
 use serde::de::DeserializeOwned;
 
 use crate::core::instrumentation::LLMSpanRecorder;
+use crate::core::pacer::RatePacer;
 use crate::core::rate_guard::RateGuard;
 use crate::core::retry::RetryPolicy;
 
@@ -76,13 +77,18 @@ pub(crate) async fn send_with_transport_phase<F>(
     span_recorder: &LLMSpanRecorder,
     retry_policy: &RetryPolicy,
     guard: &RateGuard,
+    pacer: &RatePacer,
+    model: &str,
     build_request: F,
 ) -> Result<Response>
 where
     F: Fn() -> RequestBuilder,
 {
     span_recorder.set_phase("transport");
-    match retry_policy.send_gated(build_request, guard).await {
+    match retry_policy
+        .send_gated(build_request, guard, pacer, model)
+        .await
+    {
         Ok(response) => Ok(response),
         Err(error) => {
             span_recorder.fail_at_stage("transport", &error);

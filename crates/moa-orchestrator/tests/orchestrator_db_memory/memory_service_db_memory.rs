@@ -86,7 +86,12 @@ async fn pinned_clearances_isolate_reads_and_replayed_audit_is_idempotent_db_mem
     );
     let mut config = MoaConfig::default();
     config.memory.vector.embedder.name = "disabled".to_string();
-    let executor = OrchestratorMemoryRetrievalExecutor::new(pool.clone(), kms, Arc::new(config));
+    let executor = OrchestratorMemoryRetrievalExecutor::new(
+        pool.clone(),
+        kms,
+        Arc::new(config),
+        Arc::new(moa_runtime_store::MemoryRuntimeCacheStore::new()),
+    );
     let operation_id = Uuid::now_v7().to_string();
     let audit_operation_id = format!("tool_call:{operation_id}");
 

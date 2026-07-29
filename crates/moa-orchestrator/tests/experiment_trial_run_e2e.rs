@@ -1,8 +1,6 @@
 //! End-to-end coverage for behavior-lab trial execution through Restate.
 
-use moa_core::types::experiments::{
-    ExperimentScorecard, ScorecardEffect, ScorecardRequirement, ScorecardValueType,
-};
+use moa_core::types::experiments::{ExperimentScorecard, ScorecardEffect, ScorecardRequirement};
 use std::{
     fs,
     path::Path,
@@ -1007,8 +1005,6 @@ fn new_parent_run(identity: &Identity, agent_revision_uid: Uuid) -> NewExperimen
         scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
             evaluator_id: "target_completed".to_string(),
             evaluator_version: "v1".to_string(),
-            score_name: "target_completed".to_string(),
-            value_type: ScorecardValueType::Boolean,
             config: json!({}),
             effect: ScorecardEffect::Blocking,
         }])
@@ -1213,8 +1209,6 @@ fn new_execution_template_parent_run(
         scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
             evaluator_id: "target_completed".to_string(),
             evaluator_version: "v1".to_string(),
-            score_name: "target_completed".to_string(),
-            value_type: ScorecardValueType::Boolean,
             config: json!({}),
             effect: ScorecardEffect::Blocking,
         }])

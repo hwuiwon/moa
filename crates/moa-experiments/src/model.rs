@@ -408,6 +408,8 @@ pub struct ExperimentTrialRecord {
     pub execution_run_uid: Option<Uuid>,
     /// Score run identifier used for trial-level scores.
     pub score_run_id: Uuid,
+    /// Independent digest of the terminal evidence finalized for this trial.
+    pub final_evidence_hash: Option<Vec<u8>>,
     /// Number of simulator-target turns persisted for this trial.
     pub turn_count: i32,
     /// Durable reason why the trial stopped.

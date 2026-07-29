@@ -533,9 +533,9 @@ every other writer, and active history is never touched. The archive write, the
 delete, and the marker are one transaction, so a failure at any point between
 them rolls back together — a session whose events were deleted without its
 archive becoming durable would be history that no longer exists. The archive's
-foreign key to `sessions` makes that structural rather than merely intended: an
-archive row cannot be inserted from outside the transaction holding the session
-row, because the key check would block on it.
+composite foreign key `(session_id, tenant_id) -> sessions(id, tenant_id)` makes
+session ownership structural rather than merely intended: an archive cannot
+name a session from another tenant. The key does not cascade.
 
 `sessions.events_archived_at` marks a session whose history now lives in the
 archive. It is set in the same transaction, and it lives on `sessions` rather
@@ -543,34 +543,39 @@ than being derived from the archive table because the append path already holds
 that row under `FOR UPDATE`: an append to an archived session is refused there
 with no extra round trip. Without that refusal a later append would resurrect
 rows for an archived session and permanently hide the archive from the read
-path.
+path. Status updates also refuse any archived-to-nonterminal transition, so a
+queued transition cannot reopen an archived session after winning the row lock.
+Terminal-to-terminal corrections remain allowed.
 
 Replay of an archived session is indistinguishable from replay of a live one.
 Which store holds a session's history is a *fact* — `events_archived_at` — and
-`get_events` branches on that fact, not on the live table happening to come back
-empty. Emptiness is also what a range past the last sequence returns for a
-perfectly live session, and a stray row written after archival would hide the
-archive entirely, so the marker is read and believed. A session marked archived
-with no archive row is an error rather than an empty history: the marker and the
-archive are written together, so their disagreement means something destroyed
-one of them, and returning "this conversation has no messages" would present
-that as a fact about the conversation. Hydration reproduces the same
-`EventRecord` values with the same ids, sequence numbers, and timestamps,
-applying the same range, type, and limit semantics as the live query. Claim-check references resolve normally because retention never
-touches `session_blobs`. A hydration whose digest does not match is an error,
-never a shorter history: a truncated archive must not be servable as an
-authentic conversation.
+`get_events` reads that marker and the ranged live rows in one SQL
+statement/snapshot, then hydrates the archive when marked. It does not infer
+storage from an empty live result: emptiness is also what a range past the last
+sequence returns for a live session. A session marked archived with no archive
+row is an error rather than an empty history. Hydration reproduces the same
+`EventRecord` values with the same ids, sequence numbers, and timestamps. The
+requested range is applied to serialized archive rows before claim-check blob
+collection and decoding, while type and limit semantics still match the live
+query. Claim-check references resolve normally because retention never touches
+`session_blobs`. A hydration whose digest does not match is an error, never a
+shorter history: a truncated archive must not be servable as an authentic
+conversation.
 
 `SessionRetention` is the durable workflow, dispatched per tenant and logical
 date by `SessionStore/start_session_retention`, which requires **tenant admin**
 on the target tenant — retention is the same class of irreversible act as a
-purge. The pass captures its timestamp as its first durable step and derives one
-boundary from it, so a replay re-derives the boundary it originally used instead
-of drifting forward with the wall clock. Each session is archived behind its own
-journaled step, so a crashed pass resumes rather than restarting, and a replayed
-step sees `AlreadyArchived`. A retention window below one day is refused
-outright: zero would turn a misconfigured schedule into an immediate mass delete
-of history users are still looking at.
+purge. Callers do not supply the logical date; the start handler derives the
+current UTC date for workflow identity and dispatch. The pass captures its
+timestamp as its first durable step and derives one boundary from it, so replay
+does not drift forward with the wall clock. Each session is archived behind its
+own journaled step, so a crashed pass resumes rather than restarting, and a
+replayed step sees `AlreadyArchived`. Storage failures remain retryable through
+Restate; validation, not-found, and serialization failures are terminal, while
+a hold or other archive refusal is reported as an ordinary per-session outcome.
+A retention window below one day is refused outright: zero would turn a
+misconfigured schedule into an immediate mass delete of history users are still
+looking at.
 
 There is deliberately **no default cron job** for retention. The feature is
 inert until an operator schedules or invokes it with an explicit window and

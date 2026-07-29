@@ -556,7 +556,7 @@ mod tests {
         ExperimentBudget, ExperimentLearningProposalSettings, ExperimentSimulationDefinition,
         SimulationDataSource, SimulationDataSourceKind,
     };
-    use moa_core::types::experiments::{ScorecardEffect, ScorecardRequirement, ScorecardValueType};
+    use moa_core::types::experiments::{ScorecardEffect, ScorecardRequirement};
 
     #[test]
     fn plan_expansion_refuses_a_plan_that_declares_no_scorecard_offline() {
@@ -587,8 +587,6 @@ mod tests {
             ExperimentScorecard::new(vec![ScorecardRequirement {
                 evaluator_id: "evaluator_from_the_future".to_string(),
                 evaluator_version: "v1".to_string(),
-                score_name: "target_completed".to_string(),
-                value_type: ScorecardValueType::Boolean,
                 config: json!({}),
                 effect: ScorecardEffect::Blocking,
             }])
@@ -943,8 +941,6 @@ mod tests {
                 ExperimentScorecard::new(vec![ScorecardRequirement {
                     evaluator_id: "target_completed".to_string(),
                     evaluator_version: "v1".to_string(),
-                    score_name: "target_completed".to_string(),
-                    value_type: ScorecardValueType::Boolean,
                     config: json!({}),
                     effect: ScorecardEffect::Blocking,
                 }])

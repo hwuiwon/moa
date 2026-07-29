@@ -187,7 +187,6 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
             "parse_completed",
             "normalized",
             "blocks_diffed",
-            "semantic_graph_extracted",
             "chunks_diffed",
             "embedded",
             "graph_upserted",

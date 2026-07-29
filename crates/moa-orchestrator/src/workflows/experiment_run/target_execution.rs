@@ -119,6 +119,18 @@ pub(super) async fn run_agent_loop_target(
     ctx.set(K_SESSION_ID, Json(session_id));
     tracing::Span::current().set_attribute("moa.experiment.session_id", session_id.to_string());
     persist_attached_session(ctx, scope, request.run_uid, session_id, pool).await?;
+    if forward_pending_child_cancellation(ctx, &scope, request.run_uid, pool).await? {
+        return run_status_response(
+            ctx,
+            ExperimentRunStatusRequest {
+                tenant_id: request.tenant_id,
+                run_uid: request.run_uid,
+            },
+            pool,
+            session_store,
+        )
+        .await;
+    }
 
     with_identity_headers(
         ctx.object_client::<SessionClient>(session_id.to_string())
@@ -217,6 +229,18 @@ pub(super) async fn run_execution_template_target(
         effective.session_id.to_string(),
     );
     persist_attached_session(ctx, scope, request.run_uid, effective.session_id, pool).await?;
+    if forward_pending_child_cancellation(ctx, &scope, request.run_uid, pool).await? {
+        return run_status_response(
+            ctx,
+            ExperimentRunStatusRequest {
+                tenant_id: request.tenant_id,
+                run_uid: request.run_uid,
+            },
+            pool,
+            session_store,
+        )
+        .await;
+    }
 
     let origin = append_experiment_objective(
         ctx,
@@ -289,6 +313,7 @@ pub(super) async fn run_execution_template_target(
     .name("experiment_attach_execution_run")
     .await?;
     ctx.set(K_EXECUTION_RUN_UID, Json(execution_run_uid));
+    forward_pending_child_cancellation(ctx, &scope, request.run_uid, pool).await?;
     tracing::Span::current().set_attribute(
         "moa.experiment.execution_run_uid",
         execution_run_uid.to_string(),

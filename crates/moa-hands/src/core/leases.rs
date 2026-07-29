@@ -241,6 +241,16 @@ pub trait HandLeaseStore: Send + Sync {
         handle: LeaseHandle,
     ) -> Result<()>;
 
+    /// Clears the previous generation's handle after the provisioning claimant
+    /// has destroyed it, without releasing the generation fence.
+    async fn clear_handle_for_provisioning(
+        &self,
+        session_id: SessionId,
+        worker_id: &str,
+        provider: &str,
+        generation: i64,
+    ) -> Result<bool>;
+
     /// Renews the idle deadline of a current active lease if the generation
     /// fence still matches.
     ///
@@ -428,6 +438,37 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         }
     }
 
+    async fn clear_handle_for_provisioning(
+        &self,
+        session_id: SessionId,
+        worker_id: &str,
+        provider: &str,
+        generation: i64,
+    ) -> Result<bool> {
+        let affected = sqlx::query(
+            r#"
+            UPDATE moa.hand_leases
+            SET handle = NULL,
+                updated_at = now()
+            WHERE session_id = $1
+              AND worker_id = $2
+              AND provider = $3
+              AND generation = $4
+              AND status = 'provisioning'
+              AND handle IS NOT NULL
+            "#,
+        )
+        .bind(session_id)
+        .bind(worker_id)
+        .bind(provider)
+        .bind(generation)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        Ok(affected == 1)
+    }
+
     async fn renew_active(
         &self,
         session_id: SessionId,
@@ -481,8 +522,11 @@ impl HandLeaseStore for PostgresHandLeaseStore {
         sqlx::query(
             r#"
             UPDATE moa.hand_leases
-            SET status = $5,
-                updated_at = now()
+            SET handle = CASE WHEN $5 = 'destroyed' THEN NULL ELSE handle END,
+                status = $5,
+                updated_at = now(),
+                reap_claim_token = NULL,
+                reap_claim_expires_at = NULL
             WHERE session_id = $1
               AND worker_id = $2
               AND provider = $3
@@ -760,6 +804,30 @@ impl HandLeaseStore for MemoryHandLeaseStore {
         Ok(())
     }
 
+    async fn clear_handle_for_provisioning(
+        &self,
+        session_id: SessionId,
+        worker_id: &str,
+        provider: &str,
+        generation: i64,
+    ) -> Result<bool> {
+        let mut leases = self.leases.lock().await;
+        let Some(lease) =
+            leases.get_mut(&(session_id, worker_id.to_string(), provider.to_string()))
+        else {
+            return Ok(false);
+        };
+        if lease.generation != generation
+            || lease.status != HandLeaseStatus::Provisioning
+            || lease.handle.is_none()
+        {
+            return Ok(false);
+        }
+        lease.handle = None;
+        lease.updated_at = Utc::now();
+        Ok(true)
+    }
+
     async fn renew_active(
         &self,
         session_id: SessionId,
@@ -807,6 +875,9 @@ impl HandLeaseStore for MemoryHandLeaseStore {
             provider.to_string(),
         )) && lease.generation == generation
         {
+            if status == HandLeaseStatus::Destroyed {
+                lease.handle = None;
+            }
             lease.status = status;
             lease.updated_at = Utc::now();
         }

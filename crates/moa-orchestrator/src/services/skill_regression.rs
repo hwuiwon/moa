@@ -166,7 +166,7 @@ pub async fn skill_acceptance_regression_report(
     // deduped sibling session, each naming the session and experience it came
     // from so an erasure can reach them.
     let contributions = ArtifactRegistry::new(store.pool().clone())
-        .list_suite_contributions(candidate.id)
+        .list_suite_contributions(&scope, candidate.id)
         .await?;
     let Some(generated_suite) = generated_suite_contribution(&contributions) else {
         return Ok(SkillRegressionGate::blocked(

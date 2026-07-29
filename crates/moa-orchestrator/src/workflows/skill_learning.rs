@@ -5,9 +5,9 @@ use std::sync::Arc;
 use moa_config::MoaConfig;
 use moa_core::{
     error::MoaError, error::Result as MoaResult, events::Event, events::EventType,
-    traits::EmbeddingProvider, traits::SessionStore as _, types::events_stream::EventRange,
-    types::events_stream::EventRecord, types::identifiers::SegmentId,
-    types::identifiers::SessionId,
+    traits::EmbeddingProvider, traits::RuntimeCacheStore, traits::SessionStore as _,
+    types::events_stream::EventRange, types::events_stream::EventRecord,
+    types::identifiers::SegmentId, types::identifiers::SessionId,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_providers::{ModelRouter, ProviderRegistry};
@@ -21,7 +21,7 @@ use moa_skills::evidence::{
     EvidenceScope, SanitizedLearningEvidence, SegmentNarrative, sanitize_segment_evidence,
 };
 use moa_skills::proposals::{
-    RecurrenceSiblingSuite, SiblingResynthesis, SkillDraftProposal, accumulate_recurrence_siblings,
+    RecurrenceSiblingSuite, SkillDraftProposal, accumulate_recurrence_siblings,
 };
 use moa_wire::session_store::AppendEventRequest;
 use restate_sdk::prelude::*;
@@ -50,7 +50,7 @@ pub struct RunSkillLearningRequest {
 ///
 /// The exemplar (the workflow's own `experience_id`) is distilled with the
 /// relaxed floor and recurrence evidence; `siblings` are the other cluster
-/// members fed into sibling accumulation so the draft generalizes immediately.
+/// members accumulated as held-out regression material.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecurrenceDispatch {
     /// Total resolved/partial occurrences of the fingerprint in the window.
@@ -127,8 +127,9 @@ impl SkillLearningImpl {
         session_store: Arc<PostgresSessionStore>,
         config: Arc<MoaConfig>,
         providers: Arc<ProviderRegistry>,
+        runtime_cache: Arc<dyn RuntimeCacheStore>,
     ) -> Self {
-        let embedder = build_learning_embedder(&config);
+        let embedder = build_learning_embedder(&config, runtime_cache);
         Self {
             session_store,
             config,
@@ -154,12 +155,17 @@ impl SkillLearningImpl {
 ///
 /// Reuses the same `memory.vector.embedder` selector and 1024-dim output as the
 /// graph-memory index and the embedding-backfill cron, so a probe shares the
-/// vector space the stored task/skill embeddings live in. A disabled selector or
-/// a missing credential is not fatal: it disables the semantic layer and logs a
-/// warning, exactly like the backfill cron.
-fn build_learning_embedder(config: &MoaConfig) -> Option<Arc<dyn EmbeddingProvider>> {
+/// vector space the stored task/skill embeddings live in. The injected runtime
+/// cache also shares provider coordination with the rest of the process. A
+/// disabled selector or missing credential is not fatal: it disables the
+/// semantic layer and logs a warning, exactly like the backfill cron.
+fn build_learning_embedder(
+    config: &MoaConfig,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
+) -> Option<Arc<dyn EmbeddingProvider>> {
     match moa_providers::embedding::build_embedder_from_config(
         config,
+        Some(runtime_cache),
         moa_providers::EmbedderConstructionRole::Ingestion,
     ) {
         Ok(embedder) => Some(embedder),
@@ -318,15 +324,14 @@ pub async fn run_skill_learning_for_experience(
     record_distilled_candidate_filed(&outcome, candidate_source(&request));
 
     // For a recurrence dispatch, feed the remaining cluster members through the
-    // sibling-accumulation/re-synthesis path so the just-filed draft generalizes
-    // from day one and each member's suite pools as held-out material. Best-effort
-    // per member: a load or model failure warns and leaves the rest untouched.
+    // sibling-accumulation path so each member's suite remains held-out from the
+    // draft it later evaluates. Best-effort per member: a load or suite-generation
+    // failure warns and leaves the rest untouched.
     if let (Some(recurrence), Some(proposal)) =
         (request.recurrence.as_ref(), proposal_from_outcome(&outcome))
     {
         feed_recurrence_siblings(
             store.as_ref(),
-            model_router.as_ref(),
             classifier,
             &session,
             proposal,
@@ -394,17 +399,13 @@ fn proposal_from_outcome(outcome: &DistillationOutcome) -> Option<&SkillDraftPro
     }
 }
 
-/// Loads every recurrence sibling's events, then accumulates and generalizes once.
+/// Loads every recurrence sibling's events, then accumulates held-out suites.
 ///
 /// Event loading is best-effort per member: a member whose events cannot be loaded
-/// is logged and dropped so one bad member never aborts the rest. The successfully
-/// loaded members are handed to the combined accumulation path, which durably pools
-/// each member's suite and then runs a *single* generalization model call over the
-/// whole batch (rather than one paid call per member). The accumulation caps at the
-/// open proposal's sibling cap and leaves a claimed candidate untouched.
+/// is logged and dropped so one bad member never aborts the rest. The accumulation
+/// caps at the open proposal's sibling cap and leaves a claimed candidate untouched.
 async fn feed_recurrence_siblings(
     store: &PostgresSessionStore,
-    model_router: &ModelRouter,
     classifier: &dyn moa_memory_pii::PiiClassifier,
     session: &moa_core::types::session::SessionMeta,
     proposal: &SkillDraftProposal,
@@ -436,8 +437,7 @@ async fn feed_recurrence_siblings(
         })
         .collect();
     if let Err(error) =
-        accumulate_recurrence_siblings(store, model_router, session.tenant_id, proposal, &inputs)
-            .await
+        accumulate_recurrence_siblings(store, session.tenant_id, proposal, &inputs).await
     {
         tracing::warn!(
             tenant_id = %session.tenant_id,
@@ -529,19 +529,13 @@ fn record_distilled_candidate_filed(outcome: &DistillationOutcome, source: &str)
 /// `None` when the outcome filed no new candidate.
 ///
 /// A new-skill draft counts as `created` and an accepted improvement draft as
-/// `improved`. A dedupe-hit that re-synthesized (rewrote) an open draft counts
-/// as `resynthesized`; a dedupe-hit that kept the draft unchanged filed nothing
-/// new, mirroring how an unchanged improvement or a skip files nothing.
+/// `improved`. Dedupe hits, unchanged improvements, and skips file nothing.
 fn distilled_candidate_kind(outcome: &DistillationOutcome) -> Option<&'static str> {
     match outcome {
         DistillationOutcome::NewSkillProposed { .. } => Some("created"),
         DistillationOutcome::ImprovementProposed {
             proposal: Some(_), ..
         } => Some("improved"),
-        DistillationOutcome::DedupedOntoOpenProposal {
-            resynthesis: SiblingResynthesis::DraftRewritten,
-            ..
-        } => Some("resynthesized"),
         DistillationOutcome::DedupedOntoOpenProposal { .. }
         | DistillationOutcome::ImprovementProposed { .. }
         | DistillationOutcome::Skipped { .. } => None,
@@ -729,9 +723,8 @@ mod tests {
     #[test]
     fn distilled_candidate_kind_maps_each_filed_outcome() {
         // Pins: the bounded `kind` label the loop metric files under. A fresh new/improved
-        // draft files created/improved; a dedupe-hit that rewrote an open draft files
-        // resynthesized; every non-filing outcome (unchanged dedupe, unchanged improvement,
-        // skip) files nothing.
+        // draft files created/improved; every non-filing outcome (dedupe, unchanged
+        // improvement, skip) files nothing.
         assert_eq!(
             distilled_candidate_kind(&DistillationOutcome::NewSkillProposed {
                 proposal: proposal(),
@@ -748,15 +741,6 @@ mod tests {
         assert_eq!(
             distilled_candidate_kind(&DistillationOutcome::DedupedOntoOpenProposal {
                 proposal: proposal(),
-                resynthesis: SiblingResynthesis::DraftRewritten,
-            }),
-            Some("resynthesized")
-        );
-        // A dedupe-hit that kept the draft filed nothing new.
-        assert_eq!(
-            distilled_candidate_kind(&DistillationOutcome::DedupedOntoOpenProposal {
-                proposal: proposal(),
-                resynthesis: SiblingResynthesis::DraftUnchanged,
             }),
             None
         );

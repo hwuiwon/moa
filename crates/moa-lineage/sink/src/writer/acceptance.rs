@@ -191,20 +191,24 @@ impl LineageJournal {
     /// This is deliberately not a standalone method that opens its own
     /// transaction: dequeue is only ever correct when it commits with the write
     /// that stored the content.
-    pub(super) async fn dequeue_in_tx(
+    pub(super) async fn dequeue_claim_in_tx(
+        &self,
         tx: &mut Transaction<'_, Postgres>,
         journal_ids: &[Uuid],
-    ) -> Result<u64> {
+    ) -> Result<()> {
         if journal_ids.is_empty() {
-            return Ok(0);
+            return Ok(());
         }
-        let deleted =
-            sqlx::query("DELETE FROM analytics.lineage_journal WHERE journal_id = ANY($1)")
-                .bind(journal_ids)
-                .execute(&mut **tx)
-                .await?
-                .rows_affected();
-        Ok(deleted)
+        let deleted = sqlx::query(
+            "DELETE FROM analytics.lineage_journal \
+             WHERE journal_id = ANY($1) AND lease_owner = $2",
+        )
+        .bind(journal_ids)
+        .bind(self.owner)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+        ensure_owned(journal_ids.len(), deleted)
     }
 
     /// Releases a lease and defers the rows so a recoverable failure retries.
@@ -218,19 +222,23 @@ impl LineageJournal {
         let backoff_ms = i64::try_from(backoff.as_millis())
             .map_err(|_| Error::Invalid("lineage retry backoff overflow".to_string()))?;
         let mut tx = self.begin().await?;
-        sqlx::query(
+        let updated = sqlx::query(
             r#"
             UPDATE analytics.lineage_journal
             SET lease_owner = NULL,
                 lease_expires_at = NULL,
                 available_at = now() + make_interval(secs => $2 / 1000.0)
             WHERE journal_id = ANY($1)
+              AND lease_owner = $3
             "#,
         )
         .bind(journal_ids)
         .bind(backoff_ms)
+        .bind(self.owner)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .rows_affected();
+        ensure_owned(journal_ids.len(), updated)?;
         tx.commit().await?;
         metrics::counter!("moa_lineage_journal_deferred_total").increment(journal_ids.len() as u64);
         Ok(())
@@ -260,6 +268,15 @@ impl LineageJournal {
             }),
         })
     }
+}
+
+fn ensure_owned(expected: usize, owned: u64) -> Result<()> {
+    let expected = u64::try_from(expected)
+        .map_err(|_| Error::Invalid("lineage claim row count overflow".to_string()))?;
+    if owned == expected {
+        return Ok(());
+    }
+    Err(Error::LeaseLost { expected, owned })
 }
 
 /// Decodes a claimed payload, mapping a decode failure into a permanent error.

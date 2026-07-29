@@ -110,6 +110,7 @@ validate_manifests() {
   local work_dir local_manifest production_manifest jobs_manifest
   local local_orchestrator production_orchestrator local_edge production_edge
   local local_runtime_config production_runtime_config local_key_secret
+  local local_restate production_restate
   local rewrap_job backfill_job application_content
   work_dir="$(mktemp -d)"
   trap 'rm -rf -- "${work_dir}"' RETURN
@@ -125,6 +126,8 @@ validate_manifests() {
   production_orchestrator="$(manifest_document "${production_manifest}" RestateDeployment moa-orchestrator)"
   local_edge="$(manifest_document "${local_manifest}" Deployment moa-edge)"
   production_edge="$(manifest_document "${production_manifest}" Deployment moa-edge)"
+  local_restate="$(manifest_document "${local_manifest}" RestateCluster moa-restate)"
+  production_restate="$(manifest_document "${production_manifest}" RestateCluster moa-restate)"
   local_runtime_config="$(manifest_document "${local_manifest}" ConfigMap moa-runtime-config)"
   production_runtime_config="$(manifest_document "${production_manifest}" ConfigMap moa-runtime-config)"
   local_key_secret="$(manifest_document "${local_manifest}" Secret moa-kms-root-keys)"
@@ -174,6 +177,24 @@ validate_manifests() {
     assert_excludes "${edge}" "MOA_KMS_" "edge unexpectedly receives KMS configuration"
     assert_excludes "${edge}" "moa-kms-root-keys" "edge unexpectedly mounts the KMS Secret"
     assert_excludes "${edge}" "/var/run/secrets/moa-kms" "edge unexpectedly exposes the KMS keyring"
+  done
+  for workload in \
+    "${local_orchestrator}" \
+    "${production_orchestrator}" \
+    "${local_edge}" \
+    "${production_edge}"; do
+    assert_contains "${workload}" "name: MOA_SERVICE_INSTANCE_ID" \
+      "MOA workload does not inject a per-pod telemetry identity"
+    assert_contains "${workload}" "fieldPath: metadata.uid" \
+      "MOA workload telemetry identity is not sourced from the pod UID"
+  done
+  for restate in "${local_restate}" "${production_restate}"; do
+    assert_contains "${restate}" "node:" \
+      "Restate networkPeers does not configure access to the node metrics port"
+    assert_contains "${restate}" "kubernetes.io/metadata.name: observability" \
+      "Restate networkPeers does not allow the observability namespace"
+    assert_contains "${restate}" "app.kubernetes.io/name: alloy" \
+      "Restate networkPeers does not allow the Alloy collector"
   done
   for application in "${local_manifest}" "${production_manifest}"; do
     application_content="$(<"${application}")"

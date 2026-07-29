@@ -553,7 +553,6 @@ pub async fn accept_rollback_candidate_after_authz(
         Ok(RollbackOutcome::Superseded {
             serving_revision_uid,
         }) => {
-            record_review_decision("accept_rollback", "superseded");
             // The proposal targets a revision a newer promotion has since
             // superseded, so it can never serve again — reject it terminally
             // rather than release it for a retry that would fail identically.
@@ -567,16 +566,19 @@ pub async fn accept_rollback_candidate_after_authz(
                 evaluation_payload: None,
                 updated_at: Utc::now(),
             };
-            if let Err(reject_error) = store
+            let rejected = store
                 .update_learning_candidate_status_from(&reject, LearningCandidateStatus::Evaluating)
                 .await
-            {
-                tracing::warn!(
-                    candidate_id = %candidate.id,
-                    error = %reject_error,
-                    "failed to reject superseded rollback proposal"
-                );
+                .map_err(moa_error_to_status_handler_error)?;
+            if !rejected {
+                return Err(TerminalError::new_with_code(
+                    409,
+                    "rollback proposal changed status before its superseded rejection could be \
+                     applied",
+                )
+                .into());
             }
+            record_review_decision("accept_rollback", "superseded");
             Err(TerminalError::new_with_code(
                 409,
                 format!(
@@ -598,18 +600,23 @@ pub async fn accept_rollback_candidate_after_authz(
                 evaluation_payload: None,
                 updated_at: Utc::now(),
             };
-            if let Err(release_error) = store
+            match store
                 .update_learning_candidate_status_from(
                     &release,
                     LearningCandidateStatus::Evaluating,
                 )
                 .await
             {
-                tracing::warn!(
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    candidate_id = %candidate.id,
+                    "rollback proposal was no longer evaluating when its claim was released"
+                ),
+                Err(release_error) => tracing::warn!(
                     candidate_id = %candidate.id,
                     error = %release_error,
                     "failed to release claimed rollback proposal after execution error"
-                );
+                ),
             }
             Err(error)
         }
@@ -724,7 +731,7 @@ async fn execute_rollback(
         evaluation_payload: None,
         updated_at: Utc::now(),
     };
-    store
+    let promotion_marked_rolled_back = store
         .update_learning_candidate_status_from_in_tx(
             conn.as_mut(),
             &rolled_back,
@@ -732,6 +739,12 @@ async fn execute_rollback(
         )
         .await
         .map_err(moa_error_to_status_handler_error)?;
+    if !promotion_marked_rolled_back {
+        tracing::warn!(
+            candidate_id = %execution.promotion_candidate_id,
+            "original promotion was no longer promoted; preserving its current status"
+        );
+    }
 
     store
         .invalidate_learning_by_candidate_in_tx(

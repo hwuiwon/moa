@@ -10,8 +10,160 @@ pub use memory::MemoryRuntimeCacheStore;
 #[cfg(feature = "redis")]
 pub use redis::RedisRuntimeCacheStore;
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use moa_config::{RuntimeCacheBackend, RuntimeCacheConfig};
 use moa_core::error::{MoaError, Result};
+use moa_core::traits::{
+    BoundedLeaseDecision, RateTokenDecision, RetryBudgetDecision, RuntimeCacheStore,
+};
+
+/// Runtime-cache decorator that bounds every backend operation.
+///
+/// Provider coordination wraps its cache with this at the composition boundary
+/// so a hung Redis connection becomes the same ordinary store error as a failed
+/// connection. The coordination-failure policy can then reject or degrade the
+/// request instead of leaving provider admission parked forever.
+pub struct DeadlineRuntimeCacheStore {
+    inner: Arc<dyn RuntimeCacheStore>,
+    deadline: Duration,
+}
+
+impl DeadlineRuntimeCacheStore {
+    /// Wraps `inner` with one positive operation deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when `deadline` is zero.
+    pub fn new(inner: Arc<dyn RuntimeCacheStore>, deadline: Duration) -> Result<Self> {
+        if deadline.is_zero() {
+            return Err(MoaError::ConfigError(
+                "runtime cache operation deadline must be greater than zero".to_string(),
+            ));
+        }
+        Ok(Self { inner, deadline })
+    }
+
+    async fn bounded<T>(
+        &self,
+        operation: &'static str,
+        future: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        tokio::time::timeout(self.deadline, future)
+            .await
+            .map_err(|_| {
+                MoaError::StorageError(format!(
+                    "runtime cache {operation} exceeded its {}ms operation deadline",
+                    self.deadline.as_millis()
+                ))
+            })?
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeCacheStore for DeadlineRuntimeCacheStore {
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.bounded("get", self.inner.get(key)).await
+    }
+
+    async fn set(&self, key: &str, value: Vec<u8>, ttl: Duration) -> Result<()> {
+        self.bounded("set", self.inner.set(key, value, ttl)).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.bounded("delete", self.inner.delete(key)).await
+    }
+
+    async fn compare_and_set(
+        &self,
+        key: &str,
+        expected: Option<&[u8]>,
+        value: Vec<u8>,
+        ttl: Duration,
+    ) -> Result<bool> {
+        self.bounded(
+            "compare_and_set",
+            self.inner.compare_and_set(key, expected, value, ttl),
+        )
+        .await
+    }
+
+    async fn expire(&self, key: &str, ttl: Duration) -> Result<()> {
+        self.bounded("expire", self.inner.expire(key, ttl)).await
+    }
+
+    async fn try_acquire_bounded_lease(
+        &self,
+        key: &str,
+        lease_id: &str,
+        limit: usize,
+        ttl: Duration,
+    ) -> Result<BoundedLeaseDecision> {
+        self.bounded(
+            "try_acquire_bounded_lease",
+            self.inner
+                .try_acquire_bounded_lease(key, lease_id, limit, ttl),
+        )
+        .await
+    }
+
+    async fn release_bounded_lease(&self, key: &str, lease_id: &str) -> Result<usize> {
+        self.bounded(
+            "release_bounded_lease",
+            self.inner.release_bounded_lease(key, lease_id),
+        )
+        .await
+    }
+
+    async fn try_consume_rate_tokens(
+        &self,
+        key: &str,
+        limit_per_min: u32,
+        permits: u32,
+        ttl: Duration,
+    ) -> Result<RateTokenDecision> {
+        self.bounded(
+            "try_consume_rate_tokens",
+            self.inner
+                .try_consume_rate_tokens(key, limit_per_min, permits, ttl),
+        )
+        .await
+    }
+
+    async fn extend_cooldown(&self, key: &str, cooldown: Duration) -> Result<Duration> {
+        self.bounded("extend_cooldown", self.inner.extend_cooldown(key, cooldown))
+            .await
+    }
+
+    async fn cooldown_remaining(&self, key: &str) -> Result<Duration> {
+        self.bounded("cooldown_remaining", self.inner.cooldown_remaining(key))
+            .await
+    }
+
+    async fn note_windowed_request(&self, key: &str, window: Duration) -> Result<u64> {
+        self.bounded(
+            "note_windowed_request",
+            self.inner.note_windowed_request(key, window),
+        )
+        .await
+    }
+
+    async fn try_consume_retry_budget(
+        &self,
+        key: &str,
+        window: Duration,
+        budget_percent: u32,
+        budget_floor: u64,
+    ) -> Result<RetryBudgetDecision> {
+        self.bounded(
+            "try_consume_retry_budget",
+            self.inner
+                .try_consume_retry_budget(key, window, budget_percent, budget_floor),
+        )
+        .await
+    }
+}
 
 /// Environment flag that explicitly allows the process-local memory backend for `auto`.
 pub(crate) const MEMORY_BACKEND_OPT_IN_ENV: &str = "MOA_RUNTIME_CACHE_ALLOW_MEMORY";

@@ -28,8 +28,7 @@ use crate::format::{
 use crate::improver::{ImprovementResult, format_evidence_for_learning, normalize_llm_markdown};
 use crate::package::SkillPackage;
 use crate::proposals::{
-    SiblingResynthesis, SkillDraftProposal, SkillProposalOperation, SkillProposalSource,
-    store_skill_draft_proposal,
+    SkillDraftProposal, SkillProposalOperation, SkillProposalSource, store_skill_draft_proposal,
 };
 use crate::registry::SkillRegistry;
 use crate::regression::{
@@ -136,17 +135,13 @@ pub enum DistillationOutcome {
     },
     /// A recurring sibling experience deduped onto an already-open proposal.
     ///
-    /// No new review candidate was filed: the sibling's evidence accumulated
-    /// onto the open candidate, and `resynthesis` records whether the
-    /// generalization pass rewrote the open draft. This is distinct from
+    /// No new review candidate was filed: the sibling's suite accumulated as
+    /// held-out evidence on the open candidate. This is distinct from
     /// [`DistillationOutcome::NewSkillProposed`]/[`DistillationOutcome::ImprovementProposed`]
-    /// so loop observability can count a changed re-synthesis apart from a fresh
-    /// filing.
+    /// because it filed nothing new.
     DedupedOntoOpenProposal {
         /// The open proposal the sibling deduped onto.
         proposal: SkillDraftProposal,
-        /// Whether the sibling's generalization pass rewrote the open draft.
-        resynthesis: SiblingResynthesis,
     },
     /// Distillation was intentionally skipped.
     Skipped {
@@ -265,23 +260,16 @@ pub async fn distill_skill_from_experience_with_learning(
             &open.metadata.name,
             &input.evidence,
         )?;
-        let resynthesis = crate::proposals::accumulate_sibling_and_resynthesize(
+        crate::proposals::accumulate_sibling_suite(
             store.as_ref(),
-            model_router.as_ref(),
             session.tenant_id,
             &open,
-            crate::proposals::SiblingContribution {
-                suite: sibling_suite,
-                evidence: &input.evidence,
-                source_experience_id: input.experience.id,
-                source_session_id: session.id,
-            },
+            sibling_suite,
+            input.experience.id,
+            session.id,
         )
         .await?;
-        return Ok(DistillationOutcome::DedupedOntoOpenProposal {
-            proposal: open,
-            resynthesis,
-        });
+        return Ok(DistillationOutcome::DedupedOntoOpenProposal { proposal: open });
     }
 
     let jaccard_text = experience_similarity_text(&input.experience);
@@ -350,13 +338,9 @@ pub async fn distill_skill_from_experience_with_learning(
         )
         .await;
         return result.map(|result| match result {
-            ImprovementResult::Deduped {
-                proposal,
-                resynthesis,
-            } => DistillationOutcome::DedupedOntoOpenProposal {
-                proposal,
-                resynthesis,
-            },
+            ImprovementResult::Deduped { proposal } => {
+                DistillationOutcome::DedupedOntoOpenProposal { proposal }
+            }
             ImprovementResult::Improved { proposal, .. } => {
                 DistillationOutcome::ImprovementProposed {
                     existing_skill_id,
@@ -379,7 +363,6 @@ pub async fn distill_skill_from_experience_with_learning(
     if let Some(probe) = &probe
         && let Some(outcome) = semantic_dedupe_onto_open_proposal(
             store.as_ref(),
-            model_router.as_ref(),
             session,
             &input,
             probe,
@@ -743,12 +726,11 @@ async fn nearest_skill_match(
 ///
 /// Probes the tenant's experience embeddings for near neighbors of the current
 /// experience, maps the nearest qualifying neighbor to the open proposal it backs,
-/// and routes the experience through the same sibling-accumulation/re-synthesis
-/// path the exact-fingerprint dedupe uses. The suite is generated for the open
-/// proposal's own skill name, since the match was by task similarity, not name.
+/// and routes the experience through the same held-out sibling-accumulation path
+/// the exact-fingerprint dedupe uses. The suite is generated for the open proposal's
+/// own skill name, since the match was by task similarity, not name.
 async fn semantic_dedupe_onto_open_proposal(
     store: &PostgresSessionStore,
-    model_router: &ModelRouter,
     session: &SessionMeta,
     input: &ExperienceDistillationInput,
     probe: &[f32],
@@ -787,22 +769,17 @@ async fn semantic_dedupe_onto_open_proposal(
         &open.metadata.name,
         &input.evidence,
     )?;
-    let resynthesis = crate::proposals::accumulate_sibling_and_resynthesize(
+    crate::proposals::accumulate_sibling_suite(
         store,
-        model_router,
         session.tenant_id,
         &open,
-        crate::proposals::SiblingContribution {
-            suite,
-            evidence: &input.evidence,
-            source_experience_id: input.experience.id,
-            source_session_id: session.id,
-        },
+        suite,
+        input.experience.id,
+        session.id,
     )
     .await?;
     Ok(Some(DistillationOutcome::DedupedOntoOpenProposal {
         proposal: open,
-        resynthesis,
     }))
 }
 

@@ -11,50 +11,15 @@
 //! explicitly consumes it.
 
 use moa_core::types::experiments::{ExperimentScorecard, ScorecardRequirement};
+pub use moa_core::types::experiments::{
+    ScorecardEligibility, ScorecardFinding, ScorecardGroupRollup,
+};
 use moa_scoring::ExperimentScoreRow;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::evaluator::{EvaluatorError, validate_scorecard};
+use crate::evaluator::{EvaluatorDescriptor, EvaluatorError, descriptor, validate_scorecard};
 use crate::evidence::TrialScoreTarget;
-
-/// Whether one trial's evidence satisfies its scorecard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ScorecardEligibility {
-    /// Every blocking requirement has exactly one correct, passing row.
-    Eligible,
-    /// Every present row is correct, but at least one blocking result failed.
-    Ineligible,
-    /// At least one blocking requirement has no row yet.
-    Incomplete,
-    /// The scorecard or the rows are structurally wrong: a duplicate row, a
-    /// mislinked row, or a scorecard this build cannot run.
-    Invalid,
-}
-
-impl ScorecardEligibility {
-    /// Returns the persisted representation for this eligibility.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Eligible => "eligible",
-            Self::Ineligible => "ineligible",
-            Self::Incomplete => "incomplete",
-            Self::Invalid => "invalid",
-        }
-    }
-
-    /// Combines two eligibilities, keeping the more severe one.
-    ///
-    /// Severity order is `Invalid` > `Incomplete` > `Ineligible` > `Eligible`:
-    /// a structural fault outranks missing evidence, and missing evidence
-    /// outranks evidence that arrived and said no.
-    #[must_use]
-    pub fn worst(self, other: Self) -> Self {
-        self.max(other)
-    }
-}
 
 /// The exact identity a trial's score rows must carry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,15 +36,6 @@ pub struct ScorecardExpectation {
     pub target: TrialScoreTarget,
     /// BLAKE3 digest of the evidence the scores were derived from.
     pub evidence_hash: Vec<u8>,
-}
-
-/// Why a scorecard did not come out `Eligible`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScorecardFinding {
-    /// Score name the finding concerns.
-    pub score_name: String,
-    /// Human-readable explanation.
-    pub detail: String,
 }
 
 /// One trial's scorecard assessment.
@@ -122,14 +78,19 @@ pub fn assess_trial_scorecard(
     let mut eligibility = ScorecardEligibility::Eligible;
     let mut findings = Vec::new();
     for requirement in scorecard.blocking_requirements() {
+        let descriptor = match descriptor(&requirement.evaluator_id, &requirement.evaluator_version)
+        {
+            Ok(descriptor) => descriptor,
+            Err(error) => return ScorecardAssessment::invalid("*", error.to_string()),
+        };
         let matched = rows
             .iter()
-            .filter(|row| row.name == requirement.score_name)
+            .filter(|row| row.name == descriptor.score_name)
             .collect::<Vec<_>>();
-        let (outcome, detail) = assess_requirement(requirement, expectation, &matched);
+        let (outcome, detail) = assess_requirement(requirement, descriptor, expectation, &matched);
         if let Some(detail) = detail {
             findings.push(ScorecardFinding {
-                score_name: requirement.score_name.clone(),
+                score_name: descriptor.score_name.to_string(),
                 detail,
             });
         }
@@ -144,6 +105,7 @@ pub fn assess_trial_scorecard(
 
 fn assess_requirement(
     requirement: &ScorecardRequirement,
+    descriptor: &EvaluatorDescriptor,
     expectation: &ScorecardExpectation,
     matched: &[&ExperimentScoreRow],
 ) -> (ScorecardEligibility, Option<String>) {
@@ -166,7 +128,7 @@ fn assess_requirement(
         }
     };
 
-    if let Some(mismatch) = linkage_mismatch(requirement, expectation, row) {
+    if let Some(mismatch) = linkage_mismatch(requirement, descriptor, expectation, row) {
         return (ScorecardEligibility::Invalid, Some(mismatch));
     }
 
@@ -185,10 +147,11 @@ fn assess_requirement(
 
 fn linkage_mismatch(
     requirement: &ScorecardRequirement,
+    descriptor: &EvaluatorDescriptor,
     expectation: &ScorecardExpectation,
     row: &ExperimentScoreRow,
 ) -> Option<String> {
-    let expected_value_type = requirement.value_type.as_str();
+    let expected_value_type = descriptor.value_type.as_str();
     let checks: [(&str, String, String); 10] = [
         (
             "evaluator_id",
@@ -212,7 +175,7 @@ fn linkage_mismatch(
         ),
         (
             "provenance_score_name",
-            requirement.score_name.clone(),
+            descriptor.score_name.to_string(),
             row.provenance_score_name.clone(),
         ),
         (
@@ -262,17 +225,6 @@ fn row_target_fragment(row: &ExperimentScoreRow) -> String {
     }
 }
 
-/// One group of trials rolled up into a single eligibility.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScorecardGroupRollup {
-    /// Group key, such as a scenario ID or a variant key.
-    pub key: String,
-    /// Worst eligibility across the group's trials.
-    pub eligibility: ScorecardEligibility,
-    /// Number of trials in the group.
-    pub trials: usize,
-}
-
 /// Rolls per-trial assessments up into one group eligibility.
 ///
 /// A group is only as eligible as its worst trial: one incomplete or ineligible
@@ -304,7 +256,7 @@ pub fn roll_up_group(
 /// # Errors
 ///
 /// Returns [`EvaluatorError`] when the scorecard names an evaluator, version,
-/// output, effect, or configuration this build cannot run.
+/// effect, or configuration this build cannot run.
 pub fn require_runnable_scorecard(scorecard: &ExperimentScorecard) -> Result<(), EvaluatorError> {
     validate_scorecard(scorecard)
 }
@@ -312,7 +264,7 @@ pub fn require_runnable_scorecard(scorecard: &ExperimentScorecard) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_core::types::experiments::{ScorecardEffect, ScorecardValueType};
+    use moa_core::types::experiments::ScorecardEffect;
     use moa_core::types::identifiers::SessionId;
     use serde_json::json;
 
@@ -323,16 +275,12 @@ mod tests {
             ScorecardRequirement {
                 evaluator_id: "target_completed".to_string(),
                 evaluator_version: "v1".to_string(),
-                score_name: "target_completed".to_string(),
-                value_type: ScorecardValueType::Boolean,
                 config: json!({}),
                 effect: ScorecardEffect::Blocking,
             },
             ScorecardRequirement {
                 evaluator_id: "result_produced".to_string(),
                 evaluator_version: "v1".to_string(),
-                score_name: "result_produced".to_string(),
-                value_type: ScorecardValueType::Boolean,
                 config: json!({}),
                 effect: ScorecardEffect::Informational,
             },
@@ -512,8 +460,6 @@ mod tests {
         let unrunnable = ExperimentScorecard::new(vec![ScorecardRequirement {
             evaluator_id: "evaluator_from_the_future".to_string(),
             evaluator_version: "v1".to_string(),
-            score_name: "target_completed".to_string(),
-            value_type: ScorecardValueType::Boolean,
             config: json!({}),
             effect: ScorecardEffect::Blocking,
         }])

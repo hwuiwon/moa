@@ -478,9 +478,11 @@ Deployment requirements:
 - Configured hand provider for code/tool execution.
 - OTel, metrics, and logs wired before tenant traffic.
 
-Graceful shutdown should flip readiness false, deregister or stop accepting new
-handler traffic, drain in-flight invocations within the configured window, and
-let Restate reassign anything that does not finish.
+Graceful shutdown flips readiness false, waits five seconds for load-balancer
+drain, then cancels and joins Restate, SCIM, channel, and background-job
+producers. It drains lineage before audit and flushes metrics before traces.
+Individual joins and drains are bounded at 15 seconds, so Restate can reassign
+work that does not finish.
 
 ## Observability
 

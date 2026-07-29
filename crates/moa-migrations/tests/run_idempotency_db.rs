@@ -3653,12 +3653,18 @@ struct HandLeaseProfileFacts {
     has_hard_expires_at: bool,
     dropped_legacy_expires_at: bool,
     policy_identity_columns: Vec<String>,
+    reap_claim_columns: Vec<String>,
     dropped_legacy_reaper_index: bool,
     has_reaper_index: bool,
     accepts_reaping_status: bool,
+    rejects_reaping_without_claim: bool,
     rejects_active_row_without_policy: bool,
     rejects_idle_past_hard: bool,
     has_tenant_sandbox_policy_table: bool,
+    tenant_policy_rls_enabled: bool,
+    tenant_policy_rls_forced: bool,
+    tenant_policy_visible_rows_for_tenant: i64,
+    tenant_policy_visible_rows_without_scope: i64,
 }
 
 async fn hand_lease_profile_facts(
@@ -3697,6 +3703,15 @@ async fn hand_lease_profile_facts(
     .fetch_all(pool)
     .await?;
 
+    let reap_claim_columns = sqlx::query_scalar::<_, String>(
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_schema = 'moa' AND table_name = 'hand_leases' \
+           AND column_name IN ('reap_claim_token', 'reap_claim_expires_at') \
+         ORDER BY column_name",
+    )
+    .fetch_all(pool)
+    .await?;
+
     let index_exists = |name: &'static str| async move {
         sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (SELECT 1 FROM pg_indexes \
@@ -3716,16 +3731,65 @@ async fn hand_lease_profile_facts(
     .fetch_one(pool)
     .await?;
 
-    // A `reaping` row must be insertable (the status check allows it) while an
-    // active row missing its policy identity and an idle deadline past the hard
-    // deadline must both be rejected by the database itself.
-    let accepts_reaping_status = insert_hand_lease(pool, "reaping", false, false)
+    let (tenant_policy_rls_enabled, tenant_policy_rls_forced) = sqlx::query_as::<_, (bool, bool)>(
+        "SELECT class.relrowsecurity, class.relforcerowsecurity \
+             FROM pg_class AS class \
+             JOIN pg_namespace AS namespace ON namespace.oid = class.relnamespace \
+             WHERE namespace.nspname = 'moa' AND class.relname = 'tenant_sandbox_policy'",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let tenant_a = uuid::Uuid::new_v4();
+    let tenant_b = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO moa.tenant_sandbox_policy (tenant_id, revision, profile) \
+         VALUES ($1, 'tenant-a-v1', '{}'::jsonb), ($2, 'tenant-b-v1', '{}'::jsonb)",
+    )
+    .bind(tenant_a)
+    .bind(tenant_b)
+    .execute(pool)
+    .await?;
+
+    let mut tenant_tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('moa.tenant_id', $1, true)")
+        .bind(tenant_a.to_string())
+        .execute(&mut *tenant_tx)
+        .await?;
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(&mut *tenant_tx)
+        .await?;
+    let tenant_policy_visible_rows_for_tenant =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM moa.tenant_sandbox_policy")
+            .fetch_one(&mut *tenant_tx)
+            .await?;
+    tenant_tx.commit().await?;
+
+    let mut unscoped_tx = pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(&mut *unscoped_tx)
+        .await?;
+    let tenant_policy_visible_rows_without_scope =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM moa.tenant_sandbox_policy")
+            .fetch_one(&mut *unscoped_tx)
+            .await?;
+    unscoped_tx.commit().await?;
+
+    // A `reaping` row must carry a complete expiring ownership claim. An active
+    // row missing its policy identity and an idle deadline past the hard
+    // deadline must also be rejected by the database itself.
+    let accepts_reaping_status = insert_hand_lease(pool, "reaping", false, false, true)
         .await
         .is_ok();
-    let rejects_active_row_without_policy = insert_hand_lease(pool, "active", false, false)
+    let rejects_reaping_without_claim = insert_hand_lease(pool, "reaping", false, false, false)
         .await
         .is_err();
-    let rejects_idle_past_hard = insert_hand_lease(pool, "active", true, true).await.is_err();
+    let rejects_active_row_without_policy = insert_hand_lease(pool, "active", false, false, false)
+        .await
+        .is_err();
+    let rejects_idle_past_hard = insert_hand_lease(pool, "active", true, true, false)
+        .await
+        .is_err();
 
     Ok(HandLeaseProfileFacts {
         has_idle_expires_at,
@@ -3733,22 +3797,30 @@ async fn hand_lease_profile_facts(
         has_hard_expires_at,
         dropped_legacy_expires_at,
         policy_identity_columns,
+        reap_claim_columns,
         dropped_legacy_reaper_index,
         has_reaper_index,
         accepts_reaping_status,
+        rejects_reaping_without_claim,
         rejects_active_row_without_policy,
         rejects_idle_past_hard,
         has_tenant_sandbox_policy_table,
+        tenant_policy_rls_enabled,
+        tenant_policy_rls_forced,
+        tenant_policy_visible_rows_for_tenant,
+        tenant_policy_visible_rows_without_scope,
     })
 }
 
 /// Inserts one hand lease row, optionally with full policy identity and
-/// optionally with an idle deadline deliberately past the hard deadline.
+/// optionally with an idle deadline deliberately past the hard deadline or a
+/// complete reaper ownership claim.
 async fn insert_hand_lease(
     pool: &sqlx::PgPool,
     status: &str,
     with_policy: bool,
     idle_past_hard: bool,
+    with_reap_claim: bool,
 ) -> Result<(), sqlx::Error> {
     let (idle, hard) = if idle_past_hard {
         ("now() + interval '2 hours'", "now() + interval '1 hour'")
@@ -3766,12 +3838,22 @@ async fn insert_hand_lease(
     } else {
         ""
     };
+    let claim_columns = if with_reap_claim {
+        ", reap_claim_token, reap_claim_expires_at"
+    } else {
+        ""
+    };
+    let claim_values = if with_reap_claim {
+        ", gen_random_uuid(), now() + interval '5 minutes'"
+    } else {
+        ""
+    };
     sqlx::query(&format!(
         "INSERT INTO moa.hand_leases \
          (session_id, worker_id, tenant_id, provider, tier, status, generation, \
-          idle_expires_at, hard_expires_at{policy_columns}) \
+          idle_expires_at, hard_expires_at{policy_columns}{claim_columns}) \
          VALUES (gen_random_uuid(), '', gen_random_uuid(), 'local', 'local', $1, 1, \
-                 {idle}, {hard}{policy_values})"
+                 {idle}, {hard}{policy_values}{claim_values})"
     ))
     .bind(status)
     .execute(pool)
@@ -3855,6 +3937,14 @@ async fn hand_lease_effective_profile_v000359_fresh_and_idempotent_db() {
         ],
         "every policy identity column must be persisted on the lease"
     );
+    assert_eq!(
+        facts.reap_claim_columns,
+        vec![
+            "reap_claim_expires_at".to_string(),
+            "reap_claim_token".to_string(),
+        ],
+        "a reaper claim must persist both its ownership token and expiry"
+    );
     assert!(
         facts.dropped_legacy_reaper_index,
         "the old status/expiry index must be replaced, not left behind"
@@ -3862,7 +3952,11 @@ async fn hand_lease_effective_profile_v000359_fresh_and_idempotent_db() {
     assert!(facts.has_reaper_index, "the reaper claim index must exist");
     assert!(
         facts.accepts_reaping_status,
-        "the status check must admit the reaper's fenced `reaping` state"
+        "the status check must admit `reaping` with a complete ownership claim"
+    );
+    assert!(
+        facts.rejects_reaping_without_claim,
+        "a `reaping` row without an ownership token and expiry must be rejected"
     );
     assert!(
         facts.rejects_active_row_without_policy,
@@ -3875,6 +3969,22 @@ async fn hand_lease_effective_profile_v000359_fresh_and_idempotent_db() {
     assert!(
         facts.has_tenant_sandbox_policy_table,
         "the tenant policy layer must have a durable owner"
+    );
+    assert!(
+        facts.tenant_policy_rls_enabled,
+        "tenant sandbox policy must enable row-level security"
+    );
+    assert!(
+        facts.tenant_policy_rls_forced,
+        "tenant sandbox policy must force row-level security"
+    );
+    assert_eq!(
+        facts.tenant_policy_visible_rows_for_tenant, 1,
+        "moa_app must see only the sandbox policy for its scoped tenant"
+    );
+    assert_eq!(
+        facts.tenant_policy_visible_rows_without_scope, 0,
+        "moa_app without a tenant scope must fail closed"
     );
 }
 
@@ -4235,19 +4345,36 @@ async fn insert_provenance(
     cell: ProvenanceCell,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let score_id = format!("00000000-0000-0000-0000-0000000000{:02x}", cell.score_id);
+    let score_ts = "2026-01-01T00:00:00Z";
+    sqlx::query(
+        "INSERT INTO analytics.scores (
+             score_id, ts, storage_partition_id, target_kind, session_id, run_id, name,
+             value_type, value_boolean, source, model_or_evaluator
+         ) VALUES (
+             $1::UUID, $2::TIMESTAMPTZ, '11111111-1111-1111-1111-111111111111',
+             'session', '00000000-0000-0000-0000-000000000005'::UUID,
+             '00000000-0000-0000-0000-000000000006'::UUID,
+             'target_completed', 'boolean', TRUE, 'product_evaluator', 'target_completed@v1'
+         ) ON CONFLICT (score_id, ts) DO NOTHING",
+    )
+    .bind(&score_id)
+    .bind(score_ts)
+    .execute(pool)
+    .await?;
     sqlx::query(
         "INSERT INTO moa.experiment_score_provenance (
-             score_id, storage_partition_id, user_id, score_run_id, experiment_run_uid,
+             score_id, score_ts, storage_partition_id, user_id, score_run_id, experiment_run_uid,
              plan_revision_uid, trial_uid, target_session_id, target_execution_run_uid,
              evaluator_id, evaluator_version, score_name, value_type, evidence_ref, evidence_hash
          ) VALUES (
-             $1::UUID, $2, NULL, '00000000-0000-0000-0000-000000000006'::UUID, $3::UUID,
-             $4::UUID, '00000000-0000-0000-0000-000000000002'::UUID, $5::UUID, $6::UUID,
+             $1::UUID, $2::TIMESTAMPTZ, $3, NULL, '00000000-0000-0000-0000-000000000006'::UUID, $4::UUID,
+             $5::UUID, '00000000-0000-0000-0000-000000000002'::UUID, $6::UUID, $7::UUID,
              'target_completed', 'v1', 'target_completed', 'boolean',
-             'session:00000000-0000-0000-0000-000000000005#seq=1', $7::BYTEA
+             'session:00000000-0000-0000-0000-000000000005#seq=1', $8::BYTEA
          )",
     )
     .bind(&score_id)
+    .bind(score_ts)
     .bind(cell.storage_partition_id)
     .bind(cell.experiment_run_uid)
     .bind(cell.plan_revision_uid)

@@ -194,120 +194,27 @@ Full chunk text lives in `moa.knowledge_chunks`; graph properties stay compact
 and citation-friendly. Graph properties must not contain provider tokens,
 account tokens, raw credential material, or unbounded raw source payloads.
 
-## Semantic Graph Policy
+## Tenant-Knowledge Retrieval Policy
 
-`moa_core::types::memory::SemanticGraphPolicy` (`knowledge.semantic`) is the
-single value governing the semantic graph. It has two settings:
+Tenant knowledge uses vector and lexical retrieval. Both production entry
+points disable graph expansion for this source tier, while contact-memory graph
+retrieval remains unchanged.
 
-- `off` (default) — no semantic extraction, no semantic entity or relation
-  writes, and no graph expansion on the tenant-knowledge retrieval tier.
-- `deterministic` — the deterministic keyword ruleset extracts semantic entities
-  and relations (no provider or LLM call), and tenant-knowledge retrieval expands
-  the graph to read them.
+Knowledge ingestion still writes the structural `Source -> Document -> Chunk`
+graph plus bounded deterministic title, heading, and fact links used by storage,
+inspection, and lineage. It does not run a separate semantic entity/relation
+extractor, persist semantic extraction cache rows, or expose a configuration
+switch for that unused work.
 
-**Writes and reads are derived from the same value on purpose.** Extraction used
-to run unconditionally at ingestion while tenant-knowledge retrieval hard-disabled
-graph expansion in two separately hard-coded call sites, so every deployment paid
-extraction and storage cost for data no retrieval leg could read. One value makes
-that write-only combination unrepresentable rather than merely discouraged.
+This is an intentional YAGNI decision based on the 2026-07-28 WixQA
+measurements: deterministic semantic extraction produced zero ranking rescues
+across 350 questions, while its entity-consuming retrieval arm increased p95 by
+up to 64%. A future semantic extractor must first demonstrate a production
+reader and a measured retrieval gain; it should not be added as dormant
+ingestion plumbing.
 
-### Two separate questions — do not collapse them
-
-The 2026-07-28 measurement answered two questions that share a corpus but not an
-answer. Keep them apart when reading the numbers below.
-
-1. **Should the semantic graph be written at all?** Answered **no**, and this is
-   the question the policy above settles. The evidence is that the graph was read,
-   produced evidence, and changed nothing (see the arm table), plus the structural
-   seed-gate argument that makes the result inevitable rather than corpus-specific.
-   This is independent of whether any retrieval policy clears a ranking gate.
-2. **Should `GraphRetrievalPolicy::SourceGraph` be enabled for tenant retrieval?**
-   Answered **not on this evidence**. It is not enabled today — its only caller is
-   the eval harness — so "did not clear the bar" means "leave it off", which is the
-   status quo. **It does not mean delete anything.**
-
-In particular, `SourceGraph`'s ranking features are *not* the thing this decision
-removes. Two of the seven are already dead (below), and the open question about
-them is whether to **restore** them, not whether to delete them.
-
-### Why the default is `off`
-
-Measured 2026-07-28 with `xtask wixqa-rag-eval` against a corpus ingested through
-the production pipeline, over a graph holding **1,984 semantic entity nodes and
-~7,121 semantic edges** (4,944 `mentions`, 842 `shared_entity`, 649 `requires`,
-598 `configures`, 73 `applies_to`, 15 `troubleshoots`). Each dataset ingested
-once; every policy arm read byte-identical data.
-
-| corpus | policy | recall | nDCG | p95 | graph paths | rescues | hurts |
-|---|---|---|---|---|---|---|---|
-| simulated 200q/1000a, k=25 | off | 1.0000 | 0.8567 | 56ms | 0 | 0 | 0 |
-| | anchored-rescue | 1.0000 | 0.8567 | 64ms | 0 | 0 | 0 |
-| | source-graph | 1.0000 | 0.8604 | 57ms | 0 | 0 | 0 |
-| | entity-local-search | 1.0000 | 0.8604 | 92ms | 2,908 | 0 | 0 |
-| multihoprag 150q/609a, k=10 | off | 0.7967 | 0.6735 | 119ms | 0 | 0 | 0 |
-| | anchored-rescue | 0.7967 | 0.6735 | 191ms | 0 | 0 | 0 |
-| | source-graph | 0.8533 | 0.7374 | 118ms | 0 | 0 | 0 |
-| | entity-local-search | 0.8533 | 0.7372 | 133ms | 1,428 | 0 | 0 |
-
-Graph expansion produced **zero rescues and zero regressions on every arm of both
-corpora**. `entity-local-search` — the only policy that consumes semantic entity
-seeds — walked 1,428 and 2,908 graph paths and returned metrics identical to
-`source-graph`, which walked none. Cost for that: up to +64% retrieval p95.
-
-Two seed sources are closed by construction on this tier, which is why the result
-is structural rather than corpus-specific:
-
-- Semantic entity seeds require `allows_semantic_entity_seeds()`, false for the
-  `anchored-rescue` default.
-- Exact phase-one seeds require every token of a candidate node's `name` to appear
-  in the query. Tenant-knowledge retrieval filters to `[NodeLabel::Chunk]`, and a
-  `Chunk` node's name is its `chunk_hash` (`node_name` finds no `title`, `name`,
-  or `statement` property and falls through). Measured: 1,152 of 1,152 chunk node
-  names are hex digests, which no natural-language query can match.
-
-The model-backed extractor was **removed**, not disabled: no retrieval path
-consumes semantic output, so a better extractor cannot improve retrieval.
-
-### What was retained, and what is still open
-
-`source-graph`'s multi-hop gain (+0.057 recall@10, +0.064 nDCG@10, +0.094 MRR at
-1ms faster p95) is **not graph-derived** — its `typed_graph_evidence` feature
-totals 0.0. It comes from source-object ranking and source-diverse final
-selection, which cap hits per source object and spread the window across
-documents. All 150 multihoprag questions have 2-4 gold articles, while 173 of 200
-simulated questions have exactly 1, which is why the gain appears on one corpus
-and not the other. That value is deterministic and needs no semantic graph.
-
-Two consequences, both open and neither settled by the decision above:
-
-- **It is unreachable in production.** Both source-object ranking and
-  source-diverse selection are gated by `uses_source_object_ranking()`, true only
-  for `SourceGraph` and `EntityLocalSearch`. The single caller of
-  `HybridRetriever::with_graph_policy` in the tree is
-  `crates/xtask/src/wixqa_rag_eval.rs`, so every production retriever runs the
-  `AnchoredRescue` default and never takes this path. Enabling it is a separate
-  decision needing its own bar — at minimum a no-regression check on single-gold
-  corpora, where the same measurement showed only +0.0037 nDCG, and a decision
-  about reranker interaction, since every arm above ran with the reranker off.
-- **The measured value is a floor, not a ceiling.** Two of the seven contributions
-  in `SourceObjectFeatureContributions::total()` —
-  `same_source_object_repeat` and `adjacent_chunk_support` — are hard-coded to
-  `0.0` at their only producer (`source_rank.rs:253,256`), with
-  `hybrid/tests.rs:581-582` pinning them there. They carried real weight in the
-  2026-07-06 reports. So the numbers above were produced with 2/7 of the ranker
-  dead, and restoring those features could only raise them. That is a
-  restore-or-delete-deliberately decision, and the multihop numbers above are the
-  baseline to re-measure against.
-
-### Telemetry
-
-- `moa_knowledge_semantic_extraction_chunks_total{policy,outcome}` — chunks
-  skipped, served from cache, or extracted.
-- `moa_knowledge_semantic_extraction_seconds{policy}` — extraction wall clock.
-- `moa_retrieval_graph_expansion_total{policy,outcome}` — `seeded` vs `unseeded`,
-  which is what distinguishes a working graph leg from a permanently inert one.
-- `moa_retrieval_graph_candidates{policy}` — candidates the graph leg actually
-  contributed, as opposed to paths walked.
+Experiment-only graph policies and graph-memory features used by other memory
+subsystems are separate from this decision and remain available.
 
 ## Retrieval Contract
 

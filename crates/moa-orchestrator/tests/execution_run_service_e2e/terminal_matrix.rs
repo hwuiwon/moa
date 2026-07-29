@@ -746,13 +746,15 @@ async fn rejected_initial_candidate_and_sole_repair_persist_strict_audits_servic
     );
 
     let requests = journal_requests(fixture.scripted_requests()?)?;
+    // Planner schemas are prompt guidance because candidate payloads contain free-form JSON;
+    // identify both strict calls by their frozen input marker, not `response_format`.
     let strict_initial_calls = requests
         .iter()
         .filter(|request| {
             request
-                .response_format
-                .as_ref()
-                .is_some_and(|format| format.name == "generated_execution_candidate")
+                .messages
+                .iter()
+                .any(|message| message.content.contains(PLANNER_MATCH))
         })
         .count();
     assert_eq!(
@@ -924,23 +926,35 @@ async fn amendment_planning_persists_revision_fenced_strict_audits_service_e2e()
     );
 
     let requests = journal_requests(fixture.scripted_requests()?)?;
-    let response_formats = requests
+    // Initial and amendment schemas live in their prompts rather than provider-native response
+    // formats, so retain the exact planning-call order using their frozen input markers.
+    let planning_calls = requests
         .iter()
         .filter_map(|request| {
-            request
+            if request
                 .response_format
                 .as_ref()
-                .map(|format| format.name.as_str())
+                .is_some_and(|format| format.name == "execution_route_classifier")
+            {
+                Some("route")
+            } else if request
+                .messages
+                .iter()
+                .any(|message| message.content.contains(AMENDMENT_MATCH))
+            {
+                Some("amendment")
+            } else if request
+                .messages
+                .iter()
+                .any(|message| message.content.contains(PLANNER_MATCH))
+            {
+                Some("initial")
+            } else {
+                None
+            }
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        response_formats,
-        vec![
-            "execution_route_classifier",
-            "generated_execution_candidate",
-            "generated_amendment_candidate"
-        ]
-    );
+    assert_eq!(planning_calls, vec!["route", "initial", "amendment"]);
     Ok(())
 }
 

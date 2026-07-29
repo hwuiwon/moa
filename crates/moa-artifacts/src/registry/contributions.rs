@@ -286,34 +286,6 @@ impl ArtifactRegistry {
         Ok(())
     }
 
-    /// Re-points a candidate's generated suite rows at its current draft revision.
-    ///
-    /// A generalization pass rewrites the draft and re-attaches the same suite
-    /// bytes to the new revision. Leaving the contribution pointed at the
-    /// superseded revision would record a link that is no longer true, which is
-    /// the failure mode this whole table exists to remove.
-    pub async fn repoint_suite_contributions_in_tx(
-        conn: &mut PgConnection,
-        candidate_id: Uuid,
-        revision_uid: Uuid,
-    ) -> Result<()> {
-        sqlx::query(
-            r#"
-            UPDATE moa.artifact_suite_contribution
-            SET revision_uid = $2
-            WHERE candidate_id = $1 AND suite_kind = 'generated'
-            "#,
-        )
-        .bind(candidate_id)
-        .bind(revision_uid)
-        .execute(&mut *conn)
-        .await
-        .map_err(|error| {
-            MoaError::StorageError(format!("repoint artifact suite contributions: {error}"))
-        })?;
-        Ok(())
-    }
-
     /// Counts the accumulated sibling suites already pooled onto one candidate.
     pub async fn count_suite_contributions_in_tx(
         conn: &mut PgConnection,
@@ -344,9 +316,14 @@ impl ArtifactRegistry {
     /// there is exactly one place that knows how these bytes are stored.
     pub async fn list_suite_contributions(
         &self,
+        scope: &ActionRuleScope,
         candidate_id: Uuid,
     ) -> Result<Vec<StoredSuiteContribution>> {
-        fetch_suite_contributions(&self.pool, candidate_id).await
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
+        let contributions =
+            Self::list_suite_contributions_in_tx(conn.as_mut(), scope, candidate_id).await?;
+        conn.commit().await?;
+        Ok(contributions)
     }
 
     /// Reads one candidate's suite blobs inside the caller's open transaction.
@@ -356,9 +333,17 @@ impl ArtifactRegistry {
     /// exactly as it stands inside that lock.
     pub async fn list_suite_contributions_in_tx(
         conn: &mut PgConnection,
+        scope: &ActionRuleScope,
         candidate_id: Uuid,
     ) -> Result<Vec<StoredSuiteContribution>> {
-        fetch_suite_contributions(&mut *conn, candidate_id).await
+        let parts = ArtifactScopeParts::from_scope(scope);
+        fetch_suite_contributions(
+            &mut *conn,
+            candidate_id,
+            parts.storage_partition_id.as_deref(),
+            parts.user_id.as_deref(),
+        )
+        .await
     }
 }
 
@@ -366,6 +351,8 @@ impl ArtifactRegistry {
 async fn fetch_suite_contributions<'e, E>(
     executor: E,
     candidate_id: Uuid,
+    storage_partition_id: Option<&str>,
+    user_id: Option<&str>,
 ) -> Result<Vec<StoredSuiteContribution>>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -375,10 +362,14 @@ where
             SELECT suite_kind, suite_name, suite_source, source_session_id, source_experience_id
             FROM moa.artifact_suite_contribution
             WHERE candidate_id = $1
+              AND storage_partition_id = $2
+              AND (user_id IS NULL OR user_id IS NOT DISTINCT FROM $3)
             ORDER BY suite_kind, suite_name, contribution_uid
             "#,
     )
     .bind(candidate_id)
+    .bind(storage_partition_id)
+    .bind(user_id)
     .fetch_all(executor)
     .await
     .map_err(|error| {

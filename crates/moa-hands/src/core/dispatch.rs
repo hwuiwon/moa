@@ -510,11 +510,12 @@ impl ToolRouter {
             let extra_headers = self
                 .mcp_credential_headers(session, invocation, server, &dispatch)
                 .await?;
+            let tool_invocation_id = dispatch.tool_call_id.to_string();
             let output = client
                 .call_tool(
                     dispatch.remote_tool_name,
                     invocation.input.clone(),
-                    invocation.id.as_deref(),
+                    Some(&tool_invocation_id),
                     extra_headers,
                 )
                 .await?;
@@ -788,6 +789,7 @@ mod egress_dispatch_tests {
     use super::McpDispatch;
 
     const SERVER_NAME: &str = "external-search";
+    const MCP_TOOL_INVOCATION_ID: &str = "00000000-0000-0000-0000-000000000f01";
 
     /// Spawns a fake MCP server that answers the initialize handshake and records
     /// whether a `tools/call` request ever arrives. Returns the server URL and a
@@ -811,20 +813,28 @@ mod egress_dispatch_tests {
                     Ok(read) => read,
                 };
                 let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
-                let method = request
+                let request_json = request
                     .split_once("\r\n\r\n")
-                    .and_then(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
-                    .and_then(|value| {
-                        value
-                            .get("method")
-                            .and_then(|method| method.as_str())
-                            .map(str::to_string)
-                    });
-                let body = match method.as_deref() {
+                    .and_then(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok());
+                let method = request_json
+                    .as_ref()
+                    .and_then(|value| value.get("method"))
+                    .and_then(|method| method.as_str());
+                let body = match method {
                     Some("initialize") => r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{}}}"#.to_string(),
                     Some("tools/call") => {
-                        seen.store(true, Ordering::SeqCst);
-                        r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"pong"}]}}"#.to_string()
+                        let invocation_id = request_json
+                            .as_ref()
+                            .and_then(|value| value.get("params"))
+                            .and_then(|params| params.get("_meta"))
+                            .and_then(|metadata| metadata.get("moa/toolInvocationId"))
+                            .and_then(serde_json::Value::as_str);
+                        if invocation_id == Some(MCP_TOOL_INVOCATION_ID) {
+                            seen.store(true, Ordering::SeqCst);
+                            r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"pong"}]}}"#.to_string()
+                        } else {
+                            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"tools/call _meta.moa/toolInvocationId must equal the durable tool-call ID"}}"#.to_string()
+                        }
                     }
                     // `notifications/initialized` and anything else get an empty ack.
                     _ => "{}".to_string(),
@@ -970,7 +980,7 @@ mod egress_dispatch_tests {
             server_name: SERVER_NAME,
             remote_tool_name: "external_tool",
             credential_scope: ToolCredentialScope::DeploymentOwnedMcp,
-            tool_call_id: ToolCallId::new(),
+            tool_call_id: ToolCallId(Uuid::from_u128(0x0f01)),
         }
     }
 
@@ -1088,6 +1098,7 @@ mod egress_dispatch_tests {
         let router =
             router_with_mcp_server(http_server(url, Vec::new()), Some(permissive_guard())).await;
         let mut registry = (*router.registry()).clone();
+        registry.remove_mcp_server_tools(SERVER_NAME);
         registry
             .register_mcp_tool(
                 SERVER_NAME,

@@ -193,14 +193,14 @@ impl RatePacer {
         let mut pending: Vec<(String, u32, u32)> = Vec::with_capacity(2);
         if let Some(limit) = self.limits.max_requests_per_min.filter(|_| requests > 0) {
             pending.push((
-                shared.identity.key("pace", model, CLASS_REQUESTS),
+                shared.identity.pacing_key(model, CLASS_REQUESTS),
                 limit,
                 requests,
             ));
         }
         if let Some(limit) = self.limits.max_inputs_per_min.filter(|_| inputs > 0) {
             pending.push((
-                shared.identity.key("pace", model, CLASS_INPUTS),
+                shared.identity.pacing_key(model, CLASS_INPUTS),
                 limit,
                 inputs,
             ));

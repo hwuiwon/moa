@@ -108,7 +108,7 @@ the Compose `pii` profile when `MOA_PII_SERVICE_URL` is configured.
 
 ## ClickHouse Analytics: Supported, Not Deployed
 
-ClickHouse is an optional analytics and lineage backend, selected by the
+ClickHouse is an optional analytics backend, selected by the
 presence of the `[clickhouse]` config section (in practice `MOA_CLICKHOUSE_URL`).
 Its status was settled by measurement on 2026-07-28 and is recorded here so the
 next reader does not have to re-derive it.
@@ -122,7 +122,7 @@ volume to measure.
 
 | Property | Value |
 |---|---|
-| Owner | `moa-analytics-export` (exporter and ClickHouse schema), `moa-analytics` (dual-dialect query compiler), `moa-lineage-sink` (`turn_lineage` rows) |
+| Owner | `moa-analytics-export` (exporter and ClickHouse schema), `moa-analytics` (dual-dialect query compiler) |
 | Deployment | Local only, via `docker compose --profile clickhouse`. Absent from every Kubernetes overlay. |
 | SLO | Export freshness: `moa_analytics_export_lag_seconds <= 300` for any exported table, alerted by `MOAAnalyticsExportLag` after 10 minutes |
 | Supported test path | `make test-clickhouse` (nextest profile `clickhouse-docker`), triggered in CI by the `clickhouse-analytics` job in `.github/workflows/integration-tests.yml` |
@@ -130,9 +130,9 @@ volume to measure.
 
 Two properties are load-bearing and easy to lose:
 
-- **Enabling ClickHouse enables it everywhere.** The same config section
-  switches the analytics read models, the exporter, and the `turn_lineage`
-  backend. They cannot be enabled independently.
+- **Lineage stays in Postgres.** Enabling ClickHouse switches only analytics
+  read models and their exporter. `analytics.turn_lineage`, compliance chaining,
+  lineage queries, and tenant lineage deletion remain Postgres-owned.
 - **`CREATE TABLE IF NOT EXISTS` is not a migration.** Against an existing table
   it is a silent no-op that reports success, so the bootstrap validates every
   table against the columns its own DDL declares and refuses to start on drift.
@@ -165,6 +165,7 @@ manifested under `k8s/observability/`.
 | Buffer | 20Gi `ReadWriteOnce` PVC at `/var/lib/alloy` | The WAL is the delivery guarantee. On an `emptyDir`, a backend outage plus a pod restart is silent permanent loss |
 | Image | exact release tag, never `latest` | A collector that picks up a new version on an unrelated restart changes pipeline semantics with no change to this repository |
 | Config | `k8s/observability/config.alloy`, generated into a ConfigMap with a content-hash name | A standalone `.alloy` file is checkable by `alloy validate`; the name hash is what rolls the pod when the config changes |
+| Restate scrape discovery | Kubernetes pod discovery, namespace/cluster filtered, port 5122 | Pod identity remains distinct through rollout; Restate network peers explicitly admit Alloy rather than routing samples through a Service |
 | Rule delivery | `mimir.rules.kubernetes`, selecting `moa.dev/rule-sync=mimir` | One owner for Mimir's rule namespace. An unselected synchronizer adopts, and can overwrite, rules this deployment does not own |
 
 Alert rules are `PrometheusRule` resources under `ops/prometheus/alerts/`,
@@ -258,10 +259,15 @@ Implemented architectural pillars:
 - One `moa-orchestrator` production binary for local development and cloud execution, with domain logic kept behind in-process application and repository boundaries.
 - Constructor-based runtime composition: `RuntimeDeps::build` constructs the
   concrete graph and `build_endpoint` binds it, including the durable
-  `TenantPurge` workflow.
+  `TenantPurge` workflow. Runtime cache is passed explicitly to provider and
+  embedding composition; live handles are not stored inside serializable
+  `MoaConfig`.
 - Postgres session store with tenant-isolated event log, analytics, task segments, and learning log.
 - Postgres hand leases and Postgres-backed claim-check blobs for cross-pod sandbox and replay correctness. A lease carries the exact sandbox policy identity it was provisioned under plus a renewable idle deadline and an immutable hard deadline, and an independent durable reaper destroys expired generations with `SKIP LOCKED` claims rather than waiting for traffic.
 - Redis-backed runtime cache for the production orchestrator; the in-memory implementation is limited to isolated non-orchestrator tests and embeddings.
+- Provider coordination bounds every runtime-cache operation at 250ms before
+  applying its configured fail-closed or bounded-degraded policy. Shared
+  cooldown and retry state is keyed by credential, not model.
 - Graph memory with relational Postgres nodes and edges, sidecar search, configured vector retrieval, and privacy filtering.
 - Query rewriting, segment creation, automated segment assessment, and tenant-level skill resolution-rate ranking.
 - Draft-only tenant skill distillation/improvement proposals with explicit review acceptance before learning-log emission; tenant learning remains tenant-local.

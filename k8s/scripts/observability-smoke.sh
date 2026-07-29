@@ -21,8 +21,9 @@ if [[ "${MOA_RUN_LIVE_OBSERVABILITY_SMOKE:-0}" != "1" ]]; then
   cat >&2 <<'MSG'
 Observability smoke is opt-in and mutates a live cluster.
 
-It rotates the edge and orchestrator Deployments, applies and deletes a
-temporary PrometheusRule, and starts a real (billed) model turn.
+It rotates every pod in the edge Deployment and orchestrator RestateDeployment,
+applies and deletes a temporary PrometheusRule, and starts a real (billed)
+model turn.
 
 To run it:
   MOA_RUN_LIVE_OBSERVABILITY_SMOKE=1 \
@@ -77,12 +78,92 @@ KUBECTL=(kubectl --context "${SMOKE_KUBE_CONTEXT}")
 WORK_DIR="$(mktemp -d)"
 chmod 700 "${WORK_DIR}"
 CURL_CONFIG="${WORK_DIR}/curl.conf"
+DATABASE_SERVICE_FILE="${WORK_DIR}/pg_service.conf"
+DATABASE_PASSWORD_FILE="${WORK_DIR}/pgpass"
 (
   umask 077
   printf 'user = "%s:%s"\n' "${SMOKE_MIMIR_USER}" "${SMOKE_MIMIR_KEY}" >"${CURL_CONFIG}"
 )
+python3 - "${DATABASE_SERVICE_FILE}" "${DATABASE_PASSWORD_FILE}" <<'PY'
+import os
+import pathlib
+import re
+import sys
+import urllib.parse
+
+value = os.environ["SMOKE_DATABASE_URL"]
+if "\n" in value or "\r" in value:
+    raise SystemExit("SMOKE_DATABASE_URL must be a single line")
+parsed = urllib.parse.urlsplit(value)
+if parsed.scheme not in {"postgres", "postgresql"}:
+    raise SystemExit("SMOKE_DATABASE_URL must use the postgres or postgresql scheme")
+if not parsed.hostname or not parsed.path.lstrip("/"):
+    raise SystemExit("SMOKE_DATABASE_URL must include a host and database")
+
+parameters = {
+    "host": parsed.hostname,
+    "port": str(parsed.port or 5432),
+    "dbname": urllib.parse.unquote(parsed.path.lstrip("/")),
+}
+password = None
+if parsed.username is not None:
+    parameters["user"] = urllib.parse.unquote(parsed.username)
+if parsed.password is not None:
+    password = urllib.parse.unquote(parsed.password)
+for key, item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+    if not re.fullmatch(r"[a-z_]+", key):
+        raise SystemExit(f"invalid libpq query parameter: {key!r}")
+    if key == "password":
+        password = item
+    else:
+        parameters[key] = item
+
+
+for key, item in parameters.items():
+    if "\n" in item or "\r" in item:
+        raise SystemExit(f"SMOKE_DATABASE_URL contains a multiline {key} value")
+
+
+# Keep connection routing in a libpq service file and the credential in a
+# pgpass file. psql's argv contains only the non-secret service name.
+service_path = pathlib.Path(sys.argv[1])
+service_path.write_text(
+    "[moa_observability_smoke]\n"
+    + "".join(f"{key}={item}\n" for key, item in parameters.items()),
+    encoding="utf-8",
+)
+service_path.chmod(0o600)
+
+
+def pgpass_escape(item: str) -> str:
+    return item.replace("\\", "\\\\").replace(":", "\\:")
+
+
+password_path = pathlib.Path(sys.argv[2])
+password_path.write_text(
+    (
+        ":".join(
+            pgpass_escape(item)
+            for item in (
+                parameters["host"],
+                parameters["port"],
+                parameters["dbname"],
+                parameters.get("user", "*"),
+                password,
+            )
+        )
+        + "\n"
+        if password is not None
+        else ""
+    ),
+    encoding="utf-8",
+)
+password_path.chmod(0o600)
+PY
+unset SMOKE_DATABASE_URL SMOKE_MIMIR_KEY
 
 PORT_FORWARD_PID=""
+ROTATION_WATCH_PIDS=()
 CANARY_APPLIED=0
 CANARY_RULE_NAME="moa-observability-smoke-canary-$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -c1-8)"
 CANARY_ALERT_NAME="MOAObservabilitySmokeCanary"
@@ -100,6 +181,12 @@ cleanup() {
     kill "${PORT_FORWARD_PID}" 2>/dev/null || true
     wait "${PORT_FORWARD_PID}" 2>/dev/null || true
   fi
+  for pid in "${ROTATION_WATCH_PIDS[@]}"; do
+    if kill -0 "${pid}" 2>/dev/null; then
+      kill "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
   rm -rf -- "${WORK_DIR}"
   exit "${status}"
 }
@@ -137,7 +224,108 @@ assert_no_failure_signal() {
 }
 
 psql_scalar() {
-  psql "${SMOKE_DATABASE_URL}" -At -c "$1"
+  PGSERVICEFILE="${DATABASE_SERVICE_FILE}" PGPASSFILE="${DATABASE_PASSWORD_FILE}" \
+    psql -w "service=moa_observability_smoke" -At -c "$1"
+}
+
+ready_pod_count() {
+  local selector="$1"
+  "${KUBECTL[@]}" -n "${SYSTEM_NAMESPACE}" get pods -l "${selector}" -o json \
+    | jq '[
+        .items[]
+        | select(.metadata.deletionTimestamp == null)
+        | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+      ] | length'
+}
+
+wait_for_ready_pod_count() {
+  local selector="$1" expected="$2" workload="$3"
+  local deadline=$((SECONDS + ROTATION_BUDGET_SECONDS)) ready=0
+  while ((SECONDS < deadline)); do
+    ready="$(ready_pod_count "${selector}")"
+    [[ "${ready}" -ge "${expected}" ]] && return 0
+    sleep 2
+  done
+  die "${workload} has ${ready}/${expected} non-terminating Ready pods after rotation"
+}
+
+# Rotate one pod at a time so capacity stays available and every old process can
+# be observed through its final Kubernetes DELETED watch event. A successful
+# rollout alone cannot distinguish a graceful exit from SIGKILL.
+rotate_workload_pods() {
+  local selector="$1" container="$2" workload="$3"
+  local snapshot desired old_identity_file
+  snapshot="$("${KUBECTL[@]}" -n "${SYSTEM_NAMESPACE}" get pods -l "${selector}" -o json)"
+  desired="$(jq '.items | length' <<<"${snapshot}")"
+  [[ "${desired}" -gt 0 ]] || die "${workload} selector ${selector} matched no pods"
+  old_identity_file="${WORK_DIR}/${workload}-old-uids"
+  jq -r '.items[].metadata.uid' <<<"${snapshot}" >"${old_identity_file}"
+
+  while IFS=$'\t' read -r pod_name pod_uid resource_version; do
+    local watch_file watch_pid deadline deleted_event exit_code
+    watch_file="${WORK_DIR}/${pod_name}-watch.json"
+    "${KUBECTL[@]}" -n "${SYSTEM_NAMESPACE}" get pod "${pod_name}" \
+      --watch-only \
+      --output-watch-events \
+      --resource-version="${resource_version}" \
+      -o json >"${watch_file}" 2>"${watch_file}.stderr" &
+    watch_pid=$!
+    ROTATION_WATCH_PIDS+=("${watch_pid}")
+
+    "${KUBECTL[@]}" -n "${SYSTEM_NAMESPACE}" delete pod "${pod_name}" \
+      --wait=false >/dev/null \
+      || die "could not begin graceful deletion of ${pod_name}"
+
+    deadline=$((SECONDS + ROTATION_BUDGET_SECONDS))
+    deleted_event=0
+    while ((SECONDS < deadline)); do
+      if jq -se --arg uid "${pod_uid}" \
+        'any(.[]; .type == "DELETED" and .object.metadata.uid == $uid)' \
+        "${watch_file}" >/dev/null 2>&1; then
+        deleted_event=1
+        break
+      fi
+      sleep 1
+    done
+    [[ "${deleted_event}" == "1" ]] \
+      || die "${pod_name} produced no terminal DELETED event within ${ROTATION_BUDGET_SECONDS}s"
+
+    kill "${watch_pid}" 2>/dev/null || true
+    wait "${watch_pid}" 2>/dev/null || true
+    exit_code="$(
+      jq -sr --arg uid "${pod_uid}" --arg container "${container}" '
+        [
+          .[]
+          | select(.type == "DELETED" and .object.metadata.uid == $uid)
+          | .object.status.containerStatuses[]?
+          | select(.name == $container)
+          | .state.terminated.exitCode
+        ][-1] // empty
+      ' "${watch_file}"
+    )"
+    [[ -n "${exit_code}" ]] \
+      || die "${pod_name} was deleted without a terminal state for container ${container}"
+    [[ "${exit_code}" == "0" ]] \
+      || die "${pod_name}/${container} exited ${exit_code} during graceful rotation"
+
+    wait_for_ready_pod_count "${selector}" "${desired}" "${workload}"
+    echo "  OK ${pod_name} (${pod_uid}) exited 0 and was replaced"
+  done < <(
+    jq -r '
+      .items[]
+      | [.metadata.name, .metadata.uid, .metadata.resourceVersion]
+      | @tsv
+    ' <<<"${snapshot}"
+  )
+
+  local current_uids stale_uids
+  current_uids="$(
+    "${KUBECTL[@]}" -n "${SYSTEM_NAMESPACE}" get pods -l "${selector}" \
+      -o json | jq -r '.items[].metadata.uid'
+  )"
+  stale_uids="$(comm -12 <(sort "${old_identity_file}") <(sort <<<"${current_uids}"))"
+  [[ -z "${stale_uids}" ]] \
+    || die "${workload} still runs pre-rotation pod identities: ${stale_uids}"
 }
 
 echo "== Preflight: workloads healthy before anything is rotated"
@@ -210,11 +398,18 @@ EOF
 echo "  OK moa_turns_total{service_name=\"moa-orchestrator\"}"
 
 # The resource identity is the join key between traces and metrics. Asserting the
+# instance ID catches replicas that collapse into one Prometheus series;
 # deployment environment separately catches a collector that forwards metrics
 # with only service_name preserved.
 assert_series_present \
+  'count(moa_turns_total{service_name="moa-orchestrator",service_instance_id!=""})' \
+  "no orchestrator metric carries service.instance.id"
+assert_series_present \
   'count(moa_turns_total{deployment_environment="production"})' \
   "no metric carries the deployment.environment resource attribute"
+assert_series_present \
+  'count(up{job="restate"} == 1) == 3' \
+  "Alloy does not report exactly three healthy Restate pod scrape targets"
 
 echo "== Canary rule reaches Mimir through the cluster's only synchronizer"
 cat >"${WORK_DIR}/canary.yaml" <<EOF
@@ -295,26 +490,13 @@ done
 echo "  OK journal drained"
 
 echo "== Graceful rotation of both workloads"
-for workload in moa-edge; do
-  rotation_start="${SECONDS}"
-  "${KUBECTL[@]}" -n "${SYSTEM_NAMESPACE}" rollout restart "deployment/${workload}" >/dev/null
-  "${KUBECTL[@]}" -n "${SYSTEM_NAMESPACE}" rollout status "deployment/${workload}" \
-    --timeout="${ROTATION_BUDGET_SECONDS}s" \
-    || die "${workload} did not roll within ${ROTATION_BUDGET_SECONDS}s"
-  echo "  OK ${workload} rolled in $((SECONDS - rotation_start))s"
-done
-
-# A pod that was SIGKILLed at the end of its grace period exits 137. That is the
-# exact failure the SIGTERM handler exists to prevent, and it is invisible in a
-# rollout that otherwise completes: Kubernetes reports success either way.
-killed="$(
-  "${KUBECTL[@]}" -n "${SYSTEM_NAMESPACE}" get pods -l app.kubernetes.io/name=moa-edge \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.status.containerStatuses[*].lastState.terminated.exitCode}{"\n"}{end}' \
-    | grep -E '=(137|143)$' || true
-)"
-[[ -z "${killed}" ]] \
-  || die "$(printf 'edge containers were killed by signal rather than exiting gracefully:\n%s' "${killed}")"
-echo "  OK no signal-killed containers"
+rotation_start="${SECONDS}"
+rotate_workload_pods "app.kubernetes.io/name=moa-edge" edge moa-edge
+rotate_workload_pods \
+  "app.kubernetes.io/name=moa-orchestrator" \
+  orchestrator \
+  moa-orchestrator
+echo "  OK both workloads rotated in $((SECONDS - rotation_start))s"
 
 echo "== Audit and lineage survived the rotation"
 audit_rows="$(psql_scalar "SELECT count(*) FROM moa.security_events WHERE time > now() - interval '1 hour'")"

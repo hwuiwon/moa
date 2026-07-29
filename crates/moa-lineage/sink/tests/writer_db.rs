@@ -48,7 +48,7 @@ async fn lineage_writer_flush_on_shutdown_drains_pending_rows_db() -> TestResult
     let config = test_sink_config(Duration::from_secs(3600));
 
     let (tx, rx) = mpsc::channel::<LineageEvent>(64);
-    let handle = spawn_writer(rx, config, LineageStore::Postgres(pool.clone())).await?;
+    let handle = spawn_writer(rx, config, LineageStore::new(pool.clone())).await?;
 
     let turn_ids: Vec<Uuid> = (0..3).map(|_| Uuid::now_v7()).collect();
     for turn_id in &turn_ids {
@@ -93,13 +93,11 @@ async fn lineage_writer_poison_batch_dead_letters_and_acks_journal_db() -> TestR
     let config = test_sink_config(Duration::from_secs(3600));
 
     let (tx, rx) = mpsc::channel::<LineageEvent>(64);
-    let handle = spawn_writer(rx, config.clone(), LineageStore::Postgres(pool.clone())).await?;
+    let handle = spawn_writer(rx, config.clone(), LineageStore::new(pool.clone())).await?;
 
-    // Poison the write target: dropping the destination table makes the COPY/INSERT
-    // fail with `undefined_table` (42P01), which is not a retryable SQLSTATE.
-    sqlx::query("DROP TABLE analytics.turn_lineage CASCADE")
-        .execute(&pool)
-        .await?;
+    // A check violation is permanent: retrying the identical row cannot make it
+    // valid, so the batch belongs in dead-letter storage immediately.
+    poison_turn_lineage_with_sqlstate(&pool, "23514").await?;
 
     let turn_id = Uuid::now_v7();
     tx.send(retrieval_event(turn_id, &partition))
@@ -137,11 +135,13 @@ async fn lineage_writer_poison_batch_dead_letters_and_acks_journal_db() -> TestR
         "the dead-letter row should retain the source partition for triage"
     );
 
-    // A second writer over the same queue with a healthy store (its schema
-    // bootstrap restores turn_lineage). Because the dead-letter commit dequeued
-    // the row, it is NOT replayed into turn_lineage and NOT re-dead-lettered.
+    sqlx::query("DROP TRIGGER poison_lineage ON analytics.turn_lineage")
+        .execute(&pool)
+        .await?;
+    // A second writer over the same queue does not replay the row or create a
+    // second dead letter, because the first terminal transaction dequeued it.
     let (tx2, rx2) = mpsc::channel::<LineageEvent>(64);
-    let handle2 = spawn_writer(rx2, config, LineageStore::Postgres(pool.clone())).await?;
+    let handle2 = spawn_writer(rx2, config, LineageStore::new(pool.clone())).await?;
     drop(tx2);
     let recovery_stats = handle2.shutdown().await?;
     assert_eq!(
@@ -192,7 +192,7 @@ async fn lineage_writer_repeated_dead_letter_of_same_batch_is_idempotent_db() ->
         let (tx, rx) = mpsc::channel::<LineageEvent>(64);
         // spawn_writer bootstraps the schema, so drop the target AFTER it opens
         // to keep the write path poisoned for this lifetime.
-        let handle = spawn_writer(rx, config, LineageStore::Postgres(pool.clone())).await?;
+        let handle = spawn_writer(rx, config, LineageStore::new(pool.clone())).await?;
         sqlx::query("DROP TABLE analytics.turn_lineage CASCADE")
             .execute(&pool)
             .await?;
@@ -228,7 +228,7 @@ async fn lineage_writer_compliance_partition_writes_verifiable_hash_chain_db() -
     let config = test_sink_config(Duration::from_secs(3600));
 
     let (tx, rx) = mpsc::channel::<LineageEvent>(64);
-    let handle = spawn_writer(rx, config, LineageStore::Postgres(pool.clone())).await?;
+    let handle = spawn_writer(rx, config, LineageStore::new(pool.clone())).await?;
 
     let partition = test_partition();
     sqlx::query(
@@ -312,129 +312,6 @@ async fn lineage_writer_compliance_partition_writes_verifiable_hash_chain_db() -
     Ok(())
 }
 
-/// Row shape the mock ClickHouse server decodes from the writer's RowBinary
-/// insert; field order and serde attributes mirror the sink's wire row.
-#[derive(Debug, serde::Deserialize)]
-struct RecordedClickHouseRow {
-    #[serde(with = "clickhouse::serde::uuid")]
-    turn_id: Uuid,
-    #[serde(with = "clickhouse::serde::uuid")]
-    _session_id: Uuid,
-    _user_id: String,
-    storage_partition_id: String,
-    #[serde(with = "clickhouse::serde::chrono::datetime64::micros")]
-    _ts: chrono::DateTime<Utc>,
-    _tier: i16,
-    record_kind: i16,
-    payload: String,
-    _answer_text: Option<String>,
-    integrity_hash: String,
-    _prev_hash: Option<String>,
-}
-
-#[tokio::test]
-async fn lineage_writer_clickhouse_backend_splits_rows_from_scores_db() -> TestResult<()> {
-    let partition = test_partition();
-    // Pins: with [clickhouse] configured, turn_lineage rows land in ClickHouse
-    // (bootstrapped with database + TTL table DDL) and NOT in Postgres, while
-    // score rows still land in Postgres analytics.scores.
-    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
-
-    let mock = clickhouse::test::Mock::new();
-    let create_database = mock.add(clickhouse::test::handlers::record_ddl());
-    let create_table = mock.add(clickhouse::test::handlers::record_ddl());
-    let insert = mock.add(clickhouse::test::handlers::record::<RecordedClickHouseRow>());
-
-    let clickhouse_config = moa_config::ClickHouseConfig {
-        url: mock.url().to_string(),
-        ..moa_config::ClickHouseConfig::default()
-    };
-    let store = LineageStore::from_config(Some(&clickhouse_config), pool.clone());
-
-    let config = test_sink_config(Duration::from_secs(3600));
-    let (tx, rx) = mpsc::channel::<LineageEvent>(64);
-    let handle = spawn_writer(rx, config, store).await?;
-
-    let turn_id = Uuid::now_v7();
-    let score_id = Uuid::now_v7();
-    tx.send(retrieval_event(turn_id, &partition))
-        .await
-        .map_err(|error| test_error(format!("send should enqueue event: {error}")))?;
-    tx.send(LineageEvent::Eval(moa_lineage_core::ScoreRecord {
-        score_id,
-        ts: chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
-            chrono::Utc::now().timestamp_micros(),
-        )
-        .expect("microsecond timestamp"),
-        target: moa_lineage_core::ScoreTarget::Turn {
-            turn_id: moa_lineage_core::TurnId(turn_id),
-        },
-        storage_partition_id: StoragePartitionId::new(&partition),
-        user_id: None,
-        name: "retrieval_zero_recall".to_string(),
-        value: moa_lineage_core::ScoreValue::Boolean(false),
-        source: moa_lineage_core::ScoreSource::OnlineJudge,
-        model_or_evaluator: "retriever".to_string(),
-        run_id: None,
-        dataset_id: None,
-        comment: None,
-        experiment_provenance: None,
-    }))
-    .await
-    .map_err(|error| test_error(format!("send should enqueue score: {error}")))?;
-    drop(tx);
-
-    let stats = handle.shutdown().await?;
-    assert_eq!(stats.written, 2, "both rows must count as written");
-
-    let database_ddl = create_database.query().await;
-    assert!(
-        database_ddl.contains("CREATE DATABASE IF NOT EXISTS"),
-        "first DDL must create the database: {database_ddl}"
-    );
-    let table_ddl = create_table.query().await;
-    assert!(
-        table_ddl.contains("turn_lineage") && table_ddl.contains("TTL"),
-        "second DDL must create the TTL'd turn_lineage table: {table_ddl}"
-    );
-
-    let rows: Vec<RecordedClickHouseRow> = insert.collect().await;
-    assert_eq!(rows.len(), 1, "exactly the lineage row goes to ClickHouse");
-    assert_eq!(rows[0].turn_id, turn_id);
-    assert_eq!(rows[0].storage_partition_id, partition);
-    assert_eq!(rows[0].record_kind, 1, "retrieval record kind");
-    assert!(
-        rows[0].payload.contains("what is oauth"),
-        "payload must carry the serialized event JSON"
-    );
-    assert!(
-        !rows[0].integrity_hash.is_empty(),
-        "per-row canonical hash must survive the backend switch"
-    );
-
-    let postgres_lineage_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM analytics.turn_lineage")
-            .fetch_one(&pool)
-            .await?;
-    assert_eq!(
-        postgres_lineage_rows, 0,
-        "turn_lineage rows must not land in Postgres under the clickhouse backend"
-    );
-    let postgres_score_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM analytics.scores WHERE score_id = $1")
-            .bind(score_id)
-            .fetch_one(&pool)
-            .await?;
-    assert_eq!(
-        postgres_score_rows, 1,
-        "score rows stay in Postgres under the clickhouse backend"
-    );
-
-    pool.close().await;
-    drop_database(&cleanup_pool, &database_name).await;
-    Ok(())
-}
-
 /// Builds a minimal but valid retrieval lineage event for one turn.
 /// Returns a fresh tenant-scoped storage partition.
 ///
@@ -447,9 +324,10 @@ fn test_partition() -> String {
 }
 
 fn retrieval_event(turn_id: Uuid, storage_partition_id: &str) -> LineageEvent {
-    retrieval_event_at(
+    retrieval_event_for_user(
         turn_id,
         storage_partition_id,
+        "writer-db-user",
         chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
             chrono::Utc::now().timestamp_micros(),
         )
@@ -463,11 +341,20 @@ fn retrieval_event_at(
     storage_partition_id: &str,
     ts: chrono::DateTime<Utc>,
 ) -> LineageEvent {
+    retrieval_event_for_user(turn_id, storage_partition_id, "writer-db-user", ts)
+}
+
+fn retrieval_event_for_user(
+    turn_id: Uuid,
+    storage_partition_id: &str,
+    user_id: &str,
+    ts: chrono::DateTime<Utc>,
+) -> LineageEvent {
     LineageEvent::Retrieval(RetrievalLineage {
         turn_id: moa_lineage_core::TurnId(turn_id),
         session_id: SessionId::new(),
         storage_partition_id: StoragePartitionId::new(storage_partition_id),
-        user_id: UserId::new("writer-db-user"),
+        user_id: UserId::new(user_id),
         scope: MemoryScope::Tenant {
             tenant_id: TenantId::from(Uuid::from_u128(0x7)),
         },
@@ -486,6 +373,45 @@ fn retrieval_event_at(
         introspection: BackendIntrospection::default(),
         stage: RetrievalStage::Single,
     })
+}
+
+async fn insert_retrieval_journal_row(pool: &sqlx::PgPool, event: &LineageEvent) -> TestResult<()> {
+    let LineageEvent::Retrieval(record) = event else {
+        return Err(test_error(
+            "journal fixture requires a retrieval event".to_string(),
+        ));
+    };
+    let event_payload = serde_json::to_value(event)?;
+    let integrity_hash = moa_lineage_core::chain::canonical_payload_hash(&event_payload)?
+        .as_bytes()
+        .to_vec();
+    let payload = serde_json::json!({
+        "table": "lineage",
+        "row": {
+            "turn_id": record.turn_id.0,
+            "session_id": record.session_id.0,
+            "user_id": record.user_id.to_string(),
+            "storage_partition_id": record.storage_partition_id.to_string(),
+            "ts": record.ts,
+            "tier": 1,
+            "record_kind": event.record_kind().as_i16(),
+            "payload": event_payload,
+            "integrity_hash": integrity_hash,
+            "prev_hash": null,
+        }
+    });
+    sqlx::query(
+        "INSERT INTO analytics.lineage_journal \
+         (journal_id, storage_partition_id, user_id, event_class, payload) \
+         VALUES ($1, $2, $3, 'lineage', $4)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(record.storage_partition_id.as_str())
+    .bind(record.user_id.as_str())
+    .bind(payload)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn isolated_pool() -> TestResult<(sqlx::PgPool, String, sqlx::PgPool)> {
@@ -606,7 +532,7 @@ async fn lineage_writer_experiment_score_provenance_lands_with_its_score_row_db(
 
     let config = test_sink_config(Duration::from_secs(3600));
     let (tx, rx) = mpsc::channel::<LineageEvent>(16);
-    let handle = spawn_writer(rx, config, LineageStore::Postgres(pool.clone())).await?;
+    let handle = spawn_writer(rx, config, LineageStore::new(pool.clone())).await?;
 
     let score_id = Uuid::now_v7();
     tx.send(experiment_score_event(
@@ -686,7 +612,7 @@ async fn lineage_writer_experiment_score_replay_is_accepted_but_never_rewrites_d
         let handle = spawn_writer(
             rx,
             test_sink_config(Duration::from_secs(3600)),
-            LineageStore::Postgres(pool.clone()),
+            LineageStore::new(pool.clone()),
         )
         .await?;
         for _ in 0..2 {
@@ -726,7 +652,7 @@ async fn lineage_writer_experiment_score_replay_is_accepted_but_never_rewrites_d
         let handle = spawn_writer(
             rx,
             test_sink_config(Duration::from_secs(3600)),
-            LineageStore::Postgres(pool.clone()),
+            LineageStore::new(pool.clone()),
         )
         .await?;
         let mut event = experiment_score_event(&fixture, score_id, "target_completed", true, ts);
@@ -775,7 +701,7 @@ async fn lineage_writer_experiment_score_replay_is_accepted_but_never_rewrites_d
         let handle = spawn_writer(
             rx,
             test_sink_config(Duration::from_secs(3600)),
-            LineageStore::Postgres(pool.clone()),
+            LineageStore::new(pool.clone()),
         )
         .await?;
         tx.send(experiment_score_event(
@@ -943,7 +869,7 @@ async fn durable_acceptance_is_committed_before_the_call_returns_db() -> TestRes
     // happened to run.
     let (sink, handle) = MpscSink::spawn(
         test_sink_config(Duration::from_secs(3600)),
-        LineageStore::Postgres(pool.clone()),
+        LineageStore::new(pool.clone()),
     )
     .await?;
 
@@ -994,8 +920,7 @@ async fn a_committed_batch_is_finished_by_another_replica_after_a_lease_expires_
         lease_ttl: Duration::from_millis(1),
         ..test_sink_config(Duration::from_secs(3600))
     };
-    let (sink, doomed) =
-        MpscSink::spawn(doomed_config, LineageStore::Postgres(pool.clone())).await?;
+    let (sink, doomed) = MpscSink::spawn(doomed_config, LineageStore::new(pool.clone())).await?;
     let turn_id = Uuid::now_v7();
     LineageHandle::record_durable_batch(
         &sink,
@@ -1032,7 +957,7 @@ async fn a_committed_batch_is_finished_by_another_replica_after_a_lease_expires_
     let survivor = spawn_writer(
         rx,
         test_sink_config(Duration::from_millis(50)),
-        LineageStore::Postgres(pool.clone()),
+        LineageStore::new(pool.clone()),
     )
     .await?;
     drop(tx);
@@ -1059,6 +984,99 @@ async fn a_committed_batch_is_finished_by_another_replica_after_a_lease_expires_
 }
 
 #[tokio::test]
+async fn an_expired_claimant_cannot_commit_or_dequeue_a_reclaimed_batch_db() -> TestResult<()> {
+    // Pins: lease expiry transfers terminal ownership. A stale writer that was
+    // already inside the row-store transaction must roll that transaction back
+    // when a successor has reclaimed the journal row.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let partition = test_partition();
+    let turn_id = Uuid::now_v7();
+    const BLOCK_LOCK: i64 = 8_107_241;
+
+    sqlx::raw_sql(
+        r#"
+        CREATE OR REPLACE FUNCTION block_lineage_insert_for_lease_test() RETURNS TRIGGER
+        LANGUAGE plpgsql AS $block$
+        BEGIN
+            PERFORM pg_advisory_xact_lock(8107241);
+            RETURN NEW;
+        END
+        $block$;
+        CREATE TRIGGER block_lineage_insert_for_lease_test
+            BEFORE INSERT ON analytics.turn_lineage
+            FOR EACH ROW EXECUTE FUNCTION block_lineage_insert_for_lease_test();
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+    let mut blocker = pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(BLOCK_LOCK)
+        .execute(&mut *blocker)
+        .await?;
+
+    let first_config = MpscSinkConfig {
+        lease_ttl: Duration::from_millis(100),
+        drain_timeout: Duration::from_secs(10),
+        ..test_sink_config(Duration::from_millis(20))
+    };
+    let (first_tx, first_rx) = mpsc::channel::<LineageEvent>(8);
+    let first = spawn_writer(first_rx, first_config, LineageStore::new(pool.clone())).await?;
+    insert_retrieval_journal_row(&pool, &retrieval_event(turn_id, &partition)).await?;
+    let first_owner = wait_for_journal_claim(&pool, &partition, 1).await?;
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let second_config = MpscSinkConfig {
+        lease_ttl: Duration::from_secs(5),
+        drain_timeout: Duration::from_secs(10),
+        ..test_sink_config(Duration::from_millis(20))
+    };
+    let (second_tx, second_rx) = mpsc::channel::<LineageEvent>(8);
+    let second = spawn_writer(second_rx, second_config, LineageStore::new(pool.clone())).await?;
+    let second_owner = wait_for_journal_claim(&pool, &partition, 2).await?;
+    assert_ne!(
+        second_owner, first_owner,
+        "the expired row must be reclaimed by a distinct writer owner"
+    );
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(BLOCK_LOCK)
+        .execute(&mut *blocker)
+        .await?;
+    drop(blocker);
+    wait_for_journal_empty(&pool, &partition).await?;
+    drop(first_tx);
+    drop(second_tx);
+    let first_stats = first.shutdown().await?;
+    let second_stats = second.shutdown().await?;
+    assert_eq!(
+        (first_stats.written, second_stats.written),
+        (0, 1),
+        "the stale claimant must roll back; only the reclaiming owner may count the row as written"
+    );
+
+    let (stored, queued, dead_letters): (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM analytics.turn_lineage WHERE turn_id = $1), \
+           (SELECT count(*) FROM analytics.lineage_journal WHERE storage_partition_id = $2), \
+           (SELECT count(*) FROM analytics.lineage_dead_letters WHERE first_turn_id = $1)",
+    )
+    .bind(turn_id)
+    .bind(&partition)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (stored, queued, dead_letters),
+        (1, 0, 0),
+        "only the current lease owner may commit the row and dequeue its claim"
+    );
+
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_recoverable_write_failure_preserves_the_accepted_rows_db() -> TestResult<()> {
     // Pins: storing and dequeuing are one transaction. A retryable failure inside
     // the store must roll the dequeue back with it, leaving the accepted row in
@@ -1069,7 +1087,7 @@ async fn a_recoverable_write_failure_preserves_the_accepted_rows_db() -> TestRes
 
     let (sink, handle) = MpscSink::spawn(
         test_sink_config(Duration::from_secs(3600)),
-        LineageStore::Postgres(pool.clone()),
+        LineageStore::new(pool.clone()),
     )
     .await?;
     // Poison BEFORE accepting, not after. The durable call wakes the drain, so a
@@ -1149,28 +1167,10 @@ async fn a_purged_tenant_cannot_have_lineage_written_back_after_the_fence_db() -
     let purged = StoragePartitionId::for_tenant(TenantId::from(purged_tenant)).to_string();
     let neighbour = test_partition();
 
-    // Accepting replica: `claim_batch_size: 0` means it can never claim, so the
-    // batch is committed and provably still queued when the fence lands. Without
-    // this the durable call's wake races the fence insert, and the drain can
-    // store the row first - which is the ordering the test is NOT about.
-    let accepting = MpscSinkConfig {
-        claim_batch_size: 0,
-        ..test_sink_config(Duration::from_secs(3600))
-    };
-    let (sink, accepting_handle) =
-        MpscSink::spawn(accepting, LineageStore::Postgres(pool.clone())).await?;
     let purged_turn = Uuid::now_v7();
     let neighbour_turn = Uuid::now_v7();
-    LineageHandle::record_durable_batch(
-        &sink,
-        vec![
-            serde_json::to_value(retrieval_event(purged_turn, &purged))?,
-            serde_json::to_value(retrieval_event(neighbour_turn, &neighbour))?,
-        ],
-    )
-    .await
-    .map_err(|error| test_error(format!("durable batch should be accepted: {error}")))?;
-    accepting_handle.shutdown().await?;
+    insert_retrieval_journal_row(&pool, &retrieval_event(purged_turn, &purged)).await?;
+    insert_retrieval_journal_row(&pool, &retrieval_event(neighbour_turn, &neighbour)).await?;
 
     let queued: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM analytics.lineage_journal WHERE storage_partition_id = $1",
@@ -1199,7 +1199,7 @@ async fn a_purged_tenant_cannot_have_lineage_written_back_after_the_fence_db() -
     let handle = spawn_writer(
         rx,
         test_sink_config(Duration::from_millis(50)),
-        LineageStore::Postgres(pool.clone()),
+        LineageStore::new(pool.clone()),
     )
     .await?;
     drop(tx);
@@ -1236,83 +1236,278 @@ async fn a_purged_tenant_cannot_have_lineage_written_back_after_the_fence_db() -
 }
 
 #[tokio::test]
-async fn a_drain_that_runs_out_of_budget_leaves_accepted_rows_for_another_replica_db()
+async fn a_subject_fence_blocks_only_that_contacts_lineage_while_tenant_fence_blocks_all_db()
 -> TestResult<()> {
-    // Pins: a shutdown timeout preserves committed rows. Deleting or abandoning
-    // them to bound the drain would turn "we shut down promptly" into silent data
-    // loss, and the caller was already told the batch was accepted.
-    //
-    // Determinism: `claim_batch_size` is 1 and the durable call wakes the drain
-    // exactly once, so precisely one row is stored before shutdown. The drain
-    // budget is then zero, so every remaining row is a row the budget refused to
-    // work on - which is the state under test.
+    // Pins: subject erasure is not tenant erasure. A contact fence must match
+    // UUID and `contact:<UUID>` user ids without discarding an unfenced
+    // neighbour in the same tenant; a tenant-wide fence still covers both.
     let (pool, database_name, cleanup_pool) = isolated_pool().await?;
-    let partition = test_partition();
-    const ACCEPTED: usize = 20;
+    let tenant_id = Uuid::now_v7();
+    let partition = StoragePartitionId::for_tenant(TenantId::from(tenant_id)).to_string();
+    let fenced_contact = Uuid::now_v7();
+    let neighbour_contact = Uuid::now_v7();
+    let fenced_turn = Uuid::now_v7();
+    let neighbour_turn = Uuid::now_v7();
 
-    let config = MpscSinkConfig {
-        claim_batch_size: 1,
-        drain_timeout: Duration::ZERO,
-        ..test_sink_config(Duration::from_secs(3600))
-    };
-    let (sink, handle) = MpscSink::spawn(config, LineageStore::Postgres(pool.clone())).await?;
-    let mut events = Vec::with_capacity(ACCEPTED);
-    for _ in 0..ACCEPTED {
-        events.push(serde_json::to_value(retrieval_event(
-            Uuid::now_v7(),
+    insert_retrieval_journal_row(
+        &pool,
+        &retrieval_event_for_user(
+            fenced_turn,
             &partition,
-        ))?);
-    }
-    LineageHandle::record_durable_batch(&sink, events)
-        .await
-        .map_err(|error| test_error(format!("durable batch should be accepted: {error}")))?;
+            &format!("contact:{fenced_contact}"),
+            Utc::now(),
+        ),
+    )
+    .await?;
+    insert_retrieval_journal_row(
+        &pool,
+        &retrieval_event_for_user(
+            neighbour_turn,
+            &partition,
+            &format!("contact:{neighbour_contact}"),
+            Utc::now(),
+        ),
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO moa.destruction_operation_fence \
+         (tenant_id, subject_id, operation_id, operation_kind) \
+         VALUES ($1, $2, $3, 'privacy.erase')",
+    )
+    .bind(tenant_id)
+    .bind(fenced_contact)
+    .bind(format!("erase-{fenced_contact}"))
+    .execute(&pool)
+    .await?;
 
-    let stats = handle.shutdown().await?;
-    assert!(
-        stats.written < ACCEPTED as u64,
-        "the precondition is that the zero drain budget left work undone; the writer \
-         stored all {ACCEPTED} rows, so this test is not exercising the timeout"
+    let (tx, rx) = mpsc::channel::<LineageEvent>(8);
+    let writer = spawn_writer(
+        rx,
+        test_sink_config(Duration::from_millis(20)),
+        LineageStore::new(pool.clone()),
+    )
+    .await?;
+    drop(tx);
+    writer.shutdown().await?;
+
+    let stored: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id FROM analytics.turn_lineage \
+         WHERE storage_partition_id = $1 ORDER BY turn_id",
+    )
+    .bind(&partition)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        stored,
+        vec![neighbour_turn],
+        "the subject fence must discard exactly the fenced contact"
     );
 
-    let (queued, claimable): (i64, i64) = sqlx::query_as(
-        "SELECT count(*), count(*) FILTER (WHERE claimable_at <= now()) \
-           FROM analytics.lineage_journal WHERE storage_partition_id = $1",
+    let tenant_fenced_turn = Uuid::now_v7();
+    insert_retrieval_journal_row(
+        &pool,
+        &retrieval_event_for_user(
+            tenant_fenced_turn,
+            &partition,
+            &format!("contact:{neighbour_contact}"),
+            Utc::now(),
+        ),
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO moa.destruction_operation_fence \
+         (tenant_id, subject_id, operation_id, operation_kind) \
+         VALUES ($1, NULL, $2, 'tenant.purge')",
+    )
+    .bind(tenant_id)
+    .bind(format!("purge-{tenant_id}"))
+    .execute(&pool)
+    .await?;
+    let (tx, rx) = mpsc::channel::<LineageEvent>(8);
+    let writer = spawn_writer(
+        rx,
+        test_sink_config(Duration::from_millis(20)),
+        LineageStore::new(pool.clone()),
+    )
+    .await?;
+    drop(tx);
+    writer.shutdown().await?;
+
+    let tenant_fenced_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM analytics.turn_lineage WHERE turn_id = $1")
+            .bind(tenant_fenced_turn)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        tenant_fenced_count, 0,
+        "a tenant fence must cover even a subject not named by the earlier contact fence"
+    );
+
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn destruction_lock_serializes_a_fence_with_an_in_flight_lineage_write_db() -> TestResult<()>
+{
+    // Pins: destruction and lineage take the same tenant advisory lock. The
+    // writer may claim while destruction is in progress, but cannot pass the
+    // fence check until the fence transaction commits.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let tenant_id = Uuid::now_v7();
+    let partition = StoragePartitionId::for_tenant(TenantId::from(tenant_id)).to_string();
+    let turn_id = Uuid::now_v7();
+    insert_retrieval_journal_row(&pool, &retrieval_event(turn_id, &partition)).await?;
+
+    let mut fence_tx = pool.begin().await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(\
+         hashtextextended('moa:destruction:tenant:' || $1::text, 0))",
+    )
+    .bind(tenant_id)
+    .execute(&mut *fence_tx)
+    .await?;
+
+    let (tx, rx) = mpsc::channel::<LineageEvent>(8);
+    let writer = spawn_writer(
+        rx,
+        test_sink_config(Duration::from_millis(20)),
+        LineageStore::new(pool.clone()),
+    )
+    .await?;
+    drop(tx);
+    wait_for_journal_attempts(&pool, &partition, 1).await?;
+
+    sqlx::query(
+        "INSERT INTO moa.destruction_operation_fence \
+         (tenant_id, subject_id, operation_id, operation_kind) \
+         VALUES ($1, NULL, $2, 'tenant.purge')",
+    )
+    .bind(tenant_id)
+    .bind(format!("locked-purge-{tenant_id}"))
+    .execute(&mut *fence_tx)
+    .await?;
+    fence_tx.commit().await?;
+    writer.shutdown().await?;
+
+    let (stored, queued): (i64, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM analytics.turn_lineage WHERE turn_id = $1), \
+           (SELECT count(*) FROM analytics.lineage_journal WHERE storage_partition_id = $2)",
+    )
+    .bind(turn_id)
+    .bind(&partition)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (stored, queued),
+        (0, 0),
+        "the post-lock fence must suppress and dequeue the in-flight row"
+    );
+
+    pool.close().await;
+    drop_database(&cleanup_pool, &database_name).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_drain_that_runs_out_of_budget_leaves_accepted_rows_for_another_replica_db()
+-> TestResult<()> {
+    // Pins: the outer shutdown deadline aborts even a database operation that
+    // never returns. The accepted row stays queued and a successor completes it
+    // after the abandoned lease expires.
+    let (pool, database_name, cleanup_pool) = isolated_pool().await?;
+    let partition = test_partition();
+    let turn_id = Uuid::now_v7();
+    const BLOCK_LOCK: i64 = 8_107_242;
+
+    sqlx::raw_sql(
+        r#"
+        CREATE OR REPLACE FUNCTION block_lineage_insert_for_shutdown_test() RETURNS TRIGGER
+        LANGUAGE plpgsql AS $block$
+        BEGIN
+            PERFORM pg_advisory_xact_lock(8107242);
+            RETURN NEW;
+        END
+        $block$;
+        CREATE TRIGGER block_lineage_insert_for_shutdown_test
+            BEFORE INSERT ON analytics.turn_lineage
+            FOR EACH ROW EXECUTE FUNCTION block_lineage_insert_for_shutdown_test();
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+    let mut blocker = pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(BLOCK_LOCK)
+        .execute(&mut *blocker)
+        .await?;
+    let config = MpscSinkConfig {
+        lease_ttl: Duration::from_millis(100),
+        drain_timeout: Duration::from_millis(50),
+        ..test_sink_config(Duration::from_millis(20))
+    };
+    let (sink, handle) = MpscSink::spawn(config, LineageStore::new(pool.clone())).await?;
+    LineageHandle::record_durable_batch(
+        &sink,
+        vec![serde_json::to_value(retrieval_event(turn_id, &partition))?],
+    )
+    .await
+    .map_err(|error| test_error(format!("durable batch should be accepted: {error}")))?;
+    wait_for_journal_attempts(&pool, &partition, 1).await?;
+
+    let started = tokio::time::Instant::now();
+    let error = handle
+        .shutdown()
+        .await
+        .expect_err("the blocked store must exhaust the shutdown budget");
+    assert!(
+        matches!(error, moa_lineage_sink::Error::DrainTimeout { .. }),
+        "shutdown must report its bounded drain timeout, got {error}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "a 50ms shutdown budget must not wait indefinitely on Postgres"
+    );
+
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM analytics.lineage_journal WHERE storage_partition_id = $1",
     )
     .bind(&partition)
     .fetch_one(&pool)
     .await?;
     assert_eq!(
-        queued,
-        ACCEPTED as i64 - stats.written as i64,
-        "every accepted row the drain did not store must still be queued; stored \
-         {} and found {queued} queued of {ACCEPTED} accepted",
-        stats.written
-    );
-    assert_eq!(
-        claimable, queued,
-        "and every preserved row must be immediately claimable, so a successor does \
-         not wait out a lease that belongs to a process that has already exited"
+        queued, 1,
+        "the aborted drain must preserve its accepted row"
     );
 
-    // A successor with a real budget finishes them.
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(BLOCK_LOCK)
+        .execute(&mut *blocker)
+        .await?;
+    drop(blocker);
+    sqlx::query("DROP TRIGGER block_lineage_insert_for_shutdown_test ON analytics.turn_lineage")
+        .execute(&pool)
+        .await?;
+    tokio::time::sleep(Duration::from_millis(150)).await;
     let (tx, rx) = mpsc::channel::<LineageEvent>(8);
     let survivor = spawn_writer(
         rx,
         test_sink_config(Duration::from_millis(50)),
-        LineageStore::Postgres(pool.clone()),
+        LineageStore::new(pool.clone()),
     )
     .await?;
     drop(tx);
     survivor.shutdown().await?;
-    let stored: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM analytics.turn_lineage WHERE storage_partition_id = $1",
-    )
-    .bind(&partition)
-    .fetch_one(&pool)
-    .await?;
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM analytics.turn_lineage WHERE turn_id = $1")
+            .bind(turn_id)
+            .fetch_one(&pool)
+            .await?;
     assert_eq!(
-        stored, ACCEPTED as i64,
-        "every preserved row must still be completable by another replica"
+        stored, 1,
+        "the accepted row must remain completable by another replica"
     );
 
     pool.close().await;
@@ -1333,7 +1528,7 @@ async fn an_over_age_backlog_fails_readiness_while_the_writer_stays_alive_db() -
         max_pending_age: Duration::from_secs(1),
         ..test_sink_config(Duration::from_millis(50))
     };
-    let (sink, handle) = MpscSink::spawn(config, LineageStore::Postgres(pool.clone())).await?;
+    let (sink, handle) = MpscSink::spawn(config, LineageStore::new(pool.clone())).await?;
     assert_eq!(
         handle.unready_reason(),
         None,
@@ -1424,6 +1619,65 @@ async fn wait_for<T>(budget: Duration, probe: impl Fn() -> Option<T>) -> Option<
             return None;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_journal_claim(
+    pool: &sqlx::PgPool,
+    partition: &str,
+    minimum_attempts: i32,
+) -> TestResult<Uuid> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let claim: Option<(Uuid, i32)> = sqlx::query_as(
+            "SELECT lease_owner, attempts FROM analytics.lineage_journal \
+             WHERE storage_partition_id = $1 AND lease_owner IS NOT NULL",
+        )
+        .bind(partition)
+        .fetch_optional(pool)
+        .await?;
+        if let Some((owner, attempts)) = claim
+            && attempts >= minimum_attempts
+        {
+            return Ok(owner);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(test_error(format!(
+                "journal row for {partition} was not claimed {minimum_attempts} time(s)"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_journal_attempts(
+    pool: &sqlx::PgPool,
+    partition: &str,
+    minimum_attempts: i32,
+) -> TestResult<()> {
+    wait_for_journal_claim(pool, partition, minimum_attempts)
+        .await
+        .map(|_| ())
+}
+
+async fn wait_for_journal_empty(pool: &sqlx::PgPool, partition: &str) -> TestResult<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM analytics.lineage_journal WHERE storage_partition_id = $1",
+        )
+        .bind(partition)
+        .fetch_one(pool)
+        .await?;
+        if pending == 0 {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(test_error(format!(
+                "journal row for {partition} did not reach a terminal outcome"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 

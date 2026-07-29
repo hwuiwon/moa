@@ -506,8 +506,6 @@ pub struct EnvOverlay {
     pub observability_release: Option<String>,
     /// `MOA_OBSERVABILITY_SAMPLE_RATE`.
     pub observability_sample_rate: Option<f64>,
-    /// `MOA_OBSERVABILITY_LINEAGE_ENABLED`.
-    pub observability_lineage_enabled: Option<bool>,
     /// `MOA_OBSERVABILITY_LINEAGE_CHANNEL_CAPACITY`.
     pub observability_lineage_channel_capacity: Option<usize>,
     /// `MOA_OBSERVABILITY_LINEAGE_BATCH_SIZE`.
@@ -536,8 +534,6 @@ pub struct EnvOverlay {
     /// `MOA_CLICKHOUSE_PASSWORD`; empty means unset.
     #[serde(deserialize_with = "deserialize_optional_nonempty")]
     pub clickhouse_password: Option<String>,
-    /// `MOA_CLICKHOUSE_LINEAGE_TTL_DAYS`.
-    pub clickhouse_lineage_ttl_days: Option<u32>,
     /// `MOA_CLICKHOUSE_EXPORT_POLL_SECS`.
     pub clickhouse_export_poll_secs: Option<u64>,
     /// `MOA_CLICKHOUSE_EXPORT_BATCH_ROWS`.

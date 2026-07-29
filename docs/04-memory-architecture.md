@@ -254,8 +254,10 @@ Privacy erasure follows attribution across every version of a subject's memory,
 including active, invalidated, expired, and superseded rows. It removes the
 attributable graph nodes and edges, vector projections, retrieval lineage, and
 audit-linked memory closure rather than limiting deletion to the active
-retrieval view. Historical bitemporal visibility does not override an erasure
-request.
+retrieval view. The same typed closure reaches subject-derived experience
+records, experience attributions, learning candidates, contribution rows, and
+artifact revisions. Historical bitemporal visibility does not override an
+erasure request.
 
 ## Context Pipeline Integration
 

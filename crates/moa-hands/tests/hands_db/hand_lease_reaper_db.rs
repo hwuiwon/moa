@@ -143,7 +143,11 @@ async fn competing_replicas_claim_disjoint_generations_without_new_traffic_db() 
 
     let left = PostgresExpiredHandLeaseClaims::new(pool.clone());
     let right = PostgresExpiredHandLeaseClaims::new(pool.clone());
-    let (left_claims, right_claims) = tokio::join!(left.claim_expired(64), right.claim_expired(64));
+    let claim_ttl = Duration::from_secs(300);
+    let (left_claims, right_claims) = tokio::join!(
+        left.claim_expired(64, claim_ttl),
+        right.claim_expired(64, claim_ttl)
+    );
     let left_claims = left_claims.expect("left replica claims");
     let right_claims = right_claims.expect("right replica claims");
 
@@ -187,9 +191,12 @@ async fn competing_replicas_claim_disjoint_generations_without_new_traffic_db() 
         if !sessions.contains(&claim.session_id) {
             continue;
         }
-        left.finalize_destroyed(claim)
-            .await
-            .expect("finalize the claimed generation");
+        assert!(
+            left.finalize_destroyed(claim)
+                .await
+                .expect("finalize the claimed generation"),
+            "the current claim owner should win its finalization fence"
+        );
         finalized.push(claim.session_id);
     }
     for session_id in finalized {
@@ -222,17 +229,20 @@ async fn a_failed_destroy_stays_fenced_and_never_returns_to_active_db() {
 
     let claims = PostgresExpiredHandLeaseClaims::new(pool.clone());
     let claimed = claims
-        .claim_expired(64)
+        .claim_expired(64, Duration::from_secs(300))
         .await
         .expect("claim expired leases")
         .into_iter()
         .find(|claim| claim.session_id == session_id)
         .expect("the seeded lease is claimable");
 
-    claims
-        .release_for_retry(&claimed, Duration::from_secs(120))
-        .await
-        .expect("release the failed destroy for retry");
+    assert!(
+        claims
+            .release_for_retry(&claimed, Duration::from_secs(120))
+            .await
+            .expect("release the failed destroy for retry"),
+        "the current claim owner should win its retry fence"
+    );
 
     let (status, attempts, backoff_in_future) = sqlx::query_as::<_, (String, i32, Option<bool>)>(
         "SELECT status, reap_attempts, reap_not_before > now() \
@@ -257,7 +267,7 @@ async fn a_failed_destroy_stays_fenced_and_never_returns_to_active_db() {
     // A generation the reaper released is not claimable again until its backoff
     // elapses, which is what bounds the retry rate.
     let immediate = claims
-        .claim_expired(64)
+        .claim_expired(64, Duration::from_secs(300))
         .await
         .expect("second claim pass")
         .into_iter()
@@ -266,6 +276,84 @@ async fn a_failed_destroy_stays_fenced_and_never_returns_to_active_db() {
         !immediate,
         "a released generation must not be re-claimed before its backoff elapses"
     );
+
+    let _ = sqlx::query("DELETE FROM moa.hand_leases WHERE session_id = $1")
+        .bind(session_id)
+        .execute(&pool)
+        .await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires the local compose Postgres via MOA_DATABASE_URL"]
+async fn expired_reaper_claim_is_recovered_and_the_old_owner_is_fenced_db() {
+    // Pins: a replica crash cannot strand a row in `reaping` forever. After the
+    // claim TTL expires another replica owns a new token, and the crashed
+    // owner's late finalization cannot delete that newer claim.
+    let pool = pool().await;
+    let session_id = SessionId::new();
+    seed_expired_active_lease(&pool, session_id, TenantId::new()).await;
+
+    let claims = PostgresExpiredHandLeaseClaims::new(pool.clone());
+    let first = claims
+        .claim_expired(64, Duration::from_secs(300))
+        .await
+        .expect("first replica claims")
+        .into_iter()
+        .find(|claim| claim.session_id == session_id)
+        .expect("the seeded lease is claimable");
+    sqlx::query(
+        "UPDATE moa.hand_leases \
+         SET reap_claim_expires_at = now() - interval '1 second' \
+         WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .execute(&pool)
+    .await
+    .expect("simulate the first reaper crashing past its claim TTL");
+
+    let recovered = claims
+        .claim_expired(64, Duration::from_secs(300))
+        .await
+        .expect("second replica recovers expired claim")
+        .into_iter()
+        .find(|claim| claim.session_id == session_id)
+        .expect("expired reaping claim must be reclaimable");
+    assert_eq!(recovered.generation, first.generation);
+    assert_ne!(
+        recovered.claim_token, first.claim_token,
+        "claim recovery must mint a new ownership token"
+    );
+
+    assert!(
+        !claims
+            .finalize_destroyed(&first)
+            .await
+            .expect("late stale owner finalization is a fenced no-op"),
+        "the stale ownership token must lose its finalization fence"
+    );
+    let (status, live_token) = sqlx::query_as::<_, (String, Option<uuid::Uuid>)>(
+        "SELECT status, reap_claim_token FROM moa.hand_leases WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read recovered claim");
+    assert_eq!(status, "reaping");
+    assert_eq!(
+        live_token,
+        Some(recovered.claim_token),
+        "the stale owner must not clear the recovered owner's claim"
+    );
+
+    assert!(
+        claims
+            .finalize_destroyed(&recovered)
+            .await
+            .expect("current owner finalizes"),
+        "the recovered claim owner should finalize"
+    );
+    assert_eq!(lease_status(&pool, session_id).await, "destroyed");
 
     let _ = sqlx::query("DELETE FROM moa.hand_leases WHERE session_id = $1")
         .bind(session_id)
@@ -438,10 +526,13 @@ async fn a_claim_in_flight_on_one_replica_does_not_block_another_replicas_sweep_
         .expect("hold locks on the seeded leases");
 
     let claims = PostgresExpiredHandLeaseClaims::new(pool.clone());
-    let swept = tokio::time::timeout(Duration::from_secs(5), claims.claim_expired(64))
-        .await
-        .expect("a sweep must not block behind another replica's in-flight claim")
-        .expect("claim expired leases");
+    let swept = tokio::time::timeout(
+        Duration::from_secs(5),
+        claims.claim_expired(64, Duration::from_secs(300)),
+    )
+    .await
+    .expect("a sweep must not block behind another replica's in-flight claim")
+    .expect("claim expired leases");
 
     assert!(
         !swept

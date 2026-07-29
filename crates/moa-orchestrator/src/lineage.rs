@@ -57,12 +57,8 @@ impl std::fmt::Debug for ScoreLineageHandle {
 enum LineageSinkMode {
     Null,
     Otel,
-    /// Durable DB sink writing `turn_lineage` to Postgres, whatever
-    /// `[clickhouse]` says.
+    /// Durable DB sink writing lineage and scores transactionally to Postgres.
     Postgres,
-    /// Durable DB sink writing `turn_lineage` to ClickHouse; requires
-    /// `[clickhouse]` to be configured.
-    ClickHouse,
 }
 
 impl LineageSinkMode {
@@ -70,11 +66,10 @@ impl LineageSinkMode {
         let normalized = value.map(str::trim).filter(|value| !value.is_empty());
         match normalized.map(str::to_ascii_lowercase).as_deref() {
             Some("postgres") => Ok(Self::Postgres),
-            Some("clickhouse") => Ok(Self::ClickHouse),
             Some("otel") => Ok(Self::Otel),
             Some("null") | None => Ok(Self::Null),
             Some(other) => Err(MoaError::ConfigError(format!(
-                "unknown MOA_LINEAGE_SINK value: {other}; expected postgres|clickhouse|null|otel"
+                "unknown MOA_LINEAGE_SINK value: {other}; expected postgres|null|otel"
             ))),
         }
     }
@@ -100,45 +95,15 @@ pub async fn build_lineage_sink_from_env_value(
 ) -> Result<LineageSinkRuntime> {
     let mode = LineageSinkMode::from_env_value(env_value)?;
     match mode {
-        LineageSinkMode::Postgres | LineageSinkMode::ClickHouse => {
-            if mode == LineageSinkMode::ClickHouse && config.clickhouse.is_none() {
-                return Err(MoaError::ConfigError(
-                    "MOA_LINEAGE_SINK=clickhouse requires the [clickhouse] config section \
-                     (or MOA_CLICKHOUSE_URL)"
-                        .to_string(),
-                ));
-            }
-            // `postgres` means Postgres. Before this, both modes shared
-            // `from_config`, which selects ClickHouse whenever `[clickhouse]` is
-            // present - so an operator who explicitly named Postgres silently got
-            // ClickHouse, with the startup log reporting the outcome correctly
-            // and never flagging the contradiction. Worse, the compliance guard
-            // below makes that override fail-closed only once a tenant enables
-            // compliance, so the contradiction surfaced as a startup failure on a
-            // config nobody had changed, detached in time from the decision that
-            // caused it.
-            let clickhouse = match mode {
-                LineageSinkMode::ClickHouse => config.clickhouse.as_ref(),
-                _ => None,
-            };
-            let store = moa_lineage_sink::LineageStore::from_config(clickhouse, pool);
-            let backend = store.backend_name();
-            store.ensure_schema().await.map_err(|error| {
-                MoaError::StorageError(format!("lineage schema setup failed: {error}"))
-            })?;
-            // Refuse to start on the ClickHouse backend when any compliance tenant is
-            // enabled: that backend cannot hash-chain compliance rows, and a silent
-            // downgrade of `moa lineage verify` is worse than a loud startup failure.
-            store.guard_compliance_backend().await.map_err(|error| {
-                MoaError::ConfigError(format!("lineage backend refused to start: {error}"))
-            })?;
+        LineageSinkMode::Postgres => {
+            let store = moa_lineage_sink::LineageStore::new(pool);
             let sink_config = moa_lineage_sink::MpscSinkConfig::from(&config.observability.lineage);
             let (sink, writer) = moa_lineage_sink::MpscSink::spawn(sink_config, store)
                 .await
                 .map_err(|error| {
                     MoaError::StorageError(format!("lineage writer startup failed: {error}"))
                 })?;
-            tracing::info!(backend, "lineage sink: durable (MpscSink)");
+            tracing::info!(backend = "postgres", "lineage sink: durable (MpscSink)");
             Ok(LineageSinkRuntime {
                 handle: Arc::new(sink),
                 writer: Some(Arc::new(writer)),
@@ -214,15 +179,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "configuration error: unknown MOA_LINEAGE_SINK value: garbage; expected postgres|clickhouse|null|otel"
-        );
-    }
-
-    #[test]
-    fn lineage_sink_mode_accepts_clickhouse() {
-        assert_eq!(
-            LineageSinkMode::from_env_value(Some("clickhouse")).expect("clickhouse should parse"),
-            LineageSinkMode::ClickHouse
+            "configuration error: unknown MOA_LINEAGE_SINK value: garbage; expected postgres|null|otel"
         );
     }
 }

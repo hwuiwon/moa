@@ -186,6 +186,67 @@ impl PostgresSessionStore {
         Ok(())
     }
 
+    /// Inserts one immutable learning candidate and its sources unless its ID already exists.
+    ///
+    /// Unlike [`Self::append_learning_candidate`], a conflict leaves both the
+    /// candidate row and its typed sources untouched. This is the filing seam for
+    /// deterministic mined candidates, whose later observations must not rewrite
+    /// evidence already presented for review.
+    pub async fn insert_learning_candidate_if_absent(
+        &self,
+        candidate: &LearningCandidate,
+    ) -> Result<bool> {
+        let learning_candidates = self.table_name("learning_candidates");
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let inserted = sqlx::query(&format!(
+            "INSERT INTO {learning_candidates} \
+             (id, tenant_id, storage_partition_id, user_id, candidate_type, proposal_kind, status, \
+              target_id, target_label, \
+              task_fingerprint, task_fingerprint_payload, task_facets, payload, evaluation_payload, \
+              confidence, risk_class, promotion_requirements, status_reason, \
+              batch_id, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
+                     $18, $19, $20, $21) \
+             ON CONFLICT (id) DO NOTHING"
+        ))
+        .bind(candidate.id)
+        .bind(candidate.tenant_id.to_string())
+        .bind(storage_partition_id(candidate.tenant_id))
+        .bind(candidate.user_id.as_ref().map(ToString::to_string))
+        .bind(candidate.candidate_type.as_str())
+        .bind(candidate.proposal_kind.as_str())
+        .bind(candidate.status.as_str())
+        .bind(candidate.target_id.as_deref())
+        .bind(candidate.target_label.as_deref())
+        .bind(candidate.task_fingerprint.as_ref().map(|value| value.hash.as_str()))
+        .bind(candidate.task_fingerprint.clone().map(Json))
+        .bind(candidate.task_facets.clone().map(Json))
+        .bind(Json(candidate.payload.clone()))
+        .bind(candidate.evaluation_payload.clone().map(Json))
+        .bind(candidate.confidence)
+        .bind(candidate.risk_class.as_str())
+        .bind(&candidate.promotion_requirements)
+        .bind(candidate.status_reason.as_deref())
+        .bind(candidate.batch_id)
+        .bind(candidate.created_at)
+        .bind(candidate.updated_at)
+        .execute(tx.as_mut())
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected()
+            > 0;
+        if inserted {
+            self.append_learning_candidate_sources_in_tx(
+                tx.as_mut(),
+                candidate.id,
+                &candidate.sources,
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(inserted)
+    }
+
     /// Appends or idempotently refreshes one learning candidate using an existing connection.
     ///
     /// The candidate row and every normalized source it carries are written

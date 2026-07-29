@@ -866,7 +866,7 @@ async fn an_optional_connector_outage_leaves_every_other_connector_serving_offli
         !router
             .tool_names()
             .iter()
-            .any(|name| name.starts_with("mcp__down__")),
+            .any(|name| name.starts_with(&moa_hands::mcp_tool_reference("down", ""))),
         "an unavailable connector must contribute no tools"
     );
 }

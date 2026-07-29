@@ -169,45 +169,15 @@ The turn loop is durable because external calls and side effects are wrapped thr
   returning, then claims and writes them to `analytics.turn_lineage` and
   related lineage tables. Acceptance is a Postgres commit, so a record survives
   the replica that accepted it and any replica can finish it; there is no local
-  path to configure. This selects Postgres for `turn_lineage` even when
-  `[clickhouse]` is configured.
-- `clickhouse`: the same durable sink, but fails startup when the
-  `[clickhouse]` config section is missing. Useful to make the backend choice
-  explicit in a deployment.
+  path to configure.
 
 The durable sink runs an in-memory queue (`MpscSink`) and a background writer
 that drains and replays the durable journal. Queue pressure can drop only
 explicitly configured lossy telemetry; audit-class events are not accepted
 before the journal append succeeds. Maximum queue depth and batch size come
-from `config.observability.lineage` in `MoaConfig`.
-
-#### ClickHouse Row Backend
-
-The optional top-level `[clickhouse]` config section (or `MOA_CLICKHOUSE_URL`
-plus `MOA_CLICKHOUSE_USER`/`MOA_CLICKHOUSE_PASSWORD`; empty values mean unset)
-selects where the durable sink lands `turn_lineage` rows:
-
-- **Absent (default):** everything writes to Postgres/Timescale exactly as
-  before.
-- **Present:** `turn_lineage` rows are inserted into ClickHouse
-  (`<database>.turn_lineage`, a `ReplacingMergeTree` ordered by
-  `(storage_partition_id, ts, turn_id, record_kind)` with a
-  `lineage_ttl_days` TTL, bootstrapped at startup). Lineage explain reads,
-  typed lineage queries, knowledge retrieval traces, and tenant-offboarding
-  deletes follow the same switch.
-
-Postgres always stays attached under both backends: `analytics.scores` (its
-rollups join OLTP experiment tables), lineage dead letters, and the compliance
-chain state do not move. Compliance hash chaining and `lineage verify` require
-the Postgres backend; the orchestrator refuses to start with the ClickHouse
-lineage backend while any compliance-enabled tenant exists
-(`guard_compliance_backend`), rather than writing compliance rows without
-their hash-chain links.
-
-Locally, `docker compose --profile clickhouse up -d` starts a ClickHouse
-server on host port 10061; set `MOA_CLICKHOUSE_URL=http://clickhouse:8123`,
-`MOA_CLICKHOUSE_USER=moa`, and `MOA_CLICKHOUSE_PASSWORD=dev` in `.env` to
-route the compose orchestrator and edge at it.
+from `config.observability.lineage` in `MoaConfig`; every duration and capacity
+knob must be greater than zero. The optional `[clickhouse]` configuration is
+analytics-only and never changes lineage storage or reads.
 
 `TurnExecution` threads its workflow key through context compilation as the
 lineage `turn_id`. Graph-memory retrieval, compiled context, generation,

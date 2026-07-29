@@ -109,10 +109,10 @@ async fn run_async(options: Options) -> Result<RunSummary> {
         .context("connect to MOA Postgres")?;
     let kms: Arc<dyn KeyManagementProvider> = Arc::new(LocalKmsProvider::new());
     let ingestion_embedder =
-        build_embedder_from_config(&config, EmbedderConstructionRole::Ingestion)
+        build_embedder_from_config(&config, None, EmbedderConstructionRole::Ingestion)
             .with_context(|| format!("build {} ingestion embedder", options.embedder_name))?;
     let retrieval_embedder =
-        build_embedder_from_config(&config, EmbedderConstructionRole::Retrieval)
+        build_embedder_from_config(&config, None, EmbedderConstructionRole::Retrieval)
             .with_context(|| format!("build {} retrieval embedder", options.embedder_name))?;
     let tenant_id = TenantId::from(stable_uid(&selected.cache_key));
     let connection_uid = stable_uid(&format!("wixqa-connection:{}", selected.cache_key));
@@ -631,15 +631,7 @@ async fn ingest_articles(
         moa_knowledge::ingestion::KnowledgeSourceAclContext::for_capability(
             moa_knowledge::domain::ProviderAclCapability::UniformlyPublic,
         ),
-    )
-    // The harness must ingest under the configured policy, not the built-in
-    // default. `entity-local-search` is the one arm that seeds on semantic
-    // entities, so a corpus ingested under `off` gives it nothing to seed on and
-    // the arm reports "no rescues" because the graph is empty rather than because
-    // expansion did not help. That reads as a confirmation of the 2026-07-28
-    // measurement while measuring nothing; honoring `knowledge.semantic` keeps
-    // both arms of that measurement reproducible.
-    .with_semantic_policy(config.knowledge.semantic);
+    );
 
     let started = Instant::now();
     let mut page_report = PageIngestionReport::default();

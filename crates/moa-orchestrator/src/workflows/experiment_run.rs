@@ -43,7 +43,8 @@ use crate::services::session_store::inner::{
 use crate::workflows::durable_utc_now;
 use crate::workflows::errors::{bad_request, handler_error_message, moa_error_to_handler_error};
 use crate::workflows::experiment_cancel::{
-    K_CANCEL_IDENTITY, K_EXECUTION_CONTACT_ID, K_EXECUTION_RUN_UID, forward_child_cancellation,
+    K_EXECUTION_CONTACT_ID, K_EXECUTION_RUN_UID, forward_child_cancellation,
+    forward_pending_child_cancellation, has_pending_cancellation,
 };
 use crate::workflows::experiment_errors::{
     non_retryable_handler_error, plan_expansion_error_to_handler_error,
@@ -51,6 +52,7 @@ use crate::workflows::experiment_errors::{
 use crate::workflows::experiment_trial_run::{
     ExperimentTrialRunClient, ExperimentTrialRunWorkflowRequest, trial_workflow_key,
 };
+use moa_core::types::experiments::ExperimentCancelSignal;
 
 mod plan_expansion;
 mod status;
@@ -106,7 +108,7 @@ pub trait ExperimentRun {
 
     /// Forwards cancellation to the run's own child target and every active trial.
     #[shared]
-    async fn request_cancel(reason: Json<String>) -> Result<(), HandlerError>;
+    async fn request_cancel(signal: Json<ExperimentCancelSignal>) -> Result<(), HandlerError>;
 }
 
 /// Concrete live behavior experiment workflow implementation.
@@ -157,8 +159,20 @@ impl ExperimentRun for ExperimentRunImpl {
         ctx.set(K_TENANT_ID, Json(request.tenant_id));
         ctx.set(K_SCORE_RUN_ID, Json(request.score_run_id));
         ctx.set(K_STATUS, Json(ExperimentRunStatus::Running));
-        ctx.set(K_CANCEL_IDENTITY, Json(request.identity.clone()));
         annotate_run_span(&request, None);
+        if has_pending_cancellation(&ctx, &scope, request.run_uid, &self.pool).await? {
+            return run_status_response(
+                &ctx,
+                ExperimentRunStatusRequest {
+                    tenant_id: request.tenant_id,
+                    run_uid: request.run_uid,
+                },
+                &self.pool,
+                &self.session_store,
+            )
+            .await
+            .map(Json::from);
+        }
 
         match run_experiment_target(
             &ctx,
@@ -222,24 +236,24 @@ impl ExperimentRun for ExperimentRunImpl {
             .await?)
     }
 
-    #[tracing::instrument(skip(self, ctx, reason))]
+    #[tracing::instrument(skip(self, ctx, signal))]
     // SAFETY: control-only cancellation forward after Experiments/cancel authz;
     // the child Session, Execution, and ExperimentTrialRun request_cancel
     // handlers enforce their own authorization.
     async fn request_cancel(
         &self,
         ctx: SharedWorkflowContext<'_>,
-        reason: Json<String>,
+        signal: Json<ExperimentCancelSignal>,
     ) -> Result<(), HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExperimentRun", "request_cancel");
-        let reason = reason.into_inner();
+        let signal = signal.into_inner();
         // Single-target runs drive a child Session or Execution directly.
-        forward_child_cancellation(&ctx, reason.clone()).await?;
+        forward_child_cancellation(&ctx, signal.clone()).await?;
         // Plan runs fan cancellation out to every active trial workflow so their
         // own child targets stop even while the main run loop is blocked waiting
         // on a child completion signal.
-        fan_out_cancellation_to_active_trials(&ctx, reason, &self.pool).await?;
+        fan_out_cancellation_to_active_trials(&ctx, signal, &self.pool).await?;
         Ok(())
     }
 }
@@ -251,7 +265,7 @@ impl ExperimentRun for ExperimentRunImpl {
 /// to stop. The signal is idempotent and best-effort.
 async fn fan_out_cancellation_to_active_trials(
     ctx: &SharedWorkflowContext<'_>,
-    reason: String,
+    signal: ExperimentCancelSignal,
     pool: &sqlx::PgPool,
 ) -> Result<(), HandlerError> {
     let Some(run_uid) = ctx
@@ -273,7 +287,7 @@ async fn fan_out_cancellation_to_active_trials(
             ctx.workflow_client::<ExperimentTrialRunClient>(trial_workflow_key(
                 run_uid, &trial_key,
             ))
-            .request_cancel(Json::from(reason.clone())),
+            .request_cancel(Json::from(signal.clone())),
         )
         .send();
     }
@@ -629,6 +643,7 @@ mod tests {
             session_id: None,
             execution_run_uid: None,
             score_run_id: Uuid::now_v7(),
+            final_evidence_hash: None,
             turn_count: 0,
             stop_reason: None,
             error: None,

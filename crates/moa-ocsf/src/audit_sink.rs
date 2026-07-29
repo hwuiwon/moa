@@ -23,6 +23,7 @@ use std::time::Duration;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use tokio::runtime::Handle;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -63,16 +64,38 @@ pub struct AuditEmitter {
     dropped: Arc<AtomicU64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnqueueOutcome {
+    Accepted,
+    DroppedFull,
+    DroppedClosed,
+}
+
 impl AuditEmitter {
     pub(crate) fn enqueue(&self, item: QueuedAudit) {
-        if self.tx.try_send(item).is_err() {
-            let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-            record_dropped_metric("queue_full", 1);
-            tracing::warn!(
+        let _ = self.try_enqueue(item);
+    }
+
+    fn try_enqueue(&self, item: QueuedAudit) -> EnqueueOutcome {
+        let (reason, outcome) = match self.tx.try_send(item) {
+            Ok(()) => return EnqueueOutcome::Accepted,
+            Err(TrySendError::Full(_)) => ("queue_full", EnqueueOutcome::DroppedFull),
+            Err(TrySendError::Closed(_)) => ("queue_closed", EnqueueOutcome::DroppedClosed),
+        };
+        let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+        record_dropped_metric(reason, 1);
+        match outcome {
+            EnqueueOutcome::DroppedFull => tracing::warn!(
                 dropped_total = dropped,
                 "security audit queue full; dropping event"
-            );
+            ),
+            EnqueueOutcome::DroppedClosed => tracing::warn!(
+                dropped_total = dropped,
+                "security audit admission closed; dropping event"
+            ),
+            EnqueueOutcome::Accepted => {}
         }
+        outcome
     }
 
     /// Number of audit events dropped by this writer since it started.
@@ -148,6 +171,11 @@ impl AuditRuntime {
     /// shutdown log can state plainly whether the audit trail is complete.
     pub async fn shutdown(&self) -> u64 {
         self.shutdown.cancel();
+        // The consumer owns the only operation that can close admission. Wait
+        // until it has done so before joining the drain, otherwise an emitter
+        // clone can successfully enqueue after the worker observed an empty
+        // queue and exited.
+        self.emitter.tx.closed().await;
         if let Some(join) = self.join.lock().await.take()
             && let Err(error) = join.await
         {
@@ -184,12 +212,10 @@ async fn consume(
 /// Collect the next batch: block for the first item, then accumulate until the
 /// batch is full, the age deadline passes, or the channel closes.
 ///
-/// After `shutdown` is cancelled this stops waiting for new events but keeps
-/// returning whatever is ALREADY queued, in batches, until the queue is empty.
-/// That is the difference between draining the audit trail on SIGTERM and
-/// discarding it: an event that reached the queue was accepted for persistence,
-/// and abandoning it at the cancellation point would silently lose records the
-/// caller has already stopped being able to observe.
+/// After `shutdown` is cancelled this closes the receiver before draining. That
+/// makes every later send fail as `Closed` while preserving events already in
+/// the buffer. Closing first is what gives the drain a stable end: without it,
+/// an emitter clone can enqueue just after the consumer observes an empty queue.
 ///
 /// Returns `None` only when the queue is empty AND either the channel is closed
 /// or shutdown has been requested.
@@ -200,11 +226,15 @@ async fn next_batch(
     shutdown: &CancellationToken,
 ) -> Option<Vec<QueuedAudit>> {
     let first = if shutdown.is_cancelled() {
-        rx.try_recv().ok()?
+        rx.close();
+        rx.recv().await?
     } else {
         tokio::select! {
             biased;
-            () = shutdown.cancelled() => rx.try_recv().ok()?,
+            () = shutdown.cancelled() => {
+                rx.close();
+                rx.recv().await?
+            },
             item = rx.recv() => item?,
         }
     };
@@ -212,18 +242,18 @@ async fn next_batch(
     batch.push(first);
     let deadline = tokio::time::Instant::now() + max_age;
     while batch.len() < max_rows {
-        if shutdown.is_cancelled() {
-            // Take only what is already buffered; nothing new is being awaited.
-            match rx.try_recv() {
-                Ok(item) => batch.push(item),
-                Err(_) => break,
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled(), if !rx.is_closed() => {
+                rx.close();
             }
-            continue;
-        }
-        match tokio::time::timeout_at(deadline, rx.recv()).await {
-            Ok(Some(item)) => batch.push(item),
-            Ok(None) => break, // channel closed: flush what we have
-            Err(_) => break,   // age deadline reached
+            result = tokio::time::timeout_at(deadline, rx.recv()) => {
+                match result {
+                    Ok(Some(item)) => batch.push(item),
+                    Ok(None) => break, // channel closed and drained
+                    Err(_) => break,   // age deadline reached
+                }
+            }
         }
     }
     Some(batch)
@@ -402,6 +432,19 @@ mod tests {
             batch.len()
         );
         assert!(
+            rx.is_closed(),
+            "shutdown must close admission before the queued drain completes"
+        );
+        assert_eq!(
+            emitter.try_enqueue(queued(9)),
+            EnqueueOutcome::DroppedClosed
+        );
+        assert_eq!(
+            emitter.dropped_count(),
+            1,
+            "a producer that races the drain must be rejected as closed"
+        );
+        assert!(
             next_batch(&mut rx, 64, Duration::from_millis(1), &shutdown)
                 .await
                 .is_none(),
@@ -423,6 +466,21 @@ mod tests {
             emitter.dropped_count(),
             2,
             "two events beyond capacity are dropped and counted"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn enqueue_distinguishes_saturation_from_closed_admission() {
+        // Pins: operational metrics distinguish load shedding from orderly
+        // shutdown. Conflating Closed with Full pages capacity responders for a
+        // lifecycle event and hides producers that outlive audit admission.
+        let (emitter, mut rx) = test_emitter(1);
+        assert_eq!(emitter.try_enqueue(queued(1)), EnqueueOutcome::Accepted);
+        assert_eq!(emitter.try_enqueue(queued(2)), EnqueueOutcome::DroppedFull);
+        rx.close();
+        assert_eq!(
+            emitter.try_enqueue(queued(3)),
+            EnqueueOutcome::DroppedClosed
         );
     }
 

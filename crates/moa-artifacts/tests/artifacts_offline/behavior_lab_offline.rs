@@ -63,8 +63,6 @@ definition:
       requirements:
         - evaluator_id: target_completed
           evaluator_version: v1
-          score_name: target_completed
-          value_type: boolean
           config: {}
           effect: blocking
     learning_proposals:

@@ -260,7 +260,10 @@ impl ToolRouter {
                         {
                             continue;
                         }
-                        if lease.status == HandLeaseStatus::Destroyed {
+                        if matches!(
+                            lease.status,
+                            HandLeaseStatus::Destroyed | HandLeaseStatus::Reaping
+                        ) {
                             continue;
                         }
                         let key = format!(
@@ -417,8 +420,10 @@ impl ToolRouter {
                 {
                     validated
                 } else {
-                    self.get_or_provision_durable_hand(route, session, worker_id, key, &policy)
-                        .await?
+                    self.get_or_provision_durable_hand(
+                        route, session, worker_id, key, &effective, &policy,
+                    )
+                    .await?
                 }
             } else if let Some(handle) = self.active_hands.read().await.get(&key) {
                 handle.clone()
@@ -545,6 +550,7 @@ impl ToolRouter {
         session: &SessionMeta,
         worker_id: Option<&str>,
         key: String,
+        effective: &EffectiveSandboxProfile,
         policy: &HandLeasePolicy,
     ) -> Result<HandHandle> {
         let provider = route.provider.as_str();
@@ -567,9 +573,55 @@ impl ToolRouter {
                 )
                 .await?
             {
-                let effective = self.resolve_sandbox_profile(route, session).await?;
+                if let Some(previous_handle) = claim.handle.as_ref() {
+                    let previous = match self.hydrate_lease_handle(provider, previous_handle).await
+                    {
+                        Ok(handle) => handle,
+                        Err(error) => {
+                            lease_store
+                                .mark_status(
+                                    session.id,
+                                    scope,
+                                    provider,
+                                    claim.generation,
+                                    HandLeaseStatus::Stale,
+                                )
+                                .await?;
+                            return Err(error);
+                        }
+                    };
+                    let provider_impl = self.providers.get(provider).ok_or_else(|| {
+                        MoaError::ProviderError(format!("unknown hand provider: {provider}"))
+                    })?;
+                    if let Err(error) = provider_impl.destroy(&previous).await {
+                        lease_store
+                            .mark_status(
+                                session.id,
+                                scope,
+                                provider,
+                                claim.generation,
+                                HandLeaseStatus::Stale,
+                            )
+                            .await?;
+                        return Err(error);
+                    }
+                    if !lease_store
+                        .clear_handle_for_provisioning(
+                            session.id,
+                            scope,
+                            provider,
+                            claim.generation,
+                        )
+                        .await?
+                    {
+                        return Err(MoaError::StorageError(format!(
+                            "hand lease replacement lost generation fence for session {} provider {provider}",
+                            session.id
+                        )));
+                    }
+                }
                 match self
-                    .provision_uncached_hand(route, session, key.clone(), &effective)
+                    .provision_uncached_hand(route, session, key.clone(), effective)
                     .await
                 {
                     Ok(handle) => {
@@ -882,39 +934,21 @@ impl ToolRouter {
                 MoaError::ProviderError(format!("unknown hand provider: {provider}"))
             })?;
 
-            if let Some(handle) = old_handle.as_ref()
-                && let Err(error) = provider_impl.destroy(handle).await
-            {
-                tracing::warn!(
-                    session_id = %session.id,
-                    worker_id = %scope,
-                    provider,
-                    hand_id = %hand_id(handle),
-                    error = %error,
-                    "failed to destroy unhealthy hand before re-provisioning"
-                );
+            if let Some(handle) = old_handle.as_ref() {
+                provider_impl.destroy(handle).await?;
             }
 
             if let Some(lease_store) = &self.hand_leases
-                && let Ok(Some(lease)) = lease_store.get(session.id, scope, provider).await
-                && let Err(error) = lease_store
-                    .mark_status(
-                        session.id,
-                        scope,
-                        provider,
-                        lease.generation,
-                        HandLeaseStatus::Stale,
-                    )
-                    .await
+                && let Some(lease) = lease_store.get(session.id, scope, provider).await?
             {
-                tracing::warn!(
-                    session_id = %session.id,
-                    worker_id = %scope,
-                    provider,
-                    generation = lease.generation,
-                    error = %error,
-                    "failed to mark durable hand lease stale before re-provisioning"
-                );
+                let status = if old_handle.is_some() {
+                    HandLeaseStatus::Destroyed
+                } else {
+                    HandLeaseStatus::Stale
+                };
+                lease_store
+                    .mark_status(session.id, scope, provider, lease.generation, status)
+                    .await?;
             }
 
             let started_at = Instant::now();
@@ -1051,6 +1085,7 @@ mod tests {
     use serde_json::json;
 
     use crate::core::leases::{HandLeaseStore, MemoryHandLeaseStore};
+    use crate::core::profile::TenantSandboxPolicyStore;
     use crate::core::{HandRoute, ToolRegistry, ToolRouter};
 
     use super::*;
@@ -1070,6 +1105,29 @@ mod tests {
         /// can prove the router hands the provider the resolved policy rather
         /// than a substituted default.
         last_provisioned_profile: std::sync::Mutex<Option<EffectiveSandboxProfile>>,
+    }
+
+    #[derive(Default)]
+    struct CountingTenantPolicyStore {
+        reads: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl TenantSandboxPolicyStore for CountingTenantPolicyStore {
+        async fn current(
+            &self,
+            _tenant_id: TenantId,
+        ) -> Result<Option<moa_core::types::hands::SandboxPolicySnapshot>> {
+            let read = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+            let revision = format!("tenant-policy-{read}");
+            Ok(Some(
+                moa_core::types::hands::SandboxPolicySnapshot::new(
+                    &revision,
+                    crate::core::profile::local_development_sandbox_policy().profile,
+                )
+                .expect("test tenant policy is valid"),
+            ))
+        }
     }
 
     impl CountingProvider {
@@ -1461,6 +1519,11 @@ mod tests {
             .expect("load replacement lease")
             .expect("replacement lease should exist");
         assert_eq!(provider.provision_calls(), 2);
+        assert_eq!(
+            provider.destroy_calls(),
+            1,
+            "the stale durable handle must be destroyed before its replacement is provisioned"
+        );
         assert_eq!(replacement.generation, renewed.generation + 1);
         assert_eq!(replacement.status, HandLeaseStatus::Active);
     }
@@ -1794,6 +1857,48 @@ mod tests {
             provisioned.capability_revision(),
             provider.capabilities().revision,
             "the serving provider's capability revision must reach the spec"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_claim_and_provider_share_one_policy_resolution() {
+        // Pins: the tenant policy is resolved exactly once for a provisioning
+        // decision, and that same immutable effective profile is persisted on
+        // the lease and handed to the provider. Re-resolving between those steps
+        // can claim under revision N and provision under revision N+1.
+        let lease_store = MemoryHandLeaseStore::shared();
+        let provider = Arc::new(CountingProvider::new("single-policy-resolution"));
+        let tenant_policy = Arc::new(CountingTenantPolicyStore::default());
+        let session = session();
+        let router = router(provider.clone(), lease_store.clone())
+            .with_tenant_sandbox_policy_store(tenant_policy.clone());
+        let route = test_hand_route(provider.provider_name());
+
+        router
+            .get_or_provision_hand(&route, &session, None)
+            .await
+            .expect("hand provisions");
+
+        assert_eq!(
+            tenant_policy.reads.load(Ordering::SeqCst),
+            1,
+            "one provisioning decision must resolve tenant policy only once"
+        );
+        let provisioned = provider
+            .last_provisioned_profile
+            .lock()
+            .expect("provisioned profile lock")
+            .clone()
+            .expect("provider received one profile");
+        let lease = lease_store
+            .get(session.id, "", provider.provider_name())
+            .await
+            .expect("load lease")
+            .expect("lease exists");
+        assert_eq!(
+            lease.policy.expect("active lease has policy").profile_hash,
+            provisioned.profile_hash(),
+            "lease claim and provider spec must carry the same resolved profile"
         );
     }
 

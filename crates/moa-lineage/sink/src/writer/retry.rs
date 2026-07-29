@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use crate::clickhouse::is_retryable_clickhouse_error;
 use crate::{Error, Result};
 
 use super::rows::PendingRow;
@@ -162,7 +161,6 @@ pub(super) fn is_retryable_write_error(error: &Error) -> bool {
             .code()
             .as_deref()
             .is_some_and(is_retryable_postgres_sqlstate),
-        Error::ClickHouse(clickhouse_error) => is_retryable_clickhouse_error(clickhouse_error),
         _ => false,
     }
 }

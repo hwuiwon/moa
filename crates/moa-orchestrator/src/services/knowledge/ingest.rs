@@ -5,7 +5,10 @@ use std::{collections::HashSet, sync::Arc};
 use async_trait::async_trait;
 use moa_config::MoaConfig;
 use moa_core::types::memory::{InformationBarrierId, RlsContext};
-use moa_core::{traits::EmbeddingProvider, types::identifiers::TenantId};
+use moa_core::{
+    traits::{EmbeddingProvider, RuntimeCacheStore},
+    types::identifiers::TenantId,
+};
 use moa_crypto::KeyManagementProvider;
 use moa_knowledge::{
     chunking::ChunkingConfig,
@@ -54,17 +57,24 @@ pub struct ProductionKnowledgeIngestionRunner {
     pool: sqlx::PgPool,
     kms: Arc<dyn KeyManagementProvider>,
     config: MoaConfig,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
     content_fetcher: Option<Arc<dyn RecordContentFetcher>>,
 }
 
 impl ProductionKnowledgeIngestionRunner {
     /// Creates a production ingestion runner from the shared graph pool and runtime config.
     #[must_use]
-    pub fn new(pool: sqlx::PgPool, kms: Arc<dyn KeyManagementProvider>, config: MoaConfig) -> Self {
+    pub fn new(
+        pool: sqlx::PgPool,
+        kms: Arc<dyn KeyManagementProvider>,
+        config: MoaConfig,
+        runtime_cache: Arc<dyn RuntimeCacheStore>,
+    ) -> Self {
         Self {
             pool,
             kms,
             config,
+            runtime_cache,
             content_fetcher: None,
         }
     }
@@ -95,6 +105,7 @@ impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
             self.kms.clone(),
             run.tenant_id,
             &self.config,
+            Arc::clone(&self.runtime_cache),
             provider.to_string(),
             parser_label,
             run.information_barrier.clone(),
@@ -121,6 +132,7 @@ impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
             self.kms.clone(),
             run.tenant_id,
             &self.config,
+            Arc::clone(&self.runtime_cache),
             provider.to_string(),
             parser_label,
             run.information_barrier.clone(),
@@ -155,6 +167,7 @@ async fn build_ingestion_pipeline(
     kms: Arc<dyn KeyManagementProvider>,
     tenant_id: TenantId,
     config: &MoaConfig,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
     provider: String,
     parser_label: String,
     information_barrier: Option<InformationBarrierId>,
@@ -176,8 +189,12 @@ async fn build_ingestion_pipeline(
         KnowledgeSourceAclContext::for_capability(ProviderAclCapability::for_provider(&provider)?);
     let parser = Arc::new(build_document_parser(config, &parser_label)?);
     let embedder = Arc::new(SharedEmbeddingProvider::new(
-        build_embedder_from_config(config, EmbedderConstructionRole::Ingestion)
-            .map_err(embedder_config_error)?,
+        build_embedder_from_config(
+            config,
+            Some(runtime_cache),
+            EmbedderConstructionRole::Ingestion,
+        )
+        .map_err(embedder_config_error)?,
     ));
     let vector_backend = VectorStoreFactory::from_config(config).transactional_graph_backend(
         pool.clone(),
@@ -206,7 +223,6 @@ async fn build_ingestion_pipeline(
         },
         source_acl,
     )
-    .with_semantic_policy(config.knowledge.semantic)
     .with_content_fetcher(content_fetcher))
 }
 

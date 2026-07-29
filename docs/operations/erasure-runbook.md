@@ -67,6 +67,12 @@ deferred envelope encryption; erasure is hard-purge only.
 If `MOA_PII_VAULT_SECRET_HEX` is configured, the erase call also erases matching
 PII-vault subject pseudonyms for the tenant.
 
+The typed learning closure also removes attributable experience records,
+experience attributions, learning candidates, learning-log sources, and suite
+contributions. Attributable artifact revisions are archived and cleared in
+place so pinned revision identities remain valid while no definition, source,
+package file, or serving state survives.
+
 Contact sessions store memory under `contact:<contact-uuid>`. A bare contact
 UUID in the erasure request resolves to that stored subject id before candidate
 enumeration. Linked contact deletion is never implicit; it only happens when

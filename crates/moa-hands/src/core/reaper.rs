@@ -18,12 +18,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use futures_util::{StreamExt, stream};
 use moa_core::{
     error::MoaError, error::Result, traits::HandProvider, types::hands::HandHandle,
     types::identifiers::SessionId,
 };
 use sqlx::{PgPool, Row};
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use super::leases::{LeaseHandle, map_sqlx_error};
 
@@ -38,6 +40,8 @@ pub struct ClaimedHandLease {
     pub provider: String,
     /// Fenced generation. Finalization matches on it exactly.
     pub generation: i64,
+    /// Unique ownership token for this destroy attempt.
+    pub claim_token: Uuid,
     /// Durable handle to destroy.
     pub handle: LeaseHandle,
     /// Why this generation was claimed, for telemetry only.
@@ -88,17 +92,18 @@ impl HandLeaseDestroyReason {
 #[async_trait::async_trait]
 pub trait ExpiredHandLeaseClaims: Send + Sync {
     /// Claims up to `limit` destroyable generations, fencing each one.
-    async fn claim_expired(&self, limit: i64) -> Result<Vec<ClaimedHandLease>>;
+    async fn claim_expired(&self, limit: i64, claim_ttl: Duration)
+    -> Result<Vec<ClaimedHandLease>>;
 
     /// Marks a claimed generation destroyed.
-    async fn finalize_destroyed(&self, claimed: &ClaimedHandLease) -> Result<()>;
+    async fn finalize_destroyed(&self, claimed: &ClaimedHandLease) -> Result<bool>;
 
     /// Releases a claimed generation for a later retry behind a backoff.
     async fn release_for_retry(
         &self,
         claimed: &ClaimedHandLease,
         retry_after: Duration,
-    ) -> Result<()>;
+    ) -> Result<bool>;
 }
 
 /// Postgres-backed claim surface.
@@ -117,7 +122,11 @@ impl PostgresExpiredHandLeaseClaims {
 
 #[async_trait::async_trait]
 impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
-    async fn claim_expired(&self, limit: i64) -> Result<Vec<ClaimedHandLease>> {
+    async fn claim_expired(
+        &self,
+        limit: i64,
+        claim_ttl: Duration,
+    ) -> Result<Vec<ClaimedHandLease>> {
         // `FOR UPDATE ... SKIP LOCKED` inside the CTE is what makes competing
         // replicas safe: each replica locks a disjoint set of rows and moves on
         // instead of blocking, and the outer UPDATE re-states the generation so
@@ -128,13 +137,21 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
             WITH claimable AS (
                 SELECT session_id, worker_id, provider, generation
                 FROM moa.hand_leases
-                WHERE status IN ('active', 'provisioning', 'stale', 'failed')
-                  AND handle IS NOT NULL
-                  AND (reap_not_before IS NULL OR reap_not_before <= now())
+                WHERE handle IS NOT NULL
                   AND (
-                        (hard_expires_at IS NOT NULL AND hard_expires_at <= now())
-                     OR (idle_expires_at IS NOT NULL AND idle_expires_at <= now())
-                     OR status IN ('stale', 'failed')
+                        (
+                            status IN ('active', 'provisioning', 'stale', 'failed')
+                            AND (reap_not_before IS NULL OR reap_not_before <= now())
+                            AND (
+                                  (hard_expires_at IS NOT NULL AND hard_expires_at <= now())
+                               OR (idle_expires_at IS NOT NULL AND idle_expires_at <= now())
+                               OR status IN ('stale', 'failed')
+                            )
+                        )
+                     OR (
+                            status = 'reaping'
+                            AND reap_claim_expires_at <= now()
+                        )
                   )
                 ORDER BY updated_at
                 LIMIT $1
@@ -142,7 +159,9 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
             )
             UPDATE moa.hand_leases AS lease
             SET status = 'reaping',
-                updated_at = now()
+                updated_at = now(),
+                reap_claim_token = gen_random_uuid(),
+                reap_claim_expires_at = now() + make_interval(secs => $2)
             FROM claimable
             WHERE lease.session_id = claimable.session_id
               AND lease.worker_id = claimable.worker_id
@@ -150,10 +169,11 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
               AND lease.generation = claimable.generation
             RETURNING lease.session_id, lease.worker_id, lease.provider, lease.generation,
                       lease.handle, lease.hard_expires_at, lease.idle_expires_at,
-                      lease.reap_attempts
+                      lease.reap_attempts, lease.reap_claim_token
             "#,
         )
         .bind(limit)
+        .bind(claim_ttl.as_secs_f64())
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
@@ -175,6 +195,7 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
                     worker_id: row.try_get("worker_id").map_err(map_sqlx_error)?,
                     provider: row.try_get("provider").map_err(map_sqlx_error)?,
                     generation: row.try_get("generation").map_err(map_sqlx_error)?,
+                    claim_token: row.try_get("reap_claim_token").map_err(map_sqlx_error)?,
                     handle: handle.0,
                     reason: HandLeaseDestroyReason::classify(
                         now,
@@ -187,51 +208,59 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
             .collect()
     }
 
-    async fn finalize_destroyed(&self, claimed: &ClaimedHandLease) -> Result<()> {
-        sqlx::query(
+    async fn finalize_destroyed(&self, claimed: &ClaimedHandLease) -> Result<bool> {
+        let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
             SET status = 'destroyed',
                 handle = NULL,
                 updated_at = now(),
                 reap_attempts = 0,
-                reap_not_before = NULL
+                reap_not_before = NULL,
+                reap_claim_token = NULL,
+                reap_claim_expires_at = NULL
             WHERE session_id = $1
               AND worker_id = $2
               AND provider = $3
               AND generation = $4
               AND status = 'reaping'
+              AND reap_claim_token = $5
             "#,
         )
         .bind(claimed.session_id)
         .bind(&claimed.worker_id)
         .bind(&claimed.provider)
         .bind(claimed.generation)
+        .bind(claimed.claim_token)
         .execute(&self.pool)
         .await
-        .map_err(map_sqlx_error)?;
-        Ok(())
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        Ok(affected == 1)
     }
 
     async fn release_for_retry(
         &self,
         claimed: &ClaimedHandLease,
         retry_after: Duration,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         // Released to `stale`, never to `active`: the sandbox stays fenced off
         // from reuse while it waits for another destroy attempt.
-        sqlx::query(
+        let affected = sqlx::query(
             r#"
             UPDATE moa.hand_leases
             SET status = 'stale',
                 updated_at = now(),
                 reap_attempts = reap_attempts + 1,
-                reap_not_before = now() + make_interval(secs => $5)
+                reap_not_before = now() + make_interval(secs => $5),
+                reap_claim_token = NULL,
+                reap_claim_expires_at = NULL
             WHERE session_id = $1
               AND worker_id = $2
               AND provider = $3
               AND generation = $4
               AND status = 'reaping'
+              AND reap_claim_token = $6
             "#,
         )
         .bind(claimed.session_id)
@@ -239,10 +268,12 @@ impl ExpiredHandLeaseClaims for PostgresExpiredHandLeaseClaims {
         .bind(&claimed.provider)
         .bind(claimed.generation)
         .bind(retry_after.as_secs_f64())
+        .bind(claimed.claim_token)
         .execute(&self.pool)
         .await
-        .map_err(map_sqlx_error)?;
-        Ok(())
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        Ok(affected == 1)
     }
 }
 
@@ -253,6 +284,10 @@ pub struct HandLeaseReaperConfig {
     pub interval: Duration,
     /// Maximum generations claimed in one sweep.
     pub batch_size: i64,
+    /// How long one destroy claim remains owned before another replica may recover it.
+    pub claim_ttl: Duration,
+    /// Maximum provider destroys driven concurrently by one replica.
+    pub max_destroy_concurrency: usize,
     /// Backoff applied after the first failed destroy attempt.
     pub base_retry_delay: Duration,
     /// Ceiling the exponential backoff never exceeds.
@@ -264,6 +299,8 @@ impl Default for HandLeaseReaperConfig {
         Self {
             interval: Duration::from_secs(30),
             batch_size: 64,
+            claim_ttl: Duration::from_secs(5 * 60),
+            max_destroy_concurrency: 4,
             base_retry_delay: Duration::from_secs(15),
             max_retry_delay: Duration::from_secs(15 * 60),
         }
@@ -306,34 +343,61 @@ impl HandLeaseReaper {
 
     /// Runs one bounded sweep and returns how many generations were destroyed.
     pub async fn sweep(&self) -> Result<usize> {
-        let claimed = self.claims.claim_expired(self.config.batch_size).await?;
+        let claimed = self
+            .claims
+            .claim_expired(self.config.batch_size, self.config.claim_ttl)
+            .await?;
+        let outcomes = stream::iter(claimed)
+            .map(|lease| async move {
+                match self.destroy_claimed(&lease).await {
+                    Ok(()) => {
+                        if !self.claims.finalize_destroyed(&lease).await? {
+                            tracing::warn!(
+                                provider = %lease.provider,
+                                generation = lease.generation,
+                                destroy_reason = lease.reason.as_str(),
+                                "durable reaper destroy completed after its claim fence was lost"
+                            );
+                            return Ok(0_usize);
+                        }
+                        tracing::info!(
+                            provider = %lease.provider,
+                            generation = lease.generation,
+                            destroy_reason = lease.reason.as_str(),
+                            "durable reaper destroyed an expired sandbox"
+                        );
+                        Ok(1_usize)
+                    }
+                    Err(error) => {
+                        let retry_after = self.config.retry_delay(lease.attempts);
+                        if !self.claims.release_for_retry(&lease, retry_after).await? {
+                            tracing::warn!(
+                                provider = %lease.provider,
+                                generation = lease.generation,
+                                destroy_reason = lease.reason.as_str(),
+                                "durable reaper destroy failed after its claim fence was lost"
+                            );
+                            return Ok(0);
+                        }
+                        tracing::warn!(
+                            provider = %lease.provider,
+                            generation = lease.generation,
+                            destroy_reason = lease.reason.as_str(),
+                            attempts = lease.attempts + 1,
+                            retry_after_secs = retry_after.as_secs(),
+                            error = %error,
+                            "durable reaper could not destroy a sandbox; staying fenced for retry"
+                        );
+                        Ok(0)
+                    }
+                }
+            })
+            .buffer_unordered(self.config.max_destroy_concurrency.max(1))
+            .collect::<Vec<Result<usize>>>()
+            .await;
         let mut destroyed = 0;
-        for lease in claimed {
-            match self.destroy_claimed(&lease).await {
-                Ok(()) => {
-                    self.claims.finalize_destroyed(&lease).await?;
-                    destroyed += 1;
-                    tracing::info!(
-                        provider = %lease.provider,
-                        generation = lease.generation,
-                        destroy_reason = lease.reason.as_str(),
-                        "durable reaper destroyed an expired sandbox"
-                    );
-                }
-                Err(error) => {
-                    let retry_after = self.config.retry_delay(lease.attempts);
-                    self.claims.release_for_retry(&lease, retry_after).await?;
-                    tracing::warn!(
-                        provider = %lease.provider,
-                        generation = lease.generation,
-                        destroy_reason = lease.reason.as_str(),
-                        attempts = lease.attempts + 1,
-                        retry_after_secs = retry_after.as_secs(),
-                        error = %error,
-                        "durable reaper could not destroy a sandbox; staying fenced for retry"
-                    );
-                }
-            }
+        for outcome in outcomes {
+            destroyed += outcome?;
         }
         Ok(destroyed)
     }
@@ -392,30 +456,34 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ExpiredHandLeaseClaims for RecordingClaims {
-        async fn claim_expired(&self, _limit: i64) -> Result<Vec<ClaimedHandLease>> {
+        async fn claim_expired(
+            &self,
+            _limit: i64,
+            _claim_ttl: Duration,
+        ) -> Result<Vec<ClaimedHandLease>> {
             Ok(std::mem::take(
                 &mut *self.claimed.lock().expect("claimed lock"),
             ))
         }
 
-        async fn finalize_destroyed(&self, claimed: &ClaimedHandLease) -> Result<()> {
+        async fn finalize_destroyed(&self, claimed: &ClaimedHandLease) -> Result<bool> {
             self.finalized
                 .lock()
                 .expect("finalized lock")
                 .push(claimed.generation);
-            Ok(())
+            Ok(true)
         }
 
         async fn release_for_retry(
             &self,
             claimed: &ClaimedHandLease,
             retry_after: Duration,
-        ) -> Result<()> {
+        ) -> Result<bool> {
             self.released
                 .lock()
                 .expect("released lock")
                 .push((claimed.generation, retry_after));
-            Ok(())
+            Ok(true)
         }
     }
 
@@ -475,6 +543,7 @@ mod tests {
             worker_id: String::new(),
             provider: "local".to_string(),
             generation,
+            claim_token: Uuid::new_v4(),
             handle: LeaseHandle::new(HandHandle::local(std::path::PathBuf::from("/tmp/moa-reap"))),
             reason: HandLeaseDestroyReason::HardLifetime,
             attempts,

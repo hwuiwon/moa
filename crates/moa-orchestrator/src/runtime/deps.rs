@@ -114,14 +114,6 @@ impl RuntimeDeps {
         let audit = moa_ocsf::AuditRuntime::start(pool.clone())
             .context("start orchestrator security audit writer")?;
         let runtime_cache = build_runtime_cache_store(config.as_ref()).await?;
-        // Inject the coordination store into the config that every downstream
-        // provider construction site already receives. Doing it before anything
-        // else is built means no component can hold a config without the store,
-        // which is what makes the distributed provider controls coordinate
-        // without a process-global handle.
-        let config = Arc::new(
-            Arc::unwrap_or_clone(config).with_runtime_coordination(Arc::clone(&runtime_cache)),
-        );
         let kms = KmsRuntime::build_serving(config.as_ref(), pool.clone()).await?;
         let fga_client = if skip_fga {
             tracing::warn!("MOA_SKIP_FGA set; authz outbox poller disabled");
@@ -170,10 +162,14 @@ impl RuntimeDeps {
             .then(|| build_egress_pii_classifier(config.as_ref()));
         let providers = Arc::new(build_provider_registry(
             config.as_ref(),
+            Arc::clone(&runtime_cache),
             providers_override,
             egress_classifier.as_ref(),
         )?);
-        let embedding_provider = build_embedding_provider_from_config(config.as_ref())?;
+        let embedding_provider = build_embedding_provider_from_config(
+            config.as_ref(),
+            Some(Arc::clone(&runtime_cache)),
+        )?;
         let mcp_egress_guard = build_mcp_egress_guard(config.as_ref(), egress_classifier.as_ref())?;
         // Tenant-owned MCP servers need all three owners at once. They are built
         // only when the authorization engine is available, so a deployment that
@@ -209,6 +205,7 @@ impl RuntimeDeps {
                 pool.clone(),
                 kms.provider(),
                 config.clone(),
+                Arc::clone(&runtime_cache),
             ),
         ))
         .with_memory_tool_executor(Arc::new(moa_memory_ingest::FastMemoryToolExecutor));
@@ -217,7 +214,8 @@ impl RuntimeDeps {
         tool_router.validate_cloud_startup(config.as_ref())?;
         let tool_router = Arc::new(tool_router);
         let lineage = build_lineage_sink(config.as_ref(), background_pool.clone()).await?;
-        let retrieval_embedder = build_retrieval_embedder(config.as_ref());
+        let retrieval_embedder =
+            build_retrieval_embedder(config.as_ref(), Arc::clone(&runtime_cache));
         // Reused for skill-manifest ranking; the retriever moves the original.
         let skill_embedder = retrieval_embedder.clone();
         let graph_memory_retriever = build_graph_memory_retriever(
@@ -378,8 +376,15 @@ fn build_channel_adapters(
     Ok(adapters)
 }
 
-fn build_retrieval_embedder(config: &MoaConfig) -> Option<Arc<dyn EmbeddingProvider>> {
-    match build_embedder_from_config(config, EmbedderConstructionRole::Retrieval) {
+fn build_retrieval_embedder(
+    config: &MoaConfig,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
+) -> Option<Arc<dyn EmbeddingProvider>> {
+    match build_embedder_from_config(
+        config,
+        Some(runtime_cache),
+        EmbedderConstructionRole::Retrieval,
+    ) {
         Ok(embedder) => Some(embedder),
         Err(error) => {
             tracing::warn!(
@@ -393,13 +398,14 @@ fn build_retrieval_embedder(config: &MoaConfig) -> Option<Arc<dyn EmbeddingProvi
 
 fn build_provider_registry(
     config: &MoaConfig,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
     providers_override: ProvidersOverride,
     egress_classifier: Option<&EgressPiiClassifier>,
 ) -> Result<ProviderRegistry> {
     match providers_override {
         ProvidersOverride::None => apply_llm_dlp(
             config,
-            ProviderRegistry::from_config(config),
+            ProviderRegistry::from_config(config, Some(runtime_cache))?,
             egress_classifier,
         ),
         ProvidersOverride::Scripted { path } => {

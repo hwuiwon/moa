@@ -572,8 +572,9 @@ async fn run_validated(
 
     let budget = LiveRunBudget::new(args.budget_usd)?;
     let formation_inputs = resolve_formation_inputs(&args, &mut config, budget.clone())?;
-    let raw_embedder = build_embedder_from_config(&config, EmbedderConstructionRole::Retrieval)
-        .context("construct explicit external-memory embedder")?;
+    let raw_embedder =
+        build_embedder_from_config(&config, None, EmbedderConstructionRole::Retrieval)
+            .context("construct explicit external-memory embedder")?;
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(AccountingEmbeddingProvider::new(
         raw_embedder,
         &args.embedding_selector,

@@ -1,6 +1,9 @@
+use chrono::Utc;
 use moa_artifacts::simulation::ExperimentTargetKind;
+use moa_core::traits::{Identity, IdentityType};
 use moa_core::types::experiments::{
-    ExperimentScorecard, ScorecardEffect, ScorecardRequirement, ScorecardValueType,
+    ExperimentCancelSignal, ExperimentScorecard, ScorecardEffect, ScorecardRequirement,
+    ScorecardValueType,
 };
 use moa_core::types::memory::RlsContext;
 use moa_core::{
@@ -11,6 +14,7 @@ use moa_core::{
 };
 use moa_db::ScopedConn;
 use moa_experiments::{
+    eligibility::ScorecardEligibility,
     model::{
         ExperimentRunStatus, ExperimentSimulatorConfig, ExperimentTarget, ExperimentTrialStatus,
         ExperimentTrialStopReason, ExperimentVariant, NewExperimentRun as NewExperiment,
@@ -30,6 +34,19 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 static DB_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+fn cancel_signal(tenant_id: TenantId, reason: &str) -> ExperimentCancelSignal {
+    ExperimentCancelSignal {
+        reason: reason.to_string(),
+        identity: Identity {
+            identity_type: IdentityType::Service,
+            id: Uuid::now_v7(),
+            tenant_id,
+            api_key_id: None,
+            acting_on_behalf_of: None,
+        },
+    }
+}
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
@@ -60,7 +77,7 @@ async fn tenant_scoped_run_insert_load_round_trip_db() -> Result<()> {
             .scorecard
             .requirements()
             .iter()
-            .map(|requirement| requirement.score_name.as_str())
+            .map(|requirement| requirement.evaluator_id.as_str())
             .collect::<Vec<_>>(),
         ["target_completed"]
     );
@@ -802,7 +819,8 @@ async fn trial_rejects_cross_tenant_artifact_revision_db() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
-    // Pins: trial session/execution/trace links, turn counts, and terminal status persist.
+    // Pins: trial session/execution/trace links, immutable final evidence,
+    // turn counts, and terminal status persist.
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
@@ -848,6 +866,22 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
         .attach_trial_trace(&scope, trial.trial_uid, "trace-trial-123".to_string())
         .await?
         .expect("trace link update should return the trial");
+    let evidence_hash = vec![7_u8; 32];
+    store
+        .set_trial_final_evidence_hash(&scope, trial.trial_uid, &evidence_hash)
+        .await?
+        .expect("first final evidence hash write should return the trial");
+    store
+        .set_trial_final_evidence_hash(&scope, trial.trial_uid, &evidence_hash)
+        .await?
+        .expect("an identical replay should return the trial");
+    assert!(
+        store
+            .set_trial_final_evidence_hash(&scope, trial.trial_uid, &[8_u8; 32])
+            .await?
+            .is_none(),
+        "a replay must not replace finalized evidence with a different digest"
+    );
     store
         .increment_trial_turn(&scope, trial.trial_uid)
         .await?
@@ -872,6 +906,7 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
     assert_eq!(completed.session_id, Some(session_id));
     assert_eq!(completed.execution_run_uid, Some(execution_run_uid));
     assert_eq!(completed.trace_id.as_deref(), Some("trace-trial-123"));
+    assert_eq!(completed.final_evidence_hash, Some(evidence_hash));
     assert_eq!(completed.status, ExperimentTrialStatus::Completed);
     assert_eq!(
         completed.stop_reason,
@@ -1094,7 +1129,11 @@ async fn cancel_run_and_active_trials_reconciles_behind_already_cancelled_parent
         .expect("run cancel should return run");
 
     let (reconciled_run, cancelled_trials) = store
-        .cancel_run_and_active_trials(&scope, run.run_uid, "operator cancelled".to_string())
+        .cancel_run_and_active_trials(
+            &scope,
+            run.run_uid,
+            cancel_signal(scope_tenant_id(&scope), "operator cancelled"),
+        )
         .await?;
 
     let reconciled_run =
@@ -1110,6 +1149,12 @@ async fn cancel_run_and_active_trials_reconciles_behind_already_cancelled_parent
         1,
         "only the stranded running trial is reconciled"
     );
+    let persisted_signal = store
+        .load_run_cancel_signal(&scope, run.run_uid)
+        .await?
+        .expect("cancellation fence should carry the authorized caller");
+    assert_eq!(persisted_signal.reason, "operator cancelled");
+    assert_eq!(persisted_signal.identity.tenant_id, scope_tenant_id(&scope));
     assert_eq!(cancelled_trials[0].trial_uid, running.trial_uid);
 
     let trials = store.list_trials(&scope, run.run_uid, None, 10).await?;
@@ -1154,7 +1199,11 @@ async fn cancel_run_and_active_trials_does_not_override_completed_run_db() -> Re
         .expect("run completion should return run");
 
     let (reconciled_run, cancelled_trials) = store
-        .cancel_run_and_active_trials(&scope, run.run_uid, "late cancel".to_string())
+        .cancel_run_and_active_trials(
+            &scope,
+            run.run_uid,
+            cancel_signal(scope_tenant_id(&scope), "late cancel"),
+        )
         .await?;
 
     assert!(
@@ -1228,6 +1277,7 @@ async fn cancel_run_app_reconciles_active_trials_behind_terminal_cancelled_paren
             run_uid: run.run_uid,
             reason: Some("retry".to_string()),
         },
+        cancel_signal(tenant_id, "retry").identity,
     )
     .await
     .expect("retried cancel behind a cancelled parent should succeed");
@@ -1304,8 +1354,6 @@ fn new_experiment(
         scorecard: ExperimentScorecard::new(vec![ScorecardRequirement {
             evaluator_id: "target_completed".to_string(),
             evaluator_version: "v1".to_string(),
-            score_name: "target_completed".to_string(),
-            value_type: ScorecardValueType::Boolean,
             config: json!({}),
             effect: ScorecardEffect::Blocking,
         }])
@@ -1432,7 +1480,8 @@ async fn insert_score(
 fn score_summary(name: &str, value_type: &str, n: u64, mean_or_rate: f64) -> ScoreSummaryRow {
     ScoreSummaryRow {
         name: name.to_string(),
-        value_type: value_type.to_string(),
+        value_type: ScorecardValueType::from_db(value_type)
+            .expect("score summary fixture value type should be supported"),
         n,
         mean_or_rate: Some(mean_or_rate),
     }
@@ -1968,7 +2017,8 @@ async fn seeded_score_rows_without_provenance_never_satisfy_the_scorecard_db() -
     .expect("scores read should succeed");
 
     assert_eq!(
-        response.run_scorecard.eligibility, "incomplete",
+        response.run_scorecard.eligibility,
+        ScorecardEligibility::Incomplete,
         "a seeded score row must not make a run eligible"
     );
     assert_eq!(response.run_scorecard.trials, 1);
@@ -1977,12 +2027,12 @@ async fn seeded_score_rows_without_provenance_never_satisfy_the_scorecard_db() -
         .iter()
         .find(|summary| summary.trial_uid == trial.trial_uid)
         .expect("the scored trial should appear in the breakdown");
-    assert_eq!(trial_summary.eligibility, "incomplete");
+    assert_eq!(trial_summary.eligibility, ScorecardEligibility::Incomplete);
     assert!(
         trial_summary
             .eligibility_findings
             .iter()
-            .any(|finding| finding.contains("no provenance-backed score row")),
+            .any(|finding| finding.detail.contains("no provenance-backed score row")),
         "the finding must name the missing provenance: {:?}",
         trial_summary.eligibility_findings
     );
@@ -2087,7 +2137,8 @@ async fn provenance_backed_rows_drive_run_scenario_and_variant_eligibility_db() 
     assert_eq!(variants.get("variant-b").copied(), Some("incomplete"));
 
     assert_eq!(
-        response.run_scorecard.eligibility, "incomplete",
+        response.run_scorecard.eligibility,
+        ScorecardEligibility::Incomplete,
         "one unproven trial must keep the whole run from being eligible"
     );
     assert_eq!(response.run_scorecard.trials, 2);
@@ -2171,7 +2222,8 @@ async fn a_provenance_backed_row_from_another_trial_never_satisfies_the_gate_db(
         .find(|summary| summary.trial_uid == borrower.trial_uid)
         .expect("the unscored trial should still appear");
     assert_eq!(
-        borrower_summary.eligibility, "incomplete",
+        borrower_summary.eligibility,
+        ScorecardEligibility::Incomplete,
         "a neighbouring trial's score must not satisfy this trial's requirement"
     );
     Ok(())
@@ -2245,6 +2297,7 @@ async fn insert_provenance_backed_score(
     value: bool,
 ) -> Result<()> {
     let score_id = Uuid::now_v7();
+    let score_ts = Utc::now();
     let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
     sqlx::query(
         r#"
@@ -2252,11 +2305,12 @@ async fn insert_provenance_backed_score(
             score_id, ts, storage_partition_id, user_id, target_kind, session_id, run_id,
             name, value_type, value_boolean, source, model_or_evaluator
         )
-        VALUES ($1, now(), $2, $3, 'session', $4, $5, 'target_completed', 'boolean', $6,
+        VALUES ($1, $2, $3, $4, 'session', $5, $6, 'target_completed', 'boolean', $7,
                 'product_evaluator', 'target_completed@v1')
         "#,
     )
     .bind(score_id)
+    .bind(score_ts)
     .bind(scope_storage_partition_id(scope))
     .bind(scope_user_id(scope))
     .bind(session_id.0)
@@ -2268,15 +2322,16 @@ async fn insert_provenance_backed_score(
     sqlx::query(
         r#"
         INSERT INTO moa.experiment_score_provenance (
-            score_id, storage_partition_id, user_id, score_run_id, experiment_run_uid,
+            score_id, score_ts, storage_partition_id, user_id, score_run_id, experiment_run_uid,
             plan_revision_uid, trial_uid, target_session_id, target_execution_run_uid,
             evaluator_id, evaluator_version, score_name, value_type, evidence_ref, evidence_hash
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, 'target_completed', 'v1',
-                'target_completed', 'boolean', 'session:fixture#seq=1', $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, 'target_completed', 'v1',
+                'target_completed', 'boolean', 'session:fixture#seq=1', $10)
         "#,
     )
     .bind(score_id)
+    .bind(score_ts)
     .bind(scope_storage_partition_id(scope))
     .bind(scope_user_id(scope))
     .bind(trial.score_run_id)

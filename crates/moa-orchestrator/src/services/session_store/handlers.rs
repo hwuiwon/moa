@@ -687,7 +687,7 @@ impl RestateSessionStore for SessionStoreImpl {
     ) -> Result<Json<SessionRetentionDispatch>, HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("SessionStore", "start_session_retention");
-        let mut request = request.into_inner();
+        let request = request.into_inner();
         let identity = require_identity(&ctx)?;
         let fga = require_fga_client()?;
         // Retention deletes a tenant's live conversation history. Tenant
@@ -703,17 +703,13 @@ impl RestateSessionStore for SessionStoreImpl {
         .await
         .map_err(translate_authz_error)?;
 
-        let target_date = match request.target_date {
-            Some(target_date) => target_date,
-            None => ctx
-                .run(|| async move {
-                    Ok::<_, HandlerError>(Json::from(chrono::Utc::now().date_naive()))
-                })
-                .name("session-retention-date")
-                .await?
-                .into_inner(),
-        };
-        request.target_date = Some(target_date);
+        let target_date =
+            ctx.run(|| async move {
+                Ok::<_, HandlerError>(Json::from(chrono::Utc::now().date_naive()))
+            })
+            .name("session-retention-date")
+            .await?
+            .into_inner();
         // One pass per tenant per logical day: a retried dispatch lands on the
         // same durable workflow instead of starting a second concurrent pass
         // over the same candidates.

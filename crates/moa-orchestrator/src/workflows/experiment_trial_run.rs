@@ -46,11 +46,13 @@ use crate::services::session_store::inner::{
 };
 use crate::workflows::errors::{bad_request, handler_error_message, moa_error_to_handler_error};
 use crate::workflows::experiment_cancel::{
-    K_CANCEL_IDENTITY, K_EXECUTION_CONTACT_ID, K_EXECUTION_RUN_UID, forward_child_cancellation,
+    K_EXECUTION_CONTACT_ID, K_EXECUTION_RUN_UID, forward_child_cancellation,
+    forward_pending_child_cancellation, has_pending_cancellation,
 };
 use crate::workflows::experiment_errors::{
     non_retryable_handler_error, plan_expansion_error_to_handler_error,
 };
+use moa_core::types::experiments::ExperimentCancelSignal;
 
 mod finalize;
 mod status;
@@ -147,7 +149,7 @@ pub trait ExperimentTrialRun {
 
     /// Forwards cancellation to this trial's live child target work.
     #[shared]
-    async fn request_cancel(reason: Json<String>) -> Result<(), HandlerError>;
+    async fn request_cancel(signal: Json<ExperimentCancelSignal>) -> Result<(), HandlerError>;
 }
 
 /// Concrete behavior-lab trial workflow implementation.
@@ -201,7 +203,6 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
 
         ctx.set(K_RUN_UID, Json(request.trial.run_uid));
         ctx.set(K_TRIAL_KEY, Json(request.trial.trial_key.clone()));
-        ctx.set(K_CANCEL_IDENTITY, Json(request.identity.clone()));
         annotate_trial_span(&request.trial, None);
 
         match run_trial(
@@ -273,17 +274,17 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
             .await?)
     }
 
-    #[tracing::instrument(skip(self, ctx, reason))]
+    #[tracing::instrument(skip(self, ctx, signal))]
     // SAFETY: control-only cancellation forward; the typed Session or Execution
     // cancellation handler enforces the child authority carried by this workflow.
     async fn request_cancel(
         &self,
         ctx: SharedWorkflowContext<'_>,
-        reason: Json<String>,
+        signal: Json<ExperimentCancelSignal>,
     ) -> Result<(), HandlerError> {
         crate::ctx::adopt_incoming_trace_parent(&ctx);
         annotate_restate_handler_span("ExperimentTrialRun", "request_cancel");
-        forward_child_cancellation(&ctx, reason.into_inner()).await
+        forward_child_cancellation(&ctx, signal.into_inner()).await
     }
 }
 
@@ -321,6 +322,9 @@ async fn run_trial(
     annotate_trial_record_span(&trial);
     attach_current_trial_trace(ctx, trial.scope, trial.trial_uid, pool).await?;
     if !trial_status_allows_child_start(trial.status) {
+        return status_response_from_record(request.tenant_id, trial);
+    }
+    if has_pending_cancellation(ctx, &trial.scope, trial.run_uid, pool).await? {
         return status_response_from_record(request.tenant_id, trial);
     }
 

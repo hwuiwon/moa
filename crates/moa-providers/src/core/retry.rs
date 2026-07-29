@@ -12,7 +12,8 @@ use reqwest::{
 use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::core::rate_guard::{RateGuard, RateLimitScope};
+use crate::core::pacer::RatePacer;
+use crate::core::rate_guard::RateGuard;
 
 /// Records a bounded `provider_retry` span event on the ambient span (the
 /// caller's `llm_completion`/embedding/rerank span, entered via
@@ -82,6 +83,8 @@ impl RetryPolicy {
         &self,
         build_request: F,
         guard: &RateGuard,
+        pacer: &RatePacer,
+        model: &str,
     ) -> Result<Response>
     where
         F: Fn() -> RequestBuilder,
@@ -89,6 +92,10 @@ impl RetryPolicy {
         let mut attempt = 0usize;
 
         loop {
+            // Pins: pacing is charged for each actual HTTP attempt, not once for
+            // the logical call. A retry therefore cannot exceed the credential's
+            // request-per-minute quota.
+            pacer.acquire(model, 1, 0).await?;
             let response = match build_request().send().await {
                 Ok(response) => response,
                 Err(error) => {
@@ -138,9 +145,7 @@ impl RetryPolicy {
                 // This path sees a status, headers, and an opaque body — not the
                 // vendor taxonomy that would say whether the limit is the
                 // model's or the whole account's. Record the broader scope.
-                guard
-                    .record_rate_limited(rate_limit_delay, RateLimitScope::unclassified())
-                    .await;
+                guard.record_rate_limited(rate_limit_delay).await;
             }
             let retry_eligible = Self::is_retryable_status(status) && attempt < self.max_retries;
             if retry_eligible && guard.allow_retry().await {
@@ -356,14 +361,23 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use moa_core::error::MoaError;
+    use moa_core::{error::MoaError, traits::RuntimeCacheStore};
 
-    use moa_config::ProviderPacingConfig;
+    use moa_config::{CoordinationFailurePolicy, ProviderPacingConfig};
 
-    use super::{RateGuard, RetryPolicy, retry_after_delay_from_message};
+    use super::{RateGuard, RatePacer, RetryPolicy, retry_after_delay_from_message};
+    use crate::core::concurrency_factory::QuotaIdentity;
+    use crate::core::coordination_test_support::CountingPacingStore;
+    use crate::core::pacer::PacerConfig;
+
+    fn disabled_pacer() -> RatePacer {
+        RatePacer::new(PacerConfig::disabled())
+    }
 
     #[tokio::test]
     async fn retries_on_rate_limit() {
+        // Pins: the pacing budget is charged for the initial request and every
+        // retry, so one logical call cannot bypass the credential's RPM limit.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let request_count = Arc::new(AtomicUsize::new(0));
@@ -390,17 +404,27 @@ mod tests {
 
         let client = reqwest::Client::new();
         let url = format!("http://{address}/retry");
+        let pacing_store = Arc::new(CountingPacingStore::default());
+        let pacer = RatePacer::new(PacerConfig::requests_per_min(60)).with_shared_quota(
+            Some(Arc::clone(&pacing_store) as Arc<dyn RuntimeCacheStore>),
+            QuotaIdentity::new("test", "credential"),
+            ProviderPacingConfig::default(),
+            CoordinationFailurePolicy::BoundedDegraded,
+        );
         let response = RetryPolicy::default()
             .with_max_retries(3)
             .send_gated(
                 || client.get(&url),
                 &RateGuard::new(ProviderPacingConfig::default()),
+                &pacer,
+                "test-model",
             )
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(request_count.load(Ordering::SeqCst), 2);
+        assert_eq!(pacing_store.calls(), 2);
 
         server.abort();
     }
@@ -449,6 +473,8 @@ mod tests {
                 .send_gated(
                     || client.get(&url),
                     &RateGuard::new(ProviderPacingConfig::default()),
+                    &disabled_pacer(),
+                    "test-model",
                 )
                 .instrument(span)
                 .await
@@ -526,7 +552,7 @@ mod tests {
             max_delay: Duration::from_millis(1),
             backoff_factor: 1.0,
         }
-        .send_gated(|| client.get(&url), &guard)
+        .send_gated(|| client.get(&url), &guard, &disabled_pacer(), "test-model")
         .await
         .unwrap();
 
@@ -571,6 +597,8 @@ mod tests {
             .send_gated(
                 || client.post(&url).body("payload"),
                 &RateGuard::new(ProviderPacingConfig::default()),
+                &disabled_pacer(),
+                "test-model",
             )
             .await;
 
@@ -612,7 +640,7 @@ mod tests {
         let url = format!("http://{address}/exhausted");
         let result = RetryPolicy::default()
             .with_max_retries(3)
-            .send_gated(|| client.get(&url), &guard)
+            .send_gated(|| client.get(&url), &guard, &disabled_pacer(), "test-model")
             .await;
 
         assert!(matches!(result, Err(MoaError::RateLimited { .. })));
@@ -651,15 +679,20 @@ mod tests {
         });
 
         let guard = RateGuard::new(ProviderPacingConfig::default());
-        let called = guard.for_model("claude-opus-4-6");
-        let untouched = guard.for_model("claude-haiku-4-5");
+        let called = guard.clone();
+        let untouched = guard.clone();
         assert!(untouched.pause_remaining().await.expect("read").is_none());
 
         let client = reqwest::Client::new();
         let url = format!("http://{address}/rate-limited");
         let result = RetryPolicy::default()
             .with_max_retries(0)
-            .send_gated(|| client.get(&url), &called)
+            .send_gated(
+                || client.get(&url),
+                &called,
+                &disabled_pacer(),
+                "test-model",
+            )
             .await;
         assert!(matches!(result, Err(MoaError::RateLimited { .. })));
 

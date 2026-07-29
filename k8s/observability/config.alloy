@@ -109,24 +109,59 @@ mimir.rules.kubernetes "moa" {
   }
 }
 
-// The only real scrape target left. Restate is a stateful cluster whose pods are
-// individually addressable and whose metrics are per-node by design.
-prometheus.scrape "restate" {
-  scrape_interval = "15s"
-  metrics_path    = "/metrics"
-  targets = [{
-    "__address__" = "restate.moa-restate.svc.cluster.local:5122",
-    "job"         = "restate",
-  }]
-  forward_to = [prometheus.remote_write.mimir.receiver]
-}
-
 discovery.kubernetes "pods" {
   role = "pod"
 
   namespaces {
     names = ["moa-system", "moa-restate"]
   }
+}
+
+// Restate metrics are node-local, so discover the three labeled cluster pods
+// rather than scraping the load-balanced Service and blending their counters.
+discovery.relabel "restate" {
+  targets = discovery.kubernetes.pods.targets
+
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    regex         = "moa-restate"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_moa_hwuiwon_com_restate_cluster"]
+    regex         = "moa-restate"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_port_number"]
+    regex         = "5122"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_ip"]
+    replacement   = "$1:5122"
+    target_label  = "__address__"
+  }
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_name"]
+    target_label  = "instance"
+  }
+
+  rule {
+    replacement  = "restate"
+    target_label = "job"
+  }
+}
+
+prometheus.scrape "restate" {
+  scrape_interval = "15s"
+  metrics_path    = "/metrics"
+  targets         = discovery.relabel.restate.output
+  forward_to      = [prometheus.remote_write.mimir.receiver]
 }
 
 loki.source.kubernetes "pods" {

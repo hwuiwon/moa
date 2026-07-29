@@ -12,7 +12,7 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::error::{MoaError, Result};
-use moa_core::types::events_stream::{EventRange, EventRecord};
+use moa_core::types::events_stream::EventRange;
 use moa_core::types::identifiers::{SessionId, TenantId};
 use moa_core::types::session::SessionStatus;
 use serde::{Deserialize, Serialize};
@@ -206,52 +206,56 @@ pub enum ArchiveOutcome {
     Refused(ArchiveRefusal),
 }
 
-/// Applies an [`EventRange`] to hydrated history.
+/// Applies an [`EventRange`] to archived rows before event payload hydration.
 ///
 /// Mirrors the filtering, ordering, and limit semantics of the live
-/// `get_events` query. Replay must not be able to tell whether the history it
-/// asked for came from `events` or from the archive, so this is the one place
-/// those semantics are reproduced.
+/// `get_events` query. Filtering before claim-check lookup means a caller does
+/// not fetch or decode payload blobs for events outside the requested range.
 #[must_use]
-pub fn apply_range(mut records: Vec<EventRecord>, range: &EventRange) -> Vec<EventRecord> {
+pub fn apply_archive_range(
+    mut events: Vec<ArchivedEvent>,
+    range: &EventRange,
+) -> Vec<ArchivedEvent> {
     if let Some(event_types) = &range.event_types
         && event_types.is_empty()
     {
         return Vec::new();
     }
-    records.retain(|record| {
+    events.retain(|event| {
         if let Some(from_seq) = range.from_seq
-            && record.sequence_num < from_seq
+            && event.sequence_num < from_seq as i64
         {
             return false;
         }
         if let Some(to_seq) = range.to_seq
-            && record.sequence_num > to_seq
+            && event.sequence_num > to_seq as i64
         {
             return false;
         }
         if let Some(event_types) = &range.event_types
-            && !event_types.contains(&record.event_type)
+            && !event_types
+                .iter()
+                .any(|event_type| event_type.as_str() == event.event_type)
         {
             return false;
         }
         true
     });
     let Some(limit) = range.limit else {
-        return records;
+        return events;
     };
     // The live query switches to `ORDER BY sequence_num DESC ... LIMIT` and
     // reverses when a bare limit is asked for with no sequence bounds, which
     // returns the most recent events rather than the oldest.
     let take_from_end = range.from_seq.is_none() && range.to_seq.is_none();
-    if records.len() <= limit {
-        return records;
+    if events.len() <= limit {
+        return events;
     }
     if take_from_end {
-        records.split_off(records.len() - limit)
+        events.split_off(events.len() - limit)
     } else {
-        records.truncate(limit);
-        records
+        events.truncate(limit);
+        events
     }
 }
 
@@ -260,16 +264,16 @@ mod tests {
     use super::*;
     use moa_core::events::{Event, EventType};
 
-    fn record(sequence_num: u64, event_type: EventType) -> EventRecord {
-        EventRecord {
-            id: Uuid::from_u128(u128::from(sequence_num) + 1),
-            session_id: SessionId(Uuid::from_u128(7)),
+    fn archived_event(sequence_num: i64, event_type: EventType) -> ArchivedEvent {
+        ArchivedEvent {
+            id: Uuid::from_u128(sequence_num as u128 + 1),
             sequence_num,
-            event_type,
-            event: Event::UserMessage {
+            event_type: event_type.as_str().to_string(),
+            payload: serde_json::to_value(Event::UserMessage {
                 text: format!("event {sequence_num}"),
                 attachments: Vec::new(),
-            },
+            })
+            .expect("encode archived test event"),
             timestamp: DateTime::<Utc>::MIN_UTC,
             brain_id: None,
             hand_id: None,
@@ -277,8 +281,8 @@ mod tests {
         }
     }
 
-    fn sequences(records: &[EventRecord]) -> Vec<u64> {
-        records.iter().map(|record| record.sequence_num).collect()
+    fn sequences(events: &[ArchivedEvent]) -> Vec<i64> {
+        events.iter().map(|event| event.sequence_num).collect()
     }
 
     // Pins: a bare limit on hydrated history returns the NEWEST events, matching
@@ -286,10 +290,10 @@ mod tests {
     // silently truncate an archived session's recent turns during replay.
     #[test]
     fn hydrated_bare_limit_returns_the_newest_events_offline() {
-        let records = (0..5)
-            .map(|seq| record(seq, EventType::UserMessage))
+        let events = (0..5)
+            .map(|seq| archived_event(seq, EventType::UserMessage))
             .collect();
-        let limited = apply_range(records, &EventRange::recent(2));
+        let limited = apply_archive_range(events, &EventRange::recent(2));
         assert_eq!(
             sequences(&limited),
             vec![3, 4],
@@ -301,11 +305,11 @@ mod tests {
     // the FIRST rows, so hydration must not keep taking from the end.
     #[test]
     fn hydrated_bounded_limit_returns_the_oldest_matching_events_offline() {
-        let records = (0..5)
-            .map(|seq| record(seq, EventType::UserMessage))
+        let events = (0..5)
+            .map(|seq| archived_event(seq, EventType::UserMessage))
             .collect();
-        let limited = apply_range(
-            records,
+        let limited = apply_archive_range(
+            events,
             &EventRange {
                 from_seq: Some(1),
                 to_seq: None,
@@ -324,14 +328,14 @@ mod tests {
     // nothing rather than everything.
     #[test]
     fn hydrated_range_filters_compose_offline() {
-        let records = vec![
-            record(0, EventType::UserMessage),
-            record(1, EventType::BrainResponse),
-            record(2, EventType::UserMessage),
-            record(3, EventType::BrainResponse),
+        let events = vec![
+            archived_event(0, EventType::UserMessage),
+            archived_event(1, EventType::BrainResponse),
+            archived_event(2, EventType::UserMessage),
+            archived_event(3, EventType::BrainResponse),
         ];
-        let filtered = apply_range(
-            records.clone(),
+        let filtered = apply_archive_range(
+            events.clone(),
             &EventRange {
                 from_seq: Some(1),
                 to_seq: Some(3),
@@ -344,8 +348,8 @@ mod tests {
             vec![1, 3],
             "sequence bounds and type filter must both apply"
         );
-        let empty = apply_range(
-            records,
+        let empty = apply_archive_range(
+            events,
             &EventRange {
                 from_seq: None,
                 to_seq: None,
